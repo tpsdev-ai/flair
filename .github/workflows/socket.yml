@@ -1,0 +1,17 @@
+name: Socket Security
+
+on:
+  pull_request:
+    branches: [main]
+
+# Socket.dev GitHub App handles PR analysis automatically when installed.
+# This workflow is a placeholder that documents the integration.
+# Install the Socket GitHub App at: https://socket.dev
+# Once installed, Socket automatically comments on PRs with supply chain risk analysis.
+
+jobs:
+  socket-note:
+    name: Socket.dev Supply Chain
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Socket.dev GitHub App monitors PRs automatically when installed on this repo."

@@ -1,0 +1,22 @@
+type Memory @table {
+  id: ID @primaryKey
+  agentId: String! @indexed
+  content: String!
+  embedding: [Float] @indexed(type: "HNSW")
+  tags: [String] @indexed
+  durability: String @indexed
+  source: String
+  createdAt: String! @indexed
+  updatedAt: String
+  expiresAt: String @indexed
+}
+
+type Soul @table {
+  id: ID @primaryKey
+  agentId: String! @indexed
+  key: String! @indexed
+  value: String!
+  durability: String @indexed
+  createdAt: String!
+  updatedAt: String
+}
