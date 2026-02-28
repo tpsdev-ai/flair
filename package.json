@@ -1,28 +1,22 @@
 {
   "name": "@tpsdev-ai/flair",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "bin": {
     "flair": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "tsx src/server.ts",
-    "start": "node dist/server.js",
-    "cli": "tsx src/cli.ts",
+    "build": "echo \"harper-native resources are runtime-loaded\"",
     "test": "bun test"
   },
   "dependencies": {
     "commander": "^14.0.1",
-    "express": "^4.21.2",
-    "tweetnacl": "^1.0.3",
-    "harper": "github:HarperFast/harper#47482d9b7f8701728cade6089c0125d71789de4c"
+    "harperdb": "github:HarperFast/harper#47482d9b7f8701728cade6089c0125d71789de4c",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
-    "@types/express": "^4.17.23",
     "@types/node": "^24.4.0",
-    "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   }
 }

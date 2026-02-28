@@ -1,0 +1,12 @@
+http:
+  port: 8787
+
+graphqlSchema:
+  files: schemas/*.graphql
+
+jsResource:
+  files: resources/*.ts
+
+authentication:
+  authorizeLocal: false
+  enableSessions: true
