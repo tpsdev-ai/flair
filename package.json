@@ -7,16 +7,16 @@
     "flair": "dist/cli.js"
   },
   "scripts": {
-    "build": "echo \"harper-native resources are runtime-loaded\"",
+    "build": "tsc -p tsconfig.json",
     "test": "bun test"
   },
   "dependencies": {
-    "commander": "^14.0.1",
+    "commander": "14.0.3",
     "harperdb": "github:HarperFast/harper#47482d9b7f8701728cade6089c0125d71789de4c",
-    "tweetnacl": "^1.0.3"
+    "tweetnacl": "1.0.3"
   },
   "devDependencies": {
-    "@types/node": "^24.4.0",
-    "typescript": "^5.9.2"
+    "@types/node": "24.11.0",
+    "typescript": "5.9.3"
   }
 }

@@ -1,3 +1,5 @@
+name: flair
+
 http:
   port: 8787
 
