@@ -88,3 +88,9 @@ Apache 2.0 — see [LICENSE](LICENSE).
 ## Contributing
 
 Flair is built by the [TPS](https://github.com/tpsdev-ai) team. Issues and PRs welcome.
+
+## Phase 2 Security Notes
+
+- All Memory and Soul endpoints require Ed25519 auth middleware.
+- Memory `content` is stored plaintext in Phase 2 (encryption-at-rest planned for Phase 3).
+- Soul keys should avoid direct PII by convention (e.g. use role/relationship labels, not personal identifiers).
