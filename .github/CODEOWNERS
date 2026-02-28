@@ -1,3 +1,4 @@
-# Flair — CODEOWNERS
-
-* @tpsdev-ai/reviews
+# Require review from any member of the reviewers team.
+# Currently: heskew (Nathan) and tps-sherlock (Sherlock).
+# One approval from either satisfies branch protection.
+* @tpsdev-ai/reviewers
