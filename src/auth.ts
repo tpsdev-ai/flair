@@ -6,8 +6,8 @@ const WINDOW_MS = 30_000;
 const nonceSeen = new Map<string, number>();
 
 function cleanNonceCache(now: number) {
-  for (const [k, ts] of nonceSeen.entries()) {
-    if (now - ts > WINDOW_MS) nonceSeen.delete(k);
+  for (const [k, signatureTs] of nonceSeen.entries()) {
+    if (now - signatureTs > WINDOW_MS) nonceSeen.delete(k);
   }
 }
 
@@ -46,7 +46,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
-  const payload = `${req.method.toUpperCase()}:${req.path}:${tsRaw}:${nonce}`;
+  const payload = `${req.method.toUpperCase()}:${req.originalUrl}:${tsRaw}:${nonce}`;
   const ok = nacl.sign.detached.verify(
     Buffer.from(payload, "utf-8"),
     b64ToBytes(signatureB64),
@@ -58,7 +58,8 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
-  nonceSeen.set(nonceKey, now);
+  // Cache signature timestamp (not server now) to avoid future-ts replay window bypass.
+  nonceSeen.set(nonceKey, ts);
   (req as any).agentId = agentId;
   next();
 }
