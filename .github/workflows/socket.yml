@@ -1,0 +1,16 @@
+name: Socket Security
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  socket:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Socket Search
+        uses: socketdev/socket-github-action@v1
+        with:
+          api-key: ${{ secrets.SOCKET_SECURITY_API_KEY }}
