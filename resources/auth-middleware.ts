@@ -48,7 +48,11 @@ server.http(async (request: any, nextLayer: any) => {
 
     nonceSeen.set(nonceKey, ts);
     request.agentId = agentId;
+    // Set native user for Harper auth layer recognition
+    request.user = agentId;
   }
 
+  // Requests without TPS-Ed25519 header fall through to Harper native auth (JWT/Session).
+  // Intentional behavior: bypass for local dev is controlled by authorizeLocal in config.yaml.
   return nextLayer(request);
 }, { runFirst: true });
