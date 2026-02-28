@@ -1,0 +1,4 @@
+node_modules/
+dist/
+.flair/
+.DS_Store
