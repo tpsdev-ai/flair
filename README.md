@@ -24,6 +24,7 @@ Flair is a native Harper v5 application. No external server frameworks required.
 - **Schema-Driven API** — `@table @export` auto-generates REST CRUD from GraphQL definitions.
 - **Custom Resources** — Table extensions for durability enforcement, TTL, and complex search.
 - **Dual-Layer Auth** — Ed25519 request signing for agent-to-agent calls + Harper JWT for CLI/human access.
+- **Real-Time Feeds** — WebSocket/SSE change streams for Memory and Soul tables.
 
 ## Quick Start
 
