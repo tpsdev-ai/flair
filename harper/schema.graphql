@@ -1,0 +1,21 @@
+type Agent @table @export {
+  id: ID @primaryKey
+  name: String!
+  role: String
+  publicKey: String!
+  createdAt: String!
+  updatedAt: String
+}
+
+type Integration @table @export {
+  id: ID @primaryKey
+  agentId: String! @indexed
+  platform: String! @indexed
+  username: String
+  userId: String
+  email: String
+  encryptedCredential: String
+  metadata: String
+  createdAt: String!
+  updatedAt: String
+}
