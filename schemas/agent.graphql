@@ -7,7 +7,7 @@ type Agent @table @export {
   updatedAt: String
 }
 
-type Integration @table {
+type Integration @table @export {
   id: ID @primaryKey
   agentId: String! @indexed
   platform: String! @indexed
