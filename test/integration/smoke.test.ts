@@ -13,7 +13,7 @@ describe("Flair API E2E Smoke", () => {
   });
 
   test("Agent table accepts inserts via operations API", async () => {
-    const res = await fetch(`${harper.httpURL.replace('9926', '9925')}`, {
+    const res = await fetch(harper.opsURL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -32,8 +32,7 @@ describe("Flair API E2E Smoke", () => {
 
   test("REST endpoint returns data", async () => {
     const res = await fetch(`${harper.httpURL}/Agent/smoke-test`);
-    // In dev mode without authorizeLocal, this should work
-    // If auth is enforced, we expect 401
+    // authorizeLocal: true means we expect 401 without auth
     expect([200, 401]).toContain(res.status);
     if (res.status === 200) {
       const body = await res.json();
