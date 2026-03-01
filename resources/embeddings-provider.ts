@@ -51,9 +51,9 @@ export async function initEmbeddings(): Promise<void> {
 
   // Fallback: hash
   try {
-    const { generateEmbedding, EMBEDDING_DIMS } = await import("./embeddings.js");
-    dims = EMBEDDING_DIMS;
-    hashEmbed = generateEmbedding;
+    const { fallbackEmbed } = await import("./embeddings.js");
+    dims = 512;
+    hashEmbed = fallbackEmbed;
     mode = "hash";
     console.log(`[embeddings] Fallback: ${dims} dims (hash-based)`);
   } catch (e: any) {
