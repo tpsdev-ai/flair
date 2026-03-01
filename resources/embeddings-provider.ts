@@ -1,59 +1,71 @@
+/**
+ * Embeddings provider — calls harper-fabric-embeddings in-process.
+ * 
+ * Harper v5 blocks node:module even from server.http() middleware context,
+ * so we can't import harper-fabric-embeddings directly. We use node:http
+ * to call it as an in-process sidecar (started alongside Harper).
+ * 
+ * TODO: File Harper issue requesting node:module access from server.http()
+ * middleware, or a native embeddings extension API.
+ */
+
 const MAX_CHARS = 500;
-const EMBED_URL = process.env.EMBED_URL || "http://127.0.0.1:9927";
+const EMBED_PORT = Number(process.env.FLAIR_EMBED_PORT || "9927");
 
 let dims = 0;
 let mode: "sidecar" | "hash" | "none" = "none";
-let hashEmbed: ((text: string) => number[]) | null = null;
 
 export function getDimensions(): number { return dims; }
 export function getMode(): string { return mode; }
 
-export async function initEmbeddings(): Promise<void> {
-  // Try sidecar
-  try {
-    console.log(`[embeddings] Trying sidecar at ${EMBED_URL}/health...`);
-    const res = await fetch(`${EMBED_URL}/health`, { signal: AbortSignal.timeout(3000) });
-    console.log(`[embeddings] Sidecar response: ${res.status}`);
-    if (res.ok) {
-      const data = await res.json() as { dims: number };
-      dims = data.dims;
-      mode = "sidecar";
-      console.log(`[embeddings] Sidecar connected: ${dims} dims`);
-      return;
-    }
-  } catch (err: any) {
-    console.error(`[embeddings] Sidecar failed: ${err.name}: ${err.message}`);
-    if (err.cause) console.error(`[embeddings] Cause: ${err.cause.message || err.cause}`);
-  }
-
-  // Try Node's native http module directly
-  try {
-    console.log("[embeddings] Trying node:http...");
-    const http = await import("node:http");
-    const result = await new Promise<string>((resolve, reject) => {
-      const req = http.get(`${EMBED_URL}/health`, (res: any) => {
-        let data = "";
-        res.on("data", (c: any) => data += c);
-        res.on("end", () => resolve(data));
-      });
-      req.on("error", reject);
-      req.setTimeout(3000, () => { req.destroy(); reject(new Error("timeout")); });
+async function httpGet(url: string): Promise<string> {
+  const http = await import("node:http");
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res: any) => {
+      let data = "";
+      res.on("data", (c: any) => data += c);
+      res.on("end", () => resolve(data));
     });
-    console.log(`[embeddings] node:http result: ${result}`);
+    req.on("error", reject);
+    req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
+  });
+}
+
+async function httpPost(url: string, body: string): Promise<string> {
+  const http = await import("node:http");
+  return new Promise((resolve, reject) => {
+    const req = http.request(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }, (res: any) => {
+      let data = "";
+      res.on("data", (c: any) => data += c);
+      res.on("end", () => resolve(data));
+    });
+    req.on("error", reject);
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error("timeout")); });
+    req.write(body);
+    req.end();
+  });
+}
+
+export async function initEmbeddings(): Promise<void> {
+  // Try sidecar via node:http (Harper blocks fetch globally)
+  try {
+    const result = await httpGet(`http://127.0.0.1:${EMBED_PORT}/health`);
     const parsed = JSON.parse(result) as { dims: number };
     dims = parsed.dims;
     mode = "sidecar";
-    console.log(`[embeddings] Sidecar via node:http: ${dims} dims`);
+    console.log(`[embeddings] Sidecar: ${dims} dims`);
     return;
   } catch (err: any) {
-    console.error(`[embeddings] node:http failed: ${err.name}: ${err.message}`);
+    console.error(`[embeddings] Sidecar not available: ${err.message}`);
   }
 
-  // Fallback: hash
+  // Fallback: hash-based
   try {
     const { fallbackEmbed } = await import("./embeddings.js");
     dims = 512;
-    hashEmbed = fallbackEmbed;
     mode = "hash";
     console.log(`[embeddings] Fallback: ${dims} dims (hash-based)`);
   } catch (e: any) {
@@ -65,28 +77,19 @@ export async function getEmbedding(text: string): Promise<number[] | null> {
   const truncated = text.slice(0, MAX_CHARS);
   if (mode === "sidecar") {
     try {
-      const http = await import("node:http");
-      const result = await new Promise<string>((resolve, reject) => {
-        const req = http.request(`${EMBED_URL}/embed`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-        }, (res: any) => {
-          let data = "";
-          res.on("data", (c: any) => data += c);
-          res.on("end", () => resolve(data));
-        });
-        req.on("error", reject);
-        req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
-        req.write(JSON.stringify({ text: truncated }));
-        req.end();
-      });
-      const parsed = JSON.parse(result) as { embedding: number[] };
-      return parsed.embedding;
+      const result = await httpPost(
+        `http://127.0.0.1:${EMBED_PORT}/embed`,
+        JSON.stringify({ text: truncated })
+      );
+      return (JSON.parse(result) as { embedding: number[] }).embedding;
     } catch (err: any) {
-      console.error(`[embeddings] embed call failed: ${err.message}`);
+      console.error(`[embeddings] embed failed: ${err.message}`);
     }
     return null;
   }
-  if (mode === "hash" && hashEmbed) return hashEmbed(truncated);
+  if (mode === "hash") {
+    const { fallbackEmbed } = await import("./embeddings.js");
+    return fallbackEmbed(truncated);
+  }
   return null;
 }
