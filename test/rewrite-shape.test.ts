@@ -7,7 +7,7 @@ describe("harper-native rewrite shape", () => {
     expect(cfg).toContain("graphqlSchema:");
     expect(cfg).toContain("files: schemas/*.graphql");
     expect(cfg).toContain("jsResource:");
-    expect(cfg).toContain("files: resources/*.ts");
+    expect(cfg).toContain("files: dist/resources/*.js");
   });
 
   test("auth middleware uses runFirst", () => {

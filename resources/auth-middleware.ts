@@ -5,7 +5,7 @@ const WINDOW_MS = 30_000;
 const nonceSeen = new Map<string, number>();
 
 server.http(async (request: any, nextLayer: any) => {
-  const url = new URL(request.url);
+  const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
 
   if (url.pathname === "/health") return nextLayer(request);
 
