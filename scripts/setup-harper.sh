@@ -1,27 +1,65 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 HARPER_DIR="node_modules/harperdb"
-[ -d "$HARPER_DIR" ] || { echo "Run 'npm install' first." >&2; exit 1; }
-echo "Building Harper v5 from source..."
+HARPER_DATA="${HARPER_DATA:-/tmp/harper-flair}"
+HARPER_ADMIN_USER="${HARPER_ADMIN_USER:-admin}"
+HARPER_ADMIN_PASS="${HARPER_ADMIN_PASS:-admin123}"
+NODE="${NODE:-node}"
+OPS_URL="http://localhost:9925"
+
+[ -d "$HARPER_DIR" ] || { echo "Run 'bun install' first." >&2; exit 1; }
+
+# Step 1: Build Harper v5 from source
+echo "==> Building Harper v5 from source..."
 npx tsc --project "$HARPER_DIR/tsconfig.build.json" --skipLibCheck --noCheck 2>&1 | grep -v "TS4023" || true
-echo "Patching .ts requires..."
+
+echo "==> Patching .ts requires..."
 find "$HARPER_DIR" -name "*.js" -not -path "$HARPER_DIR/dist/*" -not -path "$HARPER_DIR/node_modules/*" -not -path "$HARPER_DIR/unitTests/*" | xargs grep -l "require.*\.ts['\"]" 2>/dev/null | while read -r f; do
   sed -i '' -e "s/require('\(.*\)\.ts')/require('\1.js')/g" -e "s/require(\"\(.*\)\.ts\")/require(\"\1.js\")/g" "$f"
 done
-echo "Copying compiled JS for .ts-only files..."
+
+echo "==> Copying compiled JS for .ts-only files..."
 find "$HARPER_DIR" -name "*.ts" -not -path "$HARPER_DIR/dist/*" -not -path "$HARPER_DIR/node_modules/*" -not -name "*.d.ts" | while read -r f; do
   distf="$HARPER_DIR/dist/${f#$HARPER_DIR/}"
   distf="${distf%.ts}.js"
   srcjs="${f%.ts}.js"
   [ -f "$distf" ] && [ ! -f "$srcjs" ] && cp "$distf" "$srcjs"
 done
-echo "Done. Run: node node_modules/harperdb/bin/harper.js dev ."
 
-# Step 4: Create tps_agent role and user (idempotent — errors if exists, that's fine)
-echo "Setting up tps_agent role and user..."
-HARPER_ADMIN_AUTH="Basic $(echo -n admin:admin123 | base64)"
-OPS_URL="http://localhost:9925"
+# Step 2: Build Flair resources
+echo "==> Building Flair resources..."
+bun run build
 
+# Step 3: Non-interactive Harper install (idempotent — skips if already installed)
+echo "==> Installing Harper data directory at $HARPER_DATA..."
+ROOTPATH="$HARPER_DATA" \
+  HDB_ADMIN_USERNAME="$HARPER_ADMIN_USER" \
+  HDB_ADMIN_PASSWORD="$HARPER_ADMIN_PASS" \
+  DEFAULTS_MODE=dev \
+  NODE_HOSTNAME=localhost \
+  "$NODE" "$HARPER_DIR/bin/harper.js" install 2>&1 || echo "(install may have already completed)"
+
+# Step 4: Start Harper in background
+echo "==> Starting Harper..."
+nohup "$NODE" "$HARPER_DIR/bin/harper.js" dev . > "$HARPER_DATA/harper-stdout.log" 2>&1 &
+HARPER_PID=$!
+echo "Harper PID: $HARPER_PID"
+
+# Wait for port
+echo "==> Waiting for Harper to bind port 9926..."
+for i in $(seq 1 30); do
+  if lsof -nP -iTCP:9926 -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Harper is listening on port 9926."
+    break
+  fi
+  [ "$i" -eq 30 ] && { echo "ERROR: Harper did not start within 30s"; exit 1; }
+  sleep 1
+done
+
+# Step 5: Create tps_agent role and user
+HARPER_ADMIN_AUTH="Basic $(echo -n "${HARPER_ADMIN_USER}:${HARPER_ADMIN_PASS}" | base64)"
+echo "==> Setting up tps_agent role..."
 curl -sf -X POST "$OPS_URL" -H "Content-Type: application/json" -H "Authorization: $HARPER_ADMIN_AUTH" -d '{
   "operation": "add_role",
   "role": "tps_agent",
@@ -38,6 +76,7 @@ curl -sf -X POST "$OPS_URL" -H "Content-Type: application/json" -H "Authorizatio
   }
 }' 2>/dev/null && echo "Role created." || echo "Role may already exist (ok)."
 
+echo "==> Setting up tps_agent user..."
 curl -sf -X POST "$OPS_URL" -H "Content-Type: application/json" -H "Authorization: $HARPER_ADMIN_AUTH" -d '{
   "operation": "add_user",
   "username": "tps_agent",
@@ -46,4 +85,8 @@ curl -sf -X POST "$OPS_URL" -H "Content-Type: application/json" -H "Authorizatio
   "active": true
 }' 2>/dev/null && echo "User created." || echo "User may already exist (ok)."
 
-echo "tps_agent setup complete."
+echo ""
+echo "==> Flair is ready at http://localhost:9926"
+echo "    Operations API at http://localhost:9925"
+echo "    Harper PID: $HARPER_PID"
+echo "    Logs: $HARPER_DATA/harper-stdout.log"
