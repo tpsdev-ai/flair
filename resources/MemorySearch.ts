@@ -1,7 +1,7 @@
 import { Resource, tables } from "harperdb";
 
 export class MemorySearch extends Resource {
-  async post(_target: unknown, data: any) {
+  async post(data: any, _context?: any) {
     const { agentId, q, tag } = data || {};
     const conditions: any[] = [];
     if (agentId) conditions.push({ attribute: "agentId", comparator: "equals", value: agentId });
