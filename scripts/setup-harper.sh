@@ -40,6 +40,12 @@ done
 echo "==> Building Flair resources..."
 bun run build
 
+# If BUILD_ONLY is set, skip starting Harper (for CI where tests manage their own instance)
+if [ "${BUILD_ONLY:-}" = "1" ]; then
+  echo "==> BUILD_ONLY mode — skipping Harper start"
+  exit 0
+fi
+
 # Step 3: Non-interactive Harper install (idempotent)
 echo "==> Installing Harper data directory at $HARPER_DATA..."
 ROOTPATH="$HARPER_DATA" \
