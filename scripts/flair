@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Flair CLI wrapper — delegates to flair-client.mjs
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec /opt/homebrew/opt/node@24/bin/node "$SCRIPT_DIR/flair-client.mjs" "$@"
