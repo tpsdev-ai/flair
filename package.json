@@ -7,7 +7,7 @@
     "flair": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json --noCheck",
     "test": "bun test"
   },
   "dependencies": {

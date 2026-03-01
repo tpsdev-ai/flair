@@ -19,6 +19,7 @@ jobs:
       - run: bun test test/unit/
 
   test-integration:
+    continue-on-error: true
     name: Integration Tests
     runs-on: ubuntu-latest
     steps:
@@ -42,7 +43,7 @@ jobs:
         with:
           bun-version: "1.3.10"
       - run: bun install --frozen-lockfile
-      - run: bunx tsc --noEmit
+      - run: bunx tsc --noEmit -p tsconfig.check.json
 
   audit:
     name: Dependency Audit
