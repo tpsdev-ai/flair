@@ -1,19 +1,14 @@
 #!/usr/bin/env node
 /**
  * Flair CLI client with Ed25519 TPS auth.
- * Usage:
- *   node scripts/flair-client.mjs memory list
- *   node scripts/flair-client.mjs memory get <id>
- *   node scripts/flair-client.mjs memory write <content>
- *   node scripts/flair-client.mjs memory search <query>
- *   node scripts/flair-client.mjs soul set <key> <value>
- *   node scripts/flair-client.mjs soul get <id>
+ * Calls embed-server sidecar for real embeddings when available.
  */
 import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 const { subtle } = webcrypto;
 
 const FLAIR_URL = process.env.FLAIR_URL || 'http://127.0.0.1:9926';
+const EMBED_URL = process.env.EMBED_URL || 'http://127.0.0.1:9927';
 const AGENT_ID = process.env.FLAIR_AGENT_ID || 'flint';
 const PRIV_KEY_PATH = process.env.FLAIR_PRIV_KEY || `${process.env.HOME}/.tps/secrets/flair/${AGENT_ID}-priv.key`;
 
@@ -35,6 +30,19 @@ async function flairFetch(method, path, body = null) {
   try { return JSON.parse(text); } catch { return text; }
 }
 
+async function getEmbedding(text) {
+  try {
+    const res = await fetch(`${EMBED_URL}/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (res.ok) return (await res.json()).embedding;
+  } catch {}
+  return null;
+}
+
 const [,, resource, action, ...rest] = process.argv;
 if (!resource || !action) {
   console.error('Usage: flair-client.mjs <memory|soul|agent> <list|get|write|set|delete|search> [args]');
@@ -54,9 +62,13 @@ try {
       break;
     case 'write': {
       const content = rest.join(' ');
-      result = await flairFetch('POST', `/${table}/`, {
-        agentId: AGENT_ID, content, durability: 'standard', createdAt: new Date().toISOString(),
-      });
+      const embedding = await getEmbedding(content);
+      const body = {
+        agentId: AGENT_ID, content, durability: 'standard',
+        createdAt: new Date().toISOString(),
+      };
+      if (embedding) body.embedding = embedding;
+      result = await flairFetch('POST', `/${table}/`, body);
       break;
     }
     case 'set': {
@@ -71,7 +83,11 @@ try {
       break;
     case 'search': {
       const query = rest.join(' ');
-      result = await flairFetch('POST', '/MemorySearch/', { agentId: AGENT_ID, q: query, limit: 5 });
+      // Embed the query with the sidecar too
+      const queryEmbedding = await getEmbedding(query);
+      const body = { agentId: AGENT_ID, q: query, limit: 5 };
+      if (queryEmbedding) body.queryEmbedding = queryEmbedding;
+      result = await flairFetch('POST', '/MemorySearch/', body);
       if (result.results) {
         for (const r of result.results) {
           const date = r.createdAt?.slice(0, 10) || '?';

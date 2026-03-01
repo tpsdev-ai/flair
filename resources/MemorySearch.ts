@@ -1,14 +1,19 @@
 import { Resource, tables } from "harperdb";
-import { embed, cosineSimilarity } from "./embeddings.js";
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) dot += a[i] * b[i];
+  return dot;
+}
 
 export class MemorySearch extends Resource {
   async post(data: any, _context?: any) {
-    const { agentId, q, tag, limit = 10, mode = "hybrid" } = data || {};
+    const { agentId, q, queryEmbedding, tag, limit = 10, mode = "hybrid" } = data || {};
     const conditions: any[] = [];
     if (agentId) conditions.push({ attribute: "agentId", comparator: "equals", value: agentId });
 
     const results: any[] = [];
-    const queryEmbedding = q ? embed(q) : null;
 
     for await (const record of (tables as any).Memory.search({ conditions })) {
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
@@ -16,25 +21,23 @@ export class MemorySearch extends Resource {
 
       let score = 0;
 
-      if (mode === "keyword" || mode === "hybrid") {
-        // Keyword match score
-        if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
-          score += 0.5;
-        }
+      // Keyword match
+      if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
+        score += 0.5;
       }
 
-      if ((mode === "vector" || mode === "hybrid") && queryEmbedding && record.embedding) {
-        // Vector similarity score
-        const sim = cosineSimilarity(queryEmbedding, record.embedding);
-        score += sim;
+      // Vector similarity (if both query and record have embeddings of same dimensionality)
+      if (queryEmbedding && record.embedding &&
+          queryEmbedding.length === record.embedding.length) {
+        score += cosineSimilarity(queryEmbedding, record.embedding);
       }
 
-      if (q && score === 0) continue; // No match at all
+      if (q && score === 0) continue;
 
-      results.push({ ...record, _score: Math.round(score * 1000) / 1000 });
+      const { embedding, ...rest } = record;
+      results.push({ ...rest, _score: Math.round(score * 1000) / 1000 });
     }
 
-    // Sort by score descending, take top N
     results.sort((a: any, b: any) => b._score - a._score);
     return { results: results.slice(0, limit) };
   }
