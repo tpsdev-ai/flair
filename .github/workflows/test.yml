@@ -42,7 +42,7 @@ jobs:
         with:
           bun-version: "1.3.10"
       - run: bun install --frozen-lockfile
-      - run: bunx tsc --noEmit -p tsconfig.check.json
+      - run: bunx tsc --noEmit
 
   audit:
     name: Dependency Audit
