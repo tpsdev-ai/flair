@@ -1,4 +1,5 @@
 name: flair
+rest: true
 
 http:
   port: 8787
@@ -7,9 +8,9 @@ graphqlSchema:
   files: schemas/*.graphql
 
 jsResource:
-  files: resources/*.ts
+  files: dist/resources/*.js
 
 authentication:
   # Default secure. Set to false for local development only.
-  authorizeLocal: true
+  authorizeLocal: false
   enableSessions: true
