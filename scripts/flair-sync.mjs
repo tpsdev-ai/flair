@@ -1,13 +1,6 @@
 #!/usr/bin/env node
 /**
- * Flair sync — push/pull daily logs with embedding generation.
- * 
- * Usage:
- *   node flair-sync.mjs push              # Push today's memory (with embedding)
- *   node flair-sync.mjs push 2026-02-28   # Push a specific date
- *   node flair-sync.mjs pull              # Pull all memories from Flair
- *   node flair-sync.mjs pull-today        # Pull today's memory
- *   node flair-sync.mjs status            # Show connection status + counts
+ * Flair sync — push/pull daily logs. Middleware auto-embeds on write.
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
@@ -40,19 +33,6 @@ async function flairFetch(method, path, body, privKey) {
   try { return { ok: res.ok, data: JSON.parse(text) }; } catch { return { ok: res.ok, data: text }; }
 }
 
-async function getEmbedding(text) {
-  try {
-    const res = await fetch(`${EMBED_URL}/embed`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: text.slice(0, 500) }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (res.ok) return (await res.json()).embedding;
-  } catch {}
-  return null;
-}
-
 const privKey = await loadPrivateKey();
 const [,, cmd, arg] = process.argv;
 const today = new Date().toISOString().slice(0, 10);
@@ -65,24 +45,16 @@ switch (cmd) {
     const content = readFileSync(file, 'utf8').trim();
     const id = `${AGENT_ID}-daily-${date}`;
     
-    // Generate embedding
-    const embedding = await getEmbedding(content);
-    
-    const body = {
+    // Always PUT — middleware auto-embeds, creates-or-updates
+    const r = await flairFetch('PUT', `/Memory/${id}`, {
       id, agentId: AGENT_ID, content,
       tags: ['daily-log', date],
       durability: 'persistent',
       source: `memory/${date}.md`,
       createdAt: `${date}T00:00:00Z`,
-    };
-    if (embedding) body.embedding = embedding;
+    }, privKey);
     
-    // Try PUT first, fall back to POST
-    let r = await flairFetch('PUT', `/Memory/${id}`, body, privKey);
-    if (!r.ok) r = await flairFetch('POST', '/Memory/', body, privKey);
-    
-    const embStr = embedding ? `${embedding.length}d` : 'no-embed';
-    console.log(`${date}: ${r.ok ? 'synced' : 'FAILED'} (${embStr})`);
+    console.log(`${date}: ${r.ok ? 'synced (auto-embed)' : 'FAILED'}`);
     break;
   }
   case 'pull': {
@@ -107,12 +79,10 @@ switch (cmd) {
       console.log(`  Agent: ${AGENT_ID}`);
       console.log(`  Memories: ${Array.isArray(mem.data) ? mem.data.length : '?'}`);
       console.log(`  Soul entries: ${Array.isArray(soul.data) ? soul.data.length : '?'}`);
-      console.log(`  Embed sidecar: ${embedOk ? 'UP (nomic 768d)' : 'DOWN (hash fallback)'}`);
+      console.log(`  Embed sidecar: ${embedOk ? 'UP (search queries)' : 'DOWN (search uses keyword fallback)'}`);
       if (Array.isArray(mem.data)) {
         const withEmbed = mem.data.filter(m => m.embedding?.length === 768).length;
         console.log(`  With embeddings: ${withEmbed}/${mem.data.length}`);
-        const latest = mem.data.sort((a,b) => (b.updatedAt||b.createdAt).localeCompare(a.updatedAt||a.createdAt))[0];
-        console.log(`  Latest: ${latest?.id} (${latest?.updatedAt || latest?.createdAt})`);
       }
     } catch (e) {
       console.log(`Flair Status: DISCONNECTED (${e.message})`);
