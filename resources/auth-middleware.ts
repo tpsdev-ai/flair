@@ -70,9 +70,10 @@ server.http(async (request: any, nextLayer: any) => {
     request.tpsAgent = agentId;
     // Swap Authorization to Basic with superuser creds so Harper auth passes
     // In production, this should map to a proper Harper user with appropriate permissions
-    // DEV MODE: map verified TPS agent to Harper admin user.
-    // PRODUCTION TODO: create dedicated Harper user per agent or use JWT tokens.
-    const superAuth = "Basic " + btoa("admin:admin123");
+    // Map verified TPS agent to dedicated low-privilege Harper user.
+    // tps_agent role: read/write on Agent/Memory/Soul/Integration, no super_user.
+    // Role + user created by scripts/setup-harper.sh during initialization.
+    const superAuth = "Basic " + btoa("tps_agent:tps_agent_internal_only");
     request.headers.set("authorization", superAuth);
     if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
   }
