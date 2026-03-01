@@ -15,12 +15,21 @@ echo "==> Building Harper v5 from source..."
 npx tsc --project "$HARPER_DIR/tsconfig.build.json" --skipLibCheck --noCheck 2>&1 | grep -v "TS4023" || true
 
 echo "==> Patching .ts requires..."
-find "$HARPER_DIR" -name "*.js" -not -path "$HARPER_DIR/dist/*" -not -path "$HARPER_DIR/node_modules/*" -not -path "$HARPER_DIR/unitTests/*" | xargs grep -l "require.*\.ts['\"]" 2>/dev/null | while read -r f; do
-  sed -i '' -e "s/require('\(.*\)\.ts')/require('\1.js')/g" -e "s/require(\"\(.*\)\.ts\")/require(\"\1.js\")/g" "$f"
+find "$HARPER_DIR" -name "*.js" \
+  -not -path "$HARPER_DIR/dist/*" \
+  -not -path "$HARPER_DIR/node_modules/*" \
+  -not -path "$HARPER_DIR/unitTests/*" \
+  -print0 | while IFS= read -r -d '' f; do
+  if grep -q "require.*\.ts['\"]" "$f" 2>/dev/null; then
+    perl -pi -e "s/require\('(.*?)\.ts'\)/require('\$1.js')/g; s/require\(\"(.*?)\.ts\"\)/require(\"\$1.js\")/g" "$f"
+  fi
 done
 
 echo "==> Copying compiled JS for .ts-only files..."
-find "$HARPER_DIR" -name "*.ts" -not -path "$HARPER_DIR/dist/*" -not -path "$HARPER_DIR/node_modules/*" -not -name "*.d.ts" | while read -r f; do
+find "$HARPER_DIR" -name "*.ts" \
+  -not -path "$HARPER_DIR/dist/*" \
+  -not -path "$HARPER_DIR/node_modules/*" \
+  -not -name "*.d.ts" -print0 | while IFS= read -r -d '' f; do
   distf="$HARPER_DIR/dist/${f#$HARPER_DIR/}"
   distf="${distf%.ts}.js"
   srcjs="${f%.ts}.js"
@@ -31,7 +40,7 @@ done
 echo "==> Building Flair resources..."
 bun run build
 
-# Step 3: Non-interactive Harper install (idempotent — skips if already installed)
+# Step 3: Non-interactive Harper install (idempotent)
 echo "==> Installing Harper data directory at $HARPER_DATA..."
 ROOTPATH="$HARPER_DATA" \
   HDB_ADMIN_USERNAME="$HARPER_ADMIN_USER" \
@@ -49,7 +58,7 @@ echo "Harper PID: $HARPER_PID"
 # Wait for port
 echo "==> Waiting for Harper to bind port 9926..."
 for i in $(seq 1 30); do
-  if lsof -nP -iTCP:9926 -sTCP:LISTEN >/dev/null 2>&1; then
+  if curl -sf http://localhost:9926/Health > /dev/null 2>&1; then
     echo "Harper is listening on port 9926."
     break
   fi
