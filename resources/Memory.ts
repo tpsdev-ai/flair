@@ -1,4 +1,5 @@
 import { tables } from "harperdb";
+import { embed } from "./embeddings.js";
 
 export class Memory extends (tables as any).Memory {
   async post(content: any, context?: any) {
@@ -11,7 +12,23 @@ export class Memory extends (tables as any).Memory {
       content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
     }
 
+    // Generate embedding from content
+    if (content.content && !content.embedding) {
+      content.embedding = embed(content.content);
+    }
+
     return super.post(content, context);
+  }
+
+  async put(content: any) {
+    content.updatedAt = new Date().toISOString();
+
+    // Regenerate embedding on content update
+    if (content.content) {
+      content.embedding = embed(content.content);
+    }
+
+    return super.put(content);
   }
 
   async delete(id: any, context?: any) {
