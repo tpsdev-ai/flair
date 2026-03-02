@@ -108,7 +108,7 @@ For each insight:
     // Update lastReflected on source memories (fire-and-forget)
     const now = new Date().toISOString();
     for (const m of memories) {
-      (tables as any).Memory.put({ id: m.id, lastReflected: now }).catch(() => {});
+      (tables as any).Memory.put({ ...m, lastReflected: now }).catch(() => {});
     }
 
     return {
