@@ -6,7 +6,7 @@ let harper: HarperInstance;
 describe("Flair API E2E Smoke", () => {
   beforeAll(async () => {
     harper = await startHarper();
-  }, 60_000);
+  }, 180_000);
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);

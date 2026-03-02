@@ -19,20 +19,40 @@ jobs:
       - run: bun test test/unit/
 
   test-integration:
-    continue-on-error: true
     name: Integration Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.10"
-      - uses: actions/setup-node@v4
-        with: { node-version: '22' }
       - run: bun install --frozen-lockfile
-      - run: BUILD_ONLY=1 bash scripts/setup-harper.sh
-      - run: bun test test/integration/
-    timeout-minutes: 5
+      - name: Build Flair resources
+        run: bun run build
+      - name: Start Harper Pro with Flair component
+        run: |
+          docker run -d \
+            --name harper-flair \
+            -p 9925:9925 -p 9926:9926 \
+            -v ${{ github.workspace }}:/flair \
+            -e ROOTPATH=/tmp/harper-flair \
+            -e HDB_ADMIN_USERNAME=admin \
+            -e HDB_ADMIN_PASSWORD=admin123 \
+            -e DEFAULTS_MODE=dev \
+            -e NODE_HOSTNAME=localhost \
+            -e OPERATIONSAPI_NETWORK_PORT=9925 \
+            -e HTTP_PORT=9926 \
+            --entrypoint /bin/sh \
+            harperfast/harper-pro:5.0.0-alpha.3 \
+            -c "harperdb install && harperdb dev /flair" 
+      - name: Run integration tests against Docker Harper
+        run: bun test test/integration/
+        env:
+          HARPER_HTTP_URL: http://localhost:9926
+          HARPER_OPS_URL: http://localhost:9925
+          HARPER_ADMIN_USER: admin
+          HARPER_ADMIN_PASS: admin123
 
   typecheck:
     name: Type Check
