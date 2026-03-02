@@ -55,7 +55,7 @@ export async function startHarper(): Promise<HarperInstance> {
     const httpURL = HARPER_HTTP_URL;
     const opsURL = HARPER_OPS_URL_ENV ?? httpURL.replace(/:(\d+)($|\/)/, (_, port, rest) => `:${Number(port) - 1}${rest}`);
     console.log(`[harper-lifecycle] external mode: httpURL=${httpURL} opsURL=${opsURL} user=${HARPER_ADMIN_USER}`);
-    await waitForHealth(httpURL, 30_000); // Docker service should already be up
+    await waitForHealth(httpURL, 120_000); // allow time for Docker install + start
     return {
       httpURL,
       opsURL,

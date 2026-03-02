@@ -43,8 +43,9 @@ jobs:
             -e NODE_HOSTNAME=localhost \
             -e OPERATIONSAPI_NETWORK_PORT=9925 \
             -e HTTP_PORT=9926 \
+            --entrypoint /bin/sh \
             harperfast/harper-pro:5.0.0-alpha.3 \
-            harperdb dev /flair
+            -c "harperdb install && harperdb dev /flair" 
       - name: Run integration tests against Docker Harper
         run: bun test test/integration/
         env:
