@@ -56,25 +56,18 @@ export class MemoryBootstrap extends Resource {
     let memoriesIncluded = 0;
     let memoriesAvailable = 0;
 
-    // --- 1. Soul records ---
+    // --- 1. Soul records (unconditional — not subject to token budget) ---
+    // Soul is who you are. It's not optional context to be trimmed.
     if (includeSoul) {
-      const soulRecords: any[] = [];
+      let soulTokens = 0;
       for await (const record of (tables as any).Soul.search()) {
         if (record.agentId !== agentId) continue;
-        soulRecords.push(record);
+        const line = `**${record.key}:** ${record.value}`;
+        sections.soul.push(line);
+        soulTokens += estimateTokens(line);
       }
-
-      // Soul gets at most 30% of total budget
-      let soulBudget = Math.floor(maxTokens * 0.3);
-      for (const s of soulRecords) {
-        const line = `**${s.key}:** ${s.value}`;
-        const cost = estimateTokens(line);
-        if (cost <= soulBudget && cost <= tokenBudget) {
-          sections.soul.push(line);
-          soulBudget -= cost;
-          tokenBudget -= cost;
-        }
-      }
+      // Soul tokens are tracked but don't reduce memory budget
+      tokenBudget = maxTokens; // memory budget is separate from soul
     }
 
     // --- 2. Permanent memories (always included, highest priority) ---
@@ -176,7 +169,8 @@ export class MemoryBootstrap extends Resource {
     }
 
     const context = parts.join("\n\n");
-    const tokenEstimate = maxTokens - tokenBudget;
+    const soulTokens = sections.soul.reduce((sum, line) => sum + estimateTokens(line), 0);
+    const memoryTokens = maxTokens - tokenBudget;
 
     return {
       context,
@@ -186,7 +180,9 @@ export class MemoryBootstrap extends Resource {
         recent: sections.recent.length,
         relevant: sections.relevant.length,
       },
-      tokenEstimate,
+      tokenEstimate: soulTokens + memoryTokens,
+      soulTokens,
+      memoryTokens,
       memoriesIncluded,
       memoriesAvailable,
     };
