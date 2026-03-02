@@ -9,15 +9,69 @@ const STARTUP_TIMEOUT_MS = 45_000;
 // Use harperdb from node_modules — works on any system with Node
 const HARPER_BIN = join(process.cwd(), "node_modules", "harperdb", "bin", "harper.js");
 
+// External service mode: set HARPER_HTTP_URL (and optionally HARPER_OPS_URL) to
+// skip the local spawn and connect to an already-running Harper instance (e.g. Docker).
+const HARPER_HTTP_URL = process.env.HARPER_HTTP_URL;
+const HARPER_OPS_URL_ENV = process.env.HARPER_OPS_URL;
+const HARPER_ADMIN_USER = process.env.HARPER_ADMIN_USER ?? "admin";
+const HARPER_ADMIN_PASS = process.env.HARPER_ADMIN_PASS ?? "admin123";
+
 export interface HarperInstance {
   httpURL: string;
   opsURL: string;
   installDir: string;
-  process: ChildProcess;
+  process: ChildProcess | null;
   admin: { username: string; password: string };
+  external: boolean;
+}
+
+async function waitForHealth(httpURL: string, timeoutMs = 60_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${httpURL}/Health`, { signal: AbortSignal.timeout(2000) });
+      if (res.ok) return;
+    } catch {}
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error(`Harper at ${httpURL} did not become healthy within ${timeoutMs}ms`);
+}
+
+async function ensureTables(opsURL: string, authHeader: string): Promise<void> {
+  const tables = ["Agent", "Memory", "Soul", "MemoryGrant"];
+  for (const table of tables) {
+    try {
+      await fetch(opsURL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({ operation: "create_table", table, schema: "data" }),
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch {}
+  }
 }
 
 export async function startHarper(): Promise<HarperInstance> {
+  // ── External mode: connect to Docker service ─────────────────────────────
+  if (HARPER_HTTP_URL) {
+    const httpURL = HARPER_HTTP_URL;
+    const opsURL = HARPER_OPS_URL_ENV ?? httpURL.replace(/:(\d+)($|\/)/, (_, port, rest) => `:${Number(port) - 1}${rest}`);
+    const authHeader = "Basic " + btoa(`${HARPER_ADMIN_USER}:${HARPER_ADMIN_PASS}`);
+
+    await waitForHealth(httpURL, 90_000);
+    await ensureTables(opsURL, authHeader);
+
+    return {
+      httpURL,
+      opsURL,
+      installDir: "",
+      process: null,
+      admin: { username: HARPER_ADMIN_USER, password: HARPER_ADMIN_PASS },
+      external: true,
+    };
+  }
+
+  // ── Local mode: spawn Harper from node_modules ────────────────────────────
   const installDir = await mkdtemp(join(tmpdir(), "flair-test-"));
   const httpPort = getRandomPort();
   const opsPort = httpPort + 1;
@@ -34,7 +88,6 @@ export async function startHarper(): Promise<HarperInstance> {
     HTTP_PORT: String(httpPort),
   };
 
-  // Install: creates data dirs in ROOTPATH (no global state)
   const install = spawn(process.execPath, [HARPER_BIN, "install"], { cwd: process.cwd(), env });
   await new Promise<void>((resolve, reject) => {
     let output = "";
@@ -45,7 +98,6 @@ export async function startHarper(): Promise<HarperInstance> {
     setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
   });
 
-  // Start dev mode with our component
   const proc = spawn(process.execPath, [HARPER_BIN, "dev", "."], { cwd: process.cwd(), env });
 
   let log = "";
@@ -73,24 +125,20 @@ export async function startHarper(): Promise<HarperInstance> {
 
   const httpURL = `http://127.0.0.1:${httpPort}`;
   const opsURL = `http://127.0.0.1:${opsPort}`;
+  await waitForHealth(httpURL);
 
-  // Wait for HTTP readiness
-  for (let i = 0; i < 20; i++) {
-    try {
-      const res = await fetch(`${httpURL}/Health`, { signal: AbortSignal.timeout(1000) });
-      if (res.ok) break;
-    } catch {}
-    await new Promise(r => setTimeout(r, 500));
-  }
-
-  return { httpURL, opsURL, installDir, process: proc, admin: { username: "admin", password: "test123" } };
+  return { httpURL, opsURL, installDir, process: proc, admin: { username: "admin", password: "test123" }, external: false };
 }
 
 export async function stopHarper(inst: HarperInstance): Promise<void> {
-  inst.process.kill();
+  if (inst.external) return;
+
+  inst.process?.kill();
   await new Promise<void>(r => {
-    inst.process.on("exit", r);
-    setTimeout(() => { try { inst.process.kill("SIGKILL"); } catch {} r(); }, 3000);
+    inst.process?.on("exit", r);
+    setTimeout(() => { try { inst.process?.kill("SIGKILL"); } catch {} r(); }, 3000);
   });
-  await rm(inst.installDir, { recursive: true, force: true, maxRetries: 4 });
+  if (inst.installDir) {
+    await rm(inst.installDir, { recursive: true, force: true, maxRetries: 4 });
+  }
 }
