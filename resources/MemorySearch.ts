@@ -64,6 +64,7 @@ export class MemorySearch extends Resource {
         if (record.visibility !== "office") continue;
       }
 
+      if (record.archived === true) continue; // soft-deleted — excluded from search by default
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
       if (tag && !(record.tags || []).includes(tag)) continue;
 

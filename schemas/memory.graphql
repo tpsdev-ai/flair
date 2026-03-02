@@ -12,6 +12,12 @@ type Memory @table {
   expiresAt: String @indexed
   retrievalCount: Int
   lastRetrieved: String
+  promotionStatus: String   # null | "pending" | "approved" | "rejected"
+  promotedAt: String
+  promotedBy: String        # authenticated agentId who approved
+  archived: Boolean @indexed
+  archivedAt: String
+  archivedBy: String        # authenticated agentId who archived
 }
 
 type Soul @table {
