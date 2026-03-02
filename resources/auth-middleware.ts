@@ -104,7 +104,7 @@ server.http(async (request: any, nextLayer: any) => {
 
   // Post-process: backfill embedding after successful Memory write
   if (isMemoryWrite && memoryId && response.status >= 200 && response.status < 300) {
-    setTimeout(() => backfillEmbedding(memoryId).catch(() => {}), 500);
+    backfillEmbedding(memoryId!).catch(() => {});
   }
 
   return response;
