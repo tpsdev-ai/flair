@@ -1,4 +1,5 @@
 import { tables } from "harperdb";
+import { patchRecord } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
 
 export class Memory extends (tables as any).Memory {
@@ -15,7 +16,7 @@ export class Memory extends (tables as any).Memory {
         try {
           const src = await (tables as any).Memory.get(sourceId);
           if (src) {
-            (tables as any).Memory.put({ ...src, lastReflected: now }).catch(() => {});
+            patchRecord((tables as any).Memory, sourceId, { lastReflected: now }).catch(() => {});
           }
         } catch {}
       }

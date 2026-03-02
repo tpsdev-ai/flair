@@ -22,6 +22,7 @@
 
 import { Resource, tables } from "harperdb";
 import { isAdmin } from "./auth-middleware.js";
+import { patchRecord } from "./table-helpers.js";
 
 const FOCUS_PROMPTS: Record<string, string> = {
   lessons_learned:
@@ -108,12 +109,7 @@ For each insight:
     // Update lastReflected on source memories (read-modify-write to preserve embeddings)
     const now = new Date().toISOString();
     for (const m of memories) {
-      (async () => {
-        try {
-          const full = await (tables as any).Memory.get(m.id);
-          if (full) await (tables as any).Memory.put({ ...full, lastReflected: now });
-        } catch {}
-      })();
+      patchRecord((tables as any).Memory, m.id, { lastReflected: now }).catch(() => {});
     }
 
     return {
