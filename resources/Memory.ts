@@ -1,4 +1,5 @@
 import { tables } from "harperdb";
+import { patchRecord } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
 
 export class Memory extends (tables as any).Memory {
@@ -7,6 +8,19 @@ export class Memory extends (tables as any).Memory {
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
     content.archived = content.archived ?? false;
+
+    // Validate derivedFrom source IDs exist (best-effort, non-blocking)
+    if (Array.isArray(content.derivedFrom) && content.derivedFrom.length > 0) {
+      const now = content.createdAt;
+      for (const sourceId of content.derivedFrom) {
+        try {
+          const src = await (tables as any).Memory.get(sourceId);
+          if (src) {
+            patchRecord((tables as any).Memory, sourceId, { lastReflected: now }).catch(() => {});
+          }
+        } catch {}
+      }
+    }
 
     if (content.durability === "ephemeral" && !content.expiresAt) {
       const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
