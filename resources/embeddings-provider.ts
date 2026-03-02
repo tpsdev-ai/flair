@@ -1,65 +1,118 @@
 /**
- * Embeddings provider — calls harper-fabric-embeddings in-process.
+ * In-process embeddings via process.dlopen() — no sidecar needed.
  * 
- * Harper v5 blocks node:module even from server.http() middleware context,
- * so we can't import harper-fabric-embeddings directly. We use node:http
- * to call it as an in-process sidecar (started alongside Harper).
- * 
- * TODO: File Harper issue requesting node:module access from server.http()
- * middleware, or a native embeddings extension API.
+ * Harper blocks node:module, but process.dlopen() is available.
+ * We load the native llama-addon.node directly and replicate
+ * harper-fabric-embeddings' init/embed logic.
  */
+import { existsSync, readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 
 const MAX_CHARS = 500;
-const EMBED_PORT = Number(process.env.FLAIR_EMBED_PORT || "9927");
+const MODELS_DIR = process.env.FLAIR_MODELS_DIR || "/tmp/flair-models";
 
 let dims = 0;
-let mode: "sidecar" | "hash" | "none" = "none";
+let mode: "native" | "hash" | "none" = "none";
+let addonRef: any = null;
+let modelRef: any = null;
+let contextRef: any = null;
+let bosToken = -1;
+let eosToken = -1;
 
 export function getDimensions(): number { return dims; }
 export function getMode(): string { return mode; }
 
-async function httpGet(url: string): Promise<string> {
-  const http = await import("node:http");
-  return new Promise((resolve, reject) => {
-    const req = http.get(url, (res: any) => {
-      let data = "";
-      res.on("data", (c: any) => data += c);
-      res.on("end", () => resolve(data));
-    });
-    req.on("error", reject);
-    req.setTimeout(5000, () => { req.destroy(); reject(new Error("timeout")); });
-  });
+function findAddonPath(): string {
+  const candidates = [
+    "@node-llama-cpp/mac-arm64-metal",
+    "@node-llama-cpp/linux-x64",
+    "@node-llama-cpp/mac-x64",
+    "@node-llama-cpp/linux-arm64",
+  ];
+  const nmDir = join(process.cwd(), "node_modules");
+  for (const pkg of candidates) {
+    const binsDir = join(nmDir, pkg, "bins");
+    if (!existsSync(binsDir)) continue;
+    for (const entry of readdirSync(binsDir)) {
+      const addonPath = join(binsDir, entry, "llama-addon.node");
+      if (existsSync(addonPath)) return addonPath;
+    }
+  }
+  throw new Error("No llama-addon.node found");
 }
 
-async function httpPost(url: string, body: string): Promise<string> {
-  const http = await import("node:http");
-  return new Promise((resolve, reject) => {
-    const req = http.request(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    }, (res: any) => {
-      let data = "";
-      res.on("data", (c: any) => data += c);
-      res.on("end", () => resolve(data));
-    });
-    req.on("error", reject);
-    req.setTimeout(15000, () => { req.destroy(); reject(new Error("timeout")); });
-    req.write(body);
-    req.end();
-  });
+function findModelPath(): string {
+  if (!existsSync(MODELS_DIR)) throw new Error(`Models dir not found: ${MODELS_DIR}`);
+  const files = readdirSync(MODELS_DIR);
+  const gguf = files.find(f => f.endsWith(".gguf"));
+  if (gguf) return join(MODELS_DIR, gguf);
+  throw new Error(`No .gguf model found in ${MODELS_DIR}`);
+}
+
+function normalize(vec: Float32Array): number[] {
+  let sumSq = 0;
+  for (let i = 0; i < vec.length; i++) sumSq += vec[i] * vec[i];
+  const norm = Math.sqrt(sumSq);
+  if (norm === 0) return Array.from(vec);
+  for (let i = 0; i < vec.length; i++) vec[i] /= norm;
+  return Array.from(vec);
+}
+
+function buildTokenSequence(tokens: Uint32Array): Uint32Array {
+  const parts: number[] = [];
+  if (bosToken >= 0 && tokens[0] !== bosToken) parts.push(bosToken);
+  for (let i = 0; i < tokens.length; i++) parts.push(tokens[i]);
+  if (eosToken >= 0 && tokens[tokens.length - 1] !== eosToken) parts.push(eosToken);
+  return new Uint32Array(parts);
 }
 
 export async function initEmbeddings(): Promise<void> {
-  // Try sidecar via node:http (Harper blocks fetch globally)
   try {
-    const result = await httpGet(`http://127.0.0.1:${EMBED_PORT}/health`);
-    const parsed = JSON.parse(result) as { dims: number };
-    dims = parsed.dims;
-    mode = "sidecar";
-    console.log(`[embeddings] Sidecar: ${dims} dims`);
+    const addonPath = findAddonPath();
+    const modelPath = findModelPath();
+    
+    // Load native addon via process.dlopen (bypasses node:module block)
+    const mod = { exports: {} } as any;
+    process.dlopen(mod, addonPath);
+    const addon = mod.exports;
+    
+    // Initialize llama backend
+    await addon.init();
+    const backendsDir = dirname(addonPath);
+    addon.loadBackends();
+    addon.loadBackends(backendsDir);
+    
+    // Load model
+    const model = new addon.AddonModel(modelPath, {
+      gpuLayers: 99,
+      useMmap: true,
+      useMlock: false,
+      checkTensors: false,
+    });
+    if (!(await model.init())) throw new Error("Model init failed");
+    
+    bosToken = model.tokenBos();
+    eosToken = model.tokenEos();
+    
+    // Create embedding context
+    const ctx = new addon.AddonContext(model, {
+      contextSize: 2048,
+      batchSize: 512,
+      sequences: 1,
+      embeddings: true,
+      threads: 6,
+    });
+    if (!(await ctx.init())) throw new Error("Context init failed");
+    
+    addonRef = addon;
+    modelRef = model;
+    contextRef = ctx;
+    dims = model.getEmbeddingVectorSize();
+    mode = "native";
+    console.log(`[embeddings] Native in-process: ${dims} dims (no sidecar)`);
     return;
   } catch (err: any) {
-    console.error(`[embeddings] Sidecar not available: ${err.message}`);
+    console.error(`[embeddings] Native load failed: ${err.message}`);
   }
 
   // Fallback: hash-based
@@ -74,22 +127,29 @@ export async function initEmbeddings(): Promise<void> {
 }
 
 export async function getEmbedding(text: string): Promise<number[] | null> {
-  const truncated = text.slice(0, MAX_CHARS);
-  if (mode === "sidecar") {
+  if (mode === "native" && modelRef && contextRef) {
     try {
-      const result = await httpPost(
-        `http://127.0.0.1:${EMBED_PORT}/embed`,
-        JSON.stringify({ text: truncated })
-      );
-      return (JSON.parse(result) as { embedding: number[] }).embedding;
+      const tokens = modelRef.tokenize(text.slice(0, MAX_CHARS), false);
+      if (tokens.length === 0) return null;
+      
+      const input = buildTokenSequence(tokens);
+      contextRef.initBatch(input.length);
+      
+      const logitIndexes = new Uint32Array(input.length);
+      for (let i = 0; i < input.length; i++) logitIndexes[i] = i;
+      contextRef.addToBatch(0, 0, input, logitIndexes);
+      await contextRef.decodeBatch();
+      
+      const raw = contextRef.getEmbedding(input.length);
+      return normalize(raw);
     } catch (err: any) {
       console.error(`[embeddings] embed failed: ${err.message}`);
+      return null;
     }
-    return null;
   }
   if (mode === "hash") {
     const { fallbackEmbed } = await import("./embeddings.js");
-    return fallbackEmbed(truncated);
+    return fallbackEmbed(text.slice(0, MAX_CHARS));
   }
   return null;
 }
