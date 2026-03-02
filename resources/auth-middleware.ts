@@ -154,7 +154,7 @@ server.http(async (request: any, nextLayer: any) => {
           const body = await clone.json();
           const setsApproved = body?.promotionStatus === "approved";
           const setsPermanent = body?.durability === "permanent";
-          const setsArchived = Object.prototype.hasOwnProperty.call(body, "archived");
+          const setsArchived = body?.archived === true;
           if (setsApproved || setsPermanent || setsArchived) {
             return new Response(JSON.stringify({
               error: "forbidden: only admins can approve promotions, set permanent durability, or archive memories"
@@ -164,16 +164,21 @@ server.http(async (request: any, nextLayer: any) => {
       }
     }
 
-    // Memory DELETE: permanent memories require admin
+    // Memory PUT/DELETE: ownership check (non-admin can only modify their own memories)
     if ((url.pathname.startsWith("/Memory") || url.pathname.startsWith("/memory")) &&
-        method === "DELETE") {
+        (method === "PUT" || method === "DELETE" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
           const pathParts = url.pathname.split("/").filter(Boolean);
           const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
           if (memId) {
             const record = await (tables as any).Memory.get(memId);
-            if (record?.durability === "permanent") {
+            if (record && record.agentId && record.agentId !== agentId) {
+              return new Response(JSON.stringify({
+                error: `forbidden: cannot modify memory owned by ${record.agentId}`
+              }), { status: 403 });
+            }
+            if (method === "DELETE" && record?.durability === "permanent") {
               return new Response(JSON.stringify({
                 error: "forbidden: only admins can purge permanent memories"
               }), { status: 403 });
