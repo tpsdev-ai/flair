@@ -4,6 +4,41 @@ import { initEmbeddings, getEmbedding } from "./embeddings-provider.js";
 const WINDOW_MS = 30_000;
 const nonceSeen = new Map<string, number>();
 
+// ─── Admin resolution ─────────────────────────────────────────────────────────
+// Admin agents: from FLAIR_ADMIN_AGENTS env var (comma-separated) OR
+// Agent records with role === "admin". Both sources are OR-combined.
+// Result is cached for 60s to avoid per-request DB hits.
+
+let adminCacheExpiry = 0;
+let adminCache: Set<string> = new Set();
+
+async function getAdminAgents(): Promise<Set<string>> {
+  const now = Date.now();
+  if (now < adminCacheExpiry) return adminCache;
+
+  const from_env = (process.env.FLAIR_ADMIN_AGENTS ?? "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+
+  let from_db: string[] = [];
+  try {
+    const results = await (tables as any).Agent.search([{ attribute: "role", value: "admin", condition: "equals" }]);
+    for await (const row of results) {
+      if (row?.id) from_db.push(row.id);
+    }
+  } catch { /* Agent table might not be populated yet */ }
+
+  adminCache = new Set([...from_env, ...from_db]);
+  adminCacheExpiry = now + 60_000;
+  return adminCache;
+}
+
+export async function isAdmin(agentId: string): Promise<boolean> {
+  const admins = await getAdminAgents();
+  return admins.has(agentId);
+}
+
+// ─── Crypto helpers ───────────────────────────────────────────────────────────
+
 function b64ToArrayBuffer(b64: string): ArrayBuffer {
   const bin = atob(b64);
   const buf = new ArrayBuffer(bin.length);
@@ -28,10 +63,8 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     const record = await (tables as any).Memory.get(memoryId);
     if (!record?.content) return;
     if (record.embedding?.length > 100) return;
-    
     const embedding = await getEmbedding(record.content);
     if (!embedding) return;
-    
     await (tables as any).Memory.put({ ...record, embedding });
     console.log(`[auto-embed] ${memoryId}: ${embedding.length}d`);
   } catch (err: any) {
@@ -39,72 +72,131 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
   }
 }
 
+// ─── HTTP middleware ──────────────────────────────────────────────────────────
+
 server.http(async (request: any, nextLayer: any) => {
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
+
   if (url.pathname === "/health" || url.pathname === "/Health") return nextLayer(request);
 
   const header = request.headers.get("authorization") || "";
   const m = header.match(/^TPS-Ed25519\s+([^:]+):(\d+):([^:]+):(.+)$/);
 
-  let memoryId: string | null = null;
-  let isMemoryWrite = false;
+  if (!m) {
+    return new Response(JSON.stringify({ error: "missing_or_invalid_authorization" }), { status: 401 });
+  }
 
-  if (m) {
-    const [, agentId, tsRaw, nonce, signatureB64] = m;
-    const ts = Number(tsRaw);
-    const now = Date.now();
+  const [, agentId, tsRaw, nonce, signatureB64] = m;
+  const ts = Number(tsRaw);
+  const now = Date.now();
 
-    if (!Number.isFinite(ts) || Math.abs(now - ts) > WINDOW_MS)
-      return new Response(JSON.stringify({ error: "timestamp_out_of_window" }), { status: 401 });
+  if (!Number.isFinite(ts) || Math.abs(now - ts) > WINDOW_MS)
+    return new Response(JSON.stringify({ error: "timestamp_out_of_window" }), { status: 401 });
 
-    for (const [k, signatureTs] of nonceSeen.entries())
-      if (now - signatureTs > WINDOW_MS) nonceSeen.delete(k);
+  for (const [k, signatureTs] of nonceSeen.entries())
+    if (now - signatureTs > WINDOW_MS) nonceSeen.delete(k);
 
-    const nonceKey = `${agentId}:${nonce}`;
-    if (nonceSeen.has(nonceKey))
-      return new Response(JSON.stringify({ error: "nonce_replay_detected" }), { status: 401 });
+  const nonceKey = `${agentId}:${nonce}`;
+  if (nonceSeen.has(nonceKey))
+    return new Response(JSON.stringify({ error: "nonce_replay_detected" }), { status: 401 });
 
-    const agent = await (tables as any).Agent.get(agentId);
-    if (!agent) return new Response(JSON.stringify({ error: "unknown_agent" }), { status: 401 });
+  const agent = await (tables as any).Agent.get(agentId);
+  if (!agent) return new Response(JSON.stringify({ error: "unknown_agent" }), { status: 401 });
 
-    try {
-      const payload = `${agentId}:${tsRaw}:${nonce}:${request.method}:${url.pathname}${url.search}`;
-      const key = await importEd25519Key(agent.publicKey);
-      const ok = await crypto.subtle.verify(
-        { name: "Ed25519" } as any, key,
-        b64ToArrayBuffer(signatureB64),
-        new TextEncoder().encode(payload)
-      );
-      if (!ok) return new Response(JSON.stringify({ error: "invalid_signature" }), { status: 401 });
-    } catch (e: any) {
-      return new Response(JSON.stringify({ error: "signature_verification_failed", detail: e?.message }), { status: 401 });
+  try {
+    const payload = `${agentId}:${tsRaw}:${nonce}:${request.method}:${url.pathname}${url.search}`;
+    const key = await importEd25519Key(agent.publicKey);
+    const ok = await crypto.subtle.verify(
+      { name: "Ed25519" } as any, key,
+      b64ToArrayBuffer(signatureB64),
+      new TextEncoder().encode(payload)
+    );
+    if (!ok) return new Response(JSON.stringify({ error: "invalid_signature" }), { status: 401 });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ error: "signature_verification_failed", detail: e?.message }), { status: 401 });
+  }
+
+  nonceSeen.set(nonceKey, ts);
+  request.tpsAgent = agentId;
+  request.tpsAgentIsAdmin = await isAdmin(agentId);
+
+  const superAuth = "Basic " + btoa("admin:admin123");
+  request.headers.set("authorization", superAuth);
+  if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
+
+  // ── Server-side permission guards ──────────────────────────────────────────
+
+  const method = request.method.toUpperCase();
+  const isMutation = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+
+  if (isMutation) {
+    // Soul PUT: only owner or admin
+    if (url.pathname.startsWith("/Soul") && (method === "PUT" || method === "POST")) {
+      if (!request.tpsAgentIsAdmin) {
+        let bodyAgentId: string | null = null;
+        try {
+          const clone = request.clone();
+          const body = await clone.json();
+          bodyAgentId = body?.agentId ?? null;
+        } catch {}
+        if (bodyAgentId && bodyAgentId !== agentId) {
+          return new Response(JSON.stringify({ error: "forbidden: non-admin cannot modify another agent's soul" }), { status: 403 });
+        }
+      }
     }
 
-    nonceSeen.set(nonceKey, ts);
-    request.tpsAgent = agentId;
-    const superAuth = "Basic " + btoa("admin:admin123");
-    request.headers.set("authorization", superAuth);
-    if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
+    // Memory promotion guard: only admin can approve or set durability=permanent
+    if ((url.pathname.startsWith("/Memory") || url.pathname.startsWith("/memory")) &&
+        (method === "PUT" || method === "POST" || method === "PATCH")) {
+      if (!request.tpsAgentIsAdmin) {
+        try {
+          const clone = request.clone();
+          const body = await clone.json();
+          const setsApproved = body?.promotionStatus === "approved";
+          const setsPermanent = body?.durability === "permanent";
+          const setsArchived = Object.prototype.hasOwnProperty.call(body, "archived");
+          if (setsApproved || setsPermanent || setsArchived) {
+            return new Response(JSON.stringify({
+              error: "forbidden: only admins can approve promotions, set permanent durability, or archive memories"
+            }), { status: 403 });
+          }
+        } catch {}
+      }
+    }
 
-    // Detect Memory writes
-    isMemoryWrite = (request.method === "POST" || request.method === "PUT") && url.pathname.startsWith("/Memory");
-    if (isMemoryWrite) {
-      // Extract ID from URL path (PUT /Memory/id) or X-Memory-Id header (POST)
-      const pathParts = url.pathname.split("/").filter(Boolean);
-      if (pathParts.length >= 2) {
-        memoryId = decodeURIComponent(pathParts[1]);
-      } else {
-        // For POST /Memory/, client can send X-Memory-Id header
-        memoryId = request.headers.get("x-memory-id");
+    // Memory DELETE: permanent memories require admin
+    if ((url.pathname.startsWith("/Memory") || url.pathname.startsWith("/memory")) &&
+        method === "DELETE") {
+      if (!request.tpsAgentIsAdmin) {
+        try {
+          const pathParts = url.pathname.split("/").filter(Boolean);
+          const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
+          if (memId) {
+            const record = await (tables as any).Memory.get(memId);
+            if (record?.durability === "permanent") {
+              return new Response(JSON.stringify({
+                error: "forbidden: only admins can purge permanent memories"
+              }), { status: 403 });
+            }
+          }
+        } catch {}
       }
     }
   }
 
+  // ── Embedding backfill ─────────────────────────────────────────────────────
+
+  const isMemoryWrite = isMutation && url.pathname.startsWith("/Memory");
+  let memoryId: string | null = null;
+  if (isMemoryWrite) {
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    memoryId = pathParts.length >= 2 ? decodeURIComponent(pathParts[1]) : (request.headers.get("x-memory-id") ?? null);
+  }
+
   const response = await nextLayer(request);
 
-  // Post-process: backfill embedding after successful Memory write
   if (isMemoryWrite && memoryId && response.status >= 200 && response.status < 300) {
-    backfillEmbedding(memoryId!).catch(() => {});
+    backfillEmbedding(memoryId).catch(() => {});
   }
 
   return response;
