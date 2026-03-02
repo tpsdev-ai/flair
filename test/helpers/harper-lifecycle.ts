@@ -49,36 +49,13 @@ async function waitForHealth(httpURL: string, timeoutMs = 60_000): Promise<void>
   throw new Error(`Harper at ${httpURL} did not respond within ${timeoutMs}ms (${attempt} attempts)`);
 }
 
-async function ensureTables(opsURL: string, authHeader: string): Promise<void> {
-  const tables = ["Agent", "Memory", "Soul", "MemoryGrant"];
-  console.log(`[harper-lifecycle] ensureTables: ensuring ${tables.join(", ")} at ${opsURL}`);
-  for (const table of tables) {
-    try {
-      const res = await fetch(opsURL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: authHeader },
-        body: JSON.stringify({ operation: "create_table", table, schema: "data", primary_key: "id" }),
-        signal: AbortSignal.timeout(5000),
-      });
-      const body = await res.text().catch(() => "");
-      console.log(`[harper-lifecycle] ensureTables: ${table} → HTTP ${res.status} ${body.slice(0, 120)}`);
-    } catch (err: any) {
-      console.log(`[harper-lifecycle] ensureTables: ${table} → error: ${err?.message ?? err}`);
-    }
-  }
-}
-
 export async function startHarper(): Promise<HarperInstance> {
   // ── External mode: connect to Docker service ─────────────────────────────
   if (HARPER_HTTP_URL) {
     const httpURL = HARPER_HTTP_URL;
     const opsURL = HARPER_OPS_URL_ENV ?? httpURL.replace(/:(\d+)($|\/)/, (_, port, rest) => `:${Number(port) - 1}${rest}`);
-    const authHeader = "Basic " + btoa(`${HARPER_ADMIN_USER}:${HARPER_ADMIN_PASS}`);
-
     console.log(`[harper-lifecycle] external mode: httpURL=${httpURL} opsURL=${opsURL} user=${HARPER_ADMIN_USER}`);
     await waitForHealth(httpURL, 30_000); // Docker service should already be up
-    await ensureTables(opsURL, authHeader);
-
     return {
       httpURL,
       opsURL,
