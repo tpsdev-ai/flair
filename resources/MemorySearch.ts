@@ -7,7 +7,6 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot;
 }
 
-// Lazy-init embedding module (runs in sandbox via process.dlopen)
 let hfe: any = null;
 let hfeInitPromise: Promise<void> | null = null;
 
@@ -21,9 +20,7 @@ async function ensureEmbeddings(): Promise<boolean> {
           modelsDir: process.env.FLAIR_MODELS_DIR || "/tmp/flair-models",
           gpuLayers: 99,
         });
-      } catch {
-        hfe = null;
-      }
+      } catch { hfe = null; }
     })();
   }
   await hfeInitPromise;
@@ -31,44 +28,60 @@ async function ensureEmbeddings(): Promise<boolean> {
 }
 
 export class MemorySearch extends Resource {
-  async post(data: any, _context?: any) {
+  async post(data: any) {
     const { agentId, q, queryEmbedding, tag, limit = 10 } = data || {};
-    const conditions: any[] = [];
-    if (agentId) conditions.push({ attribute: "agentId", comparator: "equals", value: agentId });
 
-    // Generate query embedding in-process if not provided
+    // Determine searchable agent IDs (own + granted)
+    const searchAgentIds = new Set<string>();
+    if (agentId) searchAgentIds.add(agentId);
+
+    if (agentId) {
+      try {
+        for await (const grant of (tables as any).MemoryGrant.search({
+          conditions: [{ attribute: "granteeId", comparator: "equals", value: agentId }],
+        })) {
+          if (grant.scope === "search" || grant.scope === "read") {
+            searchAgentIds.add(grant.ownerId);
+          }
+        }
+      } catch { /* MemoryGrant may not exist */ }
+    }
+
+    // Generate query embedding
     let qEmb = queryEmbedding;
     if (!qEmb && q) {
-      const ready = await ensureEmbeddings();
-      if (ready) {
-        try {
-          qEmb = await hfe.embed(String(q).slice(0, 500));
-        } catch {}
+      if (await ensureEmbeddings()) {
+        try { qEmb = await hfe.embed(String(q).slice(0, 500)); } catch {}
       }
     }
 
     const results: any[] = [];
 
-    for await (const record of (tables as any).Memory.search({ conditions })) {
+    // Iterate ALL memories, filter by agent ID set
+    for await (const record of (tables as any).Memory.search()) {
+      // Filter by agent
+      if (searchAgentIds.size > 0 && !searchAgentIds.has(record.agentId)) {
+        if (record.visibility !== "office") continue;
+      }
+
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
       if (tag && !(record.tags || []).includes(tag)) continue;
 
       let score = 0;
-
-      // Keyword match
       if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
         score += 0.5;
       }
-
-      // Vector similarity
       if (qEmb && record.embedding && qEmb.length === record.embedding.length) {
         score += cosineSimilarity(qEmb, record.embedding);
       }
-
       if (q && score === 0) continue;
 
       const { embedding, ...rest } = record;
-      results.push({ ...rest, _score: Math.round(score * 1000) / 1000 });
+      results.push({
+        ...rest,
+        _score: Math.round(score * 1000) / 1000,
+        _source: record.agentId !== agentId ? record.agentId : undefined,
+      });
     }
 
     results.sort((a: any, b: any) => b._score - a._score);

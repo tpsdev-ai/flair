@@ -2,6 +2,7 @@ type Memory @table {
   id: ID @primaryKey
   agentId: String! @indexed
   content: String!
+  visibility: String
   embedding: [Float] @indexed(type: "HNSW")
   tags: [String] @indexed
   durability: String @indexed
@@ -19,4 +20,13 @@ type Soul @table {
   durability: String @indexed
   createdAt: String!
   updatedAt: String
+}
+
+type MemoryGrant @table @export {
+  id: ID @primaryKey
+  ownerId: String!
+  granteeId: String!
+  scope: String!
+  filter: String
+  createdAt: String
 }
