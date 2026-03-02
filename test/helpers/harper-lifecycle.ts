@@ -29,7 +29,7 @@ async function waitForHealth(httpURL: string, timeoutMs = 60_000): Promise<void>
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`${httpURL}/Health`, { signal: AbortSignal.timeout(2000) });
+      const res = await fetch(`${httpURL}/health`, { signal: AbortSignal.timeout(2000) });
       if (res.ok) return;
     } catch {}
     await new Promise(r => setTimeout(r, 500));
