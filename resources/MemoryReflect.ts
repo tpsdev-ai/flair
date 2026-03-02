@@ -105,10 +105,15 @@ For each insight:
 3. Set tags from the source memories where relevant
 4. Keep each memory atomic — one insight per record`;
 
-    // Update lastReflected on source memories (fire-and-forget)
+    // Update lastReflected on source memories (read-modify-write to preserve embeddings)
     const now = new Date().toISOString();
     for (const m of memories) {
-      (tables as any).Memory.put({ ...m, lastReflected: now }).catch(() => {});
+      (async () => {
+        try {
+          const full = await (tables as any).Memory.get(m.id);
+          if (full) await (tables as any).Memory.put({ ...full, lastReflected: now });
+        } catch {}
+      })();
     }
 
     return {
