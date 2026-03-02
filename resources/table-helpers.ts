@@ -19,3 +19,28 @@ export async function patchRecord(
   if (!existing) throw new Error(`Record ${id} not found`);
   await table.put({ ...existing, ...patch });
 }
+
+/**
+ * Fire-and-forget variant — swallows errors silently.
+ * Use for best-effort metadata updates (lastReflected, lastRetrieved, etc.)
+ * where a failure should never break the calling request.
+ */
+export function patchRecordSilent(
+  table: any,
+  id: string,
+  patch: Record<string, unknown>,
+): void {
+  patchRecord(table, id, patch).catch(() => {});
+}
+
+// ── RULE ──────────────────────────────────────────────────────────────────────
+// Never call `tables.X.put(partial)` directly anywhere in Flair resources.
+// Harper put() = FULL RECORD REPLACEMENT. Missing fields are deleted permanently.
+// Always use patchRecord() or patchRecordSilent().
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── RULE ──────────────────────────────────────────────────────────────────────
+// Never call `tables.X.put(partial)` directly anywhere in Flair resources.
+// Harper put() = FULL RECORD REPLACEMENT. Missing fields are deleted permanently.
+// Always use patchRecord() or patchRecordSilent().
+// ─────────────────────────────────────────────────────────────────────────────
