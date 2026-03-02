@@ -18,6 +18,11 @@ type Memory @table {
   archived: Boolean @indexed
   archivedAt: String
   archivedBy: String        # authenticated agentId who archived
+  # Learning pipeline fields
+  parentId: String          # link to related memory
+  derivedFrom: [String]     # source memory IDs this was reflected from
+  sessionId: String @indexed  # originating session
+  lastReflected: String     # ISO timestamp of last reflection pass
 }
 
 type Soul @table {
