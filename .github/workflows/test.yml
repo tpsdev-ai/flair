@@ -31,6 +31,8 @@ jobs:
         env:
           ROOTPATH: /tmp/harper-flair
           OPERATIONSAPI_NETWORK_PORT: 9925
+          HDB_ADMIN_USERNAME: admin
+          HDB_ADMIN_PASSWORD: admin123
           HTTP_PORT: 9926
           AUTHENTICATION_AUTHORIZELOCAL: "true"
           AUTHENTICATION_ENABLESESSIONS: "true"
