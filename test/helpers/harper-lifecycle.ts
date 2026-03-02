@@ -58,7 +58,7 @@ export async function startHarper(): Promise<HarperInstance> {
     const opsURL = HARPER_OPS_URL_ENV ?? httpURL.replace(/:(\d+)($|\/)/, (_, port, rest) => `:${Number(port) - 1}${rest}`);
     const authHeader = "Basic " + btoa(`${HARPER_ADMIN_USER}:${HARPER_ADMIN_PASS}`);
 
-    await waitForHealth(httpURL, 90_000);
+    await waitForHealth(httpURL, 150_000);
     await ensureTables(opsURL, authHeader);
 
     return {
