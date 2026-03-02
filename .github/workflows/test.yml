@@ -34,14 +34,15 @@ jobs:
           HDB_ADMIN_USERNAME: admin
           HDB_ADMIN_PASSWORD: admin123
           HTTP_PORT: 9926
+          DEFAULTS_MODE: dev
           AUTHENTICATION_AUTHORIZELOCAL: "true"
           AUTHENTICATION_ENABLESESSIONS: "true"
         options: >-
           --health-cmd "curl -f http://localhost:9926/Health || exit 1"
           --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-          --health-start-period 15s
+          --health-timeout 5s
+          --health-retries 24
+          --health-start-period 60s
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
