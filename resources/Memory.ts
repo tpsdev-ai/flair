@@ -15,7 +15,7 @@ export class Memory extends (tables as any).Memory {
         try {
           const src = await (tables as any).Memory.get(sourceId);
           if (src) {
-            (tables as any).Memory.put({ id: sourceId, lastReflected: now }).catch(() => {});
+            (tables as any).Memory.put({ ...src, lastReflected: now }).catch(() => {});
           }
         } catch {}
       }
