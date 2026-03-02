@@ -57,7 +57,7 @@ async function ensureTables(opsURL: string, authHeader: string): Promise<void> {
       const res = await fetch(opsURL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: authHeader },
-        body: JSON.stringify({ operation: "create_table", table, schema: "data" }),
+        body: JSON.stringify({ operation: "create_table", table, schema: "data", primary_key: "id" }),
         signal: AbortSignal.timeout(5000),
       });
       const body = await res.text().catch(() => "");
