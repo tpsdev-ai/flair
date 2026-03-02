@@ -85,6 +85,18 @@ export class MemorySearch extends Resource {
     }
 
     results.sort((a: any, b: any) => b._score - a._score);
-    return { results: results.slice(0, limit) };
+    const topResults = results.slice(0, limit);
+
+    // Async hit tracking — don't block the response
+    const now = new Date().toISOString();
+    for (const r of topResults) {
+      (tables as any).Memory.put({
+        id: r.id,
+        retrievalCount: (r.retrievalCount || 0) + 1,
+        lastRetrieved: now,
+      }).catch(() => {});
+    }
+
+    return { results: topResults };
   }
 }

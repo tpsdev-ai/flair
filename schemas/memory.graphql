@@ -10,6 +10,8 @@ type Memory @table {
   createdAt: String! @indexed
   updatedAt: String
   expiresAt: String @indexed
+  retrievalCount: Int
+  lastRetrieved: String
 }
 
 type Soul @table {
