@@ -1,0 +1,149 @@
+diff --git a/src/index.ts b/src/index.ts
+index 25ccdc6..f557b6e 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -8,13 +8,23 @@
+  * ~19 MB installed (native binary only) vs ~250 MB+ for node-llama-cpp.
+  */
+ 
+-import { createRequire } from 'node:module';
+ import { createWriteStream, existsSync, mkdirSync, readdirSync } from 'node:fs';
+ import { rename, unlink } from 'node:fs/promises';
+ import { pipeline } from 'node:stream/promises';
+ import path from 'node:path';
+ 
+-const require = createRequire(import.meta.url);
++// ─── Module loading ─────────────────────────────────────────────────────────
++// Try createRequire for standard Node.js environments.
++// Fall back to process.dlopen for sandboxed runtimes (e.g., HarperDB)
++// where node:module is blocked.
++
++let nodeRequire: NodeRequire | null = null;
++try {
++	const { createRequire } = await import('node:module');
++	nodeRequire = createRequire(import.meta.url);
++} catch {
++	// node:module not available (e.g., Harper sandbox) — use dlopen fallback
++}
+ 
+ // ─── Types ───────────────────────────────────────────────────────────────────
+ 
+@@ -386,9 +396,12 @@ export async function downloadModel(dir: string, modelName = 'nomic-embed-text')
+ 
+ /**
+  * Find the llama-addon.node binary from installed platform packages.
++ *
++ * Uses require.resolve when available (standard Node.js), falls back to
++ * filesystem scanning for sandboxed runtimes (e.g., HarperDB) where
++ * node:module is blocked.
+  */
+ function findAddonBinary(): string {
+-	// Platform-specific package names
+ 	const candidates = [
+ 		'@node-llama-cpp/linux-x64',
+ 		'@node-llama-cpp/mac-arm64-metal',
+@@ -396,23 +409,43 @@ function findAddonBinary(): string {
+ 		'@node-llama-cpp/linux-arm64',
+ 	];
+ 
+-	for (const pkg of candidates) {
+-		try {
+-			const pkgMain = require.resolve(pkg);
+-			const pkgDir = path.dirname(pkgMain);
++	// Strategy 1: require.resolve (standard Node.js)
++	if (nodeRequire) {
++		for (const pkg of candidates) {
++			try {
++				const pkgMain = nodeRequire.resolve(pkg);
++				const pkgDir = path.dirname(pkgMain);
++				const binsDir = path.join(pkgDir, '..', 'bins');
++				if (!existsSync(binsDir)) continue;
++
++				const entries = readdirSync(binsDir);
++				for (const entry of entries) {
++					const addonPath = path.join(binsDir, entry, 'llama-addon.node');
++					if (existsSync(addonPath)) return addonPath;
++				}
++			} catch {
++				// Package not installed
++			}
++		}
++	}
++
++	// Strategy 2: filesystem scan from cwd/node_modules (sandboxed runtimes)
++	const searchRoots = [
++		path.join(process.cwd(), 'node_modules'),
++		// Also check relative to this file's location
++		path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'node_modules'),
++	];
+ 
+-			// Binary lives in ../bins/<folder>/llama-addon.node
+-			const binsDir = path.join(pkgDir, '..', 'bins');
++	for (const nmDir of searchRoots) {
++		if (!existsSync(nmDir)) continue;
++		for (const pkg of candidates) {
++			const binsDir = path.join(nmDir, pkg, 'bins');
+ 			if (!existsSync(binsDir)) continue;
+ 
+-			// Find the first directory in bins/ that contains the addon
+-			const entries = readdirSync(binsDir);
+-			for (const entry of entries) {
++			for (const entry of readdirSync(binsDir)) {
+ 				const addonPath = path.join(binsDir, entry, 'llama-addon.node');
+ 				if (existsSync(addonPath)) return addonPath;
+ 			}
+-		} catch {
+-			// Package not installed
+ 		}
+ 	}
+ 
+@@ -423,27 +456,33 @@ function findAddonBinary(): string {
+ }
+ 
+ /**
+- * Load the native addon with cache isolation.
++ * Load the native addon.
+  *
+- * The require cache is cleared before and after loading so that each call
+- * gets an independent instance of the native addon's global state. Without
+- * this, Node.js returns the same cached binding and multiple Llama instances
+- * would share (and corrupt) each other's state.
++ * Uses require() when available (with cache isolation for independent instances).
++ * Falls back to process.dlopen() for sandboxed runtimes where node:module is blocked.
+  */
+ function loadAddon(addonPath: string): LlamaBinding {
+-	try {
+-		delete require.cache[require.resolve(addonPath)];
+-	} catch {
+-		// Not cached
+-	}
++	// Strategy 1: require (standard Node.js) — with cache isolation
++	if (nodeRequire) {
++		try {
++			delete nodeRequire.cache[nodeRequire.resolve(addonPath)];
++		} catch {
++			// Not cached
++		}
+ 
+-	const addon = require(addonPath) as LlamaBinding;
++		const addon = nodeRequire(addonPath) as LlamaBinding;
+ 
+-	try {
+-		delete require.cache[require.resolve(addonPath)];
+-	} catch {
+-		// Ignore
++		try {
++			delete nodeRequire.cache[nodeRequire.resolve(addonPath)];
++		} catch {
++			// Ignore
++		}
++
++		return addon;
+ 	}
+ 
+-	return addon;
++	// Strategy 2: process.dlopen (sandboxed runtimes like HarperDB)
++	const mod = { exports: {} } as { exports: LlamaBinding };
++	process.dlopen(mod, addonPath);
++	return mod.exports;
+ }
