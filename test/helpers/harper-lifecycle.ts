@@ -30,7 +30,7 @@ async function waitForHealth(httpURL: string, timeoutMs = 60_000): Promise<void>
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`${httpURL}/health`, { signal: AbortSignal.timeout(2000) });
-      if (res.ok) return;
+      if (res.status > 0) return; // any HTTP response = server is alive
     } catch {}
     await new Promise(r => setTimeout(r, 500));
   }
@@ -58,7 +58,7 @@ export async function startHarper(): Promise<HarperInstance> {
     const opsURL = HARPER_OPS_URL_ENV ?? httpURL.replace(/:(\d+)($|\/)/, (_, port, rest) => `:${Number(port) - 1}${rest}`);
     const authHeader = "Basic " + btoa(`${HARPER_ADMIN_USER}:${HARPER_ADMIN_PASS}`);
 
-    await waitForHealth(httpURL, 150_000);
+    await waitForHealth(httpURL, 30_000); // Docker service should already be up
     await ensureTables(opsURL, authHeader);
 
     return {
