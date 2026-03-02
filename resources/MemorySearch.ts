@@ -7,11 +7,45 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot;
 }
 
+// Lazy-init embedding module (runs in sandbox via process.dlopen)
+let hfe: any = null;
+let hfeInitPromise: Promise<void> | null = null;
+
+async function ensureEmbeddings(): Promise<boolean> {
+  if (hfe) return true;
+  if (!hfeInitPromise) {
+    hfeInitPromise = (async () => {
+      try {
+        hfe = await import("harper-fabric-embeddings");
+        await hfe.init({
+          modelsDir: process.env.FLAIR_MODELS_DIR || "/tmp/flair-models",
+          gpuLayers: 99,
+        });
+      } catch {
+        hfe = null;
+      }
+    })();
+  }
+  await hfeInitPromise;
+  return hfe !== null;
+}
+
 export class MemorySearch extends Resource {
   async post(data: any, _context?: any) {
-    const { agentId, q, queryEmbedding, tag, limit = 10, mode = "hybrid" } = data || {};
+    const { agentId, q, queryEmbedding, tag, limit = 10 } = data || {};
     const conditions: any[] = [];
     if (agentId) conditions.push({ attribute: "agentId", comparator: "equals", value: agentId });
+
+    // Generate query embedding in-process if not provided
+    let qEmb = queryEmbedding;
+    if (!qEmb && q) {
+      const ready = await ensureEmbeddings();
+      if (ready) {
+        try {
+          qEmb = await hfe.embed(String(q).slice(0, 500));
+        } catch {}
+      }
+    }
 
     const results: any[] = [];
 
@@ -26,10 +60,9 @@ export class MemorySearch extends Resource {
         score += 0.5;
       }
 
-      // Vector similarity (if both query and record have embeddings of same dimensionality)
-      if (queryEmbedding && record.embedding &&
-          queryEmbedding.length === record.embedding.length) {
-        score += cosineSimilarity(queryEmbedding, record.embedding);
+      // Vector similarity
+      if (qEmb && record.embedding && qEmb.length === record.embedding.length) {
+        score += cosineSimilarity(qEmb, record.embedding);
       }
 
       if (q && score === 0) continue;
