@@ -68,7 +68,7 @@ function evaluate(record: any, now: number, olderThanMs: number): Candidate {
   return { memory, suggestion: "keep", reason: `Retrieved ${count} times, ${Math.round(daysSinceRetrieved)} days since last retrieval` };
 }
 
-export class MemoryConsolidate extends Resource {
+export class ConsolidateMemories extends Resource {
   async post(data: any) {
     const { agentId, scope = "persistent", olderThan = "30d", limit = 20 } = data || {};
 

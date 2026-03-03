@@ -27,7 +27,7 @@ async function ensureEmbeddings(): Promise<boolean> {
   return hfe !== null;
 }
 
-export class MemorySearch extends Resource {
+export class SearchMemories extends Resource {
   async post(data: any) {
     const { agentId, q, queryEmbedding, tag, limit = 10 } = data || {};
 
