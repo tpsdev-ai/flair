@@ -17,7 +17,6 @@ _substitute_plist() {
   sed \
     -e "s|FLAIR_DIR|$FLAIR_DIR|g" \
     -e "s|HOME_DIR|$HOME|g" \
-    -e "s|ADMIN_TOKEN_PLACEHOLDER|${ADMIN_TOKEN}|g" \
     -e "s|/opt/homebrew/bin/node|$node_path|g" \
     "$PLIST_TEMPLATE"
 }
