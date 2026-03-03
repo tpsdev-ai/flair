@@ -3,7 +3,7 @@
 # Usage: ./scripts/install-launchd.sh install|uninstall|status|restart
 set -euo pipefail
 
-LABEL="ai.tpsdev.harper"
+LABEL="ai.tpsdev.flair"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 PLIST_TEMPLATE="$(cd "$(dirname "$0")" && pwd)/${LABEL}.plist"
 FLAIR_DIR="$(cd "$(dirname "$0")/.." && pwd)"
