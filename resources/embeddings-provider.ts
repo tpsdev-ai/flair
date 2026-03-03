@@ -7,20 +7,37 @@
 const MAX_CHARS = 500;
 const MODELS_DIR = process.env.FLAIR_MODELS_DIR || "/tmp/flair-models";
 
-let dims = 0;
-let mode: "native" | "hash" | "none" = "none";
-let hfe: any = null;
+// Process-level singleton: Harper may load this module multiple times
+// (once per resource file import). Ensure native model loads exactly once
+// AND that the serial queue is shared — otherwise concurrent module instances
+// each have their own queue but call the same native hfe.embed() concurrently,
+// causing llama.cpp thread-safety crashes.
+const GLOBAL_KEY = "__flair_embeddings__";
+if (!(process as any)[GLOBAL_KEY]) {
+  (process as any)[GLOBAL_KEY] = {
+    dims: 0, mode: "none", hfe: null,
+    queue: [] as Array<{ text: string; resolve: (v: number[] | null) => void }>,
+    processing: false,
+  };
+}
+const _g = (process as any)[GLOBAL_KEY];
+
+let dims: number = _g.dims;
+let mode: "native" | "hash" | "none" = _g.mode;
+let hfe: any = _g.hfe;
 
 export function getDimensions(): number { return dims; }
 export function getMode(): string { return mode; }
 
 export async function initEmbeddings(): Promise<void> {
+  if (mode !== "none") return; // Already initialized (singleton guard)
   try {
     hfe = await import("harper-fabric-embeddings");
     await hfe.init({ modelsDir: MODELS_DIR, gpuLayers: 99 });
     dims = hfe.dimensions();
     mode = "native";
-    console.log(`[embeddings] Native in-process: ${dims} dims`);
+    _g.dims = dims; _g.mode = mode; _g.hfe = hfe;
+    console.log(`[embeddings] Native in-process: ${dims} dims (caller=${new Error().stack?.split("\n")[2]?.trim()?.slice(0,80)})`);
     return;
   } catch (err: any) {
     console.error(`[embeddings] Native load failed: ${err.message}`);
@@ -38,17 +55,16 @@ export async function initEmbeddings(): Promise<void> {
   }
 }
 
-// --- Serial Embedding Queue ---
+// --- Serial Embedding Queue (process-level, shared across module instances) ---
 // Prevents concurrent native inference calls that crash llama.cpp.
-// All embedding requests go through this queue, processed one at a time.
-const queue: Array<{ text: string; resolve: (v: number[] | null) => void }> = [];
-let processing = false;
+// queue and processing live on process[GLOBAL_KEY] so all module instances
+// (loaded in different Harper resource sandboxes) share one serialized queue.
 
 async function processQueue(): Promise<void> {
-  if (processing) return;
-  processing = true;
-  while (queue.length > 0) {
-    const job = queue.shift()!;
+  if (_g.processing) return;
+  _g.processing = true;
+  while (_g.queue.length > 0) {
+    const job = _g.queue.shift()!;
     try {
       const result = await doEmbed(job.text);
       job.resolve(result);
@@ -57,7 +73,7 @@ async function processQueue(): Promise<void> {
       job.resolve(null);
     }
   }
-  processing = false;
+  _g.processing = false;
 }
 
 async function doEmbed(text: string): Promise<number[] | null> {
@@ -73,7 +89,7 @@ async function doEmbed(text: string): Promise<number[] | null> {
 
 export async function getEmbedding(text: string): Promise<number[] | null> {
   return new Promise<number[] | null>((resolve) => {
-    queue.push({ text, resolve });
+    _g.queue.push({ text, resolve });
     processQueue();
   });
 }
