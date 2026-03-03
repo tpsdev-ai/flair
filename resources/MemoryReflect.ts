@@ -20,7 +20,7 @@
  *   count          number     — number of memories included
  */
 
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "harper";
 import { isAdmin } from "./auth-middleware.js";
 import { patchRecordSilent } from "./table-helpers.js";
 

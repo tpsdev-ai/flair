@@ -6,8 +6,8 @@ import { join } from "node:path";
 const getRandomPort = () => 10000 + Math.floor(Math.random() * 50000);
 const STARTUP_TIMEOUT_MS = 45_000;
 
-// Use harperdb from node_modules — works on any system with Node
-const HARPER_BIN = join(process.cwd(), "node_modules", "harperdb", "bin", "harper.js");
+// Use harper from node_modules — works on any system with Node
+const HARPER_BIN = join(process.cwd(), "node_modules", "harper", "dist", "bin", "harper.js");
 
 // External service mode: set HARPER_HTTP_URL (and optionally HARPER_OPS_URL) to
 // skip the local spawn and connect to an already-running Harper instance (e.g. Docker).

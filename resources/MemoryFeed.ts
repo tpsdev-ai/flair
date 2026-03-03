@@ -1,4 +1,4 @@
-import { Resource, tables } from 'harperdb';
+import { Resource, tables } from 'harper';
 
 export class FeedMemories extends Resource {
   async *connect(target: any, incomingMessages: any) {

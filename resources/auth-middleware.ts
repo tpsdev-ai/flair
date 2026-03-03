@@ -1,4 +1,4 @@
-import { server, tables } from "harperdb";
+import { server, tables } from "harper";
 import { initEmbeddings, getEmbedding } from "./embeddings-provider.js";
 
 // --- Admin token (loaded once at startup, never hardcoded) ---

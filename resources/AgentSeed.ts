@@ -17,7 +17,7 @@
  * Auth: admin only.
  */
 
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "harper";
 import { isAdmin } from "./auth-middleware.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({

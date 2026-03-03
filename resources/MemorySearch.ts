@@ -1,4 +1,4 @@
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "harper";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 
 function cosineSimilarity(a: number[], b: number[]): number {
