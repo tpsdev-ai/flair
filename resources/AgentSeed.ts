@@ -66,6 +66,11 @@ export class AgentSeed extends Resource {
 
     for (const [key, value] of Object.entries(merged)) {
       const id = `${agentId}:${key}`;
+      const existing = await (tables as any).Soul.get(id);
+      if (existing) {
+        soulEntries.push(existing); // skip — don't overwrite existing soul entries
+        continue;
+      }
       const entry = { id, agentId, key, value: String(value), durability: "permanent", createdAt: now, updatedAt: now };
       await (tables as any).Soul.put(entry);
       soulEntries.push(entry);
