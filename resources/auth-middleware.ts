@@ -1,4 +1,4 @@
-import { server, tables } from "harper";
+import { server, tables } from "harperdb";
 import { initEmbeddings, getEmbedding } from "./embeddings-provider.js";
 import { readFileSync } from "node:fs";
 
