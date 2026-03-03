@@ -42,7 +42,7 @@
     <key>HOME</key>
     <string>HOME_DIR</string>
     <key>HARPER_SET_CONFIG</key>
-    <string>{"rootPath":"HOME_DIR/.harper/flair","http":{"port":9926,"cors":true,"corsAccessList":["http://127.0.0.1:9926","http://localhost:9926"]},"operationsApi":{"network":{"port":9925,"cors":true,"corsAccessList":["http://127.0.0.1:9925","http://localhost:9925"]}},"mqtt":{"network":{"port":null},"webSocket":false},"localStudio":{"enabled":false}}</string>
+    <string>{"rootPath":"HOME_DIR/.harper/flair","http":{"port":9926,"cors":true,"corsAccessList":["http://127.0.0.1:9926","http://localhost:9926"]},"operationsApi":{"network":{"port":9925,"cors":true,"corsAccessList":["http://127.0.0.1:9925","http://localhost:9925"],"domainSocket":"HOME_DIR/.harper/flair/operations-server"}},"mqtt":{"network":{"port":null},"webSocket":false},"localStudio":{"enabled":false}}</string>
   </dict>
 </dict>
 </plist>
