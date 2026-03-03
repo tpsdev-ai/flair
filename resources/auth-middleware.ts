@@ -79,7 +79,10 @@ server.http(async (request: any, nextLayer: any) => {
 
   if (url.pathname === "/health" || url.pathname === "/Health") return nextLayer(request);
 
-  const header = request.headers.get("authorization") || "";
+  // Skip re-entry: if we already swapped auth to Basic, pass through
+  if ((request as any)._tpsAuthVerified) return nextLayer(request);
+
+  const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
   const m = header.match(/^TPS-Ed25519\s+([^:]+):(\d+):([^:]+):(.+)$/);
 
   if (!m) {
@@ -106,18 +109,21 @@ server.http(async (request: any, nextLayer: any) => {
   try {
     const payload = `${agentId}:${tsRaw}:${nonce}:${request.method}:${url.pathname}${url.search}`;
     const key = await importEd25519Key(agent.publicKey);
-    const ok = await crypto.subtle.verify(
+    const sigBuf = b64ToArrayBuffer(signatureB64);
+    const payloadBuf = new TextEncoder().encode(payload);
+      const ok = await crypto.subtle.verify(
       { name: "Ed25519" } as any, key,
-      b64ToArrayBuffer(signatureB64),
-      new TextEncoder().encode(payload)
+      sigBuf,
+      payloadBuf
     );
-    if (!ok) return new Response(JSON.stringify({ error: "invalid_signature" }), { status: 401 });
+      if (!ok) return new Response(JSON.stringify({ error: "invalid_signature" }), { status: 401 });
   } catch (e: any) {
-    return new Response(JSON.stringify({ error: "signature_verification_failed", detail: e?.message }), { status: 401 });
+      return new Response(JSON.stringify({ error: "signature_verification_failed", detail: e?.message }), { status: 401 });
   }
 
   nonceSeen.set(nonceKey, ts);
   request.tpsAgent = agentId;
+  (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
   const superAuth = "Basic " + btoa("admin:admin123");
@@ -146,7 +152,7 @@ server.http(async (request: any, nextLayer: any) => {
     }
 
     // Memory promotion guard: only admin can approve or set durability=permanent
-    if ((url.pathname.startsWith("/Memory") || url.pathname.startsWith("/memory")) &&
+    if (((url.pathname === "/Memory" || url.pathname.startsWith("/Memory/") || url.pathname === "/memory" || url.pathname.startsWith("/memory/"))) &&
         (method === "PUT" || method === "POST" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
@@ -165,7 +171,7 @@ server.http(async (request: any, nextLayer: any) => {
     }
 
     // Memory PUT/DELETE: ownership check (non-admin can only modify their own memories)
-    if ((url.pathname.startsWith("/Memory") || url.pathname.startsWith("/memory")) &&
+    if (((url.pathname === "/Memory" || url.pathname.startsWith("/Memory/") || url.pathname === "/memory" || url.pathname.startsWith("/memory/"))) &&
         (method === "PUT" || method === "DELETE" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
@@ -191,7 +197,7 @@ server.http(async (request: any, nextLayer: any) => {
 
   // ── Embedding backfill ─────────────────────────────────────────────────────
 
-  const isMemoryWrite = isMutation && url.pathname.startsWith("/Memory");
+  const isMemoryWrite = isMutation && (url.pathname === "/Memory" || url.pathname.startsWith("/Memory/"));
   let memoryId: string | null = null;
   if (isMemoryWrite) {
     const pathParts = url.pathname.split("/").filter(Boolean);

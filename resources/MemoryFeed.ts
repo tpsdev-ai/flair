@@ -1,6 +1,6 @@
 import { Resource, tables } from 'harperdb';
 
-export class MemoryFeed extends Resource {
+export class FeedMemories extends Resource {
   async *connect(target: any, incomingMessages: any) {
     const subscription = await (tables as any).Memory.subscribe(target);
     

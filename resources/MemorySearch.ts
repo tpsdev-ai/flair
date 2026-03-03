@@ -1,4 +1,5 @@
 import { Resource, tables } from "harperdb";
+import { getEmbedding, getMode } from "./embeddings-provider.js";
 
 function cosineSimilarity(a: number[], b: number[]): number {
   let dot = 0;
@@ -7,27 +8,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot;
 }
 
-let hfe: any = null;
-let hfeInitPromise: Promise<void> | null = null;
-
-async function ensureEmbeddings(): Promise<boolean> {
-  if (hfe) return true;
-  if (!hfeInitPromise) {
-    hfeInitPromise = (async () => {
-      try {
-        hfe = await import("harper-fabric-embeddings");
-        await hfe.init({
-          modelsDir: process.env.FLAIR_MODELS_DIR || "/tmp/flair-models",
-          gpuLayers: 99,
-        });
-      } catch { hfe = null; }
-    })();
-  }
-  await hfeInitPromise;
-  return hfe !== null;
-}
-
-export class MemorySearch extends Resource {
+export class SearchMemories extends Resource {
   async post(data: any) {
     const { agentId, q, queryEmbedding, tag, limit = 10 } = data || {};
 
@@ -50,8 +31,8 @@ export class MemorySearch extends Resource {
     // Generate query embedding
     let qEmb = queryEmbedding;
     if (!qEmb && q) {
-      if (await ensureEmbeddings()) {
-        try { qEmb = await hfe.embed(String(q).slice(0, 500)); } catch {}
+      if (getMode() !== "none") {
+        try { qEmb = await getEmbedding(String(q).slice(0, 500)); } catch {}
       }
     }
 

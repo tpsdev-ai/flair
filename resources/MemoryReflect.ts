@@ -35,7 +35,7 @@ const FOCUS_PROMPTS: Record<string, string> = {
     "Extract errors, bugs, and failures. For each: what failed, root cause, and fix applied. These are high-value persistent memories.",
 };
 
-export class MemoryReflect extends Resource {
+export class ReflectMemories extends Resource {
   async post(data: any) {
     const {
       agentId,

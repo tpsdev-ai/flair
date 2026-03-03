@@ -29,7 +29,7 @@ function formatMemory(m: any): string {
   return `${tag} ${m.content}${date}`;
 }
 
-export class MemoryBootstrap extends Resource {
+export class BootstrapMemories extends Resource {
   async post(data: any, _context?: any) {
     const {
       agentId,
