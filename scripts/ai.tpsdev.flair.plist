@@ -9,7 +9,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/node</string>
-    <string>FLAIR_DIR/node_modules/harperdb/bin/harper.js</string>
+    <string>FLAIR_DIR/node_modules/harper/dist/bin/harper.js</string>
     <string>dev</string>
     <string>FLAIR_DIR</string>
   </array>

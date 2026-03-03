@@ -14,7 +14,15 @@ ACTION="${1:-status}"
 _substitute_plist() {
   local node_path
   node_path="$(which node)"
+  # Resolve harper binary: prefer new package name, fall back to old
+  local harper_bin
+  if [[ -f "$FLAIR_DIR/node_modules/harper/dist/bin/harper.js" ]]; then
+    harper_bin="$FLAIR_DIR/node_modules/harper/dist/bin/harper.js"
+  else
+    harper_bin="$FLAIR_DIR/node_modules/harperdb/bin/harper.js"
+  fi
   sed \
+    -e "s|FLAIR_DIR/node_modules/harper/dist/bin/harper.js|$harper_bin|g" \
     -e "s|FLAIR_DIR|$FLAIR_DIR|g" \
     -e "s|HOME_DIR|$HOME|g" \
     -e "s|/opt/homebrew/bin/node|$node_path|g" \
