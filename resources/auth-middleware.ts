@@ -48,11 +48,20 @@ function b64ToArrayBuffer(b64: string): ArrayBuffer {
 }
 
 const keyCache = new Map<string, CryptoKey>();
-async function importEd25519Key(publicKeyB64: string): Promise<CryptoKey> {
-  if (keyCache.has(publicKeyB64)) return keyCache.get(publicKeyB64)!;
-  const raw = b64ToArrayBuffer(publicKeyB64);
+async function importEd25519Key(publicKeyStr: string): Promise<CryptoKey> {
+  if (keyCache.has(publicKeyStr)) return keyCache.get(publicKeyStr)!;
+  // Accept hex (64-char) or base64 (44-char) encoded 32-byte Ed25519 public key
+  let raw: ArrayBuffer;
+  if (/^[0-9a-f]{64}$/i.test(publicKeyStr)) {
+    // Hex-encoded raw key (TPS CLI default: Buffer.toString('hex'))
+    const bytes = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) bytes[i] = parseInt(publicKeyStr.slice(i * 2, i * 2 + 2), 16);
+    raw = bytes.buffer;
+  } else {
+    raw = b64ToArrayBuffer(publicKeyStr);
+  }
   const key = await crypto.subtle.importKey("raw", raw, { name: "Ed25519" } as any, false, ["verify"]);
-  keyCache.set(publicKeyB64, key);
+  keyCache.set(publicKeyStr, key);
   return key;
 }
 
