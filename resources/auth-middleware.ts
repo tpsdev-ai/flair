@@ -1,6 +1,29 @@
 import { server, tables } from "harperdb";
 import { initEmbeddings, getEmbedding } from "./embeddings-provider.js";
 
+// --- Admin token (loaded once at startup, never hardcoded) ---
+// Reads from ~/.tps/secrets/flair/harper-admin-token, then env vars.
+// Fails loudly rather than falling back to a hardcoded default.
+let _adminToken: string | null = null;
+function getAdminToken(): string {
+  if (_adminToken) return _adminToken;
+  const tokenFile = (process.env.HOME ?? "") + "/.tps/secrets/flair/harper-admin-token";
+  try {
+    const { readFileSync } = require("node:fs") as typeof import("node:fs");
+    _adminToken = readFileSync(tokenFile, "utf8").trim();
+    return _adminToken;
+  } catch {
+    const envToken = process.env.FLAIR_ADMIN_TOKEN ?? process.env.HDB_ADMIN_PASSWORD;
+    if (envToken) {
+      _adminToken = envToken;
+      return _adminToken;
+    }
+    const msg = "[auth] FATAL: no admin token found. Run: tps flair install";
+    console.error(msg);
+    throw new Error(msg);
+  }
+}
+
 const WINDOW_MS = 30_000;
 const nonceSeen = new Map<string, number>();
 
@@ -135,7 +158,7 @@ server.http(async (request: any, nextLayer: any) => {
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
-  const superAuth = "Basic " + btoa("admin:admin123");
+  const superAuth = "Basic " + btoa("admin:" + getAdminToken());
   request.headers.set("authorization", superAuth);
   if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
 

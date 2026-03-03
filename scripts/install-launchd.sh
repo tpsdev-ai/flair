@@ -29,6 +29,20 @@ _install() {
   echo "→ Creating directories..."
   mkdir -p "$HARPER_DATA_DIR" "$LOG_DIR"
 
+  # Generate admin token if not present
+  local SECRETS_DIR="$HOME/.tps/secrets/flair"
+  local TOKEN_PATH="$SECRETS_DIR/harper-admin-token"
+  mkdir -p "$SECRETS_DIR"
+  if [[ ! -f "$TOKEN_PATH" ]]; then
+    openssl rand -base64 32 > "$TOKEN_PATH"
+    chmod 600 "$TOKEN_PATH"
+    echo "→ Generated admin token at $TOKEN_PATH"
+  else
+    echo "→ Using existing admin token at $TOKEN_PATH"
+  fi
+  export ADMIN_TOKEN
+  ADMIN_TOKEN="$(cat "$TOKEN_PATH")"
+
   echo "→ Writing plist to $PLIST_DST"
   _substitute_plist > "$PLIST_DST"
   chmod 644 "$PLIST_DST"
