@@ -1,5 +1,6 @@
 import { server, tables } from "harperdb";
 import { initEmbeddings, getEmbedding } from "./embeddings-provider.js";
+import { readFileSync } from "node:fs";
 
 // --- Admin token (loaded once at startup, never hardcoded) ---
 // Reads from ~/.tps/secrets/flair/harper-admin-token, then env vars.
@@ -9,7 +10,6 @@ function getAdminToken(): string {
   if (_adminToken) return _adminToken;
   const tokenFile = (process.env.HOME ?? "") + "/.tps/secrets/flair/harper-admin-token";
   try {
-    const { readFileSync } = require("node:fs") as typeof import("node:fs");
     _adminToken = readFileSync(tokenFile, "utf8").trim();
     return _adminToken;
   } catch {
