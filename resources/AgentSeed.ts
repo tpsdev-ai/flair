@@ -82,23 +82,37 @@ export class AgentSeed extends Resource {
       : DEFAULT_MEMORIES(agentId, now);
 
     const memories: any[] = [];
-    for (let i = 0; i < memDefs.length; i++) {
-      const def = memDefs[i];
-      const id = `seed-${agentId}-${i}-${Date.now()}`;
-      const record = {
-        id,
-        agentId,
-        content: def.content,
-        durability: def.durability ?? "persistent",
-        tags: def.tags ?? ["onboarding"],
-        source: "seed",
-        createdAt: now,
-        updatedAt: now,
-        archived: false,
-      };
-      await (tables as any).Memory.put(record);
-      memories.push(record);
-    }
+    // Only seed memories if this is a first-time seed (none tagged onboarding yet)
+    const hasOnboardingMemory = await (async () => {
+      for await (const m of (tables as any).Memory.search()) {
+        if (m.agentId === agentId && (m.tags ?? []).includes("onboarding")) return true;
+      }
+      return false;
+    })();
+    if (hasOnboardingMemory) {
+      // Re-seed: return existing onboarding memories without writing new ones
+      for await (const m of (tables as any).Memory.search()) {
+        if (m.agentId === agentId && (m.tags ?? []).includes("onboarding")) memories.push(m);
+      }
+    } else {
+      for (let i = 0; i < memDefs.length; i++) {
+        const def = memDefs[i];
+        const id = `seed-${agentId}-${i}-${Date.now()}`;
+        const record = {
+          id,
+          agentId,
+          content: def.content,
+          durability: def.durability ?? "persistent",
+          tags: def.tags ?? ["onboarding"],
+          source: "seed",
+          createdAt: now,
+          updatedAt: now,
+          archived: false,
+        };
+        await (tables as any).Memory.put(record);
+        memories.push(record);
+      }
+    } // end !hasOnboardingMemory
 
     return { agent, soulEntries, memories };
   }
