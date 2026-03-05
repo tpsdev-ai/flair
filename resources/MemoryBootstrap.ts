@@ -51,6 +51,7 @@ export class BootstrapMemories extends Resource {
       permanent: [],
       recent: [],
       relevant: [],
+      events: [],
     };
     let tokenBudget = maxTokens;
     let memoriesIncluded = 0;
@@ -152,6 +153,34 @@ export class BootstrapMemories extends Resource {
       }
     }
 
+    // --- 5. Recent OrgEvents for this agent ---
+    try {
+      const eventSince = data?.lastBootAt
+        ? new Date(data.lastBootAt)
+        : new Date(Date.now() - 24 * 3600_000);
+      const eventSinceStr = eventSince.toISOString();
+      const eventResults: any[] = [];
+
+      for await (const event of (tables as any).OrgEvent.search()) {
+        if (!event.createdAt || event.createdAt < eventSinceStr) continue;
+        if (event.expiresAt && new Date(event.expiresAt) < new Date()) continue;
+        const targets = event.targetIds;
+        const isRelevant = !targets || targets.length === 0 || targets.includes(agentId);
+        if (!isRelevant) continue;
+        eventResults.push(event);
+      }
+
+      eventResults.sort((a: any, b: any) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+      for (const evt of eventResults.slice(0, 10)) {
+        const elapsed = Date.now() - new Date(evt.createdAt).getTime();
+        const mins = Math.floor(elapsed / 60_000);
+        const relTime = mins < 60 ? `${mins}min ago` : `${Math.floor(mins / 60)}h ago`;
+        sections.events.push(`- ${evt.kind}: ${evt.summary} (${relTime})`);
+      }
+    } catch {
+      // non-fatal: OrgEvent table may not exist yet
+    }
+
     // --- Build context string ---
     const parts: string[] = [];
 
@@ -167,6 +196,9 @@ export class BootstrapMemories extends Resource {
     if (sections.relevant.length > 0) {
       parts.push("## Relevant Knowledge\n" + sections.relevant.join("\n"));
     }
+    if (sections.events.length > 0) {
+      parts.push("## Recent Org Events\n" + sections.events.join("\n"));
+    }
 
     const context = parts.join("\n\n");
     const soulTokens = sections.soul.reduce((sum, line) => sum + estimateTokens(line), 0);
@@ -179,6 +211,7 @@ export class BootstrapMemories extends Resource {
         permanent: sections.permanent.length,
         recent: sections.recent.length,
         relevant: sections.relevant.length,
+        events: sections.events.length,
       },
       tokenEstimate: soulTokens + memoryTokens,
       soulTokens,

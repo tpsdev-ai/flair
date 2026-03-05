@@ -2,6 +2,7 @@ type Agent @table @export {
   id: ID @primaryKey
   name: String!
   role: String
+  type: String @indexed
   publicKey: String!
   createdAt: String!
   updatedAt: String
