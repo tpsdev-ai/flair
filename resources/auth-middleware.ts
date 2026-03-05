@@ -168,6 +168,40 @@ server.http(async (request: any, nextLayer: any) => {
   const isMutation = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
 
   if (isMutation) {
+    // OrgEvent: authorId must match authenticated agent
+    if ((url.pathname === "/OrgEvent" || url.pathname.startsWith("/OrgEvent/")) &&
+        (method === "POST" || method === "PUT" || method === "PATCH")) {
+      if (!request.tpsAgentIsAdmin) {
+        try {
+          const clone = request.clone();
+          const body = await clone.json();
+          if (body?.authorId && body.authorId !== agentId) {
+            return new Response(JSON.stringify({
+              error: "forbidden: authorId must match authenticated agent"
+            }), { status: 403 });
+          }
+        } catch {}
+      }
+    }
+
+    // OrgEvent DELETE: ownership check
+    if (url.pathname.startsWith("/OrgEvent/") && method === "DELETE") {
+      if (!request.tpsAgentIsAdmin) {
+        try {
+          const pathParts = url.pathname.split("/").filter(Boolean);
+          const eventId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
+          if (eventId) {
+            const record = await (tables as any).OrgEvent.get(eventId);
+            if (record && record.authorId && record.authorId !== agentId) {
+              return new Response(JSON.stringify({
+                error: "forbidden: cannot delete events authored by another agent"
+              }), { status: 403 });
+            }
+          }
+        } catch {}
+      }
+    }
+
     // WorkspaceState: agent-scoped mutations (non-admin can only write own records)
     if ((url.pathname === "/WorkspaceState" || url.pathname.startsWith("/WorkspaceState/")) &&
         (method === "POST" || method === "PUT" || method === "PATCH")) {

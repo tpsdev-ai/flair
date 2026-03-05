@@ -1,0 +1,12 @@
+type OrgEvent @table @export {
+  id: ID @primaryKey
+  authorId: String! @indexed
+  kind: String! @indexed
+  scope: String @indexed
+  summary: String!
+  detail: String
+  targetIds: [String] @indexed
+  refId: String @indexed
+  createdAt: String! @indexed
+  expiresAt: String @indexed
+}
