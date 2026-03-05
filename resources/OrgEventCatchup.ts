@@ -15,12 +15,13 @@ import { Resource, tables } from "harperdb";
 export class OrgEventCatchup extends Resource {
   // HarperDB calls get(pathInfo, context) where pathInfo is the URL segment after /OrgEventCatchup/
   async get(pathInfo?: any) {
-    const request = (this as any).context?.request ?? (this as any).request;
+    const request = (this as any).request;
     const callerAgent = request?.tpsAgent;
     const callerIsAdmin = request?.tpsAgentIsAdmin === true;
 
-    // Extract participantId from path segment (same pattern as WorkspaceLatest)
-    const participantId =
+    // Harper routes /OrgEventCatchup/{id} with pathInfo.id as the path segment
+    const participantId: string | null =
+      (typeof pathInfo === "object" && pathInfo !== null ? (pathInfo as any).id : null) ??
       (typeof pathInfo === "string" ? pathInfo : null) ??
       (this as any).getId?.() ??
       null;
@@ -40,9 +41,13 @@ export class OrgEventCatchup extends Resource {
       );
     }
 
-    // Extract query params from the request URL
-    const url = new URL(request?.url ?? "", "http://localhost");
-    const since = url.searchParams.get("since");
+    // Harper parses query params into pathInfo.conditions array:
+    // e.g. ?since=value → conditions: [{attribute:"since", value:"...", comparator:"equals"}]
+    // pathInfo.id is the URL path segment (participantId).
+    const since: string | null =
+      (typeof pathInfo === "object" && pathInfo !== null
+        ? (pathInfo as any).conditions?.find((c: any) => c.attribute === "since")?.value ?? null
+        : null);
     if (!since) {
       return new Response(
         JSON.stringify({ error: "since query parameter required (ISO timestamp)" }),
