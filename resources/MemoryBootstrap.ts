@@ -48,6 +48,7 @@ export class BootstrapMemories extends Resource {
 
     const sections: Record<string, string[]> = {
       soul: [],
+      skills: [],
       permanent: [],
       recent: [],
       relevant: [],
@@ -59,16 +60,54 @@ export class BootstrapMemories extends Resource {
 
     // --- 1. Soul records (unconditional — not subject to token budget) ---
     // Soul is who you are. It's not optional context to be trimmed.
+    // Skill assignments (key='skill-assignment') are separated into their own section.
+    const skillAssignments: any[] = [];
     if (includeSoul) {
       let soulTokens = 0;
       for await (const record of (tables as any).Soul.search()) {
         if (record.agentId !== agentId) continue;
+        if (record.key === "skill-assignment") {
+          skillAssignments.push(record);
+          continue;
+        }
         const line = `**${record.key}:** ${record.value}`;
         sections.soul.push(line);
         soulTokens += estimateTokens(line);
       }
       // Soul tokens are tracked but don't reduce memory budget
       tokenBudget = maxTokens; // memory budget is separate from soul
+    }
+
+    // --- 1b. Skill assignments (ordered by priority, conflict detection) ---
+    if (skillAssignments.length > 0) {
+      const priorityOrder: Record<string, number> = { critical: 0, high: 1, standard: 2, low: 3 };
+      skillAssignments.sort((a, b) => {
+        const pa = priorityOrder[a.priority ?? "standard"] ?? 2;
+        const pb = priorityOrder[b.priority ?? "standard"] ?? 2;
+        return pa - pb;
+      });
+
+      // Detect conflicts at same priority level
+      const byPriority = new Map<string, any[]>();
+      for (const skill of skillAssignments) {
+        const p = skill.priority ?? "standard";
+        if (!byPriority.has(p)) byPriority.set(p, []);
+        byPriority.get(p)!.push(skill);
+      }
+
+      for (const skill of skillAssignments) {
+        const p = skill.priority ?? "standard";
+        let meta: any = {};
+        try { meta = typeof skill.metadata === "string" ? JSON.parse(skill.metadata) : (skill.metadata ?? {}); } catch {}
+        const source = meta.source ? `, source: ${meta.source}` : "";
+        let line = `- ${skill.value} (${p} priority${source})`;
+        // Flag conflicts at same priority level
+        const peers = byPriority.get(p) ?? [];
+        if (peers.length > 1) {
+          line += " [SKILL_CONFLICT]";
+        }
+        sections.skills.push(line);
+      }
     }
 
     // --- 2. Permanent memories (always included, highest priority) ---
@@ -187,6 +226,9 @@ export class BootstrapMemories extends Resource {
     if (sections.soul.length > 0) {
       parts.push("## Identity\n" + sections.soul.join("\n"));
     }
+    if (sections.skills.length > 0) {
+      parts.push("## Active Skills\n" + sections.skills.join("\n"));
+    }
     if (sections.permanent.length > 0) {
       parts.push("## Core Principles\n" + sections.permanent.join("\n"));
     }
@@ -208,6 +250,7 @@ export class BootstrapMemories extends Resource {
       context,
       sections: {
         soul: sections.soul.length,
+        skills: sections.skills.length,
         permanent: sections.permanent.length,
         recent: sections.recent.length,
         relevant: sections.relevant.length,

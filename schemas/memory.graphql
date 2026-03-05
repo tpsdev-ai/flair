@@ -30,6 +30,8 @@ type Soul @table {
   agentId: String! @indexed
   key: String! @indexed
   value: String!
+  priority: String              # critical | high | standard | low (skill governance)
+  metadata: String              # JSON blob (skill governance: source, version, hash, etc.)
   durability: String @indexed
   createdAt: String!
   updatedAt: String
