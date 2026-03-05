@@ -8,7 +8,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot;
 }
 
-export class SearchMemories extends Resource {
+export class FindMemories extends Resource {
   async post(data: any) {
     const { agentId, q, queryEmbedding, tag, limit = 10 } = data || {};
 
