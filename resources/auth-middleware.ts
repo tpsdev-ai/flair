@@ -168,6 +168,40 @@ server.http(async (request: any, nextLayer: any) => {
   const isMutation = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
 
   if (isMutation) {
+    // WorkspaceState: agent-scoped mutations (non-admin can only write own records)
+    if ((url.pathname === "/WorkspaceState" || url.pathname.startsWith("/WorkspaceState/")) &&
+        (method === "POST" || method === "PUT" || method === "PATCH")) {
+      if (!request.tpsAgentIsAdmin) {
+        try {
+          const clone = request.clone();
+          const body = await clone.json();
+          if (body?.agentId && body.agentId !== agentId) {
+            return new Response(JSON.stringify({
+              error: "forbidden: cannot write workspace state for another agent"
+            }), { status: 403 });
+          }
+        } catch {}
+      }
+    }
+
+    // WorkspaceState DELETE: ownership check
+    if ((url.pathname.startsWith("/WorkspaceState/")) && method === "DELETE") {
+      if (!request.tpsAgentIsAdmin) {
+        try {
+          const pathParts = url.pathname.split("/").filter(Boolean);
+          const wsId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
+          if (wsId) {
+            const record = await (tables as any).WorkspaceState.get(wsId);
+            if (record && record.agentId && record.agentId !== agentId) {
+              return new Response(JSON.stringify({
+                error: "forbidden: cannot delete workspace state for another agent"
+              }), { status: 403 });
+            }
+          }
+        } catch {}
+      }
+    }
+
     // Soul PUT: only owner or admin
     if (url.pathname.startsWith("/Soul") && (method === "PUT" || method === "POST")) {
       if (!request.tpsAgentIsAdmin) {
@@ -223,6 +257,18 @@ server.http(async (request: any, nextLayer: any) => {
             }
           }
         } catch {}
+      }
+    }
+  }
+
+  // ── WorkspaceState read guard: agent-scoped reads ───────────────────────────
+  if (method === "GET" && !request.tpsAgentIsAdmin) {
+    if (url.pathname === "/WorkspaceState" || url.pathname === "/WorkspaceState/") {
+      const queryAgent = url.searchParams.get("agentId");
+      if (queryAgent && queryAgent !== agentId) {
+        return new Response(JSON.stringify({
+          error: "forbidden: cannot read workspace state for another agent"
+        }), { status: 403, headers: { "Content-Type": "application/json" } });
       }
     }
   }

@@ -1,0 +1,14 @@
+type WorkspaceState @table @export {
+  id: ID @primaryKey
+  agentId: String! @indexed
+  ref: String!
+  label: String @indexed
+  provider: String!
+  timestamp: String! @indexed
+  metadata: String
+  taskId: String @indexed
+  phase: String @indexed
+  summary: String
+  filesChanged: [String]
+  createdAt: String!
+}
