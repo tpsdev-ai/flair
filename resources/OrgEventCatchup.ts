@@ -13,28 +13,35 @@
 import { Resource, tables } from "harperdb";
 
 export class OrgEventCatchup extends Resource {
-  async get(query: any, context?: any) {
-    const agentId = context?.request?.tpsAgent;
-    const url = new URL(context?.request?.url ?? "", "http://localhost");
-    const pathParts = url.pathname.split("/").filter(Boolean);
+  // HarperDB calls get(pathInfo, context) where pathInfo is the URL segment after /OrgEventCatchup/
+  async get(pathInfo?: any) {
+    const request = (this as any).context?.request ?? (this as any).request;
+    const callerAgent = request?.tpsAgent;
+    const callerIsAdmin = request?.tpsAgentIsAdmin === true;
 
-    // Extract participantId from URL path: /OrgEventCatchup/{participantId}
-    const participantId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
+    // Extract participantId from path segment (same pattern as WorkspaceLatest)
+    const participantId =
+      (typeof pathInfo === "string" ? pathInfo : null) ??
+      (this as any).getId?.() ??
+      null;
+
     if (!participantId) {
       return new Response(
-        JSON.stringify({ error: "participantId required in path" }),
+        JSON.stringify({ error: "participantId required in path: GET /OrgEventCatchup/{participantId}" }),
         { status: 400, headers: { "Content-Type": "application/json" } },
       );
     }
 
     // Auth: requesting agent must match participantId (or admin)
-    if (agentId && !context?.request?.tpsAgentIsAdmin && agentId !== participantId) {
+    if (callerAgent && !callerIsAdmin && callerAgent !== participantId) {
       return new Response(
         JSON.stringify({ error: "forbidden: can only fetch events for yourself" }),
         { status: 403, headers: { "Content-Type": "application/json" } },
       );
     }
 
+    // Extract query params from the request URL
+    const url = new URL(request?.url ?? "", "http://localhost");
     const since = url.searchParams.get("since");
     if (!since) {
       return new Response(
@@ -52,7 +59,6 @@ export class OrgEventCatchup extends Resource {
     }
 
     // Query all OrgEvents and filter in-memory
-    // Harper search doesn't support complex compound filters, so we scan + filter
     const results: any[] = [];
     for await (const event of (tables as any).OrgEvent.search()) {
       // Filter by createdAt >= since
