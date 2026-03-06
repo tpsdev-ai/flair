@@ -239,6 +239,61 @@ async function publishOrgEvent(event: any): Promise<void> {
   });
 }
 
+function parseJsonSafe(value: unknown): any | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeA2AStatus(statusRaw: unknown): string | null {
+  const status = cleanText(statusRaw).toLowerCase();
+  if (!status) return null;
+  if (status === "done" || status === "closed" || status === "complete" || status === "completed") return "completed";
+  if (status === "failed" || status === "error") return "failed";
+  if (status === "cancelled" || status === "canceled") return "canceled";
+  if (status === "working" || status === "in_progress" || status === "open" || status === "active" || status === "todo") {
+    return "working";
+  }
+  return null;
+}
+
+function inferStatusFromText(textRaw: unknown): string | null {
+  const text = cleanText(textRaw).toLowerCase();
+  if (!text) return null;
+  if (text.includes("completed") || text.includes("complete") || text.includes("done")) return "completed";
+  if (text.includes("failed") || text.includes("error")) return "failed";
+  if (text.includes("cancelled") || text.includes("canceled")) return "canceled";
+  if (text.includes("working") || text.includes("started") || text.includes("in progress")) return "working";
+  return null;
+}
+
+function taskIdFromEvent(event: any): string | null {
+  const refId = cleanText(event?.refId);
+  if (refId.startsWith("bd://")) {
+    const taskId = cleanText(refId.slice("bd://".length));
+    if (taskId) return taskId;
+  }
+  const detail = parseJsonSafe(event?.detail);
+  const fromDetail = cleanText(detail?.taskId ?? detail?.id ?? detail?.task?.id);
+  if (fromDetail) return fromDetail;
+  return null;
+}
+
+function statusFromOrgEvent(event: any): string | null {
+  const detail = parseJsonSafe(event?.detail);
+  return (
+    normalizeA2AStatus(detail?.status) ??
+    normalizeA2AStatus(detail?.task?.status) ??
+    normalizeA2AStatus(event?.status) ??
+    normalizeA2AStatus(event?.kind) ??
+    inferStatusFromText(event?.summary) ??
+    null
+  );
+}
+
 export class A2AAdapter extends Resource {
   async post(targetOrData: any, maybeData?: any) {
     const body: JsonRpcRequest = (maybeData ?? targetOrData) as JsonRpcRequest;
@@ -254,6 +309,93 @@ export class A2AAdapter extends Resource {
     const params = body.params ?? {};
 
     try {
+      if (body.method === "message/stream") {
+        const agentId = cleanText(params.agentId);
+        if (!agentId) {
+          return rpcError(id, -32602, "Invalid params: agentId is required");
+        }
+
+        const taskIdHint = cleanText(params.taskId) || null;
+        const encoder = new TextEncoder();
+        const startedAt = Date.now();
+        const timeoutMs = 5 * 60 * 1000;
+        let lastSeen = new Date(startedAt).toISOString();
+        let closed = false;
+        const seenEventIds = new Set<string>();
+        const seenEventQueue: string[] = [];
+
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            const writeEvent = (eventName: string, payload: any) => {
+              if (closed) return;
+              const frame = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
+              controller.enqueue(encoder.encode(frame));
+            };
+
+            const closeStream = () => {
+              if (closed) return;
+              closed = true;
+              clearInterval(pollTimer);
+              clearTimeout(timeoutTimer);
+              controller.close();
+            };
+
+            const poll = async () => {
+              if (closed) return;
+              if (Date.now() - startedAt >= timeoutMs) { closeStream(); return; }
+
+              const catchupUrl =
+                `http://localhost:9926/OrgEventCatchup/${encodeURIComponent(agentId)}?since=${lastSeen}`;
+
+              let events: any[] = [];
+              try {
+                const response = await fetch(catchupUrl);
+                if (!response.ok) return;
+                const data = await response.json();
+                if (Array.isArray(data)) events = data;
+                else if (Array.isArray(data?.events)) events = data.events;
+              } catch { return; }
+
+              for (const event of events) {
+                const eventId = cleanText(event?.id) || `${cleanText(event?.createdAt)}:${cleanText(event?.summary)}`;
+                if (eventId && seenEventIds.has(eventId)) continue;
+                if (eventId) {
+                  seenEventIds.add(eventId);
+                  seenEventQueue.push(eventId);
+                  if (seenEventQueue.length > 500) {
+                    const removed = seenEventQueue.shift();
+                    if (removed) seenEventIds.delete(removed);
+                  }
+                }
+                const createdAt = cleanText(event?.createdAt);
+                if (createdAt && createdAt > lastSeen) lastSeen = createdAt;
+
+                const status = statusFromOrgEvent(event);
+                if (!status) continue;
+
+                writeEvent("task.status", rpcResult(id, {
+                  type: "task",
+                  task: { id: taskIdFromEvent(event) ?? taskIdHint, status },
+                }));
+
+                if (status === "completed" || status === "failed" || status === "canceled") {
+                  closeStream(); return;
+                }
+              }
+            };
+
+            const pollTimer = setInterval(() => { void poll(); }, 2000);
+            const timeoutTimer = setTimeout(() => { closeStream(); }, timeoutMs);
+            void poll();
+          },
+          cancel() { closed = true; },
+        });
+
+        return new Response(stream, {
+          headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+        });
+      }
+
       if (body.method === "message/send") {
         const agentId = cleanText(params.agentId);
         const message = params.message;
