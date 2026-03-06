@@ -294,8 +294,8 @@ function statusFromOrgEvent(event: any): string | null {
 }
 
 export class A2AAdapter extends Resource {
-  async post(targetOrData: any, maybeData?: any) {
-    const body: JsonRpcRequest = (maybeData ?? targetOrData) as JsonRpcRequest;
+  async post(content: any, _context?: any) {
+    const body: JsonRpcRequest = content as JsonRpcRequest;
 
     if (!body || typeof body !== "object") {
       return rpcError(null, -32600, "Invalid Request");
