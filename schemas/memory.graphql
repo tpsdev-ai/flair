@@ -2,6 +2,7 @@ type Memory @table {
   id: ID @primaryKey
   agentId: String! @indexed
   content: String!
+  contentHash: String @indexed
   visibility: String
   embedding: [Float] @indexed(type: "HNSW")
   tags: [String] @indexed
