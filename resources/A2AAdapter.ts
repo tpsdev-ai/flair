@@ -2,7 +2,6 @@ import { Resource, tables } from "harperdb";
 import { access, readFile, readdir } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, extname, join } from "node:path";
-import { homedir } from "node:os";
 
 type JsonRpcRequest = {
   jsonrpc: string;
@@ -23,7 +22,7 @@ type BeadsIssue = {
   [key: string]: any;
 };
 
-const BEADS_ROOT = join(homedir(), "ops", ".beads");
+const BEADS_ROOT = join(process.env.HOME || "/root", "ops", ".beads");
 const BEADS_ISSUES_DIR = join(BEADS_ROOT, "issues");
 const BEADS_ISSUES_JSONL = join(BEADS_ROOT, "issues.jsonl");
 
