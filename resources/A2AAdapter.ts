@@ -1,5 +1,5 @@
 import { Resource, tables } from "harperdb";
-import { access, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { homedir } from "node:os";
@@ -198,41 +198,6 @@ function taskView(issue: BeadsIssue): any {
   };
 }
 
-async function cancelIssue(taskId: string): Promise<BeadsIssue | null> {
-  const yamlPath = join(BEADS_ISSUES_DIR, `${taskId}.yaml`);
-  const ymlPath = join(BEADS_ISSUES_DIR, `${taskId}.yml`);
-  const nowIso = new Date().toISOString();
-
-  for (const candidate of [yamlPath, ymlPath]) {
-    if (!(await pathExists(candidate))) continue;
-    const original = await readFile(candidate, "utf8");
-    const hasStatus = /^status:\s*.+$/m.test(original);
-    const updated = hasStatus
-      ? original.replace(/^status:\s*.+$/m, "status: cancelled")
-      : `${original.trimEnd()}\nstatus: cancelled\n`;
-    await writeFile(candidate, updated, "utf8");
-    const issue = parseSimpleYamlIssue(updated, taskId);
-    issue.status = "cancelled";
-    issue.updated_at = nowIso;
-    return issue;
-  }
-
-  const issues = await readIssuesFromJsonl();
-  const idx = issues.findIndex((issue) => issue.id === taskId);
-  if (idx === -1) return null;
-
-  issues[idx] = {
-    ...issues[idx],
-    status: "cancelled",
-    updated_at: nowIso,
-    closed_at: nowIso,
-    close_reason: issues[idx].close_reason ?? "Cancelled via A2A",
-  };
-
-  const serialized = `${issues.map((issue) => JSON.stringify(issue)).join("\n")}\n`;
-  await writeFile(BEADS_ISSUES_JSONL, serialized, "utf8");
-  return issues[idx];
-}
 
 async function taskHistory(taskId: string): Promise<any[]> {
   const history: any[] = [];
@@ -360,31 +325,6 @@ export class A2AAdapter extends Resource {
           .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
 
         return rpcResult(id, { type: "tasks", tasks });
-      }
-
-      if (body.method === "tasks/cancel") {
-        const taskId = cleanText(params.taskId);
-        if (!taskId) return rpcError(id, -32602, "Invalid params: taskId is required");
-
-        const issue = await cancelIssue(taskId);
-        if (!issue) return rpcError(id, -32004, "Task not found", { taskId });
-
-        await publishOrgEvent({
-          kind: "task.cancelled",
-          scope: issue.assignee ?? null,
-          summary: `Task ${taskId} cancelled`,
-          detail: "Cancelled via A2A tasks/cancel",
-          targetIds: issue.assignee ? [issue.assignee] : [],
-          refId: `bd://${taskId}`,
-        });
-
-        return rpcResult(id, {
-          type: "task",
-          task: {
-            ...taskView({ ...issue, status: "cancelled" }),
-            history: [{ role: "agent", parts: [{ text: `Task ${taskId} cancelled.` }] }],
-          },
-        });
       }
 
       return rpcError(id, -32601, "Method not found");
