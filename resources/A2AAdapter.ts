@@ -294,6 +294,37 @@ function statusFromOrgEvent(event: any): string | null {
 }
 
 export class A2AAdapter extends Resource {
+  async get() {
+    const host = process.env.FLAIR_PUBLIC_URL || "http://localhost:9926";
+    return new Response(JSON.stringify({
+      name: "TPS Agent Team",
+      description: "TPS — agent OS for humans and AI agents. Coordinates via Flair.",
+      url: `${host}/a2a`,
+      version: "0.1.0",
+      capabilities: {
+        streaming: true,
+        pushNotifications: false,
+      },
+      defaultInputModes: ["text"],
+      defaultOutputModes: ["text"],
+      skills: [
+        {
+          id: "task-management",
+          name: "Task Management",
+          description: "Create, list, and track tasks via Beads issue tracker",
+        },
+        {
+          id: "agent-coordination",
+          name: "Agent Coordination", 
+          description: "Send messages to agents and coordinate work via OrgEvents",
+        },
+      ],
+    }, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
   async post(content: any, _context?: any) {
     const body: JsonRpcRequest = content as JsonRpcRequest;
 
