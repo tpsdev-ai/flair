@@ -112,7 +112,10 @@ server.http(async (request: any, nextLayer: any) => {
   if (
     url.pathname === "/health" ||
     url.pathname === "/Health" ||
+    url.pathname === "/a2a" ||
+    url.pathname === "/A2AAdapter" ||
     url.pathname === "/AgentCard" ||
+    url.pathname.startsWith("/A2AAdapter/") ||
     url.pathname.startsWith("/AgentCard/")
   ) return nextLayer(request);
 
