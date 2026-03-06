@@ -1,0 +1,41 @@
+
+# ─── Observatory tables ───────────────────────────────────────────────────────
+
+type ObsOffice @table @export {
+  id: ID @primaryKey        # e.g. "rockit"
+  name: String!
+  publicKey: String!        # Ed25519 hex public key for auth verification
+  status: String @indexed   # "online" | "offline" | "degraded"
+  lastSeen: String
+  agentCount: Int
+  createdAt: String!
+  updatedAt: String
+}
+
+type ObsAgentSnapshot @table @export {
+  id: ID @primaryKey        # "{officeId}:{agentId}"
+  officeId: String! @indexed
+  agentId: String! @indexed
+  name: String
+  role: String
+  type: String              # "agent" | "human"
+  model: String
+  status: String @indexed   # "active" | "idle" | "offline"
+  currentTask: String
+  lastActivity: String
+  lastHeartbeat: String
+  updatedAt: String!
+}
+
+type ObsEventFeed @table @export {
+  id: ID @primaryKey        # "{officeId}:{eventId}"
+  officeId: String! @indexed
+  kind: String! @indexed
+  authorId: String! @indexed
+  summary: String!
+  refId: String @indexed
+  scope: String @indexed
+  createdAt: String! @indexed
+  receivedAt: String!
+  expiresAt: String @indexed
+}
