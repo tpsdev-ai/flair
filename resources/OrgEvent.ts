@@ -27,7 +27,8 @@ export class OrgEvent extends (tables as any).OrgEvent {
 
     content.createdAt = new Date().toISOString();
 
-    return super.post(content, context);
+    // Harper 5: table resources use put() for create/upsert (post() removed)
+    return (tables as any).OrgEvent.put(content);
   }
 
   async put(content: any, context?: any) {
@@ -40,7 +41,7 @@ export class OrgEvent extends (tables as any).OrgEvent {
       );
     }
 
-    return super.put(content, context);
+    return (tables as any).OrgEvent.put(content);
   }
 
   async delete(id: any, context?: any) {
