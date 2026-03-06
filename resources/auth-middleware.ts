@@ -109,7 +109,12 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
 server.http(async (request: any, nextLayer: any) => {
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
 
-  if (url.pathname === "/health" || url.pathname === "/Health") return nextLayer(request);
+  if (
+    url.pathname === "/health" ||
+    url.pathname === "/Health" ||
+    url.pathname === "/AgentCard" ||
+    url.pathname.startsWith("/AgentCard/")
+  ) return nextLayer(request);
 
   // Skip re-entry: if we already swapped auth to Basic, pass through
   if ((request as any)._tpsAuthVerified) return nextLayer(request);
