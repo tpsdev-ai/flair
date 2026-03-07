@@ -22,6 +22,13 @@ export class Memory extends (tables as any).Memory {
       }
     }
 
+    // supersedes: optional reference to the ID of the memory this one replaces
+    if (content.supersedes !== undefined && typeof content.supersedes !== "string") {
+      return new Response(JSON.stringify({ error: "supersedes must be a string (memory ID)" }), {
+        status: 400, headers: { "Content-Type": "application/json" },
+      });
+    }
+
     if (content.durability === "ephemeral" && !content.expiresAt) {
       const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
       content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
