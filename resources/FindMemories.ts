@@ -10,7 +10,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
 
 export class FindMemories extends Resource {
   async post(data: any) {
-    const { agentId, q, queryEmbedding, tag, limit = 10 } = data || {};
+    const { agentId, q, queryEmbedding, tag, limit = 10, includeSuperseded = false } = data || {};
 
     // Determine searchable agent IDs (own + granted)
     const searchAgentIds = new Set<string>();
@@ -66,8 +66,18 @@ export class FindMemories extends Resource {
       });
     }
 
-    results.sort((a: any, b: any) => b._score - a._score);
-    const topResults = results.slice(0, limit);
+    // Build superseded set and filter (unless caller opts in to see full history)
+    let filteredResults = results;
+    if (!includeSuperseded) {
+      const supersededIds = new Set<string>();
+      for (const r of results) {
+        if (r.supersedes) supersededIds.add(r.supersedes);
+      }
+      filteredResults = results.filter((r: any) => !supersededIds.has(r.id));
+    }
+
+    filteredResults.sort((a: any, b: any) => b._score - a._score);
+    const topResults = filteredResults.slice(0, limit);
 
     // Async hit tracking — don't block the response
     const now = new Date().toISOString();

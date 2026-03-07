@@ -23,10 +23,11 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-function formatMemory(m: any): string {
+function formatMemory(m: any, supersedes?: boolean): string {
   const tag = m.durability === "permanent" ? "🔒" : m.durability === "persistent" ? "📌" : "📝";
   const date = m.createdAt ? ` (${m.createdAt.slice(0, 10)})` : "";
-  return `${tag} ${m.content}${date}`;
+  const chain = m.supersedes ? " [supersedes earlier decision]" : "";
+  return `${tag} ${m.content}${date}${chain}`;
 }
 
 export class BootstrapMemories extends Resource {
@@ -119,7 +120,14 @@ export class BootstrapMemories extends Resource {
     }
     memoriesAvailable = allMemories.length;
 
-    const permanent = allMemories.filter((m) => m.durability === "permanent");
+    // Build superseded set: exclude memories that have been replaced by newer ones
+    const supersededIds = new Set<string>();
+    for (const m of allMemories) {
+      if (m.supersedes) supersededIds.add(m.supersedes);
+    }
+    const activeMemories = allMemories.filter((m) => !supersededIds.has(m.id));
+
+    const permanent = activeMemories.filter((m) => m.durability === "permanent");
     for (const m of permanent) {
       const line = formatMemory(m);
       const cost = estimateTokens(line);
@@ -134,7 +142,7 @@ export class BootstrapMemories extends Resource {
     const sinceDate = since
       ? new Date(since)
       : new Date(Date.now() - 48 * 3600_000);
-    const recent = allMemories
+    const recent = activeMemories
       .filter(
         (m) =>
           m.durability !== "permanent" &&
@@ -171,7 +179,7 @@ export class BootstrapMemories extends Resource {
         ]);
 
         const scored = allMemories
-          .filter((m) => !includedIds.has(m.id) && m.embedding?.length > 100)
+          .filter((m) => !includedIds.has(m.id) && !supersededIds.has(m.id) && m.embedding?.length > 100)
           .map((m) => {
             let dot = 0;
             const len = Math.min(queryEmbedding!.length, m.embedding.length);

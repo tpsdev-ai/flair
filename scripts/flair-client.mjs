@@ -47,12 +47,20 @@ try {
       result = await flairFetch('GET', `/${table}/${rest[0]}`);
       break;
     case 'write': {
-      const content = rest.join(' ');
+      // Support --durability <level> and --supersedes <id> flags
+      const filteredRest = [];
+      let durability = 'standard';
+      let supersedes;
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === '--durability' && rest[i + 1]) { durability = rest[++i]; }
+        else if (rest[i] === '--supersedes' && rest[i + 1]) { supersedes = rest[++i]; }
+        else filteredRest.push(rest[i]);
+      }
+      const content = filteredRest.join(' ');
       const id = `${AGENT_ID}-${Date.now()}`;
-      result = await flairFetch('PUT', `/${table}/${id}`, {
-        id, agentId: AGENT_ID, content, durability: 'standard',
-        createdAt: new Date().toISOString(),
-      });
+      const body = { id, agentId: AGENT_ID, content, durability, createdAt: new Date().toISOString() };
+      if (supersedes) body.supersedes = supersedes;
+      result = await flairFetch('PUT', `/${table}/${id}`, body);
       break;
     }
     case 'set': {
