@@ -1,13 +1,14 @@
 /**
  * In-process embeddings via harper-fabric-embeddings.
- * Uses a file-based lock + process singleton to ensure the native model
- * loads exactly once even when Harper loads this module multiple times.
+ * Uses Harper's native tryLock/unlock on the Memory table primaryStore
+ * to ensure the native model loads exactly once, even when Harper loads
+ * this module in multiple ESM contexts within the same process.
  */
-import { writeFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
+import { tables } from "harperdb";
 
 const MAX_CHARS = 500;
 const MODELS_DIR = process.env.FLAIR_MODELS_DIR || "/tmp/flair-models";
-const LOCK_FILE = "/tmp/flair-embeddings.lock";
+const LOCK_KEY = "flair-embeddings-init";
 const PID_KEY = "__flair_embed_pid__";
 
 let dims = 0;
@@ -26,13 +27,27 @@ export function getMode(): string {
   return mode;
 }
 
+/**
+ * Returns the Memory table primaryStore when Harper has initialized it.
+ * Polls briefly since Harper lazy-initializes tables.
+ */
+async function getStore(): Promise<{ tryLock: (k: any, cb?: () => void) => boolean; unlock: (k: any) => void } | null> {
+  for (let i = 0; i < 50; i++) {
+    try {
+      const store = (tables as any).Memory?.primaryStore;
+      if (store?.tryLock) return store;
+    } catch { /* not ready yet */ }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return null;
+}
+
 export async function initEmbeddings(): Promise<void> {
   // Check if already initialized in this module instance
   if (mode !== "none") return;
 
   // Check if another module instance in this process already loaded
   if ((process as any)[PID_KEY]) {
-    // Grab the shared instance
     const shared = (process as any)[PID_KEY];
     hfe = shared.hfe;
     dims = shared.dims;
@@ -40,39 +55,51 @@ export async function initEmbeddings(): Promise<void> {
     return;
   }
 
-  // Use lock file to prevent concurrent init across process restarts
-  try {
-    if (existsSync(LOCK_FILE)) {
-      const lockPid = readFileSync(LOCK_FILE, "utf8").trim();
-      // If same PID, another module instance beat us — wait for process singleton
-      if (lockPid === String(process.pid)) {
-        // Spin-wait for the process singleton
-        for (let i = 0; i < 300; i++) {  // 30s max — GPU model load takes ~6-10s
-          await new Promise(r => setTimeout(r, 100));
-          if ((process as any)[PID_KEY]) {
-            const shared = (process as any)[PID_KEY];
-            hfe = shared.hfe; dims = shared.dims; mode = shared.mode;
-            return;
-          }
+  const store = await getStore();
+
+  if (store) {
+    // Use Harper's native lock — tryLock returns true if acquired immediately,
+    // or registers callback to be called when unlocked.
+    await new Promise<void>((resolve) => {
+      const attempt = () => {
+        const acquired = store.tryLock(LOCK_KEY, attempt);
+        if (!acquired) return; // will retry via callback
+
+        // Lock acquired — re-check if another instance finished while we waited
+        if ((process as any)[PID_KEY]) {
+          store.unlock(LOCK_KEY);
+          const shared = (process as any)[PID_KEY];
+          hfe = shared.hfe; dims = shared.dims; mode = shared.mode;
+          resolve();
+          return;
         }
-        console.error("[embeddings] Timeout waiting for singleton");
-        return;
-      }
-      // Different PID — stale lock, clean up
-      try { unlinkSync(LOCK_FILE); } catch {}
+
+        // We hold the lock and no one else initialized — do the work
+        doInit().finally(() => {
+          store.unlock(LOCK_KEY);
+          resolve();
+        });
+      };
+      attempt();
+    });
+  } else {
+    // Harper store unavailable (early startup) — check singleton again then init directly
+    if ((process as any)[PID_KEY]) {
+      const shared = (process as any)[PID_KEY];
+      hfe = shared.hfe; dims = shared.dims; mode = shared.mode;
+      return;
     }
+    await doInit();
+  }
+}
 
-    // Claim the lock
-    writeFileSync(LOCK_FILE, String(process.pid));
-  } catch {}
-
+async function doInit(): Promise<void> {
   try {
     hfe = await import("harper-fabric-embeddings");
     await hfe.init({ modelsDir: MODELS_DIR, gpuLayers: 99 });
     dims = hfe.dimensions();
     mode = "native";
     (process as any)[PID_KEY] = { hfe, dims, mode };
-    try { unlinkSync(LOCK_FILE); } catch {}
     console.log(`[embeddings] Native in-process: ${dims} dims`);
     return;
   } catch (err: any) {
@@ -80,22 +107,23 @@ export async function initEmbeddings(): Promise<void> {
     hfe = null;
   }
 
-  // Fallback: hash-based
+  // Fallback: hash-based pseudo-embeddings
   try {
     const { fallbackEmbed } = await import("./embeddings.js");
     dims = 512;
     mode = "hash";
     (process as any)[PID_KEY] = { hfe: null, dims, mode };
-    try { unlinkSync(LOCK_FILE); } catch {}
     console.log(`[embeddings] Fallback: ${dims} dims (hash-based)`);
   } catch (e: any) {
     console.error(`[embeddings] Hash fallback failed: ${e.message}`);
+    mode = "none";
+    (process as any)[PID_KEY] = { hfe: null, dims: 0, mode: "none" };
   }
 }
 
 // --- Serial Embedding Queue (process-level singleton) ---
-// Must be process-level because Harper loads this module in separate contexts.
-// Each context gets its own `queue` variable — but we need ONE queue to serialize.
+// Harper loads this module in separate ESM contexts; each gets its own local
+// variables. The queue must live on `process` to be shared across contexts.
 const QUEUE_KEY = "__flair_embed_queue__";
 if (!(process as any)[QUEUE_KEY]) {
   (process as any)[QUEUE_KEY] = { queue: [], processing: false };
@@ -122,12 +150,10 @@ async function processQueue(): Promise<void> {
 }
 
 async function doEmbed(text: string): Promise<number[] | null> {
-  // Ensure we have the singleton
   if (mode === "none" && (process as any)[PID_KEY]) {
     const shared = (process as any)[PID_KEY];
     hfe = shared.hfe; dims = shared.dims; mode = shared.mode;
   }
-  
   if (mode === "native" && hfe) {
     return await hfe.embed(text.slice(0, MAX_CHARS));
   }
