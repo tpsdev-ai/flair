@@ -47,7 +47,7 @@ export async function initEmbeddings(): Promise<void> {
       // If same PID, another module instance beat us — wait for process singleton
       if (lockPid === String(process.pid)) {
         // Spin-wait for the process singleton
-        for (let i = 0; i < 50; i++) {
+        for (let i = 0; i < 300; i++) {  // 30s max — GPU model load takes ~6-10s
           await new Promise(r => setTimeout(r, 100));
           if ((process as any)[PID_KEY]) {
             const shared = (process as any)[PID_KEY];
@@ -72,6 +72,7 @@ export async function initEmbeddings(): Promise<void> {
     dims = hfe.dimensions();
     mode = "native";
     (process as any)[PID_KEY] = { hfe, dims, mode };
+    try { unlinkSync(LOCK_FILE); } catch {}
     console.log(`[embeddings] Native in-process: ${dims} dims`);
     return;
   } catch (err: any) {
@@ -85,6 +86,7 @@ export async function initEmbeddings(): Promise<void> {
     dims = 512;
     mode = "hash";
     (process as any)[PID_KEY] = { hfe: null, dims, mode };
+    try { unlinkSync(LOCK_FILE); } catch {}
     console.log(`[embeddings] Fallback: ${dims} dims (hash-based)`);
   } catch (e: any) {
     console.error(`[embeddings] Hash fallback failed: ${e.message}`);
