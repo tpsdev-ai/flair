@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Observation Center</title>
+  <style>
+    :root{--bg:#f4efe6;--panel:rgba(255,251,243,.86);--ink:#1e241f;--muted:#697265;--line:rgba(30,36,31,.12);--accent:#0f766e;--accent-soft:rgba(15,118,110,.12);--ok:#166534;--warn:#b45309;--shadow:0 18px 48px rgba(69,58,35,.14)}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;font:15px/1.45 "IBM Plex Sans","Avenir Next",sans-serif;color:var(--ink);background:radial-gradient(circle at top left,rgba(15,118,110,.14),transparent 28rem),radial-gradient(circle at top right,rgba(180,83,9,.1),transparent 18rem),linear-gradient(180deg,#fcfaf5,var(--bg))}
+    .shell{max-width:1280px;margin:0 auto;padding:28px 18px 40px}.hero,.panel{background:var(--panel);border:1px solid var(--line);border-radius:22px;backdrop-filter:blur(14px);box-shadow:var(--shadow)}.hero{padding:24px;margin-bottom:18px}.hero h1,.panel h2{margin:0;font-family:"IBM Plex Serif","Iowan Old Style",serif}.hero h1{font-size:clamp(2rem,4vw,3.1rem)}.hero p,.subtle,.empty{color:var(--muted)}
+    .summary,.grid,.events,.toolbar,.layout{display:grid;gap:12px}.summary{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:18px}.chip,.card,.event{background:rgba(255,255,255,.62);border:1px solid var(--line);border-radius:16px;padding:14px}.chip strong{display:block;font-size:1.3rem}.chip span{font-size:.92rem;color:var(--muted)}
+    .toolbar{grid-template-columns:repeat(5,minmax(0,1fr));padding:16px;margin-bottom:18px}.field{display:flex;flex-direction:column;gap:6px}.field label{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.field input,.field select,.field button{width:100%;padding:11px 12px;border-radius:12px;border:1px solid var(--line);background:#fffaf1;font:inherit;color:var(--ink)}.field button{cursor:pointer;color:#fff;background:linear-gradient(135deg,var(--accent),#115e59);border:none;font-weight:600}
+    .layout{grid-template-columns:1.05fr 1.4fr;align-items:start}.panel{padding:18px}.head,.row{display:flex;justify-content:space-between;gap:10px}.head{align-items:baseline;margin-bottom:14px}.grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}.events{max-height:72vh;overflow:auto;padding-right:4px}.card h3,.event h3{margin:0;font-size:1rem}.meta,.workspace{font-size:.9rem;color:var(--muted)}.event p{margin:8px 0 0;white-space:pre-wrap;word-break:break-word}.kind{font:0.82rem "IBM Plex Mono",monospace;color:var(--accent)}.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:.8rem;font-weight:600;background:var(--accent-soft);color:var(--accent)}.ok{background:rgba(22,101,52,.12);color:var(--ok)}.warn{background:rgba(180,83,9,.14);color:var(--warn)}
+    @media (max-width:1080px){.toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.events{max-height:none}}@media (max-width:640px){.shell{padding:18px 12px 32px}.toolbar{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <h1>Observation Center</h1>
+      <p>Read-only Flair dashboard for OrgEvents, roster state, and latest workspace snapshots. Polling every 5 seconds.</p>
+      <div class="summary" id="summary"></div>
+    </section>
+    <section class="panel toolbar">
+      <div class="field"><label for="baseUrl">Flair URL</label><input id="baseUrl" value="http://localhost:9926"></div>
+      <div class="field"><label for="agentFilter">Agent</label><select id="agentFilter"><option value="">All agents</option></select></div>
+      <div class="field"><label for="kindFilter">Event kind</label><select id="kindFilter"><option value="">All kinds</option></select></div>
+      <div class="field"><label for="timeFilter">Time range</label><select id="timeFilter"><option value="15m">Last 15 minutes</option><option value="1h" selected>Last hour</option><option value="6h">Last 6 hours</option><option value="24h">Last 24 hours</option></select></div>
+      <div class="field"><label>&nbsp;</label><button id="refresh">Refresh now</button></div>
+    </section>
+    <div class="layout">
+      <section class="panel">
+        <div class="head"><div><h2>Agent Grid</h2><p class="subtle">Status is derived from recent OrgEvents and workspace snapshots.</p></div><p class="subtle" id="agentStatus">Loading agents…</p></div>
+        <div class="grid" id="agentGrid"></div>
+      </section>
+      <section class="panel">
+        <div class="head"><div><h2>Event Feed</h2><p class="subtle">Events visible to <code>anvil</code> via <code>/OrgEventCatchup/anvil</code>.</p></div><p class="subtle" id="feedStatus">Waiting for first poll…</p></div>
+        <div class="events" id="eventFeed"></div>
+      </section>
+    </div>
+  </div>
+  <script>
+    const state={anchorAgent:"anvil",agents:[],events:[],workspace:{},latestPoll:null,rosterSource:"",timer:null};
+    const els={summary:document.querySelector("#summary"),baseUrl:document.querySelector("#baseUrl"),agentFilter:document.querySelector("#agentFilter"),kindFilter:document.querySelector("#kindFilter"),timeFilter:document.querySelector("#timeFilter"),refresh:document.querySelector("#refresh"),agentGrid:document.querySelector("#agentGrid"),eventFeed:document.querySelector("#eventFeed"),agentStatus:document.querySelector("#agentStatus"),feedStatus:document.querySelector("#feedStatus")};
+    const clean=v=>String(v??"").trim();
+    const parse=v=>{if(!v)return null;if(typeof v==="object")return v;try{return JSON.parse(v)}catch{return null}};
+    const list=v=>Array.isArray(v)?v:Array.isArray(v?.items)?v.items:Array.isArray(v?.data)?v.data:[];
+    const eventKind=e=>clean(e?.kind||e?.type||e?.status||"unknown");
+    const eventText=e=>clean(e?.summary||e?.detail||e?.message||"");
+    const eventAgents=e=>[e?.authorId,...(Array.isArray(e?.targetIds)?e.targetIds:[])].map(clean).filter(Boolean);
+    const timeAgo=iso=>{const diff=Date.now()-new Date(iso).getTime();if(!Number.isFinite(diff))return"unknown";const m=Math.round(diff/6e4);if(m<1)return"just now";if(m<60)return`${m}m ago`;const h=Math.round(m/60);if(h<24)return`${h}h ago`;return`${Math.round(h/24)}d ago`};
+    const rangeMs=()=>({"15m":9e5,"1h":36e5,"6h":216e5,"24h":864e5}[els.timeFilter.value]||36e5);
+    const rangeStart=()=>new Date(Date.now()-rangeMs());
+    async function getJson(url){const res=await fetch(url,{headers:{accept:"application/json"}});if(!res.ok)throw new Error(`${res.status} ${res.statusText}`);return res.json()}
+    async function loadRoster(baseUrl){try{const data=await getJson(baseUrl+"/Identity");state.rosterSource="/Identity";return list(data)}catch{const data=await getJson(baseUrl+"/Agent");state.rosterSource="/Agent";return list(data)}}
+    async function loadWorkspace(baseUrl,agentIds){const rows=await Promise.all(agentIds.map(async id=>{try{return[id,await getJson(baseUrl+"/WorkspaceLatest/"+encodeURIComponent(id))]}catch{return[id,null]}}));state.workspace=Object.fromEntries(rows)}
+    function deriveAgent(agent){
+      const id=clean(agent.id||agent.agentId||agent.name);
+      const related=state.events.filter(event=>eventAgents(event).includes(id));
+      const latest=related.at(-1);
+      const ws=state.workspace[id];
+      const snapshot=parse(ws?.snapshot);
+      const lastAt=clean(latest?.createdAt||ws?.timestamp||ws?.createdAt||agent.updatedAt||agent.createdAt);
+      const online=lastAt&&(Date.now()-new Date(lastAt).getTime())<6e5;
+      return{id,name:clean(agent.name||id),role:clean(agent.role||agent.type||"agent"),status:online?"online":"offline",lastAt,currentTask:clean(parse(latest?.detail)?.taskId||latest?.refId||latest?.summary||"idle"),latestKind:eventKind(latest),workspace:clean(snapshot?.gitBranch||ws?.gitBranch||ws?.path||"unavailable")};
+    }
+    function filteredEvents(){const agent=els.agentFilter.value,kind=els.kindFilter.value,start=rangeStart();return state.events.filter(e=>{if(new Date(e.createdAt||0)<start)return false;if(agent&&!eventAgents(e).includes(agent))return false;if(kind&&eventKind(e)!==kind)return false;return true}).slice().reverse()}
+    function renderSummary(cards,events){const items=[["Agents",cards.length],["Online",cards.filter(c=>c.status==="online").length],["Events",events.length],["Last Poll",state.latestPoll?timeAgo(state.latestPoll):"never"]];els.summary.innerHTML=items.map(([l,v])=>`<div class="chip"><strong>${v}</strong><span>${l}</span></div>`).join("")}
+    function renderFilters(){const agents=state.agents.map(a=>clean(a.id||a.agentId||a.name)).filter(Boolean).sort();const kinds=[...new Set(state.events.map(eventKind).filter(Boolean))].sort();const chosenAgent=els.agentFilter.value,chosenKind=els.kindFilter.value;els.agentFilter.innerHTML=`<option value="">All agents</option>`+agents.map(id=>`<option value="${id}" ${id===chosenAgent?"selected":""}>${id}</option>`).join("");els.kindFilter.innerHTML=`<option value="">All kinds</option>`+kinds.map(kind=>`<option value="${kind}" ${kind===chosenKind?"selected":""}>${kind}</option>`).join("")}
+    function renderAgents(cards){els.agentStatus.textContent=`${cards.length} agents via ${state.rosterSource||"roster"}`;els.agentGrid.innerHTML=cards.length?cards.map(agent=>`<article class="card"><div class="row"><h3>${agent.name}</h3><span class="badge ${agent.status==="online"?"ok":"warn"}">${agent.status}</span></div><div class="meta">${agent.role}</div><div class="row"><span class="kind">${agent.latestKind}</span><span class="meta">${agent.lastAt?timeAgo(agent.lastAt):"no signal"}</span></div><p><strong>Current task:</strong> ${agent.currentTask}</p><div class="workspace">Workspace: ${agent.workspace}</div></article>`).join(""):`<div class="empty">No agents found.</div>`}
+    function renderEvents(events){els.feedStatus.textContent=`${events.length} matching events`;els.eventFeed.innerHTML=events.length?events.map(event=>`<article class="event"><div class="row"><h3>${clean(event.summary||eventKind(event))}</h3><span class="meta">${timeAgo(event.createdAt)}</span></div><div class="row"><span class="kind">${eventKind(event)}</span><span class="badge">${eventAgents(event).join(", ")||"org-wide"}</span></div><p>${eventText(event)||"No detail provided."}</p></article>`).join(""):`<div class="empty">No events match the current filters.</div>`}
+    function render(){renderFilters();const cards=state.agents.map(deriveAgent);const events=filteredEvents();renderSummary(cards,events);renderAgents(cards);renderEvents(events)}
+    async function refresh(){const baseUrl=clean(els.baseUrl.value).replace(/\/$/,"");const since=rangeStart().toISOString();els.feedStatus.textContent="Polling Flair…";try{const [agents,events]=await Promise.all([loadRoster(baseUrl),getJson(`${baseUrl}/OrgEventCatchup/${encodeURIComponent(state.anchorAgent)}?since=${encodeURIComponent(since)}`)]);state.agents=agents;state.events=list(events).sort((a,b)=>clean(a.createdAt).localeCompare(clean(b.createdAt)));await loadWorkspace(baseUrl,state.agents.map(a=>clean(a.id||a.agentId||a.name)).filter(Boolean));state.latestPoll=new Date().toISOString();render()}catch(error){els.feedStatus.textContent=`Poll failed: ${error.message}`}}
+    function schedule(){clearInterval(state.timer);state.timer=setInterval(refresh,5e3)}
+    [els.agentFilter,els.kindFilter,els.timeFilter].forEach(el=>el.addEventListener("change",()=>{render();if(el===els.timeFilter)refresh()}));
+    els.refresh.addEventListener("click",refresh);els.baseUrl.addEventListener("change",()=>{refresh();schedule()});refresh();schedule();
+  </script>
+</body>
+</html>
