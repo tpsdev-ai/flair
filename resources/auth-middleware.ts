@@ -1,3 +1,4 @@
+import { patchRecord } from "./table-helpers.js";
 import { server, tables } from "harperdb";
 import { initEmbeddings, getEmbedding } from "./embeddings-provider.js";
 import { readFileSync } from "node:fs";
@@ -97,7 +98,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     if (record.embedding?.length > 100) return;
     const embedding = await getEmbedding(record.content);
     if (!embedding) return;
-    await (tables as any).Memory.put({ ...record, embedding });
+    await patchRecord((tables as any).Memory, memoryId, { embedding });
     console.log(`[auto-embed] ${memoryId}: ${embedding.length}d`);
   } catch (err: any) {
     console.error(`[auto-embed] Failed for ${memoryId}: ${err.message}`);
