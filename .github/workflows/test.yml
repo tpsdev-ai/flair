@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - name: Check for local file: deps
+      - name: "Check for local file: deps"
         run: |
           if grep -q 'file:' package.json; then
             echo "ERROR: package.json contains local file: reference"
