@@ -1,5 +1,6 @@
 import { Resource, tables } from "harperdb";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
+import { patchRecord } from "./table-helpers.js";
 
 function cosineSimilarity(a: number[], b: number[]): number {
   let dot = 0;
@@ -11,6 +12,17 @@ function cosineSimilarity(a: number[], b: number[]): number {
 export class SemanticSearch extends Resource {
   async post(data: any) {
     const { agentId, q, queryEmbedding, tag, limit = 10, includeSuperseded = false } = data || {};
+
+    // Defense-in-depth: verify agentId matches authenticated agent.
+    // The middleware already enforces this for non-admins, but double-check here
+    // so direct Harper API calls (e.g., admin scripts) are also scoped correctly.
+    const authenticatedAgent: string | undefined = (this as any).request?.headers?.get?.("x-tps-agent");
+    const callerIsAdmin: boolean = (this as any).request?.tpsAgentIsAdmin === true;
+    if (authenticatedAgent && !callerIsAdmin && agentId && agentId !== authenticatedAgent) {
+      return new Response(JSON.stringify({
+        error: "forbidden: agentId must match authenticated agent",
+      }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
 
     // Determine searchable agent IDs (own + granted)
     const searchAgentIds = new Set<string>();
@@ -80,10 +92,10 @@ export class SemanticSearch extends Resource {
     const topResults = filteredResults.slice(0, limit);
 
     // Async hit tracking — don't block the response
+    // Use patchRecord to avoid wiping other fields (embedding, content, etc.)
     const now = new Date().toISOString();
     for (const r of topResults) {
-      (tables as any).Memory.put({
-        id: r.id,
+      patchRecord((tables as any).Memory, r.id, {
         retrievalCount: (r.retrievalCount || 0) + 1,
         lastRetrieved: now,
       }).catch(() => {});

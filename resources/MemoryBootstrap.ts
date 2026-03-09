@@ -47,6 +47,15 @@ export class BootstrapMemories extends Resource {
       });
     }
 
+    // Defense-in-depth: agentId must match authenticated agent
+    const authenticatedAgent: string | undefined = (this as any).request?.headers?.get?.("x-tps-agent");
+    const callerIsAdmin: boolean = (this as any).request?.tpsAgentIsAdmin === true;
+    if (authenticatedAgent && !callerIsAdmin && agentId !== authenticatedAgent) {
+      return new Response(JSON.stringify({
+        error: "forbidden: agentId must match authenticated agent",
+      }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
+
     const sections: Record<string, string[]> = {
       soul: [],
       skills: [],

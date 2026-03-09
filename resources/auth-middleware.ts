@@ -171,6 +171,11 @@ server.http(async (request: any, nextLayer: any) => {
   request.headers.set("authorization", superAuth);
   if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
 
+  // Propagate authenticated agent to downstream resources via header.
+  // Resources can read this to enforce agent-level scoping.
+  request.headers.set("x-tps-agent", agentId);
+  if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = agentId;
+
   // ── Server-side permission guards ──────────────────────────────────────────
 
   const method = request.method.toUpperCase();
@@ -311,6 +316,102 @@ server.http(async (request: any, nextLayer: any) => {
       if (queryAgent && queryAgent !== agentId) {
         return new Response(JSON.stringify({
           error: "forbidden: cannot read workspace state for another agent"
+        }), { status: 403, headers: { "Content-Type": "application/json" } });
+      }
+    }
+  }
+
+  // ── SemanticSearch: agentId must match authenticated agent ─────────────────
+  // Non-admin agents can only search their own memories (plus MemoryGrant access,
+  // which is enforced inside SemanticSearch.ts using the x-tps-agent header).
+  if (!request.tpsAgentIsAdmin &&
+      method === "POST" &&
+      (url.pathname === "/SemanticSearch" || url.pathname === "/SemanticSearch/")) {
+    try {
+      const clone = request.clone();
+      const body = await clone.json();
+      if (body?.agentId && body.agentId !== agentId) {
+        return new Response(JSON.stringify({
+          error: "forbidden: agentId must match authenticated agent",
+        }), { status: 403, headers: { "Content-Type": "application/json" } });
+      }
+    } catch { /* malformed body — let resource return its own error */ }
+  }
+
+  // ── BootstrapMemories: agentId must match authenticated agent ───────────────
+  if (!request.tpsAgentIsAdmin &&
+      method === "POST" &&
+      (url.pathname === "/BootstrapMemories" || url.pathname === "/BootstrapMemories/")) {
+    try {
+      const clone = request.clone();
+      const body = await clone.json();
+      if (body?.agentId && body.agentId !== agentId) {
+        return new Response(JSON.stringify({
+          error: "forbidden: agentId must match authenticated agent",
+        }), { status: 403, headers: { "Content-Type": "application/json" } });
+      }
+    } catch { /* malformed body — let resource return its own error */ }
+  }
+
+  // ── Memory POST (create): agentId must match authenticated agent ────────────
+  if (!request.tpsAgentIsAdmin &&
+      method === "POST" &&
+      (url.pathname === "/Memory" || url.pathname === "/Memory/")) {
+    try {
+      const clone = request.clone();
+      const body = await clone.json();
+      if (body?.agentId && body.agentId !== agentId) {
+        return new Response(JSON.stringify({
+          error: "forbidden: cannot create memories for another agent",
+        }), { status: 403, headers: { "Content-Type": "application/json" } });
+      }
+    } catch {}
+  }
+
+  // ── Memory GET: non-admin can only read own memories (by ID) ────────────────
+  if (!request.tpsAgentIsAdmin && method === "GET") {
+    if (url.pathname.startsWith("/Memory/")) {
+      try {
+        const pathParts = url.pathname.split("/").filter(Boolean);
+        const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
+        if (memId) {
+          const record = await (tables as any).Memory.get(memId);
+          if (record && record.agentId && record.agentId !== agentId) {
+            // Allow office-wide memories
+            if (record.visibility !== "office") {
+              // Check MemoryGrant
+              let hasGrant = false;
+              try {
+                for await (const grant of (tables as any).MemoryGrant.search({
+                  conditions: [{ attribute: "granteeId", comparator: "equals", value: agentId }],
+                })) {
+                  if (grant.ownerId === record.agentId &&
+                      (grant.scope === "read" || grant.scope === "search")) {
+                    hasGrant = true;
+                    break;
+                  }
+                }
+              } catch {}
+              if (!hasGrant) {
+                return new Response(JSON.stringify({
+                  error: `forbidden: cannot read memory owned by ${record.agentId}`,
+                }), { status: 403, headers: { "Content-Type": "application/json" } });
+              }
+            }
+          }
+        }
+      } catch { /* record not found or table error — let resource handle */ }
+    }
+  }
+
+  // ── Soul GET: non-admin can only read own soul ──────────────────────────────
+  if (!request.tpsAgentIsAdmin && method === "GET") {
+    if (url.pathname.startsWith("/Soul/")) {
+      const pathParts = url.pathname.split("/").filter(Boolean);
+      const soulOwner = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
+      if (soulOwner && soulOwner !== agentId) {
+        return new Response(JSON.stringify({
+          error: "forbidden: cannot read another agent's soul",
         }), { status: 403, headers: { "Content-Type": "application/json" } });
       }
     }
