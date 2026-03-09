@@ -1,60 +1,48 @@
 #!/bin/bash
-# Harper watchdog — restarts on crash, logs crash context
-# Usage: ./harper-watchdog.sh
-# Run via launchd or screen for persistence
+# Harper watchdog — detects zombie Harper process (PID alive, HTTP port dead)
+# and force-restarts via launchd.
+#
+# Usage: run via cron or launchd every 60s
+#   * * * * * /Users/squeued/ops/flair/scripts/harper-watchdog.sh
+#
+# Or as a launchd StartInterval job (see ai.tpsdev.flair-watchdog.plist)
 
-FLAIR_DIR="${HOME}/ops/flair"
-HARPER_DATA="/tmp/harper-flair"
-LOG_DIR="${HARPER_DATA}/logs"
-CRASH_LOG="${HOME}/ops/shared/HARPER-CRASH-LOG.md"
-PORT=9926
+HARPER_PORT="${HARPER_PORT:-9926}"
+LAUNCHD_LABEL="${LAUNCHD_LABEL:-ai.tpsdev.flair}"
+LOG="${HOME}/.tps/logs/harper-watchdog.log"
+PLIST="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
 
-mkdir -p "$LOG_DIR"
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG"; }
 
-crash_count=0
+# Check if Harper process exists
+HARPER_PID=$(pgrep -f "harper.js" 2>/dev/null | head -1)
 
-while true; do
-  timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
-  log_file="${LOG_DIR}/harper-${timestamp}.log"
-  
-  echo "[watchdog] Starting Harper at $(date)" | tee -a "$log_file"
-  
-  cd "$FLAIR_DIR"
-  HARPER_DATA="$HARPER_DATA" node node_modules/harperdb/bin/harper.js dev . >> "$log_file" 2>&1
-  exit_code=$?
-  
-  crash_time=$(date '+%Y-%m-%d %H:%M:%S %Z')
-  crash_count=$((crash_count + 1))
-  
-  echo "[watchdog] Harper exited with code $exit_code at $crash_time (crash #$crash_count)" | tee -a "$log_file"
-  
-  # Capture last 50 lines for crash context
-  tail_log=$(tail -50 "$log_file")
-  
-  # Append to crash log
-  cat >> "$CRASH_LOG" << ENTRY
+if [ -z "$HARPER_PID" ]; then
+  log "Harper not running — launchd will restart"
+  exit 0
+fi
 
----
+# Check if HTTP port is responding
+if curl -sf --max-time 3 "http://localhost:${HARPER_PORT}/" -o /dev/null 2>/dev/null; then
+  # Healthy — exit quietly
+  exit 0
+fi
 
-## CRASH-AUTO-${crash_count}: Process exit (code ${exit_code})
+# Port dead but PID alive — zombie state
+log "ZOMBIE: Harper PID ${HARPER_PID} alive but port ${HARPER_PORT} dead — force killing"
+kill -9 "$HARPER_PID" 2>/dev/null
 
-**Date:** ${crash_time}
-**Harper version:** v5 (pro alpha)
-**Host:** $(hostname) ($(uname -s) $(uname -m))
-**Flair port:** ${PORT}
-**Log file:** ${log_file}
+# Let launchd restart it (KeepAlive.Crashed=true)
+sleep 2
 
-### Exit code
-${exit_code}
+# Verify launchd restarted it
+if pgrep -f "harper.js" > /dev/null 2>&1; then
+  log "Restarted by launchd"
+else
+  # Manually kick launchd if needed
+  log "Manually triggering launchd restart"
+  launchctl kickstart -k "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null || \
+    launchctl start "${LAUNCHD_LABEL}" 2>/dev/null
+fi
 
-### Last 50 lines of log
-\`\`\`
-${tail_log}
-\`\`\`
-
-### Status: AUTO-LOGGED (needs human review)
-ENTRY
-
-  echo "[watchdog] Crash logged. Restarting in 5 seconds..."
-  sleep 5
-done
+log "Watchdog cycle complete"
