@@ -77,7 +77,7 @@ try {
     case 'search': {
       const query = rest.join(' ');
       // Server generates query embedding in-process — no sidecar needed
-      result = await flairFetch('POST', '/MemoryQuery', { agentId: AGENT_ID, q: query, limit: 5 });
+      result = await flairFetch('POST', '/SemanticSearch', { agentId: AGENT_ID, q: query, limit: 5 });
       if (result.results) {
         for (const r of result.results) {
           const date = r.createdAt?.slice(0, 10) || '?';
