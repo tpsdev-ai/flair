@@ -1,5 +1,5 @@
 #!/bin/bash
-# Harper watchdog — detects zombie Harper process (PID alive, HTTP port dead)
+# Harper watchdog — detects unhealthy Harper process (PID alive, /Health failing)
 # and force-restarts via launchd.
 #
 # Usage: run via cron or launchd every 60s
@@ -10,7 +10,7 @@
 HARPER_PORT="${HARPER_PORT:-9926}"
 LAUNCHD_LABEL="${LAUNCHD_LABEL:-ai.tpsdev.flair}"
 LOG="${HOME}/.tps/logs/harper-watchdog.log"
-PLIST="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+HEALTH_URL="http://localhost:${HARPER_PORT}/Health"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG"; }
 
@@ -22,14 +22,14 @@ if [ -z "$HARPER_PID" ]; then
   exit 0
 fi
 
-# Check if HTTP port is responding
-if curl -sf --max-time 3 "http://localhost:${HARPER_PORT}/" -o /dev/null 2>/dev/null; then
+# Check the Harper health endpoint directly (embedding deadlock can leave PID alive)
+if curl -sf --max-time 5 "$HEALTH_URL" -o /dev/null 2>/dev/null; then
   # Healthy — exit quietly
   exit 0
 fi
 
-# Port dead but PID alive — zombie state
-log "ZOMBIE: Harper PID ${HARPER_PID} alive but port ${HARPER_PORT} dead — force killing"
+# Health dead but PID alive — unhealthy/zombie state
+log "UNHEALTHY: Harper PID ${HARPER_PID} alive but /Health failed at ${HEALTH_URL} — force killing"
 kill -9 "$HARPER_PID" 2>/dev/null
 
 # Let launchd restart it (KeepAlive.Crashed=true)
