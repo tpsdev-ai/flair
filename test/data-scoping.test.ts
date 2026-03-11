@@ -35,15 +35,13 @@ function checkMemoryReadScope(
   return `forbidden: cannot read memory owned by ${memoryOwner}`;
 }
 
-/** Returns 403 message if agent tries to read another agent's soul */
+/** Soul reads are open to authenticated agents for cross-team coordination */
 function checkSoulReadScope(
-  authenticatedAgent: string,
-  soulOwner: string,
-  isAdmin: boolean,
+  _authenticatedAgent: string,
+  _soulOwner: string,
+  _isAdmin: boolean,
 ): string | null {
-  if (isAdmin) return null;
-  if (soulOwner === authenticatedAgent) return null;
-  return "forbidden: cannot read another agent's soul";
+  return null;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -110,10 +108,8 @@ describe("checkSoulReadScope (Soul GET)", () => {
     expect(checkSoulReadScope("flint", "flint", false)).toBeNull();
   });
 
-  it("blocks reading another agent's soul", () => {
-    const err = checkSoulReadScope("anvil", "flint", false);
-    expect(err).not.toBeNull();
-    expect(err).toContain("forbidden");
+  it("allows reading another agent's soul", () => {
+    expect(checkSoulReadScope("anvil", "flint", false)).toBeNull();
   });
 
   it("allows admin to read any soul", () => {

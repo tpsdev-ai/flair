@@ -368,6 +368,36 @@ server.http(async (request: any, nextLayer: any) => {
     } catch {}
   }
 
+  // ── Soul POST/PUT: agentId must match authenticated agent ───────────────────
+  if (!request.tpsAgentIsAdmin &&
+      (method === "POST" || method === "PUT") &&
+      (url.pathname === "/Soul" || url.pathname === "/Soul/" || url.pathname.startsWith("/Soul/"))) {
+    try {
+      const clone = request.clone();
+      const body = await clone.json();
+      if (body?.agentId && body.agentId !== agentId) {
+        return new Response(JSON.stringify({
+          error: "forbidden: cannot write another agent's soul",
+        }), { status: 403, headers: { "Content-Type": "application/json" } });
+      }
+    } catch {}
+  }
+
+  // ── Memory PUT: agentId must match authenticated agent ──────────────────────
+  if (!request.tpsAgentIsAdmin &&
+      method === "PUT" &&
+      (url.pathname === "/Memory" || url.pathname === "/Memory/" || url.pathname.startsWith("/Memory/"))) {
+    try {
+      const clone = request.clone();
+      const body = await clone.json();
+      if (body?.agentId && body.agentId !== agentId) {
+        return new Response(JSON.stringify({
+          error: "forbidden: cannot write memories for another agent",
+        }), { status: 403, headers: { "Content-Type": "application/json" } });
+      }
+    } catch {}
+  }
+
   // ── Memory GET: non-admin can only read own memories (by ID) ────────────────
   if (!request.tpsAgentIsAdmin && method === "GET") {
     if (url.pathname.startsWith("/Memory/")) {
@@ -401,19 +431,6 @@ server.http(async (request: any, nextLayer: any) => {
           }
         }
       } catch { /* record not found or table error — let resource handle */ }
-    }
-  }
-
-  // ── Soul GET: non-admin can only read own soul ──────────────────────────────
-  if (!request.tpsAgentIsAdmin && method === "GET") {
-    if (url.pathname.startsWith("/Soul/")) {
-      const pathParts = url.pathname.split("/").filter(Boolean);
-      const soulOwner = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
-      if (soulOwner && soulOwner !== agentId) {
-        return new Response(JSON.stringify({
-          error: "forbidden: cannot read another agent's soul",
-        }), { status: 403, headers: { "Content-Type": "application/json" } });
-      }
     }
   }
 
