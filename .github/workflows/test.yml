@@ -52,7 +52,7 @@ jobs:
             -e HTTP_PORT=9926 \
             --entrypoint /bin/sh \
             harperfast/harper-pro:5.0.0-alpha.3 \
-            -c "harperdb install && harperdb dev /flair" 
+            -c "harper install && harper dev /flair" 
       - name: Run integration tests against Docker Harper
         run: bun test test/integration/
         env:
@@ -82,7 +82,7 @@ jobs:
           bun-version: "1.3.10"
       - run: bun install --frozen-lockfile
       - name: Run audit (advisory-only for transitive deps)
-        run: bun audit || echo "::warning::Audit found vulnerabilities — all in harperdb transitive deps (unreleased v5 build)"
+        run: bun audit || echo "::warning::Audit found vulnerabilities — all in harper transitive deps (unreleased v5 build)"
         continue-on-error: true
 
   sast-semgrep:

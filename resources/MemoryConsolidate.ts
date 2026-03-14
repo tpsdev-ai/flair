@@ -16,7 +16,7 @@
  *   prompt      string
  */
 
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "@harperfast/harper";
 import { isAdmin } from "./auth-middleware.js";
 
 function parseDuration(s: string): number {

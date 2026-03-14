@@ -1,4 +1,4 @@
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "@harperfast/harper";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord } from "./table-helpers.js";
 

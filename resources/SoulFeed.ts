@@ -1,4 +1,4 @@
-import { Resource, tables } from 'harperdb';
+import { Resource, tables } from '@harperfast/harper';
 
 export class FeedSouls extends Resource {
   async *connect(target: any, incomingMessages: any) {

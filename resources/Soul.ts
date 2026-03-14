@@ -1,4 +1,4 @@
-import { tables } from "harperdb";
+import { tables } from "@harperfast/harper";
 
 export class Soul extends (tables as any).Soul {
   async post(content: any, context?: any) {

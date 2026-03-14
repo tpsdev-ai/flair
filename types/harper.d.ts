@@ -1,4 +1,4 @@
-declare module "harperdb" {
+declare module "@harperfast/harper" {
   export const server: {
     http: (handler: (request: any, next: any) => any, options?: any) => void;
   };

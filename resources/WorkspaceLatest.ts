@@ -5,7 +5,7 @@
  * Auth: requesting agent must match agentId in path (or be admin).
  */
 
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "@harperfast/harper";
 
 export class WorkspaceLatest extends Resource {
   async get(pathInfo?: any) {

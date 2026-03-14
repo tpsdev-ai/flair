@@ -1,4 +1,4 @@
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "@harperfast/harper";
 import { access, readFile, readdir } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, extname, join } from "node:path";

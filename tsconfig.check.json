@@ -10,7 +10,7 @@
     "skipLibCheck": true,
     "types": ["node", "bun-types"],
     "paths": {
-      "harperdb": ["./types/harperdb.d.ts"]
+      "@harperfast/harper": ["./types/harper.d.ts"]
     }
   },
   "include": ["resources/**/*.ts"],
