@@ -1,4 +1,4 @@
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "@harperfast/harper";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 
 export class FeedMemories extends Resource {

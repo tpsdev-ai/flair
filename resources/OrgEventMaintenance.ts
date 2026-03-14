@@ -5,7 +5,7 @@
  * Auth: admin only.
  */
 
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "@harperfast/harper";
 
 export class OrgEventMaintenance extends Resource {
   async post(_data: any, context?: any) {

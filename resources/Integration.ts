@@ -1,4 +1,4 @@
-import { tables } from "harperdb";
+import { tables } from "@harperfast/harper";
 
 export class Integration extends (tables as any).Integration {
   async post(content: any, context?: any) {

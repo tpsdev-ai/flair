@@ -10,7 +10,7 @@
  * Limit 50 events max.
  */
 
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "@harperfast/harper";
 
 export class OrgEventCatchup extends Resource {
   // HarperDB calls get(pathInfo, context) where pathInfo is the URL segment after /OrgEventCatchup/

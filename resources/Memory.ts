@@ -1,4 +1,4 @@
-import { tables } from "harperdb";
+import { tables } from "@harperfast/harper";
 import { patchRecord } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
 

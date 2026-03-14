@@ -1,4 +1,4 @@
-import { Resource, databases } from "harperdb";
+import { Resource, databases } from "@harperfast/harper";
 
 export class IssueTokens extends Resource {
   static loadAsInstance = false;

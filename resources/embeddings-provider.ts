@@ -4,7 +4,7 @@
  * to ensure the native model loads exactly once, even when Harper loads
  * this module in multiple ESM contexts within the same process.
  */
-import { tables } from "harperdb";
+import { tables } from "@harperfast/harper";
 
 const MAX_CHARS = 500;
 const MODELS_DIR = process.env.FLAIR_MODELS_DIR || "/tmp/flair-models";

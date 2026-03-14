@@ -6,7 +6,7 @@
  * Read: any authenticated participant can read (org-scoped).
  */
 
-import { tables } from "harperdb";
+import { tables } from "@harperfast/harper";
 
 export class OrgEvent extends (tables as any).OrgEvent {
   async post(content: any, context?: any) {

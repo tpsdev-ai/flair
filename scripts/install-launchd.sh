@@ -19,7 +19,7 @@ _substitute_plist() {
   if [[ -f "$FLAIR_DIR/node_modules/harper/dist/bin/harper.js" ]]; then
     harper_bin="$FLAIR_DIR/node_modules/harper/dist/bin/harper.js"
   else
-    harper_bin="$FLAIR_DIR/node_modules/harperdb/bin/harper.js"
+    harper_bin="$FLAIR_DIR/node_modules/@harperfast/harper/dist/bin/harper.js"
   fi
   sed \
     -e "s|FLAIR_DIR/node_modules/harper/dist/bin/harper.js|$harper_bin|g" \

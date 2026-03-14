@@ -1,4 +1,4 @@
-import { tables } from "harperdb";
+import { tables } from "@harperfast/harper";
 
 export class Agent extends (tables as any).Agent {
   async post(content: any, context: any) {

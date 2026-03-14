@@ -1,4 +1,4 @@
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "@harperfast/harper";
 
 type SoulLike = {
   key?: string;

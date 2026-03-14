@@ -5,7 +5,7 @@
  * Pattern follows Memory.ts — extends Harper auto-generated table class.
  */
 
-import { tables } from "harperdb";
+import { tables } from "@harperfast/harper";
 import { isAdmin } from "./auth-middleware.js";
 
 export class WorkspaceState extends (tables as any).WorkspaceState {

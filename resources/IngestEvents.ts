@@ -22,7 +22,7 @@
  * Batch limit: 100 events per call
  */
 
-import { Resource, tables } from "harperdb";
+import { Resource, tables } from "@harperfast/harper";
 import { createPublicKey, verify } from "node:crypto";
 
 const BATCH_LIMIT = 100;

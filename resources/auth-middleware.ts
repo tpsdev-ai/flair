@@ -1,5 +1,5 @@
 import { patchRecord } from "./table-helpers.js";
-import { server, tables } from "harperdb";
+import { server, tables } from "@harperfast/harper";
 import { initEmbeddings, getEmbedding } from "./embeddings-provider.js";
 import { readFileSync } from "node:fs";
 
@@ -64,7 +64,9 @@ export async function isAdmin(agentId: string): Promise<boolean> {
 // ─── Crypto helpers ───────────────────────────────────────────────────────────
 
 function b64ToArrayBuffer(b64: string): ArrayBuffer {
-  const bin = atob(b64);
+  // Handle both standard and URL-safe base64
+  const std = b64.replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(std);
   const buf = new ArrayBuffer(bin.length);
   const view = new Uint8Array(buf);
   for (let i = 0; i < bin.length; i++) view[i] = bin.charCodeAt(i);
