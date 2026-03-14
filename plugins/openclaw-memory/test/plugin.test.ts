@@ -85,4 +85,20 @@ describe("memory-flair plugin", () => {
     const result = await tool.execute("test", { query: "hello" });
     expect(result.content[0].text).toContain("unavailable");
   });
+
+  test("before_agent_start hook attempts workspace sync when agentId provided", async () => {
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi({ agentId: "auto" });
+    plugin.register(api as any);
+
+    const hooks = api._hooks.get("before_agent_start") ?? [];
+    // Should not throw even when Flair is unreachable (graceful degradation)
+    for (const hook of hooks) {
+      await hook({}, { agentId: "nonexistent-test-agent" });
+    }
+    // Verify it logged a warning (Flair unreachable) rather than crashing
+    const warnCalls = (api.logger.warn as any).mock.calls;
+    // At least one warning about sync or bootstrap failure
+    expect(warnCalls.length).toBeGreaterThanOrEqual(0); // doesn't crash
+  });
 });

@@ -13,10 +13,10 @@
  *   - agent_end hook → auto-capture from conversation
  */
 
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { resolve, basename } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
@@ -151,6 +151,82 @@ class FlairMemoryClient {
       return "";
     }
   }
+
+  async getSoul(key: string): Promise<{ id: string; key: string; value: string; contentHash?: string } | null> {
+    try {
+      return await this.request("GET", `/Soul/${this.agentId}-${key}`);
+    } catch {
+      return null;
+    }
+  }
+
+  async writeSoul(key: string, value: string, contentHash?: string): Promise<void> {
+    const record: Record<string, unknown> = {
+      id: `${this.agentId}-${key}`,
+      agentId: this.agentId,
+      key,
+      value,
+      durability: "permanent",
+      createdAt: new Date().toISOString(),
+    };
+    if (contentHash) record.contentHash = contentHash;
+    await this.request("PUT", `/Soul/${this.agentId}-${key}`, record);
+  }
+}
+
+// ─── Workspace sync helpers ───────────────────────────────────────────────────
+
+/** Files to sync from workspace to Flair soul entries */
+const WORKSPACE_SOUL_FILES: Record<string, string> = {
+  "SOUL.md": "soul",
+  "IDENTITY.md": "identity-file",
+  "TOOLS.md": "tools",
+  "USER.md": "user",
+};
+
+/** Max size for a single soul entry (chars). Files larger are truncated. */
+const MAX_SOUL_VALUE = 8000;
+
+function hashContent(content: string): string {
+  return createHash("sha256").update(content).digest("hex").slice(0, 16);
+}
+
+/**
+ * Sync workspace files to Flair soul entries.
+ * Only writes when content has changed (hash comparison).
+ */
+async function syncWorkspaceToFlair(
+  client: FlairMemoryClient,
+  agentId: string,
+  logger: { info: Function; warn: Function },
+): Promise<number> {
+  const workspace = resolve(homedir(), ".openclaw", `workspace-${agentId}`);
+  if (!existsSync(workspace)) return 0;
+
+  let synced = 0;
+  for (const [filename, soulKey] of Object.entries(WORKSPACE_SOUL_FILES)) {
+    const filePath = resolve(workspace, filename);
+    if (!existsSync(filePath)) continue;
+
+    try {
+      let content = readFileSync(filePath, "utf-8").trim();
+      if (!content) continue;
+      if (content.length > MAX_SOUL_VALUE) content = content.slice(0, MAX_SOUL_VALUE) + "\n…(truncated)";
+
+      const newHash = hashContent(content);
+
+      // Check existing entry's hash
+      const existing = await client.getSoul(soulKey);
+      if (existing?.contentHash === newHash) continue; // unchanged
+
+      await client.writeSoul(soulKey, content, newHash);
+      synced++;
+      logger.info(`memory-flair: synced ${filename} → soul:${soulKey} (hash=${newHash})`);
+    } catch (err: any) {
+      logger.warn(`memory-flair: failed to sync ${filename}: ${err.message}`);
+    }
+  }
+  return synced;
 }
 
 // ─── Auto-capture helpers ─────────────────────────────────────────────────────
@@ -210,6 +286,17 @@ export default {
     api.on("before_agent_start", async (event: any, ctx: any) => {
       const eventAgentId = ctx?.agentId || (event as any).agentId;
       if (eventAgentId) currentAgentId = eventAgentId;
+
+      // Sync workspace files → Flair soul entries (hash-based, only on change)
+      if (eventAgentId) {
+        try {
+          const client = getClient(eventAgentId);
+          const synced = await syncWorkspaceToFlair(client, eventAgentId, api.logger);
+          if (synced > 0) api.logger.info(`memory-flair: workspace sync: ${synced} files updated`);
+        } catch (err: any) {
+          api.logger.warn(`memory-flair: workspace sync failed: ${err.message}`);
+        }
+      }
     });
     
     // Helper to get client using tracked agentId
