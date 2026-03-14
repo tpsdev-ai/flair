@@ -1,0 +1,37 @@
+{
+  "name": "@tpsdev/openclaw-memory-flair",
+  "version": "0.1.0",
+  "description": "OpenClaw memory plugin backed by Flair — replaces built-in memory with semantic vector search via Harper",
+  "type": "module",
+  "main": "index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "memory",
+    "flair",
+    "harper",
+    "semantic-search",
+    "agent-memory"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tpsdev-ai/flair.git",
+    "directory": "plugins/openclaw-memory"
+  },
+  "homepage": "https://github.com/tpsdev-ai/flair/tree/main/plugins/openclaw-memory",
+  "peerDependencies": {
+    "openclaw": ">=2025.0.0"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.0"
+  }
+}
