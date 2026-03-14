@@ -95,7 +95,18 @@ export async function initEmbeddings(): Promise<void> {
 
 async function doInit(): Promise<void> {
   try {
-    hfe = await import("harper-fabric-embeddings");
+    // Use file:// URL to bypass Node's strict "exports" map enforcement.
+    // Harper's VM sandbox module resolver doesn't handle the "exports" field
+    // in harper-fabric-embeddings' package.json. Importing via file:// URL
+    // skips package resolution entirely and loads the file directly.
+    // Resolve from module location (not cwd) to prevent path manipulation.
+    const { resolve: resolvePath, dirname } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const moduleDir = dirname(fileURLToPath(import.meta.url));
+    const mainPath = resolvePath(
+      moduleDir, "..", "..", "node_modules", "harper-fabric-embeddings", "dist", "index.js"
+    );
+    hfe = await import(`file://${mainPath}`);
     await hfe.init({ modelsDir: MODELS_DIR, gpuLayers: 99 });
     dims = hfe.dimensions();
     mode = "native";
