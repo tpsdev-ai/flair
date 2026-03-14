@@ -1,0 +1,45 @@
+{
+  "id": "memory-flair",
+  "kind": "memory",
+  "uiHints": {
+    "url": {
+      "label": "Flair URL",
+      "placeholder": "http://localhost:9926",
+      "help": "Base URL for the Flair server"
+    },
+    "agentId": {
+      "label": "Agent ID",
+      "placeholder": "flint",
+      "help": "TPS agent identifier (used for memory namespacing)"
+    },
+    "keyPath": {
+      "label": "Private Key Path",
+      "placeholder": "~/.tps/secrets/flair/flint-priv.key",
+      "help": "Path to Ed25519 private key for Flair auth",
+      "sensitive": true,
+      "advanced": true
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically capture important information from conversations"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Automatically inject relevant memories into context at session start"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "url": { "type": "string" },
+      "agentId": { "type": "string" },
+      "keyPath": { "type": "string" },
+      "autoCapture": { "type": "boolean" },
+      "autoRecall": { "type": "boolean" },
+      "maxRecallResults": { "type": "number", "minimum": 1, "maximum": 20 },
+      "maxBootstrapTokens": { "type": "number", "minimum": 500, "maximum": 8000 }
+    },
+    "required": ["agentId"]
+  }
+}
