@@ -31,7 +31,7 @@ Agent ──[Ed25519-signed request]──▶ Flair (Harper)
                                       └── Search (semantic + keyword, ranked)
 ```
 
-**No external dependencies at runtime.** Embeddings are generated in-process using [llama.cpp](https://github.com/ggerganov/llama.cpp) via a native addon. Model runs on CPU or GPU (Metal, CUDA). No API calls, no sidecar processes, no network hops.
+**No external dependencies at runtime.** Embeddings are generated in-process using [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) via a Harper plugin. Model runs on CPU or GPU (Metal, CUDA). No API calls, no sidecar processes, no network hops.
 
 ## Features
 
@@ -69,37 +69,73 @@ One Flair instance serves any number of agents. Each agent has its own keys, mem
 ## Quick Start
 
 ### Prerequisites
-- [Node.js 24+](https://nodejs.org/) (Harper v5 requirement)
-- [Bun](https://bun.sh/) (build tooling)
+- [Node.js 20+](https://nodejs.org/) (24+ recommended)
 
 ### Install & Run
 
 ```bash
-git clone https://github.com/tpsdev-ai/flair.git
-cd flair
-bun install
-bun run build
+# Install
+npm install -g @tps/flair
 
-# Start Flair (Harper dev mode)
-node node_modules/harperdb/bin/harper.js dev .
+# Bootstrap a Flair instance (installs Harper, creates database, starts service)
+flair init
 
-# Write your first memory
-node scripts/flair-client.mjs memory write "I exist."
+# Register your first agent
+flair agent add mybot --name "My Bot" --role assistant
 
-# Search memories
-node scripts/flair-client.mjs memory search "existence"
+# Check everything is working
+flair status
+```
+
+That's it. Your agent now has identity and memory.
+
+### Use with OpenClaw
+
+```bash
+npm install @tps/openclaw-flair
+```
+
+Add to your `openclaw.json`:
+```json
+{
+  "memory": {
+    "provider": "@tps/openclaw-flair"
+  }
+}
+```
+
+Your agent will automatically remember things between sessions and recall them by meaning.
+
+### Use the CLI directly
+
+```bash
+# Write a memory
+flair memory add --agent mybot --content "Harper v5 sandbox blocks bare imports"
+
+# Search by meaning, not keywords
+flair memory search --agent mybot --q "native module loading issues"
+
+# Set personality
+flair soul set --agent mybot --key role --value "Security reviewer, meticulous and skeptical"
+
+# Back up everything
+flair backup --admin-pass "$FLAIR_ADMIN_PASS"
+
+# Restore from backup
+flair restore ./flair-backup-2026-03-15.json --admin-pass "$FLAIR_ADMIN_PASS"
 ```
 
 ### Cold Start Bootstrap
 
-Agents can pull their full context on startup:
+Agents can pull their full context on startup via the `BootstrapMemories` endpoint:
 
 ```bash
-# Soul + recent memories + semantic search
-node scripts/flair-bootstrap.mjs --days 3 --query "current project status"
+curl -H "Authorization: TPS-Ed25519 ..." \
+  -X POST http://localhost:9926/BootstrapMemories \
+  -d '{"agentId": "mybot", "maxTokens": 4000}'
 ```
 
-Outputs markdown ready to inject into an agent's system prompt. Bounded context regardless of total memory size.
+Returns soul + recent memories + relevant context as a formatted block. Bounded context regardless of total memory size.
 
 ## Architecture
 
@@ -127,7 +163,7 @@ flair/
 ### Key Design Decisions
 
 - **Harper-native** — No Express, no middleware frameworks. Harper IS the runtime.
-- **In-process embeddings** — `process.dlopen()` loads llama.cpp's native addon directly inside Harper's sandboxed VM. No sidecar, no HTTP calls.
+- **In-process embeddings** — Native [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) via [llama.cpp](https://github.com/ggerganov/llama.cpp). Runs on CPU or GPU (Metal, CUDA). No API calls, no sidecar processes.
 - **Schema-driven** — GraphQL schemas with `@table @export` auto-generate REST CRUD. Custom resources extend behavior (durability guards, auto-embedding, search).
 - **Auth header swap** — After Ed25519 verification, middleware swaps the auth header for Harper's internal auth. Agent never needs Harper credentials.
 
@@ -157,9 +193,9 @@ Flair is in active development and daily use. We dogfood it — the agents that 
 
 **What's next:**
 - [ ] Encryption at rest (opt-in AES-256-GCM per memory)
-- [ ] Cross-agent memory sharing with access control
 - [ ] Pluggable embedding backends (OpenAI, Cohere, local)
-- [ ] TPS integration (agent management ↔ identity service)
+- [ ] Harper Fabric deployment (managed multi-office)
+- [ ] Key rotation and revocation
 
 ## License
 
