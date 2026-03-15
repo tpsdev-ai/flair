@@ -1,6 +1,6 @@
-# @tpsdev/openclaw-memory-flair
+# @tps/openclaw-flair
 
-OpenClaw memory plugin that replaces the built-in `MEMORY.md` / `memory-lancedb` system with [Flair](https://github.com/tpsdev-ai/flair) as the single source of truth for agent memory.
+OpenClaw memory plugin for Flair — agent identity and semantic memory. Replaces the built-in `MEMORY.md` / `memory-lancedb` system with [Flair](https://github.com/tpsdev-ai/flair) as the single source of truth for agent memory.
 
 Uses Flair's native Harper vector embeddings — no OpenAI API key required.
 
@@ -25,7 +25,7 @@ Uses Flair's native Harper vector embeddings — no OpenAI API key required.
 
 ```bash
 # From npm (when published)
-openclaw plugin install @tpsdev/openclaw-memory-flair
+openclaw plugin install @tps/openclaw-flair
 
 # From source
 cd plugins/openclaw-memory
