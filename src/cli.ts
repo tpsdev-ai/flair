@@ -445,4 +445,218 @@ soul.command("get").argument("<id>").action(async (id) => console.log(JSON.strin
 soul.command("list").requiredOption("--agent <id>")
   .action(async (opts) => console.log(JSON.stringify(await api("GET", `/Soul?agentId=${encodeURIComponent(opts.agent)}`), null, 2)));
 
+// ─── flair backup ────────────────────────────────────────────────────────────
+
+program
+  .command("backup")
+  .description("Export agents, memories, and souls to a JSON archive")
+  .option("--output <path>", "Output file path (default: ~/.flair/backups/flair-backup-<timestamp>.json)")
+  .option("--agents <ids>", "Comma-separated agent IDs to include (default: all)")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .action(async (opts) => {
+    const baseUrl: string = opts.url ?? `http://127.0.0.1:${opts.port}`;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    const adminUser = DEFAULT_ADMIN_USER;
+
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for backup");
+      process.exit(1);
+    }
+
+    const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+
+    async function adminGet(path: string): Promise<any> {
+      const res = await fetch(`${baseUrl}${path}`, {
+        headers: { Authorization: auth },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`GET ${path} failed (${res.status}): ${text}`);
+      }
+      return res.json();
+    }
+
+    console.log("Fetching agents...");
+    const allAgents: any[] = await adminGet("/Agent");
+    const filterIds = opts.agents ? opts.agents.split(",").map((s: string) => s.trim()) : null;
+    const agents: any[] = filterIds ? allAgents.filter((a: any) => filterIds.includes(a.id)) : allAgents;
+
+    console.log(`Fetching memories for ${agents.length} agent(s)...`);
+    const memories: any[] = [];
+    for (const agent of agents) {
+      try {
+        const agentMemories = await adminGet(`/Memory?agentId=${encodeURIComponent(agent.id)}`);
+        if (Array.isArray(agentMemories)) memories.push(...agentMemories);
+      } catch (err: any) {
+        console.warn(`  Warning: could not fetch memories for ${agent.id}: ${err.message}`);
+      }
+    }
+
+    console.log("Fetching souls...");
+    const souls: any[] = [];
+    for (const agent of agents) {
+      try {
+        const agentSouls = await adminGet(`/Soul?agentId=${encodeURIComponent(agent.id)}`);
+        if (Array.isArray(agentSouls)) souls.push(...agentSouls);
+      } catch (err: any) {
+        console.warn(`  Warning: could not fetch souls for ${agent.id}: ${err.message}`);
+      }
+    }
+
+    const backup = {
+      version: 1,
+      createdAt: new Date().toISOString(),
+      source: baseUrl,
+      agents,
+      memories,
+      souls,
+    };
+
+    // Determine output path
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const defaultOutput = join(homedir(), ".flair", "backups", `flair-backup-${timestamp}.json`);
+    const outputPath: string = opts.output ?? defaultOutput;
+    mkdirSync(join(outputPath, ".."), { recursive: true });
+
+    const tmp = outputPath + ".tmp";
+    writeFileSync(tmp, JSON.stringify(backup, null, 2) + "\n", "utf-8");
+    renameSync(tmp, outputPath);
+
+    console.log(`\n✅ Backup complete`);
+    console.log(`   Agents:   ${agents.length}`);
+    console.log(`   Memories: ${memories.length}`);
+    console.log(`   Souls:    ${souls.length}`);
+    console.log(`   Output:   ${outputPath}`);
+  });
+
+// ─── flair restore ────────────────────────────────────────────────────────────
+
+program
+  .command("restore <path>")
+  .description("Import a Flair backup archive")
+  .option("--merge", "Add/update records without deleting existing (default)")
+  .option("--replace", "Delete all existing data for backed-up agents first, then import")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--dry-run", "Show what would be imported without making changes")
+  .action(async (backupPath: string, opts) => {
+    const baseUrl: string = opts.url ?? `http://127.0.0.1:${opts.port}`;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    const adminUser = DEFAULT_ADMIN_USER;
+    const dryRun: boolean = Boolean(opts.dryRun);
+    const mode: "merge" | "replace" = opts.replace ? "replace" : "merge";
+
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for restore");
+      process.exit(1);
+    }
+
+    if (!existsSync(backupPath)) {
+      console.error(`Error: backup file not found: ${backupPath}`);
+      process.exit(1);
+    }
+
+    const backup = JSON.parse(readFileSync(backupPath, "utf-8"));
+    if (backup.version !== 1) {
+      console.error(`Error: unsupported backup version: ${backup.version}`);
+      process.exit(1);
+    }
+
+    const { agents = [], memories = [], souls = [] } = backup;
+    const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+
+    console.log(`Restoring from: ${backupPath}`);
+    console.log(`Mode: ${mode}${dryRun ? " (dry run)" : ""}`);
+    console.log(`  Agents:   ${agents.length}`);
+    console.log(`  Memories: ${memories.length}`);
+    console.log(`  Souls:    ${souls.length}`);
+
+    if (dryRun) {
+      console.log("\n✅ Dry run complete — no changes made");
+      return;
+    }
+
+    async function adminPut(path: string, body: unknown): Promise<void> {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: auth },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`PUT ${path} failed (${res.status}): ${text}`);
+      }
+    }
+
+    async function adminDelete(path: string): Promise<void> {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method: "DELETE",
+        headers: { Authorization: auth },
+        signal: AbortSignal.timeout(10_000),
+      });
+      // 404 is fine — already gone
+      if (!res.ok && res.status !== 404) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`DELETE ${path} failed (${res.status}): ${text}`);
+      }
+    }
+
+    // Replace mode: delete existing data for these agents first
+    if (mode === "replace") {
+      console.log("\nDeleting existing data (replace mode)...");
+      for (const memory of memories) {
+        if (memory.id) await adminDelete(`/Memory/${memory.id}`).catch((e) => console.warn(`  warn: ${e.message}`));
+      }
+      for (const soul of souls) {
+        if (soul.id) await adminDelete(`/Soul/${soul.id}`).catch((e) => console.warn(`  warn: ${e.message}`));
+      }
+    }
+
+    // Restore agents
+    console.log("\nRestoring agents...");
+    let agentCount = 0;
+    for (const agent of agents) {
+      try {
+        await adminPut(`/Agent/${agent.id}`, agent);
+        agentCount++;
+      } catch (err: any) {
+        console.warn(`  warn: agent ${agent.id}: ${err.message}`);
+      }
+    }
+
+    // Restore memories
+    console.log("Restoring memories...");
+    let memoryCount = 0;
+    for (const memory of memories) {
+      try {
+        await adminPut(`/Memory/${memory.id}`, memory);
+        memoryCount++;
+      } catch (err: any) {
+        console.warn(`  warn: memory ${memory.id}: ${err.message}`);
+      }
+    }
+
+    // Restore souls
+    console.log("Restoring souls...");
+    let soulCount = 0;
+    for (const soul of souls) {
+      try {
+        await adminPut(`/Soul/${soul.id}`, soul);
+        soulCount++;
+      } catch (err: any) {
+        console.warn(`  warn: soul ${soul.id}: ${err.message}`);
+      }
+    }
+
+    console.log(`\n✅ Restore complete`);
+    console.log(`   Agents restored:   ${agentCount}/${agents.length}`);
+    console.log(`   Memories restored: ${memoryCount}/${memories.length}`);
+    console.log(`   Souls restored:    ${soulCount}/${souls.length}`);
+  });
+
 await program.parseAsync();
