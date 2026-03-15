@@ -1,0 +1,58 @@
+# Dockerfile.test — validates flair CLI from scratch
+# Tests: init, agent add, status, backup
+#
+# Build:  docker build -f docker/Dockerfile.test -t flair-test .
+# Run:    docker run --rm flair-test
+#
+# Uses node:22-slim + bun for install/build, then node for CLI execution.
+
+FROM node:22-slim AS base
+
+WORKDIR /app
+
+# Install bun (needed for bun install + bun run build)
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates && \
+    curl -fsSL https://bun.sh/install | bash && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.bun/bin:$PATH"
+ENV BUN_INSTALL="/root/.bun"
+
+# Copy repo
+COPY package.json bun.lock* tsconfig.json tsconfig.cli.json config.yaml ./
+COPY src/ ./src/
+COPY resources/ ./resources/
+COPY schemas/ ./schemas/
+
+# Install dependencies
+RUN bun install --frozen-lockfile
+
+# Build resources (tsc → dist/resources/*.js) and CLI (tsc → dist/src/cli.js)
+RUN bun run build && bun run build:cli
+
+# ── Test stage ────────────────────────────────────────────────────────────────
+
+FROM node:22-slim AS test
+
+WORKDIR /app
+
+# Install bun for node_modules (needed at runtime for tweetnacl, commander, @harperfast/harper)
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates && \
+    curl -fsSL https://bun.sh/install | bash && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.bun/bin:$PATH"
+
+COPY --from=base /app/node_modules ./node_modules
+COPY --from=base /app/dist ./dist
+COPY --from=base /app/package.json ./
+# Harper needs resources/ (TS source), schemas/, and config.yaml at runtime
+COPY --from=base /app/resources ./resources
+COPY --from=base /app/schemas ./schemas
+COPY --from=base /app/config.yaml ./config.yaml
+
+# Copy test script
+COPY docker/test-from-scratch.sh ./docker/test-from-scratch.sh
+RUN chmod +x docker/test-from-scratch.sh
+
+CMD ["./docker/test-from-scratch.sh"]
