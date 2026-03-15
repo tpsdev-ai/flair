@@ -143,8 +143,10 @@ async function seedAgentViaOpsApi(
     records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
   };
 
-  // Retry — database may not exist yet if app schemas are still loading
-  const maxAttempts = 20;
+  // Retry — database may not exist yet if app schemas are still loading.
+  // Allow up to 60s (60 × 1s) — schema processing can be slow on first run
+  // when the embeddings model is also initializing.
+  const maxAttempts = 60;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const res = await fetch(url, {
       method: "POST",

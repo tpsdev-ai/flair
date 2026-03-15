@@ -51,6 +51,17 @@ COPY --from=base /app/resources ./resources
 COPY --from=base /app/schemas ./schemas
 COPY --from=base /app/config.yaml ./config.yaml
 
+# Pre-download the embeddings model so Harper doesn't fetch it at runtime.
+# Without this, the ~80MB download blocks schema initialization and the
+# seedAgentViaOpsApi retry loop times out before the DB is ready.
+# curl is already installed (from the apt-get above). -fSL follows redirects.
+ENV FLAIR_MODELS_DIR=/opt/flair-models
+RUN mkdir -p /opt/flair-models && \
+    curl -fSL \
+      "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
+      -o /opt/flair-models/nomic-embed-text-v1.5.Q4_K_M.gguf && \
+    echo "Embeddings model cached ($(du -sh /opt/flair-models/*.gguf | cut -f1))"
+
 # Copy test script
 COPY docker/test-from-scratch.sh ./docker/test-from-scratch.sh
 RUN chmod +x docker/test-from-scratch.sh
