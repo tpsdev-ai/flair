@@ -127,50 +127,6 @@ async function waitForHealth(httpPort: number, adminUser: string, adminPass: str
   throw new Error(`Harper at port ${httpPort} did not respond within ${timeoutMs}ms (${attempt} attempts)`);
 }
 
-/**
- * Ensure the 'flair' database and all required tables exist via Operations API.
- * Must be called after waitForHealth() and before any insert/query operations.
- *
- * Harper's schema-based auto-creation is async and may not have completed by
- * the time health check passes (especially on first run with embeddings init).
- * This call is idempotent — "already exists" responses are treated as success.
- */
-async function ensureDatabaseReady(
-  opsPort: number,
-  adminUser: string,
-  adminPass: string,
-): Promise<void> {
-  const url = `http://127.0.0.1:${opsPort}/`;
-  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
-
-  async function opsExec(body: unknown): Promise<void> {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
-      body: JSON.stringify(body),
-    });
-    if (res.ok) return;
-    const text = await res.text().catch(() => "");
-    // "already exists" is not an error — this function is idempotent
-    if (text.includes("already exists") || res.status === 409) return;
-    const op = (body as any).operation ?? "op";
-    throw new Error(`${op} failed (${res.status}): ${text.slice(0, 200)}`);
-  }
-
-  // Create database
-  await opsExec({ operation: "create_database", database: "flair" });
-
-  // Tables required by the flair app (matches schemas/*.graphql @table types)
-  const tables = [
-    "Agent", "Integration", "OrgEvent", "Memory", "Soul",
-    "MemoryGrant", "ObsOffice", "ObsAgentSnapshot", "ObsEventFeed", "WorkspaceState",
-  ];
-
-  for (const table of tables) {
-    await opsExec({ operation: "create_table", database: "flair", table });
-  }
-}
-
 async function seedAgentViaOpsApi(
   opsPort: number,
   agentId: string,
@@ -280,13 +236,6 @@ program
       await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
       console.log("Harper is healthy ✓");
     } // end if (!opts.skipStart)
-
-    // Ensure the flair database and all tables exist before seeding.
-    // Harper's schema-based creation is async; health check may pass before
-    // the DB is ready (especially on first boot with embeddings initializing).
-    console.log("Ensuring database is ready...");
-    await ensureDatabaseReady(opsPort, adminUser, adminPass);
-    console.log("Database ready ✓");
 
     // Generate or reuse keypair
     mkdirSync(keysDir, { recursive: true });
