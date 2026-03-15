@@ -127,6 +127,51 @@ async function waitForHealth(httpPort: number, adminUser: string, adminPass: str
   throw new Error(`Harper at port ${httpPort} did not respond within ${timeoutMs}ms (${attempt} attempts)`);
 }
 
+// ─── Database bootstrap ───────────────────────────────────────────────────────
+
+const FLAIR_TABLES = [
+  "Agent",
+  "Integration",
+  "Memory",
+  "MemoryGrant",
+  "Soul",
+  "WorkspaceState",
+  "OrgEvent",
+  "ObsOffice",
+  "ObsAgentSnapshot",
+  "ObsEventFeed",
+];
+
+async function bootstrapDatabase(opsPort: number, adminUser: string, adminPass: string): Promise<void> {
+  const url = `http://127.0.0.1:${opsPort}/`;
+  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+
+  async function opsPost(body: unknown): Promise<{ ok: boolean; status: number; text: string }> {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const text = await res.text().catch(() => "");
+    return { ok: res.ok, status: res.status, text };
+  }
+
+  // Create database — ignore if already exists
+  const dbRes = await opsPost({ operation: "create_database", database: "flair" });
+  if (!dbRes.ok && !dbRes.text.includes("already exists") && !dbRes.text.includes("duplicate") && dbRes.status !== 409) {
+    throw new Error(`Failed to create database 'flair' (${dbRes.status}): ${dbRes.text}`);
+  }
+
+  // Create tables — ignore if already exist
+  for (const table of FLAIR_TABLES) {
+    const res = await opsPost({ operation: "create_table", database: "flair", table, hash_attribute: "id" });
+    if (!res.ok && !res.text.includes("already exists") && !res.text.includes("duplicate") && res.status !== 409) {
+      console.warn(`  [bootstrap] Warning: could not create table '${table}' (${res.status}): ${res.text}`);
+    }
+  }
+}
+
 async function seedAgentViaOpsApi(
   opsPort: number,
   agentId: string,
@@ -236,6 +281,11 @@ program
       console.log("Harper is healthy ✓");
     }
 
+    // Bootstrap database and tables (idempotent — safe to run on existing instance)
+    console.log("Bootstrapping Flair database and tables...");
+    await bootstrapDatabase(opsPort, adminUser, adminPass);
+    console.log("Database bootstrap complete ✓");
+
     // Generate or reuse keypair
     mkdirSync(keysDir, { recursive: true });
     const privPath = privKeyPath(agentId, keysDir);
@@ -328,6 +378,8 @@ agent
       console.log(`Keypair written: ${privPath}`);
     }
 
+    // Ensure database exists (safe to call on existing instance)
+    await bootstrapDatabase(opsPort, adminUser, adminPass);
     await seedAgentViaOpsApi(opsPort, id, pubKeyB64url, adminUser, adminPass);
     console.log(`✅ Agent '${id}' (${name}) registered`);
     console.log(`   Private key: ${privPath}`);
