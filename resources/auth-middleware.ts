@@ -1,28 +1,39 @@
 import { patchRecord } from "./table-helpers.js";
 import { server, tables } from "@harperfast/harper";
 import { initEmbeddings, getEmbedding } from "./embeddings-provider.js";
-import { readFileSync } from "node:fs";
 
-// --- Admin token (loaded once at startup, never hardcoded) ---
-// Reads from ~/.tps/secrets/flair/harper-admin-token, then env vars.
-// Fails loudly rather than falling back to a hardcoded default.
-let _adminToken: string | null = null;
-function getAdminToken(): string {
-  if (_adminToken) return _adminToken;
-  const tokenFile = (process.env.HOME ?? "") + "/.tps/secrets/flair/harper-admin-token";
-  try {
-    _adminToken = readFileSync(tokenFile, "utf8").trim();
-    return _adminToken;
-  } catch {
-    const envToken = process.env.FLAIR_ADMIN_TOKEN ?? process.env.HDB_ADMIN_PASSWORD;
-    if (envToken) {
-      _adminToken = envToken;
-      return _adminToken;
-    }
-    const msg = "[auth] FATAL: no admin token found. Run: tps flair install";
-    console.error(msg);
-    throw new Error(msg);
+// --- Admin credentials ---
+// Admin auth is sourced exclusively from Harper's own environment variables
+// (HDB_ADMIN_PASSWORD / FLAIR_ADMIN_PASSWORD). No filesystem token file.
+//
+// FLAIR_ADMIN_TOKEN env var is still accepted for backwards compat but
+// emits a deprecation warning on first use.
+let _adminPass: string | null = null;
+let _deprecationWarned = false;
+
+function getAdminPass(): string {
+  if (_adminPass) return _adminPass;
+
+  // Primary source: Harper's own admin password (set at startup via env)
+  const primary = process.env.HDB_ADMIN_PASSWORD ?? process.env.FLAIR_ADMIN_PASSWORD;
+  if (primary) {
+    _adminPass = primary;
+    return _adminPass;
   }
+
+  // Backwards compat: FLAIR_ADMIN_TOKEN (deprecated — never write to disk)
+  if (process.env.FLAIR_ADMIN_TOKEN) {
+    if (!_deprecationWarned) {
+      console.warn("[auth] DEPRECATION: FLAIR_ADMIN_TOKEN is deprecated. Use HDB_ADMIN_PASSWORD instead.");
+      _deprecationWarned = true;
+    }
+    _adminPass = process.env.FLAIR_ADMIN_TOKEN;
+    return _adminPass;
+  }
+
+  const msg = "[auth] FATAL: no admin password found. Set HDB_ADMIN_PASSWORD env var.";
+  console.error(msg);
+  throw new Error(msg);
 }
 
 const WINDOW_MS = 30_000;
@@ -169,7 +180,7 @@ server.http(async (request: any, nextLayer: any) => {
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
-  const superAuth = "Basic " + btoa("admin:" + getAdminToken());
+  const superAuth = "Basic " + btoa("admin:" + getAdminPass());
   request.headers.set("authorization", superAuth);
   if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
 
