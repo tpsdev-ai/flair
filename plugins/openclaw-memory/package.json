@@ -1,7 +1,7 @@
 {
-  "name": "@tpsdev/openclaw-memory-flair",
+  "name": "@tps/openclaw-flair",
   "version": "0.1.0",
-  "description": "OpenClaw memory plugin backed by Flair — replaces built-in memory with semantic vector search via Harper",
+  "description": "OpenClaw memory plugin for Flair — agent identity and semantic memory",
   "type": "module",
   "main": "index.ts",
   "exports": {
