@@ -4,10 +4,11 @@
   "private": true,
   "type": "module",
   "bin": {
-    "flair": "dist/cli.js"
+    "flair": "dist/src/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noCheck",
+    "build:cli": "tsc -p tsconfig.cli.json --noCheck",
     "test": "bun test"
   },
   "dependencies": {
