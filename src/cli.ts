@@ -429,6 +429,224 @@ agent
     console.log(`   Old key backup: ${backupPrivPath}`);
   });
 
+// ─── flair agent remove ──────────────────────────────────────────────────────
+
+agent
+  .command("remove <id>")
+  .description("Remove an agent and all its data from Flair")
+  .option("--keep-keys", "Do not delete key files from disk")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--keys-dir <dir>", "Directory for Ed25519 keys")
+  .option("--force", "Skip interactive confirmation (required when stdin is not a TTY)")
+  .action(async (id: string, opts) => {
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : Number(opts.port) + 1;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    const adminUser = DEFAULT_ADMIN_USER;
+    const keysDir: string = opts.keysDir ?? defaultKeysDir();
+
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for agent remove");
+      process.exit(1);
+    }
+
+    const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+
+    async function opsPost(body: unknown): Promise<Response> {
+      return fetch(`http://127.0.0.1:${opsPort}/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: auth },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10_000),
+      });
+    }
+
+    // Fetch agent info and memory count for confirmation
+    const agentRes = await opsPost({ operation: "search_by_value", database: "flair", table: "Agent", search_attribute: "id", search_value: id, get_attributes: ["id", "name"] });
+    const agentData = agentRes.ok ? await agentRes.json().catch(() => null) : null;
+    const agentName = agentData?.[0]?.name ?? id;
+
+    const memRes = await opsPost({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "agentId", search_value: id, get_attributes: ["id"] });
+    const memories = memRes.ok ? await memRes.json().catch(() => []) : [];
+    const memoryCount = Array.isArray(memories) ? memories.length : 0;
+
+    // Confirmation
+    const isInteractive = process.stdin.isTTY;
+    if (!opts.force) {
+      if (!isInteractive) {
+        console.error("Error: stdin is not a TTY. Use --force to skip confirmation.");
+        process.exit(1);
+      }
+      console.log(`⚠️  About to permanently remove agent '${agentName}' (${id})`);
+      console.log(`   Memories to delete: ${memoryCount}`);
+      process.stdout.write(`\nType 'yes' to confirm: `);
+      const answer = await new Promise<string>((resolve) => {
+        let buf = "";
+        process.stdin.setEncoding("utf-8");
+        process.stdin.resume();
+        process.stdin.on("data", (chunk: string) => {
+          buf += chunk;
+          if (buf.includes("\n")) { process.stdin.pause(); resolve(buf.trim()); }
+        });
+      });
+      if (answer !== "yes") {
+        console.log("Aborted.");
+        process.exit(0);
+      }
+    } else {
+      console.log(`Removing agent '${agentName}' (${id}) with ${memoryCount} memories...`);
+    }
+
+    // Delete all memories
+    if (memoryCount > 0) {
+      console.log(`Deleting ${memoryCount} memories...`);
+      for (const mem of (Array.isArray(memories) ? memories : [])) {
+        if (!mem?.id) continue;
+        await opsPost({ operation: "delete", database: "flair", table: "Memory", ids: [mem.id] }).catch(() => {});
+      }
+    }
+
+    // Delete all souls
+    const soulRes = await opsPost({ operation: "search_by_value", database: "flair", table: "Soul", search_attribute: "agentId", search_value: id, get_attributes: ["id"] });
+    const souls = soulRes.ok ? await soulRes.json().catch(() => []) : [];
+    if (Array.isArray(souls) && souls.length > 0) {
+      console.log(`Deleting ${souls.length} soul entries...`);
+      for (const soul of souls) {
+        if (!soul?.id) continue;
+        await opsPost({ operation: "delete", database: "flair", table: "Soul", ids: [soul.id] }).catch(() => {});
+      }
+    }
+
+    // Delete agent record
+    const delRes = await opsPost({ operation: "delete", database: "flair", table: "Agent", ids: [id] });
+    if (!delRes.ok) {
+      const text = await delRes.text().catch(() => "");
+      throw new Error(`Failed to delete agent record (${delRes.status}): ${text}`);
+    }
+
+    // Delete key files (unless --keep-keys)
+    if (!opts.keepKeys) {
+      const privPath = privKeyPath(id, keysDir);
+      const pubPath = pubKeyPath(id, keysDir);
+      const backupPath = privPath + ".bak";
+      for (const p of [privPath, pubPath, backupPath]) {
+        if (existsSync(p)) {
+          try { require("node:fs").unlinkSync(p); } catch { /* best effort */ }
+        }
+      }
+      console.log("Key files deleted.");
+    } else {
+      console.log("Key files preserved (--keep-keys).");
+    }
+
+    console.log(`\n✅ Agent '${id}' removed successfully`);
+  });
+
+// ─── flair grant / revoke ─────────────────────────────────────────────────────
+
+program
+  .command("grant <from-agent> <to-agent>")
+  .description("Grant an agent read access to another agent's memories")
+  .option("--scope <scope>", "Grant scope: read or search", "read")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--keys-dir <dir>", "Directory for Ed25519 keys (for from-agent Ed25519 auth)")
+  .action(async (fromAgent: string, toAgent: string, opts) => {
+    const httpPort = Number(opts.port);
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : httpPort + 1;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    const adminUser = DEFAULT_ADMIN_USER;
+    const scope: string = opts.scope ?? "read";
+
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for grant");
+      process.exit(1);
+    }
+
+    const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+    const grantId = `${fromAgent}:${toAgent}`;
+    const body = {
+      operation: "insert",
+      database: "flair",
+      table: "MemoryGrant",
+      records: [{
+        id: grantId,
+        fromAgentId: fromAgent,
+        toAgentId: toAgent,
+        scope,
+        createdAt: new Date().toISOString(),
+      }],
+    };
+
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) {
+        console.log(`ℹ️  Grant already exists: '${toAgent}' can already read '${fromAgent}'s memories`);
+        return;
+      }
+      throw new Error(`Failed to create grant (${res.status}): ${text}`);
+    }
+
+    console.log(`✅ Grant created: '${toAgent}' can now read '${fromAgent}'s memories`);
+    console.log(`   ID:    ${grantId}`);
+    console.log(`   Scope: ${scope}`);
+  });
+
+program
+  .command("revoke <from-agent> <to-agent>")
+  .description("Revoke a memory grant between two agents")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .action(async (fromAgent: string, toAgent: string, opts) => {
+    const httpPort = Number(opts.port);
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : httpPort + 1;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    const adminUser = DEFAULT_ADMIN_USER;
+
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for revoke");
+      process.exit(1);
+    }
+
+    const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+    const grantId = `${fromAgent}:${toAgent}`;
+    const body = {
+      operation: "delete",
+      database: "flair",
+      table: "MemoryGrant",
+      ids: [grantId],
+    };
+
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      if (res.status === 404 || text.includes("not found")) {
+        console.log(`ℹ️  No grant found: '${toAgent}' does not have access to '${fromAgent}'s memories`);
+        return;
+      }
+      throw new Error(`Failed to revoke grant (${res.status}): ${text}`);
+    }
+
+    console.log(`✅ Grant revoked: '${toAgent}' can no longer read '${fromAgent}'s memories`);
+    console.log(`   Removed grant ID: ${grantId}`);
+  });
+
 // ─── flair status ─────────────────────────────────────────────────────────────
 
 program
