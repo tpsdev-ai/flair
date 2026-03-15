@@ -248,4 +248,4 @@ Flair is in active development and daily use. We dogfood it — the agents that 
 
 ---
 
-*[You know, the Nazis had pieces of flair that they made the Jews wear.](https://www.youtube.com/watch?v=3vdcw415OcQ)* ☕
+*[Looks like someone has a case of the Mondays.](https://www.youtube.com/watch?v=3vdcw415OcQ)* ☕
