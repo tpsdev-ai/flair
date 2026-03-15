@@ -7,7 +7,11 @@ trap '
   echo "=== Harper stdout/stderr log ==="
   cat "$HOME/.flair/data/harper.log" 2>/dev/null || echo "(no flair log found)"
   echo "=== HDB log ==="
-  find "$HOME" /tmp -name "*.log" -path "*/hdb_logs/*" 2>/dev/null | head -3 | while read f; do echo "--- $f ---"; tail -50 "$f"; done
+  find "$HOME" /tmp -name "hdb.log" 2>/dev/null | head -3 | while read f; do echo "--- $f ---"; tail -100 "$f"; done
+  echo "=== RUN_HDB_APP check ==="
+  echo "config.yaml exists at /app: $(ls -la /app/config.yaml 2>&1)"
+  echo "schemas dir: $(ls /app/schemas/ 2>&1)"
+  echo "dist/resources: $(ls /app/dist/resources/ 2>&1)"
   echo "=== end ==="
 ' ERR
 #
