@@ -176,12 +176,12 @@ class FlairMemoryClient {
 
 // ─── Workspace sync helpers ───────────────────────────────────────────────────
 
-/** Files to sync from workspace to Flair soul entries */
+/** Files to sync from workspace to Flair soul entries (spec: OPS-workspace-sync) */
 const WORKSPACE_SOUL_FILES: Record<string, string> = {
   "SOUL.md": "soul",
-  "IDENTITY.md": "identity-file",
-  "TOOLS.md": "tools",
-  "USER.md": "user",
+  "IDENTITY.md": "identity",
+  "USER.md": "user-context",
+  "AGENTS.md": "workspace-rules",
 };
 
 /** Max size for a single soul entry (chars). Files larger are truncated. */
