@@ -144,3 +144,139 @@ describe("cross-agent scoping scenarios", () => {
     }
   });
 });
+
+// ── Collection search scoping helpers (mirrors Memory.search / WorkspaceState.search) ──
+
+/**
+ * Simulates the agentId injection logic in Memory.search() and
+ * WorkspaceState.search() without actually calling Harper.
+ *
+ * Returns the effective conditions that would be passed to super.search().
+ */
+function buildScopedSearchConditions(
+  authAgent: string | undefined,
+  isAdminAgent: boolean,
+  grantedOwners: string[],
+  userQuery: any,
+): { filtered: boolean; allowedOwners?: string[]; query?: any } {
+  if (!authAgent || isAdminAgent) {
+    return { filtered: false };
+  }
+
+  const allowedOwners = [authAgent, ...grantedOwners];
+
+  const agentIdCondition =
+    allowedOwners.length === 1
+      ? { attribute: "agentId", comparator: "equals", value: allowedOwners[0] }
+      : allowedOwners.map((id, i) => {
+          const cond = { attribute: "agentId", comparator: "equals", value: id };
+          return i === 0 ? cond : ["or", cond];
+        });
+
+  let scopedQuery: any;
+  if (!userQuery || (Array.isArray(userQuery) && userQuery.length === 0)) {
+    scopedQuery = Array.isArray(agentIdCondition) ? agentIdCondition : [agentIdCondition];
+  } else {
+    scopedQuery = { conditions: [agentIdCondition], and: userQuery };
+  }
+
+  return { filtered: true, allowedOwners, query: scopedQuery };
+}
+
+describe("Memory.search() / WorkspaceState.search() — collection scoping", () => {
+  it("unfiltered for admin agents", () => {
+    const r = buildScopedSearchConditions("admin", true, [], undefined);
+    expect(r.filtered).toBe(false);
+  });
+
+  it("unfiltered when no auth context (internal call)", () => {
+    const r = buildScopedSearchConditions(undefined, false, [], undefined);
+    expect(r.filtered).toBe(false);
+  });
+
+  it("scoped to own agentId for non-admin with no grants", () => {
+    const r = buildScopedSearchConditions("anvil", false, [], undefined);
+    expect(r.filtered).toBe(true);
+    expect(r.allowedOwners).toEqual(["anvil"]);
+    // Single-owner condition is a plain object
+    expect(Array.isArray(r.query)).toBe(true);
+    expect(JSON.stringify(r.query)).toContain("anvil");
+  });
+
+  it("includes granted owners in allowed set", () => {
+    const r = buildScopedSearchConditions("kern", false, ["flint", "anvil"], undefined);
+    expect(r.filtered).toBe(true);
+    expect(r.allowedOwners).toEqual(["kern", "flint", "anvil"]);
+    expect(JSON.stringify(r.query)).toContain("flint");
+    expect(JSON.stringify(r.query)).toContain("anvil");
+  });
+
+  it("wraps user query in outer and (injection prevention)", () => {
+    const userQ = [{ attribute: "type", comparator: "equals", value: "lesson" }];
+    const r = buildScopedSearchConditions("anvil", false, [], userQ);
+    expect(r.filtered).toBe(true);
+    // Result must be an object with both conditions and and fields
+    expect(r.query).toHaveProperty("conditions");
+    expect(r.query).toHaveProperty("and");
+    // agentId condition is at top level — user query is nested under and
+    expect(JSON.stringify(r.query.conditions)).toContain("anvil");
+    expect(r.query.and).toEqual(userQ);
+  });
+
+  it("boolean injection cannot escape agentId scope", () => {
+    // Attacker tries to pass an "or all" user query — must be trapped under and
+    const attackerQuery = [
+      { attribute: "agentId", comparator: "equals", value: "attacker" },
+      "or",
+      { attribute: "id", comparator: "starts_with", value: "" },
+    ];
+    const r = buildScopedSearchConditions("attacker", false, [], attackerQuery);
+    expect(r.filtered).toBe(true);
+    // The malicious query is nested under .and — it cannot affect the outer agentId filter
+    expect(r.query).toHaveProperty("conditions");
+    expect(r.query).toHaveProperty("and");
+    expect(r.query.and).toEqual(attackerQuery);
+    // Top-level conditions only contain attacker's own agentId constraint
+    expect(JSON.stringify(r.query.conditions)).toContain("attacker");
+    expect(JSON.stringify(r.query.conditions)).not.toContain("starts_with");
+  });
+});
+
+describe("SQL/GraphQL endpoint blocking (non-admin)", () => {
+  function checkRawEndpoint(pathname: string, isAdminAgent: boolean): string | null {
+    if (isAdminAgent) return null;
+    const lower = pathname.toLowerCase();
+    if (
+      lower === "/sql" || lower.startsWith("/sql/") ||
+      lower === "/graphql" || lower.startsWith("/graphql/")
+    ) {
+      return "forbidden: raw query endpoints require admin access";
+    }
+    return null;
+  }
+
+  it("blocks /sql for non-admin", () => {
+    expect(checkRawEndpoint("/sql", false)).not.toBeNull();
+    expect(checkRawEndpoint("/SQL", false)).not.toBeNull();
+  });
+
+  it("blocks /graphql for non-admin", () => {
+    expect(checkRawEndpoint("/graphql", false)).not.toBeNull();
+    expect(checkRawEndpoint("/GraphQL", false)).not.toBeNull();
+  });
+
+  it("blocks /sql/query subpath for non-admin", () => {
+    expect(checkRawEndpoint("/sql/execute", false)).not.toBeNull();
+  });
+
+  it("allows admin to access raw endpoints", () => {
+    expect(checkRawEndpoint("/sql", true)).toBeNull();
+    expect(checkRawEndpoint("/graphql", true)).toBeNull();
+  });
+
+  it("does not block regular resource endpoints", () => {
+    for (const path of ["/Memory", "/Memory/abc", "/Soul", "/WorkspaceState"]) {
+      expect(checkRawEndpoint(path, false)).toBeNull();
+    }
+  });
+});

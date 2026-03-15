@@ -9,6 +9,30 @@ import { tables } from "@harperfast/harper";
 import { isAdmin } from "./auth-middleware.js";
 
 export class WorkspaceState extends (tables as any).WorkspaceState {
+  /**
+   * Override search() to scope collection GETs to the authenticated agent's
+   * own workspace state records. Admin agents see all records.
+   */
+  async search(query?: any, context?: any) {
+    const authAgent: string | undefined = context?.request?.tpsAgent;
+    const isAdminAgent: boolean = context?.request?.tpsAgentIsAdmin ?? false;
+
+    if (!authAgent || isAdminAgent) {
+      return super.search(query, context);
+    }
+
+    const agentIdCondition = { attribute: "agentId", comparator: "equals", value: authAgent };
+
+    let scopedQuery: any;
+    if (!query || (Array.isArray(query) && query.length === 0)) {
+      scopedQuery = [agentIdCondition];
+    } else {
+      scopedQuery = { conditions: [agentIdCondition], and: query };
+    }
+
+    return super.search(scopedQuery, context);
+  }
+
   async post(content: any, context?: any) {
     const agentId = context?.request?.tpsAgent;
 
