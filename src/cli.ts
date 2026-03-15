@@ -270,21 +270,54 @@ program
           setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
         });
 
-        // Start (detached)
+        // Start Harper (first pass — database may not exist yet)
         console.log(`Starting Harper on port ${httpPort}...`);
-        const proc = spawn(process.execPath, [bin, "dev", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
-        proc.unref();
+        let harperPid: number | null = null;
+        {
+          const firstProc = spawn(process.execPath, [bin, "dev", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
+          harperPid = firstProc.pid ?? null;
+          firstProc.unref();
+        }
+
+        console.log("Waiting for Harper health check (first start)...");
+        await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
+        console.log("Harper is healthy (first start) ✓");
+
+        // Bootstrap database and tables BEFORE second start
+        console.log("Bootstrapping Flair database and tables...");
+        await bootstrapDatabase(opsPort, adminUser, adminPass);
+        console.log("Database bootstrap complete ✓");
+
+        // Restart Harper so custom resources initialize against the now-existing database
+        console.log("Restarting Harper (resources need live database to initialize)...");
+        if (harperPid) {
+          try { process.kill(harperPid, "SIGTERM"); } catch { /* already gone */ }
+          // Give it a moment to shut down
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+        // Kill anything still on the port (graceful fallback)
+        try {
+          const { execSync } = await import("node:child_process") as any;
+          execSync(`fuser -k ${httpPort}/tcp 2>/dev/null || lsof -ti:${httpPort} | xargs kill -9 2>/dev/null || true`, { shell: true });
+          await new Promise((r) => setTimeout(r, 1000));
+        } catch { /* best effort */ }
+
+        // Second start — database now exists, resources will initialize cleanly
+        const restartProc = spawn(process.execPath, [bin, "dev", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
+        restartProc.unref();
+
+        console.log("Waiting for Harper health check (second start)...");
+        await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
+        console.log("Harper is healthy (second start) ✓");
       }
 
-      console.log("Waiting for Harper health check...");
-      await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
-      console.log("Harper is healthy ✓");
-    }
-
-    // Bootstrap database and tables (idempotent — safe to run on existing instance)
-    console.log("Bootstrapping Flair database and tables...");
-    await bootstrapDatabase(opsPort, adminUser, adminPass);
-    console.log("Database bootstrap complete ✓");
+      // If Harper was already running, still ensure database + tables exist (idempotent)
+      if (alreadyRunning) {
+        console.log("Bootstrapping Flair database and tables (idempotent)...");
+        await bootstrapDatabase(opsPort, adminUser, adminPass);
+        console.log("Database bootstrap complete ✓");
+      }
+    } // end if (!opts.skipStart)
 
     // Generate or reuse keypair
     mkdirSync(keysDir, { recursive: true });
