@@ -1,20 +1,53 @@
 {
-  "name": "@tpsdev-ai/flair",
+  "name": "@tps/flair",
   "version": "0.2.0",
-  "private": true,
+  "description": "Identity, memory, and soul for AI agents. Cryptographic identity (Ed25519), semantic memory with local embeddings, and persistent personality — all in a single process.",
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tpsdev-ai/flair.git"
+  },
+  "homepage": "https://github.com/tpsdev-ai/flair",
+  "bugs": {
+    "url": "https://github.com/tpsdev-ai/flair/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "identity",
+    "memory",
+    "semantic-search",
+    "embeddings",
+    "ed25519",
+    "harper",
+    "llm",
+    "openclaw"
+  ],
   "bin": {
     "flair": "dist/cli.js"
   },
+  "files": [
+    "dist/",
+    "resources/",
+    "schemas/",
+    "config.yaml",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json --noCheck",
     "test": "bun test"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
+    "@harperfast/harper": "5.0.0-alpha.10",
     "@node-llama-cpp/mac-arm64-metal": "^3.17.1",
     "commander": "14.0.3",
     "harper-fabric-embeddings": "^0.1.4",
-    "@harperfast/harper": "5.0.0-alpha.10",
     "tweetnacl": "1.0.3"
   },
   "devDependencies": {
