@@ -202,7 +202,8 @@ program
 
         const env: Record<string, string> = {
           ...(process.env as Record<string, string>),
-          ROOTPATH: process.cwd(),
+          // No ROOTPATH override — Harper defaults to ~/.harper/
+          // The `.` argument to `harper run .` tells it where the app config lives
           HDB_ADMIN_USERNAME: adminUser,
           HDB_ADMIN_PASSWORD: adminPass,
           THREADS_COUNT: "1",
