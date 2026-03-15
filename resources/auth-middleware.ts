@@ -178,6 +178,22 @@ server.http(async (request: any, nextLayer: any) => {
   request.headers.set("x-tps-agent", agentId);
   if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = agentId;
 
+  // ── Raw query endpoint block (non-admins) ─────────────────────────────────
+  // SQL and GraphQL endpoints bypass all resource-level scoping — block them
+  // for non-admin agents. Admins (bootstrap, consolidation scripts) still pass.
+  if (!request.tpsAgentIsAdmin) {
+    const rawPath = url.pathname.toLowerCase();
+    if (
+      rawPath === "/sql" || rawPath.startsWith("/sql/") ||
+      rawPath === "/graphql" || rawPath.startsWith("/graphql/")
+    ) {
+      return new Response(
+        JSON.stringify({ error: "forbidden: raw query endpoints require admin access" }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      );
+    }
+  }
+
   // ── Server-side permission guards ──────────────────────────────────────────
 
   const method = request.method.toUpperCase();

@@ -3,6 +3,64 @@ import { patchRecord } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
 
 export class Memory extends (tables as any).Memory {
+  /**
+   * Override search() to scope collection GETs by authenticated agent.
+   *
+   * Security Critical: the agentId condition is wrapped as the outermost
+   * `and` block so user-supplied query operators cannot bypass it via
+   * boolean injection (e.g. [..., "or", { wildcard }]).
+   *
+   * Admin agents and unauthenticated internal calls pass through unfiltered.
+   * Non-admin calls also check MemoryGrant to include granted memories.
+   */
+  async search(query?: any, context?: any) {
+    const authAgent: string | undefined = context?.request?.tpsAgent;
+    const isAdminAgent: boolean = context?.request?.tpsAgentIsAdmin ?? false;
+
+    // No auth context (internal admin call) or admin agent — unfiltered
+    if (!authAgent || isAdminAgent) {
+      return super.search(query, context);
+    }
+
+    // Collect agentIds this agent may read: own + any granted owners
+    const allowedOwners: string[] = [authAgent];
+    try {
+      for await (const grant of (tables as any).MemoryGrant.search({
+        conditions: [{ attribute: "granteeId", comparator: "equals", value: authAgent }],
+      })) {
+        if (grant.ownerId && (grant.scope === "read" || grant.scope === "search")) {
+          allowedOwners.push(grant.ownerId);
+        }
+      }
+    } catch { /* MemoryGrant table not yet populated — ignore */ }
+
+    // Build an agentId condition: own memories OR granted owners
+    // If more than one allowed owner, use "or" across equals conditions
+    let agentIdCondition: any;
+    if (allowedOwners.length === 1) {
+      agentIdCondition = { attribute: "agentId", comparator: "equals", value: allowedOwners[0] };
+    } else {
+      agentIdCondition = allowedOwners.map((id, i) => {
+        const cond = { attribute: "agentId", comparator: "equals", value: id };
+        return i === 0 ? cond : ["or", cond];
+      });
+    }
+
+    // Firmly wrap user query in outer `and` so they cannot escape the scope check
+    let scopedQuery: any;
+    if (!query || (Array.isArray(query) && query.length === 0)) {
+      // No user query — just the agentId filter
+      scopedQuery = Array.isArray(agentIdCondition)
+        ? agentIdCondition
+        : [agentIdCondition];
+    } else {
+      // Wrap: { and: [agentIdCondition, userQuery] } expressed as Harper conditions
+      scopedQuery = { conditions: [agentIdCondition], and: query };
+    }
+
+    return super.search(scopedQuery, context);
+  }
+
   async post(content: any, context?: any) {
     content.durability ||= "standard";
     content.createdAt = new Date().toISOString();
