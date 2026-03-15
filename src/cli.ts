@@ -142,14 +142,22 @@ async function seedAgentViaOpsApi(
     table: "Agent",
     records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
   };
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
+
+  // Retry — database may not exist yet if app schemas are still loading
+  const maxAttempts = 20;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) return;
     const text = await res.text().catch(() => "");
     if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
+    if (text.includes("does not exist") && attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 1000));
+      continue;
+    }
     throw new Error(`Operations API insert failed (${res.status}): ${text}`);
   }
 }
