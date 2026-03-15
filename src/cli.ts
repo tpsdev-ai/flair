@@ -202,8 +202,6 @@ program
 
         const env: Record<string, string> = {
           ...(process.env as Record<string, string>),
-          // No ROOTPATH override — Harper defaults to ~/.harper/
-          // The `.` argument to `harper run .` tells it where the app config lives
           HDB_ADMIN_USERNAME: adminUser,
           HDB_ADMIN_PASSWORD: adminPass,
           THREADS_COUNT: "1",
@@ -213,11 +211,24 @@ program
           LOCAL_STUDIO: "false",
         };
 
-                // Start Harper — config.yaml + schemas/ in cwd define the app.
-        // Harper auto-creates the database from schema files on first run.
-        // No separate `harper install` needed.
-        console.log(`Starting Harper on port ${httpPort}...`);
-        const proc = spawn(process.execPath, [bin, "run", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
+        // Install Harper (first-time setup)
+        console.log("Installing Harper...");
+        await new Promise<void>((resolve, reject) => {
+          let output = "";
+          const install = spawn(process.execPath, [bin, "install"], { cwd: process.cwd(), env });
+          install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
+          install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
+          install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
+          install.on("error", reject);
+          setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
+        });
+
+        // Start Harper — log output for debugging
+        const { openSync } = await import("node:fs");
+        const logPath = join(dataDir, "harper.log");
+        const logFd = openSync(logPath, "a");
+        console.log(`Starting Harper on port ${httpPort}... (log: ${logPath})`);
+        const proc = spawn(process.execPath, [bin, "run", "."], { cwd: process.cwd(), env, detached: true, stdio: ["ignore", logFd, logFd] });
         proc.unref();
       }
 

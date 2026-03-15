@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # test-from-scratch.sh — validates the full flair experience from zero
 #
+# Dumps Harper log on failure for debugging.
+trap 'echo ""; echo "=== Harper log ==="; cat "$HOME/.flair/data/harper.log" 2>/dev/null || echo "(no log found)"; echo "=== end ==="' ERR
+#
 # Steps:
 #   1. flair init --agent-id testbot --admin-pass test123
 #   2. flair agent add reviewer --name Reviewer --admin-pass test123
