@@ -127,51 +127,6 @@ async function waitForHealth(httpPort: number, adminUser: string, adminPass: str
   throw new Error(`Harper at port ${httpPort} did not respond within ${timeoutMs}ms (${attempt} attempts)`);
 }
 
-// ─── Database bootstrap ───────────────────────────────────────────────────────
-
-const FLAIR_TABLES = [
-  "Agent",
-  "Integration",
-  "Memory",
-  "MemoryGrant",
-  "Soul",
-  "WorkspaceState",
-  "OrgEvent",
-  "ObsOffice",
-  "ObsAgentSnapshot",
-  "ObsEventFeed",
-];
-
-async function bootstrapDatabase(opsPort: number, adminUser: string, adminPass: string): Promise<void> {
-  const url = `http://127.0.0.1:${opsPort}/`;
-  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
-
-  async function opsPost(body: unknown): Promise<{ ok: boolean; status: number; text: string }> {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const text = await res.text().catch(() => "");
-    return { ok: res.ok, status: res.status, text };
-  }
-
-  // Create database — ignore if already exists
-  const dbRes = await opsPost({ operation: "create_database", database: "flair" });
-  if (!dbRes.ok && !dbRes.text.includes("already exists") && !dbRes.text.includes("duplicate") && dbRes.status !== 409) {
-    throw new Error(`Failed to create database 'flair' (${dbRes.status}): ${dbRes.text}`);
-  }
-
-  // Create tables — ignore if already exist
-  for (const table of FLAIR_TABLES) {
-    const res = await opsPost({ operation: "create_table", database: "flair", table, hash_attribute: "id" });
-    if (!res.ok && !res.text.includes("already exists") && !res.text.includes("duplicate") && res.status !== 409) {
-      console.warn(`  [bootstrap] Warning: could not create table '${table}' (${res.status}): ${res.text}`);
-    }
-  }
-}
-
 async function seedAgentViaOpsApi(
   opsPort: number,
   agentId: string,
@@ -270,53 +225,15 @@ program
           setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
         });
 
-        // Start Harper (first pass — database may not exist yet)
+        // Start Harper — schemas/ and config.yaml in cwd, Harper auto-creates the database
         console.log(`Starting Harper on port ${httpPort}...`);
-        let harperPid: number | null = null;
-        {
-          const firstProc = spawn(process.execPath, [bin, "dev", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
-          harperPid = firstProc.pid ?? null;
-          firstProc.unref();
-        }
-
-        console.log("Waiting for Harper health check (first start)...");
-        await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
-        console.log("Harper is healthy (first start) ✓");
-
-        // Bootstrap database and tables BEFORE second start
-        console.log("Bootstrapping Flair database and tables...");
-        await bootstrapDatabase(opsPort, adminUser, adminPass);
-        console.log("Database bootstrap complete ✓");
-
-        // Restart Harper so custom resources initialize against the now-existing database
-        console.log("Restarting Harper (resources need live database to initialize)...");
-        if (harperPid) {
-          try { process.kill(harperPid, "SIGTERM"); } catch { /* already gone */ }
-          // Give it a moment to shut down
-          await new Promise((r) => setTimeout(r, 3000));
-        }
-        // Kill anything still on the port (graceful fallback)
-        try {
-          const { execSync } = await import("node:child_process") as any;
-          execSync(`fuser -k ${httpPort}/tcp 2>/dev/null || lsof -ti:${httpPort} | xargs kill -9 2>/dev/null || true`, { shell: true });
-          await new Promise((r) => setTimeout(r, 1000));
-        } catch { /* best effort */ }
-
-        // Second start — database now exists, resources will initialize cleanly
-        const restartProc = spawn(process.execPath, [bin, "dev", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
-        restartProc.unref();
-
-        console.log("Waiting for Harper health check (second start)...");
-        await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
-        console.log("Harper is healthy (second start) ✓");
+        const proc = spawn(process.execPath, [bin, "run", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
+        proc.unref();
       }
 
-      // If Harper was already running, still ensure database + tables exist (idempotent)
-      if (alreadyRunning) {
-        console.log("Bootstrapping Flair database and tables (idempotent)...");
-        await bootstrapDatabase(opsPort, adminUser, adminPass);
-        console.log("Database bootstrap complete ✓");
-      }
+      console.log("Waiting for Harper health check...");
+      await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
+      console.log("Harper is healthy ✓");
     } // end if (!opts.skipStart)
 
     // Generate or reuse keypair
@@ -441,8 +358,6 @@ agent
       console.log(`Keypair written: ${privPath}`);
     }
 
-    // Ensure database exists (safe to call on existing instance)
-    await bootstrapDatabase(opsPort, adminUser, adminPass);
     await seedAgentViaOpsApi(opsPort, id, pubKeyB64url, adminUser, adminPass);
     console.log(`✅ Agent '${id}' (${name}) registered`);
     console.log(`   Private key: ${privPath}`);
