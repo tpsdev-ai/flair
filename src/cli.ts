@@ -344,6 +344,91 @@ agent
   .description("Show agent details")
   .action(async (id: string) => console.log(JSON.stringify(await api("GET", `/Agent/${id}`), null, 2)));
 
+agent
+  .command("rotate-key <id>")
+  .description("Rotate an agent's Ed25519 keypair")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--keys-dir <dir>", "Directory for Ed25519 keys")
+  .action(async (id: string, opts) => {
+    const httpPort = Number(opts.port);
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : httpPort + 1;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    const adminUser = DEFAULT_ADMIN_USER;
+    const keysDir: string = opts.keysDir ?? defaultKeysDir();
+
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for key rotation");
+      process.exit(1);
+    }
+
+    mkdirSync(keysDir, { recursive: true });
+    const currentPrivPath = privKeyPath(id, keysDir);
+    const currentPubPath = pubKeyPath(id, keysDir);
+    const backupPrivPath = currentPrivPath + ".bak";
+
+    // Generate new keypair
+    console.log(`Generating new keypair for agent '${id}'...`);
+    const kp = nacl.sign.keyPair();
+    const newSeed = kp.secretKey.slice(0, 32);
+    const newPubKeyB64url = b64url(kp.publicKey);
+
+    // Back up old key if it exists
+    if (existsSync(currentPrivPath)) {
+      writeFileSync(backupPrivPath, readFileSync(currentPrivPath));
+      chmodSync(backupPrivPath, 0o600);
+      console.log(`Old key backed up to: ${backupPrivPath}`);
+    }
+
+    // Update publicKey in Flair via operations API
+    console.log(`Updating public key in Flair via operations API...`);
+    const opsUrl = `http://127.0.0.1:${opsPort}/`;
+    const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+    const updateBody = {
+      operation: "update",
+      database: "flair",
+      table: "Agent",
+      records: [{ id, publicKey: newPubKeyB64url, updatedAt: new Date().toISOString() }],
+    };
+    const updateRes = await fetch(opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+      body: JSON.stringify(updateBody),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!updateRes.ok) {
+      const text = await updateRes.text().catch(() => "");
+      // Roll back: keep old key in place (don't write new key yet)
+      if (existsSync(backupPrivPath)) {
+        // Restore not needed — we haven't written new key yet
+      }
+      throw new Error(`Failed to update public key in Flair (${updateRes.status}): ${text}`);
+    }
+    console.log(`Public key updated in Flair ✓`);
+
+    // Write new private key (only after Flair update succeeds)
+    writeFileSync(currentPrivPath, Buffer.from(newSeed));
+    chmodSync(currentPrivPath, 0o600);
+    writeFileSync(currentPubPath, Buffer.from(kp.publicKey));
+    console.log(`New private key written: ${currentPrivPath} ✓`);
+
+    // Verify new key works
+    console.log(`Verifying new Ed25519 auth...`);
+    const httpUrl = `http://127.0.0.1:${httpPort}`;
+    const verifyRes = await authFetch(httpUrl, id, currentPrivPath, "GET", `/Agent/${id}`);
+    if (!verifyRes.ok) {
+      console.error(`⚠️  Auth verification failed (${verifyRes.status}). Old key is backed up at: ${backupPrivPath}`);
+      process.exit(1);
+    }
+    console.log(`Ed25519 auth verified ✓`);
+
+    console.log(`\n✅ Key rotation complete for agent '${id}'`);
+    console.log(`   New public key: ${newPubKeyB64url}`);
+    console.log(`   Private key:    ${currentPrivPath}`);
+    console.log(`   Old key backup: ${backupPrivPath}`);
+  });
+
 // ─── flair status ─────────────────────────────────────────────────────────────
 
 program
