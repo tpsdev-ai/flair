@@ -74,10 +74,15 @@ In your OpenClaw config (`openclaw.json`):
 
 ## Auth
 
-Uses TPS Ed25519 signatures. The plugin looks for private keys at:
-1. `keyPath` from config (if set)
-2. `~/.tps/secrets/flair/<agentId>-priv.key`
-3. `~/.tps/secrets/<agentId>-flair.key`
+Uses TPS Ed25519 signatures. The plugin looks for private keys in this order:
+
+1. `keyPath` from config (if explicitly set)
+2. `$FLAIR_KEY_DIR/<agentId>.key` (if `FLAIR_KEY_DIR` env var is set)
+3. `~/.flair/keys/<agentId>.key` (**standard path** — use `flair init` to generate)
+4. `~/.tps/secrets/flair/<agentId>-priv.key` *(legacy — deprecated, will warn)*
+5. `~/.tps/secrets/<agentId>-flair.key` *(legacy — deprecated, will warn)*
+
+Key files may be raw 32-byte binary seeds (written by `flair init`) or base64-encoded seeds (legacy format). Both are supported.
 
 ## License
 

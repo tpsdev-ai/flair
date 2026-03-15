@@ -52,19 +52,55 @@ class FlairMemoryClient {
   }
 
   private resolveDefaultKey(agentId: string): string | null {
-    const candidates = [
+    // 1. FLAIR_KEY_DIR env var (if set)
+    const keyDirEnv = process.env.FLAIR_KEY_DIR;
+    if (keyDirEnv) {
+      const envPath = resolve(keyDirEnv, `${agentId}.key`);
+      if (existsSync(envPath)) return envPath;
+    }
+
+    // 2. ~/.flair/keys/<agent>.key (new standard path)
+    const newStandard = resolve(homedir(), ".flair", "keys", `${agentId}.key`);
+    if (existsSync(newStandard)) return newStandard;
+
+    // 3. Legacy paths (backwards compat — warn on first use)
+    const legacyCandidates = [
       resolve(homedir(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
       resolve(homedir(), ".tps", "secrets", `${agentId}-flair.key`),
     ];
-    return candidates.find(existsSync) ?? null;
+    const legacyPath = legacyCandidates.find(existsSync);
+    if (legacyPath) {
+      if (!FlairMemoryClient._legacyKeyWarned.has(agentId)) {
+        console.warn(
+          `[flair-plugin] DEPRECATION: key at legacy path ${legacyPath}. ` +
+          `Move to ~/.flair/keys/${agentId}.key or set FLAIR_KEY_DIR.`
+        );
+        FlairMemoryClient._legacyKeyWarned.add(agentId);
+      }
+      return legacyPath;
+    }
+
+    return null;
   }
+
+  private static _legacyKeyWarned = new Set<string>();
 
   private buildAuthHeader(method: string, path: string): Record<string, string> {
     if (!this.keyPath || !existsSync(this.keyPath)) return {};
     try {
       const { sign: ed25519Sign, createPrivateKey, randomUUID: rv } = require("node:crypto");
-      const raw = readFileSync(this.keyPath).toString("utf-8").trim();
-      const rawBuf = Buffer.from(raw, "base64");
+      // Read raw bytes — supports both:
+      //   - 32-byte binary seed (written by `flair init`)
+      //   - base64-encoded seed (legacy format)
+      const fileBuf = readFileSync(this.keyPath);
+      let rawBuf: Buffer;
+      if (fileBuf.length === 32) {
+        // Raw binary seed
+        rawBuf = fileBuf;
+      } else {
+        // Try base64 decode
+        rawBuf = Buffer.from(fileBuf.toString("utf-8").trim(), "base64");
+      }
       let privateKey: ReturnType<typeof createPrivateKey>;
       if (rawBuf.length === 32) {
         // Raw Ed25519 seed — wrap in PKCS8 DER envelope
