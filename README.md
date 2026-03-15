@@ -129,7 +129,8 @@ flair/
 - **Harper-native** — No Express, no middleware frameworks. Harper IS the runtime.
 - **In-process embeddings** — `process.dlopen()` loads llama.cpp's native addon directly inside Harper's sandboxed VM. No sidecar, no HTTP calls.
 - **Schema-driven** — GraphQL schemas with `@table @export` auto-generate REST CRUD. Custom resources extend behavior (durability guards, auto-embedding, search).
-- **Auth header swap** — After Ed25519 verification, middleware swaps the auth header for Harper's internal auth. Agent never needs Harper credentials.
+- **Auth header swap** — After Ed25519 verification, middleware swaps the auth header for Harper's internal Basic auth (sourced from `HDB_ADMIN_PASSWORD` env var, set at startup). No admin token file on disk — credentials live only in the process environment.
+- **No filesystem admin tokens** — Admin credentials come exclusively from `HDB_ADMIN_PASSWORD` (Harper's own env var) or the deprecated `FLAIR_ADMIN_TOKEN` env var. The old `~/.tps/secrets/flair/harper-admin-token` file path is no longer read; any such file can be safely deleted.
 
 ## Development
 
