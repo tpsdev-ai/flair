@@ -1,10 +1,14 @@
 # 🎖️ Flair
 
+[![Tests](https://github.com/tpsdev-ai/flair/actions/workflows/test.yml/badge.svg)](https://github.com/tpsdev-ai/flair/actions/workflows/test.yml)
+[![CodeQL](https://github.com/tpsdev-ai/flair/actions/workflows/codeql.yml/badge.svg)](https://github.com/tpsdev-ai/flair/actions/workflows/codeql.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 **Identity, memory, and soul for AI agents.**
 
 Agents forget everything between sessions. Flair gives them a persistent sense of self — who they are, what they know, how they think — backed by cryptographic identity and semantic search.
 
-Built on [Harper](https://github.com/HarperFast/harper). Single process. No sidecars.
+Built on [Harper](https://github.com/HarperFast/harper). Single process. No sidecars. Zero external API calls for embeddings.
 
 ## Why
 
@@ -141,32 +145,68 @@ Returns soul + recent memories + relevant context as a formatted block. Bounded 
 
 ```
 flair/
-├── config.yaml              # Harper configuration
+├── src/cli.ts                # CLI: init, agent, status, backup, grant
+├── config.yaml               # Harper app configuration
 ├── schemas/
-│   ├── agent.graphql         # Agent + Integration tables
-│   └── memory.graphql        # Memory + Soul tables
+│   ├── agent.graphql          # Agent + Integration + MemoryGrant tables
+│   └── memory.graphql         # Memory + Soul tables
 ├── resources/
-│   ├── auth-middleware.ts    # Ed25519 signature verification
+│   ├── auth-middleware.ts     # Ed25519 verification + agent scoping
 │   ├── embeddings-provider.ts # In-process nomic embeddings
-│   ├── Memory.ts            # Durability enforcement + auto-embed
-│   ├── Soul.ts              # Permanent-by-default personality
-│   ├── MemorySearch.ts      # Hybrid semantic + keyword search
-│   ├── MemoryFeed.ts        # Real-time memory changes
-│   └── health.ts            # Health check endpoint
-└── scripts/
-    ├── flair-client.mjs     # CLI client with Ed25519 auth
-    ├── flair-bootstrap.mjs  # Agent cold start context loader
-    ├── flair-sync.mjs       # Flat-file ↔ Flair sync
-    └── setup-harper.sh      # First-run setup
+│   ├── Memory.ts             # Durability enforcement + auto-embed
+│   ├── Soul.ts               # Permanent-by-default personality
+│   ├── MemorySearch.ts       # Hybrid semantic + keyword search
+│   ├── MemoryBootstrap.ts    # Cold start context assembly
+│   └── MemoryFeed.ts         # Real-time memory changes
+├── plugins/
+│   └── openclaw-memory/       # @tps/openclaw-flair plugin
+└── SECURITY.md                # Threat model + auth documentation
 ```
 
 ### Key Design Decisions
 
 - **Harper-native** — No Express, no middleware frameworks. Harper IS the runtime.
-- **In-process embeddings** — Native [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) via [llama.cpp](https://github.com/ggerganov/llama.cpp). Runs on CPU or GPU (Metal, CUDA). No API calls, no sidecar processes.
+- **In-process embeddings** — Native [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) (768 dimensions) via [llama.cpp](https://github.com/ggerganov/llama.cpp). Runs on CPU or GPU (Metal, CUDA). No API calls, no OpenAI key needed.
 - **Schema-driven** — GraphQL schemas with `@table @export` auto-generate REST CRUD. Custom resources extend behavior (durability guards, auto-embedding, search).
-- **Auth header swap** — After Ed25519 verification, middleware swaps the auth header for Harper's internal Basic auth (sourced from `HDB_ADMIN_PASSWORD` env var, set at startup). No admin token file on disk — credentials live only in the process environment.
-- **No filesystem admin tokens** — Admin credentials come exclusively from `HDB_ADMIN_PASSWORD` (Harper's own env var) or the deprecated `FLAIR_ADMIN_TOKEN` env var. The old `~/.tps/secrets/flair/harper-admin-token` file path is no longer read; any such file can be safely deleted.
+- **Zero admin tokens on disk** — Admin credentials come from the `HDB_ADMIN_PASSWORD` environment variable only. Never stored on the filesystem.
+
+## Deployment
+
+### Local (default)
+
+```bash
+flair init
+```
+
+Your data stays on your machine. Best for personal agents, dev teams, and privacy-first setups. Flair runs as a single Harper process — no Docker, no cloud, no external services.
+
+### Remote Server
+
+Run Flair on a VPS or cloud instance. Agents connect over HTTPS:
+
+```bash
+# On the server
+flair init --port 9926
+# Agents connect with:
+FLAIR_URL=https://your-server:9926 flair agent add mybot
+```
+
+Good for teams with multiple machines or always-on agents.
+
+### Harper Fabric (coming soon)
+
+Managed multi-region deployment via [Harper Fabric](https://www.harperdb.io/). Data replication, automatic failover, web dashboard. Enterprise scale without ops overhead.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the full security model, threat analysis, and recommendations.
+
+**Key points:**
+- Ed25519 cryptographic identity — agents sign every request
+- Collection-level data isolation — agents can't read each other's memories
+- Admin credentials never stored on disk — environment variables only
+- Key rotation via `flair agent rotate-key`
+- Cross-agent access requires explicit grants
 
 ## Development
 
@@ -180,28 +220,28 @@ Integration tests spin up a real Harper instance on a random port, run the test 
 
 ## Status
 
-Flair is in active development and daily use. We dogfood it — the agents that build Flair use Flair for their own memory and identity.
+> **Note:** Flair uses [Harper v5](https://github.com/HarperFast/harper), currently in alpha. We run it in production daily and track upstream closely. Pin your Harper version.
+
+Flair is in active development and daily use. We dogfood it — the agents that build Flair use Flair for their own memory and identity. 7 agents, 150+ memories, running continuously since March 2026.
 
 **What works:**
 - ✅ Ed25519 agent identity and auth
+- ✅ CLI: init, agent add/remove/rotate-key, status, backup/restore, grant/revoke
 - ✅ Memory CRUD with durability enforcement
-- ✅ In-process semantic embeddings (768-dim, Metal GPU)
+- ✅ In-process semantic embeddings (768-dim nomic-embed-text, Metal GPU)
 - ✅ Hybrid search (semantic + keyword)
 - ✅ Soul (permanent personality/values)
-- ✅ Real-time feeds
-- ✅ Agent cold start bootstrap
-- ✅ Daily memory sync
+- ✅ Real-time feeds (WebSocket/SSE)
+- ✅ Agent-scoped data isolation
+- ✅ Cold start bootstrap
+- ✅ OpenClaw memory plugin
 
 **What's next:**
 - [ ] Encryption at rest (opt-in AES-256-GCM per memory)
 - [ ] Pluggable embedding backends (OpenAI, Cohere, local)
 - [ ] Harper Fabric deployment (managed multi-office)
-- [ ] Key rotation and revocation
+- [ ] Scheduled automatic backups
 
 ## License
 
 [Apache 2.0](LICENSE)
-
----
-
-*You know, the Nazis had pieces of flair that they made the Jews wear.* ☕
