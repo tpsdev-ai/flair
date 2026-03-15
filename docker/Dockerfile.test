@@ -19,7 +19,7 @@ ENV PATH="/root/.bun/bin:$PATH"
 ENV BUN_INSTALL="/root/.bun"
 
 # Copy repo
-COPY package.json bun.lock* tsconfig.json tsconfig.cli.json ./
+COPY package.json bun.lock* tsconfig.json tsconfig.cli.json config.yaml ./
 COPY src/ ./src/
 COPY resources/ ./resources/
 COPY schemas/ ./schemas/
@@ -27,8 +27,8 @@ COPY schemas/ ./schemas/
 # Install dependencies
 RUN bun install --frozen-lockfile
 
-# Build CLI (tsc → dist/src/cli.js)
-RUN bun run build:cli
+# Build resources (tsc → dist/resources/*.js) and CLI (tsc → dist/src/cli.js)
+RUN bun run build && bun run build:cli
 
 # ── Test stage ────────────────────────────────────────────────────────────────
 
@@ -46,9 +46,10 @@ ENV PATH="/root/.bun/bin:$PATH"
 COPY --from=base /app/node_modules ./node_modules
 COPY --from=base /app/dist ./dist
 COPY --from=base /app/package.json ./
-# Harper needs resources/ and schemas/ at runtime (loaded by `harper dev .`)
+# Harper needs resources/ (TS source), schemas/, and config.yaml at runtime
 COPY --from=base /app/resources ./resources
 COPY --from=base /app/schemas ./schemas
+COPY --from=base /app/config.yaml ./config.yaml
 
 # Copy test script
 COPY docker/test-from-scratch.sh ./docker/test-from-scratch.sh
