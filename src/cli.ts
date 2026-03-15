@@ -213,19 +213,9 @@ program
           LOCAL_STUDIO: "false",
         };
 
-        // Install
-        console.log("Installing Harper...");
-        await new Promise<void>((resolve, reject) => {
-          let output = "";
-          const install = spawn(process.execPath, [bin, "install"], { cwd: process.cwd(), env });
-          install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
-          install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
-          install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
-          install.on("error", reject);
-          setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
-        });
-
-        // Start Harper — schemas/ and config.yaml in cwd, Harper auto-creates the database
+                // Start Harper — config.yaml + schemas/ in cwd define the app.
+        // Harper auto-creates the database from schema files on first run.
+        // No separate `harper install` needed.
         console.log(`Starting Harper on port ${httpPort}...`);
         const proc = spawn(process.execPath, [bin, "run", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
         proc.unref();
