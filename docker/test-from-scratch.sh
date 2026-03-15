@@ -2,7 +2,14 @@
 # test-from-scratch.sh — validates the full flair experience from zero
 #
 # Dumps Harper log on failure for debugging.
-trap 'echo ""; echo "=== Harper log ==="; cat "$HOME/.flair/data/harper.log" 2>/dev/null || echo "(no log found)"; echo "=== end ==="' ERR
+trap '
+  echo ""
+  echo "=== Harper stdout/stderr log ==="
+  cat "$HOME/.flair/data/harper.log" 2>/dev/null || echo "(no flair log found)"
+  echo "=== HDB log ==="
+  find "$HOME" /tmp -name "*.log" -path "*/hdb_logs/*" 2>/dev/null | head -3 | while read f; do echo "--- $f ---"; tail -50 "$f"; done
+  echo "=== end ==="
+' ERR
 #
 # Steps:
 #   1. flair init --agent-id testbot --admin-pass test123

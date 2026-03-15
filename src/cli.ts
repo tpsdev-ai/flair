@@ -202,6 +202,8 @@ program
 
         const env: Record<string, string> = {
           ...(process.env as Record<string, string>),
+          ROOTPATH: dataDir,
+          DEFAULTS_MODE: "dev",
           HDB_ADMIN_USERNAME: adminUser,
           HDB_ADMIN_PASSWORD: adminPass,
           THREADS_COUNT: "1",
@@ -211,19 +213,8 @@ program
           LOCAL_STUDIO: "false",
         };
 
-        // Install Harper (first-time setup)
-        console.log("Installing Harper...");
-        await new Promise<void>((resolve, reject) => {
-          let output = "";
-          const install = spawn(process.execPath, [bin, "install"], { cwd: process.cwd(), env });
-          install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
-          install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
-          install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
-          install.on("error", reject);
-          setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
-        });
-
-        // Start Harper — log output for debugging
+        // Start Harper — install happens automatically on first run.
+        // Capture stdout/stderr to log file for debugging.
         const { openSync } = await import("node:fs");
         const logPath = join(dataDir, "harper.log");
         const logFd = openSync(logPath, "a");
