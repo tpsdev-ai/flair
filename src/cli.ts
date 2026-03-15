@@ -1,9 +1,60 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import nacl from "tweetnacl";
+import {
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  chmodSync,
+  renameSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypto";
+
+// ─── Defaults ────────────────────────────────────────────────────────────────
+
+const DEFAULT_PORT = 9926;
+const DEFAULT_ADMIN_USER = "admin";
+const STARTUP_TIMEOUT_MS = 60_000;
+const HEALTH_POLL_INTERVAL_MS = 500;
+
+function defaultKeysDir(): string {
+  return join(homedir(), ".flair", "keys");
+}
+
+function defaultDataDir(): string {
+  return join(homedir(), ".flair", "data");
+}
+
+function privKeyPath(agentId: string, keysDir: string): string {
+  return join(keysDir, `${agentId}.key`);
+}
+
+function pubKeyPath(agentId: string, keysDir: string): string {
+  return join(keysDir, `${agentId}.pub`);
+}
+
+function harperBin(): string | null {
+  // Resolve relative to this file's location (dist/cli.js → ../node_modules/...)
+  const candidates = [
+    join(import.meta.dirname ?? __dirname, "..", "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js"),
+    join(process.cwd(), "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js"),
+  ];
+  for (const c of candidates) if (existsSync(c)) return c;
+  return null;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function b64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64");
+}
+
+function b64url(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("base64url");
 }
 
 async function api(method: string, path: string, body?: any): Promise<any> {
@@ -22,10 +73,320 @@ async function api(method: string, path: string, body?: any): Promise<any> {
   return json;
 }
 
+/** Build a TPS-Ed25519 auth header from a raw 32-byte seed on disk. */
+function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
+  const rawBuf = readFileSync(keyPath);
+  let privKey: ReturnType<typeof createPrivateKey>;
+  if (rawBuf.length === 32) {
+    const pkcs8Header = Buffer.from("302e020100300506032b657004220420", "hex");
+    privKey = createPrivateKey({ key: Buffer.concat([pkcs8Header, rawBuf]), format: "der", type: "pkcs8" });
+  } else {
+    privKey = createPrivateKey(rawBuf);
+  }
+  const ts = Date.now().toString();
+  const nonce = randomUUID();
+  const payload = `${agentId}:${ts}:${nonce}:${method}:${path}`;
+  const sig = nodeCryptoSign(null, Buffer.from(payload), privKey).toString("base64");
+  return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sig}`;
+}
+
+/** Authenticated fetch against Flair using Ed25519. */
+async function authFetch(
+  baseUrl: string,
+  agentId: string,
+  keyPath: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<Response> {
+  const auth = buildEd25519Auth(agentId, method, path, keyPath);
+  const headers: Record<string, string> = { Authorization: auth };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  return fetch(`${baseUrl}${path}`, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+}
+
+async function waitForHealth(httpPort: number, adminUser: string, adminPass: string, timeoutMs: number): Promise<void> {
+  const url = `http://127.0.0.1:${httpPort}/health`;
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt++;
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}` },
+        signal: AbortSignal.timeout(2000),
+      });
+      if (res.status > 0) return;
+    } catch { /* not ready yet */ }
+    await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
+  }
+  throw new Error(`Harper at port ${httpPort} did not respond within ${timeoutMs}ms (${attempt} attempts)`);
+}
+
+async function seedAgentViaOpsApi(
+  opsPort: number,
+  agentId: string,
+  pubKeyB64url: string,
+  adminUser: string,
+  adminPass: string,
+): Promise<void> {
+  const url = `http://127.0.0.1:${opsPort}/`;
+  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+  const body = {
+    operation: "insert",
+    database: "flair",
+    table: "Agent",
+    records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
+  };
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
+    throw new Error(`Operations API insert failed (${res.status}): ${text}`);
+  }
+}
+
+// ─── Program ─────────────────────────────────────────────────────────────────
+
 const program = new Command();
 program.name("flair");
 
-const identity = program.command("identity");
+// ─── flair init ──────────────────────────────────────────────────────────────
+
+program
+  .command("init")
+  .description("Bootstrap a local Flair (Harper) instance for an agent")
+  .option("--agent-id <id>", "Agent ID to register", "local")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--admin-pass <pass>", "Admin password (generated if omitted)")
+  .option("--keys-dir <dir>", "Directory for Ed25519 keys")
+  .option("--data-dir <dir>", "Harper data directory")
+  .option("--skip-start", "Skip Harper startup (assume already running)")
+  .action(async (opts) => {
+    const agentId: string = opts.agentId;
+    const httpPort = Number(opts.port);
+    const opsPort = httpPort + 1;
+    const keysDir: string = opts.keysDir ?? defaultKeysDir();
+    const dataDir: string = opts.dataDir ?? defaultDataDir();
+
+    // Admin password: generate if not provided, NEVER written to disk
+    const adminPass: string = opts.adminPass ?? Buffer.from(nacl.randomBytes(18)).toString("base64url");
+    const adminUser = DEFAULT_ADMIN_USER;
+
+    // Check Node.js version
+    const major = parseInt(process.version.slice(1), 10);
+    if (major < 18) throw new Error(`Node.js >= 18 required (found ${process.version})`);
+
+    let alreadyRunning = false;
+
+    if (!opts.skipStart) {
+      // Check if already running
+      try {
+        const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) { alreadyRunning = true; console.log(`Harper already running on port ${httpPort} — skipping start`); }
+      } catch { /* not running */ }
+
+      if (!alreadyRunning) {
+        const bin = harperBin();
+        if (!bin) throw new Error("@harperfast/harper not found in node_modules.\nRun: npm install @harperfast/harper");
+
+        mkdirSync(dataDir, { recursive: true });
+
+        const env: Record<string, string> = {
+          ...(process.env as Record<string, string>),
+          ROOTPATH: dataDir,
+          DEFAULTS_MODE: "dev",
+          HDB_ADMIN_USERNAME: adminUser,
+          HDB_ADMIN_PASSWORD: adminPass,
+          THREADS_COUNT: "1",
+          NODE_HOSTNAME: "localhost",
+          HTTP_PORT: String(httpPort),
+          OPERATIONSAPI_NETWORK_PORT: String(opsPort),
+          LOCAL_STUDIO: "false",
+        };
+
+        // Install
+        console.log("Installing Harper...");
+        await new Promise<void>((resolve, reject) => {
+          let output = "";
+          const install = spawn(process.execPath, [bin, "install"], { cwd: process.cwd(), env });
+          install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
+          install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
+          install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
+          install.on("error", reject);
+          setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
+        });
+
+        // Start (detached)
+        console.log(`Starting Harper on port ${httpPort}...`);
+        const proc = spawn(process.execPath, [bin, "dev", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
+        proc.unref();
+      }
+
+      console.log("Waiting for Harper health check...");
+      await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
+      console.log("Harper is healthy ✓");
+    }
+
+    // Generate or reuse keypair
+    mkdirSync(keysDir, { recursive: true });
+    const privPath = privKeyPath(agentId, keysDir);
+    const pubPath = pubKeyPath(agentId, keysDir);
+    let pubKeyB64url: string;
+
+    if (existsSync(privPath)) {
+      console.log(`Reusing existing key: ${privPath}`);
+      const seed = new Uint8Array(readFileSync(privPath));
+      const kp = nacl.sign.keyPair.fromSeed(seed);
+      pubKeyB64url = b64url(kp.publicKey);
+    } else {
+      console.log("Generating Ed25519 keypair...");
+      const kp = nacl.sign.keyPair();
+      // Store only the 32-byte seed (first 32 bytes of secretKey)
+      const seed = kp.secretKey.slice(0, 32);
+      writeFileSync(privPath, Buffer.from(seed));
+      chmodSync(privPath, 0o600);
+      writeFileSync(pubPath, Buffer.from(kp.publicKey));
+      pubKeyB64url = b64url(kp.publicKey);
+      console.log(`Keypair written: ${privPath} ✓`);
+    }
+
+    // Seed agent via operations API
+    console.log(`Seeding agent '${agentId}' via operations API...`);
+    await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass);
+    console.log(`Agent '${agentId}' registered ✓`);
+
+    // Verify Ed25519 auth
+    console.log("Verifying Ed25519 auth...");
+    const httpUrl = `http://127.0.0.1:${httpPort}`;
+    const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${agentId}`);
+    if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
+    console.log("Ed25519 auth verified ✓");
+
+    // Output — admin password printed once, never written to disk
+    console.log("\n✅ Flair initialized successfully");
+    console.log(`   Agent ID:    ${agentId}`);
+    console.log(`   Flair URL:   ${httpUrl}`);
+    console.log(`   Private key: ${privPath}`);
+    if (!opts.adminPass && !alreadyRunning) {
+      console.log(`\n⚠️  Admin password (save this — it won't be shown again):`);
+      console.log(`   ${adminPass}`);
+    }
+    console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
+  });
+
+// ─── flair agent ─────────────────────────────────────────────────────────────
+
+const agent = program.command("agent").description("Manage Flair agents");
+
+agent
+  .command("add <id>")
+  .description("Register a new agent in a running Flair instance")
+  .option("--name <name>", "Display name (defaults to id)")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--admin-pass <pass>", "Admin password for registration")
+  .option("--keys-dir <dir>", "Directory for Ed25519 keys")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (id: string, opts) => {
+    const httpPort = Number(opts.port);
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : httpPort + 1;
+    const keysDir: string = opts.keysDir ?? defaultKeysDir();
+    const adminPass: string | undefined = opts.adminPass;
+    const adminUser = DEFAULT_ADMIN_USER;
+    const name: string = opts.name ?? id;
+
+    if (!adminPass) {
+      console.error("Error: --admin-pass is required for agent add (needed to insert into Agent table)");
+      process.exit(1);
+    }
+
+    mkdirSync(keysDir, { recursive: true });
+    const privPath = privKeyPath(id, keysDir);
+    const pubPath = pubKeyPath(id, keysDir);
+    let pubKeyB64url: string;
+
+    if (existsSync(privPath)) {
+      console.log(`Reusing existing key: ${privPath}`);
+      const seed = new Uint8Array(readFileSync(privPath));
+      const kp = nacl.sign.keyPair.fromSeed(seed);
+      pubKeyB64url = b64url(kp.publicKey);
+    } else {
+      const kp = nacl.sign.keyPair();
+      const seed = kp.secretKey.slice(0, 32);
+      writeFileSync(privPath, Buffer.from(seed));
+      chmodSync(privPath, 0o600);
+      writeFileSync(pubPath, Buffer.from(kp.publicKey));
+      pubKeyB64url = b64url(kp.publicKey);
+      console.log(`Keypair written: ${privPath}`);
+    }
+
+    await seedAgentViaOpsApi(opsPort, id, pubKeyB64url, adminUser, adminPass);
+    console.log(`✅ Agent '${id}' (${name}) registered`);
+    console.log(`   Private key: ${privPath}`);
+    console.log(`   Public key:  ${pubKeyB64url}`);
+  });
+
+agent
+  .command("list")
+  .description("List all agents")
+  .action(async () => console.log(JSON.stringify(await api("GET", "/Agent"), null, 2)));
+
+agent
+  .command("show <id>")
+  .description("Show agent details")
+  .action(async (id: string) => console.log(JSON.stringify(await api("GET", `/Agent/${id}`), null, 2)));
+
+// ─── flair status ─────────────────────────────────────────────────────────────
+
+program
+  .command("status")
+  .description("Check Flair (Harper) instance health and agent count")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .action(async (opts) => {
+    const baseUrl = opts.url ?? `http://127.0.0.1:${opts.port}`;
+    let healthy = false;
+    let agentCount: number | null = null;
+    let version: string | null = null;
+
+    try {
+      const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(3000) });
+      healthy = res.status > 0;
+      if (res.headers.get("content-type")?.includes("application/json")) {
+        const body = await res.json().catch(() => null);
+        if (body?.version) version = body.version;
+      }
+    } catch { /* unreachable */ }
+
+    if (healthy) {
+      try {
+        const agents = await fetch(`${baseUrl}/Agent`, { signal: AbortSignal.timeout(3000) });
+        if (agents.ok) {
+          const list = await agents.json().catch(() => null);
+          if (Array.isArray(list)) agentCount = list.length;
+        }
+      } catch { /* best effort */ }
+    }
+
+    const status = healthy ? "🟢 running" : "🔴 unreachable";
+    console.log(`Flair status: ${status}`);
+    console.log(`  URL:     ${baseUrl}`);
+    if (version) console.log(`  Version: ${version}`);
+    if (agentCount !== null) console.log(`  Agents:  ${agentCount}`);
+    if (!healthy) process.exit(1);
+  });
+
+// ─── Legacy identity/memory/soul commands (preserved) ────────────────────────
+
+const identity = program.command("identity").description("Legacy identity commands");
 identity.command("register")
   .requiredOption("--id <id>")
   .requiredOption("--name <name>")
@@ -33,17 +394,12 @@ identity.command("register")
   .action(async (opts) => {
     const kp = nacl.sign.keyPair();
     const now = new Date().toISOString();
-    const agent = await api("POST", "/Agent", {
-      id: opts.id,
-      name: opts.name,
-      role: opts.role,
-      publicKey: b64(kp.publicKey),
-      createdAt: now,
-      updatedAt: now,
+    const agentRecord = await api("POST", "/Agent", {
+      id: opts.id, name: opts.name, role: opts.role,
+      publicKey: b64(kp.publicKey), createdAt: now, updatedAt: now,
     });
-    console.log(JSON.stringify({ agent, privateKey: b64(kp.secretKey) }, null, 2));
+    console.log(JSON.stringify({ agent: agentRecord, privateKey: b64(kp.secretKey) }, null, 2));
   });
-
 identity.command("show").argument("<id>").action(async (id) => console.log(JSON.stringify(await api("GET", `/Agent/${id}`), null, 2)));
 identity.command("list").action(async () => console.log(JSON.stringify(await api("GET", "/Agent"), null, 2)));
 identity.command("add-integration")
@@ -53,40 +409,32 @@ identity.command("add-integration")
   .action(async (opts) => {
     const now = new Date().toISOString();
     const out = await api("POST", "/Integration", {
-      id: `${opts.agent}:${opts.platform}`,
-      agentId: opts.agent,
-      platform: opts.platform,
-      encryptedCredential: opts.encryptedCredential,
-      createdAt: now,
-      updatedAt: now,
+      id: `${opts.agent}:${opts.platform}`, agentId: opts.agent,
+      platform: opts.platform, encryptedCredential: opts.encryptedCredential,
+      createdAt: now, updatedAt: now,
     });
     console.log(JSON.stringify(out, null, 2));
   });
 
-const memory = program.command("memory");
+const memory = program.command("memory").description("Manage agent memories");
 memory.command("add").requiredOption("--agent <id>").requiredOption("--content <text>")
-  .option("--durability <d>", "standard")
-  .option("--tags <csv>")
+  .option("--durability <d>", "standard").option("--tags <csv>")
   .action(async (opts) => {
     const out = await api("POST", "/Memory", {
-      agentId: opts.agent,
-      content: opts.content,
-      durability: opts.durability,
+      agentId: opts.agent, content: opts.content, durability: opts.durability,
       tags: opts.tags ? String(opts.tags).split(",").map((x: string) => x.trim()).filter(Boolean) : undefined,
     });
     console.log(JSON.stringify(out, null, 2));
   });
-memory.command("search").requiredOption("--agent <id>").requiredOption("--q <query>")
-  .option("--tag <tag>")
+memory.command("search").requiredOption("--agent <id>").requiredOption("--q <query>").option("--tag <tag>")
   .action(async (opts) => console.log(JSON.stringify(await api("POST", "/MemorySearch", { agentId: opts.agent, q: opts.q, tag: opts.tag }), null, 2)));
-memory.command("list").requiredOption("--agent <id>")
-  .option("--tag <tag>")
+memory.command("list").requiredOption("--agent <id>").option("--tag <tag>")
   .action(async (opts) => {
     const q = new URLSearchParams({ agentId: opts.agent, ...(opts.tag ? { tag: opts.tag } : {}) }).toString();
     console.log(JSON.stringify(await api("GET", `/Memory?${q}`), null, 2));
   });
 
-const soul = program.command("soul");
+const soul = program.command("soul").description("Manage agent soul entries");
 soul.command("set").requiredOption("--agent <id>").requiredOption("--key <key>").requiredOption("--value <value>")
   .option("--durability <d>", "permanent")
   .action(async (opts) => {
