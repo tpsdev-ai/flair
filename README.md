@@ -1,7 +1,6 @@
 # 🎖️ Flair
 
-[![Tests](https://github.com/tpsdev-ai/flair/actions/workflows/test.yml/badge.svg)](https://github.com/tpsdev-ai/flair/actions/workflows/test.yml)
-[![CodeQL](https://github.com/tpsdev-ai/flair/actions/workflows/codeql.yml/badge.svg)](https://github.com/tpsdev-ai/flair/actions/workflows/codeql.yml)
+[![CI](https://github.com/tpsdev-ai/flair/actions/workflows/test.yml/badge.svg)](https://github.com/tpsdev-ai/flair/actions/workflows/test.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 **Identity, memory, and soul for AI agents.**
