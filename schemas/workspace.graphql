@@ -1,4 +1,4 @@
-type WorkspaceState @table(schema: "flair") @export {
+type WorkspaceState @table(database: "flair") @export {
   id: ID @primaryKey
   agentId: String! @indexed
   ref: String!

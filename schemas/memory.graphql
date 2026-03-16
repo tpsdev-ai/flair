@@ -1,4 +1,4 @@
-type Memory @table(schema: "flair") {
+type Memory @table(database: "flair") {
   id: ID @primaryKey
   agentId: String! @indexed
   content: String!
@@ -26,7 +26,7 @@ type Memory @table(schema: "flair") {
   lastReflected: String     # ISO timestamp of last reflection pass
 }
 
-type Soul @table(schema: "flair") {
+type Soul @table(database: "flair") {
   id: ID @primaryKey
   agentId: String! @indexed
   key: String! @indexed
@@ -38,7 +38,7 @@ type Soul @table(schema: "flair") {
   updatedAt: String
 }
 
-type MemoryGrant @table(schema: "flair") @export {
+type MemoryGrant @table(database: "flair") @export {
   id: ID @primaryKey
   ownerId: String!
   granteeId: String!
