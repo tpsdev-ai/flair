@@ -12,12 +12,6 @@ trap '
   echo "config.yaml exists at /app: $(ls -la /app/config.yaml 2>&1)"
   echo "schemas dir: $(ls /app/schemas/ 2>&1)"
   echo "dist/resources: $(ls /app/dist/resources/ 2>&1)"
-  echo "=== Harper config file ==="
-  find "$HOME" /tmp -name "harper-config.yaml" -o -name "harperdb-config.yaml" 2>/dev/null | while read f; do echo "--- $f ---"; cat "$f"; done
-  echo "=== Databases dir ==="
-  find "$HOME" /tmp -type d -name "databases" 2>/dev/null | while read d; do echo "$d:"; ls -la "$d" 2>/dev/null; done
-  echo "=== Components dir ==="
-  find "$HOME" /tmp -type d -name "components" 2>/dev/null | while read d; do echo "$d:"; ls -la "$d" 2>/dev/null; done
   echo "=== end ==="
 ' ERR
 #
@@ -124,4 +118,3 @@ echo "=============================="
 echo "✅ All 5 steps passed"
 echo "   Agents in backup: $AGENT_COUNT"
 echo "=============================="
-# trigger CI
