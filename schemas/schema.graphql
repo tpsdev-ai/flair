@@ -1,7 +1,7 @@
 
 # ─── Observatory tables ───────────────────────────────────────────────────────
 
-type ObsOffice @table(schema: "flair") @export {
+type ObsOffice @table @export {
   id: ID @primaryKey        # e.g. "rockit"
   name: String!
   publicKey: String!        # Ed25519 hex public key for auth verification
@@ -12,7 +12,7 @@ type ObsOffice @table(schema: "flair") @export {
   updatedAt: String
 }
 
-type ObsAgentSnapshot @table(schema: "flair") @export {
+type ObsAgentSnapshot @table @export {
   id: ID @primaryKey        # "{officeId}:{agentId}"
   officeId: String! @indexed
   agentId: String! @indexed
@@ -27,7 +27,7 @@ type ObsAgentSnapshot @table(schema: "flair") @export {
   updatedAt: String!
 }
 
-type ObsEventFeed @table(schema: "flair") @export {
+type ObsEventFeed @table @export {
   id: ID @primaryKey        # "{officeId}:{eventId}"
   officeId: String! @indexed
   kind: String! @indexed

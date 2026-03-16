@@ -138,7 +138,7 @@ async function seedAgentViaOpsApi(
   const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
   const body = {
     operation: "insert",
-    database: "flair",
+    database: "data",
     table: "Agent",
     records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
   };
@@ -387,7 +387,7 @@ agent
     const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
     const updateBody = {
       operation: "update",
-      database: "flair",
+      database: "data",
       table: "Agent",
       records: [{ id, publicKey: newPubKeyB64url, updatedAt: new Date().toISOString() }],
     };
@@ -463,11 +463,11 @@ agent
     }
 
     // Fetch agent info and memory count for confirmation
-    const agentRes = await opsPost({ operation: "search_by_value", database: "flair", table: "Agent", search_attribute: "id", search_value: id, get_attributes: ["id", "name"] });
+    const agentRes = await opsPost({ operation: "search_by_value", database: "data", table: "Agent", search_attribute: "id", search_value: id, get_attributes: ["id", "name"] });
     const agentData = agentRes.ok ? await agentRes.json().catch(() => null) : null;
     const agentName = agentData?.[0]?.name ?? id;
 
-    const memRes = await opsPost({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "agentId", search_value: id, get_attributes: ["id"] });
+    const memRes = await opsPost({ operation: "search_by_value", database: "data", table: "Memory", search_attribute: "agentId", search_value: id, get_attributes: ["id"] });
     const memories = memRes.ok ? await memRes.json().catch(() => []) : [];
     const memoryCount = Array.isArray(memories) ? memories.length : 0;
 
@@ -503,23 +503,23 @@ agent
       console.log(`Deleting ${memoryCount} memories...`);
       for (const mem of (Array.isArray(memories) ? memories : [])) {
         if (!mem?.id) continue;
-        await opsPost({ operation: "delete", database: "flair", table: "Memory", ids: [mem.id] }).catch(() => {});
+        await opsPost({ operation: "delete", database: "data", table: "Memory", ids: [mem.id] }).catch(() => {});
       }
     }
 
     // Delete all souls
-    const soulRes = await opsPost({ operation: "search_by_value", database: "flair", table: "Soul", search_attribute: "agentId", search_value: id, get_attributes: ["id"] });
+    const soulRes = await opsPost({ operation: "search_by_value", database: "data", table: "Soul", search_attribute: "agentId", search_value: id, get_attributes: ["id"] });
     const souls = soulRes.ok ? await soulRes.json().catch(() => []) : [];
     if (Array.isArray(souls) && souls.length > 0) {
       console.log(`Deleting ${souls.length} soul entries...`);
       for (const soul of souls) {
         if (!soul?.id) continue;
-        await opsPost({ operation: "delete", database: "flair", table: "Soul", ids: [soul.id] }).catch(() => {});
+        await opsPost({ operation: "delete", database: "data", table: "Soul", ids: [soul.id] }).catch(() => {});
       }
     }
 
     // Delete agent record
-    const delRes = await opsPost({ operation: "delete", database: "flair", table: "Agent", ids: [id] });
+    const delRes = await opsPost({ operation: "delete", database: "data", table: "Agent", ids: [id] });
     if (!delRes.ok) {
       const text = await delRes.text().catch(() => "");
       throw new Error(`Failed to delete agent record (${delRes.status}): ${text}`);
@@ -569,7 +569,7 @@ program
     const grantId = `${fromAgent}:${toAgent}`;
     const body = {
       operation: "insert",
-      database: "flair",
+      database: "data",
       table: "MemoryGrant",
       records: [{
         id: grantId,
@@ -622,7 +622,7 @@ program
     const grantId = `${fromAgent}:${toAgent}`;
     const body = {
       operation: "delete",
-      database: "flair",
+      database: "data",
       table: "MemoryGrant",
       ids: [grantId],
     };

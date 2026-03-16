@@ -1,4 +1,4 @@
-type Agent @table(schema: "flair") @export {
+type Agent @table @export {
   id: ID @primaryKey
   name: String!
   role: String
@@ -8,7 +8,7 @@ type Agent @table(schema: "flair") @export {
   updatedAt: String
 }
 
-type Integration @table(schema: "flair") @export {
+type Integration @table @export {
   id: ID @primaryKey
   agentId: String! @indexed
   platform: String! @indexed
