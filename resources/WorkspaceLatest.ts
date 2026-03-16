@@ -5,7 +5,7 @@
  * Auth: requesting agent must match agentId in path (or be admin).
  */
 
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 
 export class WorkspaceLatest extends Resource {
   async get(pathInfo?: any) {
@@ -37,7 +37,7 @@ export class WorkspaceLatest extends Resource {
     // Query WorkspaceState table for this agent, sorted by timestamp desc
     let latest: any = null;
     try {
-      const results = (tables as any).WorkspaceState.search({
+      const results = (databases as any).flair.WorkspaceState.search({
         conditions: [{ attribute: "agentId", comparator: "equals", value: agentId }],
         sort: { attribute: "timestamp", descending: true },
         limit: 1,

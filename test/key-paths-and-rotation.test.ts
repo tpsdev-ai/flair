@@ -118,7 +118,7 @@ async function rotateKey(opts: {
   const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
   const updateBody = {
     operation: "update",
-    database: "data",
+    database: "flair",
     table: "Agent",
     records: [{ id: agentId, publicKey: newPubKeyB64url, updatedAt: new Date().toISOString() }],
   };

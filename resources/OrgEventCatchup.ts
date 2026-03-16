@@ -10,7 +10,7 @@
  * Limit 50 events max.
  */
 
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 
 export class OrgEventCatchup extends Resource {
   // HarperDB calls get(pathInfo, context) where pathInfo is the URL segment after /OrgEventCatchup/
@@ -65,7 +65,7 @@ export class OrgEventCatchup extends Resource {
 
     // Query all OrgEvents and filter in-memory
     const results: any[] = [];
-    for await (const event of (tables as any).OrgEvent.search()) {
+    for await (const event of (databases as any).flair.OrgEvent.search()) {
       // Filter by createdAt >= since
       if (!event.createdAt || event.createdAt < since) continue;
 

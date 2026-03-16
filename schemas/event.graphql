@@ -1,4 +1,4 @@
-type OrgEvent @table @export {
+type OrgEvent @table(schema: "flair") @export {
   id: ID @primaryKey
   authorId: String! @indexed
   kind: String! @indexed

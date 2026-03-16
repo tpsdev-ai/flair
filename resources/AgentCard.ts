@@ -1,4 +1,4 @@
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 
 type SoulLike = {
   key?: string;
@@ -29,7 +29,7 @@ export class AgentCard extends Resource {
       );
     }
 
-    const agent = await (tables as any).Agent.get(agentId).catch(() => null);
+    const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
     if (!agent) {
       return new Response(JSON.stringify({ error: "agent_not_found", agentId }), {
         status: 404,
@@ -38,7 +38,7 @@ export class AgentCard extends Resource {
     }
 
     const souls: SoulLike[] = [];
-    for await (const row of (tables as any).Soul.search()) {
+    for await (const row of (databases as any).flair.Soul.search()) {
       if (row?.agentId === agentId) souls.push(row);
     }
 

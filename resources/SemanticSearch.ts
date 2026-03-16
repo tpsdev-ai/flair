@@ -1,4 +1,4 @@
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord } from "./table-helpers.js";
 
@@ -30,7 +30,7 @@ export class SemanticSearch extends Resource {
 
     if (agentId) {
       try {
-        for await (const grant of (tables as any).MemoryGrant.search({
+        for await (const grant of (databases as any).flair.MemoryGrant.search({
           conditions: [{ attribute: "granteeId", comparator: "equals", value: agentId }],
         })) {
           if (grant.scope === "search" || grant.scope === "read") {
@@ -51,7 +51,7 @@ export class SemanticSearch extends Resource {
     const results: any[] = [];
 
     // Iterate ALL memories, filter by agent ID set
-    for await (const record of (tables as any).Memory.search()) {
+    for await (const record of (databases as any).flair.Memory.search()) {
       // Filter by agent
       if (searchAgentIds.size > 0 && !searchAgentIds.has(record.agentId)) {
         if (record.visibility !== "office") continue;
@@ -95,7 +95,7 @@ export class SemanticSearch extends Resource {
     // Use patchRecord to avoid wiping other fields (embedding, content, etc.)
     const now = new Date().toISOString();
     for (const r of topResults) {
-      patchRecord((tables as any).Memory, r.id, {
+      patchRecord((databases as any).flair.Memory, r.id, {
         retrievalCount: (r.retrievalCount || 0) + 1,
         lastRetrieved: now,
       }).catch(() => {});

@@ -1,4 +1,4 @@
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 
 export class FeedMemories extends Resource {
@@ -15,7 +15,7 @@ export class FeedMemories extends Resource {
     const now = new Date().toISOString();
     const contentHash = computeContentHash(agentId, body);
 
-    const existing = await findExistingMemoryByContentHash((tables as any).Memory.search(), agentId, contentHash);
+    const existing = await findExistingMemoryByContentHash((databases as any).flair.Memory.search(), agentId, contentHash);
     if (existing) return existing;
 
     const record = {
@@ -30,12 +30,12 @@ export class FeedMemories extends Resource {
       archived: content.archived ?? false,
     };
 
-    await (tables as any).Memory.put(record);
+    await (databases as any).flair.Memory.put(record);
     return record;
   }
 
   async *connect(target: any, incomingMessages: any) {
-    const subscription = await (tables as any).Memory.subscribe(target);
+    const subscription = await (databases as any).flair.Memory.subscribe(target);
 
     if (!incomingMessages) {
       return subscription;

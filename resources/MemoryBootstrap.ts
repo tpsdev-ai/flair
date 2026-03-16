@@ -1,4 +1,4 @@
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
 
 /**
@@ -74,7 +74,7 @@ export class BootstrapMemories extends Resource {
     const skillAssignments: any[] = [];
     if (includeSoul) {
       let soulTokens = 0;
-      for await (const record of (tables as any).Soul.search()) {
+      for await (const record of (databases as any).flair.Soul.search()) {
         if (record.agentId !== agentId) continue;
         if (record.key === "skill-assignment") {
           skillAssignments.push(record);
@@ -122,7 +122,7 @@ export class BootstrapMemories extends Resource {
 
     // --- 2. Permanent memories (always included, highest priority) ---
     const allMemories: any[] = [];
-    for await (const record of (tables as any).Memory.search()) {
+    for await (const record of (databases as any).flair.Memory.search()) {
       if (record.agentId !== agentId) continue;
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
       allMemories.push(record);
@@ -217,7 +217,7 @@ export class BootstrapMemories extends Resource {
       const eventSinceStr = eventSince.toISOString();
       const eventResults: any[] = [];
 
-      for await (const event of (tables as any).OrgEvent.search()) {
+      for await (const event of (databases as any).flair.OrgEvent.search()) {
         if (!event.createdAt || event.createdAt < eventSinceStr) continue;
         if (event.expiresAt && new Date(event.expiresAt) < new Date()) continue;
         const targets = event.targetIds;

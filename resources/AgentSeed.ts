@@ -17,7 +17,7 @@
  * Auth: admin only.
  */
 
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 import { isAdmin } from "./auth-middleware.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
@@ -52,11 +52,11 @@ export class AgentSeed extends Resource {
     const name = displayName || agentId;
 
     // ── Agent record ──────────────────────────────────────────────────────────
-    const existingAgent = await (tables as any).Agent.get(agentId).catch(() => null);
+    const existingAgent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
     let agent = existingAgent;
     if (!existingAgent) {
       agent = { id: agentId, name, role, publicKey: "pending", createdAt: now, updatedAt: now };
-      await (tables as any).Agent.put(agent);
+      await (databases as any).flair.Agent.put(agent);
     }
 
     // ── Soul entries ──────────────────────────────────────────────────────────
@@ -66,13 +66,13 @@ export class AgentSeed extends Resource {
 
     for (const [key, value] of Object.entries(merged)) {
       const id = `${agentId}:${key}`;
-      const existing = await (tables as any).Soul.get(id);
+      const existing = await (databases as any).flair.Soul.get(id);
       if (existing) {
         soulEntries.push(existing); // skip — don't overwrite existing soul entries
         continue;
       }
       const entry = { id, agentId, key, value: String(value), durability: "permanent", createdAt: now, updatedAt: now };
-      await (tables as any).Soul.put(entry);
+      await (databases as any).flair.Soul.put(entry);
       soulEntries.push(entry);
     }
 
@@ -84,14 +84,14 @@ export class AgentSeed extends Resource {
     const memories: any[] = [];
     // Only seed memories if this is a first-time seed (none tagged onboarding yet)
     const hasOnboardingMemory = await (async () => {
-      for await (const m of (tables as any).Memory.search()) {
+      for await (const m of (databases as any).flair.Memory.search()) {
         if (m.agentId === agentId && (m.tags ?? []).includes("onboarding")) return true;
       }
       return false;
     })();
     if (hasOnboardingMemory) {
       // Re-seed: return existing onboarding memories without writing new ones
-      for await (const m of (tables as any).Memory.search()) {
+      for await (const m of (databases as any).flair.Memory.search()) {
         if (m.agentId === agentId && (m.tags ?? []).includes("onboarding")) memories.push(m);
       }
     } else {
@@ -109,7 +109,7 @@ export class AgentSeed extends Resource {
           updatedAt: now,
           archived: false,
         };
-        await (tables as any).Memory.put(record);
+        await (databases as any).flair.Memory.put(record);
         memories.push(record);
       }
     } // end !hasOnboardingMemory

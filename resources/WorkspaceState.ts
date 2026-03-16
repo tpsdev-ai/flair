@@ -5,10 +5,10 @@
  * Pattern follows Memory.ts — extends Harper auto-generated table class.
  */
 
-import { tables } from "@harperfast/harper";
+import { databases } from "@harperfast/harper";
 import { isAdmin } from "./auth-middleware.js";
 
-export class WorkspaceState extends (tables as any).WorkspaceState {
+export class WorkspaceState extends (databases as any).flair.WorkspaceState {
   /**
    * Override search() to scope collection GETs to the authenticated agent's
    * own workspace state records. Admin agents see all records.

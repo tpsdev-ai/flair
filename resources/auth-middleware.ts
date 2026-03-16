@@ -1,5 +1,5 @@
 import { patchRecord } from "./table-helpers.js";
-import { server, tables } from "@harperfast/harper";
+import { server, databases } from "@harperfast/harper";
 import { initEmbeddings, getEmbedding } from "./embeddings-provider.js";
 
 // --- Admin credentials ---
@@ -56,7 +56,7 @@ async function getAdminAgents(): Promise<Set<string>> {
 
   let from_db: string[] = [];
   try {
-    const results = await (tables as any).Agent.search([{ attribute: "role", value: "admin", condition: "equals" }]);
+    const results = await (databases as any).flair.Agent.search([{ attribute: "role", value: "admin", condition: "equals" }]);
     for await (const row of results) {
       if (row?.id) from_db.push(row.id);
     }
@@ -106,12 +106,12 @@ initEmbeddings().catch((err: any) => console.error("[embeddings] init:", err.mes
 
 async function backfillEmbedding(memoryId: string): Promise<void> {
   try {
-    const record = await (tables as any).Memory.get(memoryId);
+    const record = await (databases as any).flair.Memory.get(memoryId);
     if (!record?.content) return;
     if (record.embedding?.length > 100) return;
     const embedding = await getEmbedding(record.content);
     if (!embedding) return;
-    await patchRecord((tables as any).Memory, memoryId, { embedding });
+    await patchRecord((databases as any).flair.Memory, memoryId, { embedding });
     console.log(`[auto-embed] ${memoryId}: ${embedding.length}d`);
   } catch (err: any) {
     console.error(`[auto-embed] Failed for ${memoryId}: ${err.message}`);
@@ -177,7 +177,7 @@ server.http(async (request: any, nextLayer: any) => {
   if (nonceSeen.has(nonceKey))
     return new Response(JSON.stringify({ error: "nonce_replay_detected" }), { status: 401 });
 
-  const agent = await (tables as any).Agent.get(agentId);
+  const agent = await (databases as any).flair.Agent.get(agentId);
   if (!agent) return new Response(JSON.stringify({ error: "unknown_agent" }), { status: 401 });
 
   try {
@@ -254,7 +254,7 @@ server.http(async (request: any, nextLayer: any) => {
           const pathParts = url.pathname.split("/").filter(Boolean);
           const eventId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
           if (eventId) {
-            const record = await (tables as any).OrgEvent.get(eventId);
+            const record = await (databases as any).flair.OrgEvent.get(eventId);
             if (record && record.authorId && record.authorId !== agentId) {
               return new Response(JSON.stringify({
                 error: "forbidden: cannot delete events authored by another agent"
@@ -288,7 +288,7 @@ server.http(async (request: any, nextLayer: any) => {
           const pathParts = url.pathname.split("/").filter(Boolean);
           const wsId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
           if (wsId) {
-            const record = await (tables as any).WorkspaceState.get(wsId);
+            const record = await (databases as any).flair.WorkspaceState.get(wsId);
             if (record && record.agentId && record.agentId !== agentId) {
               return new Response(JSON.stringify({
                 error: "forbidden: cannot delete workspace state for another agent"
@@ -341,7 +341,7 @@ server.http(async (request: any, nextLayer: any) => {
           const pathParts = url.pathname.split("/").filter(Boolean);
           const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
           if (memId) {
-            const record = await (tables as any).Memory.get(memId);
+            const record = await (databases as any).flair.Memory.get(memId);
             if (record && record.agentId && record.agentId !== agentId) {
               return new Response(JSON.stringify({
                 error: `forbidden: cannot modify memory owned by ${record.agentId}`
@@ -454,14 +454,14 @@ server.http(async (request: any, nextLayer: any) => {
         const pathParts = url.pathname.split("/").filter(Boolean);
         const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
         if (memId) {
-          const record = await (tables as any).Memory.get(memId);
+          const record = await (databases as any).flair.Memory.get(memId);
           if (record && record.agentId && record.agentId !== agentId) {
             // Allow office-wide memories
             if (record.visibility !== "office") {
               // Check MemoryGrant
               let hasGrant = false;
               try {
-                for await (const grant of (tables as any).MemoryGrant.search({
+                for await (const grant of (databases as any).flair.MemoryGrant.search({
                   conditions: [{ attribute: "granteeId", comparator: "equals", value: agentId }],
                 })) {
                   if (grant.ownerId === record.agentId &&

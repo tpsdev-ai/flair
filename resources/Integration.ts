@@ -1,6 +1,6 @@
-import { tables } from "@harperfast/harper";
+import { databases } from "@harperfast/harper";
 
-export class Integration extends (tables as any).Integration {
+export class Integration extends (databases as any).flair.Integration {
   async post(content: any, context?: any) {
     // S31-A: API never accepts plaintext credentials.
     if (typeof content?.credential === "string" || typeof content?.token === "string") {

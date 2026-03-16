@@ -62,7 +62,7 @@ async function runSeedAgent(
   const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
   const body = {
     operation: "insert",
-    database: "data",
+    database: "flair",
     table: "Agent",
     records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
   };
