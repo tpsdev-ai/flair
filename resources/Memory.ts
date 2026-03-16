@@ -13,13 +13,16 @@ export class Memory extends (databases as any).flair.Memory {
    * Admin agents and unauthenticated internal calls pass through unfiltered.
    * Non-admin calls also check MemoryGrant to include granted memories.
    */
-  async search(query?: any, context?: any) {
-    const authAgent: string | undefined = context?.request?.tpsAgent;
-    const isAdminAgent: boolean = context?.request?.tpsAgentIsAdmin ?? false;
+  async search(query?: any) {
+    // Access request context via Harper's Resource instance context
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
+    const authAgent: string | undefined = request?.tpsAgent;
+    const isAdminAgent: boolean = request?.tpsAgentIsAdmin ?? false;
 
     // No auth context (internal admin call) or admin agent — unfiltered
     if (!authAgent || isAdminAgent) {
-      return super.search(query, context);
+      return super.search(query);
     }
 
     // Collect agentIds this agent may read: own + any granted owners
@@ -58,7 +61,7 @@ export class Memory extends (databases as any).flair.Memory {
       scopedQuery = { conditions: [agentIdCondition], and: query };
     }
 
-    return super.search(scopedQuery, context);
+    return super.search(scopedQuery);
   }
 
   async post(content: any, context?: any) {
