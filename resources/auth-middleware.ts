@@ -137,6 +137,26 @@ server.http(async (request: any, nextLayer: any) => {
   if ((request as any)._tpsAuthVerified) return nextLayer(request);
 
   const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
+
+  // ── Basic admin auth ──────────────────────────────────────────────────────
+  // Allow Basic auth with the admin password for CLI operations (backup, etc.)
+  // This is checked BEFORE Ed25519 so admin tools can use simple auth.
+  if (header.startsWith("Basic ")) {
+    try {
+      const decoded = Buffer.from(header.slice(6), "base64").toString("utf-8");
+      const [user, pass] = decoded.split(":");
+      if (user === "admin" && pass === getAdminPass()) {
+        // Mark as verified and pass through to Harper with admin credentials
+        (request as any)._tpsAuthVerified = true;
+        request.headers.set("x-tps-agent", "admin");
+        if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = "admin";
+        return nextLayer(request);
+      }
+    } catch { /* fall through to Ed25519 check */ }
+    return new Response(JSON.stringify({ error: "invalid_admin_credentials" }), { status: 401 });
+  }
+
+  // ── Ed25519 agent auth ────────────────────────────────────────────────────
   const m = header.match(/^TPS-Ed25519\s+([^:]+):(\d+):([^:]+):(.+)$/);
 
   if (!m) {
