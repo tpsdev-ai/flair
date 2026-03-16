@@ -213,6 +213,7 @@ program
         const env: Record<string, string> = {
           ...(process.env as Record<string, string>),
           ROOTPATH: dataDir,
+          DEFAULTS_MODE: "dev",
           HDB_ADMIN_USERNAME: adminUser,
           HDB_ADMIN_PASSWORD: adminPass,
           THREADS_COUNT: "1",
