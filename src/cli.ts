@@ -142,24 +142,14 @@ async function seedAgentViaOpsApi(
     table: "Agent",
     records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
   };
-
-  // Retry — database may not exist yet if app schemas are still loading.
-  // Allow up to 60s (60 × 1s) — schema processing can be slow on first run
-  // when the embeddings model is also initializing.
-  const maxAttempts = 60;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
-      body: JSON.stringify(body),
-    });
-    if (res.ok) return;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
-    if (text.includes("does not exist") && attempt < maxAttempts) {
-      await new Promise((r) => setTimeout(r, 1000));
-      continue;
-    }
     throw new Error(`Operations API insert failed (${res.status}): ${text}`);
   }
 }
@@ -223,20 +213,28 @@ program
           LOCAL_STUDIO: "false",
         };
 
-        // Start Harper — install happens automatically on first run.
-        // Capture stdout/stderr to log file for debugging.
-        const { openSync } = await import("node:fs");
-        const logPath = join(dataDir, "harper.log");
-        const logFd = openSync(logPath, "a");
-        console.log(`Starting Harper on port ${httpPort}... (log: ${logPath})`);
-        const proc = spawn(process.execPath, [bin, "run", "."], { cwd: process.cwd(), env, detached: true, stdio: ["ignore", logFd, logFd] });
+        // Install
+        console.log("Installing Harper...");
+        await new Promise<void>((resolve, reject) => {
+          let output = "";
+          const install = spawn(process.execPath, [bin, "install"], { cwd: process.cwd(), env });
+          install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
+          install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
+          install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
+          install.on("error", reject);
+          setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
+        });
+
+        // Start (detached)
+        console.log(`Starting Harper on port ${httpPort}...`);
+        const proc = spawn(process.execPath, [bin, "dev", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
         proc.unref();
       }
 
       console.log("Waiting for Harper health check...");
       await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
       console.log("Harper is healthy ✓");
-    } // end if (!opts.skipStart)
+    }
 
     // Generate or reuse keypair
     mkdirSync(keysDir, { recursive: true });
@@ -266,41 +264,11 @@ program
     await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass);
     console.log(`Agent '${agentId}' registered ✓`);
 
-    // Verify Ed25519 auth — retry with backoff to allow Harper app resources to finish loading
+    // Verify Ed25519 auth
     console.log("Verifying Ed25519 auth...");
     const httpUrl = `http://127.0.0.1:${httpPort}`;
-    {
-      const VERIFY_ATTEMPTS = 10;
-      const VERIFY_DELAY_MS = 2000;
-      let lastStatus = 0;
-      let verified = false;
-      for (let attempt = 1; attempt <= VERIFY_ATTEMPTS; attempt++) {
-        try {
-          const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${agentId}`);
-          lastStatus = verifyRes.status;
-          if (verifyRes.ok) {
-            verified = true;
-            break;
-          }
-          // 404 may mean resources not loaded yet — retry
-          // 401/403 means auth is wrong — fail fast
-          if (verifyRes.status === 401 || verifyRes.status === 403) {
-            throw new Error(`Ed25519 auth rejected (${verifyRes.status}) — check key matches registered public key`);
-          }
-        } catch (err: any) {
-          if (err.message?.includes("auth rejected")) throw err;
-          // Network error — keep retrying
-          lastStatus = 0;
-        }
-        if (attempt < VERIFY_ATTEMPTS) {
-          console.log(`  (attempt ${attempt}/${VERIFY_ATTEMPTS}, status ${lastStatus} — waiting for resources to load...)`);
-          await new Promise((r) => setTimeout(r, VERIFY_DELAY_MS));
-        }
-      }
-      if (!verified) {
-        throw new Error(`Ed25519 auth verification failed after ${VERIFY_ATTEMPTS} attempts (last status: ${lastStatus}). Harper app resources may not have loaded.`);
-      }
-    }
+    const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${agentId}`);
+    if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
     console.log("Ed25519 auth verified ✓");
 
     // Output — admin password printed once, never written to disk
