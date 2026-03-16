@@ -83,25 +83,25 @@ async function runAgentRemove(opts: RemoveOpts): Promise<{
   }
 
   // Get memories
-  const memories = await opsPost({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "agentId", search_value: agentId, get_attributes: ["id"] });
+  const memories = await opsPost({ operation: "search_by_value", database: "data", table: "Memory", search_attribute: "agentId", search_value: agentId, get_attributes: ["id"] });
   const memList = Array.isArray(memories) ? memories : [];
 
   // Delete memories
   for (const m of memList) {
-    if (m?.id) await opsPost({ operation: "delete", database: "flair", table: "Memory", ids: [m.id] }).catch(() => {});
+    if (m?.id) await opsPost({ operation: "delete", database: "data", table: "Memory", ids: [m.id] }).catch(() => {});
   }
 
   // Get souls
-  const souls = await opsPost({ operation: "search_by_value", database: "flair", table: "Soul", search_attribute: "agentId", search_value: agentId, get_attributes: ["id"] });
+  const souls = await opsPost({ operation: "search_by_value", database: "data", table: "Soul", search_attribute: "agentId", search_value: agentId, get_attributes: ["id"] });
   const soulList = Array.isArray(souls) ? souls : [];
 
   // Delete souls
   for (const s of soulList) {
-    if (s?.id) await opsPost({ operation: "delete", database: "flair", table: "Soul", ids: [s.id] }).catch(() => {});
+    if (s?.id) await opsPost({ operation: "delete", database: "data", table: "Soul", ids: [s.id] }).catch(() => {});
   }
 
   // Delete agent
-  await opsPost({ operation: "delete", database: "flair", table: "Agent", ids: [agentId] });
+  await opsPost({ operation: "delete", database: "data", table: "Agent", ids: [agentId] });
 
   // Delete key files
   let keysDeleted = false;
@@ -136,7 +136,7 @@ async function runGrant(opts: {
     headers: { "Content-Type": "application/json", Authorization: auth },
     body: JSON.stringify({
       operation: "insert",
-      database: "flair",
+      database: "data",
       table: "MemoryGrant",
       records: [{ id: grantId, fromAgentId: fromAgent, toAgentId: toAgent, scope, createdAt: new Date().toISOString() }],
     }),
@@ -164,7 +164,7 @@ async function runRevoke(opts: {
   const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: auth },
-    body: JSON.stringify({ operation: "delete", database: "flair", table: "MemoryGrant", ids: [grantId] }),
+    body: JSON.stringify({ operation: "delete", database: "data", table: "MemoryGrant", ids: [grantId] }),
     signal: AbortSignal.timeout(5000),
   });
 
