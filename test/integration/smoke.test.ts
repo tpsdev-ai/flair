@@ -21,6 +21,7 @@ describe("Flair API E2E Smoke", () => {
       },
       body: JSON.stringify({
         operation: "insert",
+        database: "flair",
         table: "Agent",
         records: [{ id: "smoke-test", name: "Smoke", role: "test", publicKey: "dGVzdA==", createdAt: new Date().toISOString() }],
       }),
