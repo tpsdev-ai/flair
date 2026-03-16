@@ -6,7 +6,7 @@
 #
 # Uses node:22-slim + bun for install/build, then node for CLI execution.
 
-FROM node:22-slim AS base
+FROM node:24-slim AS base
 
 WORKDIR /app
 
@@ -27,12 +27,12 @@ COPY schemas/ ./schemas/
 # Install dependencies
 RUN bun install --frozen-lockfile
 
-# Build resources (tsc → dist/resources/*.js) and CLI (tsc → dist/src/cli.js)
+# Build resources (tsc → dist/resources/*.js) and CLI (tsc → dist/cli.js)
 RUN bun run build && bun run build:cli
 
 # ── Test stage ────────────────────────────────────────────────────────────────
 
-FROM node:22-slim AS test
+FROM node:24-slim AS test
 
 WORKDIR /app
 
@@ -51,10 +51,11 @@ COPY --from=base /app/resources ./resources
 COPY --from=base /app/schemas ./schemas
 COPY --from=base /app/config.yaml ./config.yaml
 
-# Pre-download the embeddings model so Harper doesn't fetch it at runtime.
-# Without this, the ~80MB download blocks schema initialization and the
-# seedAgentViaOpsApi retry loop times out before the DB is ready.
-# curl is already installed (from the apt-get above). -fSL follows redirects.
+# Pre-download embeddings model (~80MB). Docker layer cache ensures this
+# only downloads once — subsequent builds reuse the cached layer.
+# Required because Harper blocks on model download during schema init,
+# causing the seed retry loop to time out.
+# TODO: Move to GHCR base image or test-fixtures once we have more models.
 ENV FLAIR_MODELS_DIR=/opt/flair-models
 RUN mkdir -p /opt/flair-models && \
     curl -fSL \

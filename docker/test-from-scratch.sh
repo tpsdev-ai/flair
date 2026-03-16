@@ -26,7 +26,7 @@ trap '
 
 set -euo pipefail
 
-FLAIR="node /app/dist/src/cli.js"
+FLAIR="node /app/dist/cli.js"
 ADMIN_PASS="test123"
 PORT="9926"
 

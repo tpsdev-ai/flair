@@ -25,7 +25,7 @@
     "openclaw"
   ],
   "bin": {
-    "flair": "dist/src/cli.js"
+    "flair": "dist/cli.js"
   },
   "files": [
     "dist/",
