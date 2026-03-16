@@ -1,6 +1,6 @@
-import { tables } from "@harperfast/harper";
+import { databases } from "@harperfast/harper";
 
-export class Agent extends (tables as any).Agent {
+export class Agent extends (databases as any).flair.Agent {
   async post(content: any, context: any) {
     content.type ||= "agent";
     content.createdAt = new Date().toISOString();

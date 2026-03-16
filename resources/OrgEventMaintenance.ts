@@ -5,7 +5,7 @@
  * Auth: admin only.
  */
 
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 
 export class OrgEventMaintenance extends Resource {
   async post(_data: any, context?: any) {
@@ -20,7 +20,7 @@ export class OrgEventMaintenance extends Resource {
     const now = new Date().toISOString();
     const toDelete: string[] = [];
 
-    for await (const event of (tables as any).OrgEvent.search()) {
+    for await (const event of (databases as any).flair.OrgEvent.search()) {
       if (event.expiresAt && event.expiresAt < now) {
         toDelete.push(event.id);
       }
@@ -28,7 +28,7 @@ export class OrgEventMaintenance extends Resource {
 
     for (const id of toDelete) {
       try {
-        await (tables as any).OrgEvent.delete(id);
+        await (databases as any).flair.OrgEvent.delete(id);
       } catch {}
     }
 

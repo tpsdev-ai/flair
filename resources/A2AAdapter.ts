@@ -1,4 +1,4 @@
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 import { access, readFile, readdir } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, extname, join } from "node:path";
@@ -201,7 +201,7 @@ function taskView(issue: BeadsIssue): any {
 async function taskHistory(taskId: string): Promise<any[]> {
   const history: any[] = [];
   const refId = `bd://${taskId}`;
-  for await (const event of (tables as any).OrgEvent.search()) {
+  for await (const event of (databases as any).flair.OrgEvent.search()) {
     if (event?.refId !== refId) continue;
     const summary = cleanText(event.summary);
     if (!summary) continue;
@@ -225,7 +225,7 @@ function artifactsFromIssue(issue: BeadsIssue): any[] {
 }
 
 async function publishOrgEvent(event: any): Promise<void> {
-  await (tables as any).OrgEvent.put({
+  await (databases as any).flair.OrgEvent.put({
     id: event.id ?? `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     authorId: event.authorId ?? "a2a",
     kind: event.kind,
@@ -433,7 +433,7 @@ export class A2AAdapter extends Resource {
           return rpcError(id, -32602, "Invalid params: agentId and message are required");
         }
 
-        const agent = await (tables as any).Agent.get(agentId).catch(() => null);
+        const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
         if (!agent) {
           return rpcError(id, -32004, "Agent not found", { agentId });
         }

@@ -38,6 +38,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json --noCheck",
+    "build:cli": "tsc -p tsconfig.cli.json --noCheck",
     "test": "bun test"
   },
   "engines": {

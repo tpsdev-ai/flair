@@ -1,8 +1,8 @@
-import { tables } from "@harperfast/harper";
+import { databases } from "@harperfast/harper";
 import { patchRecord } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
 
-export class Memory extends (tables as any).Memory {
+export class Memory extends (databases as any).flair.Memory {
   /**
    * Override search() to scope collection GETs by authenticated agent.
    *
@@ -25,7 +25,7 @@ export class Memory extends (tables as any).Memory {
     // Collect agentIds this agent may read: own + any granted owners
     const allowedOwners: string[] = [authAgent];
     try {
-      for await (const grant of (tables as any).MemoryGrant.search({
+      for await (const grant of (databases as any).flair.MemoryGrant.search({
         conditions: [{ attribute: "granteeId", comparator: "equals", value: authAgent }],
       })) {
         if (grant.ownerId && (grant.scope === "read" || grant.scope === "search")) {
@@ -72,9 +72,9 @@ export class Memory extends (tables as any).Memory {
       const now = content.createdAt;
       for (const sourceId of content.derivedFrom) {
         try {
-          const src = await (tables as any).Memory.get(sourceId);
+          const src = await (databases as any).flair.Memory.get(sourceId);
           if (src) {
-            patchRecord((tables as any).Memory, sourceId, { lastReflected: now }).catch(() => {});
+            patchRecord((databases as any).flair.Memory, sourceId, { lastReflected: now }).catch(() => {});
           }
         } catch {}
       }

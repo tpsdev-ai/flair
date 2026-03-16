@@ -4,7 +4,7 @@
  * to ensure the native model loads exactly once, even when Harper loads
  * this module in multiple ESM contexts within the same process.
  */
-import { tables } from "@harperfast/harper";
+import { databases } from "@harperfast/harper";
 
 const MAX_CHARS = 500;
 const MODELS_DIR = process.env.FLAIR_MODELS_DIR || "/tmp/flair-models";
@@ -34,7 +34,7 @@ export function getMode(): string {
 async function getStore(): Promise<{ tryLock: (k: any, cb?: () => void) => boolean; unlock: (k: any) => void } | null> {
   for (let i = 0; i < 50; i++) {
     try {
-      const store = (tables as any).Memory?.primaryStore;
+      const store = (databases as any).flair.Memory?.primaryStore;
       if (store?.tryLock) return store;
     } catch { /* not ready yet */ }
     await new Promise(r => setTimeout(r, 100));

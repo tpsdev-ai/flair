@@ -6,9 +6,9 @@
  * Read: any authenticated participant can read (org-scoped).
  */
 
-import { tables } from "@harperfast/harper";
+import { databases } from "@harperfast/harper";
 
-export class OrgEvent extends (tables as any).OrgEvent {
+export class OrgEvent extends (databases as any).flair.OrgEvent {
   async post(content: any, context?: any) {
     const agentId = context?.request?.tpsAgent;
 
@@ -28,7 +28,7 @@ export class OrgEvent extends (tables as any).OrgEvent {
     content.createdAt = new Date().toISOString();
 
     // Harper 5: table resources use put() for create/upsert (post() removed)
-    return (tables as any).OrgEvent.put(content);
+    return (databases as any).flair.OrgEvent.put(content);
   }
 
   async put(content: any, context?: any) {
@@ -41,7 +41,7 @@ export class OrgEvent extends (tables as any).OrgEvent {
       );
     }
 
-    return (tables as any).OrgEvent.put(content);
+    return (databases as any).flair.OrgEvent.put(content);
   }
 
   async delete(id: any, context?: any) {

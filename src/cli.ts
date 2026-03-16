@@ -783,7 +783,7 @@ program
     }
 
     console.log("Fetching agents...");
-    const allAgents: any[] = await adminGet("/Agent");
+    const allAgents: any[] = await adminGet("/Agent/");
     const filterIds = opts.agents ? opts.agents.split(",").map((s: string) => s.trim()) : null;
     const agents: any[] = filterIds ? allAgents.filter((a: any) => filterIds.includes(a.id)) : allAgents;
 
@@ -791,7 +791,7 @@ program
     const memories: any[] = [];
     for (const agent of agents) {
       try {
-        const agentMemories = await adminGet(`/Memory?agentId=${encodeURIComponent(agent.id)}`);
+        const agentMemories = await adminGet(`/Memory/?agentId=${encodeURIComponent(agent.id)}`);
         if (Array.isArray(agentMemories)) memories.push(...agentMemories);
       } catch (err: any) {
         console.warn(`  Warning: could not fetch memories for ${agent.id}: ${err.message}`);
@@ -802,7 +802,7 @@ program
     const souls: any[] = [];
     for (const agent of agents) {
       try {
-        const agentSouls = await adminGet(`/Soul?agentId=${encodeURIComponent(agent.id)}`);
+        const agentSouls = await adminGet(`/Soul/?agentId=${encodeURIComponent(agent.id)}`);
         if (Array.isArray(agentSouls)) souls.push(...agentSouls);
       } catch (err: any) {
         console.warn(`  Warning: could not fetch souls for ${agent.id}: ${err.message}`);

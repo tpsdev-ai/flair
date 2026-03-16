@@ -20,7 +20,7 @@
  *   count          number     — number of memories included
  */
 
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 import { isAdmin } from "./auth-middleware.js";
 import { patchRecordSilent } from "./table-helpers.js";
 
@@ -57,7 +57,7 @@ export class ReflectMemories extends Resource {
     const sinceDate = since ? new Date(since) : new Date(Date.now() - 24 * 3600_000);
     const memories: any[] = [];
 
-    for await (const record of (tables as any).Memory.search()) {
+    for await (const record of (databases as any).flair.Memory.search()) {
       if (record.agentId !== agentId) continue;
       if (record.archived) continue;
       if (record.durability === "permanent") continue; // permanent memories don't need reflection
@@ -109,7 +109,7 @@ For each insight:
     // Update lastReflected on source memories (read-modify-write to preserve embeddings)
     const now = new Date().toISOString();
     for (const m of memories) {
-      patchRecordSilent((tables as any).Memory, m.id, { lastReflected: now });
+      patchRecordSilent((databases as any).flair.Memory, m.id, { lastReflected: now });
     }
 
     return {

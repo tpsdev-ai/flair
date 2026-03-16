@@ -1,6 +1,6 @@
-import { tables } from "@harperfast/harper";
+import { databases } from "@harperfast/harper";
 
-export class Soul extends (tables as any).Soul {
+export class Soul extends (databases as any).flair.Soul {
   async post(content: any, context?: any) {
     content.durability ||= "permanent";
     content.createdAt = new Date().toISOString();

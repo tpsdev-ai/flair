@@ -20,7 +20,7 @@ describe("memory durability guards (integration)", () => {
       fetch(harper.opsURL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: authHeader },
-        body: JSON.stringify({ operation: "insert", table: "Memory", records: [record] }),
+        body: JSON.stringify({ operation: "insert", database: "flair", table: "Memory", records: [record] }),
       });
 
     await insert({ id: "perm-1", agentId: "test", content: "permanent memory", durability: "permanent", createdAt: new Date().toISOString() });
@@ -42,7 +42,7 @@ describe("memory durability guards (integration)", () => {
     const res = await fetch(harper.opsURL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
-      body: JSON.stringify({ operation: "search_by_value", table: "Memory", search_attribute: "id", search_value: "perm-1", get_attributes: ["id", "durability", "content"] }),
+      body: JSON.stringify({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "id", search_value: "perm-1", get_attributes: ["id", "durability", "content"] }),
     });
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -54,7 +54,7 @@ describe("memory durability guards (integration)", () => {
     const res = await fetch(harper.opsURL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authHeader },
-      body: JSON.stringify({ operation: "delete", table: "Memory", ids: ["std-1"] }),
+      body: JSON.stringify({ operation: "delete", database: "flair", table: "Memory", ids: ["std-1"] }),
     });
     expect(res.status).toBe(200);
   });

@@ -22,7 +22,7 @@
  * Batch limit: 100 events per call
  */
 
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 import { createPublicKey, verify } from "node:crypto";
 
 const BATCH_LIMIT = 100;
@@ -106,7 +106,7 @@ export class IngestEvents extends Resource {
     }
 
     // Look up the office
-    const office = await (tables as any).ObsOffice.get(officeId).catch(() => null);
+    const office = await (databases as any).flair.ObsOffice.get(officeId).catch(() => null);
     if (!office) {
       return new Response(JSON.stringify({ error: "office not registered — POST /ObsOffice first" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
@@ -136,7 +136,7 @@ export class IngestEvents extends Resource {
     for (const agent of agents) {
       if (!agent.agentId) continue;
       const snapshotId = `${officeId}:${agent.agentId}`;
-      await (tables as any).ObsAgentSnapshot.put({
+      await (databases as any).flair.ObsAgentSnapshot.put({
         id: snapshotId,
         officeId,
         agentId: agent.agentId,
@@ -155,9 +155,9 @@ export class IngestEvents extends Resource {
     for (const ev of events) {
       if (!ev.id || !ev.kind) continue;
       const feedId = `${officeId}:${ev.id}`;
-      const existing = await (tables as any).ObsEventFeed.get(feedId).catch(() => null);
+      const existing = await (databases as any).flair.ObsEventFeed.get(feedId).catch(() => null);
       if (existing) continue;
-      await (tables as any).ObsEventFeed.put({
+      await (databases as any).flair.ObsEventFeed.put({
         id: feedId,
         officeId,
         kind: ev.kind,
@@ -173,7 +173,7 @@ export class IngestEvents extends Resource {
     }
 
     // Update office lastSeen + agentCount
-    await (tables as any).ObsOffice.put({
+    await (databases as any).flair.ObsOffice.put({
       ...office,
       status: "online",
       lastSeen: now,

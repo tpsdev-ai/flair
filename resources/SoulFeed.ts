@@ -1,8 +1,8 @@
-import { Resource, tables } from '@harperfast/harper';
+import { Resource, databases } from '@harperfast/harper';
 
 export class FeedSouls extends Resource {
   async *connect(target: any, incomingMessages: any) {
-    const subscription = await (tables as any).Soul.subscribe(target);
+    const subscription = await (databases as any).flair.Soul.subscribe(target);
     
     if (!incomingMessages) {
       return subscription;

@@ -16,7 +16,7 @@
  *   prompt      string
  */
 
-import { Resource, tables } from "@harperfast/harper";
+import { Resource, databases } from "@harperfast/harper";
 import { isAdmin } from "./auth-middleware.js";
 
 function parseDuration(s: string): number {
@@ -83,7 +83,7 @@ export class ConsolidateMemories extends Resource {
     const now = Date.now();
     const candidates: Candidate[] = [];
 
-    for await (const record of (tables as any).Memory.search()) {
+    for await (const record of (databases as any).flair.Memory.search()) {
       if (record.agentId !== agentId) continue;
       if (record.archived) continue;
       if (record.durability === "permanent") continue; // permanent can't be demoted
