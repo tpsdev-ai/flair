@@ -37,14 +37,20 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
 
     const agentIdCondition = { attribute: "agentId", comparator: "equals", value: authAgent };
 
-    let scopedQuery: any;
-    if (!query || (Array.isArray(query) && query.length === 0)) {
-      scopedQuery = [agentIdCondition];
-    } else {
-      scopedQuery = { conditions: [agentIdCondition], and: query };
+    // Harper passes `query` as a request target object (with pathname, id, isCollection, etc.)
+    // Inject scope condition into its `.conditions` array so Table.search() processes it correctly.
+    if (query && typeof query === "object" && !Array.isArray(query)) {
+      const existing = query.conditions ?? [];
+      query.conditions = Array.isArray(existing)
+        ? [agentIdCondition, ...existing]
+        : [agentIdCondition, existing];
+      return super.search(query);
     }
 
-    return super.search(scopedQuery);
+    const conditions = Array.isArray(query) && query.length > 0
+      ? [agentIdCondition, ...query]
+      : [agentIdCondition];
+    return super.search(conditions);
   }
 
   async post(content: any) {

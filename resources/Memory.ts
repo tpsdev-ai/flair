@@ -37,31 +37,26 @@ export class Memory extends (databases as any).flair.Memory {
       }
     } catch { /* MemoryGrant table not yet populated — ignore */ }
 
-    // Build an agentId condition: own memories OR granted owners
-    // If more than one allowed owner, use "or" across equals conditions
-    let agentIdCondition: any;
-    if (allowedOwners.length === 1) {
-      agentIdCondition = { attribute: "agentId", comparator: "equals", value: allowedOwners[0] };
-    } else {
-      agentIdCondition = allowedOwners.map((id, i) => {
-        const cond = { attribute: "agentId", comparator: "equals", value: id };
-        return i === 0 ? cond : ["or", cond];
-      });
+    // Build the agentId scope condition
+    const agentIdCondition: any = allowedOwners.length === 1
+      ? { attribute: "agentId", comparator: "equals", value: allowedOwners[0] }
+      : { conditions: allowedOwners.map(id => ({ attribute: "agentId", comparator: "equals", value: id })), operator: "or" };
+
+    // Harper passes `query` as a RequestTarget (extends URLSearchParams) with pathname, id, etc.
+    // Table.search() reads `target.conditions` from it. We inject our scope condition there.
+    if (query && typeof query === "object" && !Array.isArray(query)) {
+      const existing = query.conditions ?? [];
+      query.conditions = Array.isArray(existing)
+        ? [agentIdCondition, ...existing]
+        : [agentIdCondition, existing];
+      return super.search(query);
     }
 
-    // Firmly wrap user query in outer `and` so they cannot escape the scope check
-    let scopedQuery: any;
-    if (!query || (Array.isArray(query) && query.length === 0)) {
-      // No user query — just the agentId filter
-      scopedQuery = Array.isArray(agentIdCondition)
-        ? agentIdCondition
-        : [agentIdCondition];
-    } else {
-      // Wrap: { and: [agentIdCondition, userQuery] } expressed as Harper conditions
-      scopedQuery = { conditions: [agentIdCondition], and: query };
-    }
-
-    return super.search(scopedQuery);
+    // Fallback: plain array or no query (internal calls)
+    const conditions = Array.isArray(query) && query.length > 0
+      ? [agentIdCondition, ...query]
+      : [agentIdCondition];
+    return super.search(conditions);
   }
 
   async post(content: any, context?: any) {
