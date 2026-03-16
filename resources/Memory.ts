@@ -95,10 +95,10 @@ export class Memory extends (databases as any).flair.Memory {
       content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
     }
 
-    return super.post(content, context);
+    return super.post(content);
   }
 
-  async put(content: any, context?: any) {
+  async put(content: any) {
     const now = new Date().toISOString();
     content.updatedAt = now;
 
@@ -118,16 +118,18 @@ export class Memory extends (databases as any).flair.Memory {
       content.durability = "permanent";
     }
 
-    return super.put(content, context);
+    return super.put(content);
   }
 
-  async delete(id: any, context?: any) {
+  async delete(id: any) {
     const record = await this.get(id);
-    if (!record) return super.delete(id, context);
+    if (!record) return super.delete(id);
 
     if (record.durability === "permanent") {
       // Middleware already guards this for non-admins, but belt-and-suspenders
-      const actorId = context?.request?.tpsAgent;
+      const ctx = (this as any).getContext?.();
+      const request = ctx?.request ?? ctx;
+      const actorId = request?.tpsAgent;
       if (actorId && !(await isAdmin(actorId))) {
         return new Response(JSON.stringify({ error: "permanent_memory_cannot_be_deleted_by_non_admin" }), {
           status: 403,
@@ -136,6 +138,6 @@ export class Memory extends (databases as any).flair.Memory {
       }
     }
 
-    return super.delete(id, context);
+    return super.delete(id);
   }
 }
