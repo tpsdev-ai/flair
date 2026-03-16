@@ -51,7 +51,7 @@ jobs:
             -e OPERATIONSAPI_NETWORK_PORT=9925 \
             -e HTTP_PORT=9926 \
             --entrypoint /bin/sh \
-            harperfast/harper-pro:5.0.0-alpha.3 \
+            harperfast/harper-pro:5.0.0-alpha.10 \
             -c "harper install && harper dev /flair" 
       - name: Run integration tests against Docker Harper
         run: bun test test/integration/

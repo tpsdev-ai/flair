@@ -4,7 +4,7 @@
 # Build:  docker build -f docker/Dockerfile.test -t flair-test .
 # Run:    docker run --rm flair-test
 #
-# Uses node:22-slim + bun for install/build, then node for CLI execution.
+# Uses node:24-slim + bun for install/build, then node for CLI execution.
 
 FROM node:24-slim AS base
 
