@@ -24,6 +24,8 @@ type Memory @table(database: "flair") {
   derivedFrom: [String]     # source memory IDs this was reflected from
   sessionId: String @indexed  # originating session
   lastReflected: String     # ISO timestamp of last reflection pass
+  supersedes: String @indexed  # ID of memory this one replaces (version chain)
+  subject: String @indexed     # entity this memory is about (person, service, project)
 }
 
 type Soul @table(database: "flair") {
