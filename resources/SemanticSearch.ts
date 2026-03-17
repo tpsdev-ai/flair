@@ -9,9 +9,51 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot;
 }
 
+// ─── Temporal Decay + Relevance Scoring ─────────────────────────────────────
+
+const DURABILITY_WEIGHTS: Record<string, number> = {
+  permanent: 1.0,
+  persistent: 0.9,
+  standard: 0.7,
+  ephemeral: 0.4,
+};
+
+// Half-life in days for exponential decay per durability level
+const DECAY_HALF_LIFE_DAYS: Record<string, number> = {
+  permanent: Infinity, // never decays
+  persistent: 90,
+  standard: 30,
+  ephemeral: 7,
+};
+
+function recencyFactor(createdAt: string, durability: string): number {
+  const halfLife = DECAY_HALF_LIFE_DAYS[durability] ?? 30;
+  if (halfLife === Infinity) return 1.0;
+  const ageDays = (Date.now() - Date.parse(createdAt)) / (1000 * 60 * 60 * 24);
+  const lambda = Math.LN2 / halfLife;
+  return Math.exp(-lambda * ageDays);
+}
+
+function retrievalBoost(retrievalCount: number): number {
+  if (!retrievalCount || retrievalCount <= 0) return 1.0;
+  return 1.0 + 0.1 * Math.log2(retrievalCount); // gentle boost: 10 retrievals → ~1.33x
+}
+
+function compositeScore(
+  semanticScore: number,
+  record: { durability?: string; createdAt?: string; retrievalCount?: number; supersedes?: string },
+): number {
+  const durability = record.durability ?? "standard";
+  const dWeight = DURABILITY_WEIGHTS[durability] ?? 0.7;
+  const rFactor = record.createdAt ? recencyFactor(record.createdAt, durability) : 1.0;
+  const rBoost = retrievalBoost(record.retrievalCount ?? 0);
+  return semanticScore * dWeight * rFactor * rBoost;
+}
+
 export class SemanticSearch extends Resource {
   async post(data: any) {
-    const { agentId, q, queryEmbedding, tag, limit = 10, includeSuperseded = false } = data || {};
+    const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite" } = data || {};
+    const subjectFilter = subjects ? new Set(subjects as string[]) : subject ? new Set([subject as string]) : null;
 
     // Defense-in-depth: verify agentId matches authenticated agent.
     // The middleware already enforces this for non-admins, but double-check here
@@ -60,20 +102,25 @@ export class SemanticSearch extends Resource {
       if (record.archived === true) continue; // soft-deleted — excluded from search by default
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
       if (tag && !(record.tags || []).includes(tag)) continue;
+      if (subjectFilter && record.subject && !subjectFilter.has(record.subject)) continue;
 
-      let score = 0;
+      let rawScore = 0;
       if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
-        score += 0.5;
+        rawScore += 0.5;
       }
       if (qEmb && record.embedding && qEmb.length === record.embedding.length) {
-        score += cosineSimilarity(qEmb, record.embedding);
+        rawScore += cosineSimilarity(qEmb, record.embedding);
       }
-      if (q && score === 0) continue;
+      if (q && rawScore === 0) continue;
+
+      // Apply composite scoring (temporal decay + durability + retrieval boost)
+      const finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
 
       const { embedding, ...rest } = record;
       results.push({
         ...rest,
-        _score: Math.round(score * 1000) / 1000,
+        _score: Math.round(finalScore * 1000) / 1000,
+        _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
         _source: record.agentId !== agentId ? record.agentId : undefined,
       });
     }
