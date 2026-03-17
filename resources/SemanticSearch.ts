@@ -53,7 +53,11 @@ function compositeScore(
 export class SemanticSearch extends Resource {
   async post(data: any) {
     const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite" } = data || {};
-    const subjectFilter = subjects ? new Set(subjects as string[]) : subject ? new Set([subject as string]) : null;
+    const subjectFilter = subjects
+      ? new Set((subjects as string[]).map((s: string) => s.toLowerCase()))
+      : subject
+        ? new Set([(subject as string).toLowerCase()])
+        : null;
 
     // Defense-in-depth: verify agentId matches authenticated agent.
     // The middleware already enforces this for non-admins, but double-check here
@@ -102,7 +106,7 @@ export class SemanticSearch extends Resource {
       if (record.archived === true) continue; // soft-deleted — excluded from search by default
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
       if (tag && !(record.tags || []).includes(tag)) continue;
-      if (subjectFilter && record.subject && !subjectFilter.has(record.subject)) continue;
+      if (subjectFilter && record.subject && !subjectFilter.has(String(record.subject).toLowerCase())) continue;
 
       let rawScore = 0;
       if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
