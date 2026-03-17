@@ -1,9 +1,12 @@
 /**
  * In-process embeddings via harper-fabric-embeddings (v0.2.0+).
  *
- * Harper loads this resource module in multiple worker threads/ESM contexts.
- * The native model must load exactly once per process. We use a process-level
- * singleton to coordinate initialization across contexts.
+ * Harper loads resource modules in multiple worker threads/ESM contexts.
+ * The native model must load exactly once per process. We use a
+ * process-level singleton to coordinate initialization.
+ *
+ * file:// import bypasses Harper's VM sandbox ESM resolver which can't
+ * resolve the package's "exports" map.
  */
 
 const MAX_CHARS = 500;
@@ -21,11 +24,7 @@ function getSingleton(): HfeSingleton | null {
   return (process as any)[SINGLETON_KEY] ?? null;
 }
 
-function setSingleton(s: HfeSingleton): void {
-  (process as any)[SINGLETON_KEY] = s;
-}
-
-// Local references (populated from singleton)
+// Local refs
 let hfe: any = null;
 let dims = 0;
 let mode: "native" | "hash" | "none" = "none";
@@ -49,12 +48,9 @@ export function getMode(): string {
 }
 
 export async function initEmbeddings(): Promise<void> {
-  // Already initialized in this context
   if (mode !== "none") return;
-  // Check if another context already did it
   if (syncFromSingleton()) return;
 
-  // Check if init is in progress from another context
   const existing = getSingleton();
   if (existing?.initPromise) {
     await existing.initPromise;
@@ -62,16 +58,14 @@ export async function initEmbeddings(): Promise<void> {
     return;
   }
 
-  // We're the first — claim the init
-  const sentinel: HfeSingleton = { hfe: null, dims: 0, mode: "none", initPromise: null };
-  setSingleton(sentinel);
-  sentinel.initPromise = doInit(sentinel);
-  await sentinel.initPromise;
+  const singleton: HfeSingleton = { hfe: null, dims: 0, mode: "none", initPromise: null };
+  (process as any)[SINGLETON_KEY] = singleton;
+  singleton.initPromise = doInit(singleton);
+  await singleton.initPromise;
   syncFromSingleton();
 }
 
 async function doInit(singleton: HfeSingleton): Promise<void> {
-  // file:// URL bypass for Harper's VM sandbox ESM resolver
   try {
     const { resolve: resolvePath, dirname } = await import("node:path");
     const { fileURLToPath } = await import("node:url");
@@ -90,7 +84,6 @@ async function doInit(singleton: HfeSingleton): Promise<void> {
     console.error(`[embeddings] Native load failed: ${err.message}`);
   }
 
-  // Fallback: hash-based pseudo-embeddings
   try {
     await import("./embeddings.js");
     singleton.dims = 512;
@@ -117,27 +110,22 @@ async function processQueue(): Promise<void> {
   while (queueState.queue.length > 0) {
     const job = queueState.queue.shift()!;
     try {
-      const result = await doEmbed(job.text);
-      job.resolve(result);
+      if (mode === "none") syncFromSingleton();
+      const s = getSingleton();
+      if (s?.mode === "native" && s.hfe) {
+        job.resolve(await s.hfe.embed(job.text.slice(0, MAX_CHARS)));
+      } else if (s?.mode === "hash" || mode === "hash") {
+        const { fallbackEmbed } = await import("./embeddings.js");
+        job.resolve(fallbackEmbed(job.text.slice(0, MAX_CHARS)));
+      } else {
+        job.resolve(null);
+      }
     } catch (err: any) {
       console.error(`[embeddings] queue job failed: ${err.message}`);
       job.resolve(null);
     }
   }
   queueState.processing = false;
-}
-
-async function doEmbed(text: string): Promise<number[] | null> {
-  if (mode === "none") syncFromSingleton();
-  const s = getSingleton();
-  if (s?.mode === "native" && s.hfe) {
-    return await s.hfe.embed(text.slice(0, MAX_CHARS));
-  }
-  if (s?.mode === "hash" || mode === "hash") {
-    const { fallbackEmbed } = await import("./embeddings.js");
-    return fallbackEmbed(text.slice(0, MAX_CHARS));
-  }
-  return null;
 }
 
 export async function getEmbedding(text: string): Promise<number[] | null> {
