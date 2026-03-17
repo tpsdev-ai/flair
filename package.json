@@ -45,7 +45,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@harperfast/harper": "5.0.0-alpha.10",
+    "@harperfast/harper": "5.0.0-beta.1",
     "@node-llama-cpp/mac-arm64-metal": "^3.17.1",
     "commander": "14.0.3",
     "harper-fabric-embeddings": "^0.2.0",
