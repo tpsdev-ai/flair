@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { resolveKeyPath, loadPrivateKey } from "./key-resolver.js";
+import { resolveKeyPath, loadPrivateKey, resolveAgentId } from "./key-resolver.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -241,9 +241,12 @@ export default {
     // Client pool: one client per agentId, created lazily
     const clientPool = new Map<string, FlairMemoryClient>();
     
+    // Resolve fallback agentId once at registration time
+    const fallbackAgentId = resolveAgentId();
+
     function getClient(agentId?: string): FlairMemoryClient {
-      const id = agentId || cfg.agentId;
-      if (!id || id === "auto") throw new Error("no agentId available — set agentId in plugin config or ensure OpenClaw provides it via session context");
+      const id = agentId || cfg.agentId || fallbackAgentId;
+      if (!id || id === "auto") throw new Error("no agentId available — set agentId in plugin config, FLAIR_AGENT_ID env var, or ensure OpenClaw provides it via session context");
       let client = clientPool.get(id);
       if (!client) {
         client = new FlairMemoryClient({ ...cfg, agentId: id });
@@ -259,6 +262,8 @@ export default {
 
     if (!isAutoMode) {
       api.logger.info("openclaw-flair: client created");
+    } else if (fallbackAgentId) {
+      api.logger.info(`openclaw-flair: auto mode — fallback agentId="${fallbackAgentId}" (from config/env)`);
     } else {
       api.logger.info("openclaw-flair: auto mode — agentId will be resolved from session context");
     }
@@ -267,7 +272,7 @@ export default {
     const autoRecall = cfg.autoRecall ?? true;
 
     // Track current agent per-session via hooks (tools don't get agentId in execute)
-    let currentAgentId: string | undefined = isAutoMode ? undefined : cfg.agentId;
+    let currentAgentId: string | undefined = isAutoMode ? fallbackAgentId ?? undefined : cfg.agentId;
     
     api.on("before_agent_start", async (event: any, ctx: any) => {
       const eventAgentId = ctx?.agentId || (event as any).agentId;

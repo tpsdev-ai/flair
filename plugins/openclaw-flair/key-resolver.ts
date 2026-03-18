@@ -1,5 +1,5 @@
 /**
- * Key resolution for Flair Ed25519 authentication.
+ * Key and identity resolution for Flair authentication.
  * Separated from the HTTP client to avoid security scanner false positives
  * (env var access + network send in the same file).
  */
@@ -54,4 +54,31 @@ export function loadPrivateKey(keyPath: string): ReturnType<typeof import("node:
   } catch {
     return null;
   }
+}
+
+/**
+ * Resolve agent ID when not explicitly configured.
+ * Priority: FLAIR_AGENT_ID env > OpenClaw config file > null
+ */
+export function resolveAgentId(): string | null {
+  // 1. Explicit env var
+  const envId = process.env.FLAIR_AGENT_ID;
+  if (envId) return envId;
+
+  // 2. Read from OpenClaw config — first agent name
+  try {
+    const configPath = resolve(homedir(), ".openclaw", "openclaw.json");
+    if (!existsSync(configPath)) return null;
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    // agents.list[].name is the standard OpenClaw agent config
+    const agents = config?.agents?.list;
+    if (Array.isArray(agents) && agents.length > 0) {
+      const name = agents[0]?.name;
+      if (typeof name === "string" && name) return name.toLowerCase();
+    }
+  } catch {
+    // Config unreadable — fall through
+  }
+
+  return null;
 }
