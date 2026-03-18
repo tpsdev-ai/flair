@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/openclaw-flair",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "OpenClaw memory plugin for Flair — agent identity and semantic memory",
   "type": "module",
   "main": "index.ts",
