@@ -16,9 +16,10 @@
 import { randomUUID, createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve, basename } from "node:path";
+import { resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { resolveKeyPath, loadPrivateKey } from "./key-resolver.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -36,23 +37,6 @@ const DEFAULT_URL = "http://127.0.0.1:9926";
 const DEFAULT_MAX_RECALL = 5;
 const DEFAULT_MAX_BOOTSTRAP_TOKENS = 4000;
 
-// ─── Key Resolution (separated from network client for security scanner) ──────
-
-/**
- * Resolve the default Flair key path for an agent.
- * Checks FLAIR_KEY_DIR env var first, then standard ~/.flair/keys/ path.
- */
-function resolveDefaultKeyPath(agentId: string): string | null {
-  const keyDirEnv = process.env.FLAIR_KEY_DIR;
-  if (keyDirEnv) {
-    const envPath = resolve(keyDirEnv, `${agentId}.key`);
-    if (existsSync(envPath)) return envPath;
-  }
-  const standard = resolve(homedir(), ".flair", "keys", `${agentId}.key`);
-  if (existsSync(standard)) return standard;
-  return null;
-}
-
 // ─── Flair HTTP Client ────────────────────────────────────────────────────────
 
 class FlairMemoryClient {
@@ -63,35 +47,15 @@ class FlairMemoryClient {
   constructor(config: FlairMemoryConfig) {
     this.baseUrl = (config.url ?? DEFAULT_URL).replace(/\/$/, "");
     this.agentId = config.agentId;
-    this.keyPath = config.keyPath
-      ? resolve(config.keyPath.replace(/^~/, homedir()))
-      : resolveDefaultKeyPath(config.agentId);
+    this.keyPath = resolveKeyPath(config.agentId, config.keyPath);
   }
 
   private buildAuthHeader(method: string, path: string): Record<string, string> {
-    if (!this.keyPath || !existsSync(this.keyPath)) return {};
+    if (!this.keyPath) return {};
     try {
-      const { sign: ed25519Sign, createPrivateKey, randomUUID: rv } = require("node:crypto");
-      // Read raw bytes — supports both:
-      //   - 32-byte binary seed (written by `flair init`)
-      //   - base64-encoded seed (legacy format)
-      const fileBuf = readFileSync(this.keyPath);
-      let rawBuf: Buffer;
-      if (fileBuf.length === 32) {
-        // Raw binary seed
-        rawBuf = fileBuf;
-      } else {
-        // Try base64 decode
-        rawBuf = Buffer.from(fileBuf.toString("utf-8").trim(), "base64");
-      }
-      let privateKey: ReturnType<typeof createPrivateKey>;
-      if (rawBuf.length === 32) {
-        // Raw Ed25519 seed — wrap in PKCS8 DER envelope
-        const pkcs8Header = Buffer.from("302e020100300506032b657004220420", "hex");
-        privateKey = createPrivateKey({ key: Buffer.concat([pkcs8Header, rawBuf]), format: "der", type: "pkcs8" });
-      } else {
-        privateKey = createPrivateKey({ key: rawBuf, format: "der", type: "pkcs8" });
-      }
+      const { sign: ed25519Sign, randomUUID: rv } = require("node:crypto");
+      const privateKey = loadPrivateKey(this.keyPath);
+      if (!privateKey) return {};
       const ts = Date.now().toString();
       const nonce = rv();
       const payload = `${this.agentId}:${ts}:${nonce}:${method}:${path}`;

@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/openclaw-flair",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "OpenClaw memory plugin for Flair — agent identity and semantic memory",
   "type": "module",
   "main": "index.ts",
@@ -9,6 +9,7 @@
   },
   "files": [
     "index.ts",
+    "key-resolver.ts",
     "openclaw.plugin.json",
     "README.md"
   ],
@@ -25,9 +26,9 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/tpsdev-ai/flair.git",
-    "directory": "plugins/openclaw-memory"
+    "directory": "plugins/openclaw-flair"
   },
-  "homepage": "https://github.com/tpsdev-ai/flair/tree/main/plugins/openclaw-memory",
+  "homepage": "https://github.com/tpsdev-ai/flair/tree/main/plugins/openclaw-flair",
   "openclaw": {
     "extensions": ["./index.ts"]
   },
