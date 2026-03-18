@@ -1,5 +1,5 @@
 /**
- * memory-flair — OpenClaw Memory Plugin backed by Flair
+ * openclaw-flair — OpenClaw Memory Plugin backed by Flair
  *
  * Replaces the built-in MEMORY.md / memory-lancedb system with Flair as the
  * single source of truth for agent memory. Uses Flair's native Harper
@@ -238,9 +238,9 @@ async function syncWorkspaceToFlair(
 
       await client.writeSoul(soulKey, content, newHash);
       synced++;
-      logger.info(`memory-flair: synced ${filename} → soul:${soulKey} (hash=${newHash})`);
+      logger.info(`openclaw-flair: synced ${filename} → soul:${soulKey} (hash=${newHash})`);
     } catch (err: any) {
-      logger.warn(`memory-flair: failed to sync ${filename}: ${err.message}`);
+      logger.warn(`openclaw-flair: failed to sync ${filename}: ${err.message}`);
     }
   }
   return synced;
@@ -291,8 +291,8 @@ export default {
       getClient(cfg.agentId);
     }
 
-    api.logger.info("memory-flair: config ok, creating client...");
-    api.logger.info("memory-flair: client created");
+    api.logger.info("openclaw-flair: config ok, creating client...");
+    api.logger.info("openclaw-flair: client created");
     const maxRecall = cfg.maxRecallResults ?? DEFAULT_MAX_RECALL;
     const autoCapture = cfg.autoCapture ?? true;
     const autoRecall = cfg.autoRecall ?? true;
@@ -309,9 +309,9 @@ export default {
         try {
           const client = getClient(eventAgentId);
           const synced = await syncWorkspaceToFlair(client, eventAgentId, api.logger);
-          if (synced > 0) api.logger.info(`memory-flair: workspace sync: ${synced} files updated`);
+          if (synced > 0) api.logger.info(`openclaw-flair: workspace sync: ${synced} files updated`);
         } catch (err: any) {
-          api.logger.warn(`memory-flair: workspace sync failed: ${err.message}`);
+          api.logger.warn(`openclaw-flair: workspace sync failed: ${err.message}`);
         }
       }
     });
@@ -322,7 +322,7 @@ export default {
     }
 
     const displayAgent = isAutoMode ? "auto (per-session)" : cfg.agentId;
-    api.logger.info(`memory-flair: registered (agent=${displayAgent}, url=${cfg.url ?? DEFAULT_URL})`);
+    api.logger.info(`openclaw-flair: registered (agent=${displayAgent}, url=${cfg.url ?? DEFAULT_URL})`);
 
     // ── memory_recall ──────────────────────────────────────────────────────
 
@@ -352,7 +352,7 @@ export default {
               details: { count: results.length, memories: results },
             };
           } catch (err: any) {
-            api.logger.warn(`memory-flair: recall failed: ${err.message}`);
+            api.logger.warn(`openclaw-flair: recall failed: ${err.message}`);
             return { content: [{ type: "text", text: `Memory recall unavailable: ${err.message}` }], details: { count: 0 } };
           }
         },
@@ -402,7 +402,7 @@ export default {
               details: { id: memId },
             };
           } catch (err: any) {
-            api.logger.warn(`memory-flair: store failed: ${err.message}`);
+            api.logger.warn(`openclaw-flair: store failed: ${err.message}`);
             return { content: [{ type: "text", text: `Memory store unavailable: ${err.message}` }], details: {} };
           }
         },
@@ -450,10 +450,10 @@ export default {
           if (context && typeof context === "string" && context.trim().length > 0) {
             const truncated = context.slice(0, (cfg.maxBootstrapTokens ?? DEFAULT_MAX_BOOTSTRAP_TOKENS) * 4);
             event.injectContext?.(`\n## Memory Context (from Flair)\n\n${truncated}\n`);
-            api.logger.info(`memory-flair: injected bootstrap context (${context.length} chars)`);
+            api.logger.info(`openclaw-flair: injected bootstrap context (${context.length} chars)`);
           }
         } catch (err: any) {
-          api.logger.warn(`memory-flair: bootstrap recall failed: ${err.message}`);
+          api.logger.warn(`openclaw-flair: bootstrap recall failed: ${err.message}`);
         }
       });
     }
@@ -477,15 +477,15 @@ export default {
             stored++;
             if (stored >= 3) break; // cap at 3 per session
           }
-          if (stored > 0) api.logger.info(`memory-flair: auto-captured ${stored} memories`);
+          if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
         } catch (err: any) {
-          api.logger.warn(`memory-flair: auto-capture failed: ${err.message}`);
+          api.logger.warn(`openclaw-flair: auto-capture failed: ${err.message}`);
         }
       });
     }
 
     } catch (err: any) {
-      api.logger.error(`memory-flair register error: ${err.message}`);
+      api.logger.error(`openclaw-flair register error: ${err.message}`);
       throw err;
     }
   },
