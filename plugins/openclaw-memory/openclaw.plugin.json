@@ -10,7 +10,7 @@
     "agentId": {
       "label": "Agent ID",
       "placeholder": "flint",
-      "help": "TPS agent identifier (used for memory namespacing)"
+      "help": "Agent identifier for memory namespacing. Auto-detected from OpenClaw agent name if omitted."
     },
     "keyPath": {
       "label": "Private Key Path",
@@ -40,6 +40,6 @@
       "maxRecallResults": { "type": "number", "minimum": 1, "maximum": 20 },
       "maxBootstrapTokens": { "type": "number", "minimum": 500, "maximum": 8000 }
     },
-    "required": ["agentId"]
+    "required": []
   }
 }

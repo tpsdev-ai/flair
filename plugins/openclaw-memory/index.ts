@@ -277,7 +277,7 @@ export default {
     
     function getClient(agentId?: string): FlairMemoryClient {
       const id = agentId || cfg.agentId;
-      if (!id || id === "auto") throw new Error("no agentId available");
+      if (!id || id === "auto") throw new Error("no agentId available — set agentId in plugin config or ensure OpenClaw provides it via session context");
       let client = clientPool.get(id);
       if (!client) {
         client = new FlairMemoryClient({ ...cfg, agentId: id });
@@ -291,8 +291,11 @@ export default {
       getClient(cfg.agentId);
     }
 
-    api.logger.info("openclaw-flair: config ok, creating client...");
-    api.logger.info("openclaw-flair: client created");
+    if (!isAutoMode) {
+      api.logger.info("openclaw-flair: client created");
+    } else {
+      api.logger.info("openclaw-flair: auto mode — agentId will be resolved from session context");
+    }
     const maxRecall = cfg.maxRecallResults ?? DEFAULT_MAX_RECALL;
     const autoCapture = cfg.autoCapture ?? true;
     const autoRecall = cfg.autoRecall ?? true;
