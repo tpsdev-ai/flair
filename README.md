@@ -78,7 +78,7 @@ One Flair instance serves any number of agents. Each agent has its own keys, mem
 
 ```bash
 # Install
-npm install -g @tps/flair
+npm install -g @tpsdev-ai/flair
 
 # Bootstrap a Flair instance (installs Harper, creates database, starts service)
 flair init
@@ -95,14 +95,14 @@ That's it. Your agent now has identity and memory.
 ### Use with OpenClaw
 
 ```bash
-npm install @tps/openclaw-flair
+npm install @tpsdev-ai/openclaw-flair
 ```
 
 Add to your `openclaw.json`:
 ```json
 {
   "memory": {
-    "provider": "@tps/openclaw-flair"
+    "provider": "@tpsdev-ai/openclaw-flair"
   }
 }
 ```
@@ -158,7 +158,7 @@ flair/
 │   ├── MemoryBootstrap.ts    # Cold start context assembly
 │   └── MemoryFeed.ts         # Real-time memory changes
 ├── plugins/
-│   └── openclaw-memory/       # @tps/openclaw-flair plugin
+│   └── openclaw-memory/       # @tpsdev-ai/openclaw-flair plugin
 └── SECURITY.md                # Threat model + auth documentation
 ```
 
@@ -219,7 +219,7 @@ Integration tests spin up a real Harper instance on a random port, run the test 
 
 ## Status
 
-> **Note:** Flair uses [Harper v5](https://github.com/HarperFast/harper), currently in alpha. We run it in production daily and track upstream closely. Pin your Harper version.
+> **Note:** Flair uses [Harper v5](https://github.com/HarperFast/harper), currently in beta. We run it in production daily and track upstream closely. Pin your Harper version.
 
 Flair is in active development and daily use. We dogfood it — the agents that build Flair use Flair for their own memory and identity. 7 agents, 150+ memories, running continuously since March 2026.
 

@@ -1,5 +1,5 @@
 {
-  "name": "@tps/flair",
+  "name": "@tpsdev-ai/flair",
   "version": "0.2.0",
   "description": "Identity, memory, and soul for AI agents. Cryptographic identity (Ed25519), semantic memory with local embeddings, and persistent personality — all in a single process.",
   "type": "module",
