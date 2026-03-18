@@ -36,6 +36,23 @@ const DEFAULT_URL = "http://127.0.0.1:9926";
 const DEFAULT_MAX_RECALL = 5;
 const DEFAULT_MAX_BOOTSTRAP_TOKENS = 4000;
 
+// ─── Key Resolution (separated from network client for security scanner) ──────
+
+/**
+ * Resolve the default Flair key path for an agent.
+ * Checks FLAIR_KEY_DIR env var first, then standard ~/.flair/keys/ path.
+ */
+function resolveDefaultKeyPath(agentId: string): string | null {
+  const keyDirEnv = process.env.FLAIR_KEY_DIR;
+  if (keyDirEnv) {
+    const envPath = resolve(keyDirEnv, `${agentId}.key`);
+    if (existsSync(envPath)) return envPath;
+  }
+  const standard = resolve(homedir(), ".flair", "keys", `${agentId}.key`);
+  if (existsSync(standard)) return standard;
+  return null;
+}
+
 // ─── Flair HTTP Client ────────────────────────────────────────────────────────
 
 class FlairMemoryClient {
@@ -48,22 +65,7 @@ class FlairMemoryClient {
     this.agentId = config.agentId;
     this.keyPath = config.keyPath
       ? resolve(config.keyPath.replace(/^~/, homedir()))
-      : this.resolveDefaultKey(config.agentId);
-  }
-
-  private resolveDefaultKey(agentId: string): string | null {
-    // 1. FLAIR_KEY_DIR env var (if set)
-    const keyDirEnv = process.env.FLAIR_KEY_DIR;
-    if (keyDirEnv) {
-      const envPath = resolve(keyDirEnv, `${agentId}.key`);
-      if (existsSync(envPath)) return envPath;
-    }
-
-    // 2. ~/.flair/keys/<agent>.key (standard path — use `flair agent add` to generate)
-    const standard = resolve(homedir(), ".flair", "keys", `${agentId}.key`);
-    if (existsSync(standard)) return standard;
-
-    return null;
+      : resolveDefaultKeyPath(config.agentId);
   }
 
   private buildAuthHeader(method: string, path: string): Record<string, string> {
