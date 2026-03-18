@@ -3,3 +3,4 @@ dist/
 .flair/
 .DS_Store
 package-lock.json
+*.gguf

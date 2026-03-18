@@ -42,7 +42,7 @@
     "test": "bun test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "@harperfast/harper": "5.0.0-beta.1",
