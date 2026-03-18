@@ -41,6 +41,9 @@
     "build:cli": "tsc -p tsconfig.cli.json --noCheck",
     "test": "bun test"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22"
   },

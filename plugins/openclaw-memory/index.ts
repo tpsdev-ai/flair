@@ -59,31 +59,12 @@ class FlairMemoryClient {
       if (existsSync(envPath)) return envPath;
     }
 
-    // 2. ~/.flair/keys/<agent>.key (new standard path)
-    const newStandard = resolve(homedir(), ".flair", "keys", `${agentId}.key`);
-    if (existsSync(newStandard)) return newStandard;
-
-    // 3. Legacy paths (backwards compat — warn on first use)
-    const legacyCandidates = [
-      resolve(homedir(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
-      resolve(homedir(), ".tps", "secrets", `${agentId}-flair.key`),
-    ];
-    const legacyPath = legacyCandidates.find(existsSync);
-    if (legacyPath) {
-      if (!FlairMemoryClient._legacyKeyWarned.has(agentId)) {
-        console.warn(
-          `[flair-plugin] DEPRECATION: key at legacy path ${legacyPath}. ` +
-          `Move to ~/.flair/keys/${agentId}.key or set FLAIR_KEY_DIR.`
-        );
-        FlairMemoryClient._legacyKeyWarned.add(agentId);
-      }
-      return legacyPath;
-    }
+    // 2. ~/.flair/keys/<agent>.key (standard path — use `flair agent add` to generate)
+    const standard = resolve(homedir(), ".flair", "keys", `${agentId}.key`);
+    if (existsSync(standard)) return standard;
 
     return null;
   }
-
-  private static _legacyKeyWarned = new Set<string>();
 
   private buildAuthHeader(method: string, path: string): Record<string, string> {
     if (!this.keyPath || !existsSync(this.keyPath)) return {};
