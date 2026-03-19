@@ -129,6 +129,35 @@ async function waitForHealth(httpPort: number, adminUser: string, adminPass: str
 
 
 
+/** Ensure the 'flair' database exists in Harper before inserting records.
+ *
+ * Harper v5 does NOT auto-create the application database on `run .` — the
+ * database must be created via the operations API on first boot.  We do this
+ * once, ignore "already exists" responses, and let Harper's graphqlSchema
+ * directive handle table creation once the database is present.
+ */
+async function ensureDatabaseExists(
+  opsPort: number,
+  adminUser: string,
+  adminPass: string,
+): Promise<void> {
+  const url = `http://127.0.0.1:${opsPort}/`;
+  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    body: JSON.stringify({ operation: "create_database", database: "flair" }),
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (res.ok) return; // created
+  const text = await res.text().catch(() => "");
+  // "already exists" variants — not an error
+  if (text.includes("already exists") || text.includes("exists")) return;
+  throw new Error(`Failed to create database (${res.status}): ${text}`);
+}
+
 async function seedAgentViaOpsApi(
   opsPort: number,
   agentId: string,
@@ -145,10 +174,9 @@ async function seedAgentViaOpsApi(
     records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
   };
 
-  // Retry — database may not exist yet if app schemas are still loading.
-  // Allow up to 60s (60 × 1s) — schema processing can be slow on first run
-  // when the embeddings model is also initializing.
-  const maxAttempts = 60;
+  // Retry — tables may not be ready immediately after database creation.
+  // Allow up to 30s (30 × 1s).
+  const maxAttempts = 30;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const res = await fetch(url, {
       method: "POST",
@@ -158,7 +186,7 @@ async function seedAgentViaOpsApi(
     if (res.ok) return;
     const text = await res.text().catch(() => "");
     if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
-    if (text.includes("does not exist") && attempt < maxAttempts) {
+    if ((text.includes("does not exist") || text.includes("not found")) && attempt < maxAttempts) {
       await new Promise((r) => setTimeout(r, 1000));
       continue;
     }
@@ -261,6 +289,11 @@ program
       pubKeyB64url = b64url(kp.publicKey);
       console.log(`Keypair written: ${privPath} ✓`);
     }
+
+    // Ensure database exists (Harper v5 does not auto-create on run .)
+    console.log("Ensuring database 'flair' exists...");
+    await ensureDatabaseExists(opsPort, adminUser, adminPass);
+    console.log("Database ready ✓");
 
     // Seed agent via operations API
     console.log(`Seeding agent '${agentId}' via operations API...`);
