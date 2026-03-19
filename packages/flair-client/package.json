@@ -1,0 +1,48 @@
+{
+  "name": "@tpsdev-ai/flair-client",
+  "version": "0.1.0",
+  "description": "Lightweight client for Flair — identity, memory, and soul for AI agents. Zero heavy dependencies.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tpsdev-ai/flair.git",
+    "directory": "packages/flair-client"
+  },
+  "homepage": "https://tps.dev/#flair",
+  "keywords": [
+    "flair",
+    "ai",
+    "agent",
+    "memory",
+    "identity",
+    "client",
+    "ed25519"
+  ],
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
