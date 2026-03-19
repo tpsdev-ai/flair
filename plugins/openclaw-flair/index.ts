@@ -200,7 +200,11 @@ export default {
               return { content: [{ type: "text", text: "No relevant memories found." }], details: { count: 0 } };
             }
             const text = results
-              .map((r, i) => `${i + 1}. ${r.content} (${(r.score * 100).toFixed(0)}%)`)
+              .map((r, i) => {
+                const date = r.createdAt ? r.createdAt.slice(0, 10) : "";
+                const meta = [date, r.type, r.durability].filter(Boolean).join(", ");
+                return `${i + 1}. ${r.content}${meta ? ` (${meta})` : ""}`;
+              })
               .join("\n");
             return {
               content: [{ type: "text", text: `Found ${results.length} memories:\n\n${text}` }],
