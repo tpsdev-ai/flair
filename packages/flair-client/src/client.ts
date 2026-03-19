@@ -109,8 +109,9 @@ class MemoryApi {
     /** Similarity threshold for dedup. Default: 0.7 */
     dedupThreshold?: number;
   } = {}): Promise<Memory> {
-    // Near-duplicate check
-    if (opts.dedup) {
+    // Near-duplicate check — skip for very short content where similarity
+    // is unreliable (e.g., "ok", "thanks" would match each other)
+    if (opts.dedup && content.length >= 20) {
       const threshold = opts.dedupThreshold ?? 0.7;
       const existing = await this.search(content, { limit: 1, minScore: threshold });
       if (existing.length > 0) {
