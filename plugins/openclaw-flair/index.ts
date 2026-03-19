@@ -250,15 +250,20 @@ export default {
           try {
             const client = getCurrentClient();
             const memId = `${client.agentId}-${Date.now()}`;
-            await client.memory.write(text, {
+            const result = await client.memory.write(text, {
               id: memId,
               tags,
               durability: durability as any,
               type: type as any,
+              dedup: true,
+              dedupThreshold: 0.7,
             });
+            const wasDeduped = result.id !== memId;
             return {
-              content: [{ type: "text", text: `Memory stored (id: ${memId})` }],
-              details: { id: memId },
+              content: [{ type: "text", text: wasDeduped
+                ? `Similar memory already exists (id: ${result.id})`
+                : `Memory stored (id: ${memId})` }],
+              details: { id: result.id, deduplicated: wasDeduped },
             };
           } catch (err: any) {
             api.logger.warn(`openclaw-flair: store failed: ${err.message}`);

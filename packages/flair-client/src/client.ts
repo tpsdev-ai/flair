@@ -95,14 +95,31 @@ export class FlairClient {
 class MemoryApi {
   constructor(private client: FlairClient) {}
 
-  /** Write a memory. */
+  /** Write a memory. Optionally checks for near-duplicates before writing. */
   async write(content: string, opts: {
     id?: string;
     type?: MemoryType;
     durability?: Durability;
     tags?: string[];
     subject?: string;
+    /** Check for similar existing memories before writing. If a near-duplicate
+     *  is found (score >= threshold), returns it instead of creating a new one.
+     *  Default: false (no dedup check). */
+    dedup?: boolean;
+    /** Similarity threshold for dedup. Default: 0.7 */
+    dedupThreshold?: number;
   } = {}): Promise<Memory> {
+    // Near-duplicate check
+    if (opts.dedup) {
+      const threshold = opts.dedupThreshold ?? 0.7;
+      const existing = await this.search(content, { limit: 1, minScore: threshold });
+      if (existing.length > 0) {
+        // Return the existing memory instead of creating a duplicate
+        const match = await this.get(existing[0].id);
+        if (match) return match;
+      }
+    }
+
     const id = opts.id ?? `${this.client.agentId}-${Date.now()}`;
     return this.client.request("PUT", `/Memory/${id}`, {
       id,
