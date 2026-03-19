@@ -52,7 +52,7 @@ function compositeScore(
 
 export class SemanticSearch extends Resource {
   async post(data: any) {
-    const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0 } = data || {};
+    const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since } = data || {};
     const subjectFilter = subjects
       ? new Set((subjects as string[]).map((s: string) => s.toLowerCase()))
       : subject
@@ -94,6 +94,33 @@ export class SemanticSearch extends Resource {
       }
     }
 
+    // ─── Temporal intent detection ────────────────────────────────────────────
+    // If the query implies a time window and no explicit `since` was provided,
+    // auto-detect and apply a recency boost.
+    let sinceDate: Date | null = since ? new Date(since) : null;
+    let temporalBoost = 1.0;
+    if (q && !sinceDate) {
+      const lq = String(q).toLowerCase();
+      if (/\btoday\b|\bthis morning\b|\bthis afternoon\b/.test(lq)) {
+        const d = new Date(); d.setHours(0, 0, 0, 0);
+        sinceDate = d;
+        temporalBoost = 1.5; // boost recent results for temporal queries
+      } else if (/\byesterday\b/.test(lq)) {
+        const d = new Date(); d.setDate(d.getDate() - 1); d.setHours(0, 0, 0, 0);
+        sinceDate = d;
+        temporalBoost = 1.3;
+      } else if (/\bthis week\b|\blast few days\b/.test(lq)) {
+        sinceDate = new Date(Date.now() - 7 * 24 * 3600_000);
+        temporalBoost = 1.2;
+      } else if (/\blast week\b/.test(lq)) {
+        sinceDate = new Date(Date.now() - 14 * 24 * 3600_000);
+        temporalBoost = 1.1;
+      } else if (/\brecently\b|\blately\b/.test(lq)) {
+        sinceDate = new Date(Date.now() - 3 * 24 * 3600_000);
+        temporalBoost = 1.3;
+      }
+    }
+
     const results: any[] = [];
 
     // Iterate ALL memories, filter by agent ID set
@@ -103,10 +130,12 @@ export class SemanticSearch extends Resource {
         if (record.visibility !== "office") continue;
       }
 
-      if (record.archived === true) continue; // soft-deleted — excluded from search by default
+      if (record.archived === true) continue;
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
       if (tag && !(record.tags || []).includes(tag)) continue;
       if (subjectFilter && record.subject && !subjectFilter.has(String(record.subject).toLowerCase())) continue;
+      // Time window filter
+      if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
 
       let semanticScore = 0;
       let keywordHit = false;
@@ -122,8 +151,9 @@ export class SemanticSearch extends Resource {
       const rawScore = semanticScore + (keywordHit ? 0.05 : 0);
       if (q && rawScore === 0) continue;
 
-      // Apply composite scoring (temporal decay + durability + retrieval boost)
-      const finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
+      // Apply composite scoring (temporal decay + durability + retrieval boost + temporal intent)
+      let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
+      if (temporalBoost > 1.0) finalScore *= temporalBoost;
 
       const { embedding, ...rest } = record;
       results.push({
