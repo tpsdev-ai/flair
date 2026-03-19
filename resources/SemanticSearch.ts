@@ -52,7 +52,7 @@ function compositeScore(
 
 export class SemanticSearch extends Resource {
   async post(data: any) {
-    const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite" } = data || {};
+    const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0 } = data || {};
     const subjectFilter = subjects
       ? new Set((subjects as string[]).map((s: string) => s.toLowerCase()))
       : subject
@@ -108,13 +108,18 @@ export class SemanticSearch extends Resource {
       if (tag && !(record.tags || []).includes(tag)) continue;
       if (subjectFilter && record.subject && !subjectFilter.has(String(record.subject).toLowerCase())) continue;
 
-      let rawScore = 0;
+      let semanticScore = 0;
+      let keywordHit = false;
       if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
-        rawScore += 0.5;
+        keywordHit = true;
       }
       if (qEmb && record.embedding && qEmb.length === record.embedding.length) {
-        rawScore += cosineSimilarity(qEmb, record.embedding);
+        semanticScore = cosineSimilarity(qEmb, record.embedding);
       }
+      // Keyword match is a small tiebreaker (5%), not a primary signal.
+      // This prevents weak semantic matches from ranking high just because
+      // a query word appears in the content.
+      const rawScore = semanticScore + (keywordHit ? 0.05 : 0);
       if (q && rawScore === 0) continue;
 
       // Apply composite scoring (temporal decay + durability + retrieval boost)
@@ -137,6 +142,11 @@ export class SemanticSearch extends Resource {
         if (r.supersedes) supersededIds.add(r.supersedes);
       }
       filteredResults = results.filter((r: any) => !supersededIds.has(r.id));
+    }
+
+    // Apply minimum score filter
+    if (minScore > 0) {
+      filteredResults = filteredResults.filter((r: any) => r._score >= minScore);
     }
 
     filteredResults.sort((a: any, b: any) => b._score - a._score);
