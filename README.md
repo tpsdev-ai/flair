@@ -72,7 +72,7 @@ One Flair instance serves any number of agents. Each agent has its own keys, mem
 ## Quick Start
 
 ### Prerequisites
-- [Node.js 20+](https://nodejs.org/) (24+ recommended)
+- [Node.js 22+](https://nodejs.org/)
 
 ### Install & Run
 
@@ -92,44 +92,120 @@ flair status
 
 That's it. Your agent now has identity and memory.
 
-### Use with OpenClaw
+## Integration
+
+Flair works with any agent runtime. Pick the path that fits yours.
+
+### Standalone (Flair CLI)
+
+Use the `flair` CLI directly from any agent that can run shell commands.
+
+```bash
+# Write a memory
+flair memory add --agent mybot --content "learned something important"
+
+# Search by meaning
+flair memory search --agent mybot --q "that important thing"
+
+# Set personality
+flair soul set --agent mybot --key role --value "Security reviewer"
+
+# Cold-start bootstrap (soul + recent memories)
+flair bootstrap --agent mybot --max-tokens 4000
+
+# Backup / restore
+flair backup --admin-pass "$FLAIR_ADMIN_PASS"
+flair restore ./backup.json --admin-pass "$FLAIR_ADMIN_PASS"
+```
+
+### OpenClaw
+
+One command. Zero config.
 
 ```bash
 openclaw plugins install @tpsdev-ai/openclaw-flair
 ```
 
-Zero config. The plugin auto-detects your agent identity from Flair keys and starts persisting memory across sessions. Search by meaning, not keywords.
+The plugin auto-detects your agent identity, provides `memory_store`/`memory_recall`/`memory_get` tools, and injects relevant memories at session start. See the [plugin README](plugins/openclaw-flair/README.md) for details.
 
-### Use the CLI directly
+### Claude Code / Codex / Cursor
 
-```bash
-# Write a memory
-flair memory add --agent mybot --content "Harper v5 sandbox blocks bare imports"
+Add a snippet to your `CLAUDE.md` (or `AGENTS.md`, `.codex/instructions.md`, etc.):
 
-# Search by meaning, not keywords
-flair memory search --agent mybot --q "native module loading issues"
+```markdown
+## Memory
 
-# Set personality
-flair soul set --agent mybot --key role --value "Security reviewer, meticulous and skeptical"
+You have persistent memory via Flair. Use it.
 
-# Back up everything
-flair backup --admin-pass "$FLAIR_ADMIN_PASS"
+### On session start
+Run: `flair bootstrap --agent mybot --max-tokens 4000`
+This returns your soul + recent memories. Read it — that's your context.
 
-# Restore from backup
-flair restore ./flair-backup-2026-03-15.json --admin-pass "$FLAIR_ADMIN_PASS"
+### During work
+- Remember something: `flair memory add --agent mybot --content "what you learned"`
+- Search memory: `flair memory search --agent mybot --q "your query"`
+- Store a lesson: `flair memory add --agent mybot --content "lesson" --type lesson --durability persistent`
+
+### Rules
+- Bootstrap FIRST, before doing anything else
+- Store lessons and decisions immediately — don't wait
+- If you learn something that should survive restarts, write it to Flair
 ```
 
-### Cold Start Bootstrap
+### JavaScript / TypeScript (Client Library)
 
-Agents can pull their full context on startup via the `BootstrapMemories` endpoint:
+For custom integrations, use the lightweight client — no Harper, no embeddings, just HTTP + auth:
 
 ```bash
-curl -H "Authorization: TPS-Ed25519 ..." \
+npm install @tpsdev-ai/flair-client
+```
+
+```typescript
+import { FlairClient } from '@tpsdev-ai/flair-client'
+
+const flair = new FlairClient({
+  url: 'http://localhost:9926',  // or remote: https://flair.example.com
+  agentId: 'mybot',
+  // key auto-resolved from ~/.flair/keys/mybot.key
+})
+
+// Write a memory
+await flair.memory.write('Harper v5 sandbox blocks bare imports')
+
+// Search by meaning
+const results = await flair.memory.search('native module loading')
+
+// Cold-start bootstrap
+const ctx = await flair.bootstrap({ maxTokens: 4000 })
+
+// Set personality
+await flair.soul.set('role', 'Security reviewer')
+```
+
+See the [client README](packages/flair-client/README.md) for the full API.
+
+### HTTP API (Any Language)
+
+Flair is a pure HTTP API. Use it from Python, Go, Rust, shell scripts — anything that can make HTTP requests and sign with Ed25519.
+
+```bash
+# Search memories
+curl -H "Authorization: TPS-Ed25519 mybot:$TS:$NONCE:$SIG" \
+  -X POST http://localhost:9926/SemanticSearch \
+  -d '{"agentId": "mybot", "q": "deployment procedure", "limit": 5}'
+
+# Write a memory
+curl -H "Authorization: TPS-Ed25519 mybot:$TS:$NONCE:$SIG" \
+  -X PUT http://localhost:9926/Memory/mybot-123 \
+  -d '{"id": "mybot-123", "agentId": "mybot", "content": "...", "durability": "standard"}'
+
+# Bootstrap (soul + recent memories)
+curl -H "Authorization: TPS-Ed25519 mybot:$TS:$NONCE:$SIG" \
   -X POST http://localhost:9926/BootstrapMemories \
   -d '{"agentId": "mybot", "maxTokens": 4000}'
 ```
 
-Returns soul + recent memories + relevant context as a formatted block. Bounded context regardless of total memory size.
+Auth is Ed25519 — sign `agentId:timestamp:nonce:METHOD:/path` with your private key. See [SECURITY.md](SECURITY.md) for the full protocol.
 
 ## Architecture
 
