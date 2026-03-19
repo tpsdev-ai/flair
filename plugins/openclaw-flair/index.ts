@@ -87,13 +87,19 @@ async function syncWorkspaceToFlair(
 
 // ─── Auto-capture helpers ─────────────────────────────────────────────────────
 
+// Auto-capture triggers — conservative patterns that indicate genuinely
+// important context, not casual conversation. The LLM has memory_store
+// for explicit saves; auto-capture is a safety net for things it misses.
 const CAPTURE_TRIGGERS = [
-  /\b(remember|note that|important:|keep in mind|don't forget)\b/i,
-  /\b(preference|prefer|always|never|my name is|i am|i'm)\b/i,
-  /\b(decided|agreed|confirmed|finalized)\b/i,
+  /\b(remember this|note for future|important lesson|key decision|for the record)\b/i,
+  /\b(my name is|call me|i go by)\b/i,
+  /\b(we decided|final decision|agreed to|commitment:)\b/i,
 ];
 
+const MIN_CAPTURE_LENGTH = 30; // skip very short messages
+
 function shouldCapture(text: string): boolean {
+  if (text.length < MIN_CAPTURE_LENGTH) return false;
   return CAPTURE_TRIGGERS.some((re) => re.test(text));
 }
 
@@ -144,7 +150,7 @@ export default {
       api.logger.info("openclaw-flair: auto mode — agentId will be resolved from session context");
     }
     const maxRecall = cfg.maxRecallResults ?? DEFAULT_MAX_RECALL;
-    const autoCapture = cfg.autoCapture ?? true;
+    const autoCapture = cfg.autoCapture ?? false; // opt-in — trust the LLM to use memory_store
     const autoRecall = cfg.autoRecall ?? true;
 
     // Per-session agentId — set from config, env, or session context.
@@ -261,7 +267,7 @@ export default {
             const wasDeduped = result.id !== memId;
             return {
               content: [{ type: "text", text: wasDeduped
-                ? `Similar memory already exists (id: ${result.id})`
+                ? `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}`
                 : `Memory stored (id: ${memId})` }],
               details: { id: result.id, deduplicated: wasDeduped },
             };
