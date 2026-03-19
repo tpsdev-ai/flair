@@ -68,12 +68,24 @@ export class BootstrapMemories extends Resource {
     let memoriesIncluded = 0;
     let memoriesAvailable = 0;
 
-    // --- 1. Soul records (unconditional — not subject to token budget) ---
-    // Soul is who you are. It's not optional context to be trimmed.
-    // Skill assignments (key='skill-assignment') are separated into their own section.
+    // --- 1. Soul records (budgeted — prioritized by key importance) ---
+    // Soul is who you are, but we still need to respect token budgets.
+    // Workspace files (SOUL.md, AGENTS.md) can be massive — they're already
+    // injected by the runtime via workspace context, so we prioritize
+    // concise soul entries over full file dumps.
+    const SOUL_KEY_PRIORITY: Record<string, number> = {
+      role: 0, identity: 1, thinking: 2, communication_style: 3,
+      team: 4, ownership: 5, infrastructure: 6, "user-context": 7,
+      // Full workspace files — lowest priority (runtime already injects these)
+      soul: 90, "workspace-rules": 91,
+    };
+
     const skillAssignments: any[] = [];
+    const soulMaxTokens = Math.floor(maxTokens * 0.4); // 40% of budget for soul
     if (includeSoul) {
       let soulTokens = 0;
+      const soulEntries: { key: string; line: string; tokens: number; priority: number }[] = [];
+
       for await (const record of (databases as any).flair.Soul.search()) {
         if (record.agentId !== agentId) continue;
         if (record.key === "skill-assignment") {
@@ -81,11 +93,30 @@ export class BootstrapMemories extends Resource {
           continue;
         }
         const line = `**${record.key}:** ${record.value}`;
-        sections.soul.push(line);
-        soulTokens += estimateTokens(line);
+        const tokens = estimateTokens(line);
+        const priority = SOUL_KEY_PRIORITY[record.key] ?? 50;
+        soulEntries.push({ key: record.key, line, tokens, priority });
       }
-      // Soul tokens are tracked but don't reduce memory budget
-      tokenBudget = maxTokens; // memory budget is separate from soul
+
+      // Sort by priority (lower = more important)
+      soulEntries.sort((a, b) => a.priority - b.priority);
+
+      for (const entry of soulEntries) {
+        if (soulTokens + entry.tokens > soulMaxTokens) {
+          // Skip large entries that exceed budget — truncate or skip
+          if (entry.priority >= 90) continue; // skip full workspace files
+          // Truncate if it's important but too long
+          const maxChars = (soulMaxTokens - soulTokens) * 4;
+          if (maxChars > 100) {
+            const truncated = `**${entry.key}:** ${entry.line.slice(entry.key.length + 6, entry.key.length + 6 + maxChars)}…(truncated)`;
+            sections.soul.push(truncated);
+            soulTokens += estimateTokens(truncated);
+          }
+          continue;
+        }
+        sections.soul.push(entry.line);
+        soulTokens += entry.tokens;
+      }
     }
 
     // --- 1b. Skill assignments (ordered by priority, conflict detection) ---
