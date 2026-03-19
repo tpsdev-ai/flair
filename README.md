@@ -3,11 +3,11 @@
 [![CI](https://github.com/tpsdev-ai/flair/actions/workflows/test.yml/badge.svg)](https://github.com/tpsdev-ai/flair/actions/workflows/test.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-**Identity, memory, and soul for AI agents.**
+**Identity, memory, and soul for AI agents. Runs standalone or as part of a [TPS](https://tps.dev) office.**
 
 Agents forget everything between sessions. Flair gives them a persistent sense of self — who they are, what they know, how they think — backed by cryptographic identity and semantic search.
 
-Built on [Harper](https://github.com/HarperFast/harper). Single process. No sidecars. Zero external API calls for embeddings.
+Built on [Harper](https://harper.fast). Single process. No sidecars. Zero external API calls for embeddings.
 
 ## Why
 
