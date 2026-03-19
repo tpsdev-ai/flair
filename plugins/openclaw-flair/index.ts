@@ -147,11 +147,19 @@ export default {
     const autoCapture = cfg.autoCapture ?? true;
     const autoRecall = cfg.autoRecall ?? true;
 
+    // Per-session agentId — set from config, env, or session context.
+    // IMPORTANT: Only update from before_agent_start if it matches our configured agent,
+    // NOT from other agents' cron jobs sharing the same gateway.
     let currentAgentId: string | undefined = isAutoMode ? fallbackAgentId ?? undefined : cfg.agentId;
+    const configuredAgentId = cfg.agentId && cfg.agentId !== "auto" ? cfg.agentId : fallbackAgentId;
 
     api.on("before_agent_start", async (event: any, ctx: any) => {
       const eventAgentId = ctx?.agentId || (event as any).agentId;
-      if (eventAgentId) currentAgentId = eventAgentId;
+      // Only adopt the session agentId if we don't already have one configured,
+      // or if it matches our configured agent. Don't let kern's cron overwrite flint's agentId.
+      if (eventAgentId && (!configuredAgentId || eventAgentId === configuredAgentId)) {
+        currentAgentId = eventAgentId;
+      }
 
       if (eventAgentId) {
         try {
