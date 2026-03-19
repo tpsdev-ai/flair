@@ -48,8 +48,9 @@ export class FlairClient {
     this.keyResolved = true;
     const path = resolveKeyPath(this.agentId, this.keyPath);
     if (path) {
-      try { this.privateKey = loadPrivateKey(path); }
-      catch { /* key load failed, proceed unauthenticated */ }
+      // Key file exists — failure to parse is a hard error.
+      // Silent fallback to unauthenticated would be a security risk.
+      this.privateKey = loadPrivateKey(path);
     }
     return this.privateKey;
   }
