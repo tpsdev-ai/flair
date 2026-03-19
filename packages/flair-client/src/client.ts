@@ -117,20 +117,23 @@ class MemoryApi {
   }
 
   /** Search memories by meaning. */
-  async search(query: string, opts: { limit?: number } = {}): Promise<SearchResult[]> {
+  async search(query: string, opts: { limit?: number; minScore?: number } = {}): Promise<SearchResult[]> {
     const result = await this.client.request<{ results?: unknown[] }>(
       "POST", "/SemanticSearch",
       { agentId: this.client.agentId, q: query, limit: opts.limit ?? 5 },
     );
-    return (result.results ?? []).map((r: any) => ({
-      id: r.id ?? r.memory?.id ?? "",
-      content: r.content ?? r.memory?.content ?? "",
-      score: r.score ?? r.similarity ?? 0,
-      type: r.type ?? r.memory?.type,
-      durability: r.durability ?? r.memory?.durability,
-      tags: r.tags ?? r.memory?.tags,
-      createdAt: r.createdAt ?? r.memory?.createdAt,
-    }));
+    const minScore = opts.minScore ?? 0;
+    return (result.results ?? [])
+      .map((r: any) => ({
+        id: r.id ?? r.memory?.id ?? "",
+        content: r.content ?? r.memory?.content ?? "",
+        score: r._score ?? r.score ?? r.similarity ?? 0,
+        type: r.type ?? r.memory?.type,
+        durability: r.durability ?? r.memory?.durability,
+        tags: r.tags ?? r.memory?.tags,
+        createdAt: r.createdAt ?? r.memory?.createdAt,
+      }))
+      .filter((r) => r.score >= minScore);
   }
 
   /** Get a memory by ID. */
