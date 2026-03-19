@@ -23,7 +23,7 @@ Flair fixes that:
 
 ## How It Works
 
-Flair is a native [Harper v5](https://github.com/HarperFast/harper) application. Harper handles HTTP, persistence (RocksDB), and application logic in a single process.
+Flair is a native [Harper v5](https://harper.fast) application. Harper handles HTTP, persistence (RocksDB), and application logic in a single process.
 
 ```
 Agent ──[Ed25519-signed request]──▶ Flair (Harper)
@@ -95,19 +95,10 @@ That's it. Your agent now has identity and memory.
 ### Use with OpenClaw
 
 ```bash
-npm install @tpsdev-ai/openclaw-flair
+openclaw plugins install @tpsdev-ai/openclaw-flair
 ```
 
-Add to your `openclaw.json`:
-```json
-{
-  "memory": {
-    "provider": "@tpsdev-ai/openclaw-flair"
-  }
-}
-```
-
-Your agent will automatically remember things between sessions and recall them by meaning.
+Zero config. The plugin auto-detects your agent identity from Flair keys and starts persisting memory across sessions. Search by meaning, not keywords.
 
 ### Use the CLI directly
 
@@ -154,11 +145,11 @@ flair/
 │   ├── embeddings-provider.ts # In-process nomic embeddings
 │   ├── Memory.ts             # Durability enforcement + auto-embed
 │   ├── Soul.ts               # Permanent-by-default personality
-│   ├── MemorySearch.ts       # Hybrid semantic + keyword search
+│   ├── SemanticSearch.ts     # Hybrid semantic + keyword search
 │   ├── MemoryBootstrap.ts    # Cold start context assembly
 │   └── MemoryFeed.ts         # Real-time memory changes
 ├── plugins/
-│   └── openclaw-memory/       # @tpsdev-ai/openclaw-flair plugin
+│   └── openclaw-flair/        # @tpsdev-ai/openclaw-flair plugin
 └── SECURITY.md                # Threat model + auth documentation
 ```
 
@@ -219,9 +210,9 @@ Integration tests spin up a real Harper instance on a random port, run the test 
 
 ## Status
 
-> **Note:** Flair uses [Harper v5](https://github.com/HarperFast/harper), currently in beta. We run it in production daily and track upstream closely. Pin your Harper version.
+> **Note:** Flair uses [Harper v5](https://harper.fast), currently in beta. We run it in production daily and track upstream closely. Pin your Harper version.
 
-Flair is in active development and daily use. We dogfood it — the agents that build Flair use Flair for their own memory and identity. 7 agents, 150+ memories, running continuously since March 2026.
+Flair is in active development and daily use. We dogfood it — the agents that build Flair use Flair for their own memory and identity.
 
 **What works:**
 - ✅ Ed25519 agent identity and auth
