@@ -178,18 +178,27 @@ export class BootstrapMemories extends Resource {
       }
     }
 
-    // --- 3. Recent memories (last 24-48h, standard + persistent) ---
-    const sinceDate = since
-      ? new Date(since)
-      : new Date(Date.now() - 48 * 3600_000);
-    const recent = activeMemories
-      .filter(
-        (m) =>
-          m.durability !== "permanent" &&
-          m.createdAt &&
-          new Date(m.createdAt) >= sinceDate
-      )
+    // --- 3. Recent memories (adaptive window) ---
+    // Start with 48h. If nothing found, widen to 7d, then 30d.
+    // This prevents empty recent sections for agents that were idle.
+    const nonPermanent = activeMemories
+      .filter((m) => m.durability !== "permanent" && m.createdAt)
       .sort((a: any, b: any) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+
+    let effectiveSince: Date;
+    if (since) {
+      effectiveSince = new Date(since);
+    } else {
+      const windows = [48 * 3600_000, 7 * 24 * 3600_000, 30 * 24 * 3600_000];
+      effectiveSince = new Date(Date.now() - windows[0]);
+      for (const w of windows) {
+        effectiveSince = new Date(Date.now() - w);
+        const count = nonPermanent.filter((m) => new Date(m.createdAt!) >= effectiveSince).length;
+        if (count >= 3) break; // found enough recent memories
+      }
+    }
+
+    const recent = nonPermanent.filter((m) => new Date(m.createdAt!) >= effectiveSince);
 
     // Budget: up to 40% of remaining for recent
     const recentBudget = Math.floor(tokenBudget * 0.4);
