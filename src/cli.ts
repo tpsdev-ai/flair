@@ -58,7 +58,7 @@ function b64url(bytes: Uint8Array): string {
 }
 
 async function api(method: string, path: string, body?: any): Promise<any> {
-  const base = process.env.FLAIR_URL || "http://127.0.0.1:8787";
+  const base = process.env.FLAIR_URL || "http://127.0.0.1:9926";
   const token = process.env.FLAIR_TOKEN;
   const res = await fetch(`${base}${path}`, {
     method,
@@ -73,15 +73,38 @@ async function api(method: string, path: string, body?: any): Promise<any> {
   return json;
 }
 
+/** Find the agent's private key file from standard locations. */
+function resolveKeyPath(agentId: string): string | null {
+  const candidates = [
+    process.env.FLAIR_KEY_DIR ? join(process.env.FLAIR_KEY_DIR, `${agentId}.key`) : null,
+    join(homedir(), ".flair", "keys", `${agentId}.key`),
+    join(homedir(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
+  ].filter(Boolean) as string[];
+  return candidates.find((p) => existsSync(p)) ?? null;
+}
+
 /** Build a TPS-Ed25519 auth header from a raw 32-byte seed on disk. */
 function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
-  const rawBuf = readFileSync(keyPath);
+  const raw = readFileSync(keyPath);
+  const pkcs8Header = Buffer.from("302e020100300506032b657004220420", "hex");
   let privKey: ReturnType<typeof createPrivateKey>;
-  if (rawBuf.length === 32) {
-    const pkcs8Header = Buffer.from("302e020100300506032b657004220420", "hex");
-    privKey = createPrivateKey({ key: Buffer.concat([pkcs8Header, rawBuf]), format: "der", type: "pkcs8" });
+  if (raw.length === 32) {
+    // Raw 32-byte seed
+    privKey = createPrivateKey({ key: Buffer.concat([pkcs8Header, raw]), format: "der", type: "pkcs8" });
   } else {
-    privKey = createPrivateKey(rawBuf);
+    // Try as base64-encoded PKCS8 DER (standard Flair key format)
+    const decoded = Buffer.from(raw.toString("utf-8").trim(), "base64");
+    if (decoded.length === 32) {
+      // Base64-encoded raw seed
+      privKey = createPrivateKey({ key: Buffer.concat([pkcs8Header, decoded]), format: "der", type: "pkcs8" });
+    } else {
+      // Full PKCS8 DER or PEM
+      try {
+        privKey = createPrivateKey({ key: decoded, format: "der", type: "pkcs8" });
+      } catch {
+        privKey = createPrivateKey(raw);
+      }
+    }
   }
   const ts = Date.now().toString();
   const nonce = randomUUID();
@@ -735,6 +758,90 @@ memory.command("list").requiredOption("--agent <id>").option("--tag <tag>")
   .action(async (opts) => {
     const q = new URLSearchParams({ agentId: opts.agent, ...(opts.tag ? { tag: opts.tag } : {}) }).toString();
     console.log(JSON.stringify(await api("GET", `/Memory?${q}`), null, 2));
+  });
+
+// ─── flair search (top-level shortcut) ───────────────────────────────────────
+
+program
+  .command("search <query>")
+  .description("Search memories by meaning (shortcut for memory search)")
+  .requiredOption("--agent <id>", "Agent ID")
+  .option("--limit <n>", "Max results", "5")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--key <path>", "Ed25519 private key path")
+  .action(async (query, opts) => {
+    try {
+      const baseUrl = opts.url || `http://127.0.0.1:${opts.port}`;
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      const keyPath = opts.key || resolveKeyPath(opts.agent);
+      if (keyPath) {
+        headers["authorization"] = buildEd25519Auth(opts.agent, "POST", "/SemanticSearch", keyPath);
+      }
+      const res = await fetch(`${baseUrl}/SemanticSearch`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ agentId: opts.agent, q: query, limit: parseInt(opts.limit, 10) }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const result = await res.json() as any;
+      const results = result.results || result || [];
+      if (!Array.isArray(results) || results.length === 0) {
+        console.log("No results found.");
+        return;
+      }
+      for (const r of results) {
+        const date = r.createdAt ? r.createdAt.slice(0, 10) : "";
+        const score = r._score ? `${(r._score * 100).toFixed(0)}%` : "";
+        const meta = [date, r.type, score].filter(Boolean).join(" · ");
+        console.log(`  ${r.content}`);
+        if (meta) console.log(`  (${meta})`);
+        console.log();
+      }
+    } catch (err: any) {
+      console.error(`Search failed: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+// ─── flair bootstrap ─────────────────────────────────────────────────────────
+
+program
+  .command("bootstrap")
+  .description("Cold-start context: get soul + recent memories as formatted text")
+  .requiredOption("--agent <id>", "Agent ID")
+  .option("--max-tokens <n>", "Maximum tokens in output", "4000")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--key <path>", "Ed25519 private key path")
+  .action(async (opts) => {
+    const baseUrl = opts.url || `http://127.0.0.1:${opts.port}`;
+    try {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      const keyPath = opts.key || resolveKeyPath(opts.agent);
+      if (keyPath) {
+        headers["authorization"] = buildEd25519Auth(opts.agent, "POST", "/BootstrapMemories", keyPath);
+      }
+      const res = await fetch(`${baseUrl}/BootstrapMemories`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ agentId: opts.agent, maxTokens: parseInt(opts.maxTokens, 10) }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`${res.status}: ${body}`);
+      }
+      const result = await res.json() as any;
+      if (result.context) {
+        console.log(result.context);
+      } else {
+        console.error("No context available.");
+        process.exit(1);
+      }
+    } catch (err: any) {
+      console.error(`Bootstrap failed: ${err.message}`);
+      process.exit(1);
+    }
   });
 
 const soul = program.command("soul").description("Manage agent soul entries");
