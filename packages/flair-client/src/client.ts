@@ -35,8 +35,8 @@ export class FlairClient {
   private timeoutMs: number;
 
   constructor(config: FlairClientConfig) {
-    this.url = (config.url ?? DEFAULT_URL).replace(/\/$/, "");
-    this.agentId = config.agentId;
+    this.url = (config.url ?? process.env.FLAIR_URL ?? DEFAULT_URL).replace(/\/$/, "");
+    this.agentId = config.agentId || process.env.FLAIR_AGENT_ID || "";
     this.keyPath = config.keyPath;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT;
     this.memory = new MemoryApi(this);

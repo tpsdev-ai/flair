@@ -256,12 +256,29 @@ export default {
           try {
             const client = getCurrentClient();
             const memId = `${client.agentId}-${Date.now()}`;
+            // If superseding an old memory, archive it
+            if (supersedes) {
+              try {
+                const old = await client.memory.get(supersedes);
+                if (old) {
+                  await client.request("PUT", `/Memory/${supersedes}`, {
+                    ...old,
+                    archived: true,
+                    archivedAt: new Date().toISOString(),
+                    supersededBy: memId,
+                  });
+                }
+              } catch {
+                // Old memory not found — continue with the write
+              }
+            }
+
             const result = await client.memory.write(text, {
               id: memId,
               tags,
               durability: durability as any,
               type: type as any,
-              dedup: true,
+              dedup: !supersedes, // skip dedup when explicitly superseding
               dedupThreshold: 0.7,
             });
             const wasDeduped = result.id !== memId;
