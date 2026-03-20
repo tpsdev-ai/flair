@@ -16,13 +16,26 @@ export default class MemoryMaintenance {
 
   async post(data: any) {
     const { databases }: any = this;
-    const { dryRun = false } = data || {};
+    const request = (this as any).request;
+    const { dryRun = false, agentId } = data || {};
+
+    // Scope to authenticated agent. Admin can pass agentId for system-wide
+    // maintenance; non-admin always scoped to their own agent.
+    const authAgent = request?.headers?.get?.("x-tps-agent");
+    const isAdmin = (request as any)?.tpsAgentIsAdmin === true;
+    const targetAgent = isAdmin && agentId ? agentId : authAgent;
+
+    if (!targetAgent && !isAdmin) {
+      return { error: "agentId required" };
+    }
 
     const now = new Date();
-    const stats = { expired: 0, archived: 0, total: 0, errors: 0 };
+    const stats = { expired: 0, archived: 0, total: 0, errors: 0, agent: targetAgent || "all" };
 
     try {
       for await (const record of (databases as any).flair.Memory.search()) {
+        // Skip records not belonging to target agent (unless admin running system-wide)
+        if (targetAgent && record.agentId !== targetAgent) continue;
         stats.total++;
 
         // 1. Delete expired memories
