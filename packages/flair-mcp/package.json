@@ -1,0 +1,50 @@
+{
+  "name": "@tpsdev-ai/flair-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Flair — persistent memory for Claude Code, Cursor, and any MCP client.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "flair-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc --noCheck",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@tpsdev-ai/flair-client": "^0.2.0",
+    "zod": "^4.3.6"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tpsdev-ai/flair.git",
+    "directory": "packages/flair-mcp"
+  },
+  "homepage": "https://tps.dev/#flair",
+  "keywords": [
+    "flair",
+    "mcp",
+    "claude",
+    "claude-code",
+    "cursor",
+    "memory",
+    "ai",
+    "agent"
+  ],
+  "devDependencies": {
+    "@types/node": "^24.11.0"
+  }
+}
