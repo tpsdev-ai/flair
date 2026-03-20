@@ -58,7 +58,17 @@ function b64url(bytes: Uint8Array): string {
 }
 
 async function api(method: string, path: string, body?: any): Promise<any> {
-  const base = process.env.FLAIR_URL || "http://127.0.0.1:9926";
+  // Resolve port: FLAIR_URL env > ~/.flair/config.yaml > default 9926
+  let defaultUrl = "http://127.0.0.1:9926";
+  try {
+    const configPath = join(homedir(), ".flair", "config.yaml");
+    if (existsSync(configPath)) {
+      const yaml = readFileSync(configPath, "utf-8");
+      const portMatch = yaml.match(/port:\s*(\d+)/);
+      if (portMatch) defaultUrl = `http://127.0.0.1:${portMatch[1]}`;
+    }
+  } catch { /* ignore config read errors */ }
+  const base = process.env.FLAIR_URL || defaultUrl;
   const token = process.env.FLAIR_TOKEN;
   const res = await fetch(`${base}${path}`, {
     method,
