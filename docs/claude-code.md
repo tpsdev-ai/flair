@@ -31,40 +31,51 @@ This generates an Ed25519 key pair at `~/.flair/keys/my-project.key` and registe
 
 Copy this into your project's `CLAUDE.md` (or `.claude/settings.md`, `AGENTS.md`, etc.):
 
-```markdown
-## Memory
+---
 
-You have persistent memory via Flair. Use it to remember context across sessions.
+> **Start of CLAUDE.md snippet** — copy everything between the lines.
 
-### On session start
-Run this FIRST, before doing anything else:
-```
-flair bootstrap --agent my-project --max-tokens 4000
-```
-Read the output — that's your soul and recent memories.
+    ## Memory
 
-### During work
-- **Remember something:** `flair memory add --agent my-project --content "what you learned"`
-- **Search memory:** `flair search "your query" --agent my-project`
-- **Store a lesson:** `flair memory add --agent my-project --content "lesson text" --type lesson --durability persistent`
-- **Store a decision:** `flair memory add --agent my-project --content "decision text" --type decision --durability persistent`
+    You have persistent memory via Flair. Use it to remember context across sessions.
 
-### What to remember
-- Lessons learned (bugs, workarounds, patterns)
-- Decisions made (why we chose X over Y)
-- Project-specific context (architecture, conventions, constraints)
-- User preferences (coding style, review standards)
+    ### On session start
 
-### What NOT to remember
-- Transient task details (what file am I editing right now)
-- Things already in the codebase (read the code instead)
-- Secrets or credentials (never store these in memory)
+    Run this FIRST, before doing anything else:
 
-### Durability levels
-- `persistent` — survives indefinitely. Use for lessons, decisions, preferences.
-- `standard` — default. Good for session context, observations.
-- `ephemeral` — auto-expires after 72h. Use for temporary notes.
-```
+        flair bootstrap --agent my-project --max-tokens 4000
+
+    Read the output — that's your soul and recent memories.
+
+    ### During work
+
+    - Remember something: `flair memory add --agent my-project --content "what you learned"`
+    - Search memory: `flair search "your query" --agent my-project`
+    - Store a lesson: `flair memory add --agent my-project --content "lesson text" --type lesson --durability persistent`
+    - Store a decision: `flair memory add --agent my-project --content "decision text" --type decision --durability persistent`
+
+    ### What to remember
+
+    - Lessons learned (bugs, workarounds, patterns)
+    - Decisions made (why we chose X over Y)
+    - Project-specific context (architecture, conventions, constraints)
+    - User preferences (coding style, review standards)
+
+    ### What NOT to remember
+
+    - Transient task details (what file am I editing right now)
+    - Things already in the codebase (read the code instead)
+    - Secrets or credentials (never store these in memory)
+
+    ### Durability levels
+
+    - persistent — survives indefinitely. Use for lessons, decisions, preferences.
+    - standard — default. Good for session context, observations.
+    - ephemeral — auto-expires after 72h. Use for temporary notes.
+
+> **End of CLAUDE.md snippet.**
+
+---
 
 That's it. Claude Code will now bootstrap context on start and store important things as it works.
 
@@ -84,13 +95,11 @@ Each project's `CLAUDE.md` uses its own agent ID. Memories are fully isolated be
 
 Claude Code subagents (spawned via `/run` or background tasks) can share the parent's memory:
 
-```markdown
-### Subagents
-Subagents share memory with the parent session. Use the same agent ID:
-FLAIR_AGENT_ID=my-project
+    ### Subagents
+    Subagents share memory with the parent session. Use the same agent ID:
+    FLAIR_AGENT_ID=my-project
 
-When spawning subagents, pass the agent ID so they can access shared context.
-```
+    When spawning subagents, pass the agent ID so they can access shared context.
 
 Or give subagents their own identity for isolation:
 
@@ -111,12 +120,10 @@ export FLAIR_URL=http://localhost:9926  # default, only needed if custom
 
 Then the CLAUDE.md simplifies to:
 
-```markdown
-## Memory
-- Bootstrap: `flair bootstrap`
-- Remember: `flair memory add --content "what you learned"`
-- Search: `flair search "your query"`
-```
+    ## Memory
+    - Bootstrap: `flair bootstrap`
+    - Remember: `flair memory add --content "what you learned"`
+    - Search: `flair search "your query"`
 
 ## Soul (Personality / Context)
 
