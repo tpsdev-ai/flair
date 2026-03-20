@@ -124,8 +124,8 @@ export default {
     const fallbackAgentId = resolveAgentId();
 
     function getClient(agentId?: string): FlairClient {
-      const id = agentId || cfg.agentId || fallbackAgentId;
-      if (!id || id === "auto") throw new Error("no agentId available — set agentId in plugin config, FLAIR_AGENT_ID env var, or ensure OpenClaw provides it via session context");
+      const id = agentId || (cfg.agentId && cfg.agentId !== "auto" ? cfg.agentId : null) || currentAgentId || fallbackAgentId;
+      if (!id || id === "auto") throw new Error("no agentId available — set agentId in plugin config, FLAIR_AGENT_ID env var, or ensure OpenClaw provides it via session context (before_agent_start)");
       let client = clientPool.get(id);
       if (!client) {
         client = new FlairClient({
@@ -153,17 +153,22 @@ export default {
     const autoCapture = cfg.autoCapture ?? false; // opt-in — trust the LLM to use memory_store
     const autoRecall = cfg.autoRecall ?? true;
 
-    // Per-session agentId — set from config, env, or session context.
-    // IMPORTANT: Only update from before_agent_start if it matches our configured agent,
-    // NOT from other agents' cron jobs sharing the same gateway.
-    let currentAgentId: string | undefined = isAutoMode ? fallbackAgentId ?? undefined : cfg.agentId;
-    const configuredAgentId = cfg.agentId && cfg.agentId !== "auto" ? cfg.agentId : fallbackAgentId;
+    // Per-session agentId — resolved from session context at runtime.
+    // In auto mode, each session gets its own agentId from before_agent_start.
+    // With explicit config, all sessions use the configured agentId.
+    let currentAgentId: string | undefined = isAutoMode ? (fallbackAgentId ?? undefined) : cfg.agentId;
+    const configuredAgentId = cfg.agentId && cfg.agentId !== "auto" ? cfg.agentId : null;
 
     api.on("before_agent_start", async (event: any, ctx: any) => {
       const eventAgentId = ctx?.agentId || (event as any).agentId;
-      // Only adopt the session agentId if we don't already have one configured,
-      // or if it matches our configured agent. Don't let kern's cron overwrite flint's agentId.
-      if (eventAgentId && (!configuredAgentId || eventAgentId === configuredAgentId)) {
+      if (!eventAgentId) return;
+
+      if (isAutoMode) {
+        // Auto mode: always adopt the session's agentId — each session is its own agent
+        currentAgentId = eventAgentId;
+        api.logger.info(`openclaw-flair: session agentId="${eventAgentId}"`);
+      } else if (eventAgentId === configuredAgentId) {
+        // Explicit mode: only accept matching agentId
         currentAgentId = eventAgentId;
       }
 
