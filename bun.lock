@@ -19,14 +19,29 @@
     },
     "packages/flair-client": {
       "name": "@tpsdev-ai/flair-client",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "devDependencies": {
         "typescript": "5.9.3",
       },
     },
+    "packages/flair-mcp": {
+      "name": "@tpsdev-ai/flair-mcp",
+      "version": "0.1.0",
+      "bin": {
+        "flair-mcp": "dist/index.js",
+      },
+      "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.12.1",
+        "@tpsdev-ai/flair-client": "^0.2.0",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "@types/node": "^24.11.0",
+      },
+    },
     "plugins/openclaw-flair": {
       "name": "@tpsdev-ai/openclaw-flair",
-      "version": "0.3.0",
+      "version": "0.4.1",
       "dependencies": {
         "@sinclair/typebox": "^0.34.0",
         "@tpsdev-ai/flair-client": "^0.1.0",
@@ -645,6 +660,8 @@
     "@tootallnate/quickjs-emscripten": ["@tootallnate/quickjs-emscripten@0.23.0", "", {}, "sha512-C5Mc6rdnsaJDjO3UpGW/CQTHtCKaYlScZTly4JIu97Jxo/odCiH0ITnDXSJPTOrEKk/ycSZ0AOgTmkDtkOsvIA=="],
 
     "@tpsdev-ai/flair-client": ["@tpsdev-ai/flair-client@workspace:packages/flair-client"],
+
+    "@tpsdev-ai/flair-mcp": ["@tpsdev-ai/flair-mcp@workspace:packages/flair-mcp"],
 
     "@tpsdev-ai/openclaw-flair": ["@tpsdev-ai/openclaw-flair@workspace:plugins/openclaw-flair"],
 
