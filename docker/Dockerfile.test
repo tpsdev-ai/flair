@@ -10,19 +10,21 @@ FROM node:24-slim AS base
 
 WORKDIR /app
 
-# Install bun (needed for bun install + bun run build)
+# Install bun (pinned to match bun.lock version — bump together)
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates && \
-    curl -fsSL https://bun.sh/install | bash && \
+    curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.10" && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/root/.bun/bin:$PATH"
 ENV BUN_INSTALL="/root/.bun"
 
-# Copy repo
+# Copy repo (include workspace packages so bun lockfile is consistent)
 COPY package.json bun.lock* tsconfig.json tsconfig.cli.json config.yaml ./
 COPY src/ ./src/
 COPY resources/ ./resources/
 COPY schemas/ ./schemas/
+COPY packages/ ./packages/
+COPY plugins/ ./plugins/
 
 # Install dependencies
 RUN bun install --frozen-lockfile
