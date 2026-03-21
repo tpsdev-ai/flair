@@ -1,100 +1,57 @@
 /**
  * embeddings-provider.ts
  *
- * Provides a singleton embedding context for Flair using node-llama-cpp
- * with the nomic-embed-text model (768-dim, Metal-accelerated on macOS).
+ * Thin wrapper around harper-fabric-embeddings for Flair resources.
+ * harper-fabric-embeddings handles loading and running the embedding model
+ * at the Harper sub-component level — we just delegate to its exported API.
  *
- * node-llama-cpp is an OPTIONAL dependency — on Linux or platforms without
- * Metal/CUDA support, this gracefully returns null and semantic search
- * falls back to keyword matching.
- *
- * Uses process-level global to ensure only one llama instance exists,
- * surviving Harper's VM sandbox and hot-reload cycles.
+ * On platforms where the native binary isn't available, getEmbedding()
+ * returns null and semantic search falls back to keyword matching.
  */
 
-const SINGLETON_KEY = "__flair_hfe_021__";
-const MODEL_FILE = "nomic-embed-text-v1.5.Q4_K_M.gguf";
+import * as hfe from "harper-fabric-embeddings";
 
-interface EmbeddingContext {
-  getEmbeddingFor(text: string): Promise<{ vector: number[] }>;
+const SINGLETON_KEY = "__flair_hfe_provider_v1__";
+
+interface ProviderState {
+  initialized: boolean;
+  available: boolean;
 }
 
-async function initEmbeddings(): Promise<EmbeddingContext | null> {
-  // Return existing singleton if available
-  const existing = (globalThis as any)[SINGLETON_KEY];
-  if (existing) return existing;
-
-  try {
-    // node-llama-cpp is optional — may not be installed on Linux
-    let getLlama: any;
-    try {
-      const dynamicImport = new Function("url", "return import(url)");
-      ({ getLlama } = await dynamicImport("node-llama-cpp"));
-    } catch {
-      console.log("[embeddings] node-llama-cpp not available on this platform — local embeddings disabled");
-      return null;
-    }
-
-    const llama = await getLlama();
-
-    // Find model file in the package directory
-    const { resolve, dirname, join } = await import("node:path");
-    const { existsSync } = await import("node:fs");
-    const { fileURLToPath } = await import("node:url");
-
-    let modelDir: string;
-    try {
-      modelDir = dirname(fileURLToPath(import.meta.url));
-    } catch {
-      modelDir = __dirname;
-    }
-
-    // Search common locations for the model file
-    const candidates = [
-      join(modelDir, MODEL_FILE),
-      join(modelDir, "..", MODEL_FILE),
-      join(modelDir, "..", "models", MODEL_FILE),
-    ];
-    const modelPath = candidates.find(existsSync);
-    if (!modelPath) {
-      console.log(`[embeddings] model file ${MODEL_FILE} not found — local embeddings disabled`);
-      return null;
-    }
-
-    const model = await llama.loadModel({ modelPath });
-    const ctx = await model.createEmbeddingContext();
-
-    // Cache as process-level singleton
-    (globalThis as any)[SINGLETON_KEY] = ctx;
-    console.log(`[embeddings] loaded ${MODEL_FILE} (768-dim)`);
-    return ctx;
-  } catch (err: any) {
-    console.log(`[embeddings] init failed: ${err.message} — local embeddings disabled`);
-    return null;
+function getState(): ProviderState {
+  if (!(globalThis as any)[SINGLETON_KEY]) {
+    (globalThis as any)[SINGLETON_KEY] = { initialized: false, available: false };
   }
+  return (globalThis as any)[SINGLETON_KEY];
 }
 
-export async function embed(text: string): Promise<number[] | null> {
-  const ctx = await initEmbeddings();
-  if (!ctx) return null;
+export async function initEmbeddings(): Promise<void> {
+  const state = getState();
+  if (state.initialized) return;
   try {
-    const result = await ctx.getEmbeddingFor(text);
-    return result.vector;
+    await hfe.init({});
+    state.available = true;
+    console.log(`[embeddings] harper-fabric-embeddings ready (${hfe.dimensions()} dims)`);
+  } catch (err: any) {
+    console.log(`[embeddings] harper-fabric-embeddings unavailable: ${err.message}`);
+    state.available = false;
+  }
+  state.initialized = true;
+}
+
+export async function getEmbedding(text: string): Promise<number[] | null> {
+  const state = getState();
+  if (!state.initialized) await initEmbeddings();
+  if (!state.available) return null;
+  try {
+    return hfe.embed(text);
   } catch (err: any) {
     console.log(`[embeddings] embed failed: ${err.message}`);
     return null;
   }
 }
 
-/** Alias for embed() — backwards compatibility */
-export const getEmbedding = embed;
-
-/** Returns "local" when embeddings are available, "none" otherwise. */
 export function getMode(): "local" | "none" {
-  // Synchronously check if the singleton is already loaded
-  const existing = (globalThis as any)[SINGLETON_KEY];
-  return existing ? "local" : "none";
+  const state = getState();
+  return state.available ? "local" : "none";
 }
-
-/** Re-export initEmbeddings for callers that want eager initialisation. */
-export { initEmbeddings };
