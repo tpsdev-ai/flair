@@ -17,6 +17,7 @@ import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypt
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
 const DEFAULT_PORT = 9926;
+const DEFAULT_OPS_PORT = 9925;
 const DEFAULT_ADMIN_USER = "admin";
 const STARTUP_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
@@ -199,6 +200,7 @@ program
   .description("Bootstrap a local Flair (Harper) instance for an agent")
   .option("--agent-id <id>", "Agent ID to register", "local")
   .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (generated if omitted)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
@@ -206,7 +208,7 @@ program
   .action(async (opts) => {
     const agentId: string = opts.agentId;
     const httpPort = Number(opts.port);
-    const opsPort = httpPort + 1;
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     const dataDir: string = opts.dataDir ?? defaultDataDir();
 
@@ -330,7 +332,7 @@ agent
   .option("--ops-port <port>", "Harper operations API port")
   .action(async (id: string, opts) => {
     const httpPort = Number(opts.port);
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : httpPort + 1;
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     const adminPass: string | undefined = opts.adminPass;
     const adminUser = DEFAULT_ADMIN_USER;
@@ -386,7 +388,7 @@ agent
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .action(async (id: string, opts) => {
     const httpPort = Number(opts.port);
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : httpPort + 1;
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = DEFAULT_ADMIN_USER;
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
@@ -588,7 +590,7 @@ program
   .option("--keys-dir <dir>", "Directory for Ed25519 keys (for from-agent Ed25519 auth)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
     const httpPort = Number(opts.port);
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : httpPort + 1;
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = DEFAULT_ADMIN_USER;
     const scope: string = opts.scope ?? "read";
@@ -642,7 +644,7 @@ program
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
     const httpPort = Number(opts.port);
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : httpPort + 1;
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = DEFAULT_ADMIN_USER;
 
