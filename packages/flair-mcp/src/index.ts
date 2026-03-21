@@ -62,7 +62,8 @@ server.tool(
     const text = results
       .map((r, i) => {
         const date = r.createdAt ? r.createdAt.slice(0, 10) : "";
-        const meta = [date, r.type, r.durability].filter(Boolean).join(", ");
+        const idStr = r.id ? `id:${r.id}` : "";
+        const meta = [date, r.type, idStr].filter(Boolean).join(", ");
         return `${i + 1}. ${r.content}${meta ? ` (${meta})` : ""}`;
       })
       .join("\n");
@@ -88,7 +89,9 @@ server.tool(
       dedup: true,
       dedupThreshold: 0.7,
     });
-    const wasDeduped = !result.id?.startsWith(`${agentId}-`);
+    // Check if dedup returned an existing memory (different ID than what we generated)
+    const generatedPrefix = `${agentId}-`;
+    const wasDeduped = result.id && !result.id.startsWith(generatedPrefix);
     if (wasDeduped) {
       return { content: [{ type: "text", text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}` }] };
     }

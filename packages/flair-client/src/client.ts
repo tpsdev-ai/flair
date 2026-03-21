@@ -122,7 +122,7 @@ class MemoryApi {
     }
 
     const id = opts.id ?? `${this.client.agentId}-${Date.now()}`;
-    return this.client.request("PUT", `/Memory/${id}`, {
+    const record = {
       id,
       agentId: this.client.agentId,
       content,
@@ -131,7 +131,10 @@ class MemoryApi {
       tags: opts.tags ?? [],
       subject: opts.subject,
       createdAt: new Date().toISOString(),
-    });
+    };
+    await this.client.request("PUT", `/Memory/${id}`, record);
+    // Harper PUT returns {} — return the record we constructed
+    return record as Memory;
   }
 
   /** Search memories by meaning. */
