@@ -1,3 +1,8 @@
+# Docker From-Scratch Test
+#
+# Security: This workflow runs arbitrary code from the PR (Dockerfile + test script).
+# No secrets are used, but ensure "Require approval for first-time contributors"
+# is enabled in repo Settings → Actions → General to prevent abuse from fork PRs.
 name: Docker From-Scratch Test
 
 on:

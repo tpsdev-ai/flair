@@ -112,9 +112,37 @@ fi
 echo ""
 echo "[5/5] ✓ backup file valid: $BACKUP_FILE"
 
+# ── Step 6: test from non-repo directory (simulates real user) ────────────────
+echo ""
+echo "[6/7] Testing flair init from a different working directory..."
+
+# Kill previous Harper
+pkill -f "harper" 2>/dev/null || true
+sleep 2
+
+# Create a fresh home and run from /tmp (NOT the flair package dir)
+export HOME2="$(mktemp -d)"
+cd /tmp
+HOME="$HOME2" $FLAIR init \
+  --agent-id userbot \
+  --admin-pass "$ADMIN_PASS" \
+  --data-dir "$HOME2/.flair/data" \
+  --keys-dir "$HOME2/.flair/keys"
+
+echo "[6/7] ✓ init from /tmp succeeded (flairPackageDir resolved correctly)"
+
+# ── Step 7: verify agent add works from non-repo dir ──────────────────────────
+echo ""
+echo "[7/7] Testing agent add from /tmp..."
+HOME="$HOME2" $FLAIR agent add remotebot \
+  --admin-pass "$ADMIN_PASS" \
+  --keys-dir "$HOME2/.flair/keys"
+
+echo "[7/7] ✓ agent add from /tmp succeeded (ops API port correct)"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=============================="
-echo "✅ All 5 steps passed"
+echo "✅ All 7 steps passed"
 echo "   Agents in backup: $AGENT_COUNT"
 echo "=============================="
