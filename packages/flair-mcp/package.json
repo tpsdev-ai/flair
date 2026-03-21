@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/flair-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for Flair — persistent memory for Claude Code, Cursor, and any MCP client.",
   "type": "module",
   "main": "dist/index.js",

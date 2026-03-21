@@ -1,7 +1,7 @@
 {
   "name": "@tpsdev-ai/flair-client",
-  "version": "0.2.0",
-  "description": "Lightweight client for Flair \u2014 identity, memory, and soul for AI agents. Zero heavy dependencies.",
+  "version": "0.2.1",
+  "description": "Lightweight client for Flair — identity, memory, and soul for AI agents. Zero heavy dependencies.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
