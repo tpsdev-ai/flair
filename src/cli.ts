@@ -322,6 +322,10 @@ program
       console.log(`   ${adminPass}`);
     }
     console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
+    console.log(`\n   Claude Code: Add to your CLAUDE.md:`);
+    console.log(`     At the start of every session, run mcp__flair__bootstrap before responding.`);
+    console.log(`\n   MCP config (.mcp.json):`);
+    console.log(`     { "mcpServers": { "flair": { "command": "npx", "args": ["@tpsdev-ai/flair-mcp"], "env": { "FLAIR_AGENT_ID": "${agentId}" } } } }`);
   });
 
 // ─── flair agent ─────────────────────────────────────────────────────────────
