@@ -196,8 +196,15 @@ async function seedAgentViaOpsApi(
 
 // ─── Program ─────────────────────────────────────────────────────────────────
 
+// Read version from package.json at the package root
+const __pkgDir = join(import.meta.dirname ?? __dirname, "..");
+const __pkgVersion = (() => {
+  try { return JSON.parse(readFileSync(join(__pkgDir, "package.json"), "utf-8")).version; }
+  catch { return "unknown"; }
+})();
+
 const program = new Command();
-program.name("flair");
+program.name("flair").version(__pkgVersion, "-v, --version");
 
 // ─── flair init ──────────────────────────────────────────────────────────────
 
@@ -727,9 +734,49 @@ program
     const status = healthy ? "🟢 running" : "🔴 unreachable";
     console.log(`Flair status: ${status}`);
     console.log(`  URL:     ${baseUrl}`);
-    if (version) console.log(`  Version: ${version}`);
+    console.log(`  Flair:   v${__pkgVersion}`);
+    if (version) console.log(`  Harper:  ${version}`);
     if (agentCount !== null) console.log(`  Agents:  ${agentCount}`);
     if (!healthy) process.exit(1);
+  });
+
+// ─── flair upgrade ────────────────────────────────────────────────────────────
+
+program
+  .command("upgrade")
+  .description("Upgrade Flair and related packages to latest versions")
+  .action(async () => {
+    console.log("Checking for updates...\n");
+
+    const packages = [
+      "@tpsdev-ai/flair",
+      "@tpsdev-ai/flair-client",
+      "@tpsdev-ai/flair-mcp",
+    ];
+
+    for (const pkg of packages) {
+      try {
+        const res = await fetch(`https://registry.npmjs.org/${pkg}/latest`, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok) continue;
+        const data = await res.json() as { version?: string };
+        const latest = data.version ?? "unknown";
+
+        // Check installed version
+        let installed = "not installed";
+        try {
+          const { execSync } = await import("node:child_process");
+          installed = execSync(`npm list -g ${pkg} --depth=0 2>/dev/null | grep ${pkg} || echo "not installed"`, { encoding: "utf-8" }).trim();
+          const match = installed.match(/@(\d+\.\d+\.\d+)/);
+          installed = match ? match[1] : "not installed";
+        } catch { /* best effort */ }
+
+        const upToDate = installed === latest;
+        const icon = upToDate ? "✅" : "⬆️";
+        console.log(`  ${icon} ${pkg}: ${installed} → ${latest}${upToDate ? " (current)" : ""}`);
+      } catch { /* skip unavailable packages */ }
+    }
+
+    console.log("\nTo upgrade: npm install -g @tpsdev-ai/flair@latest");
   });
 
 // ─── Legacy identity/memory/soul commands (preserved) ────────────────────────
