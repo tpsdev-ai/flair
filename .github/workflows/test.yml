@@ -103,8 +103,8 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@480db559a14342288b67e54bd959dd52dc3ee68f # v3
         with:
           languages: javascript-typescript
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@480db559a14342288b67e54bd959dd52dc3ee68f # v3
