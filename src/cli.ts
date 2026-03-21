@@ -38,6 +38,12 @@ function pubKeyPath(agentId: string, keysDir: string): string {
   return join(keysDir, `${agentId}.pub`);
 }
 
+
+function flairPackageDir(): string {
+  // dist/cli.js → package root (one level up from dist/)
+  return join(import.meta.dirname ?? __dirname, "..");
+}
+
 function harperBin(): string | null {
   // Resolve relative to this file's location (dist/cli.js → ../node_modules/...)
   const candidates = [
@@ -252,7 +258,7 @@ program
         console.log("Installing Harper...");
         await new Promise<void>((resolve, reject) => {
           let output = "";
-          const install = spawn(process.execPath, [bin, "install"], { cwd: process.cwd(), env });
+          const install = spawn(process.execPath, [bin, "install"], { cwd: flairPackageDir(), env });
           install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
           install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
           install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
@@ -262,7 +268,7 @@ program
 
         // Start (detached)
         console.log(`Starting Harper on port ${httpPort}...`);
-        const proc = spawn(process.execPath, [bin, "dev", "."], { cwd: process.cwd(), env, detached: true, stdio: "ignore" });
+        const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
         proc.unref();
       }
 
