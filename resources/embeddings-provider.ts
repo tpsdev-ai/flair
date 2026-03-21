@@ -85,3 +85,16 @@ export async function embed(text: string): Promise<number[] | null> {
     return null;
   }
 }
+
+/** Alias for embed() — backwards compatibility */
+export const getEmbedding = embed;
+
+/** Returns "local" when embeddings are available, "none" otherwise. */
+export function getMode(): "local" | "none" {
+  // Synchronously check if the singleton is already loaded
+  const existing = (globalThis as any)[SINGLETON_KEY];
+  return existing ? "local" : "none";
+}
+
+/** Re-export initEmbeddings for callers that want eager initialisation. */
+export { initEmbeddings };
