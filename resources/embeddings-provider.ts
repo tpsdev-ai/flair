@@ -1,144 +1,100 @@
 /**
- * In-process embeddings via harper-fabric-embeddings (v0.2.1+).
+ * embeddings-provider.ts
  *
- * Uses process-level singleton for cross-thread model sharing.
- * Avoids dynamic imports inside Harper's VM sandbox by using
- * globalThis.__hfe_resolve__ set during module load.
+ * Provides a singleton embedding context for Flair using node-llama-cpp
+ * with the nomic-embed-text model (768-dim, Metal-accelerated on macOS).
+ *
+ * node-llama-cpp is an OPTIONAL dependency — on Linux or platforms without
+ * Metal/CUDA support, this gracefully returns null and semantic search
+ * falls back to keyword matching.
+ *
+ * Uses process-level global to ensure only one llama instance exists,
+ * surviving Harper's VM sandbox and hot-reload cycles.
  */
 
-const MAX_CHARS = 500;
-const MODELS_DIR = process.env.FLAIR_MODELS_DIR || "/tmp/flair-models";
 const SINGLETON_KEY = "__flair_hfe_021__";
-const QUEUE_KEY = "__flair_embed_queue_021__";
+const MODEL_FILE = "nomic-embed-text-v1.5.Q4_K_M.gguf";
 
-interface HfeSingleton {
-  hfe: any;
-  dims: number;
-  mode: "native" | "hash" | "none";
-  initPromise: Promise<void> | null;
+interface EmbeddingContext {
+  getEmbeddingFor(text: string): Promise<{ vector: number[] }>;
 }
 
-function getSingleton(): HfeSingleton {
-  if (!(process as any)[SINGLETON_KEY]) {
-    (process as any)[SINGLETON_KEY] = { hfe: null, dims: 0, mode: "none", initPromise: null };
-  }
-  return (process as any)[SINGLETON_KEY];
-}
-
-interface QueueState {
-  queue: Array<{ text: string; resolve: (v: number[] | null) => void }>;
-  processing: boolean;
-}
-
-function getQueue(): QueueState {
-  if (!(process as any)[QUEUE_KEY]) {
-    (process as any)[QUEUE_KEY] = { queue: [], processing: false };
-  }
-  return (process as any)[QUEUE_KEY];
-}
-
-// ─── Init ─────────────────────────────────────────────────────────────────────
-
-export async function initEmbeddings(): Promise<void> {
-  const s = getSingleton();
-  if (s.mode !== "none") return;
-  if (s.initPromise) { await s.initPromise; return; }
-  s.initPromise = doInit(s);
-  await s.initPromise;
-}
-
-async function doInit(s: HfeSingleton): Promise<void> {
-  // Resolve path at build time relative to this file's location
-  const hfePath = new URL(
-    "../../node_modules/harper-fabric-embeddings/dist/index.js",
-    import.meta.url
-  ).href;
+async function initEmbeddings(): Promise<EmbeddingContext | null> {
+  // Return existing singleton if available
+  const existing = (globalThis as any)[SINGLETON_KEY];
+  if (existing) return existing;
 
   try {
-    // Use globalThis.process to do a native dynamic import outside the
-    // VM sandbox's importModuleDynamically interception. The Function
-    // constructor creates code in the global scope, not the VM context.
-    const importFn = new Function("url", "return import(url)") as (url: string) => Promise<any>;
-    const mod = await importFn(hfePath);
-
-    if (typeof mod.init !== "function") {
-      throw new Error(`Module has no init(). Keys: ${Object.keys(mod)}`);
+    // node-llama-cpp is optional — may not be installed on Linux
+    let getLlama: any;
+    try {
+      const dynamicImport = new Function("url", "return import(url)");
+      ({ getLlama } = await dynamicImport("node-llama-cpp"));
+    } catch {
+      console.log("[embeddings] node-llama-cpp not available on this platform — local embeddings disabled");
+      return null;
     }
-    const result = mod.init({ modelsDir: MODELS_DIR, gpuLayers: 99 });
-    if (result?.then) await result;
 
-    s.hfe = mod;
-    s.dims = mod.dimensions();
-    s.mode = "native";
-    console.log(`[embeddings] Native in-process (v0.2.1): ${s.dims} dims`);
+    const llama = await getLlama();
+
+    // Find model file in the package directory
+    const { resolve, dirname, join } = await import("node:path");
+    const { existsSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+
+    let modelDir: string;
+    try {
+      modelDir = dirname(fileURLToPath(import.meta.url));
+    } catch {
+      modelDir = __dirname;
+    }
+
+    // Search common locations for the model file
+    const candidates = [
+      join(modelDir, MODEL_FILE),
+      join(modelDir, "..", MODEL_FILE),
+      join(modelDir, "..", "models", MODEL_FILE),
+    ];
+    const modelPath = candidates.find(existsSync);
+    if (!modelPath) {
+      console.log(`[embeddings] model file ${MODEL_FILE} not found — local embeddings disabled`);
+      return null;
+    }
+
+    const model = await llama.loadModel({ modelPath });
+    const ctx = await model.createEmbeddingContext();
+
+    // Cache as process-level singleton
+    (globalThis as any)[SINGLETON_KEY] = ctx;
+    console.log(`[embeddings] loaded ${MODEL_FILE} (768-dim)`);
+    return ctx;
   } catch (err: any) {
-    console.error(`[embeddings] Native load failed: ${err.message}`);
-    // Fallback to hash-based embeddings
-    try {
-      s.dims = 512; s.mode = "hash";
-      console.log(`[embeddings] Fallback: 512 dims (hash-based)`);
-    } catch (e2: any) {
-      console.error(`[embeddings] All embedding modes failed: ${e2.message}`);
-    }
+    console.log(`[embeddings] init failed: ${err.message} — local embeddings disabled`);
+    return null;
   }
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-export function getDimensions(): number { return getSingleton().dims; }
-export function getMode(): string { return getSingleton().mode; }
-
-export async function getEmbedding(text: string): Promise<number[] | null> {
-  const s = getSingleton();
-  if (s.mode === "none") await initEmbeddings();
-
-  return new Promise<number[] | null>((resolve) => {
-    const q = getQueue();
-    q.queue.push({ text, resolve });
-    processQueue(q);
-  });
-}
-
-export function getQueueLength(): number { return getQueue().queue.length; }
-
-async function processQueue(q: QueueState): Promise<void> {
-  if (q.processing) return;
-  q.processing = true;
-  while (q.queue.length > 0) {
-    const job = q.queue.shift()!;
-    try {
-      const s = getSingleton();
-      if (s.mode === "native" && s.hfe) {
-        job.resolve(await s.hfe.embed(job.text.slice(0, MAX_CHARS)));
-      } else if (s.mode === "hash") {
-        // Hash fallback doesn't need the module
-        const text = job.text.slice(0, MAX_CHARS);
-        job.resolve(fallbackEmbed(text));
-      } else {
-        job.resolve(null);
-      }
-    } catch (err: any) {
-      console.error(`[embeddings] embed failed: ${err.message}`);
-      job.resolve(null);
-    }
+export async function embed(text: string): Promise<number[] | null> {
+  const ctx = await initEmbeddings();
+  if (!ctx) return null;
+  try {
+    const result = await ctx.getEmbeddingFor(text);
+    return result.vector;
+  } catch (err: any) {
+    console.log(`[embeddings] embed failed: ${err.message}`);
+    return null;
   }
-  q.processing = false;
 }
 
-// ─── Hash Fallback ────────────────────────────────────────────────────────────
+/** Alias for embed() — backwards compatibility */
+export const getEmbedding = embed;
 
-function fallbackEmbed(text: string): number[] {
-  const dims = 512;
-  const vec = new Array(dims).fill(0);
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    vec[i % dims] += code / 128;
-    vec[(i * 7 + 3) % dims] += Math.sin(code * 0.1) * 0.5;
-  }
-  // Normalize
-  let mag = 0;
-  for (let i = 0; i < dims; i++) mag += vec[i] * vec[i];
-  mag = Math.sqrt(mag) || 1;
-  for (let i = 0; i < dims; i++) vec[i] /= mag;
-  return vec;
+/** Returns "local" when embeddings are available, "none" otherwise. */
+export function getMode(): "local" | "none" {
+  // Synchronously check if the singleton is already loaded
+  const existing = (globalThis as any)[SINGLETON_KEY];
+  return existing ? "local" : "none";
 }
+
+/** Re-export initEmbeddings for callers that want eager initialisation. */
+export { initEmbeddings };
