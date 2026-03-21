@@ -10,7 +10,7 @@ import {
   renameSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypto";
 
@@ -1097,7 +1097,7 @@ program
   .command("export <agent-id>")
   .description("Export a single agent's identity (soul + memories) to a portable file")
   .option("--output <path>", "Output file path")
-  .option("--include-key", "Include private key in export (encrypted)")
+  .option("--include-key", "Include private key in export (UNENCRYPTED — keep the output file secure)")
   .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
@@ -1163,15 +1163,20 @@ program
       ...(privateKey ? { privateKey } : {}),
     };
 
-    const outputPath = opts.output ?? join(homedir(), ".flair", "exports", `${agentId}-${Date.now()}.json`);
+    const rawOutputPath = opts.output ?? join(homedir(), ".flair", "exports", `${agentId}-${Date.now()}.json`);
+    // Canonicalize to prevent path traversal (e.g. ../../etc/passwd)
+    const outputPath = resolvePath(rawOutputPath);
     mkdirSync(join(outputPath, ".."), { recursive: true });
-    writeFileSync(outputPath, JSON.stringify(exportData, null, 2));
+    const fileMode = privateKey ? 0o600 : 0o644;
+    writeFileSync(outputPath, JSON.stringify(exportData, null, 2), { mode: fileMode });
+    if (privateKey) chmodSync(outputPath, 0o600); // enforce even if umask is permissive
 
     console.log(`\n✅ Agent '${agentId}' exported`);
     console.log(`   Memories: ${memories.length}`);
     console.log(`   Souls:    ${souls.length}`);
     console.log(`   Grants:   ${grants.length}`);
-    console.log(`   Key:      ${privateKey ? "included" : "not included"}`);
+    console.log(`   Key:      ${privateKey ? "included (UNENCRYPTED — protect this file)" : "not included"}`);
+    console.log(`   Mode:     ${fileMode.toString(8)} (${privateKey ? "owner-only" : "standard"})`);
     console.log(`   Output:   ${outputPath}`);
   });
 
