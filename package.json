@@ -1,7 +1,7 @@
 {
   "name": "@tpsdev-ai/flair",
-  "version": "0.3.1",
-  "description": "Identity, memory, and soul for AI agents. Cryptographic identity (Ed25519), semantic memory with local embeddings, and persistent personality \u2014 all in a single process.",
+  "version": "0.3.3",
+  "description": "Identity, memory, and soul for AI agents. Cryptographic identity (Ed25519), semantic memory with local embeddings, and persistent personality — all in a single process.",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
