@@ -10,7 +10,7 @@ import {
   renameSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypto";
 
@@ -1136,6 +1136,219 @@ program
     console.log(`   Agents restored:   ${agentCount}/${agents.length}`);
     console.log(`   Memories restored: ${memoryCount}/${memories.length}`);
     console.log(`   Souls restored:    ${soulCount}/${souls.length}`);
+  });
+
+// ─── flair export ────────────────────────────────────────────────────────────
+
+program
+  .command("export <agent-id>")
+  .description("Export a single agent's identity (soul + memories) to a portable file")
+  .option("--output <path>", "Output file path")
+  .option("--include-key", "Include private key in export (UNENCRYPTED — keep the output file secure)")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
+  .action(async (agentId, opts) => {
+    const baseUrl: string = opts.url ?? `http://127.0.0.1:${opts.port}`;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass) { console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required"); process.exit(1); }
+
+    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    async function adminGet(path: string): Promise<any> {
+      const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: auth }, signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) throw new Error(`GET ${path} failed (${res.status})`);
+      return res.json();
+    }
+
+    console.log(`Exporting agent '${agentId}'...`);
+
+    // Fetch agent record
+    let agent: any;
+    try { agent = await adminGet(`/Agent/${agentId}`); }
+    catch { console.error(`Agent '${agentId}' not found`); process.exit(1); }
+
+    // Fetch memories
+    const allMemories: any[] = await adminGet("/Memory/").catch(() => []);
+    const memories = Array.isArray(allMemories)
+      ? allMemories.filter((m: any) => m.agentId === agentId)
+      : [];
+
+    // Fetch souls
+    const allSouls: any[] = await adminGet("/Soul/").catch(() => []);
+    const souls = Array.isArray(allSouls)
+      ? allSouls.filter((s: any) => s.agentId === agentId)
+      : [];
+
+    // Fetch grants
+    const allGrants: any[] = await adminGet("/MemoryGrant/").catch(() => []);
+    const grants = Array.isArray(allGrants)
+      ? allGrants.filter((g: any) => g.ownerId === agentId || g.granteeId === agentId)
+      : [];
+
+    // Optionally include private key
+    let privateKey: string | undefined;
+    if (opts.includeKey) {
+      const keyPath = privKeyPath(agentId, opts.keysDir);
+      if (existsSync(keyPath)) {
+        privateKey = readFileSync(keyPath, "utf-8").trim();
+        console.log("  Including private key (base64-encoded in export)");
+      } else {
+        console.warn(`  Warning: key file not found at ${keyPath} — skipping key export`);
+      }
+    }
+
+    const exportData = {
+      version: 1,
+      type: "agent-export",
+      exportedAt: new Date().toISOString(),
+      source: baseUrl,
+      agent,
+      memories,
+      souls,
+      grants,
+      ...(privateKey ? { privateKey } : {}),
+    };
+
+    const rawOutputPath = opts.output ?? join(homedir(), ".flair", "exports", `${agentId}-${Date.now()}.json`);
+    // Canonicalize to prevent path traversal (e.g. ../../etc/passwd)
+    const outputPath = resolvePath(rawOutputPath);
+    mkdirSync(join(outputPath, ".."), { recursive: true });
+    const fileMode = privateKey ? 0o600 : 0o644;
+    writeFileSync(outputPath, JSON.stringify(exportData, null, 2), { mode: fileMode });
+    if (privateKey) chmodSync(outputPath, 0o600); // enforce even if umask is permissive
+
+    console.log(`\n✅ Agent '${agentId}' exported`);
+    console.log(`   Memories: ${memories.length}`);
+    console.log(`   Souls:    ${souls.length}`);
+    console.log(`   Grants:   ${grants.length}`);
+    console.log(`   Key:      ${privateKey ? "included (UNENCRYPTED — protect this file)" : "not included"}`);
+    console.log(`   Mode:     ${fileMode.toString(8)} (${privateKey ? "owner-only" : "standard"})`);
+    console.log(`   Output:   ${outputPath}`);
+  });
+
+// ─── flair import ────────────────────────────────────────────────────────────
+
+program
+  .command("import <path>")
+  .description("Import an agent from an export file into this Flair instance")
+  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
+  .action(async (importPath, opts) => {
+    const baseUrl: string = opts.url ?? `http://127.0.0.1:${opts.port}`;
+    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass) { console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required"); process.exit(1); }
+
+    if (!existsSync(importPath)) { console.error(`File not found: ${importPath}`); process.exit(1); }
+    const data = JSON.parse(readFileSync(importPath, "utf-8"));
+
+    if (data.type !== "agent-export") {
+      console.error("Error: not an agent export file. Use 'flair restore' for full backups.");
+      process.exit(1);
+    }
+
+    const agentId = data.agent?.id;
+    if (!agentId) { console.error("Error: no agent ID in export"); process.exit(1); }
+
+    console.log(`Importing agent '${agentId}'...`);
+
+    // Register agent (generates new key if export doesn't include one)
+    const keysDir = opts.keysDir ?? defaultKeysDir();
+    mkdirSync(keysDir, { recursive: true });
+    const privPath = privKeyPath(agentId, keysDir);
+
+    if (data.privateKey && !existsSync(privPath)) {
+      // Restore exported key
+      writeFileSync(privPath, data.privateKey);
+      chmodSync(privPath, 0o600);
+      console.log(`  Key restored: ${privPath}`);
+    } else if (!existsSync(privPath)) {
+      // Generate new key
+      const kp = nacl.sign.keyPair();
+      writeFileSync(privPath, Buffer.from(kp.secretKey.slice(0, 32)));
+      chmodSync(privPath, 0o600);
+      console.log(`  New key generated: ${privPath}`);
+    } else {
+      console.log(`  Using existing key: ${privPath}`);
+    }
+
+    // Read public key for registration
+    const seed = readFileSync(privPath);
+    const decodedSeed = seed.length === 32 ? seed : Buffer.from(seed.toString("utf-8").trim(), "base64");
+    const pubKey = decodedSeed.length === 32
+      ? nacl.sign.keyPair.fromSeed(new Uint8Array(decodedSeed)).publicKey
+      : nacl.sign.keyPair.fromSeed(new Uint8Array(decodedSeed.subarray(0, 32))).publicKey;
+    const pubKeyB64url = b64url(pubKey);
+
+    // Register agent via ops API
+    await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, DEFAULT_ADMIN_USER, adminPass);
+    console.log(`  Agent registered`);
+
+    // Restore memories
+    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    let memCount = 0;
+    for (const mem of data.memories ?? []) {
+      try {
+        await fetch(`${baseUrl}/Memory/${mem.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify(mem),
+        });
+        memCount++;
+      } catch { /* skip failures */ }
+    }
+
+    // Restore souls
+    let soulCount = 0;
+    for (const soul of data.souls ?? []) {
+      try {
+        await fetch(`${baseUrl}/Soul/${encodeURIComponent(soul.id)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify(soul),
+        });
+        soulCount++;
+      } catch { /* skip failures */ }
+    }
+
+    console.log(`\n✅ Agent '${agentId}' imported`);
+    console.log(`   Memories: ${memCount}/${(data.memories ?? []).length}`);
+    console.log(`   Souls:    ${soulCount}/${(data.souls ?? []).length}`);
+    console.log(`   Key:      ${privPath}`);
+  });
+
+// ─── flair backup inspect ────────────────────────────────────────────────────
+
+program
+  .command("inspect <path>")
+  .description("Show contents of a backup or export file")
+  .action(async (filePath) => {
+    if (!existsSync(filePath)) { console.error(`File not found: ${filePath}`); process.exit(1); }
+    const data = JSON.parse(readFileSync(filePath, "utf-8"));
+
+    console.log(`File: ${filePath}`);
+    console.log(`Type: ${data.type ?? "full-backup"}`);
+    console.log(`Created: ${data.createdAt ?? data.exportedAt ?? "unknown"}`);
+    console.log(`Source: ${data.source ?? "unknown"}`);
+
+    if (data.type === "agent-export") {
+      console.log(`\nAgent: ${data.agent?.id ?? "unknown"}`);
+      console.log(`  Name: ${data.agent?.name ?? data.agent?.id}`);
+      console.log(`  Memories: ${(data.memories ?? []).length}`);
+      console.log(`  Souls: ${(data.souls ?? []).length}`);
+      console.log(`  Grants: ${(data.grants ?? []).length}`);
+      console.log(`  Key included: ${data.privateKey ? "yes" : "no"}`);
+    } else {
+      const agents = data.agents ?? [];
+      console.log(`\nAgents: ${agents.length}`);
+      for (const a of agents) console.log(`  - ${a.id} (${a.name ?? a.id})`);
+      console.log(`Memories: ${(data.memories ?? []).length}`);
+      console.log(`Souls: ${(data.souls ?? []).length}`);
+    }
   });
 
 // ─── flair migrate-keys ───────────────────────────────────────────────────────
