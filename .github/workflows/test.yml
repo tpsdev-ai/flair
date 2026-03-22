@@ -132,6 +132,25 @@ jobs:
             --entrypoint /bin/sh \
             harperfast/harper:5.0.0-beta.1 \
             -c "harper install && harper dev /flair"
+      - name: Wait for Harper to start
+        run: |
+          echo "Docker containers:"
+          docker ps -a
+          echo ""
+          echo "Waiting for Harper..."
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:9926/Health > /dev/null 2>&1; then
+              echo "Harper ready after ${i}s"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "FAIL: Harper not ready after 60s"
+              echo "--- Container logs ---"
+              docker logs harper-e2e 2>&1 | tail -30
+              exit 1
+            fi
+            sleep 1
+          done
       - name: Run E2E CLI test
         run: bash test/e2e-cli.sh
         env:
