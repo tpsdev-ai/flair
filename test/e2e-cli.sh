@@ -19,18 +19,18 @@ echo "=== E2E CLI Test ==="
 echo "Agent: $AGENT_ID"
 echo "Port:  $PORT"
 
-# Harper is already running (started by CI integration test job or manually).
+# Wait for Harper to be ready (may still be starting from Docker)
 echo ""
-echo "--- Checking Harper is running ---"
+echo "--- Waiting for Harper ---"
 export FLAIR_URL="http://localhost:${PORT}"
-# Use the same runtime as the CLI to check health
-if $FLAIR status 2>/dev/null; then
-  echo "Harper is running ✓"
-else
-  echo "FAIL: Harper not reachable via flair status on port ${PORT}"
-  docker ps -a 2>/dev/null || true
-  exit 1
-fi
+for i in $(seq 1 30); do
+  if curl -sf "http://localhost:${PORT}/Health" > /dev/null 2>&1; then
+    echo "Harper ready (${i}s)"
+    break
+  fi
+  [ "$i" -eq 30 ] && { echo "FAIL: Harper not ready after 30s"; exit 1; }
+  sleep 1
+done
 
 # Step 1: flair status
 echo ""
