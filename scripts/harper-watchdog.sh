@@ -46,3 +46,14 @@ else
 fi
 
 log "Watchdog cycle complete"
+
+# --- Stale build detection ---
+# Check if dist/ is behind source (origin/main has newer commits)
+cd "$HOME/ops/flair" 2>/dev/null || exit 0
+git fetch origin main --quiet 2>/dev/null || exit 0
+LOCAL=$(git rev-parse HEAD 2>/dev/null)
+REMOTE=$(git rev-parse origin/main 2>/dev/null)
+if [ "$LOCAL" != "$REMOTE" ]; then
+  log "STALE BUILD: local=$LOCAL remote=$REMOTE — running deploy.sh"
+  "$HOME/ops/flair/scripts/deploy.sh" 2>&1 || log "Deploy failed — check logs"
+fi
