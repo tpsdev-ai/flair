@@ -76,12 +76,36 @@ async function api(method: string, path: string, body?: any): Promise<any> {
     }
   } catch { /* ignore config read errors */ }
   const base = process.env.FLAIR_URL || defaultUrl;
+
+  // Auth resolution order:
+  // 1. FLAIR_TOKEN env → Bearer token (backward compat)
+  // 2. FLAIR_AGENT_ID env + key file → Ed25519 signature (standard)
+  // 3. --agent flag extracted from body.agentId + key file → Ed25519 signature
+  // 4. No auth (will 401 on any authenticated endpoint)
+  let authHeader: string | undefined;
   const token = process.env.FLAIR_TOKEN;
+  if (token) {
+    authHeader = `Bearer ${token}`;
+  } else {
+    const agentId = process.env.FLAIR_AGENT_ID || (body && typeof body === "object" ? body.agentId : undefined);
+    if (agentId) {
+      const keyPath = resolveKeyPath(agentId);
+      if (keyPath) {
+        try {
+          authHeader = buildEd25519Auth(agentId, method, path, keyPath);
+        } catch (err: any) {
+          // Key exists but auth build failed — warn and continue without auth
+          console.error(`Warning: Ed25519 auth failed for agent '${agentId}': ${err.message}`);
+        }
+      }
+    }
+  }
+
   const res = await fetch(`${base}${path}`, {
     method,
     headers: {
       "content-type": "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(authHeader ? { authorization: authHeader } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
