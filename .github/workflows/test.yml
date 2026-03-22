@@ -115,13 +115,7 @@ jobs:
       - run: bun run build
       - name: Run E2E CLI test
         run: |
-          # Run CLI directly from built source — no global install needed
-          alias flair="node dist/cli.js"
-          export -f flair 2>/dev/null || true
-          # Create a wrapper script so the e2e test can call `flair`
-          echo '#!/bin/sh' > /usr/local/bin/flair
-          echo "exec node $(pwd)/dist/cli.js \"\$@\"" >> /usr/local/bin/flair
-          chmod +x /usr/local/bin/flair
+          npm link
           flair --version
           bash test/e2e-cli.sh
 
