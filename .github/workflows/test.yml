@@ -67,6 +67,11 @@ jobs:
           HARPER_OPS_URL: http://localhost:9925
           HARPER_ADMIN_USER: admin
           HARPER_ADMIN_PASS: admin123
+      - name: E2E CLI smoke test
+        run: bash test/e2e-cli.sh
+        env:
+          FLAIR_PORT: "9926"
+          FLAIR_ADMIN_PASS: admin123
 
   typecheck:
     name: Type Check
@@ -101,61 +106,6 @@ jobs:
       - run: >
           semgrep scan --config=auto --error
           --exclude='**/test/**' --exclude='**/dist/**'
-
-  e2e-cli:
-    name: E2E CLI Flow
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
-        with:
-          bun-version: "1.3.10"
-      - run: bun install --frozen-lockfile
-      - run: bun run build
-      - name: Start Harper with Flair
-        run: |
-          docker run -d \
-            --name harper-e2e \
-            -p 9926:9926 -p 9925:9925 \
-            -v ${{ github.workspace }}:/flair \
-            -e ROOTPATH=/tmp/harper-e2e \
-            -e HDB_ADMIN_USERNAME=admin \
-            -e HDB_ADMIN_PASSWORD=admin123 \
-            -e DEFAULTS_MODE=dev \
-            -e NODE_HOSTNAME=localhost \
-            -e OPERATIONSAPI_NETWORK_PORT=9925 \
-            -e HTTP_PORT=9926 \
-            --entrypoint /bin/sh \
-            harperfast/harper:5.0.0-beta.1 \
-            -c "harper install && harper dev /flair"
-      - name: Wait for Harper to start
-        run: |
-          echo "Docker containers:"
-          docker ps -a
-          echo ""
-          echo "Waiting for Harper..."
-          for i in $(seq 1 60); do
-            if curl -sf http://127.0.0.1:9926/Health > /dev/null 2>&1; then
-              echo "Harper ready after ${i}s"
-              break
-            fi
-            if [ "$i" -eq 60 ]; then
-              echo "FAIL: Harper not ready after 60s"
-              echo "--- Container logs ---"
-              docker logs harper-e2e 2>&1 | tail -30
-              exit 1
-            fi
-            sleep 1
-          done
-      - name: Run E2E CLI test
-        run: bash test/e2e-cli.sh
-        env:
-          FLAIR_PORT: "9926"
-          FLAIR_ADMIN_PASS: admin123
 
   sast-codeql:
     name: CodeQL SAST
