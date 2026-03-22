@@ -4,7 +4,13 @@
 # Usage: bash test/e2e-cli.sh
 set -euo pipefail
 
-FLAIR="node $(cd "$(dirname "$0")/.." && pwd)/dist/cli.js"
+# Use bun if available (CI), fall back to node
+FLAIR_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if command -v bun > /dev/null 2>&1; then
+  FLAIR="bun ${FLAIR_DIR}/dist/cli.js"
+else
+  FLAIR="node ${FLAIR_DIR}/dist/cli.js"
+fi
 AGENT_ID="e2e-test-$$"
 PORT="${FLAIR_PORT:-9926}"
 ADMIN_PASS="${FLAIR_ADMIN_PASS:-admin123}"
@@ -14,29 +20,16 @@ echo "Agent: $AGENT_ID"
 echo "Port:  $PORT"
 
 # Harper is already running (started by CI integration test job or manually).
-# Verify it's up — try multiple addresses and paths.
 echo ""
 echo "--- Checking Harper is running ---"
-for addr in "127.0.0.1" "localhost" "0.0.0.0"; do
-  for path in "/Health" "/health" "/"; do
-    if curl -sf "http://${addr}:${PORT}${path}" > /dev/null 2>&1; then
-      echo "Harper is running at ${addr}:${PORT}${path} ✓"
-      export FLAIR_URL="http://${addr}:${PORT}"
-      break 2
-    fi
-  done
-done
-if [ -z "${FLAIR_URL:-}" ]; then
-  echo "WARN: curl can't reach Harper — trying node fetch..."
-  if node -e "fetch('http://127.0.0.1:${PORT}/Health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
-    echo "Harper reachable via node fetch ✓"
-    export FLAIR_URL="http://127.0.0.1:${PORT}"
-  else
-    echo "FAIL: Harper not reachable on port ${PORT}"
-    echo "Debug: docker ps"
-    docker ps -a 2>/dev/null || true
-    exit 1
-  fi
+export FLAIR_URL="http://localhost:${PORT}"
+# Use the same runtime as the CLI to check health
+if $FLAIR status 2>/dev/null; then
+  echo "Harper is running ✓"
+else
+  echo "FAIL: Harper not reachable via flair status on port ${PORT}"
+  docker ps -a 2>/dev/null || true
+  exit 1
 fi
 
 # Step 1: flair status
