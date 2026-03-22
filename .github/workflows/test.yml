@@ -114,9 +114,13 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
       - name: Install Flair CLI globally (from local build)
-        run: npm install -g .
+        run: |
+          npm install -g .
+          echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
       - name: Run E2E CLI test
-        run: bash test/e2e-cli.sh
+        run: |
+          which flair
+          bash test/e2e-cli.sh
 
   sast-codeql:
     name: CodeQL SAST
