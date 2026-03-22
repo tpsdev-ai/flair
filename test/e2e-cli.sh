@@ -19,18 +19,34 @@ echo "=== E2E CLI Test ==="
 echo "Agent: $AGENT_ID"
 echo "Port:  $PORT"
 
-# Wait for Harper to be ready (may still be starting from Docker)
+# Wait for Harper to be ready
 echo ""
 echo "--- Waiting for Harper ---"
 export FLAIR_URL="http://localhost:${PORT}"
-for i in $(seq 1 30); do
-  if curl -sf "http://localhost:${PORT}/Health" > /dev/null 2>&1; then
-    echo "Harper ready (${i}s)"
+# Debug: show what's listening
+echo "Checking ports..."
+ss -tlnp 2>/dev/null | grep "${PORT}" || netstat -tlnp 2>/dev/null | grep "${PORT}" || true
+echo "Trying curl..."
+curl -v "http://localhost:${PORT}/Health" 2>&1 | head -10 || true
+echo "Trying curl 127.0.0.1..."
+curl -v "http://127.0.0.1:${PORT}/Health" 2>&1 | head -10 || true
+echo "Trying docker inspect..."
+docker inspect harper-flair --format '{{.NetworkSettings.IPAddress}}' 2>/dev/null || true
+# Try the Docker container's direct IP if localhost fails
+DOCKER_IP=$(docker inspect harper-flair --format '{{.NetworkSettings.IPAddress}}' 2>/dev/null || echo "")
+for addr in "localhost" "127.0.0.1" "$DOCKER_IP"; do
+  [ -z "$addr" ] && continue
+  if curl -sf "http://${addr}:${PORT}/Health" > /dev/null 2>&1; then
+    echo "Harper ready at ${addr}:${PORT} ✓"
+    export FLAIR_URL="http://${addr}:${PORT}"
     break
   fi
-  [ "$i" -eq 30 ] && { echo "FAIL: Harper not ready after 30s"; exit 1; }
-  sleep 1
 done
+if ! curl -sf "${FLAIR_URL}/Health" > /dev/null 2>&1; then
+  echo "FAIL: Harper not reachable. Docker logs:"
+  docker logs harper-flair 2>&1 | tail -15
+  exit 1
+fi
 
 # Step 1: flair status
 echo ""
