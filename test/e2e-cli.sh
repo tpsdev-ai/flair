@@ -13,17 +13,16 @@ echo "=== E2E CLI Test ==="
 echo "Agent: $AGENT_ID"
 echo "Port:  $PORT"
 
-# Wait for Harper to be ready
+# Harper is already running (started by CI integration test job or manually).
+# Verify it's up — try both /Health and /health (case varies by version).
 echo ""
-echo "--- Waiting for Harper ---"
-for i in $(seq 1 30); do
-  if curl -sf "http://127.0.0.1:${PORT}/Health" > /dev/null 2>&1; then
-    echo "Harper ready after ${i}s"
-    break
-  fi
-  [ "$i" -eq 30 ] && { echo "FAIL: Harper not ready after 30s"; exit 1; }
-  sleep 1
-done
+echo "--- Checking Harper is running ---"
+if curl -sf "http://127.0.0.1:${PORT}/Health" > /dev/null 2>&1 || curl -sf "http://127.0.0.1:${PORT}/health" > /dev/null 2>&1; then
+  echo "Harper is running ✓"
+else
+  echo "FAIL: Harper not running on port ${PORT}"
+  exit 1
+fi
 
 # Step 1: flair status
 echo ""
