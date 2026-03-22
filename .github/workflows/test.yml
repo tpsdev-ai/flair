@@ -102,6 +102,22 @@ jobs:
           semgrep scan --config=auto --error
           --exclude='**/test/**' --exclude='**/dist/**'
 
+  e2e-cli:
+    name: E2E CLI Flow
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Install Flair CLI globally (from local build)
+        run: npm install -g .
+      - name: Run E2E CLI test
+        run: bash test/e2e-cli.sh
+
   sast-codeql:
     name: CodeQL SAST
     runs-on: ubuntu-latest

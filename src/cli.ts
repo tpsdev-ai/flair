@@ -839,14 +839,16 @@ const memory = program.command("memory").description("Manage agent memories");
 memory.command("add").requiredOption("--agent <id>").requiredOption("--content <text>")
   .option("--durability <d>", "standard").option("--tags <csv>")
   .action(async (opts) => {
-    const out = await api("POST", "/Memory", {
-      agentId: opts.agent, content: opts.content, durability: opts.durability,
+    const memId = `${opts.agent}-${Date.now()}`;
+    const out = await api("PUT", `/Memory/${memId}`, {
+      id: memId, agentId: opts.agent, content: opts.content, durability: opts.durability || "standard",
       tags: opts.tags ? String(opts.tags).split(",").map((x: string) => x.trim()).filter(Boolean) : undefined,
+      type: "memory", createdAt: new Date().toISOString(),
     });
     console.log(JSON.stringify(out, null, 2));
   });
 memory.command("search").requiredOption("--agent <id>").requiredOption("--q <query>").option("--tag <tag>")
-  .action(async (opts) => console.log(JSON.stringify(await api("POST", "/MemorySearch", { agentId: opts.agent, q: opts.q, tag: opts.tag }), null, 2)));
+  .action(async (opts) => console.log(JSON.stringify(await api("POST", "/SemanticSearch", { agentId: opts.agent, q: opts.q, tag: opts.tag }), null, 2)));
 memory.command("list").requiredOption("--agent <id>").option("--tag <tag>")
   .action(async (opts) => {
     const q = new URLSearchParams({ agentId: opts.agent, ...(opts.tag ? { tag: opts.tag } : {}) }).toString();
