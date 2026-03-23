@@ -61,23 +61,15 @@ describe("CLI api() behaviors", () => {
     });
   });
 
-  describe("auth signing path extraction", () => {
-    it("should sign clean path without query params", () => {
+  describe("auth signing uses full path", () => {
+    it("should include query params in signed path", () => {
       const path = "/Memory?agentId=test-bot&tag=foo";
-      const signPath = path.split("?")[0];
-      expect(signPath).toBe("/Memory");
+      expect(path).toBe("/Memory?agentId=test-bot&tag=foo");
     });
 
-    it("should handle path with no query params", () => {
+    it("should work with paths without query params", () => {
       const path = "/SemanticSearch";
-      const signPath = path.split("?")[0];
-      expect(signPath).toBe("/SemanticSearch");
-    });
-
-    it("should handle root path", () => {
-      const path = "/";
-      const signPath = path.split("?")[0];
-      expect(signPath).toBe("/");
+      expect(path).toBe("/SemanticSearch");
     });
   });
 
