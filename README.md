@@ -128,29 +128,28 @@ openclaw plugins install @tpsdev-ai/openclaw-flair
 
 The plugin auto-detects your agent identity, provides `memory_store`/`memory_recall`/`memory_get` tools, and injects relevant memories at session start. See the [plugin README](plugins/openclaw-flair/README.md) for details.
 
-### Claude Code / Codex / Cursor
+### Claude Code / Codex / Cursor (MCP)
 
-Add a snippet to your `CLAUDE.md` (or `AGENTS.md`, `.codex/instructions.md`, etc.):
+Install the MCP server for native tool integration:
 
-```markdown
-## Memory
-
-You have persistent memory via Flair. Use it.
-
-### On session start
-Run: `flair bootstrap --agent mybot --max-tokens 4000`
-This returns your soul + recent memories. Read it — that's your context.
-
-### During work
-- Remember something: `flair memory add --agent mybot --content "what you learned"`
-- Search memory: `flair memory search --agent mybot --q "your query"`
-- Store a lesson: `flair memory add --agent mybot --content "lesson" --type lesson --durability persistent`
-
-### Rules
-- Bootstrap FIRST, before doing anything else
-- Store lessons and decisions immediately — don't wait
-- If you learn something that should survive restarts, write it to Flair
+```json
+// .mcp.json in your project root
+{
+  "mcpServers": {
+    "flair": {
+      "command": "npx",
+      "args": ["@tpsdev-ai/flair-mcp"],
+      "env": { "FLAIR_AGENT_ID": "mybot" }
+    }
+  }
+}
 ```
+
+Add to your `CLAUDE.md`:
+
+    At the start of every session, run mcp__flair__bootstrap before responding.
+
+Claude Code gets native tools: `memory_store`, `memory_search`, `bootstrap`, `soul_set`, and more. See the [MCP README](packages/flair-mcp/README.md) and [Claude Code guide](docs/claude-code.md).
 
 ### JavaScript / TypeScript (Client Library)
 
@@ -292,21 +291,25 @@ Flair is in active development and daily use. We dogfood it — the agents that 
 
 **What works:**
 - ✅ Ed25519 agent identity and auth
-- ✅ CLI: init, agent add/remove/rotate-key, status, backup/restore, grant/revoke
-- ✅ Memory CRUD with durability enforcement
-- ✅ In-process semantic embeddings (768-dim nomic-embed-text, Metal GPU)
-- ✅ Hybrid search (semantic + keyword)
+- ✅ CLI: init, agent add/remove/rotate-key, status, backup/restore, export/import, grant/revoke
+- ✅ Memory CRUD with durability enforcement and near-duplicate detection
+- ✅ In-process semantic embeddings (768-dim nomic-embed-text via harper-fabric-embeddings)
+- ✅ Hybrid search (semantic + keyword + temporal intent detection)
 - ✅ Soul (permanent personality/values)
 - ✅ Real-time feeds (WebSocket/SSE)
 - ✅ Agent-scoped data isolation
-- ✅ Cold start bootstrap
+- ✅ Cold start bootstrap with adaptive time window
 - ✅ OpenClaw memory plugin
+- ✅ MCP server for Claude Code / Cursor / Windsurf
+- ✅ Lightweight client library (`@tpsdev-ai/flair-client`)
+- ✅ Portable agent identity (export/import between instances)
+- ✅ `flair --version`, `flair upgrade`
 
 **What's next:**
+- [ ] First-run soul wizard (interactive personality setup)
+- [ ] Git-backed memory sync
 - [ ] Encryption at rest (opt-in AES-256-GCM per memory)
-- [ ] Pluggable embedding backends (OpenAI, Cohere, local)
 - [ ] Harper Fabric deployment (managed multi-office)
-- [ ] Scheduled automatic backups
 
 ## License
 
