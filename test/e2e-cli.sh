@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # E2E CLI test — verifies CLI commands work against a running Flair instance.
-# Expects Harper to already be running (started by CI or manually).
 set -euo pipefail
 
 FLAIR_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,29 +26,38 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# Status
 echo "--- status ---"
 $FLAIR status
 echo "PASS: status"
 
-# Agent add
 echo "--- agent add ---"
 $FLAIR agent add "$AGENT_ID" --name "E2E Bot" --admin-pass "$ADMIN_PASS" --port "$PORT"
 echo "PASS: agent add"
 
-# Memory add
 echo "--- memory add ---"
 $FLAIR memory add --agent "$AGENT_ID" --content "The quick brown fox jumps over the lazy dog"
 echo "PASS: memory add"
 
-# Memory search
-echo "--- memory search ---"
-$FLAIR memory search --agent "$AGENT_ID" --q "animals"
-echo "PASS: memory search"
+sleep 2
 
-# Memory list
 echo "--- memory list ---"
-$FLAIR memory list --agent "$AGENT_ID"
-echo "PASS: memory list"
+LIST_OUTPUT=$($FLAIR memory list --agent "$AGENT_ID")
+echo "$LIST_OUTPUT"
+if echo "$LIST_OUTPUT" | grep -q "quick brown fox"; then
+  echo "PASS: memory list (content found)"
+else
+  echo "FAIL: memory list — stored content not found"
+  exit 1
+fi
+
+echo "--- memory search ---"
+SEARCH_OUTPUT=$($FLAIR memory search --agent "$AGENT_ID" --q "animals jumping")
+echo "$SEARCH_OUTPUT"
+if echo "$SEARCH_OUTPUT" | grep -q '"results":\[\]'; then
+  echo "FAIL: memory search — empty results (embeddings not generated on write)"
+  exit 1
+else
+  echo "PASS: memory search (results returned)"
+fi
 
 echo "=== E2E CLI Test PASSED ==="

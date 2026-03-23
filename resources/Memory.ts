@@ -1,6 +1,7 @@
 import { databases } from "@harperfast/harper";
 import { patchRecord } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
+import { getEmbedding } from "./embeddings-provider.js";
 
 export class Memory extends (databases as any).flair.Memory {
   /**
@@ -90,12 +91,24 @@ export class Memory extends (databases as any).flair.Memory {
       content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
     }
 
+    // Generate embedding from content text
+    if (content.content && !content.embedding) {
+      const vec = await getEmbedding(content.content);
+      if (vec) content.embedding = vec;
+    }
+
     return super.post(content);
   }
 
   async put(content: any) {
     const now = new Date().toISOString();
     content.updatedAt = now;
+
+    // Re-generate embedding if content changed
+    if (content.content && !content.embedding) {
+      const vec = await getEmbedding(content.content);
+      if (vec) content.embedding = vec;
+    }
 
     // If archiving, record who + when
     if (content.archived === true && !content.archivedAt) {
