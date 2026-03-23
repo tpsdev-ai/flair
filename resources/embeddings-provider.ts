@@ -28,14 +28,24 @@ function getState(): ProviderState {
 export async function initEmbeddings(): Promise<void> {
   const state = getState();
   if (state.initialized) return;
-  try {
-    await hfe.init({});
-    state.available = true;
-    console.log(`[embeddings] harper-fabric-embeddings ready (${hfe.dimensions()} dims)`);
-  } catch (err: any) {
-    console.log(`[embeddings] harper-fabric-embeddings unavailable: ${err.message}`);
-    state.available = false;
+
+  // harper-fabric-embeddings is initialized by Harper as a sub-component
+  // (declared in config.yaml). It inits in the background so it may not
+  // be ready when resources first load. Retry a few times before giving up.
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    try {
+      const dims = hfe.dimensions();
+      state.available = true;
+      state.initialized = true;
+      console.log(`[embeddings] ready (${dims} dims, attempt ${attempt})`);
+      return;
+    } catch {
+      if (attempt < 10) await new Promise(r => setTimeout(r, 500));
+    }
   }
+
+  console.log("[embeddings] not available after 10 attempts — search will be keyword-only");
+  state.available = false;
   state.initialized = true;
 }
 

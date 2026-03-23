@@ -10,6 +10,10 @@ graphqlSchema:
 jsResource:
   files: dist/resources/*.js
 
+'harper-fabric-embeddings':
+  package: 'harper-fabric-embeddings'
+  modelName: nomic-embed-text
+
 authentication:
   # Default secure. Set to false for local development only.
   authorizeLocal: true
