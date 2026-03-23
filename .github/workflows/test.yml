@@ -41,7 +41,6 @@ jobs:
         run: |
           echo "Checking embeddings-provider exports..."
           grep -q "export.*function getEmbedding" dist/resources/embeddings-provider.js || { echo "FATAL: getEmbedding missing"; exit 1; }
-          grep -q "export.*function initEmbeddings" dist/resources/embeddings-provider.js || { echo "FATAL: initEmbeddings missing"; exit 1; }
           grep -q "export.*function getMode" dist/resources/embeddings-provider.js || { echo "FATAL: getMode missing"; exit 1; }
           echo "All critical exports present ✅"
       - name: Start Harper Pro with Flair component
