@@ -1,6 +1,6 @@
 import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "@harperfast/harper";
-import { initEmbeddings, getEmbedding } from "./embeddings-provider.js";
+import { getEmbedding } from "./embeddings-provider.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -102,7 +102,6 @@ async function importEd25519Key(publicKeyStr: string): Promise<CryptoKey> {
   return key;
 }
 
-initEmbeddings().catch((err: any) => console.error("[embeddings] init:", err.message));
 
 async function backfillEmbedding(memoryId: string): Promise<void> {
   try {
