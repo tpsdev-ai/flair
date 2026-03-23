@@ -98,8 +98,8 @@ async function api(method: string, path: string, body?: any): Promise<any> {
       if (keyPath) {
         try {
           // Sign the path without query params — auth middleware verifies the clean path
-          const signPath = path.split("?")[0];
-          authHeader = buildEd25519Auth(agentId, method, signPath, keyPath);
+          // Auth middleware verifies the full request path including query params
+          authHeader = buildEd25519Auth(agentId, method, path, keyPath);
         } catch (err: any) {
           // Key exists but auth build failed — warn and continue without auth
           console.error(`Warning: Ed25519 auth failed for agent '${agentId}': ${err.message}`);
