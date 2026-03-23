@@ -79,7 +79,10 @@ server.tool(
     type: z.enum(["session", "lesson", "decision", "preference", "fact", "goal"]).optional().default("session"),
     durability: z.enum(["permanent", "persistent", "standard", "ephemeral"]).optional().default("standard")
       .describe("permanent=inviolable, persistent=key decisions, standard=default, ephemeral=auto-expires 72h"),
-    tags: z.array(z.string()).optional().describe("Optional tags for categorization"),
+    tags: z.union([
+      z.array(z.string()),
+      z.string().transform(s => s.startsWith("[") ? JSON.parse(s) : s.split(",").map(t => t.trim()).filter(Boolean)),
+    ]).optional().describe("Optional tags — array or comma-separated string"),
   },
   async ({ content, type, durability, tags }) => {
     const result = await flair.memory.write(content, {
