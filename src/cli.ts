@@ -255,6 +255,7 @@ program
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
   .option("--skip-start", "Skip Harper startup (assume already running)")
+  .option("--skip-soul", "Skip interactive personality setup")
   .action(async (opts) => {
     const agentId: string = opts.agentId;
     const httpPort = Number(opts.port);
@@ -366,6 +367,46 @@ program
       console.log(`   ${adminPass}`);
     }
     console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
+
+    // ── First-run soul setup ──────────────────────────────────────────────
+    // Interactive prompts to set initial personality. Skipped with --skip-soul
+    // or when stdin is not a TTY (CI, scripts, piped input).
+    if (!opts.skipSoul && process.stdin.isTTY) {
+      console.log("\n🎭 Set up agent personality (press Enter to skip any):\n");
+
+      const { createInterface } = await import("node:readline");
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
+
+      const role = await ask("   What's this agent's role? (e.g., \"Senior dev, concise and direct\")\n   > ");
+      const project = await ask("   What project is it working on?\n   > ");
+      const standards = await ask("   Any coding standards or preferences?\n   > ");
+
+      rl.close();
+
+      // Write non-empty answers as soul entries
+      const soulEntries: [string, string][] = [];
+      if (role.trim()) soulEntries.push(["role", role.trim()]);
+      if (project.trim()) soulEntries.push(["project", project.trim()]);
+      if (standards.trim()) soulEntries.push(["standards", standards.trim()]);
+
+      if (soulEntries.length > 0) {
+        console.log("");
+        for (const [key, value] of soulEntries) {
+          try {
+            await authFetch(httpUrl, agentId, privPath, "PUT", `/Soul/${agentId}:${key}`,
+              { id: `${agentId}:${key}`, agentId, key, value, createdAt: new Date().toISOString() });
+            console.log(`   ✓ soul:${key} set`);
+          } catch (err: any) {
+            console.warn(`   ⚠ soul:${key} failed: ${err.message}`);
+          }
+        }
+        console.log(`\n   ${soulEntries.length} soul entries saved. Bootstrap will include them.`);
+      } else {
+        console.log("\n   No soul entries — you can add them later with: flair soul set --agent " + agentId + " --key role --value \"...\"");
+      }
+    }
+
     console.log(`\n   Claude Code: Add to your CLAUDE.md:`);
     console.log(`     At the start of every session, run mcp__flair__bootstrap before responding.`);
     console.log(`\n   MCP config (.mcp.json):`);
