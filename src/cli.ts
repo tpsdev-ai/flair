@@ -87,12 +87,19 @@ async function api(method: string, path: string, body?: any): Promise<any> {
   if (token) {
     authHeader = `Bearer ${token}`;
   } else {
-    const agentId = process.env.FLAIR_AGENT_ID || (body && typeof body === "object" ? body.agentId : undefined);
+    // Extract agentId from body (POST/PUT) or URL query params (GET)
+    let agentId = process.env.FLAIR_AGENT_ID || (body && typeof body === "object" ? body.agentId : undefined);
+    if (!agentId && path.includes("agentId=")) {
+      const match = path.match(/agentId=([^&]+)/);
+      if (match) agentId = decodeURIComponent(match[1]);
+    }
     if (agentId) {
       const keyPath = resolveKeyPath(agentId);
       if (keyPath) {
         try {
-          authHeader = buildEd25519Auth(agentId, method, path, keyPath);
+          // Sign the path without query params — auth middleware verifies the clean path
+          const signPath = path.split("?")[0];
+          authHeader = buildEd25519Auth(agentId, method, signPath, keyPath);
         } catch (err: any) {
           // Key exists but auth build failed — warn and continue without auth
           console.error(`Warning: Ed25519 auth failed for agent '${agentId}': ${err.message}`);
@@ -109,9 +116,15 @@ async function api(method: string, path: string, body?: any): Promise<any> {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  const json = await res.json();
-  if (!res.ok) throw new Error(JSON.stringify(json));
-  return json;
+  // Handle 204 No Content (e.g., PUT upsert returns empty body)
+  if (res.status === 204 || res.headers.get("content-length") === "0") {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return { ok: true };
+  }
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+  if (!text) return { ok: true };
+  return JSON.parse(text);
 }
 
 /** Find the agent's private key file from standard locations. */
