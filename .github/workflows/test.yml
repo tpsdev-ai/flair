@@ -59,7 +59,7 @@ jobs:
             -e HTTP_PORT=9926 \
             --entrypoint /bin/sh \
             harperfast/harper:5.0.0-beta.5 \
-            -c "harper install && harper dev /flair" 
+            -c "harper install && ln -sf /home/harperdb/.npm-global/lib/node_modules/harper /flair/node_modules/@harperfast/harper && harper dev /flair" 
       - name: Run integration tests against Docker Harper
         run: bun test test/integration/
         env:
