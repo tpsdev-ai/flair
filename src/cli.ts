@@ -30,6 +30,28 @@ function defaultDataDir(): string {
   return join(homedir(), ".flair", "data");
 }
 
+function configPath(): string {
+  return join(homedir(), ".flair", "config.yaml");
+}
+
+function readPortFromConfig(): number | null {
+  try {
+    const p = configPath();
+    if (existsSync(p)) {
+      const yaml = readFileSync(p, "utf-8");
+      const m = yaml.match(/port:\s*(\d+)/);
+      if (m) return Number(m[1]);
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function writeConfig(port: number): void {
+  const p = configPath();
+  mkdirSync(join(homedir(), ".flair"), { recursive: true });
+  writeFileSync(p, `# Flair configuration\nport: ${port}\n`);
+}
+
 function privKeyPath(agentId: string, keysDir: string): string {
   return join(keysDir, `${agentId}.key`);
 }
@@ -66,15 +88,8 @@ function b64url(bytes: Uint8Array): string {
 
 async function api(method: string, path: string, body?: any): Promise<any> {
   // Resolve port: FLAIR_URL env > ~/.flair/config.yaml > default 9926
-  let defaultUrl = "http://127.0.0.1:9926";
-  try {
-    const configPath = join(homedir(), ".flair", "config.yaml");
-    if (existsSync(configPath)) {
-      const yaml = readFileSync(configPath, "utf-8");
-      const portMatch = yaml.match(/port:\s*(\d+)/);
-      if (portMatch) defaultUrl = `http://127.0.0.1:${portMatch[1]}`;
-    }
-  } catch { /* ignore config read errors */ }
+  const savedPort = readPortFromConfig();
+  const defaultUrl = savedPort ? `http://127.0.0.1:${savedPort}` : `http://127.0.0.1:${DEFAULT_PORT}`;
   const base = process.env.FLAIR_URL || defaultUrl;
 
   // Auth resolution order:
@@ -322,6 +337,9 @@ program
       console.log("Harper is healthy ✓");
     }
 
+    // Persist port to config so other commands can find this instance
+    writeConfig(httpPort);
+
     // Generate or reuse keypair
     mkdirSync(keysDir, { recursive: true });
     const privPath = privKeyPath(agentId, keysDir);
@@ -409,8 +427,10 @@ program
 
     console.log(`\n   Claude Code: Add to your CLAUDE.md:`);
     console.log(`     At the start of every session, run mcp__flair__bootstrap before responding.`);
+    const mcpEnv: Record<string, string> = { FLAIR_AGENT_ID: agentId };
+    if (httpPort !== DEFAULT_PORT) mcpEnv.FLAIR_URL = httpUrl;
     console.log(`\n   MCP config (.mcp.json):`);
-    console.log(`     { "mcpServers": { "flair": { "command": "npx", "args": ["@tpsdev-ai/flair-mcp"], "env": { "FLAIR_AGENT_ID": "${agentId}" } } } }`);
+    console.log(`     { "mcpServers": { "flair": { "command": "npx", "args": ["@tpsdev-ai/flair-mcp"], "env": ${JSON.stringify(mcpEnv)} } } }`);
   });
 
 // ─── flair agent ─────────────────────────────────────────────────────────────
@@ -782,10 +802,11 @@ program
 program
   .command("status")
   .description("Check Flair (Harper) instance health and agent count")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .action(async (opts) => {
-    const baseUrl = opts.url ?? `http://127.0.0.1:${opts.port}`;
+    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const baseUrl = opts.url ?? `http://127.0.0.1:${port}`;
     let healthy = false;
     let agentCount: number | null = null;
     let version: string | null = null;
