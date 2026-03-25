@@ -2,13 +2,6 @@ import { Resource, databases } from "@harperfast/harper";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord } from "./table-helpers.js";
 
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) dot += a[i] * b[i];
-  return dot;
-}
-
 // ─── Temporal Decay + Relevance Scoring ─────────────────────────────────────
 
 const DURABILITY_WEIGHTS: Record<string, number> = {
@@ -50,6 +43,15 @@ function compositeScore(
   return semanticScore * dWeight * rFactor * rBoost;
 }
 
+// Convert HNSW cosine distance (1 - similarity) to similarity score
+function distanceToSimilarity(distance: number): number {
+  return 1 - distance;
+}
+
+// Candidate multiplier: fetch more candidates than needed from the HNSW index
+// so composite re-ranking has enough headroom to reorder results.
+const CANDIDATE_MULTIPLIER = 5;
+
 export class SemanticSearch extends Resource {
   async post(data: any) {
     const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since } = data || {};
@@ -60,8 +62,6 @@ export class SemanticSearch extends Resource {
         : null;
 
     // Defense-in-depth: verify agentId matches authenticated agent.
-    // The middleware already enforces this for non-admins, but double-check here
-    // so direct Harper API calls (e.g., admin scripts) are also scoped correctly.
     const authenticatedAgent: string | undefined = (this as any).request?.headers?.get?.("x-tps-agent");
     const callerIsAdmin: boolean = (this as any).request?.tpsAgentIsAdmin === true;
     if (authenticatedAgent && !callerIsAdmin && agentId && agentId !== authenticatedAgent) {
@@ -95,8 +95,6 @@ export class SemanticSearch extends Resource {
     }
 
     // ─── Temporal intent detection ────────────────────────────────────────────
-    // If the query implies a time window and no explicit `since` was provided,
-    // auto-detect and apply a recency boost.
     let sinceDate: Date | null = since ? new Date(since) : null;
     let temporalBoost = 1.0;
     if (q && !sinceDate) {
@@ -104,7 +102,7 @@ export class SemanticSearch extends Resource {
       if (/\btoday\b|\bthis morning\b|\bthis afternoon\b/.test(lq)) {
         const d = new Date(); d.setHours(0, 0, 0, 0);
         sinceDate = d;
-        temporalBoost = 1.5; // boost recent results for temporal queries
+        temporalBoost = 1.5;
       } else if (/\byesterday\b/.test(lq)) {
         const d = new Date(); d.setDate(d.getDate() - 1); d.setHours(0, 0, 0, 0);
         sinceDate = d;
@@ -121,47 +119,111 @@ export class SemanticSearch extends Resource {
       }
     }
 
+    // ─── Build conditions for Harper query ──────────────────────────────────
+    const conditions: any[] = [];
+
+    // Agent scoping: filter to allowed agent IDs or office-visible memories
+    if (searchAgentIds.size === 1) {
+      const [id] = searchAgentIds;
+      conditions.push({
+        operator: "or",
+        conditions: [
+          { attribute: "agentId", comparator: "equals", value: id },
+          { attribute: "visibility", comparator: "equals", value: "office" },
+        ],
+      });
+    } else if (searchAgentIds.size > 1) {
+      const agentConditions = [...searchAgentIds].map(id => (
+        { attribute: "agentId", comparator: "equals", value: id }
+      ));
+      agentConditions.push({ attribute: "visibility", comparator: "equals", value: "office" } as any);
+      conditions.push({ operator: "or", conditions: agentConditions });
+    }
+
+    conditions.push({ attribute: "archived", comparator: "equals", value: false });
+
+    if (tag) {
+      conditions.push({ attribute: "tags", comparator: "equals", value: tag });
+    }
+    if (subjectFilter) {
+      const subjects = [...subjectFilter];
+      if (subjects.length === 1) {
+        conditions.push({ attribute: "subject", comparator: "equals", value: subjects[0] });
+      } else {
+        conditions.push({
+          operator: "or",
+          conditions: subjects.map(s => ({ attribute: "subject", comparator: "equals", value: s })),
+        });
+      }
+    }
+
     const results: any[] = [];
 
-    // Iterate ALL memories, filter by agent ID set
-    for await (const record of (databases as any).flair.Memory.search()) {
-      // Filter by agent
-      if (searchAgentIds.size > 0 && !searchAgentIds.has(record.agentId)) {
-        if (record.visibility !== "office") continue;
+    // ─── HNSW vector search path ───────────────────────────────────────────
+    if (qEmb) {
+      const candidateLimit = limit * CANDIDATE_MULTIPLIER;
+      const query: any = {
+        sort: { attribute: "embedding", target: qEmb, distance: "cosine" },
+        select: ["id", "agentId", "content", "contentHash", "visibility", "tags", "durability",
+          "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "lastRetrieved",
+          "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
+          "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject",
+          "$distance"],
+        limit: candidateLimit,
+      };
+      if (conditions.length > 0) {
+        query.conditions = conditions;
       }
 
-      if (record.archived === true) continue;
-      if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
-      if (tag && !(record.tags || []).includes(tag)) continue;
-      if (subjectFilter && record.subject && !subjectFilter.has(String(record.subject).toLowerCase())) continue;
-      // Time window filter
-      if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
+      for await (const record of (databases as any).flair.Memory.search(query)) {
+        if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
+        if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
 
-      let semanticScore = 0;
-      let keywordHit = false;
-      if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
-        keywordHit = true;
+        const semanticScore = distanceToSimilarity(record.$distance ?? 1);
+        let keywordHit = false;
+        if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
+          keywordHit = true;
+        }
+        const rawScore = semanticScore + (keywordHit ? 0.05 : 0);
+
+        let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
+        if (temporalBoost > 1.0) finalScore *= temporalBoost;
+
+        const { $distance, ...rest } = record;
+        results.push({
+          ...rest,
+          _score: Math.round(finalScore * 1000) / 1000,
+          _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
+          _source: record.agentId !== agentId ? record.agentId : undefined,
+        });
       }
-      if (qEmb && record.embedding && qEmb.length === record.embedding.length) {
-        semanticScore = cosineSimilarity(qEmb, record.embedding);
+    } else {
+      // ─── No embedding available — keyword-only fallback ──────────────────
+      // Full scan is only used when there's no query embedding (e.g. tag-only
+      // or subject-only searches, or when the embedding engine is unavailable).
+      const query: any = conditions.length > 0 ? { conditions } : {};
+      for await (const record of (databases as any).flair.Memory.search(query)) {
+        if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
+        if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
+
+        let keywordHit = false;
+        if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
+          keywordHit = true;
+        }
+        const rawScore = keywordHit ? 0.05 : 0;
+        if (q && rawScore === 0) continue;
+
+        const { embedding, ...rest } = record;
+        let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, rest);
+        if (temporalBoost > 1.0) finalScore *= temporalBoost;
+
+        results.push({
+          ...rest,
+          _score: Math.round(finalScore * 1000) / 1000,
+          _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
+          _source: record.agentId !== agentId ? record.agentId : undefined,
+        });
       }
-      // Keyword match is a small tiebreaker (5%), not a primary signal.
-      // This prevents weak semantic matches from ranking high just because
-      // a query word appears in the content.
-      const rawScore = semanticScore + (keywordHit ? 0.05 : 0);
-      if (q && rawScore === 0) continue;
-
-      // Apply composite scoring (temporal decay + durability + retrieval boost + temporal intent)
-      let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
-      if (temporalBoost > 1.0) finalScore *= temporalBoost;
-
-      const { embedding, ...rest } = record;
-      results.push({
-        ...rest,
-        _score: Math.round(finalScore * 1000) / 1000,
-        _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
-        _source: record.agentId !== agentId ? record.agentId : undefined,
-      });
     }
 
     // Build superseded set and filter (unless caller opts in to see full history)
@@ -183,7 +245,6 @@ export class SemanticSearch extends Resource {
     const topResults = filteredResults.slice(0, limit);
 
     // Async hit tracking — don't block the response
-    // Use patchRecord to avoid wiping other fields (embedding, content, etc.)
     const now = new Date().toISOString();
     for (const r of topResults) {
       patchRecord((databases as any).flair.Memory, r.id, {
