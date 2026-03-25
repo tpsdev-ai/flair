@@ -245,6 +245,13 @@ flair init
 
 Your data stays on your machine. Best for personal agents, dev teams, and privacy-first setups. Flair runs as a single Harper process — no Docker, no cloud, no external services.
 
+#### Custom Ports
+If the default port (`9926`) is already in use, initialize with a custom port:
+```bash
+flair init --port 8000
+```
+Flair will automatically remember this port for future CLI commands by saving it to `~/.flair/config.yaml`.
+
 ### Remote Server
 
 Run Flair on a VPS or cloud instance. Agents connect over HTTPS:
