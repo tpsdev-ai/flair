@@ -2,7 +2,7 @@ name: flair
 rest: true
 
 http:
-  port: 8787
+  port: 19926
 
 graphqlSchema:
   files: schemas/*.graphql
