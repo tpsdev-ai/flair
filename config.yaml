@@ -1,8 +1,10 @@
 name: flair
 rest: true
 
-http:
-  port: 19926
+## Port is configured via CLI (flair init --port) or HTTP_PORT env var.
+## Omitted here to avoid conflicts with different deployment scenarios.
+# http:
+#   port: 19926
 
 graphqlSchema:
   files: schemas/*.graphql
