@@ -23,6 +23,7 @@ _substitute_plist() {
   fi
   sed \
     -e "s|FLAIR_DIR/node_modules/harper/dist/bin/harper.js|$harper_bin|g" \
+    -e "s|ADMIN_TOKEN|$ADMIN_TOKEN|g" \
     -e "s|FLAIR_DIR|$FLAIR_DIR|g" \
     -e "s|HOME_DIR|$HOME|g" \
     -e "s|/opt/homebrew/bin/node|$node_path|g" \
