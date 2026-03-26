@@ -254,6 +254,12 @@ export class SemanticSearch extends Resource {
       }).catch(() => {});
     }
 
-    return { results: topResults };
+    // Surface degradation warning when semantic search was unavailable
+    const response: any = { results: topResults };
+    if (!qEmb && q && getMode() === "none") {
+      response._warning = "semantic search unavailable — results are keyword-only";
+    }
+
+    return response;
   }
 }

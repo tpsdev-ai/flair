@@ -16,21 +16,38 @@
 import * as hfe from "harper-fabric-embeddings";
 import { join } from "node:path";
 
-let _ready = false;
+type InitState = "uninitialized" | "ready" | "failed";
+
+let _state: InitState = "uninitialized";
+let _initError: string | undefined;
+let _warnedOnce = false;
 
 async function ensureInit(): Promise<void> {
-  if (_ready) return;
+  if (_state === "ready") return;
+  if (_state === "failed") return; // Don't retry — already logged warning
+
   try {
     // Check if already initialized (e.g. shared context)
     hfe.dimensions();
-    _ready = true;
+    _state = "ready";
     return;
   } catch {
     // Not initialized — init with modelsDir pointing to where Harper's
     // plugin loader downloaded the model (process.cwd() is the app dir)
-    const modelsDir = join(process.cwd(), "models");
-    await hfe.init({ modelsDir });
-    _ready = true;
+    try {
+      const modelsDir = join(process.cwd(), "models");
+      await hfe.init({ modelsDir });
+      _state = "ready";
+    } catch (err: any) {
+      _state = "failed";
+      _initError = err.message || String(err);
+      if (!_warnedOnce) {
+        console.warn(
+          `[embeddings] WARN: native embeddings unavailable, falling back to keyword-only search. Error: ${_initError}`
+        );
+        _warnedOnce = true;
+      }
+    }
   }
 }
 
@@ -41,6 +58,7 @@ async function ensureInit(): Promise<void> {
 export async function getEmbedding(text: string): Promise<number[] | null> {
   try {
     await ensureInit();
+    if (_state !== "ready") return null;
     return await hfe.embed(text);
   } catch (err: any) {
     console.error(`[embeddings] embed failed: ${err.message}`);
@@ -52,10 +70,40 @@ export async function getEmbedding(text: string): Promise<number[] | null> {
  * Check if the embedding engine is currently available.
  */
 export function getMode(): "local" | "none" {
+  if (_state === "ready") return "local";
+  if (_state === "failed") return "none";
+  // Still uninitialized — check directly
   try {
     hfe.dimensions();
     return "local";
   } catch {
     return "none";
   }
+}
+
+/**
+ * Get embedding engine status for diagnostics.
+ */
+export function getStatus(): {
+  mode: "local" | "none";
+  model?: string;
+  dims?: number;
+  error?: string;
+} {
+  const mode = getMode();
+  if (mode === "local") {
+    try {
+      return {
+        mode,
+        model: "nomic-embed-text-v1.5",
+        dims: hfe.dimensions(),
+      };
+    } catch {
+      return { mode };
+    }
+  }
+  return {
+    mode,
+    error: _initError,
+  };
 }
