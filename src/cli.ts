@@ -1074,6 +1074,117 @@ program
     }
   });
 
+// ─── flair reembed ────────────────────────────────────────────────────────────
+
+program
+  .command("reembed")
+  .description("Re-generate embeddings for memories with stale or missing model tags")
+  .requiredOption("--agent <id>", "Agent ID to re-embed memories for")
+  .option("--stale-only", "Only re-embed memories with mismatched model tag")
+  .option("--dry-run", "Show count without modifying")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--batch-size <n>", "Records per batch", "50")
+  .option("--delay-ms <ms>", "Delay between batches (ms)", "100")
+  .action(async (opts) => {
+    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const agentId = opts.agent;
+    const staleOnly = opts.staleOnly ?? false;
+    const dryRun = opts.dryRun ?? false;
+    const batchSize = Number(opts.batchSize);
+    const delayMs = Number(opts.delayMs);
+
+    // Current model ID — must match what embeddings-provider.ts uses
+    const currentModel = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
+
+    console.log(`Re-embedding memories for agent: ${agentId}`);
+    console.log(`Current model: ${currentModel}`);
+    if (staleOnly) console.log("Mode: stale-only (skipping up-to-date memories)");
+    if (dryRun) console.log("Mode: dry-run (no modifications)");
+    console.log("");
+
+    // Determine key path for auth
+    const keysDir = defaultKeysDir();
+    const privPath = privKeyPath(agentId, keysDir);
+    if (!existsSync(privPath)) {
+      console.error(`❌ Key not found: ${privPath}`);
+      console.error("Provide the agent's private key or use --agent with a registered agent.");
+      process.exit(1);
+    }
+
+    // Fetch all memories for this agent
+    const searchRes = await authFetch(baseUrl, agentId, privPath, "POST", "/SemanticSearch", {
+      agentId,
+      limit: 10000,
+    });
+    if (!searchRes.ok) {
+      console.error(`❌ Failed to fetch memories: ${searchRes.status}`);
+      process.exit(1);
+    }
+    const data = await searchRes.json() as { results?: any[] };
+    const allMemories = data.results ?? [];
+
+    // Filter to candidates
+    const candidates = allMemories.filter((m: any) => {
+      if (!m.content) return false;
+      if (staleOnly) {
+        return !m.embeddingModel || m.embeddingModel !== currentModel;
+      }
+      return true;
+    });
+
+    const total = candidates.length;
+    const skipped = allMemories.length - total;
+
+    console.log(`Total memories: ${allMemories.length}`);
+    console.log(`Candidates for re-embedding: ${total}`);
+    if (skipped > 0) console.log(`Skipped (up-to-date): ${skipped}`);
+
+    if (dryRun || total === 0) {
+      if (total === 0) console.log("\n✅ All memories are up-to-date!");
+      return;
+    }
+
+    console.log("");
+    let processed = 0;
+    let errors = 0;
+
+    for (let i = 0; i < candidates.length; i += batchSize) {
+      const batch = candidates.slice(i, i + batchSize);
+
+      for (const memory of batch) {
+        try {
+          // PUT with content triggers re-embedding in Memory.put()
+          // We clear the embedding to force regeneration
+          const updateRes = await authFetch(baseUrl, agentId, privPath, "PUT", `/Memory/${memory.id}`, {
+            id: memory.id,
+            content: memory.content,
+            embedding: undefined,
+            embeddingModel: undefined,
+          });
+          if (updateRes.ok) {
+            processed++;
+          } else {
+            errors++;
+          }
+        } catch {
+          errors++;
+        }
+      }
+
+      // Progress
+      const pct = Math.round(((i + batch.length) / total) * 100);
+      process.stdout.write(`\rRe-embedded ${processed}/${total} (${pct}%)${errors > 0 ? ` [${errors} errors]` : ""}`);
+
+      // Rate limiting between batches
+      if (i + batchSize < candidates.length) {
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
+
+    console.log(`\n\n✅ Re-embedding complete: ${processed} updated, ${errors} errors`);
+  });
+
 // ─── Legacy identity/memory/soul commands (preserved) ────────────────────────
 
 const identity = program.command("identity").description("Legacy identity commands");
