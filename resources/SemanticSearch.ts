@@ -90,7 +90,8 @@ export class SemanticSearch extends Resource {
     let qEmb = queryEmbedding;
     if (!qEmb && q) {
       if (getMode() !== "none") {
-        try { qEmb = await getEmbedding(String(q).slice(0, 500)); } catch {}
+        // align truncation with model's context window (~8000 chars / 2048 tokens)
+        try { qEmb = await getEmbedding(String(q).slice(0, 8000)); } catch {}
       }
     }
 
