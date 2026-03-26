@@ -1,6 +1,7 @@
 import { Resource, databases } from "@harperfast/harper";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord } from "./table-helpers.js";
+import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 
 // ─── Temporal Decay + Relevance Scoring ─────────────────────────────────────
 
@@ -55,6 +56,13 @@ const CANDIDATE_MULTIPLIER = 5;
 export class SemanticSearch extends Resource {
   async post(data: any) {
     const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since } = data || {};
+
+    // Rate limiting (embedding bucket for searches that will generate embeddings)
+    if (agentId) {
+      const bucket = q && !queryEmbedding ? "embedding" : "general";
+      const rl = checkRateLimit(agentId, bucket);
+      if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "search");
+    }
     const subjectFilter = subjects
       ? new Set((subjects as string[]).map((s: string) => s.toLowerCase()))
       : subject
