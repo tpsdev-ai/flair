@@ -58,11 +58,11 @@ export class SemanticSearch extends Resource {
     const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since } = data || {};
 
     // Rate limiting — use authenticated agent ID from request context, not client-supplied body
-    const authenticatedAgent: string | undefined = (this as any).request?.headers?.get?.("x-tps-agent")
+    const rateLimitAgent: string | undefined = (this as any).request?.headers?.get?.("x-tps-agent")
       ?? (this as any).request?.tpsAgent;
-    if (authenticatedAgent) {
+    if (rateLimitAgent) {
       const bucket = q && !queryEmbedding ? "embedding" : "general";
-      const rl = checkRateLimit(authenticatedAgent, bucket);
+      const rl = checkRateLimit(rateLimitAgent, bucket);
       if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "search");
     }
 
