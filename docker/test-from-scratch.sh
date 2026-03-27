@@ -116,9 +116,19 @@ echo "[5/5] ✓ backup file valid: $BACKUP_FILE"
 echo ""
 echo "[6/7] Testing flair init from a different working directory..."
 
-# Kill previous Harper
+# Kill previous Harper and wait for port to fully release
 pkill -f "harper" 2>/dev/null || true
-sleep 2
+sleep 5
+
+# Verify port is free before continuing
+for i in $(seq 1 10); do
+  if ! lsof -ti :${PORT} > /dev/null 2>&1; then
+    echo "Port ${PORT} is free (${i}s)"
+    break
+  fi
+  [ "$i" -eq 10 ] && { echo "WARN: Port ${PORT} still in use after 10s"; }
+  sleep 1
+done
 
 # Create a fresh home and run from /tmp (NOT the flair package dir)
 export HOME2="$(mktemp -d)"
@@ -126,6 +136,7 @@ cd /tmp
 HOME="$HOME2" $FLAIR init \
   --agent-id userbot \
   --admin-pass "$ADMIN_PASS" \
+  --port "$PORT" \
   --data-dir "$HOME2/.flair/data" \
   --keys-dir "$HOME2/.flair/keys"
 
@@ -136,6 +147,7 @@ echo ""
 echo "[7/7] Testing agent add from /tmp..."
 HOME="$HOME2" $FLAIR agent add remotebot \
   --admin-pass "$ADMIN_PASS" \
+  --port "$PORT" \
   --keys-dir "$HOME2/.flair/keys"
 
 echo "[7/7] ✓ agent add from /tmp succeeded (ops API port correct)"
