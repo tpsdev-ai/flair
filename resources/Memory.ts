@@ -2,6 +2,7 @@ import { databases } from "@harperfast/harper";
 import { patchRecord } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
 import { getEmbedding } from "./embeddings-provider.js";
+import { scanContent, isStrictMode } from "./content-safety.js";
 
 export class Memory extends (databases as any).flair.Memory {
   /**
@@ -91,6 +92,21 @@ export class Memory extends (databases as any).flair.Memory {
       content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
     }
 
+    // Content safety scan
+    if (content.content) {
+      const safety = scanContent(content.content);
+      if (!safety.safe) {
+        if (isStrictMode()) {
+          return new Response(JSON.stringify({
+            error: "content_safety_violation",
+            flags: safety.flags,
+            message: "Content flagged for potential prompt injection. Set FLAIR_CONTENT_SAFETY=warn to allow with tagging.",
+          }), { status: 400, headers: { "Content-Type": "application/json" } });
+        }
+        content._safetyFlags = safety.flags;
+      }
+    }
+
     // Generate embedding from content text
     if (content.content && !content.embedding) {
       const vec = await getEmbedding(content.content);
@@ -103,6 +119,24 @@ export class Memory extends (databases as any).flair.Memory {
   async put(content: any) {
     const now = new Date().toISOString();
     content.updatedAt = now;
+
+    // Content safety scan on updated content
+    if (content.content) {
+      const safety = scanContent(content.content);
+      if (!safety.safe) {
+        if (isStrictMode()) {
+          return new Response(JSON.stringify({
+            error: "content_safety_violation",
+            flags: safety.flags,
+            message: "Content flagged for potential prompt injection.",
+          }), { status: 400, headers: { "Content-Type": "application/json" } });
+        }
+        content._safetyFlags = safety.flags;
+      } else {
+        // Clear previous flags if content is now clean
+        content._safetyFlags = null;
+      }
+    }
 
     // Re-generate embedding if content changed
     if (content.content && !content.embedding) {

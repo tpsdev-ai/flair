@@ -1,5 +1,6 @@
 import { Resource, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
+import { wrapUntrusted } from "./content-safety.js";
 
 /**
  * POST /MemoryBootstrap
@@ -27,7 +28,13 @@ function formatMemory(m: any, supersedes?: boolean): string {
   const tag = m.durability === "permanent" ? "🔒" : m.durability === "persistent" ? "📌" : "📝";
   const date = m.createdAt ? ` (${m.createdAt.slice(0, 10)})` : "";
   const chain = m.supersedes ? " [supersedes earlier decision]" : "";
-  return `${tag} ${m.content}${date}${chain}`;
+  const base = `${tag} ${m.content}${date}${chain}`;
+
+  // Wrap flagged memories in safety delimiters
+  if (m._safetyFlags && Array.isArray(m._safetyFlags) && m._safetyFlags.length > 0) {
+    return wrapUntrusted(base, m._source);
+  }
+  return base;
 }
 
 export class BootstrapMemories extends Resource {
