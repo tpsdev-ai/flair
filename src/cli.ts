@@ -16,8 +16,8 @@ import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypt
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
-const DEFAULT_PORT = 9926;
-const DEFAULT_OPS_PORT = 9925;
+const DEFAULT_PORT = 19926;
+const DEFAULT_OPS_PORT = 19925;
 const DEFAULT_ADMIN_USER = "admin";
 const STARTUP_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
@@ -876,6 +876,202 @@ program
     }
 
     console.log("\nTo upgrade: npm install -g @tpsdev-ai/flair@latest");
+  });
+
+// ─── flair stop ───────────────────────────────────────────────────────────────
+
+program
+  .command("stop")
+  .description("Stop the running Flair (Harper) instance")
+  .option("--port <port>", "Harper HTTP port")
+  .action(async (opts) => {
+    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const platform = process.platform;
+
+    if (platform === "darwin") {
+      // macOS: try launchd first
+      const label = "ai.tpsdev.flair";
+      const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+      if (existsSync(plistPath)) {
+        try {
+          const { execSync } = await import("node:child_process");
+          execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" });
+          console.log("✅ Flair stopped (launchd service unloaded)");
+          return;
+        } catch {
+          // launchd unload failed, try PID fallback
+        }
+      }
+    }
+
+    // Fallback: find process by port
+    try {
+      const { execSync } = await import("node:child_process");
+      const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+      if (lsof) {
+        const pids = lsof.split("\n").map(p => p.trim()).filter(Boolean);
+        for (const pid of pids) {
+          process.kill(Number(pid), "SIGTERM");
+        }
+        console.log(`✅ Flair stopped (killed PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")})`);
+      } else {
+        console.log("Flair is not running.");
+      }
+    } catch {
+      console.log("Flair is not running (nothing found on port " + port + ").");
+    }
+  });
+
+// ─── flair restart ────────────────────────────────────────────────────────────
+
+program
+  .command("restart")
+  .description("Restart the Flair (Harper) instance")
+  .option("--port <port>", "Harper HTTP port")
+  .action(async (opts) => {
+    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const platform = process.platform;
+
+    if (platform === "darwin") {
+      const label = "ai.tpsdev.flair";
+      const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+      if (existsSync(plistPath)) {
+        try {
+          const { execSync } = await import("node:child_process");
+          const uid = process.getuid?.() ?? 501;
+          execSync(`launchctl kickstart -k user/${uid}/${label}`, { stdio: "pipe" });
+          console.log("✅ Flair restarted (launchd kickstart)");
+          return;
+        } catch (err: any) {
+          console.error(`launchd restart failed: ${err.message}`);
+        }
+      } else {
+        console.error("❌ No launchd service found. Run 'flair init' first.");
+        process.exit(1);
+      }
+    } else {
+      // Linux: stop + start via init
+      console.log("Stopping...");
+      try {
+        const { execSync } = await import("node:child_process");
+        const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+        if (lsof) {
+          for (const pid of lsof.split("\n")) {
+            try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
+          }
+          // Wait briefly for shutdown
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      } catch { /* not running */ }
+
+      console.log("Starting...");
+      const bin = harperBin();
+      if (!bin) {
+        console.error("❌ Harper binary not found. Run 'flair init' first.");
+        process.exit(1);
+      }
+
+      const dataDir = defaultDataDir();
+      const adminPass = process.env.HDB_ADMIN_PASSWORD ?? "";
+      const env: Record<string, string> = {
+        ...(process.env as Record<string, string>),
+        ROOTPATH: dataDir,
+        DEFAULTS_MODE: "dev",
+        HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
+        HDB_ADMIN_PASSWORD: adminPass,
+        HTTP_PORT: String(port),
+        LOCAL_STUDIO: "false",
+      };
+
+      const proc = spawn(process.execPath, [bin, "run", "."], {
+        cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
+      });
+      proc.unref();
+
+      try {
+        await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
+        console.log("✅ Flair restarted");
+      } catch {
+        console.error("❌ Flair failed to restart within timeout");
+        process.exit(1);
+      }
+    }
+  });
+
+// ─── flair uninstall ──────────────────────────────────────────────────────────
+
+program
+  .command("uninstall")
+  .description("Stop Flair and remove the launchd/systemd service")
+  .option("--purge", "Also remove data and keys (destructive)")
+  .action(async (opts) => {
+    const platform = process.platform;
+    const port = readPortFromConfig() ?? DEFAULT_PORT;
+
+    // Stop first
+    if (platform === "darwin") {
+      const label = "ai.tpsdev.flair";
+      const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+      if (existsSync(plistPath)) {
+        try {
+          const { execSync } = await import("node:child_process");
+          execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" });
+        } catch { /* best effort */ }
+        const { unlinkSync } = await import("node:fs");
+        unlinkSync(plistPath);
+        console.log("✅ Launchd service removed");
+      } else {
+        console.log("No launchd service found — skipping");
+      }
+    } else {
+      // Linux: kill by port
+      try {
+        const { execSync } = await import("node:child_process");
+        const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+        if (lsof) {
+          for (const pid of lsof.split("\n")) {
+            try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
+          }
+        }
+      } catch { /* not running */ }
+      console.log("✅ Flair process stopped");
+    }
+
+    // Remove config
+    const cfgPath = configPath();
+    if (existsSync(cfgPath)) {
+      const { unlinkSync } = await import("node:fs");
+      unlinkSync(cfgPath);
+      console.log("✅ Config removed");
+    }
+
+    if (opts.purge) {
+      const { rmSync } = await import("node:fs");
+      const dataDir = defaultDataDir();
+      const keysDir = defaultKeysDir();
+      const flairDir = join(homedir(), ".flair");
+
+      if (existsSync(dataDir)) {
+        rmSync(dataDir, { recursive: true, force: true });
+        console.log("✅ Data removed: " + dataDir);
+      }
+      if (existsSync(keysDir)) {
+        rmSync(keysDir, { recursive: true, force: true });
+        console.log("✅ Keys removed: " + keysDir);
+      }
+      // Remove .flair dir if empty
+      try {
+        const { readdirSync, rmdirSync } = await import("node:fs");
+        if (existsSync(flairDir) && readdirSync(flairDir).length === 0) {
+          rmdirSync(flairDir);
+        }
+      } catch { /* non-empty, that's fine */ }
+
+      console.log("\n🗑️  Flair fully purged");
+    } else {
+      console.log("\nData and keys preserved at ~/.flair/");
+      console.log("To remove everything: flair uninstall --purge");
+    }
   });
 
 // ─── Legacy identity/memory/soul commands (preserved) ────────────────────────

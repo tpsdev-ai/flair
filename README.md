@@ -88,6 +88,12 @@ flair agent add mybot --name "My Bot" --role assistant
 
 # Check everything is working
 flair status
+
+# Lifecycle management
+flair stop          # Stop the Flair instance
+flair restart       # Restart the Flair instance
+flair uninstall     # Remove the service (keeps data)
+flair uninstall --purge  # Remove everything including data and keys
 ```
 
 That's it. Your agent now has identity and memory.
@@ -163,7 +169,7 @@ npm install @tpsdev-ai/flair-client
 import { FlairClient } from '@tpsdev-ai/flair-client'
 
 const flair = new FlairClient({
-  url: 'http://localhost:9926',  // or remote: https://flair.example.com
+  url: 'http://localhost:19926',  // or remote: https://flair.example.com
   agentId: 'mybot',
   // key auto-resolved from ~/.flair/keys/mybot.key
 })
@@ -190,17 +196,17 @@ Flair is a pure HTTP API. Use it from Python, Go, Rust, shell scripts — anythi
 ```bash
 # Search memories
 curl -H "Authorization: TPS-Ed25519 mybot:$TS:$NONCE:$SIG" \
-  -X POST http://localhost:9926/SemanticSearch \
+  -X POST http://localhost:19926/SemanticSearch \
   -d '{"agentId": "mybot", "q": "deployment procedure", "limit": 5}'
 
 # Write a memory
 curl -H "Authorization: TPS-Ed25519 mybot:$TS:$NONCE:$SIG" \
-  -X PUT http://localhost:9926/Memory/mybot-123 \
+  -X PUT http://localhost:19926/Memory/mybot-123 \
   -d '{"id": "mybot-123", "agentId": "mybot", "content": "...", "durability": "standard"}'
 
 # Bootstrap (soul + recent memories)
 curl -H "Authorization: TPS-Ed25519 mybot:$TS:$NONCE:$SIG" \
-  -X POST http://localhost:9926/BootstrapMemories \
+  -X POST http://localhost:19926/BootstrapMemories \
   -d '{"agentId": "mybot", "maxTokens": 4000}'
 ```
 
@@ -246,7 +252,7 @@ flair init
 Your data stays on your machine. Best for personal agents, dev teams, and privacy-first setups. Flair runs as a single Harper process — no Docker, no cloud, no external services.
 
 #### Custom Ports
-If the default port (`9926`) is already in use, initialize with a custom port:
+If the default port (`19926`) is already in use, initialize with a custom port:
 ```bash
 flair init --port 8000
 ```
@@ -258,9 +264,9 @@ Run Flair on a VPS or cloud instance. Agents connect over HTTPS:
 
 ```bash
 # On the server
-flair init --port 9926
+flair init --port 19926
 # Agents connect with:
-FLAIR_URL=https://your-server:9926 flair agent add mybot
+FLAIR_URL=https://your-server:19926 flair agent add mybot
 ```
 
 Good for teams with multiple machines or always-on agents.
