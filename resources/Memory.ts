@@ -63,9 +63,11 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async post(content: any, context?: any) {
-    // Rate limiting
-    if (content.agentId) {
-      const rl = checkRateLimit(content.agentId, "general");
+    // Rate limiting — use authenticated agent ID, not client-supplied body field
+    const ctx = (this as any).getContext?.();
+    const authenticatedAgent: string | undefined = ctx?.request?.tpsAgent;
+    if (authenticatedAgent) {
+      const rl = checkRateLimit(authenticatedAgent, "general");
       if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "write");
     }
 
