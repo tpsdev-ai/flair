@@ -1,7 +1,7 @@
 import { databases } from "@harperfast/harper";
 import { patchRecord } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
-import { getEmbedding } from "./embeddings-provider.js";
+import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanContent, isStrictMode } from "./content-safety.js";
 
 export class Memory extends (databases as any).flair.Memory {
@@ -110,7 +110,7 @@ export class Memory extends (databases as any).flair.Memory {
     // Generate embedding from content text
     if (content.content && !content.embedding) {
       const vec = await getEmbedding(content.content);
-      if (vec) content.embedding = vec;
+      if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
     return super.post(content);
@@ -141,7 +141,7 @@ export class Memory extends (databases as any).flair.Memory {
     // Re-generate embedding if content changed
     if (content.content && !content.embedding) {
       const vec = await getEmbedding(content.content);
-      if (vec) content.embedding = vec;
+      if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
     // If archiving, record who + when
