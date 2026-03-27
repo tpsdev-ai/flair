@@ -82,6 +82,14 @@ export function getMode(): "local" | "none" {
 }
 
 /**
+ * Get the current embedding model identifier.
+ * Used for stamping memories and detecting stale embeddings.
+ */
+export function getModelId(): string {
+  return process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
+}
+
+/**
  * Get embedding engine status for diagnostics.
  */
 export function getStatus(): {
