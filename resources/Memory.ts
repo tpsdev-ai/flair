@@ -3,6 +3,7 @@ import { patchRecord } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { scanContent, isStrictMode } from "./content-safety.js";
+import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 
 export class Memory extends (databases as any).flair.Memory {
   /**
@@ -62,6 +63,12 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async post(content: any, context?: any) {
+    // Rate limiting
+    if (content.agentId) {
+      const rl = checkRateLimit(content.agentId, "general");
+      if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "write");
+    }
+
     content.durability ||= "standard";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
