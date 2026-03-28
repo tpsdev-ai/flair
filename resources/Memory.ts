@@ -3,6 +3,7 @@ import { patchRecord } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanContent, isStrictMode } from "./content-safety.js";
+import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 
 export class Memory extends (databases as any).flair.Memory {
   /**
@@ -62,6 +63,14 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async post(content: any, context?: any) {
+    // Rate limiting — use authenticated agent ID, not client-supplied body field
+    const ctx = (this as any).getContext?.();
+    const authenticatedAgent: string | undefined = ctx?.request?.tpsAgent;
+    if (authenticatedAgent) {
+      const rl = checkRateLimit(authenticatedAgent, "general");
+      if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "write");
+    }
+
     content.durability ||= "standard";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
