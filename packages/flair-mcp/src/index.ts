@@ -32,11 +32,44 @@ if (!agentId) {
   process.exit(1);
 }
 
+const flairUrl = (process.env.FLAIR_URL || "http://localhost:19926").replace(/\/$/, "");
+const adminUser = process.env.FLAIR_ADMIN_USER;
+const adminPassword = process.env.FLAIR_ADMIN_PASSWORD;
+
 const flair = new FlairClient({
   agentId,
-  url: process.env.FLAIR_URL,
+  url: flairUrl,
   keyPath: process.env.FLAIR_KEY_PATH,
 });
+
+type SearchResult = {
+  id?: string;
+  content?: string;
+  type?: string;
+  createdAt?: string;
+  _score?: number;
+  score?: number;
+};
+
+function buildAuthHeaders(): Headers {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (adminUser && adminPassword) {
+    headers.set("authorization", `Basic ${Buffer.from(`${adminUser}:${adminPassword}`).toString("base64")}`);
+  }
+  return headers;
+}
+
+async function postHttp(path: string, body: unknown): Promise<any> {
+  const res = await fetch(`${flairUrl}${path}`, {
+    method: "POST",
+    headers: buildAuthHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`${path} failed: ${res.status} ${await res.text()}`);
+  }
+  return res.json();
+}
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
 
@@ -55,16 +88,18 @@ server.tool(
     limit: z.number().optional().default(5).describe("Max results (default 5)"),
   },
   async ({ query, limit }) => {
-    const results = await flair.memory.search(query, { limit });
-    if (results.length === 0) {
+    const payload = await postHttp("/SemanticSearch", { q: query, limit, agentId });
+    const results = (payload?.results ?? []) as SearchResult[];
+    if (!Array.isArray(results) || results.length === 0) {
       return { content: [{ type: "text", text: "No relevant memories found." }] };
     }
     const text = results
       .map((r, i) => {
         const date = r.createdAt ? r.createdAt.slice(0, 10) : "";
         const idStr = r.id ? `id:${r.id}` : "";
-        const meta = [date, r.type, idStr].filter(Boolean).join(", ");
-        return `${i + 1}. ${r.content}${meta ? ` (${meta})` : ""}`;
+        const score = typeof (r._score ?? r.score) === "number" ? `score:${(r._score ?? r.score)!.toFixed(3)}` : "";
+        const meta = [date, r.type, idStr, score].filter(Boolean).join(", ");
+        return `${i + 1}. ${r.content ?? ""}${meta ? ` (${meta})` : ""}`;
       })
       .join("\n");
     return { content: [{ type: "text", text }] };
@@ -85,20 +120,16 @@ server.tool(
     ]).optional().describe("Optional tags — array or comma-separated string"),
   },
   async ({ content, type, durability, tags }) => {
-    const result = await flair.memory.write(content, {
-      type: type as any,
-      durability: durability as any,
+    const result = await postHttp("/Memory", {
+      agentId,
+      content,
+      type,
+      durability,
       tags,
-      dedup: true,
-      dedupThreshold: 0.7,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     });
-    // Check if dedup returned an existing memory (different ID than what we generated)
-    const generatedPrefix = `${agentId}-`;
-    const wasDeduped = result.id && !result.id.startsWith(generatedPrefix);
-    if (wasDeduped) {
-      return { content: [{ type: "text", text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}` }] };
-    }
-    return { content: [{ type: "text", text: `Memory stored (id: ${result.id})` }] };
+    return { content: [{ type: "text", text: `Memory stored${result?.id ? ` (id: ${result.id})` : ""}` }] };
   },
 );
 

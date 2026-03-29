@@ -54,7 +54,7 @@ Once configured, Claude Code (or any MCP client) gets these tools:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FLAIR_AGENT_ID` | *(required)* | Agent identity for memory scoping |
-| `FLAIR_URL` | `http://localhost:9926` | Flair server URL |
+| `FLAIR_URL` | `http://localhost:19926` | Flair server URL |
 | `FLAIR_KEY_PATH` | auto-resolved | Path to Ed25519 private key |
 
 ## How It Works
@@ -77,7 +77,7 @@ Point to a remote Flair instance:
       "args": ["@tpsdev-ai/flair-mcp"],
       "env": {
         "FLAIR_AGENT_ID": "my-project",
-        "FLAIR_URL": "http://your-server:9926"
+        "FLAIR_URL": "http://your-server:19926"
       }
     }
   }
