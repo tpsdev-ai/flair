@@ -145,8 +145,11 @@ server.http(async (request: any, nextLayer: any) => {
       const decoded = Buffer.from(header.slice(6), "base64").toString("utf-8");
       const [user, pass] = decoded.split(":");
       if (user === "admin" && pass === getAdminPass()) {
-        // Mark as verified and pass through to Harper with admin credentials
+        // Mark as verified and set Harper user directly
         (request as any)._tpsAuthVerified = true;
+        try {
+          request.user = await (server as any).getUser("admin", null, request);
+        } catch { /* fallback: let original Basic header pass through */ }
         request.headers.set("x-tps-agent", "admin");
         if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = "admin";
         return nextLayer(request);
@@ -199,9 +202,23 @@ server.http(async (request: any, nextLayer: any) => {
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
-  const superAuth = "Basic " + btoa("admin:" + getAdminPass());
-  request.headers.set("authorization", superAuth);
-  if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
+  // Set the Harper user directly on the request so Harper's auth layer
+  // recognizes this as an authenticated request. This eliminates the need
+  // for authorizeLocal:true or HDB_ADMIN_PASSWORD in the middleware.
+  // server.getUser(username, null, request) resolves the user without password validation.
+  try {
+    request.user = await (server as any).getUser("admin", null, request);
+  } catch {
+    // Fallback: swap to Basic admin auth (requires HDB_ADMIN_PASSWORD env var)
+    try {
+      const superAuth = "Basic " + btoa("admin:" + getAdminPass());
+      request.headers.set("authorization", superAuth);
+      if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
+    } catch {
+      // No admin password available — let the request through and hope
+      // Harper's auth is configured to allow it (authorizeLocal: true)
+    }
+  }
 
   // Propagate authenticated agent to downstream resources via header.
   // Resources can read this to enforce agent-level scoping.
