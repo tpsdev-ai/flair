@@ -20,7 +20,7 @@ import type {
   BootstrapResult,
 } from "./types.js";
 
-const DEFAULT_URL = "http://localhost:9926";
+const DEFAULT_URL = "http://localhost:19926";
 const DEFAULT_TIMEOUT = 10_000;
 
 export class FlairClient {
@@ -33,12 +33,19 @@ export class FlairClient {
   private keyResolved = false;
   private keyPath: string | undefined;
   private timeoutMs: number;
+  private basicAuth: string | null = null;
 
   constructor(config: FlairClientConfig) {
     this.url = (config.url ?? process.env.FLAIR_URL ?? DEFAULT_URL).replace(/\/$/, "");
     this.agentId = config.agentId || process.env.FLAIR_AGENT_ID || "";
     this.keyPath = config.keyPath;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT;
+    // Basic auth fallback for standalone deployments without Ed25519 keys
+    const adminUser = config.adminUser ?? process.env.FLAIR_ADMIN_USER;
+    const adminPass = config.adminPassword ?? process.env.FLAIR_ADMIN_PASSWORD;
+    if (adminUser && adminPass) {
+      this.basicAuth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+    }
     this.memory = new MemoryApi(this);
     this.soul = new SoulApi(this);
   }
@@ -61,6 +68,8 @@ export class FlairClient {
     const key = this.resolveKey();
     if (key) {
       headers["Authorization"] = signRequest(this.agentId, key, method, path);
+    } else if (this.basicAuth) {
+      headers["Authorization"] = this.basicAuth;
     }
     const res = await fetch(`${this.url}${path}`, {
       method,

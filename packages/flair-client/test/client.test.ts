@@ -15,7 +15,7 @@ const { FlairClient, FlairError } = await import("../src/client.js");
 describe("FlairClient", () => {
   test("constructor uses default URL when none provided", () => {
     const client = new FlairClient({ agentId: "test" });
-    expect(client.url).toBe("http://localhost:9926");
+    expect(client.url).toBe("http://localhost:19926");
   });
 
   test("constructor uses provided URL", () => {
