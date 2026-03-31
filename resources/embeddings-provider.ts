@@ -33,10 +33,24 @@ async function ensureInit(): Promise<void> {
     return;
   } catch {
     // Not initialized — init with modelsDir pointing to where Harper's
-    // plugin loader downloaded the model (process.cwd() is the app dir)
+    // plugin loader downloaded the model (process.cwd() is the app dir).
+    // NOTE: import.meta.dirname and __dirname are both undefined in Harper v5's
+    // VM sandbox / worker threads, so we use process.cwd() which points to the
+    // Flair application directory.
     try {
       const modelsDir = join(process.cwd(), "models");
-      await hfe.init({ modelsDir });
+
+      // Find the native addon binary explicitly to avoid __dirname-dependent
+      // discovery in @node-llama-cpp which fails in Harper's VM sandbox.
+      const { existsSync } = await import("node:fs");
+      const platforms = ["linux-x64", "mac-arm64-metal", "mac-arm64", "win-x64"];
+      let addonPath: string | undefined;
+      for (const platform of platforms) {
+        const candidate = join(process.cwd(), "node_modules", "@node-llama-cpp", platform, "bins", platform, "llama-addon.node");
+        if (existsSync(candidate)) { addonPath = candidate; break; }
+      }
+
+      await hfe.init({ modelsDir, ...(addonPath ? { addonPath } : {}) });
       _state = "ready";
     } catch (err: any) {
       _state = "failed";
@@ -69,14 +83,28 @@ export async function getEmbedding(text: string): Promise<number[] | null> {
 /**
  * Check if the embedding engine is currently available.
  */
+/**
+ * Check if the embedding engine is currently available.
+ * If still uninitialized, attempts initialization first.
+ * This ensures worker threads (which don't share the main thread's init)
+ * get a chance to initialize before we give up.
+ */
+let _getModeInitAttempted = false;
 export function getMode(): "local" | "none" {
   if (_state === "ready") return "local";
   if (_state === "failed") return "none";
-  // Still uninitialized — check directly
+  // Still uninitialized — try direct check first
   try {
     hfe.dimensions();
+    _state = "ready";
     return "local";
   } catch {
+    // Not yet initialized. Trigger async init on first call so subsequent
+    // calls (including getEmbedding) will find the engine ready.
+    if (!_getModeInitAttempted) {
+      _getModeInitAttempted = true;
+      ensureInit().catch(() => {}); // fire-and-forget
+    }
     return "none";
   }
 }

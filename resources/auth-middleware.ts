@@ -145,8 +145,11 @@ server.http(async (request: any, nextLayer: any) => {
       const decoded = Buffer.from(header.slice(6), "base64").toString("utf-8");
       const [user, pass] = decoded.split(":");
       if (user === "admin" && pass === getAdminPass()) {
-        // Mark as verified and pass through to Harper with admin credentials
+        // Mark as verified and set Harper user directly
         (request as any)._tpsAuthVerified = true;
+        try {
+          request.user = await (server as any).getUser("admin", null, request);
+        } catch { /* fallback: let original Basic header pass through */ }
         request.headers.set("x-tps-agent", "admin");
         if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = "admin";
         return nextLayer(request);
@@ -199,9 +202,20 @@ server.http(async (request: any, nextLayer: any) => {
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
-  const superAuth = "Basic " + btoa("admin:" + getAdminPass());
-  request.headers.set("authorization", superAuth);
-  if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
+  // Swap the Authorization header to Basic admin auth so Harper's internal auth
+  // pipeline (passport) authenticates the request with full permissions including
+  // HNSW vector search. This requires HDB_ADMIN_PASSWORD to be set.
+  // NOTE: server.getUser() alone doesn't grant HNSW permissions in Harper v5.
+  try {
+    const superAuth = "Basic " + btoa("admin:" + getAdminPass());
+    request.headers.set("authorization", superAuth);
+    if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
+  } catch {
+    // No admin password — try server.getUser as fallback (limited permissions)
+    try {
+      request.user = await (server as any).getUser("admin", null, request);
+    } catch {}
+  }
 
   // Propagate authenticated agent to downstream resources via header.
   // Resources can read this to enforce agent-level scoping.

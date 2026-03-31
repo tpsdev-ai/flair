@@ -100,8 +100,9 @@ export class SemanticSearch extends Resource {
     // Generate query embedding
     let qEmb = queryEmbedding;
     if (!qEmb && q) {
-      if (getMode() !== "none") {
-        // align truncation with model's context window (~8000 chars / 2048 tokens)
+      // Always attempt embedding generation — getEmbedding() handles init internally.
+      // Don't gate on getMode() which may return "none" before init completes in worker threads.
+      {
         try { qEmb = await getEmbedding(String(q).slice(0, 8000)); } catch {}
       }
     }
@@ -152,7 +153,9 @@ export class SemanticSearch extends Resource {
       conditions.push({ operator: "or", conditions: agentConditions });
     }
 
-    conditions.push({ attribute: "archived", comparator: "equals", value: false });
+    // Exclude archived records. Use "not equals true" instead of "equals false"
+    // so records without the archived field (default: not archived) are included.
+    conditions.push({ attribute: "archived", comparator: "not_equals", value: true });
 
     if (tag) {
       conditions.push({ attribute: "tags", comparator: "equals", value: tag });
