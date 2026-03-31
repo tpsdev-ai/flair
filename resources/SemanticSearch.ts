@@ -153,7 +153,9 @@ export class SemanticSearch extends Resource {
       conditions.push({ operator: "or", conditions: agentConditions });
     }
 
-    conditions.push({ attribute: "archived", comparator: "equals", value: false });
+    // Exclude archived records. Use "not equals true" instead of "equals false"
+    // so records without the archived field (default: not archived) are included.
+    conditions.push({ attribute: "archived", comparator: "not_equals", value: true });
 
     if (tag) {
       conditions.push({ attribute: "tags", comparator: "equals", value: tag });
