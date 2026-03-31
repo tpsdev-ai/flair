@@ -47,7 +47,7 @@ export interface BootstrapResult {
 
 /** Client configuration. */
 export interface FlairClientConfig {
-  /** Flair server URL. Default: http://localhost:9926 */
+  /** Flair server URL. Default: http://localhost:19926 */
   url?: string;
   /** Agent ID for authentication and data scoping. Falls back to FLAIR_AGENT_ID env var. */
   agentId?: string;
@@ -55,4 +55,8 @@ export interface FlairClientConfig {
   keyPath?: string;
   /** Request timeout in ms. Default: 10000 */
   timeoutMs?: number;
+  /** Admin username for Basic auth fallback (standalone deployments). Falls back to FLAIR_ADMIN_USER env var. */
+  adminUser?: string;
+  /** Admin password for Basic auth fallback (standalone deployments). Falls back to FLAIR_ADMIN_PASSWORD env var. */
+  adminPassword?: string;
 }
