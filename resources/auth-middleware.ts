@@ -202,22 +202,19 @@ server.http(async (request: any, nextLayer: any) => {
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
-  // Set the Harper user directly on the request so Harper's auth layer
-  // recognizes this as an authenticated request. This eliminates the need
-  // for authorizeLocal:true or HDB_ADMIN_PASSWORD in the middleware.
-  // server.getUser(username, null, request) resolves the user without password validation.
+  // Swap the Authorization header to Basic admin auth so Harper's internal auth
+  // pipeline (passport) authenticates the request with full permissions including
+  // HNSW vector search. This requires HDB_ADMIN_PASSWORD to be set.
+  // NOTE: server.getUser() alone doesn't grant HNSW permissions in Harper v5.
   try {
-    request.user = await (server as any).getUser("admin", null, request);
+    const superAuth = "Basic " + btoa("admin:" + getAdminPass());
+    request.headers.set("authorization", superAuth);
+    if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
   } catch {
-    // Fallback: swap to Basic admin auth (requires HDB_ADMIN_PASSWORD env var)
+    // No admin password — try server.getUser as fallback (limited permissions)
     try {
-      const superAuth = "Basic " + btoa("admin:" + getAdminPass());
-      request.headers.set("authorization", superAuth);
-      if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
-    } catch {
-      // No admin password available — let the request through and hope
-      // Harper's auth is configured to allow it (authorizeLocal: true)
-    }
+      request.user = await (server as any).getUser("admin", null, request);
+    } catch {}
   }
 
   // Propagate authenticated agent to downstream resources via header.

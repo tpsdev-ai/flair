@@ -128,6 +128,9 @@ export class Memory extends (databases as any).flair.Memory {
   async put(content: any) {
     const now = new Date().toISOString();
     content.updatedAt = now;
+    // Set defaults that post() sets — put() is also used for new records via CLI
+    content.archived = content.archived ?? false;
+    content.createdAt = content.createdAt ?? now;
 
     // Content safety scan on updated content
     if (content.content) {
