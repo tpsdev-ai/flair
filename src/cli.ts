@@ -444,7 +444,7 @@ program
     console.log(`\n   Claude Code: Add to your CLAUDE.md:`);
     console.log(`     At the start of every session, run mcp__flair__bootstrap before responding.`);
     const mcpEnv: Record<string, string> = { FLAIR_AGENT_ID: agentId };
-    if (httpPort !== DEFAULT_PORT) mcpEnv.FLAIR_URL = httpUrl;
+    mcpEnv.FLAIR_URL = httpUrl;
     console.log(`\n   MCP config (.mcp.json):`);
     console.log(`     { "mcpServers": { "flair": { "command": "npx", "args": ["@tpsdev-ai/flair-mcp"], "env": ${JSON.stringify(mcpEnv)} } } }`);
   });
