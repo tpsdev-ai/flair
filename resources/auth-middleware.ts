@@ -397,7 +397,7 @@ server.http(async (request: any, nextLayer: any) => {
           error: "forbidden: agentId must match authenticated agent",
         }), { status: 403, headers: { "Content-Type": "application/json" } });
       }
-    } catch { /* malformed body — let resource return its own error */ }
+    } catch { return new Response(JSON.stringify({ error: "malformed_request_body" }), { status: 400, headers: { "Content-Type": "application/json" } }); }
   }
 
   // ── BootstrapMemories: agentId must match authenticated agent ───────────────
@@ -412,7 +412,7 @@ server.http(async (request: any, nextLayer: any) => {
           error: "forbidden: agentId must match authenticated agent",
         }), { status: 403, headers: { "Content-Type": "application/json" } });
       }
-    } catch { /* malformed body — let resource return its own error */ }
+    } catch { return new Response(JSON.stringify({ error: "malformed_request_body" }), { status: 400, headers: { "Content-Type": "application/json" } }); }
   }
 
   // ── Memory POST (create): agentId must match authenticated agent ────────────
@@ -427,7 +427,7 @@ server.http(async (request: any, nextLayer: any) => {
           error: "forbidden: cannot create memories for another agent",
         }), { status: 403, headers: { "Content-Type": "application/json" } });
       }
-    } catch {}
+    } catch { return new Response(JSON.stringify({ error: "malformed_request_body" }), { status: 400, headers: { "Content-Type": "application/json" } }); }
   }
 
   // ── Soul POST/PUT: agentId must match authenticated agent ───────────────────
@@ -442,7 +442,7 @@ server.http(async (request: any, nextLayer: any) => {
           error: "forbidden: cannot write another agent's soul",
         }), { status: 403, headers: { "Content-Type": "application/json" } });
       }
-    } catch {}
+    } catch { return new Response(JSON.stringify({ error: "malformed_request_body" }), { status: 400, headers: { "Content-Type": "application/json" } }); }
   }
 
   // ── Memory PUT: agentId must match authenticated agent ──────────────────────
@@ -457,7 +457,7 @@ server.http(async (request: any, nextLayer: any) => {
           error: "forbidden: cannot write memories for another agent",
         }), { status: 403, headers: { "Content-Type": "application/json" } });
       }
-    } catch {}
+    } catch { return new Response(JSON.stringify({ error: "malformed_request_body" }), { status: 400, headers: { "Content-Type": "application/json" } }); }
   }
 
   // ── Memory GET: non-admin can only read own memories (by ID) ────────────────
