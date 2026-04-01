@@ -155,7 +155,9 @@ export class SemanticSearch extends Resource {
 
     // Exclude archived records. Use "not equals true" instead of "equals false"
     // so records without the archived field (default: not archived) are included.
-    conditions.push({ attribute: "archived", comparator: "not_equals", value: true });
+    // Exclude archived records. Use "not_equal" (Harper v5 comparator) instead of
+    // "equals false" so records without the archived field are included.
+    conditions.push({ attribute: "archived", comparator: "not_equal", value: true });
 
     if (tag) {
       conditions.push({ attribute: "tags", comparator: "equals", value: tag });

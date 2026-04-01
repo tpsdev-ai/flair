@@ -301,9 +301,20 @@ program
 
         mkdirSync(dataDir, { recursive: true });
 
+        const opsSocket = join(dataDir, "operations-server");
+        const harperSetConfig = JSON.stringify({
+          rootPath: dataDir,
+          http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
+          operationsApi: { network: { port: opsPort, cors: true }, domainSocket: opsSocket },
+          mqtt: { network: { port: null }, webSocket: false },
+          localStudio: { enabled: false },
+          authentication: { authorizeLocal: true, enableSessions: true },
+        });
+
         const env: Record<string, string> = {
           ...(process.env as Record<string, string>),
           ROOTPATH: dataDir,
+          HARPER_SET_CONFIG: harperSetConfig,
           DEFAULTS_MODE: "dev",
           HDB_ADMIN_USERNAME: adminUser,
           HDB_ADMIN_PASSWORD: adminPass,
@@ -314,7 +325,10 @@ program
           LOCAL_STUDIO: "false",
         };
 
-        // Install
+        // Install Harper (creates system database, admin user, config file).
+        // IMPORTANT: Do NOT pre-create harper-config.yaml — Harper's install checks
+        // for its existence to detect existing installations. If found, it skips
+        // install and tries to read the (empty) database, causing a crash.
         console.log("Installing Harper...");
         await new Promise<void>((resolve, reject) => {
           let output = "";
@@ -323,12 +337,14 @@ program
           install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
           install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
           install.on("error", reject);
-          setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
+          setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 60_000);
         });
 
-        // Start (detached)
+        // Start Harper in dev mode (detached). Dev mode sets authorizeLocal=true
+        // which allows our Ed25519 middleware to handle auth while internal
+        // cross-resource calls (e.g. SemanticSearch → Memory) pass through.
         console.log(`Starting Harper on port ${httpPort}...`);
-        const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
+        const proc = spawn(process.execPath, [bin, "dev", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
         proc.unref();
       }
 
