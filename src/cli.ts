@@ -1176,6 +1176,90 @@ program
     console.log(`\n\n✅ Re-embedding complete: ${processed} updated, ${errors} errors`);
   });
 
+// ─── flair test ───────────────────────────────────────────────────────────────
+
+program
+  .command("test")
+  .description("Verify Flair is working: store, search, bootstrap, cleanup")
+  .requiredOption("--agent <id>", "Agent ID to test with")
+  .option("--port <port>", "Harper HTTP port")
+  .action(async (opts) => {
+    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const agentId = opts.agent;
+    const keysDir = defaultKeysDir();
+    const privPath = privKeyPath(agentId, keysDir);
+
+    if (!existsSync(privPath)) {
+      console.error(`❌ Key not found: ${privPath}`);
+      console.error(`   Run: flair init --agent-id ${agentId}`);
+      process.exit(1);
+    }
+
+    const testId = `test-${agentId}-${Date.now()}`;
+    const testContent = `Flair test memory (${new Date().toISOString()})`;
+    let passed = 0;
+    let failed = 0;
+
+    const check = async (name: string, fn: () => Promise<boolean>) => {
+      try {
+        const ok = await fn();
+        if (ok) { console.log(`  ✅ ${name}`); passed++; }
+        else { console.log(`  ❌ ${name}`); failed++; }
+      } catch (e: any) {
+        console.log(`  ❌ ${name}: ${e.message?.slice(0, 100)}`);
+        failed++;
+      }
+    };
+
+    console.log(`\nFlair test (agent: ${agentId}, url: ${baseUrl})\n`);
+
+    // 1. Health
+    await check("Health check", async () => {
+      const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
+      return res.status > 0;
+    });
+
+    // 2. Store
+    await check("Memory store", async () => {
+      const res = await authFetch(baseUrl, agentId, privPath, "PUT", `/Memory/${testId}`, {
+        id: testId, agentId, content: testContent, durability: "ephemeral",
+        createdAt: new Date().toISOString(), archived: false,
+      });
+      return res.ok;
+    });
+
+    // 3. Search
+    await check("Semantic search", async () => {
+      await new Promise(r => setTimeout(r, 2000)); // wait for indexing
+      const res = await authFetch(baseUrl, agentId, privPath, "POST", "/SemanticSearch", {
+        agentId, q: "flair test memory", limit: 5,
+      });
+      if (!res.ok) return false;
+      const data = await res.json() as { results?: any[] };
+      return (data.results?.length ?? 0) > 0;
+    });
+
+    // 4. Bootstrap
+    await check("Bootstrap context", async () => {
+      const res = await authFetch(baseUrl, agentId, privPath, "POST", "/BootstrapMemories", {
+        agentId, maxTokens: 1000,
+      });
+      if (!res.ok) return false;
+      const data = await res.json() as { context?: string };
+      return (data.context?.length ?? 0) > 0;
+    });
+
+    // 5. Cleanup
+    await check("Memory delete", async () => {
+      const res = await authFetch(baseUrl, agentId, privPath, "DELETE", `/Memory/${testId}`);
+      return res.ok || res.status === 204;
+    });
+
+    console.log(`\n${passed} passed, ${failed} failed`);
+    if (failed > 0) process.exit(1);
+  });
+
 // ─── Legacy identity/memory/soul commands (preserved) ────────────────────────
 
 const identity = program.command("identity").description("Legacy identity commands");
