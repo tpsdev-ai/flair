@@ -1396,37 +1396,7 @@ program
     if (issues > 0) process.exit(1);
   });
 
-// ─── Legacy identity/memory/soul commands (preserved) ────────────────────────
-
-const identity = program.command("identity").description("Legacy identity commands");
-identity.command("register")
-  .requiredOption("--id <id>")
-  .requiredOption("--name <name>")
-  .option("--role <role>")
-  .action(async (opts) => {
-    const kp = nacl.sign.keyPair();
-    const now = new Date().toISOString();
-    const agentRecord = await api("POST", "/Agent", {
-      id: opts.id, name: opts.name, role: opts.role,
-      publicKey: b64(kp.publicKey), createdAt: now, updatedAt: now,
-    });
-    console.log(JSON.stringify({ agent: agentRecord, privateKey: b64(kp.secretKey) }, null, 2));
-  });
-identity.command("show").argument("<id>").action(async (id) => console.log(JSON.stringify(await api("GET", `/Agent/${id}`), null, 2)));
-identity.command("list").action(async () => console.log(JSON.stringify(await api("GET", "/Agent"), null, 2)));
-identity.command("add-integration")
-  .requiredOption("--agent <agentId>")
-  .requiredOption("--platform <platform>")
-  .requiredOption("--encrypted-credential <ciphertext>")
-  .action(async (opts) => {
-    const now = new Date().toISOString();
-    const out = await api("POST", "/Integration", {
-      id: `${opts.agent}:${opts.platform}`, agentId: opts.agent,
-      platform: opts.platform, encryptedCredential: opts.encryptedCredential,
-      createdAt: now, updatedAt: now,
-    });
-    console.log(JSON.stringify(out, null, 2));
-  });
+// ─── Memory and Soul commands ────────────────────────────────────────────────
 
 const memory = program.command("memory").description("Manage agent memories");
 memory.command("add").requiredOption("--agent <id>").requiredOption("--content <text>")
@@ -1974,8 +1944,8 @@ program
 
 program
   .command("migrate-keys")
-  .description("Migrate agent keys from legacy path (~/.tps/secrets/flair/) to ~/.flair/keys/")
-  .option("--from <dir>", "Legacy keys directory", join(homedir(), ".tps", "secrets", "flair"))
+  .description("Migrate agent keys from old path (~/.tps/secrets/flair/) to ~/.flair/keys/")
+  .option("--from <dir>", "Old keys directory", join(homedir(), ".tps", "secrets", "flair"))
   .option("--to <dir>", "New keys directory", defaultKeysDir())
   .option("--dry-run", "Show what would be migrated without copying")
   .option("--port <port>", "Harper HTTP port (for agent list)", String(DEFAULT_PORT))
@@ -1989,7 +1959,7 @@ program
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
 
     if (!existsSync(fromDir)) {
-      console.log(`Legacy keys directory not found: ${fromDir}`);
+      console.log(`Old keys directory not found: ${fromDir}`);
       console.log("Nothing to migrate.");
       process.exit(0);
     }
@@ -2039,7 +2009,7 @@ program
     } else {
       console.log(`\n✅ Migration complete: ${migrated} migrated, ${skipped} skipped`);
       if (migrated > 0) {
-        console.log(`\nLegacy keys preserved at ${fromDir} (delete manually when confirmed working).`);
+        console.log(`\nOld keys preserved at ${fromDir} (delete manually when confirmed working).`);
 
         // Optionally verify keys match Flair records
         if (adminPass) {
