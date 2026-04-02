@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/flair",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Identity, memory, and soul for AI agents. Cryptographic identity (Ed25519), semantic memory with local embeddings, and persistent personality — all in a single process.",
   "type": "module",
   "license": "Apache-2.0",
@@ -48,7 +48,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@harperfast/harper": "5.0.0-beta.7",
+    "@harperfast/harper": "^5.0.0-beta.8",
     "commander": "14.0.3",
     "harper-fabric-embeddings": "^0.2.2",
     "tweetnacl": "1.0.3"

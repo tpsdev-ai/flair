@@ -358,17 +358,8 @@ program
           authentication: { authorizeLocal: true, enableSessions: true },
         });
 
-        // Isolate from any global Harper install. Harper's installer reads
-        // ~/.harperdb/hdb_boot_properties.file to detect prior installs —
-        // if one exists (unrelated to flair), checkForExistingInstall crashes
-        // in beta.6+ querying databases with an uninitialized env. Setting
-        // HOME to flair's own dir prevents the subprocess from seeing the
-        // global boot file. Flair never uses the boot file (relies on
-        // ROOTPATH), so this is safe.
-        const flairHome = join(dataDir, "..");  // ~/.flair
         const env: Record<string, string> = {
           ...(process.env as Record<string, string>),
-          HOME: flairHome,
           ROOTPATH: dataDir,
           HARPER_SET_CONFIG: harperSetConfig,
           DEFAULTS_MODE: "dev",
@@ -385,10 +376,15 @@ program
           console.log("Existing Harper installation found — skipping install.");
           console.log("If something is wrong, run: flair doctor");
         } else {
+          // Isolate install from any global Harper boot file.
+          // ~/.harperdb/hdb_boot_properties.file from an unrelated install
+          // causes checkForExistingInstall to crash in Harper v5 beta.6+.
+          // Only applied to install — run needs real HOME for npm/node resolution.
+          const installEnv = { ...env, HOME: join(dataDir, "..") };
           console.log("Installing Harper...");
           await new Promise<void>((resolve, reject) => {
             let output = "";
-            const install = spawn(process.execPath, [bin, "install"], { cwd: flairPackageDir(), env });
+            const install = spawn(process.execPath, [bin, "install"], { cwd: flairPackageDir(), env: installEnv });
             install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
             install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
             install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
