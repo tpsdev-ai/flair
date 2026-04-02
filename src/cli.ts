@@ -50,6 +50,42 @@ function readPortFromConfig(): number | null {
   return null;
 }
 
+// Unified port resolution: --port flag > FLAIR_URL env > config file > default
+// Every command that talks to Harper MUST use these helpers.
+function resolveHttpPort(opts: { port?: string | number }): number {
+  if (opts.port !== undefined && opts.port !== null) {
+    const n = Number(opts.port);
+    if (!isNaN(n) && n > 0) return n;
+  }
+  const envUrl = process.env.FLAIR_URL;
+  if (envUrl) {
+    const m = envUrl.match(/:(\d+)/);
+    if (m) return Number(m[1]);
+  }
+  return readPortFromConfig() ?? DEFAULT_PORT;
+}
+
+// Ops port resolution: --ops-port flag > FLAIR_OPS_PORT env > config opsPort > httpPort - 1
+function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }): number {
+  if (opts.opsPort !== undefined && opts.opsPort !== null) {
+    const n = Number(opts.opsPort);
+    if (!isNaN(n) && n > 0) return n;
+  }
+  const envOps = process.env.FLAIR_OPS_PORT;
+  if (envOps) return Number(envOps);
+  // Try reading from config
+  try {
+    const p = configPath();
+    if (existsSync(p)) {
+      const yaml = readFileSync(p, "utf-8");
+      const m = yaml.match(/opsPort:\s*(\d+)/);
+      if (m) return Number(m[1]);
+    }
+  } catch { /* ignore */ }
+  // Default: httpPort - 1
+  return resolveHttpPort(opts) - 1;
+}
+
 function writeConfig(port: number): void {
   const p = configPath();
   mkdirSync(join(homedir(), ".flair"), { recursive: true });
@@ -277,8 +313,8 @@ program
   .option("--skip-soul", "Skip interactive personality setup")
   .action(async (opts) => {
     const agentId: string = opts.agentId;
-    const httpPort = Number(opts.port);
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
+    const httpPort = resolveHttpPort(opts);
+    const opsPort = resolveOpsPort(opts);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     const dataDir: string = opts.dataDir ?? defaultDataDir();
 
@@ -466,8 +502,8 @@ agent
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--ops-port <port>", "Harper operations API port")
   .action(async (id: string, opts) => {
-    const httpPort = Number(opts.port);
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
+    const httpPort = resolveHttpPort(opts);
+    const opsPort = resolveOpsPort(opts);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     const adminPass: string | undefined = opts.adminPass;
     const adminUser = DEFAULT_ADMIN_USER;
@@ -507,7 +543,31 @@ agent
 agent
   .command("list")
   .description("List all agents")
-  .action(async () => console.log(JSON.stringify(await api("GET", "/Agent"), null, 2)));
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--port <port>", "Harper HTTP port")
+  .action(async (opts) => {
+    const port = resolveHttpPort(opts);
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (adminPass) {
+      // Use admin basic auth against ops API to list agents directly
+      const opsPort = resolveOpsPort(opts);
+      const auth = Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64");
+      const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+        body: JSON.stringify({ operation: "sql", sql: "SELECT id, name, createdAt FROM flair.Agent ORDER BY createdAt" }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.error(`Error: ${res.status} ${text}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(await res.json(), null, 2));
+    } else {
+      // Try agent-authed API (requires FLAIR_AGENT_ID to be set)
+      console.log(JSON.stringify(await api("GET", "/Agent"), null, 2));
+    }
+  });
 
 agent
   .command("show <id>")
@@ -522,8 +582,8 @@ agent
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .action(async (id: string, opts) => {
-    const httpPort = Number(opts.port);
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
+    const httpPort = resolveHttpPort(opts);
+    const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = DEFAULT_ADMIN_USER;
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
@@ -611,7 +671,7 @@ agent
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--force", "Skip interactive confirmation (required when stdin is not a TTY)")
   .action(async (id: string, opts) => {
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : Number(opts.port) + 1;
+    const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = DEFAULT_ADMIN_USER;
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
@@ -724,8 +784,8 @@ program
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys (for from-agent Ed25519 auth)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
-    const httpPort = Number(opts.port);
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
+    const httpPort = resolveHttpPort(opts);
+    const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = DEFAULT_ADMIN_USER;
     const scope: string = opts.scope ?? "read";
@@ -778,8 +838,8 @@ program
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
-    const httpPort = Number(opts.port);
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
+    const httpPort = resolveHttpPort(opts);
+    const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = DEFAULT_ADMIN_USER;
 
@@ -825,7 +885,7 @@ program
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .action(async (opts) => {
-    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const port = resolveHttpPort(opts);
     const baseUrl = opts.url ?? `http://127.0.0.1:${port}`;
     let healthy = false;
     let agentCount: number | null = null;
@@ -905,7 +965,7 @@ program
   .description("Stop the running Flair (Harper) instance")
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
-    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const port = resolveHttpPort(opts);
     const platform = process.platform;
 
     if (platform === "darwin") {
@@ -949,7 +1009,7 @@ program
   .description("Restart the Flair (Harper) instance")
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
-    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const port = resolveHttpPort(opts);
     const platform = process.platform;
 
     if (platform === "darwin") {
@@ -1106,7 +1166,7 @@ program
   .option("--batch-size <n>", "Records per batch", "50")
   .option("--delay-ms <ms>", "Delay between batches (ms)", "100")
   .action(async (opts) => {
-    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const port = resolveHttpPort(opts);
     const baseUrl = `http://127.0.0.1:${port}`;
     const agentId = opts.agent;
     const staleOnly = opts.staleOnly ?? false;
@@ -1188,7 +1248,7 @@ program
   .requiredOption("--agent <id>", "Agent ID to test with")
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
-    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const port = resolveHttpPort(opts);
     const baseUrl = `http://127.0.0.1:${port}`;
     const agentId = opts.agent;
     const keysDir = defaultKeysDir();
@@ -1273,7 +1333,7 @@ program
   .option("--fix", "Automatically fix issues where possible")
   .option("--dry-run", "Show what --fix would do without making changes")
   .action(async (opts) => {
-    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const port = resolveHttpPort(opts);
     const autoFix = opts.fix ?? false;
     const dryRun = opts.dryRun ?? false;
     if (dryRun && !autoFix) {
@@ -1529,7 +1589,7 @@ program
   .option("--key <path>", "Ed25519 private key path")
   .action(async (query, opts) => {
     try {
-      const baseUrl = opts.url || `http://127.0.0.1:${opts.port}`;
+      const baseUrl = opts.url || `http://127.0.0.1:${resolveHttpPort(opts)}`;
       const headers: Record<string, string> = { "content-type": "application/json" };
       const keyPath = opts.key || resolveKeyPath(opts.agent);
       if (keyPath) {
@@ -1572,7 +1632,7 @@ program
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--key <path>", "Ed25519 private key path")
   .action(async (opts) => {
-    const baseUrl = opts.url || `http://127.0.0.1:${opts.port}`;
+    const baseUrl = opts.url || `http://127.0.0.1:${resolveHttpPort(opts)}`;
     try {
       const headers: Record<string, string> = { "content-type": "application/json" };
       const keyPath = opts.key || resolveKeyPath(opts.agent);
@@ -1623,7 +1683,7 @@ program
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .action(async (opts) => {
-    const baseUrl: string = opts.url ?? `http://127.0.0.1:${opts.port}`;
+    const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = DEFAULT_ADMIN_USER;
 
@@ -1711,7 +1771,7 @@ program
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--dry-run", "Show what would be imported without making changes")
   .action(async (backupPath: string, opts) => {
-    const baseUrl: string = opts.url ?? `http://127.0.0.1:${opts.port}`;
+    const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = DEFAULT_ADMIN_USER;
     const dryRun: boolean = Boolean(opts.dryRun);
@@ -1838,7 +1898,7 @@ program
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
   .action(async (agentId, opts) => {
-    const baseUrl: string = opts.url ?? `http://127.0.0.1:${opts.port}`;
+    const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     if (!adminPass) { console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required"); process.exit(1); }
 
@@ -1926,8 +1986,8 @@ program
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
   .action(async (importPath, opts) => {
-    const baseUrl: string = opts.url ?? `http://127.0.0.1:${opts.port}`;
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : DEFAULT_OPS_PORT;
+    const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
+    const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     if (!adminPass) { console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required"); process.exit(1); }
 
@@ -2054,7 +2114,7 @@ program
     const fromDir: string = opts.from;
     const toDir: string = opts.to;
     const dryRun: boolean = opts.dryRun ?? false;
-    const opsPort = opts.opsPort ? Number(opts.opsPort) : Number(opts.port) + 1;
+    const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
 
     if (!existsSync(fromDir)) {
