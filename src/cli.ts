@@ -358,8 +358,17 @@ program
           authentication: { authorizeLocal: true, enableSessions: true },
         });
 
+        // Isolate from any global Harper install. Harper's installer reads
+        // ~/.harperdb/hdb_boot_properties.file to detect prior installs —
+        // if one exists (unrelated to flair), checkForExistingInstall crashes
+        // in beta.6+ querying databases with an uninitialized env. Setting
+        // HOME to flair's own dir prevents the subprocess from seeing the
+        // global boot file. Flair never uses the boot file (relies on
+        // ROOTPATH), so this is safe.
+        const flairHome = join(dataDir, "..");  // ~/.flair
         const env: Record<string, string> = {
           ...(process.env as Record<string, string>),
+          HOME: flairHome,
           ROOTPATH: dataDir,
           HARPER_SET_CONFIG: harperSetConfig,
           DEFAULTS_MODE: "dev",
