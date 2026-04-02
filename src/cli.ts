@@ -1260,6 +1260,142 @@ program
     if (failed > 0) process.exit(1);
   });
 
+// ─── flair doctor ─────────────────────────────────────────────────────────────
+
+program
+  .command("doctor")
+  .description("Diagnose common Flair problems and suggest fixes")
+  .option("--port <port>", "Harper HTTP port")
+  .action(async (opts) => {
+    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    let issues = 0;
+
+    console.log("\n🩺 Flair Doctor\n");
+
+    // 1. Port check — is something listening?
+    try {
+      const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
+      if (res.status > 0) {
+        console.log(`  ✅ Harper responding on port ${port}`);
+      }
+    } catch {
+      console.log(`  ❌ Nothing responding on port ${port}`);
+      // Check if port is in use by something else
+      try {
+        const { execSync } = await import("node:child_process");
+        const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+        if (lsof) {
+          console.log(`     Port ${port} is in use by PID ${lsof} — might be a stale process`);
+          console.log(`     Fix: kill ${lsof} && flair restart`);
+        } else {
+          console.log(`     Harper is not running`);
+          console.log(`     Fix: flair init --agent-id <your-agent>`);
+        }
+      } catch {
+        console.log(`     Harper is not running`);
+        console.log(`     Fix: flair init --agent-id <your-agent>`);
+      }
+      issues++;
+    }
+
+    // 2. Keys directory
+    const keysDir = defaultKeysDir();
+    if (existsSync(keysDir)) {
+      const keyFiles = (await import("node:fs")).readdirSync(keysDir).filter((f: string) => f.endsWith(".key"));
+      if (keyFiles.length > 0) {
+        console.log(`  ✅ Keys found: ${keyFiles.length} agent(s) in ${keysDir}`);
+      } else {
+        console.log(`  ❌ Keys directory exists but no .key files found`);
+        console.log(`     Fix: flair init --agent-id <your-agent>`);
+        issues++;
+      }
+    } else {
+      console.log(`  ❌ Keys directory missing: ${keysDir}`);
+      console.log(`     Fix: flair init --agent-id <your-agent>`);
+      issues++;
+    }
+
+    // 3. Config file
+    const cfgPath = join(homedir(), ".flair", "config.yaml");
+    if (existsSync(cfgPath)) {
+      const savedPort = readPortFromConfig();
+      console.log(`  ✅ Config: ${cfgPath} (port: ${savedPort ?? "default"})`);
+    } else {
+      console.log(`  ⚠️  No config file at ${cfgPath} — using defaults`);
+    }
+
+    // 4. Embeddings check (only if Harper is running)
+    try {
+      const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
+      if (res.status > 0) {
+        // Try a test embedding via SemanticSearch with a dummy query
+        // If embedding mode is "none", search will include _warning
+        const testRes = await fetch(`${baseUrl}/SemanticSearch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ q: "test", limit: 1 }),
+          signal: AbortSignal.timeout(10000),
+        });
+        if (testRes.ok) {
+          const data = await testRes.json() as { _warning?: string };
+          if (data._warning) {
+            console.log(`  ⚠️  Embeddings: keyword-only (${data._warning})`);
+            console.log(`     Semantic search quality is degraded`);
+            console.log(`     Check: ls ~/.npm-global/lib/node_modules/@tpsdev-ai/flair/models/`);
+            issues++;
+          } else {
+            console.log(`  ✅ Embeddings: semantic search operational`);
+          }
+        } else if (testRes.status === 401) {
+          // Auth required — can't test embeddings without an agent key
+          console.log(`  ⚠️  Embeddings: cannot verify (auth required for SemanticSearch)`);
+        }
+      }
+    } catch { /* Harper not running, already flagged above */ }
+
+    // 5. Stale PID file
+    const dataDir = defaultDataDir();
+    const pidFile = join(dataDir, "hdb.pid");
+    if (existsSync(pidFile)) {
+      const pidContent = (await import("node:fs")).readFileSync(pidFile, "utf-8").trim();
+      try {
+        process.kill(Number(pidContent), 0); // check if process exists
+        console.log(`  ✅ PID file: ${pidFile} (process ${pidContent} is alive)`);
+      } catch {
+        console.log(`  ❌ Stale PID file: ${pidFile} (process ${pidContent} is dead)`);
+        console.log(`     Fix: rm ${pidFile} && flair restart`);
+        issues++;
+      }
+    }
+
+    // 6. Data directory
+    if (existsSync(dataDir)) {
+      console.log(`  ✅ Data directory: ${dataDir}`);
+    } else {
+      // Check ~/harper/ (common alternative)
+      const altDir = join(homedir(), "harper");
+      if (existsSync(altDir)) {
+        console.log(`  ⚠️  Data at ~/harper/ (not ~/.flair/data) — old install location`);
+      } else {
+        console.log(`  ❌ No data directory found`);
+        console.log(`     Fix: flair init --agent-id <your-agent>`);
+        issues++;
+      }
+    }
+
+    // Summary
+    console.log("");
+    if (issues === 0) {
+      console.log("  🟢 No issues found");
+    } else {
+      console.log(`  🔴 ${issues} issue${issues > 1 ? "s" : ""} found — see fixes above`);
+    }
+    console.log("");
+
+    if (issues > 0) process.exit(1);
+  });
+
 // ─── Legacy identity/memory/soul commands (preserved) ────────────────────────
 
 const identity = program.command("identity").description("Legacy identity commands");
