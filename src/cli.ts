@@ -1279,50 +1279,107 @@ program
     if (dryRun && !autoFix) {
       console.log("  ℹ️  --dry-run only has effect with --fix\n");
     }
-    const baseUrl = `http://127.0.0.1:${port}`;
+    let effectivePort = port;
+    let baseUrl = `http://127.0.0.1:${port}`;
     let issues = 0;
+    let harperResponding = false;
 
     console.log("\n🩺 Flair Doctor\n");
 
-    // 1. Port check — is something listening?
-    try {
-      const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
-      if (res.status > 0) {
-        console.log(`  ✅ Harper responding on port ${port}`);
-      }
-    } catch {
-      console.log(`  ❌ Nothing responding on port ${port}`);
-      // Check if port is in use by something else
+    // Helper: try to reach Harper on a given port
+    async function probePort(p: number): Promise<boolean> {
+      try {
+        const res = await fetch(`http://127.0.0.1:${p}/Health`, { signal: AbortSignal.timeout(3000) });
+        return res.status > 0;
+      } catch { return false; }
+    }
+
+    // Helper: discover what port a Harper PID is listening on
+    async function discoverPortFromPid(pid: string): Promise<number | null> {
       try {
         const { execSync } = await import("node:child_process");
-        const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
-        if (lsof) {
-          console.log(`     Port ${port} is in use by PID ${lsof} — might be a stale process`);
-          console.log(`     Fix: kill ${lsof} && flair restart`);
-        } else {
-          console.log(`     Harper is not running`);
-          console.log(`     Fix: flair init --agent-id <your-agent>`);
-        }
-      } catch {
-        console.log(`     Harper is not running`);
-        if (autoFix) {
-          if (dryRun) {
-            console.log(`     Would run: flair restart`);
-          } else {
-            console.log(`     Attempting restart...`);
-            try {
-              const { execSync } = await import("node:child_process");
-              execSync(`${process.argv[0]} ${process.argv[1]} restart --port ${port}`, { stdio: "inherit" });
-              console.log(`     ✅ Restart attempted`);
-            } catch {
-              console.log(`     ❌ Restart failed — run: flair init --agent-id <your-agent>`);
+        const out = execSync(`lsof -aPi -p ${pid} -sTCP:LISTEN -Fn 2>/dev/null || true`, { encoding: "utf-8" });
+        const match = out.match(/:(\d+)$/m);
+        if (match) return Number(match[1]);
+      } catch { /* ignore */ }
+      return null;
+    }
+
+    // 1. Port check — is something listening?
+    // First, check PID file so we can cross-reference
+    const dataDir0 = defaultDataDir();
+    const pidFile0 = join(dataDir0, "hdb.pid");
+    let pidAlive = false;
+    let pidValue = "";
+    if (existsSync(pidFile0)) {
+      pidValue = (await import("node:fs")).readFileSync(pidFile0, "utf-8").trim();
+      try { process.kill(Number(pidValue), 0); pidAlive = true; } catch { /* dead */ }
+    }
+
+    if (await probePort(port)) {
+      console.log(`  ✅ Harper responding on port ${port}`);
+      harperResponding = true;
+    } else {
+      // Port didn't respond — but if PID is alive, try to find the real port
+      let discoveredPort: number | null = null;
+      if (pidAlive) {
+        discoveredPort = await discoverPortFromPid(pidValue);
+        if (discoveredPort && discoveredPort !== port && await probePort(discoveredPort)) {
+          console.log(`  ⚠️  Harper not on expected port ${port}, but responding on port ${discoveredPort} (PID ${pidValue})`);
+          console.log(`     Your config says port ${port} but Harper is actually running on ${discoveredPort}`);
+          if (autoFix) {
+            if (dryRun) {
+              console.log(`     Would update config to port ${discoveredPort}`);
+            } else {
+              writeConfig(discoveredPort);
+              console.log(`     ✅ Updated config to port ${discoveredPort}`);
             }
+          } else {
+            console.log(`     Fix: flair doctor --fix (updates config to match running port)`);
           }
+          effectivePort = discoveredPort;
+          baseUrl = `http://127.0.0.1:${discoveredPort}`;
+          harperResponding = true;
+          issues++;
         } else {
-          console.log(`     Fix: flair init --agent-id <your-agent>`);
+          console.log(`  ❌ Harper process alive (PID ${pidValue}) but not responding on any detected port`);
+          console.log(`     Fix: flair restart`);
+          issues++;
         }
+      } else {
+        // No live PID — Harper genuinely isn't running
+        // Check if something else grabbed the port
+        try {
+          const { execSync } = await import("node:child_process");
+          const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+          if (lsof) {
+            console.log(`  ❌ Nothing responding on port ${port} (port occupied by PID ${lsof})`);
+            console.log(`     Fix: kill ${lsof} && flair restart`);
+          } else {
+            console.log(`  ❌ Harper is not running`);
+            console.log(`     Fix: flair restart`);
+          }
+        } catch {
+          console.log(`  ❌ Harper is not running`);
+          if (autoFix) {
+            if (dryRun) {
+              console.log(`     Would run: flair restart`);
+            } else {
+              console.log(`     Attempting restart...`);
+              try {
+                const { execSync } = await import("node:child_process");
+                execSync(`${process.argv[0]} ${process.argv[1]} restart --port ${port}`, { stdio: "inherit" });
+                console.log(`     ✅ Restart attempted`);
+              } catch {
+                console.log(`     ❌ Restart failed — try: flair init --agent-id <your-agent>`);
+              }
+            }
+          } else {
+            console.log(`     Fix: flair restart`);
+          }
+        }
+        issues++;
       }
-      issues++;
     }
 
     // 2. Keys directory
@@ -1351,12 +1408,9 @@ program
       console.log(`  ⚠️  No config file at ${cfgPath} — using defaults`);
     }
 
-    // 4. Embeddings check (only if Harper is running)
-    try {
-      const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
-      if (res.status > 0) {
-        // Try a test embedding via SemanticSearch with a dummy query
-        // If embedding mode is "none", search will include _warning
+    // 4. Embeddings check (only if Harper is responding)
+    if (harperResponding) {
+      try {
         const testRes = await fetch(`${baseUrl}/SemanticSearch`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1374,20 +1428,22 @@ program
             console.log(`  ✅ Embeddings: semantic search operational`);
           }
         } else if (testRes.status === 401) {
-          // Auth required — can't test embeddings without an agent key
           console.log(`  ⚠️  Embeddings: cannot verify (auth required for SemanticSearch)`);
         }
-      }
-    } catch { /* Harper not running, already flagged above */ }
+      } catch { /* fetch error, already flagged */ }
+    }
 
-    // 5. Stale PID file
+    // 5. Stale PID file (skip if already reported in port check)
     const dataDir = defaultDataDir();
     const pidFile = join(dataDir, "hdb.pid");
     if (existsSync(pidFile)) {
       const pidContent = (await import("node:fs")).readFileSync(pidFile, "utf-8").trim();
       try {
-        process.kill(Number(pidContent), 0); // check if process exists
-        console.log(`  ✅ PID file: ${pidFile} (process ${pidContent} is alive)`);
+        process.kill(Number(pidContent), 0);
+        if (harperResponding) {
+          console.log(`  ✅ PID file: ${pidFile} (process ${pidContent} is alive)`);
+        }
+        // If not responding, we already reported the issue in step 1
       } catch {
         console.log(`  ❌ Stale PID file: ${pidFile} (process ${pidContent} is dead)`);
         if (autoFix) {
