@@ -1296,6 +1296,8 @@ program
 
     // Helper: discover what port a Harper PID is listening on
     async function discoverPortFromPid(pid: string): Promise<number | null> {
+      // Defense-in-depth: caller already validates, but re-check here
+      if (!/^\d+$/.test(pid)) return null;
       try {
         const { execSync } = await import("node:child_process");
         const out = execSync(`lsof -aPi -p ${pid} -sTCP:LISTEN -Fn 2>/dev/null || true`, { encoding: "utf-8" });
@@ -1312,8 +1314,14 @@ program
     let pidAlive = false;
     let pidValue = "";
     if (existsSync(pidFile0)) {
-      pidValue = (await import("node:fs")).readFileSync(pidFile0, "utf-8").trim();
-      try { process.kill(Number(pidValue), 0); pidAlive = true; } catch { /* dead */ }
+      const rawPid = (await import("node:fs")).readFileSync(pidFile0, "utf-8").trim();
+      // Strict integer validation — PID must be purely numeric to prevent injection
+      if (/^\d+$/.test(rawPid)) {
+        pidValue = rawPid;
+        try { process.kill(Number(pidValue), 0); pidAlive = true; } catch { /* dead */ }
+      } else {
+        console.log(`  ⚠️  PID file contains non-numeric value: ${pidFile0} — skipping`);
+      }
     }
 
     if (await probePort(port)) {
