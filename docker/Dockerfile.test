@@ -53,11 +53,17 @@ COPY --from=base /app/resources ./resources
 COPY --from=base /app/schemas ./schemas
 COPY --from=base /app/config.yaml ./config.yaml
 
+# Install the Linux x64 native binary for node-llama-cpp.
+# The package.json only has mac-arm64-metal as optional dep (dev machines).
+# Without this, Harper starts but embeddings fail with:
+#   "No llama-addon.node binary found. Install a @node-llama-cpp platform package"
+RUN bun add @node-llama-cpp/linux-x64@3 --no-save 2>/dev/null || \
+    npm install --no-save @node-llama-cpp/linux-x64@3
+
 # Pre-download embeddings model (~80MB). Docker layer cache ensures this
 # only downloads once — subsequent builds reuse the cached layer.
 # Required because Harper blocks on model download during schema init,
 # causing the seed retry loop to time out.
-# TODO: Move to GHCR base image or test-fixtures once we have more models.
 ENV FLAIR_MODELS_DIR=/opt/flair-models
 RUN mkdir -p /opt/flair-models && \
     curl -fSL \
