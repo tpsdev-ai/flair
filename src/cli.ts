@@ -31,7 +31,11 @@ function defaultDataDir(): string {
 }
 
 function configPath(): string {
-  return join(homedir(), ".flair", "config.yaml");
+  // Check both .yaml and .yml extensions
+  const yamlPath = join(homedir(), ".flair", "config.yaml");
+  const ymlPath = join(homedir(), ".flair", "config.yml");
+  if (existsSync(ymlPath) && !existsSync(yamlPath)) return ymlPath;
+  return yamlPath;
 }
 
 function readPortFromConfig(): number | null {
@@ -1266,8 +1270,15 @@ program
   .command("doctor")
   .description("Diagnose common Flair problems and suggest fixes")
   .option("--port <port>", "Harper HTTP port")
+  .option("--fix", "Automatically fix issues where possible")
+  .option("--dry-run", "Show what --fix would do without making changes")
   .action(async (opts) => {
     const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const autoFix = opts.fix ?? false;
+    const dryRun = opts.dryRun ?? false;
+    if (dryRun && !autoFix) {
+      console.log("  ℹ️  --dry-run only has effect with --fix\n");
+    }
     const baseUrl = `http://127.0.0.1:${port}`;
     let issues = 0;
 
@@ -1294,7 +1305,22 @@ program
         }
       } catch {
         console.log(`     Harper is not running`);
-        console.log(`     Fix: flair init --agent-id <your-agent>`);
+        if (autoFix) {
+          if (dryRun) {
+            console.log(`     Would run: flair restart`);
+          } else {
+            console.log(`     Attempting restart...`);
+            try {
+              const { execSync } = await import("node:child_process");
+              execSync(`${process.argv[0]} ${process.argv[1]} restart --port ${port}`, { stdio: "inherit" });
+              console.log(`     ✅ Restart attempted`);
+            } catch {
+              console.log(`     ❌ Restart failed — run: flair init --agent-id <your-agent>`);
+            }
+          }
+        } else {
+          console.log(`     Fix: flair init --agent-id <your-agent>`);
+        }
       }
       issues++;
     }
@@ -1317,7 +1343,7 @@ program
     }
 
     // 3. Config file
-    const cfgPath = join(homedir(), ".flair", "config.yaml");
+    const cfgPath = configPath();
     if (existsSync(cfgPath)) {
       const savedPort = readPortFromConfig();
       console.log(`  ✅ Config: ${cfgPath} (port: ${savedPort ?? "default"})`);
@@ -1364,7 +1390,16 @@ program
         console.log(`  ✅ PID file: ${pidFile} (process ${pidContent} is alive)`);
       } catch {
         console.log(`  ❌ Stale PID file: ${pidFile} (process ${pidContent} is dead)`);
-        console.log(`     Fix: rm ${pidFile} && flair restart`);
+        if (autoFix) {
+          if (dryRun) {
+            console.log(`     Would remove: ${pidFile}`);
+          } else {
+            (await import("node:fs")).unlinkSync(pidFile);
+            console.log(`     ✅ Removed stale PID file`);
+          }
+        } else {
+          console.log(`     Fix: rm ${pidFile} && flair restart`);
+        }
         issues++;
       }
     }
