@@ -341,6 +341,13 @@ program
 
         mkdirSync(dataDir, { recursive: true });
 
+        // Detect whether Harper has already been installed in this data dir.
+        // harper-config.yaml is created during install — its presence means
+        // install already ran. Re-running install against an existing data dir
+        // crashes in Harper v5 beta.6+ (checkForExistingInstall queries the
+        // database before the env is initialized).
+        const alreadyInstalled = existsSync(join(dataDir, "harper-config.yaml"));
+
         const opsSocket = join(dataDir, "operations-server");
         const harperSetConfig = JSON.stringify({
           rootPath: dataDir,
@@ -365,26 +372,27 @@ program
           LOCAL_STUDIO: "false",
         };
 
-        // Install Harper (creates system database, admin user, config file).
-        // IMPORTANT: Do NOT pre-create harper-config.yaml — Harper's install checks
-        // for its existence to detect existing installations. If found, it skips
-        // install and tries to read the (empty) database, causing a crash.
-        console.log("Installing Harper...");
-        await new Promise<void>((resolve, reject) => {
-          let output = "";
-          const install = spawn(process.execPath, [bin, "install"], { cwd: flairPackageDir(), env });
-          install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
-          install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
-          install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
-          install.on("error", reject);
-          setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 60_000);
-        });
+        if (alreadyInstalled) {
+          console.log("Existing Harper installation found — skipping install.");
+          console.log("If something is wrong, run: flair doctor");
+        } else {
+          console.log("Installing Harper...");
+          await new Promise<void>((resolve, reject) => {
+            let output = "";
+            const install = spawn(process.execPath, [bin, "install"], { cwd: flairPackageDir(), env });
+            install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
+            install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
+            install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
+            install.on("error", reject);
+            setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 60_000);
+          });
+        }
 
-        // Start Harper in dev mode (detached). Dev mode sets authorizeLocal=true
-        // which allows our Ed25519 middleware to handle auth while internal
-        // cross-resource calls (e.g. SemanticSearch → Memory) pass through.
+        // Start Harper with flair loaded as a component (the "." arg).
+        // ROOTPATH in env points to the data dir; authorizeLocal and thread
+        // count are set via HARPER_SET_CONFIG — no need for dev mode.
         console.log(`Starting Harper on port ${httpPort}...`);
-        const proc = spawn(process.execPath, [bin, "dev", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
+        const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
         proc.unref();
       }
 
