@@ -31,7 +31,11 @@ function defaultDataDir(): string {
 }
 
 function configPath(): string {
-  return join(homedir(), ".flair", "config.yaml");
+  // Check both .yaml and .yml extensions
+  const yamlPath = join(homedir(), ".flair", "config.yaml");
+  const ymlPath = join(homedir(), ".flair", "config.yml");
+  if (existsSync(ymlPath) && !existsSync(yamlPath)) return ymlPath;
+  return yamlPath;
 }
 
 function readPortFromConfig(): number | null {
@@ -1317,7 +1321,7 @@ program
     }
 
     // 3. Config file
-    const cfgPath = join(homedir(), ".flair", "config.yaml");
+    const cfgPath = configPath();
     if (existsSync(cfgPath)) {
       const savedPort = readPortFromConfig();
       console.log(`  ✅ Config: ${cfgPath} (port: ${savedPort ?? "default"})`);
