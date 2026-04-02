@@ -457,7 +457,7 @@ agent
   .command("add <id>")
   .description("Register a new agent in a running Flair instance")
   .option("--name <name>", "Display name (defaults to id)")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password for registration")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--ops-port <port>", "Harper operations API port")
@@ -513,7 +513,7 @@ agent
 agent
   .command("rotate-key <id>")
   .description("Rotate an agent's Ed25519 keypair")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
@@ -601,7 +601,7 @@ agent
   .command("remove <id>")
   .description("Remove an agent and all its data from Flair")
   .option("--keep-keys", "Do not delete key files from disk")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
@@ -715,7 +715,7 @@ program
   .command("grant <from-agent> <to-agent>")
   .description("Grant an agent read access to another agent's memories")
   .option("--scope <scope>", "Grant scope: read or search", "read")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys (for from-agent Ed25519 auth)")
@@ -770,7 +770,7 @@ program
 program
   .command("revoke <from-agent> <to-agent>")
   .description("Revoke a memory grant between two agents")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
@@ -1260,37 +1260,143 @@ program
     if (failed > 0) process.exit(1);
   });
 
-// ─── Legacy identity/memory/soul commands (preserved) ────────────────────────
+// ─── flair doctor ─────────────────────────────────────────────────────────────
 
-const identity = program.command("identity").description("Legacy identity commands");
-identity.command("register")
-  .requiredOption("--id <id>")
-  .requiredOption("--name <name>")
-  .option("--role <role>")
+program
+  .command("doctor")
+  .description("Diagnose common Flair problems and suggest fixes")
+  .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
-    const kp = nacl.sign.keyPair();
-    const now = new Date().toISOString();
-    const agentRecord = await api("POST", "/Agent", {
-      id: opts.id, name: opts.name, role: opts.role,
-      publicKey: b64(kp.publicKey), createdAt: now, updatedAt: now,
-    });
-    console.log(JSON.stringify({ agent: agentRecord, privateKey: b64(kp.secretKey) }, null, 2));
+    const port = opts.port ? Number(opts.port) : (readPortFromConfig() ?? DEFAULT_PORT);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    let issues = 0;
+
+    console.log("\n🩺 Flair Doctor\n");
+
+    // 1. Port check — is something listening?
+    try {
+      const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
+      if (res.status > 0) {
+        console.log(`  ✅ Harper responding on port ${port}`);
+      }
+    } catch {
+      console.log(`  ❌ Nothing responding on port ${port}`);
+      // Check if port is in use by something else
+      try {
+        const { execSync } = await import("node:child_process");
+        const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+        if (lsof) {
+          console.log(`     Port ${port} is in use by PID ${lsof} — might be a stale process`);
+          console.log(`     Fix: kill ${lsof} && flair restart`);
+        } else {
+          console.log(`     Harper is not running`);
+          console.log(`     Fix: flair init --agent-id <your-agent>`);
+        }
+      } catch {
+        console.log(`     Harper is not running`);
+        console.log(`     Fix: flair init --agent-id <your-agent>`);
+      }
+      issues++;
+    }
+
+    // 2. Keys directory
+    const keysDir = defaultKeysDir();
+    if (existsSync(keysDir)) {
+      const keyFiles = (await import("node:fs")).readdirSync(keysDir).filter((f: string) => f.endsWith(".key"));
+      if (keyFiles.length > 0) {
+        console.log(`  ✅ Keys found: ${keyFiles.length} agent(s) in ${keysDir}`);
+      } else {
+        console.log(`  ❌ Keys directory exists but no .key files found`);
+        console.log(`     Fix: flair init --agent-id <your-agent>`);
+        issues++;
+      }
+    } else {
+      console.log(`  ❌ Keys directory missing: ${keysDir}`);
+      console.log(`     Fix: flair init --agent-id <your-agent>`);
+      issues++;
+    }
+
+    // 3. Config file
+    const cfgPath = join(homedir(), ".flair", "config.yaml");
+    if (existsSync(cfgPath)) {
+      const savedPort = readPortFromConfig();
+      console.log(`  ✅ Config: ${cfgPath} (port: ${savedPort ?? "default"})`);
+    } else {
+      console.log(`  ⚠️  No config file at ${cfgPath} — using defaults`);
+    }
+
+    // 4. Embeddings check (only if Harper is running)
+    try {
+      const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
+      if (res.status > 0) {
+        // Try a test embedding via SemanticSearch with a dummy query
+        // If embedding mode is "none", search will include _warning
+        const testRes = await fetch(`${baseUrl}/SemanticSearch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ q: "test", limit: 1 }),
+          signal: AbortSignal.timeout(10000),
+        });
+        if (testRes.ok) {
+          const data = await testRes.json() as { _warning?: string };
+          if (data._warning) {
+            console.log(`  ⚠️  Embeddings: keyword-only (${data._warning})`);
+            console.log(`     Semantic search quality is degraded`);
+            console.log(`     Check: ls ~/.npm-global/lib/node_modules/@tpsdev-ai/flair/models/`);
+            issues++;
+          } else {
+            console.log(`  ✅ Embeddings: semantic search operational`);
+          }
+        } else if (testRes.status === 401) {
+          // Auth required — can't test embeddings without an agent key
+          console.log(`  ⚠️  Embeddings: cannot verify (auth required for SemanticSearch)`);
+        }
+      }
+    } catch { /* Harper not running, already flagged above */ }
+
+    // 5. Stale PID file
+    const dataDir = defaultDataDir();
+    const pidFile = join(dataDir, "hdb.pid");
+    if (existsSync(pidFile)) {
+      const pidContent = (await import("node:fs")).readFileSync(pidFile, "utf-8").trim();
+      try {
+        process.kill(Number(pidContent), 0); // check if process exists
+        console.log(`  ✅ PID file: ${pidFile} (process ${pidContent} is alive)`);
+      } catch {
+        console.log(`  ❌ Stale PID file: ${pidFile} (process ${pidContent} is dead)`);
+        console.log(`     Fix: rm ${pidFile} && flair restart`);
+        issues++;
+      }
+    }
+
+    // 6. Data directory
+    if (existsSync(dataDir)) {
+      console.log(`  ✅ Data directory: ${dataDir}`);
+    } else {
+      // Check ~/harper/ (common alternative)
+      const altDir = join(homedir(), "harper");
+      if (existsSync(altDir)) {
+        console.log(`  ⚠️  Data at ~/harper/ (not ~/.flair/data) — old install location`);
+      } else {
+        console.log(`  ❌ No data directory found`);
+        console.log(`     Fix: flair init --agent-id <your-agent>`);
+        issues++;
+      }
+    }
+
+    // Summary
+    console.log("");
+    if (issues === 0) {
+      console.log("  🟢 No issues found");
+    } else {
+      console.log(`  🔴 ${issues} issue${issues > 1 ? "s" : ""} found — see fixes above`);
+    }
+    console.log("");
+
+    if (issues > 0) process.exit(1);
   });
-identity.command("show").argument("<id>").action(async (id) => console.log(JSON.stringify(await api("GET", `/Agent/${id}`), null, 2)));
-identity.command("list").action(async () => console.log(JSON.stringify(await api("GET", "/Agent"), null, 2)));
-identity.command("add-integration")
-  .requiredOption("--agent <agentId>")
-  .requiredOption("--platform <platform>")
-  .requiredOption("--encrypted-credential <ciphertext>")
-  .action(async (opts) => {
-    const now = new Date().toISOString();
-    const out = await api("POST", "/Integration", {
-      id: `${opts.agent}:${opts.platform}`, agentId: opts.agent,
-      platform: opts.platform, encryptedCredential: opts.encryptedCredential,
-      createdAt: now, updatedAt: now,
-    });
-    console.log(JSON.stringify(out, null, 2));
-  });
+
+// ─── Memory and Soul commands ────────────────────────────────────────────────
 
 const memory = program.command("memory").description("Manage agent memories");
 memory.command("add").requiredOption("--agent <id>").requiredOption("--content <text>")
@@ -1319,7 +1425,7 @@ program
   .description("Search memories by meaning (shortcut for memory search)")
   .requiredOption("--agent <id>", "Agent ID")
   .option("--limit <n>", "Max results", "5")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--key <path>", "Ed25519 private key path")
   .action(async (query, opts) => {
@@ -1363,7 +1469,7 @@ program
   .description("Cold-start context: get soul + recent memories as formatted text")
   .requiredOption("--agent <id>", "Agent ID")
   .option("--max-tokens <n>", "Maximum tokens in output", "4000")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--key <path>", "Ed25519 private key path")
   .action(async (opts) => {
@@ -1414,7 +1520,7 @@ program
   .description("Export agents, memories, and souls to a JSON archive")
   .option("--output <path>", "Output file path (default: ~/.flair/backups/flair-backup-<timestamp>.json)")
   .option("--agents <ids>", "Comma-separated agent IDs to include (default: all)")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .action(async (opts) => {
@@ -1501,7 +1607,7 @@ program
   .description("Import a Flair backup archive")
   .option("--merge", "Add/update records without deleting existing (default)")
   .option("--replace", "Delete all existing data for backed-up agents first, then import")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--dry-run", "Show what would be imported without making changes")
@@ -1628,7 +1734,7 @@ program
   .description("Export a single agent's identity (soul + memories) to a portable file")
   .option("--output <path>", "Output file path")
   .option("--include-key", "Include private key in export (UNENCRYPTED — keep the output file secure)")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
@@ -1715,7 +1821,7 @@ program
 program
   .command("import <path>")
   .description("Import an agent from an export file into this Flair instance")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
@@ -1838,11 +1944,11 @@ program
 
 program
   .command("migrate-keys")
-  .description("Migrate agent keys from legacy path (~/.tps/secrets/flair/) to ~/.flair/keys/")
-  .option("--from <dir>", "Legacy keys directory", join(homedir(), ".tps", "secrets", "flair"))
+  .description("Migrate agent keys from old path (~/.tps/secrets/flair/) to ~/.flair/keys/")
+  .option("--from <dir>", "Old keys directory", join(homedir(), ".tps", "secrets", "flair"))
   .option("--to <dir>", "New keys directory", defaultKeysDir())
   .option("--dry-run", "Show what would be migrated without copying")
-  .option("--port <port>", "Harper HTTP port (for agent list)", String(DEFAULT_PORT))
+  .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .action(async (opts) => {
@@ -1853,7 +1959,7 @@ program
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
 
     if (!existsSync(fromDir)) {
-      console.log(`Legacy keys directory not found: ${fromDir}`);
+      console.log(`Old keys directory not found: ${fromDir}`);
       console.log("Nothing to migrate.");
       process.exit(0);
     }
@@ -1903,7 +2009,7 @@ program
     } else {
       console.log(`\n✅ Migration complete: ${migrated} migrated, ${skipped} skipped`);
       if (migrated > 0) {
-        console.log(`\nLegacy keys preserved at ${fromDir} (delete manually when confirmed working).`);
+        console.log(`\nOld keys preserved at ${fromDir} (delete manually when confirmed working).`);
 
         // Optionally verify keys match Flair records
         if (adminPass) {
