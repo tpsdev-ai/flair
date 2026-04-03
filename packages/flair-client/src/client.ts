@@ -122,7 +122,9 @@ class MemoryApi {
     // is unreliable (e.g., "ok", "thanks" would match each other)
     if (opts.dedup && content.length >= 20) {
       const threshold = opts.dedupThreshold ?? 0.95;
-      const existing = await this.search(content, { limit: 1, minScore: threshold });
+      // Use raw scoring to avoid retrieval-boost feedback loop where repeated
+      // dedup checks inflate scores above the threshold.
+      const existing = await this.search(content, { limit: 1, minScore: threshold, scoring: "raw" });
       if (existing.length > 0) {
         // Return the existing memory instead of creating a duplicate
         const match = await this.get(existing[0].id);
@@ -147,10 +149,10 @@ class MemoryApi {
   }
 
   /** Search memories by meaning. */
-  async search(query: string, opts: { limit?: number; minScore?: number } = {}): Promise<SearchResult[]> {
+  async search(query: string, opts: { limit?: number; minScore?: number; scoring?: "composite" | "raw" } = {}): Promise<SearchResult[]> {
     const result = await this.client.request<{ results?: unknown[] }>(
       "POST", "/SemanticSearch",
-      { agentId: this.client.agentId, q: query, limit: opts.limit ?? 5 },
+      { agentId: this.client.agentId, q: query, limit: opts.limit ?? 5, scoring: opts.scoring },
     );
     const minScore = opts.minScore ?? 0;
     return (result.results ?? [])
