@@ -1169,18 +1169,22 @@ program
       process.exit(1);
     }
 
-    const adminPass = process.env.HDB_ADMIN_PASSWORD ?? "";
+    const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
     const opsPort = resolveOpsPort(opts);
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       ROOTPATH: dataDir,
       DEFAULTS_MODE: "dev",
       HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
-      HDB_ADMIN_PASSWORD: adminPass,
       HTTP_PORT: String(port),
       OPERATIONSAPI_NETWORK_PORT: String(opsPort),
       LOCAL_STUDIO: "false",
     };
+    // Only set HDB_ADMIN_PASSWORD if we have a real value — empty string
+    // would strip Harper's auth on an existing install
+    if (adminPass) {
+      env.HDB_ADMIN_PASSWORD = adminPass;
+    }
 
     const proc = spawn(process.execPath, [bin, "run", "."], {
       cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
