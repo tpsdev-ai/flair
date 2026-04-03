@@ -21,20 +21,20 @@
     },
     "packages/flair-client": {
       "name": "@tpsdev-ai/flair-client",
-      "version": "0.4.1",
+      "version": "0.4.3",
       "devDependencies": {
         "typescript": "5.9.3",
       },
     },
     "packages/flair-mcp": {
       "name": "@tpsdev-ai/flair-mcp",
-      "version": "0.4.1",
+      "version": "0.4.4",
       "bin": {
         "flair-mcp": "dist/index.js",
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.27.1",
-        "@tpsdev-ai/flair-client": "0.2.1",
+        "@tpsdev-ai/flair-client": "0.4.3",
         "zod": "4.3.6",
       },
       "devDependencies": {
@@ -1916,8 +1916,6 @@
     "@smithy/node-http-handler/@smithy/abort-controller": ["@smithy/abort-controller@4.2.12", "", { "dependencies": { "@smithy/types": "^4.13.1", "tslib": "^2.6.2" } }, "sha512-xolrFw6b+2iYGl6EcOL7IJY71vvyZ0DJ3mcKtpykqPe2uscwtzDZJa1uVQXyP7w9Dd+kGwYnPbMsJrGISKiY/Q=="],
 
     "@smithy/util-waiter/@smithy/abort-controller": ["@smithy/abort-controller@4.2.12", "", { "dependencies": { "@smithy/types": "^4.13.1", "tslib": "^2.6.2" } }, "sha512-xolrFw6b+2iYGl6EcOL7IJY71vvyZ0DJ3mcKtpykqPe2uscwtzDZJa1uVQXyP7w9Dd+kGwYnPbMsJrGISKiY/Q=="],
-
-    "@tpsdev-ai/flair-mcp/@tpsdev-ai/flair-client": ["@tpsdev-ai/flair-client@0.2.1", "", {}, "sha512-fIWlJA1sW2OGPcHCAxJwJybBc8reDIzuspopBGwX5D6G8TWJjIju/Cb0nzcTh5XvUFOFYgtsOk5PEWlUKlyKHw=="],
 
     "@tpsdev-ai/openclaw-flair/@tpsdev-ai/flair-client": ["@tpsdev-ai/flair-client@0.2.1", "", {}, "sha512-fIWlJA1sW2OGPcHCAxJwJybBc8reDIzuspopBGwX5D6G8TWJjIju/Cb0nzcTh5XvUFOFYgtsOk5PEWlUKlyKHw=="],
 

@@ -1113,19 +1113,19 @@ program
       if (existsSync(plistPath)) {
         try {
           const { execSync } = await import("node:child_process");
+          // Ensure the service is loaded (init writes the plist but doesn't load it)
+          try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
           const uid = process.getuid?.() ?? 501;
           execSync(`launchctl kickstart -k user/${uid}/${label}`, { stdio: "pipe" });
           console.log("✅ Flair restarted (launchd kickstart)");
           return;
         } catch (err: any) {
-          console.error(`launchd restart failed: ${err.message}`);
+          console.error(`launchd restart failed, falling back to port restart: ${err.message}`);
         }
-      } else {
-        console.error("❌ No launchd service found. Run 'flair init' first.");
-        process.exit(1);
       }
-    } else {
-      // Linux: stop + start via init
+    }
+    {
+      // Port-based restart (Linux, or macOS fallback)
       console.log("Stopping...");
       try {
         const { execSync } = await import("node:child_process");
