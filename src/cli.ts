@@ -408,11 +408,22 @@ program
       // Register launchd service on macOS so Harper survives reboots
       // and `flair restart` / `flair stop` work via launchctl.
       if (process.platform === "darwin") {
-        const label = "ai.tpsdev.flair";
-        const plistDir = join(homedir(), "Library", "LaunchAgents");
-        mkdirSync(plistDir, { recursive: true });
-        const plistPath = join(plistDir, `${label}.plist`);
-        const plist = `<?xml version="1.0" encoding="UTF-8"?>
+        const harperBinPath = harperBin();
+        if (harperBinPath) {
+          const label = "ai.tpsdev.flair";
+          const plistDir = join(homedir(), "Library", "LaunchAgents");
+          mkdirSync(plistDir, { recursive: true });
+          const plistPath = join(plistDir, `${label}.plist`);
+          const opsSocket = join(dataDir, "operations-server");
+          const setConfig = JSON.stringify({
+            rootPath: dataDir,
+            http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
+            operationsApi: { network: { port: opsPort, cors: true }, domainSocket: opsSocket },
+            mqtt: { network: { port: null }, webSocket: false },
+            localStudio: { enabled: false },
+            authentication: { authorizeLocal: true, enableSessions: true },
+          });
+          const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -420,7 +431,7 @@ program
   <key>ProgramArguments</key>
   <array>
     <string>${process.execPath}</string>
-    <string>${bin}</string>
+    <string>${harperBinPath}</string>
     <string>run</string>
     <string>.</string>
   </array>
@@ -428,7 +439,7 @@ program
   <key>EnvironmentVariables</key>
   <dict>
     <key>ROOTPATH</key><string>${dataDir}</string>
-    <key>HARPER_SET_CONFIG</key><string>${harperSetConfig.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;")}</string>
+    <key>HARPER_SET_CONFIG</key><string>${setConfig.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;")}</string>
     <key>DEFAULTS_MODE</key><string>dev</string>
     <key>HDB_ADMIN_USERNAME</key><string>${adminUser}</string>
     <key>HDB_ADMIN_PASSWORD</key><string>${adminPass}</string>
@@ -444,20 +455,21 @@ program
   <key>StandardErrorPath</key><string>${join(dataDir, "log", "launchd-stderr.log")}</string>
 </dict>
 </plist>`;
-        writeFileSync(plistPath, plist);
-        try {
-          const { execSync } = await import("node:child_process");
-          // Stop the detached process — launchd will manage it from here
+          writeFileSync(plistPath, plist);
           try {
-            const lsof = execSync(`lsof -ti :${httpPort}`, { encoding: "utf-8" }).trim();
-            if (lsof) for (const pid of lsof.split("\n")) try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
-            await new Promise(r => setTimeout(r, 1000));
-          } catch {}
-          execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" });
-          await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
-          console.log("Launchd service registered ✓");
-        } catch (err: any) {
-          console.log(`Note: launchd registration failed (${err.message}) — Harper is running but won't auto-start on reboot`);
+            const { execSync } = await import("node:child_process");
+            // Stop the detached process — launchd will manage it from here
+            try {
+              const lsof = execSync(`lsof -ti :${httpPort}`, { encoding: "utf-8" }).trim();
+              if (lsof) for (const pid of lsof.split("\n")) try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
+              await new Promise(r => setTimeout(r, 1000));
+            } catch {}
+            execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" });
+            await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
+            console.log("Launchd service registered ✓");
+          } catch (err: any) {
+            console.log(`Note: launchd registration failed (${err.message}) — Harper is running but won't auto-start on reboot`);
+          }
         }
       }
     }
