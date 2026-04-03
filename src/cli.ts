@@ -1115,9 +1115,10 @@ program
           const { execSync } = await import("node:child_process");
           // Ensure the service is loaded (init writes the plist but doesn't load it)
           try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
-          const uid = process.getuid?.() ?? 501;
-          execSync(`launchctl kickstart -k user/${uid}/${label}`, { stdio: "pipe" });
-          console.log("✅ Flair restarted (launchd kickstart)");
+          // Stop the service — KeepAlive=true in the plist auto-restarts it
+          try { execSync(`launchctl stop ${label}`, { stdio: "pipe" }); } catch {}
+          await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+          console.log("✅ Flair restarted");
           return;
         } catch (err: any) {
           console.error(`launchd restart failed, falling back to port restart: ${err.message}`);
