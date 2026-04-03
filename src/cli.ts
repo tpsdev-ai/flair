@@ -1206,6 +1206,8 @@ program
         for (const pid of lsof.split("\n")) {
           try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
         }
+        // Wait for process to release file handles (RocksDB)
+        await new Promise(r => setTimeout(r, 2000));
         console.log("✅ Flair process stopped");
       }
     } catch { /* not running */ }
