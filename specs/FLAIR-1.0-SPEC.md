@@ -151,10 +151,27 @@ Output: problem description + fix command for each issue found.
 - MCP server connects and all 6 tools work
 - OpenClaw plugin installs and provides tools
 
-### Stress tests:
-- 10,000 memories → search still < 500ms
+### Security tests:
+- Agent A cannot read Agent B's memories (isolation enforcement)
+- Ed25519 auth rejects invalid/expired/replayed signatures
+- Content safety scan blocks prompt injection attempts
+- Permanent memories cannot be deleted by non-admin agents
+- Rate limiter triggers correctly under burst load
+
+### Performance benchmarks:
+- 1,000 memories → search < 100ms
+- 10,000 memories → search < 500ms
+- 100,000 memories → search < 2s
 - 5 concurrent agents writing → no corruption
+
+### Stress tests:
 - 30-day uptime simulation (Harper doesn't leak memory or degrade)
+- Machine restart → first request succeeds within 10s of Harper starting
+
+### Coverage as a product signal:
+- Publish test count + coverage % in README
+- Match Microsoft's Agent Governance Toolkit pattern: "covers X out of Y risks"
+- CI badge showing passing tests on every commit
 
 ---
 

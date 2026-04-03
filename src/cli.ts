@@ -524,7 +524,24 @@ program
 
       const { createInterface } = await import("node:readline");
       const rl = createInterface({ input: process.stdin, output: process.stdout });
-      const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
+      // Buffered ask: collects rapid input (pasted text) into one answer.
+      // Waits 200ms after last line before resolving, so pasted multiline
+      // blocks are captured as a single answer instead of spilling across prompts.
+      const ask = (q: string): Promise<string> => new Promise(resolve => {
+        let buffer = "";
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const finish = () => {
+          rl.removeListener("line", onLine);
+          resolve(buffer.trim());
+        };
+        const onLine = (line: string) => {
+          buffer += (buffer ? "\n" : "") + line;
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(finish, 200);
+        };
+        process.stdout.write(q);
+        rl.on("line", onLine);
+      });
 
       const role = await ask("   What's this agent's role? (e.g., \"Senior dev, concise and direct\")\n   > ");
       const project = await ask("   What project is it working on?\n   > ");
@@ -1100,6 +1117,86 @@ program
       }
     } catch {
       console.log("Flair is not running (nothing found on port " + port + ").");
+    }
+  });
+
+// ─── flair start ──────────────────────────────────────────────────────────────
+
+program
+  .command("start")
+  .description("Start Flair (Harper) — requires a prior 'flair init'")
+  .option("--port <port>", "Harper HTTP port")
+  .action(async (opts) => {
+    const port = resolveHttpPort(opts);
+
+    // Check if already running
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(2000) });
+      if (res.status > 0) {
+        console.log(`Flair is already running on port ${port}.`);
+        return;
+      }
+    } catch { /* not running — good */ }
+
+    const dataDir = defaultDataDir();
+    if (!existsSync(dataDir)) {
+      console.error("❌ No Flair data directory found. Run 'flair init' first.");
+      process.exit(1);
+    }
+
+    const platform = process.platform;
+    if (platform === "darwin") {
+      const label = "ai.tpsdev.flair";
+      const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+      if (existsSync(plistPath)) {
+        try {
+          const { execSync } = await import("node:child_process");
+          try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
+          execSync(`launchctl start ${label}`, { stdio: "pipe" });
+          await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+          console.log("✅ Flair started (launchd)");
+          return;
+        } catch (err: any) {
+          console.error(`launchd start failed, falling back to direct start: ${err.message}`);
+        }
+      }
+    }
+
+    // Direct start (Linux, or macOS fallback when no launchd plist)
+    const bin = harperBin();
+    if (!bin) {
+      console.error("❌ Harper binary not found. Run 'flair init' first.");
+      process.exit(1);
+    }
+
+    const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
+    const opsPort = resolveOpsPort(opts);
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      ROOTPATH: dataDir,
+      DEFAULTS_MODE: "dev",
+      HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
+      HTTP_PORT: String(port),
+      OPERATIONSAPI_NETWORK_PORT: String(opsPort),
+      LOCAL_STUDIO: "false",
+    };
+    // Only set HDB_ADMIN_PASSWORD if we have a real value — empty string
+    // would strip Harper's auth on an existing install
+    if (adminPass) {
+      env.HDB_ADMIN_PASSWORD = adminPass;
+    }
+
+    const proc = spawn(process.execPath, [bin, "run", "."], {
+      cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
+    });
+    proc.unref();
+
+    try {
+      await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
+      console.log(`✅ Flair started on port ${port}`);
+    } catch {
+      console.error("❌ Flair failed to start within timeout. Check logs in " + join(dataDir, "harper.log"));
+      process.exit(1);
     }
   });
 
