@@ -52,7 +52,7 @@ server.tool(
   "Search memories by meaning. Understands temporal queries like 'what happened today'.",
   {
     query: z.string().describe("Search query — natural language, semantic matching"),
-    limit: z.number().optional().default(5).describe("Max results (default 5)"),
+    limit: z.coerce.number().optional().default(5).describe("Max results (default 5)"),
   },
   async ({ query, limit }) => {
     const results = await flair.memory.search(query, { limit });
@@ -131,7 +131,7 @@ server.tool(
   "bootstrap",
   "Get cold-start context: soul + recent memories. Run this at the start of every session.",
   {
-    maxTokens: z.number().optional().default(4000).describe("Max tokens in output"),
+    maxTokens: z.coerce.number().optional().default(4000).describe("Max tokens in output"),
   },
   async ({ maxTokens }) => {
     const result = await flair.bootstrap({ maxTokens });
