@@ -505,8 +505,14 @@ program
     console.log(`   Flair URL:   ${httpUrl}`);
     console.log(`   Private key: ${privPath}`);
     if (!opts.adminPass && !alreadyRunning) {
-      console.log(`\n⚠️  Admin password (save this — it won't be shown again):`);
-      console.log(`   ${adminPass}`);
+      console.log(`\n   ┌─────────────────────────────────────────────────┐`);
+      console.log(`   │  Harper admin credentials (save these now):     │`);
+      console.log(`   │                                                 │`);
+      console.log(`   │  Username: ${DEFAULT_ADMIN_USER.padEnd(37)}│`);
+      console.log(`   │  Password: ${adminPass.padEnd(37)}│`);
+      console.log(`   │                                                 │`);
+      console.log(`   │  ⚠️  The password won't be shown again.         │`);
+      console.log(`   └─────────────────────────────────────────────────┘`);
     }
     console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
 
