@@ -404,6 +404,62 @@ program
       console.log("Waiting for Harper health check...");
       await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
       console.log("Harper is healthy ✓");
+
+      // Register launchd service on macOS so Harper survives reboots
+      // and `flair restart` / `flair stop` work via launchctl.
+      if (process.platform === "darwin") {
+        const label = "ai.tpsdev.flair";
+        const plistDir = join(homedir(), "Library", "LaunchAgents");
+        mkdirSync(plistDir, { recursive: true });
+        const plistPath = join(plistDir, `${label}.plist`);
+        const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${process.execPath}</string>
+    <string>${bin}</string>
+    <string>run</string>
+    <string>.</string>
+  </array>
+  <key>WorkingDirectory</key><string>${flairPackageDir()}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ROOTPATH</key><string>${dataDir}</string>
+    <key>HARPER_SET_CONFIG</key><string>${harperSetConfig.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;")}</string>
+    <key>DEFAULTS_MODE</key><string>dev</string>
+    <key>HDB_ADMIN_USERNAME</key><string>${adminUser}</string>
+    <key>HDB_ADMIN_PASSWORD</key><string>${adminPass}</string>
+    <key>THREADS_COUNT</key><string>1</string>
+    <key>NODE_HOSTNAME</key><string>localhost</string>
+    <key>HTTP_PORT</key><string>${httpPort}</string>
+    <key>OPERATIONSAPI_NETWORK_PORT</key><string>${opsPort}</string>
+    <key>LOCAL_STUDIO</key><string>false</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${join(dataDir, "log", "launchd-stdout.log")}</string>
+  <key>StandardErrorPath</key><string>${join(dataDir, "log", "launchd-stderr.log")}</string>
+</dict>
+</plist>`;
+        writeFileSync(plistPath, plist);
+        try {
+          const { execSync } = await import("node:child_process");
+          // Stop the detached process — launchd will manage it from here
+          try {
+            const lsof = execSync(`lsof -ti :${httpPort}`, { encoding: "utf-8" }).trim();
+            if (lsof) for (const pid of lsof.split("\n")) try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
+            await new Promise(r => setTimeout(r, 1000));
+          } catch {}
+          execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" });
+          await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
+          console.log("Launchd service registered ✓");
+        } catch (err: any) {
+          console.log(`Note: launchd registration failed (${err.message}) — Harper is running but won't auto-start on reboot`);
+        }
+      }
     }
 
     // Persist port to config so other commands can find this instance
