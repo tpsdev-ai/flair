@@ -456,20 +456,7 @@ program
 </dict>
 </plist>`;
           writeFileSync(plistPath, plist);
-          try {
-            const { execSync } = await import("node:child_process");
-            // Stop the detached process — launchd will manage it from here
-            try {
-              const lsof = execSync(`lsof -ti :${httpPort}`, { encoding: "utf-8" }).trim();
-              if (lsof) for (const pid of lsof.split("\n")) try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
-              await new Promise(r => setTimeout(r, 1000));
-            } catch {}
-            execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" });
-            await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
-            console.log("Launchd service registered ✓");
-          } catch (err: any) {
-            console.log(`Note: launchd registration failed (${err.message}) — Harper is running but won't auto-start on reboot`);
-          }
+          console.log("Launchd service registered ✓");
         }
       }
     }
