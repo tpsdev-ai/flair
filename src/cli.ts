@@ -496,10 +496,37 @@ program
 
     console.log(`\n   Claude Code: Add to your CLAUDE.md:`);
     console.log(`     At the start of every session, run mcp__flair__bootstrap before responding.`);
-    const mcpEnv: Record<string, string> = { FLAIR_AGENT_ID: agentId };
-    mcpEnv.FLAIR_URL = httpUrl;
-    console.log(`\n   MCP config (.mcp.json):`);
-    console.log(`     { "mcpServers": { "flair": { "command": "npx", "args": ["@tpsdev-ai/flair-mcp"], "env": ${JSON.stringify(mcpEnv)} } } }`);
+
+    // Auto-wire MCP config into ~/.claude.json if Claude Code is installed
+    const claudeJsonPath = join(homedir(), ".claude.json");
+    const mcpEnv: Record<string, string> = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
+    const flairMcpConfig = {
+      type: "stdio" as const,
+      command: "flair-mcp",
+      args: [] as string[],
+      env: mcpEnv,
+    };
+    try {
+      if (existsSync(claudeJsonPath)) {
+        const claudeJson = JSON.parse(readFileSync(claudeJsonPath, "utf-8"));
+        const existing = claudeJson.mcpServers?.flair;
+        if (existing && existing.env?.FLAIR_URL === httpUrl && existing.env?.FLAIR_AGENT_ID === agentId) {
+          console.log(`\n   MCP config already set in ~/.claude.json ✓`);
+        } else {
+          claudeJson.mcpServers = claudeJson.mcpServers || {};
+          claudeJson.mcpServers.flair = flairMcpConfig;
+          writeFileSync(claudeJsonPath, JSON.stringify(claudeJson, null, 2));
+          console.log(`\n   MCP config written to ~/.claude.json ✓`);
+          console.log(`   Restart Claude Code to pick up the new config.`);
+        }
+      } else {
+        console.log(`\n   MCP config (add to ~/.claude.json):`);
+        console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
+      }
+    } catch {
+      console.log(`\n   MCP config (add manually to ~/.claude.json):`);
+      console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
+    }
   });
 
 // ─── flair agent ─────────────────────────────────────────────────────────────
