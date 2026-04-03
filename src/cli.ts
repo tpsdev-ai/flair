@@ -999,42 +999,124 @@ program
 
 program
   .command("status")
-  .description("Check Flair (Harper) instance health and agent count")
+  .description("Show Flair instance status, memory stats, and agent info")
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--json", "Output as JSON")
+  .option("--agent <id>", "Agent ID for authenticated detail (or set FLAIR_AGENT_ID)")
   .action(async (opts) => {
     const port = resolveHttpPort(opts);
     const baseUrl = opts.url ?? `http://127.0.0.1:${port}`;
     let healthy = false;
-    let agentCount: number | null = null;
-    let version: string | null = null;
+    let healthData: any = null;
 
+    // 1. Basic health check (unauthenticated — just { ok: true })
     try {
-      const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(3000) });
-      healthy = res.status > 0;
-      if (res.headers.get("content-type")?.includes("application/json")) {
-        const body = await res.json().catch(() => null);
-        if (body?.version) version = body.version;
-      }
+      const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
+      healthy = res.ok;
     } catch { /* unreachable */ }
 
+    // 2. Try authenticated /HealthDetail for rich stats
     if (healthy) {
-      try {
-        const agents = await fetch(`${baseUrl}/Agent`, { signal: AbortSignal.timeout(3000) });
-        if (agents.ok) {
-          const list = await agents.json().catch(() => null);
-          if (Array.isArray(list)) agentCount = list.length;
+      const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+      if (agentId) {
+        const keyPath = resolveKeyPath(agentId);
+        if (keyPath) {
+          try {
+            const authHeader = buildEd25519Auth(agentId, "GET", "/HealthDetail", keyPath);
+            const res = await fetch(`${baseUrl}/HealthDetail`, {
+              headers: { Authorization: authHeader },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (res.ok) {
+              healthData = await res.json().catch(() => null);
+            }
+          } catch { /* fall through to basic output */ }
         }
-      } catch { /* best effort */ }
+      }
+      // Fallback: try admin basic auth if available
+      if (!healthData) {
+        const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS;
+        if (adminPass) {
+          try {
+            const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+            const res = await fetch(`${baseUrl}/HealthDetail`, {
+              headers: { Authorization: auth },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (res.ok) {
+              healthData = await res.json().catch(() => null);
+            }
+          } catch { /* fall through to basic output */ }
+        }
+      }
     }
 
-    const status = healthy ? "🟢 running" : "🔴 unreachable";
-    console.log(`Flair status: ${status}`);
-    console.log(`  URL:     ${baseUrl}`);
-    console.log(`  Flair:   v${__pkgVersion}`);
-    if (version) console.log(`  Harper:  ${version}`);
-    if (agentCount !== null) console.log(`  Agents:  ${agentCount}`);
-    if (!healthy) process.exit(1);
+    if (opts.json) {
+      console.log(JSON.stringify({ healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData }, null, 2));
+      if (!healthy) process.exit(1);
+      return;
+    }
+
+    if (!healthy) {
+      console.log(`Flair v${__pkgVersion} — 🔴 unreachable`);
+      console.log(`  URL:  ${baseUrl}`);
+      console.log(`\n  Run: flair start  or  flair doctor`);
+      process.exit(1);
+    }
+
+    // Format uptime
+    const uptimeSec = healthData?.uptimeSeconds;
+    let uptimeStr = "";
+    if (uptimeSec != null) {
+      const d = Math.floor(uptimeSec / 86400);
+      const h = Math.floor((uptimeSec % 86400) / 3600);
+      const m = Math.floor((uptimeSec % 3600) / 60);
+      uptimeStr = d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+    }
+
+    // Format last write as relative time
+    let lastWriteStr = "";
+    if (healthData?.lastWrite) {
+      const ago = Date.now() - new Date(healthData.lastWrite).getTime();
+      const mins = Math.floor(ago / 60000);
+      const hrs = Math.floor(ago / 3600000);
+      const days = Math.floor(ago / 86400000);
+      lastWriteStr = days > 0 ? `${days}d ago` : hrs > 0 ? `${hrs}h ago` : mins > 0 ? `${mins}m ago` : "just now";
+    }
+
+    const pid = healthData?.pid ?? "";
+    const agents = healthData?.agents;
+    const memories = healthData?.memories;
+
+    console.log(`Flair v${__pkgVersion} — 🟢 running${pid ? ` (PID ${pid}` : ""}${uptimeStr ? `, uptime ${uptimeStr})` : pid ? ")" : ""}`);
+    console.log(`  URL:        ${baseUrl}`);
+
+    if (memories) {
+      const embStr = memories.withEmbeddings > 0
+        ? `${memories.withEmbeddings} with embeddings`
+        : "";
+      const hashStr = memories.hashFallback > 0
+        ? `${memories.hashFallback} hash-fallback`
+        : "";
+      const detail = [embStr, hashStr].filter(Boolean).join(", ");
+      console.log(`  Memories:   ${memories.total}${detail ? ` (${detail})` : ""}`);
+    }
+
+    if (agents) {
+      const nameStr = agents.names?.length > 0 ? ` (${agents.names.join(", ")})` : "";
+      console.log(`  Agents:     ${agents.count}${nameStr}`);
+    }
+
+    if (healthData?.soulEntries != null) {
+      console.log(`  Soul:       ${healthData.soulEntries} entries`);
+    }
+
+    if (lastWriteStr) {
+      console.log(`  Last write: ${lastWriteStr}`);
+    }
+
+    console.log(`  Health:     ✅ all checks passing`);
   });
 
 // ─── flair upgrade ────────────────────────────────────────────────────────────
@@ -1042,7 +1124,12 @@ program
 program
   .command("upgrade")
   .description("Upgrade Flair and related packages to latest versions")
-  .action(async () => {
+  .option("--check", "Only check for updates, don't install")
+  .option("--restart", "Restart Flair after upgrade")
+  .action(async (opts) => {
+    const { execSync } = await import("node:child_process");
+    const checkOnly = opts.check ?? false;
+
     console.log("Checking for updates...\n");
 
     const packages = [
@@ -1051,6 +1138,8 @@ program
       "@tpsdev-ai/flair-mcp",
     ];
 
+    const upgrades: { pkg: string; installed: string; latest: string }[] = [];
+
     for (const pkg of packages) {
       try {
         const res = await fetch(`https://registry.npmjs.org/${pkg}/latest`, { signal: AbortSignal.timeout(5000) });
@@ -1058,22 +1147,63 @@ program
         const data = await res.json() as { version?: string };
         const latest = data.version ?? "unknown";
 
-        // Check installed version
         let installed = "not installed";
         try {
-          const { execSync } = await import("node:child_process");
-          installed = execSync(`npm list -g ${pkg} --depth=0 2>/dev/null | grep ${pkg} || echo "not installed"`, { encoding: "utf-8" }).trim();
-          const match = installed.match(/@(\d+\.\d+\.\d+)/);
+          const out = execSync(`npm list -g ${pkg} --depth=0 2>/dev/null || true`, { encoding: "utf-8" }).trim();
+          const match = out.match(/@(\d+\.\d+[\d.a-z-]*)/);
           installed = match ? match[1] : "not installed";
         } catch { /* best effort */ }
 
         const upToDate = installed === latest;
         const icon = upToDate ? "✅" : "⬆️";
         console.log(`  ${icon} ${pkg}: ${installed} → ${latest}${upToDate ? " (current)" : ""}`);
+        if (!upToDate && installed !== "not installed") {
+          upgrades.push({ pkg, installed, latest });
+        }
       } catch { /* skip unavailable packages */ }
     }
 
-    console.log("\nTo upgrade: npm install -g @tpsdev-ai/flair@latest");
+    if (upgrades.length === 0) {
+      console.log("\n✅ Everything is up to date.");
+      return;
+    }
+
+    if (checkOnly) {
+      console.log(`\n${upgrades.length} update${upgrades.length > 1 ? "s" : ""} available. Run: flair upgrade`);
+      return;
+    }
+
+    // Perform upgrade
+    console.log(`\nUpgrading ${upgrades.length} package${upgrades.length > 1 ? "s" : ""}...\n`);
+    for (const { pkg, latest } of upgrades) {
+      try {
+        console.log(`  Installing ${pkg}@${latest}...`);
+        execSync(`npm install -g ${pkg}@${latest}`, { stdio: "pipe" });
+        console.log(`  ✅ ${pkg}@${latest} installed`);
+      } catch (err: any) {
+        console.error(`  ❌ ${pkg} upgrade failed: ${err.message}`);
+      }
+    }
+
+    if (opts.restart) {
+      console.log("\nRestarting Flair...");
+      try {
+        const port = resolveHttpPort({});
+        const label = "ai.tpsdev.flair";
+        const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+        if (process.platform === "darwin" && existsSync(plistPath)) {
+          try { execSync(`launchctl stop ${label}`, { stdio: "pipe" }); } catch {}
+          await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+          console.log("✅ Flair restarted with new version");
+        } else {
+          console.log("Run: flair restart");
+        }
+      } catch {
+        console.log("Run: flair restart");
+      }
+    } else {
+      console.log("\nRun: flair restart  to use the new version");
+    }
   });
 
 // ─── flair stop ───────────────────────────────────────────────────────────────
