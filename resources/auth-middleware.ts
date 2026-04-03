@@ -383,82 +383,13 @@ server.http(async (request: any, nextLayer: any) => {
     }
   }
 
-  // ── SemanticSearch: agentId must match authenticated agent ─────────────────
-  // Non-admin agents can only search their own memories (plus MemoryGrant access,
-  // which is enforced inside SemanticSearch.ts using the x-tps-agent header).
-  if (!request.tpsAgentIsAdmin &&
-      method === "POST" &&
-      (url.pathname === "/SemanticSearch" || url.pathname === "/SemanticSearch/")) {
-    try {
-      const clone = request.clone();
-      const body = await clone.json();
-      if (body?.agentId && body.agentId !== agentId) {
-        return new Response(JSON.stringify({
-          error: "forbidden: agentId must match authenticated agent",
-        }), { status: 403, headers: { "Content-Type": "application/json" } });
-      }
-    } catch { return new Response(JSON.stringify({ error: "malformed_request_body" }), { status: 400, headers: { "Content-Type": "application/json" } }); }
-  }
-
-  // ── BootstrapMemories: agentId must match authenticated agent ───────────────
-  if (!request.tpsAgentIsAdmin &&
-      method === "POST" &&
-      (url.pathname === "/BootstrapMemories" || url.pathname === "/BootstrapMemories/")) {
-    try {
-      const clone = request.clone();
-      const body = await clone.json();
-      if (body?.agentId && body.agentId !== agentId) {
-        return new Response(JSON.stringify({
-          error: "forbidden: agentId must match authenticated agent",
-        }), { status: 403, headers: { "Content-Type": "application/json" } });
-      }
-    } catch { return new Response(JSON.stringify({ error: "malformed_request_body" }), { status: 400, headers: { "Content-Type": "application/json" } }); }
-  }
-
-  // ── Memory POST (create): agentId must match authenticated agent ────────────
-  if (!request.tpsAgentIsAdmin &&
-      method === "POST" &&
-      (url.pathname === "/Memory" || url.pathname === "/Memory/")) {
-    try {
-      const clone = request.clone();
-      const body = await clone.json();
-      if (body?.agentId && body.agentId !== agentId) {
-        return new Response(JSON.stringify({
-          error: "forbidden: cannot create memories for another agent",
-        }), { status: 403, headers: { "Content-Type": "application/json" } });
-      }
-    } catch { return new Response(JSON.stringify({ error: "malformed_request_body" }), { status: 400, headers: { "Content-Type": "application/json" } }); }
-  }
-
-  // ── Soul POST/PUT: agentId must match authenticated agent ───────────────────
-  if (!request.tpsAgentIsAdmin &&
-      (method === "POST" || method === "PUT") &&
-      (url.pathname === "/Soul" || url.pathname === "/Soul/" || url.pathname.startsWith("/Soul/"))) {
-    try {
-      const clone = request.clone();
-      const body = await clone.json();
-      if (body?.agentId && body.agentId !== agentId) {
-        return new Response(JSON.stringify({
-          error: "forbidden: cannot write another agent's soul",
-        }), { status: 403, headers: { "Content-Type": "application/json" } });
-      }
-    } catch { return new Response(JSON.stringify({ error: "malformed_request_body" }), { status: 400, headers: { "Content-Type": "application/json" } }); }
-  }
-
-  // ── Memory PUT: agentId must match authenticated agent ──────────────────────
-  if (!request.tpsAgentIsAdmin &&
-      method === "PUT" &&
-      (url.pathname === "/Memory" || url.pathname === "/Memory/" || url.pathname.startsWith("/Memory/"))) {
-    try {
-      const clone = request.clone();
-      const body = await clone.json();
-      if (body?.agentId && body.agentId !== agentId) {
-        return new Response(JSON.stringify({
-          error: "forbidden: cannot write memories for another agent",
-        }), { status: 403, headers: { "Content-Type": "application/json" } });
-      }
-    } catch { return new Response(JSON.stringify({ error: "malformed_request_body" }), { status: 400, headers: { "Content-Type": "application/json" } }); }
-  }
+  // ── Mutation scoping: agentId in body must match authenticated agent ────────
+  // The resource handlers also enforce this (defense-in-depth), but rejecting
+  // early avoids unnecessary work. We don't use request.clone().json() because
+  // Harper's Request is not a Web API Request — it wraps a Node.js stream.
+  // Instead, the resource-level check (e.g. BootstrapMemories line 58) handles
+  // body-level enforcement since it receives the parsed data from Harper's REST
+  // layer. The middleware's job is identity verification (done above).
 
   // ── Memory GET: non-admin can only read own memories (by ID) ────────────────
   if (!request.tpsAgentIsAdmin && method === "GET") {
