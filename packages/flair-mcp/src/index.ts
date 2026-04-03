@@ -90,7 +90,7 @@ server.tool(
       durability: durability as any,
       tags,
       dedup: true,
-      dedupThreshold: 0.7,
+      dedupThreshold: 0.95,
     });
     // Check if dedup returned an existing memory (different ID than what we generated)
     const generatedPrefix = `${agentId}-`;
