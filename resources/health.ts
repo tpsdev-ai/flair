@@ -2,7 +2,24 @@ import { Resource, databases } from "@harperfast/harper";
 
 const db = databases as any;
 
+/**
+ * Health endpoint — unauthenticated, returns only { ok: true }.
+ *
+ * Rich stats (memory counts, agent names, etc.) are behind /HealthDetail
+ * which requires authentication. This prevents information leakage on
+ * publicly exposed instances.
+ */
 export class Health extends Resource {
+  async get() {
+    return { ok: true };
+  }
+}
+
+/**
+ * Authenticated health detail — returns memory/agent/soul stats + process info.
+ * Requires Ed25519 agent auth or admin basic auth.
+ */
+export class HealthDetail extends Resource {
   async get() {
     const stats: Record<string, any> = { ok: true };
 

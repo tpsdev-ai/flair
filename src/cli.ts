@@ -1003,19 +1003,54 @@ program
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--json", "Output as JSON")
+  .option("--agent <id>", "Agent ID for authenticated detail (or set FLAIR_AGENT_ID)")
   .action(async (opts) => {
     const port = resolveHttpPort(opts);
     const baseUrl = opts.url ?? `http://127.0.0.1:${port}`;
     let healthy = false;
     let healthData: any = null;
 
+    // 1. Basic health check (unauthenticated — just { ok: true })
     try {
       const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
       healthy = res.ok;
-      if (res.headers.get("content-type")?.includes("application/json")) {
-        healthData = await res.json().catch(() => null);
-      }
     } catch { /* unreachable */ }
+
+    // 2. Try authenticated /HealthDetail for rich stats
+    if (healthy) {
+      const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+      if (agentId) {
+        const keyPath = resolveKeyPath(agentId);
+        if (keyPath) {
+          try {
+            const authHeader = buildEd25519Auth(agentId, "GET", "/HealthDetail", keyPath);
+            const res = await fetch(`${baseUrl}/HealthDetail`, {
+              headers: { Authorization: authHeader },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (res.ok) {
+              healthData = await res.json().catch(() => null);
+            }
+          } catch { /* fall through to basic output */ }
+        }
+      }
+      // Fallback: try admin basic auth if available
+      if (!healthData) {
+        const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS;
+        if (adminPass) {
+          try {
+            const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+            const res = await fetch(`${baseUrl}/HealthDetail`, {
+              headers: { Authorization: auth },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (res.ok) {
+              healthData = await res.json().catch(() => null);
+            }
+          } catch { /* fall through to basic output */ }
+        }
+      }
+    }
 
     if (opts.json) {
       console.log(JSON.stringify({ healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData }, null, 2));
