@@ -1101,7 +1101,7 @@ program
     const platform = process.platform;
     const port = readPortFromConfig() ?? DEFAULT_PORT;
 
-    // Stop first
+    // Stop first: remove launchd service on macOS, then kill by port on all platforms
     if (platform === "darwin") {
       const label = "ai.tpsdev.flair";
       const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
@@ -1113,22 +1113,19 @@ program
         const { unlinkSync } = await import("node:fs");
         unlinkSync(plistPath);
         console.log("✅ Launchd service removed");
-      } else {
-        console.log("No launchd service found — skipping");
       }
-    } else {
-      // Linux: kill by port
-      try {
-        const { execSync } = await import("node:child_process");
-        const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
-        if (lsof) {
-          for (const pid of lsof.split("\n")) {
-            try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
-          }
-        }
-      } catch { /* not running */ }
-      console.log("✅ Flair process stopped");
     }
+    // Kill any process still on the port (covers direct-start, no-service, or failed unload)
+    try {
+      const { execSync } = await import("node:child_process");
+      const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+      if (lsof) {
+        for (const pid of lsof.split("\n")) {
+          try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
+        }
+        console.log("✅ Flair process stopped");
+      }
+    } catch { /* not running */ }
 
     // Remove config
     const cfgPath = configPath();
