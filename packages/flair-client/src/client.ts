@@ -130,7 +130,7 @@ class MemoryApi {
       }
     }
 
-    const id = opts.id ?? `${this.client.agentId}-${Date.now()}`;
+    const id = opts.id ?? `${this.client.agentId}-${crypto.randomUUID()}`;
     const record = {
       id,
       agentId: this.client.agentId,
