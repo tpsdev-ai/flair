@@ -39,7 +39,8 @@
     "build": "tsc -p tsconfig.json --noCheck",
     "build:cli": "tsc -p tsconfig.cli.json --noCheck",
     "prepublishOnly": "npm run build && npm run build:cli",
-    "test": "bun test"
+    "test": "bun test",
+    "release": "./scripts/release.sh"
   },
   "publishConfig": {
     "access": "public"
