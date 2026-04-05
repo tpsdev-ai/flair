@@ -34,7 +34,7 @@ interface FlairMemoryConfig {
   maxBootstrapTokens?: number;
 }
 
-const DEFAULT_URL = "http://127.0.0.1:9926";
+const DEFAULT_URL = "http://127.0.0.1:19926";
 const DEFAULT_MAX_RECALL = 5;
 const DEFAULT_MAX_BOOTSTRAP_TOKENS = 4000;
 

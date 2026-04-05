@@ -34,6 +34,9 @@
       "./index.ts"
     ]
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "openclaw": ">=2026.3.7"
   },
@@ -42,6 +45,6 @@
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.48",
-    "@tpsdev-ai/flair-client": "0.2.1"
+    "@tpsdev-ai/flair-client": "0.4.3"
   }
 }
