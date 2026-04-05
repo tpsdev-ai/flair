@@ -1,6 +1,7 @@
 # 🎖️ Flair
 
 [![CI](https://github.com/tpsdev-ai/flair/actions/workflows/test.yml/badge.svg)](https://github.com/tpsdev-ai/flair/actions/workflows/test.yml)
+[![Docker Test](https://github.com/tpsdev-ai/flair/actions/workflows/docker-test.yml/badge.svg)](https://github.com/tpsdev-ai/flair/actions/workflows/docker-test.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 **Identity, memory, and soul for AI agents. Runs standalone or as part of a [TPS](https://tps.dev) office.**
@@ -295,6 +296,22 @@ bun test             # Run unit + integration tests
 ```
 
 Integration tests spin up a real Harper instance on a random port, run the test suite, and tear down. No mocks for the database layer.
+
+### Test Coverage
+
+**212 tests** across 19 test files, covering 7 CI checks on every commit.
+
+| Category | Tests | What's covered |
+|----------|-------|----------------|
+| **Auth & Identity** | auth-middleware, auth-scoping, key-paths-and-rotation | Ed25519 signature verification, agent isolation, key rotation |
+| **Memory** | data-scoping, backup-restore, agent-remove-and-grants | Cross-agent access denied, data durability, grant lifecycle |
+| **Content Safety** | content-safety | Prompt injection detection, identity hijacking, format injection, exfiltration patterns |
+| **Search** | temporal-scoring, embeddings | Temporal decay, relevance scoring, embedding generation |
+| **Rate Limiting** | rate-limiter | Per-agent rate limiting, bucket isolation |
+| **Integration** | smoke, durability-guard | End-to-end write/search/bootstrap, durability tier enforcement |
+| **CLI** | cli-v2, cli-api, first-run-soul | Full CLI command coverage, API layer, soul onboarding |
+
+CI pipeline: unit tests, integration tests, type check, dependency audit, Semgrep SAST, CodeQL SAST, Docker from-scratch validation.
 
 ## Status
 
