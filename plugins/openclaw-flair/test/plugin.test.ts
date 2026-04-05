@@ -10,7 +10,7 @@ function createMockApi(config: Record<string, unknown> = {}) {
 
   return {
     pluginConfig: {
-      url: "http://localhost:9926",
+      url: "http://localhost:19926",
       agentId: "test-agent",
       autoCapture: false,
       autoRecall: false,

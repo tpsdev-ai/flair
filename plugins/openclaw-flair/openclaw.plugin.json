@@ -4,7 +4,7 @@
   "uiHints": {
     "url": {
       "label": "Flair URL",
-      "placeholder": "http://localhost:9926",
+      "placeholder": "http://localhost:19926",
       "help": "Base URL for the Flair server"
     },
     "agentId": {

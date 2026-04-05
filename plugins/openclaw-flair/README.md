@@ -47,7 +47,7 @@ In your OpenClaw config (`openclaw.json`):
       "memory-flair": {
         "enabled": true,
         "config": {
-          "url": "http://localhost:9926",
+          "url": "http://localhost:19926",
           "agentId": "auto",
           "autoCapture": true,
           "autoRecall": true,
