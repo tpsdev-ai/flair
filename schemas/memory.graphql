@@ -26,6 +26,7 @@ type Memory @table(database: "flair") {
   lastReflected: String     # ISO timestamp of last reflection pass
   supersedes: String @indexed  # ID of memory this one replaces (version chain)
   subject: String @indexed     # entity this memory is about (person, service, project)
+  _safetyFlags: [String]       # content safety flags from scanContent()
 }
 
 type Soul @table(database: "flair") {
