@@ -2,6 +2,7 @@ import { Resource, databases } from "@harperfast/harper";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
+import { wrapUntrusted } from "./content-safety.js";
 
 // ─── Temporal Decay + Relevance Scoring ─────────────────────────────────────
 
@@ -181,7 +182,7 @@ export class SemanticSearch extends Resource {
           "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "lastRetrieved",
           "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
           "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject",
-          "$distance"],
+          "_safetyFlags", "$distance"],
         limit: candidateLimit,
       };
       if (conditions.length > 0) {
@@ -203,11 +204,14 @@ export class SemanticSearch extends Resource {
         if (temporalBoost > 1.0) finalScore *= temporalBoost;
 
         const { $distance, ...rest } = record;
+        const isFlagged = rest._safetyFlags && Array.isArray(rest._safetyFlags) && rest._safetyFlags.length > 0;
+        const source = record.agentId !== agentId ? record.agentId : undefined;
         results.push({
           ...rest,
+          content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
-          _source: record.agentId !== agentId ? record.agentId : undefined,
+          _source: source,
         });
       }
     } else {
@@ -230,11 +234,14 @@ export class SemanticSearch extends Resource {
         let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, rest);
         if (temporalBoost > 1.0) finalScore *= temporalBoost;
 
+        const isFlagged = rest._safetyFlags && Array.isArray(rest._safetyFlags) && rest._safetyFlags.length > 0;
+        const source = record.agentId !== agentId ? record.agentId : undefined;
         results.push({
           ...rest,
+          content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
-          _source: record.agentId !== agentId ? record.agentId : undefined,
+          _source: source,
         });
       }
     }
