@@ -10,31 +10,49 @@
 
 230+ memories across 7 agents, zero cross-pollination. Every agent is a solo brain. MemoryGrant table exists but is empty. No process for extracting organizational knowledge from individual agent experiences.
 
-Agents independently learn the same lessons, hit the same bugs, and make overlapping decisions — but none of them know what the others discovered. The organization has collective intelligence trapped in individual silos.
+Agents independently learn the same lessons, hit the same bugs, and make overlapping decisions — but none of them know what the others discovered.
 
-## Solution: Two-Tier Distillation
+## Design Principle
 
-### Tier 1: Core (no external dependencies)
+**Flair is the data layer, not the intelligence layer.**
 
-Uses existing HNSW embeddings for cross-agent semantic clustering. No LLM, no API key, always available.
+Same pattern as MemoryReflect: Flair does the clustering and returns structured data + a synthesis prompt. The *agent* feeds the prompt to its own LLM, reviews the output, and writes insights back. Flair never makes LLM calls. Any agent, any model, any workflow.
 
-#### Harper Resource: `POST /DistillTribalKnowledge`
+This means:
+- No LLM config in Flair. No API keys. No provider abstraction.
+- Synthesis quality depends on the agent's model — Claude, Gemini, Ollama, whatever.
+- HITL is natural — agent proposes, human approves.
+- Reprocessing is trivial — run again with different focus, different agent, different model.
+- The clustering is deterministic; only the synthesis varies.
 
-**Request:**
+---
+
+## Harper Resource: `POST /DistillTribalKnowledge`
+
+### Request
 ```json
 {
-  "agents": ["flint", "kern", "sherlock"],  // required: agents to cross-reference
-  "minAgents": 2,          // minimum agents that must agree for consensus (default: 2)
-  "minSimilarity": 0.7,    // cosine similarity threshold for clustering (default: 0.7)
-  "maxClusters": 20,       // cap on output clusters (default: 20)
-  "scope": "all",          // "all" | "recent" | "persistent-only"
-  "since": "2026-03-01",   // ISO timestamp lower bound (optional, used with scope=recent)
-  "focus": null,           // optional query to bias clustering (e.g. "deployment issues")
-  "synthesize": false      // if true, use LLM synthesis (Tier 2)
+  "agents": ["flint", "kern", "sherlock"],
+  "minAgents": 2,
+  "minSimilarity": 0.7,
+  "maxClusters": 20,
+  "scope": "all",
+  "since": "2026-03-01",
+  "focus": "deployment issues"
 }
 ```
 
-**Response:**
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `agents` | string[] | required | Agents to cross-reference |
+| `minAgents` | number | 2 | Minimum agents in a cluster for consensus |
+| `minSimilarity` | number | 0.7 | Cosine similarity threshold for clustering |
+| `maxClusters` | number | 20 | Cap on output clusters |
+| `scope` | string | "all" | "all" \| "recent" \| "persistent-only" |
+| `since` | string | null | ISO timestamp lower bound (with scope=recent) |
+| `focus` | string | null | Query to bias clustering toward a topic |
+
+### Response
 ```json
 {
   "clusters": [
@@ -50,138 +68,145 @@ Uses existing HNSW embeddings for cross-agent semantic clustering. No LLM, no AP
           "agentId": "flint",
           "content": "Key rotation must preserve old public key...",
           "similarity": 0.92
-        },
-        {
-          "id": "kern-456",
-          "agentId": "kern",
-          "content": "Architecture review: key pair lifecycle needs...",
-          "similarity": 0.88
-        },
-        {
-          "id": "sherlock-789",
-          "agentId": "sherlock",
-          "content": "Security finding: stale keys in production...",
-          "similarity": 0.79
         }
-      ],
-      "contradictions": [],
-      "synthesis": null
+      ]
     }
   ],
   "contradictions": [
     {
-      "memoryA": { "id": "flint-111", "agentId": "flint", "content": "Default port should be 9926..." },
-      "memoryB": { "id": "kern-222", "agentId": "kern", "content": "Port 19926 avoids conflicts..." },
+      "memoryA": { "id": "flint-111", "agentId": "flint", "content": "..." },
+      "memoryB": { "id": "kern-222", "agentId": "kern", "content": "..." },
       "similarity": 0.75,
       "type": "opposing_conclusions"
     }
   ],
+  "prompt": "# Tribal Knowledge Synthesis\n...",
   "stats": {
     "totalMemories": 350,
     "memoriesAnalyzed": 280,
     "clustersFound": 12,
     "contradictionsFound": 2,
     "agentsIncluded": 3
-  },
-  "prompt": null
+  }
 }
 ```
 
-#### Algorithm
+### The `prompt` Field
 
-1. **Collect memories** from all specified agents (via admin auth or cross-agent grants)
-2. **Build pairwise similarity matrix** using existing HNSW embeddings (cosine distance)
-3. **Cluster by similarity** — greedy agglomerative clustering with `minSimilarity` threshold
-4. **Filter for consensus** — keep only clusters where `>= minAgents` different agents contributed
-5. **Detect contradictions** — find pairs where agents have high semantic similarity but opposing sentiment or conclusions (heuristic: same topic keywords, different durability/type, or explicit "don't" vs "do" patterns)
-6. **Generate theme labels** — extract key terms from cluster centroid's nearest content (no LLM needed; TF-IDF or just the most common significant words)
-7. **Score consensus** — `consensusScore = (agentCount / totalAgents) * avgSimilarity * durabilityWeight`
-
-#### Contradiction Detection (Heuristic)
-
-Two memories are flagged as potentially contradictory when:
-- Cosine similarity > 0.6 (same topic)
-- Different agents
-- One of:
-  - Opposite durability signals (one ephemeral, one persistent on same topic)
-  - Negation patterns in content ("don't do X" vs "always do X")
-  - Different `type` fields (one is `decision`, other is `lesson` that contradicts it)
-
-False positives are fine — the goal is to surface for human review, not to auto-resolve.
-
-### Tier 2: Enhanced (optional LLM API key)
-
-When `synthesize: true` is set AND an LLM provider is configured in `~/.flair/config.yaml`:
-
-```yaml
-llm:
-  provider: openai | anthropic | google | ollama
-  model: gpt-4o | claude-sonnet-4-6 | gemini-2.5-flash | qwen3:32b
-  apiKey: ${FLAIR_LLM_API_KEY}  # env var or literal
-  baseUrl: http://localhost:11434/v1  # for ollama
-```
-
-#### What Tier 2 adds:
-
-1. **Natural language theme labels** — LLM names each cluster instead of keyword extraction
-2. **Synthesized tribal knowledge** — Each cluster gets a crisp, distilled insight written by the LLM
-3. **Decision-outcome linking** — LLM connects decision memories to their outcomes across agents
-4. **Contradiction analysis** — LLM explains why two memories conflict and suggests resolution
-
-#### Synthesis prompt template:
+Like MemoryReflect, the response includes a structured LLM prompt that the calling agent feeds to its own model:
 
 ```
-You are synthesizing organizational knowledge from multiple AI agents.
+# Tribal Knowledge Synthesis
 
-## Cluster: {theme}
-Agents: {agent_list}
-Consensus score: {score}
+You are synthesizing organizational knowledge from {agentCount} AI agents.
 
-## Memories (from different agents):
+## Clusters
+For each cluster below, write ONE concise tribal knowledge statement.
+
+### Cluster 1: {theme} (consensus: {score}, agents: {agents})
 {formatted_memories}
 
-## Task
-1. Write ONE concise tribal knowledge statement that captures what these agents collectively know.
-2. Note any nuance lost in the synthesis.
-3. If memories partially conflict, note the tension.
+### Cluster 2: ...
 
-Output format:
-INSIGHT: <one paragraph>
-NUANCE: <optional, one sentence>
-CONFIDENCE: high | medium | low
+## Contradictions
+For each contradiction, explain the tension and suggest a resolution.
+
+### Contradiction 1:
+Agent {a}: "{content_a}"
+Agent {b}: "{content_b}"
+
+## Output Format
+For each cluster, produce:
+- INSIGHT: <one paragraph distilling what the team collectively knows>
+- CONFIDENCE: high | medium | low
+- ACTION: <optional — what should change based on this insight>
+- TAGS: <comma-separated relevant tags>
+
+For each contradiction:
+- TENSION: <what's conflicting>
+- RESOLUTION: <suggested resolution or "needs human decision">
 ```
 
-#### Output handling:
+The agent takes this prompt, runs it through its LLM, and decides what to write back to Flair as tribal knowledge memories.
 
-Synthesized insights are written as new Memory records with:
-- `agentId`: special org-scoped ID (e.g., `org` or configurable)
-- `durability`: `persistent`
-- `type`: `fact`
-- `source`: `tribal-distill`
-- `derivedFrom`: array of source memory IDs from the cluster
-- `tags`: `["tribal-knowledge", "distilled"]`
-- `visibility`: `office` (visible to all agents without explicit grants)
+---
 
-**Critical constraint:** LLM synthesis produces DERIVED artifacts only. Source memories are never modified. Remove the API key → lose synthesis, keep all originals.
+## Algorithm
 
-### Degraded Mode
+1. **Collect memories** from specified agents
+   - Admin auth: can read any agent's memories directly
+   - Agent auth: can only read memories from agents with MemoryGrant (scope: search|read)
+2. **Optional focus bias** — if `focus` is set, generate a query embedding and pre-filter memories by relevance to the focus topic (cosine similarity > 0.3 against focus embedding)
+3. **Build pairwise similarity** — for each pair of memories from *different* agents, compute cosine similarity from existing embeddings
+4. **Cluster** — greedy agglomerative clustering:
+   - Start with the highest-similarity cross-agent pair as seed
+   - Add memories with similarity > `minSimilarity` to the nearest cluster centroid
+   - Stop when no unassigned memory has similarity > threshold to any cluster
+5. **Filter for consensus** — discard clusters where `< minAgents` different agents contributed
+6. **Detect contradictions** — pairs where:
+   - Cosine similarity > 0.6 (same topic)
+   - Different agents
+   - Negation patterns ("don't" vs "always", "avoid" vs "prefer")
+   - Or conflicting signals (one ephemeral/archived, one persistent on same topic)
+7. **Extract themes** — significant terms from cluster centroid's nearest content (TF-IDF or most common non-stopword terms across cluster members)
+8. **Score consensus** — `consensusScore = (agentCount / totalAgents) * avgSimilarity * durabilityWeight`
+9. **Build synthesis prompt** — structured prompt for the calling agent's LLM
 
-| Configuration | What works |
-|--------------|-----------|
-| No LLM key | Core clustering, consensus scores, keyword themes, contradictions |
-| No grants | Admin-only operation (requires admin auth) |
-| Single agent | Returns empty clusters (needs ≥2 agents for consensus) |
+---
+
+## Agent Workflow
+
+### Without HITL (trusted agent, automated)
+```
+Agent → POST /DistillTribalKnowledge → clusters + prompt
+Agent → LLM(prompt) → proposed insights
+Agent → PUT /Memory (for each insight, with source: "tribal-distill", derivedFrom: [...], visibility: "office")
+```
+
+### With HITL (human review)
+```
+Agent → POST /DistillTribalKnowledge → clusters + prompt
+Agent → LLM(prompt) → proposed insights
+Agent → display proposals to human
+Human → approve/reject/edit each
+Agent → PUT /Memory (approved only)
+```
+
+### Reprocessing
+```
+Agent → POST /DistillTribalKnowledge (same params) → same clusters (deterministic)
+Agent → different LLM or different prompt engineering → refined insights
+Agent → PUT /Memory with supersedes: <previous-distill-memory-id>
+```
+
+The `supersedes` field on Memory already supports version chains. A re-distillation supersedes the previous one.
+
+---
+
+## Memory Schema for Tribal Knowledge
+
+Distilled memories written by agents use existing fields:
+
+| Field | Value | Purpose |
+|-------|-------|---------|
+| `agentId` | the synthesizing agent's ID | who did the synthesis |
+| `source` | `"tribal-distill"` | marks as derived, not original |
+| `derivedFrom` | `["flint-123", "kern-456", ...]` | links to source memories |
+| `visibility` | `"office"` | visible to all agents without grants |
+| `durability` | `"persistent"` | survives consolidation |
+| `type` | `"fact"` or `"lesson"` | standard memory types |
+| `tags` | `["tribal-knowledge", ...]` | filterable |
+| `supersedes` | previous distill memory ID | for re-distillation |
+
+**No new tables. No new fields.** Everything uses existing Memory schema.
 
 ---
 
 ## CLI: `flair distill`
 
 ```bash
-# Basic cross-agent distillation
+# Show cluster report (human-readable)
 flair distill --agents flint,kern,sherlock
-
-# With LLM synthesis
-flair distill --agents flint,kern,sherlock --synthesize
 
 # Focused on a topic
 flair distill --agents flint,kern,sherlock --focus "deployment"
@@ -189,95 +214,94 @@ flair distill --agents flint,kern,sherlock --focus "deployment"
 # Recent memories only
 flair distill --agents flint,kern,sherlock --scope recent --since 2026-04-01
 
-# Write results to Flair (not just display)
-flair distill --agents flint,kern,sherlock --synthesize --write
+# Output as JSON (for piping to an agent)
+flair distill --agents flint,kern,sherlock --json
 
-# Dry run (show what would be clustered)
+# Dry run — show stats without full clustering
 flair distill --agents flint,kern,sherlock --dry-run
 ```
 
-**Output (no --write):** Pretty-printed cluster report to stdout. Human reviews, decides what to keep.
-
-**Output (--write):** Writes synthesized memories to Flair with `source: tribal-distill` tag. Reports IDs of created memories.
+The CLI does NOT synthesize or write — it only calls the endpoint and displays results. Synthesis and writing are the agent's responsibility.
 
 ---
 
-## Schema Changes
+## MCP Tool: `distill`
 
-### New field on Memory:
-```graphql
-visibility: String  # existing field, values: null (private) | "office" (visible to all)
+Added to flair-mcp so agents can call it programmatically:
+
+```json
+{
+  "name": "distill",
+  "description": "Cross-agent knowledge synthesis. Returns clusters of similar memories across agents, contradictions, and a synthesis prompt.",
+  "inputSchema": {
+    "agents": { "type": "array", "items": { "type": "string" } },
+    "focus": { "type": "string" },
+    "minAgents": { "type": "number" },
+    "scope": { "type": "string" }
+  }
+}
 ```
-
-Already exists in the schema. Office-visible memories are included in SemanticSearch results for any agent without needing explicit MemoryGrant.
-
-### No new tables needed.
-
-The `source` field on Memory already supports tagging derived records. The `derivedFrom` field links back to source memories. The `visibility: "office"` field handles org-wide access.
 
 ---
 
 ## Auth & Access
 
-- **Admin mode:** Admin credentials can distill across any agents (no grants needed)
-- **Agent mode:** Agent can distill only across agents they have `search` or `read` grants for
-- **Grant-based:** `flair grant flint kern --scope search` enables flint to include kern's memories in distillation
+- **Admin:** Can distill across any agents (no grants needed)
+- **Agent:** Can only include agents they have `search` or `read` grants for
+- **Grant setup:** `flair grant kern flint --scope search` lets flint read kern's memories for distillation
 
-This reuses the existing MemoryGrant infrastructure that SemanticSearch already supports.
+Reuses existing MemoryGrant + SemanticSearch infrastructure.
 
 ---
 
 ## Bootstrap Integration
 
-BootstrapMemories already includes office-visible memories alongside personal ones. Tribal knowledge records written with `visibility: "office"` will automatically appear in every agent's bootstrap — no additional integration needed.
+Office-visible memories (`visibility: "office"`) are already included in BootstrapMemories alongside personal memories. Tribal knowledge records appear in every agent's bootstrap automatically — no additional integration needed.
 
 ---
 
 ## Implementation Plan
 
 ### Phase 1: Core Resource
-1. `resources/DistillTribalKnowledge.ts` — Harper custom resource
-2. Cross-agent memory collection (admin + grant-based)
-3. Pairwise cosine similarity using existing embeddings
+1. `resources/DistillTribalKnowledge.ts` — Harper resource
+2. Cross-agent memory collection (admin + grant-based auth)
+3. Pairwise cosine similarity from existing embeddings
 4. Greedy agglomerative clustering
-5. Consensus scoring
+5. Consensus scoring and filtering
 6. Keyword-based theme extraction
 7. Contradiction detection (heuristic)
+8. Synthesis prompt generation
 
 ### Phase 2: CLI
-8. `flair distill` command in `src/cli.ts`
-9. Pretty-print output format
-10. `--dry-run` mode
+9. `flair distill` command in `src/cli.ts`
+10. Pretty-print output format (cluster report)
+11. `--json`, `--dry-run` modes
 
-### Phase 3: LLM Synthesis (Tier 2)
-11. LLM provider config in `~/.flair/config.yaml`
-12. Synthesis prompt + response parsing
-13. Memory write path with `source: tribal-distill` + `derivedFrom`
-14. `--synthesize` and `--write` CLI flags
-
-### Phase 4: Integration
-15. MCP tool: `distill` in flair-mcp
-16. Tests: unit (clustering, scoring), integration (multi-agent roundtrip)
-17. Documentation: `docs/tribal-knowledge.md`
+### Phase 3: Integration
+12. MCP tool in flair-mcp
+13. Tests: unit (clustering algorithm, scoring, contradiction detection), integration (multi-agent roundtrip)
+14. Documentation: `docs/tribal-knowledge.md`
 
 ---
 
 ## Success Criteria
 
-- [ ] Cross-agent clusters surfaced with consensus scores (core, no LLM)
+- [ ] Cross-agent clusters surfaced with consensus scores
 - [ ] Contradiction detection surfaces conflicting memories
+- [ ] Synthesis prompt returned for agent-side LLM processing
 - [ ] `flair distill` CLI outputs readable cluster report
-- [ ] LLM synthesis produces distilled tribal knowledge records (when configured)
-- [ ] Distilled records visible to all agents via bootstrap (office visibility)
+- [ ] Agent can write synthesized tribal knowledge as office-visible memories
+- [ ] Tribal knowledge appears in all agents' bootstrap
 - [ ] Source memories never modified by distillation
-- [ ] Works (degraded) without LLM key — core clustering still valuable
 - [ ] Admin auth OR grant-based access — no bypass of agent isolation
+- [ ] Works without any LLM — core clustering is self-contained
+- [ ] Re-distillation uses `supersedes` for version chains
 
 ---
 
 ## References
 
-- ops-31.2: MemoryReflect (single-agent reflection — shipped)
-- MemoryConsolidate.ts: promotion/archival heuristics (pattern for evaluate())
-- SemanticSearch.ts: cross-agent search via MemoryGrant (reuse for collection)
-- Jack Dorsey's "Company World Model" essay — Flair as organizational nervous system
+- MemoryReflect.ts: single-agent reflection prompt pattern (template for this)
+- MemoryConsolidate.ts: promotion/archival heuristics
+- SemanticSearch.ts: cross-agent search via MemoryGrant
+- Jack Dorsey's "Company World Model" — Flair as organizational nervous system
