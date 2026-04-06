@@ -2541,4 +2541,116 @@ program
     }
   });
 
+// ─── flair distill ────────────────────────────────────────────────────────────
+
+program
+  .command("distill")
+  .description("Cross-agent knowledge synthesis — cluster similar memories across agents")
+  .requiredOption("--agents <ids>", "Comma-separated agent IDs to cross-reference")
+  .option("--focus <query>", "Bias clustering toward a topic")
+  .option("--scope <scope>", "all | recent | persistent-only", "all")
+  .option("--since <date>", "ISO date lower bound (with --scope recent)")
+  .option("--min-agents <n>", "Minimum agents per cluster for consensus", "2")
+  .option("--min-similarity <n>", "Cosine similarity threshold", "0.7")
+  .option("--max-clusters <n>", "Maximum clusters to return", "20")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--json", "Output raw JSON")
+  .option("--dry-run", "Show stats without full clustering")
+  .action(async (opts) => {
+    const port = resolveHttpPort(opts);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const agents = opts.agents.split(",").map((s: string) => s.trim());
+
+    if (agents.length < 2) {
+      console.error("❌ Need at least 2 agents for cross-agent distillation.");
+      process.exit(1);
+    }
+
+    const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASSWORD;
+    if (!adminPass) {
+      console.error("❌ Admin password required. Set HDB_ADMIN_PASSWORD or FLAIR_ADMIN_PASSWORD.");
+      process.exit(1);
+    }
+
+    const body: Record<string, unknown> = {
+      agents,
+      minAgents: Number(opts.minAgents),
+      minSimilarity: Number(opts.minSimilarity),
+      maxClusters: Number(opts.maxClusters),
+      scope: opts.scope,
+    };
+    if (opts.since) body.since = opts.since;
+    if (opts.focus) body.focus = opts.focus;
+
+    if (!opts.json) {
+      console.log(`🔬 Distilling tribal knowledge across ${agents.length} agents: ${agents.join(", ")}`);
+      if (opts.focus) console.log(`   Focus: ${opts.focus}`);
+      console.log("");
+    }
+
+    const auth = "Basic " + Buffer.from(`admin:${adminPass}`).toString("base64");
+    const res = await fetch(`${baseUrl}/DistillTribalKnowledge`, {
+      method: "POST",
+      headers: { Authorization: auth, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`❌ Failed: ${res.status} ${text}`);
+      process.exit(1);
+    }
+
+    const result = await res.json() as {
+      clusters: Array<{ id: string; theme: string; consensusScore: number; agentCount: number; agents: string[]; memories: Array<{ agentId: string; content: string; similarity: number }> }>;
+      contradictions: Array<{ memoryA: { agentId: string; content: string }; memoryB: { agentId: string; content: string }; similarity: number; type: string }>;
+      prompt: string;
+      stats: { totalMemories: number; memoriesAnalyzed: number; clustersFound: number; contradictionsFound: number; agentsIncluded: number };
+    };
+
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    // Stats
+    const s = result.stats;
+    console.log(`📊 Stats: ${s.memoriesAnalyzed} memories analyzed (${s.totalMemories} total), ${s.agentsIncluded} agents`);
+    console.log(`   ${s.clustersFound} clusters, ${s.contradictionsFound} contradictions`);
+    console.log("");
+
+    if (opts.dryRun) return;
+
+    // Clusters
+    if (result.clusters.length === 0) {
+      console.log("No cross-agent consensus found at this similarity threshold.");
+      return;
+    }
+
+    for (const cluster of result.clusters) {
+      console.log(`━━━ ${cluster.id}: ${cluster.theme}`);
+      console.log(`    Consensus: ${cluster.consensusScore} | Agents: ${cluster.agents.join(", ")}`);
+      for (const m of cluster.memories) {
+        console.log(`    [${m.agentId}] (${m.similarity}) ${m.content.slice(0, 120)}${m.content.length > 120 ? "..." : ""}`);
+      }
+      console.log("");
+    }
+
+    // Contradictions
+    if (result.contradictions.length > 0) {
+      console.log("⚠️  Contradictions:");
+      for (const c of result.contradictions) {
+        console.log(`    ${c.memoryA.agentId}: "${c.memoryA.content.slice(0, 80)}..."`);
+        console.log(`    ${c.memoryB.agentId}: "${c.memoryB.content.slice(0, 80)}..."`);
+        console.log(`    Type: ${c.type} | Similarity: ${c.similarity}`);
+        console.log("");
+      }
+    }
+
+    // Prompt (truncated)
+    console.log("─── Synthesis Prompt ───");
+    console.log(result.prompt.slice(0, 2000));
+    if (result.prompt.length > 2000) console.log("... (truncated, use --json for full prompt)");
+  });
+
 await program.parseAsync();
