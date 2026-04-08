@@ -11,22 +11,44 @@
 
 Flair 1.0 must support two deployment topologies as first-class:
 
-1. **Federated** — a local Flair instance (rockit) plus a hosted Flair instance (Harper Fabric), bidirectionally synchronized.
-2. **Standalone hosted** — a single Flair instance running on Fabric (or any Harper Core host), complete by itself.
+1. **Federated (hub-and-spoke)** — one hosted Flair instance on Harper Fabric serving as the **hub**, with local Flair instances on rockit and VMs (tps-anvil, future VMs) as **spokes**. Each spoke dials outbound WSS to the hub. Spokes do not peer with each other directly in 1.0; cross-spoke data propagates through the hub as a two-hop path.
+2. **Standalone hosted** — a single Flair instance running on Fabric, complete by itself. No spokes.
 
-Both run the same Flair codebase. The difference is configuration and whether a peer is declared. This spec defines the federation layer — how two Flair instances establish trust, exchange records, handle conflicts, and stay consistent over an unreliable WAN link — such that the federated topology works and the standalone topology is simply "federation with no peers configured."
+Both run the same Flair codebase. The difference is configuration and whether peers are declared. This spec defines the federation layer — how Flair instances establish trust, exchange records, handle conflicts, and stay consistent over an unreliable WAN link.
+
+**Why Fabric is the hub and not rockit.** A hub "machine deep in a private network" doesn't work because spokes can't reach it inbound. The hub must be publicly reachable so spokes can dial outbound to it. Fabric satisfies that by design (it's the managed, always-on node with a public TLS endpoint). Rockit sits behind NAT and should never be asked to accept inbound connections from the internet. Spokes (rockit, VMs) all initiate outbound. Hub (Fabric) accepts.
 
 Key constraints driving the design:
 
-- **rockit is not publicly reachable.** All peer connections must be initiated outbound from rockit.
-- **Tunnels are off the table.** No Tailscale, Cloudflare Tunnel, or SSH-based reverse tunnel. Peer connectivity runs on a single persistent authenticated WebSocket over TLS.
-- **Harper Pro replication is unusable.** Source-available license conflicts with our open-source positioning, and replication only exists between Pro nodes anyway. Sync must live at the Flair application layer.
-- **The hosted side runs on Harper Fabric with no CLI access.** All operations on the hosted instance must happen via HTTP APIs, bootstrap tokens surfaced through deployment console logs, or sync traffic from a paired peer.
+- **Spokes are not publicly reachable.** rockit and VMs are behind NAT or otherwise not inbound-addressable. All peer connections initiate outbound from spokes to the hub.
+- **Tunnels are off the table for the sync link.** No Tailscale, Cloudflare Tunnel, or reverse SSH for the hub ↔ spoke sync channel. Sync runs on a single persistent authenticated WebSocket over TLS directly to the hub's public endpoint. (This does not preclude tunnels elsewhere in the deployment — e.g., legacy VM-to-rockit tunnels for clients of rockit's Flair.)
+- **Harper Pro replication is unusable.** Source-available license conflicts with our open-source positioning. Sync must live at the Flair application layer.
+- **The hub runs on Harper Fabric with no CLI access.** All operations on the hub happen via Harper's operations API (via `harper set_configuration` and similar), via sync traffic from a paired spoke, or via the web admin UI (FLAIR-WEB-ADMIN).
 - **"Nathan-grade" reliability.** Every visible failure mode must have a designed recovery path. "Restart it" is not a valid answer.
+- **No secrets manager on Fabric.** Harper Fabric does not provide dedicated secret storage. Sensitive runtime values are either baked into Harper's configuration (via `harper set_configuration`) or stored in Harper blobs (encrypted at rest where needed). Private keys must not appear in logs or config files that could be inspected by platform operators.
 
 ---
 
 ## 1. Concepts
+
+### Topology: hub-and-spoke
+
+1.0 uses a hub-and-spoke federation pattern, with Harper Fabric as the hub:
+
+```
+                    Fabric (public, always-on, the hub)
+                         ↑       ↑         ↑
+                         |       |         |
+                    rockit   tps-anvil   future-vm
+                    (spoke)   (spoke)    (spoke)
+```
+
+- **Hub:** exactly one Flair instance running on Harper Fabric with a public `wss://` endpoint.
+- **Spokes:** any number of Flair instances on private machines (rockit, tps-anvil, future VMs) that dial outbound to the hub's WSS endpoint.
+- **Spokes don't peer with each other** in 1.0. Cross-spoke records propagate via the hub (rockit writes → rockit syncs to Fabric → Fabric syncs to anvil).
+- **Each instance maintains its own Flair deployment** — own Harper Core, own data, own memory, own principals. Cross-spoke independence means if the hub goes down, each spoke operates fully locally; only cross-spoke synchronization pauses.
+
+Full mesh (spoke-to-spoke direct connections) is reserved for 2.0. It would reduce cross-spoke latency and eliminate the hub as the coordination choke point, but it adds N×(N-1)/2 connection complexity and doesn't solve any 1.0 problem.
 
 ### Instance identity
 
@@ -37,12 +59,21 @@ interface InstanceIdentity {
   id: string;                    // "flair_h82kx9" — generated on first boot
   publicKey: string;             // Ed25519, base64url
   createdAt: string;
-  // Private key stored in ~/.flair/data/instance-key (Core) or
-  // fabric_secrets.instance_key (Fabric). Encrypted at rest.
+  // Private key storage:
+  //   Harper Core hosts (rockit, VMs):
+  //     Stored in a Harper blob record under a fixed key (e.g., "instance:ed25519:private").
+  //     Harper blobs are persistent across restarts and local to the host.
+  //   Harper Fabric (the hub):
+  //     Also stored in a Harper blob. Harper handles blob persistence and replication.
+  //     Encrypted at rest via a key derived from a deploy-time configuration value
+  //     set via `harper set_configuration flair.instance_key_passphrase=...`
+  //     (not present in stdout or source code). See § 7.3.
 }
 ```
 
 **Why a separate identity:** instance-level auth protects the WSS channel between peers. Per-record signatures (from the originating Principal) protect the integrity of individual memory writes. These are two different trust layers and they must not be conflated — a compromised peer should only be able to inject records for principals it controls, never for principals owned by the other peer.
+
+**Why instance keys are acceptable on Flair** (clarification vs. human-principal keys, which are NOT stored on Flair — see FLAIR-PRINCIPALS): the instance key is a deployment artifact that the instance must possess to do its job as a peer. Losing it means losing the ability to authenticate to other instances, which is a bounded outage (pair again with a new key). It is not a user-controlled identity and its compromise doesn't expose user data directly. User-controlled cryptographic material (passkey private keys, which never leave the authenticator anyway; any per-human Ed25519 keys, which we chose not to have) stays out of Flair entirely.
 
 ### Peer record
 
@@ -63,7 +94,10 @@ interface Peer {
 }
 ```
 
-For 1.0, Flair supports at most one peer per instance. The schema is prepared to list more but cross-validation between N>2 peers is out of scope for 1.0.
+**Peer count limits for 1.0:**
+- The **hub** maintains one Peer record per spoke. N spokes = N peer records. All peer records follow the same rules; the hub just has multiple active sync channels simultaneously.
+- Each **spoke** maintains exactly one Peer record — the hub.
+- Spoke-to-spoke peer records are forbidden in 1.0. The schema supports them but the configuration validator rejects any spoke that tries to pair with another spoke.
 
 ### SyncFrame
 
@@ -123,47 +157,78 @@ Lamport ordering governs the supersede chain — "which memory supersedes which"
 
 ### Instance cold start
 
-On first boot of a Flair instance (detected by absence of `~/.flair/data/instance-key` or equivalent):
+On first boot of a Flair instance (detected by absence of the instance Harper blob containing the private key):
 
-1. Generate an Ed25519 keypair. Store the private key in the encrypted-at-rest secret store. Publish the public key at `/instance-identity.json`.
+1. Generate an Ed25519 keypair.
 2. Generate a random instance id (`flair_<12 random base62 chars>`).
-3. Log the instance id and public key to stdout so a human operator can see them in the deployment console.
-4. Start the HTTP listener, OAuth endpoints, memory resources, and the `/sync` WebSocket endpoint.
-5. If Flair is configured as standalone (no peers declared), stop here. The instance is complete.
-6. If Flair is configured to expect a peer (federated topology), enter "awaiting pairing" state and log the one-time bootstrap token (see below).
+3. Look for an **instance key passphrase** in Harper configuration under `flair.instance_key_passphrase`. If present, encrypt the Ed25519 private key with a symmetric key derived from the passphrase (Argon2id → AEAD). If absent, store the private key unencrypted and log a warning — this is acceptable on a trusted host (rockit, Nathan's machines) but a misconfiguration on Fabric.
+4. Store the (possibly encrypted) private key in a Harper blob record under the key `instance:ed25519:private`. Store the public key under `instance:ed25519:public` (unencrypted).
+5. Store the instance id in Harper configuration at `flair.instance_id` for convenient lookup.
+6. Expose the public key via `GET /instance-identity.json` (unauthenticated — the public key is public by definition).
+7. **Do not log the instance private key, the passphrase, or any secret to stdout.** Harper Fabric surfaces stdout to platform operators; treat stdout as a semi-public audit trail.
+8. Start the HTTP listener, OAuth endpoints, memory resources, and the `/sync` WebSocket endpoint.
+9. If Flair is configured standalone (no peer configured), the instance is complete.
+10. If Flair is configured as the hub (`flair.role = "hub"`), it accepts inbound `/pair` attempts (see below) but does not initiate connections.
+11. If Flair is configured as a spoke (`flair.role = "spoke"` with `flair.hub_endpoint` set), it begins dialing outbound to the hub.
 
-### Pairing a peer — federated topology
+### Pairing flow — hub (Fabric)
 
-The pairing flow differs based on which side has shell/CLI access. rockit has it; Fabric does not.
+The hub doesn't have CLI access, so pairing uses Harper's `set_configuration` API combined with a short-lived `/pair` endpoint:
 
-**Scenario A — rockit + Fabric (the expected 1.0 configuration):**
+1. **Nathan deploys Flair to Fabric:**
+   ```
+   harper deploy target=https://<cluster>.harper.fabric \
+     username=<deploy-user> password=<deploy-pass> \
+     project=flair package=<flair-package-url-or-path> \
+     restart=true
+   ```
+2. Flair boots on Fabric and enters "awaiting pairing" state. No bootstrap token exists yet.
+3. **Nathan generates a bootstrap token locally and sets it on Fabric:**
+   ```
+   # Generate a 32-byte base62 token locally
+   TOKEN=$(flair bootstrap-token-gen)
+   # Push it to Fabric as configuration
+   harper set_configuration target=https://<cluster>.harper.fabric \
+     username=<deploy-user> password=<deploy-pass> \
+     flair.pending_bootstrap_token=$TOKEN \
+     flair.pending_bootstrap_expires_at=$(date -v+15M -Iseconds)
+   ```
+   The token is never written to stdout or logs. It exists in the local shell variable on Nathan's machine and in Harper's configuration store on Fabric. When pairing completes or the TTL expires, Flair clears both config keys via `set_configuration` with empty values.
+4. **Nathan now pairs rockit to Fabric:**
+   ```
+   flair peer add wss://<cluster>.harper.fabric/sync \
+     --role spoke \
+     --bootstrap-token "$TOKEN"
+   ```
+5. rockit dials the hub's `/pair` endpoint over HTTPS (NOT the WSS sync endpoint yet — pairing is a one-shot HTTP handshake). rockit presents the token and its own instance id + public key.
+6. Fabric (hub) validates the token against `flair.pending_bootstrap_token`, checks it hasn't expired, and responds with its own instance id + public key.
+7. Both sides pin each other's public keys in their Peer tables.
+8. Fabric clears `flair.pending_bootstrap_token` via its internal `set_configuration` call. The token cannot be reused.
+9. rockit opens the WSS sync channel at `/sync` using the now-pinned hub identity.
 
-1. Nathan deploys Flair to Harper Fabric. On first boot, the Fabric instance generates its instance keypair and logs the instance id, public key, and a one-time bootstrap token to stdout. The deployment console surfaces stdout.
-2. Nathan reads the bootstrap token from the Fabric console.
-3. On rockit: `flair peer add wss://flair.lifestylelab.io/sync --bootstrap-token <token>`
-4. rockit's CLI hits the Fabric instance's `/pair` endpoint with the bootstrap token.
-5. Fabric verifies the token (single-use, TTL ~15 min, rejected after) and responds with its instance id and public key.
-6. rockit pins Fabric's public key in its Peer table.
-7. rockit sends its own instance id and public key in the same exchange.
-8. Fabric pins rockit's public key in its Peer table.
-9. Fabric invalidates the bootstrap token permanently.
-10. Both sides now have a mutually pinned peer record. The sync channel opens automatically from rockit to Fabric.
+### Pairing flow — spoke (rockit, VMs)
 
-**Scenario B — two instances, both with CLI (rare, mainly for testing):**
+Spokes are initiated from their own CLI. The spoke-side pairing flow:
 
-Same flow as A, except step 1's token can be retrieved via CLI (`flair bootstrap-token`) instead of deployment console logs.
+1. Nathan is on the spoke machine (rockit or a VM)
+2. He runs `flair peer add wss://<hub-endpoint>/sync --role spoke --bootstrap-token <token>`
+3. The spoke's Flair instance dials the hub's `/pair` endpoint (HTTPS, not WSS) and completes the exchange described above.
+4. The spoke records the hub as its single peer in `flair.config.yaml` and the local Peer table.
+5. The spoke begins steady-state dial-out to the hub's `/sync` endpoint and catches up.
 
-**Scenario C — standalone hosted only (no peer):**
+### Scenario: standalone hosted
 
-Pairing is skipped entirely. The instance runs complete by itself. If Nathan later wants to add a local peer, he installs Flair on his machine and runs `flair peer add wss://flair.lifestylelab.io/sync --bootstrap-token <t>` from the new side. Fabric, as the already-provisioned side, issues the bootstrap token via the web admin UI (see FLAIR-WEB-ADMIN).
+For the standalone hosted topology (Fabric only, no spokes), pairing is skipped entirely. The instance runs complete by itself. If Nathan later decides to add a local spoke, he uses the same flow as above — generate a token, `set_configuration` it on Fabric, pair from the new spoke.
 
 ### Bootstrap token properties
 
-- **Single use.** Consumed and invalidated on first successful pair exchange.
-- **Short TTL.** 15 minutes. Expired tokens are rejected.
+- **Single use.** Consumed and cleared from Harper configuration on first successful pair exchange.
+- **Short TTL.** 15 minutes, enforced via `flair.pending_bootstrap_expires_at` configuration value.
 - **High entropy.** 32 random bytes, base62-encoded.
-- **Visible only via deployment console or admin web UI.** Never logged to persistent storage beyond the ephemeral deployment log surfaced to the operator.
-- **Single outstanding token per instance.** Generating a new token (via CLI or web UI) invalidates any previous unclaimed one.
+- **Never logged.** Not in stdout, not in Harper audit logs, not persisted beyond the config key Flair clears after use.
+- **Client-generated, server-stored.** Nathan generates the token locally on a machine he trusts (rockit, his laptop) and pushes it to Fabric as configuration. This way the token never passes through a "generated by Fabric and retrieved by Nathan" step, which would have required a surface that could leak.
+- **Single outstanding token per instance.** Pushing a new token overwrites the previous one.
+- **Stored as a hash.** Flair hashes the incoming token on receipt (`set_configuration` value is the plaintext for 15 minutes; Flair immediately re-writes it as a hash via its own internal config call). Pair verification compares incoming candidate tokens against the hash. Means a leaked Harper config snapshot from within the 15-minute window could expose the plaintext, but from outside the window only the hash exists.
 
 ### Schema version check in the handshake
 
@@ -367,21 +432,62 @@ Each SyncFrame's `frameId` is a UUID. The receiver maintains a 60-second window 
 
 ## 6. Security
 
-### 6.1 Signature-to-Principal Binding (Kern's finding)
+### 6.1 Signature-to-Principal Binding (Kern's finding, revised 2026-04-08)
 
-This is the critical new security requirement Kern surfaced during his review.
+This is the critical new security requirement Kern surfaced during his review. The verification model differs between agent-authored and human-authored records per FLAIR-PRINCIPALS § 1 "Identity vs Credential":
 
-When a receiver processes an incoming SyncFrame:
+When a receiver processes an incoming SyncFrame, it performs **two independent verifications**:
 
-1. Verify the WSS channel's peer identity via pinned public key. (Channel auth.)
-2. Verify the SyncFrame's `signature` field against the **originator's** public key as registered in the local Principal table. The signature must be from `originatorPrincipalId`'s Ed25519 public key, NOT from the sending peer's instance key.
-3. If the signature does not verify, the frame is rejected with `NACK: SIGNATURE_MISMATCH`. The rejection is logged.
+1. **Channel authentication.** Verify the WSS channel's peer identity via the pinned instance public key (the `senderInstanceId` must match a pinned peer record, and the WSS connection's TLS+challenge-response must be valid).
 
-**Why this matters:** without step 2, a compromised peer could fabricate a SyncFrame claiming to originate from `agent_flint` by simply re-signing the frame with its own instance key and dropping the originator signature. Signature-to-Principal binding prevents this — the receiving instance verifies provenance by checking the claim against its own trusted record of who each Principal is (via the Principal table's publicKey field).
+2. **Record signature verification.** Verify the SyncFrame's `signature` field. The verification key depends on the Principal kind of the `originatorPrincipalId`:
 
-**Corollary:** a peer can only inject records originating from Principals whose private keys it actually holds. A compromised rockit can inject memories as any of rockit's local agents (Flint, Kern, Anvil, Pulse, Nathan) because rockit holds those private keys. It cannot inject memories as a Principal that originated on the hosted side. This bounds the blast radius of peer compromise.
+   - **If the originating Principal has `kind: "agent"`:** verify against the agent's registered Ed25519 public key from the local Principal table. The signature is from the agent itself.
+   - **If the originating Principal has `kind: "human"`:** verify against the **originating instance's** public key (the instance that first accepted and signed the human's write). The SyncFrame carries `originatorInstanceId` in addition to `originatorPrincipalId`; the receiver looks up that instance's pinned public key in its Peer table. The signature is from the instance, not from the human.
 
-**Exception for humans with server-held keys:** for human Principals whose Ed25519 key is held server-side (see FLAIR-PRINCIPALS § 2), the signature is produced by whichever instance wrote the record on the human's behalf. The receiving instance verifies against the registered publicKey for that human Principal. In practice this means a compromised hosted instance could forge records from a human Principal only if that Principal's key was held on hosted. Rockit-originated human writes are still safe because rockit holds the key for humans whose account was claimed from rockit. Humans whose account was claimed from hosted have their key on hosted. This is a deliberate trade-off documented in FLAIR-PRINCIPALS § 9.6.
+3. If verification fails, the frame is rejected with `NACK: SIGNATURE_MISMATCH`. The rejection is logged.
+
+**Why the split.** Per FLAIR-PRINCIPALS (revised 2026-04-08 per Nathan's direction), humans do not have server-held private keys. Records written by humans are signed at the instance level instead — the Flair instance that accepted the write signs the record with its instance key. Other instances verify that instance signature. The guarantee is "Instance X attests that Human Y wrote this at time T," not "Human Y cryptographically wrote this" directly.
+
+**Blast radius of peer compromise:**
+
+- **Agent records:** a compromised peer can inject records claiming to originate from agents whose private keys it holds. A compromised rockit can forge `agent_flint`, `agent_kern`, etc. memories because rockit holds those agents' keys. A compromised rockit **cannot** forge records from agents originating on the Fabric hub (if any) or on another spoke. The per-agent signature check catches such forgery.
+- **Human records:** a compromised peer can inject records claiming to originate from any human, but only with the peer's own instance signature. Receivers see "instance X signed this record claiming Nathan wrote it" — they trust the attestation to the extent they trust the instance. A compromised rockit can forge Nathan-authored records; receivers would accept them because rockit's instance key is pinned. This is a weaker guarantee than per-principal signing would give, and it's the explicit trade-off Nathan accepted in exchange for not storing user private keys on Flair.
+
+**Mitigations for the weaker human-record guarantee:**
+
+- Audit logs: every record stores the originating instance id, visible in `flair memory show`. A forensic reviewer can see which instance attested each record.
+- Instance-key compromise detection: unusual write volume or pattern from an instance should alert the operator. This is part of § 9.5 "Compromised peer" response.
+- OAuth session hardening: short-lived tokens (max 1 hour), refresh token rotation, client fingerprinting, anomaly detection on sessions. See FLAIR-PRINCIPALS § 2 OAuth.
+- WebAuthn for direct sessions: passkeys are phishing-resistant and hardware-bound; a human session can only be hijacked via active session theft (cookie theft, token leakage), not via credential reuse.
+
+### 6.1.1 SyncFrame originatorInstanceId field addition
+
+To support human-record verification, the SyncFrame schema gains one field that wasn't in § 1:
+
+```typescript
+interface SyncFrame {
+  protocolVersion: 1;
+  frameId: string;
+  senderInstanceId: string;       // who is relaying this frame NOW
+  senderSequence: number;
+  originatorPrincipalId: string;  // who the record is attributed to
+  originatorInstanceId: string;   // NEW: which instance signed this record originally
+                                  //      (for agents, this == the instance that was running
+                                  //       when the agent wrote it; for humans, this is the
+                                  //       instance that accepted the OAuth/WebAuthn write)
+  recordType: "memory" | "principal" | "credential" | "grant" | "soul";
+  operation: "upsert" | "tombstone";
+  recordId: string;
+  recordPayload: unknown;
+  lamport: number;
+  signature: string;              // Ed25519 sig over the frame
+                                  // For agent records: by originatorPrincipalId
+                                  // For human records: by originatorInstanceId
+}
+```
+
+The schema previously listed only `senderInstanceId` (the immediate peer relaying the frame). The new `originatorInstanceId` disambiguates "who relayed this frame right now" from "who first signed this record." In a hub-and-spoke topology, records from agent_kern on anvil-vm are first signed on anvil-vm (originatorInstanceId = anvil-vm), relayed to Fabric (senderInstanceId = anvil-vm → Fabric), then relayed from Fabric to rockit (senderInstanceId = Fabric at the second hop). The originator field is stable across hops; the sender field changes.
 
 ### 6.2 Instance key compromise
 
@@ -407,12 +513,15 @@ The following never crosses the sync channel under any circumstances:
 
 - Memory records with `visibility: "private"`
 - Memory records tagged `no-sync`
-- The instance's private Ed25519 key
-- Any principal's private Ed25519 key (server-held)
+- The instance's private Ed25519 key (held in each instance's Harper blob, never transmitted)
 - OAuth client secrets
+- OAuth access/refresh token plaintexts (only hashes / signed JWTs are stored; the plaintexts only exist in transit to the client)
 - Bearer token plaintexts (only hashes are stored; hashes are synced, plaintexts never existed post-creation)
 - WebAuthn credential private keys (they never leave the authenticator, period)
 - WebAuthn credential public keys **are** synced as part of the Credential record
+- The `flair.instance_key_passphrase` configuration value
+
+**Per-principal Ed25519 private keys for humans are not listed above because they do not exist** (revised 2026-04-08 per Nathan). Human records are signed by the instance key instead. See § 6.1 and FLAIR-PRINCIPALS § 1.
 
 ### 6.5 Subject subscription
 
@@ -431,23 +540,98 @@ The sender evaluates every outbound SyncFrame against the peer's subscription. F
 
 ### 7.1 Deployment story
 
-Harper Fabric deploys Flair as a standard Harper Core application component. The exact deployment mechanism (git-based push, `harper deploy` CLI, container image) needs research before implementation — we haven't dogfooded Fabric yet. This is an open question (see § 10).
+Flair is packaged as a **Harper Fabric app** — a Harper application component that includes Flair's resources, the openclaw-flair plugin, the OAuth 2.1 server endpoints, and flair-mcp for MCP client access.
 
-### 7.2 Secret storage
+Deployment uses Harper's standard CLI:
 
-The instance private key and any OAuth client secrets must be stored in Fabric's secret store (environment variables injected at runtime, or a secrets manager — needs research). Under no circumstances should these live in the Harper data directory where they might end up in backups or replicas.
+```
+harper deploy \
+  target=https://<cluster>.harper.fabric \
+  username=$HARPER_DEPLOY_USER \
+  password=$HARPER_DEPLOY_PASS \
+  project=flair \
+  package=<path-or-url-to-flair-package> \
+  restart=true \
+  replicated=true
+```
 
-### 7.3 No CLI access
+The `harper deploy` command is the standard Harper CLI operation (aliased to `harper deploy_component`). It supports both push-based deployment (CLI pushes a package) and pull-based deployment (Harper pulls from a git repo). We use push-based for 1.0 to keep deployments explicit and audit-able from Nathan's laptop.
 
-All admin operations that would normally be CLI commands become HTTP API calls initiated by the paired rockit peer or by the web admin UI (FLAIR-WEB-ADMIN). The hosted Flair instance runs unattended.
+Credentials are passed via environment variables (`CLI_TARGET_USERNAME`, `CLI_TARGET_PASSWORD`) or inline; never committed to source.
 
-### 7.4 Log surfacing
+### 7.2 Runtime configuration (post-deploy)
 
-The bootstrap token and instance identity must be visible in the deployment console's standard log view. Fabric surfaces stdout, so Flair just needs to `console.log` the relevant lines during first boot.
+Harper exposes `set_configuration` / `get_configuration` operations API commands that modify app configuration **after** deployment. This is how we set sensitive values like the bootstrap token passphrase without baking them into the deploy command:
 
-### 7.5 Persistence across Fabric restarts
+```
+harper set_configuration \
+  target=https://<cluster>.harper.fabric \
+  username=$HARPER_DEPLOY_USER password=$HARPER_DEPLOY_PASS \
+  flair.pending_bootstrap_token=$TOKEN \
+  flair.pending_bootstrap_expires_at=$EXPIRES_AT
 
-The instance private key, Peer table, and principal data must persist across Fabric restarts. This requires Fabric-provided persistent storage — the details of how to request persistent volumes on Fabric need verification. Another open question (§ 10).
+# Apply config
+harper restart_service target=https://... service=flair
+```
+
+**Key implication:** the bootstrap token is set via `set_configuration`, not passed through the initial `harper deploy` command. This matches Nathan's guidance: "Config can be set, not part of deploy." Flair reads the config value on startup (or on a config reload) and uses it to authenticate the incoming pair request, then clears it.
+
+### 7.3 Secret storage
+
+Harper Fabric does not provide a dedicated secrets manager. Secrets storage strategies for Flair on Fabric:
+
+- **Bootstrap token** (short-lived): stored transiently in `flair.pending_bootstrap_token` via `set_configuration` for up to 15 minutes, then cleared.
+- **Instance private key** (long-lived): stored in a Harper blob record encrypted with a key derived from `flair.instance_key_passphrase` (a configuration value set once during initial deploy via `set_configuration`, never shown in logs). The passphrase is Nathan's responsibility to back up off-box. Losing it means losing the ability to decrypt the instance key and requires re-pairing.
+- **OAuth client credentials for DCR-registered clients**: stored in Harper data (Principal table's credentials), hashed where possible, encrypted-at-rest via the instance key passphrase.
+- **Per-human-principal private keys**: **not stored on Flair.** See FLAIR-PRINCIPALS for the design that replaces server-held human keys with OAuth-authenticated, instance-signed records.
+- **Bearer tokens**: stored as SHA-256 hashes in Harper data (plaintext never persisted after creation).
+
+**Under no circumstances** should any of these secrets be written to stdout. Harper surfaces stdout to Fabric logs, which are accessible to platform operators — Nathan flagged this as a security concern.
+
+### 7.4 No CLI access (to the Fabric-hosted instance)
+
+The Fabric-hosted Flair instance runs unattended. All operations that would normally be CLI-initiated happen through:
+
+- **Harper's operations API** (via `harper <command> target=...` from a machine with deploy credentials) for instance-level config
+- **Paired spokes** (rockit, VMs) initiating sync traffic and mail flow
+- **The web admin UI** (FLAIR-WEB-ADMIN) for principal and credential management
+
+### 7.5 Log surfacing
+
+Harper Fabric surfaces the Flair app's stdout/stderr through Harper's log facility (`read_log`, `read_transaction_log`). Operators can read logs via Harper's operations API.
+
+**Security implication:** anything Flair writes to stdout is visible to Fabric platform operators and any admin with deploy credentials. Therefore:
+
+- **Never log secrets** — instance private keys, bootstrap tokens, bearer tokens, OAuth codes, passphrases, WebAuthn registration challenges.
+- **Log diagnostic state only** — connection attempts, peer status, sync catch-up progress, error conditions, SLO metrics.
+- **Log the public key and instance id** — these are public by definition, and operators need to see them during bootstrap and debugging.
+
+### 7.6 Persistence across Fabric restarts
+
+Harper data persists across restarts (Harper Core behavior, inherited by Fabric). Records that survive:
+
+- All Flair database tables (Principal, Credential, Memory, Peer, Soul, etc.)
+- Harper blobs (including the instance private key blob)
+- Harper configuration values
+
+Records that do NOT survive:
+
+- In-memory state (open WSS connections, pending ACK windows, Lamport clock counters above what's been written to disk — these recompute from persisted data on restart)
+- Stdout log history beyond Harper's retention window
+
+### 7.7 TLS certificates
+
+Harper Fabric manages TLS certificates for the instance's public endpoint — either via a Fabric-provided domain (e.g. `<cluster>.harper.fabric`) or Bring Your Own Domain (BYOD) with DNS pointing at the Fabric cluster. Either path gives Flair a valid TLS cert on the `/sync` WebSocket endpoint automatically. No Let's Encrypt automation or certificate management on our side.
+
+### 7.8 Blob storage
+
+Harper supports blob records as a native feature — arbitrary binary data stored alongside the relational data, persistent across restarts, queryable via the operations API. Flair uses Harper blobs for:
+
+- The instance private key (encrypted)
+- Any large memory payloads that exceed comfortable inline storage
+- Audit log archives (future)
+
+Per Nathan: "Private keys would need to be in harper blobs to be replicated and persisted." We follow that guidance for the instance private key specifically.
 
 ---
 
@@ -546,21 +730,25 @@ The token is single-use and has a 15-minute TTL. If leaked and used by an attack
 
 ## 10. Open Questions
 
-1. **Harper Fabric deployment mechanics.** How does Flair get deployed to Fabric? Git push? Container image? `harper deploy` CLI? Needs verification before we can write the deployment runbook. Probably worth spinning up a test Fabric instance to figure out.
+1. ~~Harper Fabric deployment mechanics.~~ **RESOLVED** — `harper deploy` CLI with push-based deployment from Nathan's machine. See § 7.1.
 
-2. **Fabric persistent storage.** Does Fabric provide persistent volumes that survive restarts? How is the instance private key stored across Fabric restarts? Needs verification.
+2. ~~Fabric persistent storage.~~ **RESOLVED** — Harper data (including blobs) persists across restarts. Instance private key lives in a Harper blob. See § 7.6, § 7.8.
 
-3. **Fabric secret injection.** Is there a Fabric secrets manager we should use for the instance key and OAuth client secrets, or do we roll our own encrypted-at-rest scheme? Needs verification.
+3. ~~Fabric secret injection.~~ **RESOLVED** — no dedicated secrets manager on Fabric. Secrets are held either (a) as short-lived `harper set_configuration` values for things like the bootstrap token, (b) in Harper blobs encrypted with a key derived from a passphrase configured at deploy time, or (c) hashed in Harper data (bearer tokens, OAuth credentials). See § 7.3.
 
-4. **Fabric log surfacing.** Can Nathan see stdout during first boot clearly enough to copy the bootstrap token? If not, we need an alternative (e.g., the token appears on the instance's `/bootstrap-info` endpoint for 15 minutes before locking).
+4. ~~Fabric log surfacing.~~ **RESOLVED — different answer than expected.** Stdout IS visible to Fabric operators, which Nathan flagged as a security concern. We therefore do NOT log the bootstrap token to stdout. Instead, the bootstrap token is pushed to Fabric as a transient `harper set_configuration` value from Nathan's machine. See § 2 pairing flow.
 
-5. **Catch-up performance at scale.** If rockit has 100,000 memories and hosted is freshly paired, catch-up may take a while. Is there a cap on frames per second during catch-up? Proposed: bound by the WSS connection throughput; no artificial cap. Monitor and add one if needed.
+5. **Catch-up performance at scale.** If a fresh spoke pairs with the hub after months of hub writes, catch-up may stream hundreds of thousands of frames. Is there a cap on frames per second during catch-up? Proposed: bound by WSS connection throughput; no artificial cap. Monitor and add one if needed. **Still open.**
 
-6. **Network partition longer than sequence number reset.** If an instance is offline for months and the peer has been actively issuing sequences the whole time, is there any upper bound on the catch-up stream? No — per-principal sequences can be arbitrarily large. Disk is the only bound.
+6. **Network partition longer than sequence number reset.** If an instance is offline for months and the peer has been actively issuing sequences the whole time, is there any upper bound on the catch-up stream? No — per-principal sequences can be arbitrarily large. Disk is the only bound. **Still open as observation, no action needed.**
 
-7. **Concurrent writes to the same memory's supersede chain from two instances.** Resolved by Lamport clock, but worth confirming that the supersede UI (eventually — `flair memory correct`) handles seeing "this memory has been superseded on the other instance" correctly.
+7. **Concurrent writes to the same memory's supersede chain from two instances.** Resolved by Lamport clock, but worth confirming that the supersede UI (eventually — `flair memory correct`) handles seeing "this memory has been superseded on the other instance" correctly. **Still open, defer to implementation.**
 
-8. **Single-peer-only constraint for 1.0.** Do we need to enforce this in code, or is it convention? I lean code — the Peer table schema supports N but the sync logic assumes 1. Enforcing via code prevents someone accidentally setting up 3 peers and discovering bugs.
+8. **Enforcement of hub-and-spoke topology in code.** Schema supports any peer relationship; sync logic now expects hub-and-spoke (one central hub, N spokes that only peer with the hub). Proposed: runtime config validator rejects invalid peer configurations at startup. If role is `spoke`, the Peer table must have exactly one entry (the hub). If role is `hub`, peers may be any number of spokes. **Resolved by design, enforce in implementation.**
+
+9. **OAuth token ↔ record write audit correlation.** A human-written record should be traceable back to the specific OAuth session that created it, for forensic purposes when instance signatures are the only provenance. Proposed: each human-written record includes a `authSessionId` in metadata referencing the OAuth session (but NOT the bearer token itself). Sessions are stored in Harper data with creation time, client fingerprint, expiry, and correlation is read-only from the audit view. **New question — worth Sherlock's input in his FEDERATION review.**
+
+10. **Instance key passphrase rotation.** The passphrase that decrypts the instance private key blob is set at deploy time via `harper set_configuration flair.instance_key_passphrase`. Rotating it requires re-encrypting the blob. How often should rotation be required? Proposed: no forced rotation. Operator-initiated rotation via `flair instance rotate-passphrase`, which re-encrypts the blob and updates the config value in one transaction. **Defer to implementation.**
 
 ---
 

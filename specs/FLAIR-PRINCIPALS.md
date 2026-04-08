@@ -18,7 +18,7 @@ Changes since the 2026-04-07 draft, based on K&S review and Nathan direction:
 - **Accept self-attestation for WebAuthn**, per Sherlock, with the trade-off documented. Strict attestation breaks iCloud Keychain, 1Password, Bitwarden — the actual ways humans use passkeys. The security loss is bounded and documented.
 - **Recovery code escrow rejected**, per K&S agreement. The recovery path for "lost all passkeys in standalone hosted" is a fresh token issued via the Fabric deployment console (or equivalent infrastructure access). No static credentials, no paper codes.
 - **Single Principal per human across all Claude clients confirmed**, per Sherlock. OAuth session tracks the source client for audit; the underlying Principal is shared.
-- **Server-held Ed25519 key for humans — threat accepted**, per Sherlock. Mitigation: HSM-backed storage if Fabric supports it; encrypted-at-rest otherwise; off-site encrypted backups.
+- **No server-held Ed25519 keys for humans** (revised 2026-04-08 per Nathan): private keys for human principals are not stored on Flair at all. Replaced with instance-signature attestation — the Flair instance signs records it accepts on behalf of humans, using its own instance key. Cross-instance sync verifies against peer instance keys rather than per-principal keys. Weaker provenance for humans, but eliminates the server-held-key concentration risk entirely. See § 1 "Identity vs Credential" and § 9.6.
 - **Bearer token format `flair_at_<32 random bytes base62>` confirmed**, per Sherlock.
 - **Added forward reference to FLAIR-FEDERATION §** Signature-to-Principal Binding, per Kern. Receiving Flair instance must verify every record's Ed25519 signature matches the `publicKey` registered to the claimed `principalId`, or reject. A compromised peer cannot re-sign records under another principal's identity. This is a federation-layer requirement but referenced here because it justifies the Principal identity model.
 - **Sherlock's SOUL.md updated** with explicit trust-decision rules, "show your work" ritual, and "calibration against Kern" section. Time removed as a trust signal from his heuristics. Separate change, not in this spec.
@@ -105,18 +105,38 @@ interface Credential {
 }
 ```
 
-### Identity vs Credential
+### Identity vs Credential (revised 2026-04-08)
 
-A Principal has **one cryptographic identity** (the Ed25519 keypair) that signs memories — this is the provenance layer.
+A Principal has **one cryptographic identity** that establishes provenance for records they write. The identity model differs between agents and humans:
 
-A Principal can have **many credentials** that authenticate API access. A credential is "how do you prove you are this Principal right now"; the Ed25519 keypair is "how do we attribute records to you in the data layer."
+**Agents — one Ed25519 keypair per Principal, held by the agent itself.**
+The agent holds its own private key. Every memory write is signed by the agent with that key. Cross-instance sync carries the per-record signature; receivers verify against the Principal's registered public key. This is today's model, unchanged.
 
-For agents, the credential and the identity are typically the same Ed25519 key (the agent signs API requests with the same key it signs memories with). For humans, the identity Ed25519 key lives only on the Flair instance — the human never holds it. Their credentials are passkeys (WebAuthn) and OAuth sessions, which Flair maps to the human's Principal and uses the server-held Ed25519 key to sign on their behalf.
+**Humans — NO server-held Ed25519 keypair. Identity is established via OAuth/passkey session; provenance is carried by the instance signature.**
 
-This separation matters because:
-1. Humans can't reasonably manage Ed25519 keys themselves — passkeys are the only realistic credential for them
-2. Memory provenance must be cryptographically verifiable inside Flair's data layer regardless of how the write was authenticated
-3. Cross-instance sync (FLAIR-FEDERATION) replicates signed records — the signature must be by a key Flair controls so other instances can verify
+Humans do not have a per-principal Ed25519 keypair on Flair. Per Nathan's direction (2026-04-08), private keys for human principals must **not** be stored on Flair, because concentrating user-controlled cryptographic material on the server is an unacceptable compromise target even with encryption-at-rest.
+
+Instead:
+1. Humans authenticate via passkey/WebAuthn for direct web sessions, or via OAuth 2.1 tokens for Claude clients (§ 2).
+2. When a human writes a memory, the record is attributed to the human's Principal at the data layer (`agentId: "usr_nathan"`). The write is authorized because the HTTP request carries a valid OAuth session or web cookie tied to that Principal.
+3. The record is signed at the instance level — the **Flair instance** that accepted the write signs the record with its own Ed25519 instance key (the one from FLAIR-FEDERATION § 1). The signature attests "Flair instance X accepted this write on behalf of human Principal Y at time T."
+4. Cross-instance sync replicates the record with the instance-level signature. Other instances verify the signature against the originating instance's pinned public key (which they have from the peering handshake) AND verify that the claimed `agentId` is a human Principal that has a record in their local Principal table.
+
+**Security properties this produces:**
+
+- **Human private key compromise is impossible** because there is no human private key.
+- **Flair instance compromise limited to that instance's record attestation.** A compromised instance can sign fabricated records claiming to be from any human Principal, but only for records written while the instance was compromised. The damage is bounded and detectable (audit logs show the signing instance per record).
+- **Cross-instance trust is instance-level, not principal-level** for human writes. Each instance trusts its peers' attestation of "this human wrote this." This is weaker than per-principal Ed25519 signing but is the strongest model compatible with "humans can't manage keys."
+
+**Weaker provenance, explicitly accepted.** Under this model, a forensic examination cannot distinguish "Nathan wrote this memory directly" from "an attacker with OAuth session access to Nathan's account wrote this memory" — the instance signed both. Mitigation: OAuth session security (short-lived tokens, refresh rotation, fingerprint logging) and WebAuthn session security (passkey ceremony per login). These are not as strong as per-record signatures would be, but they are industry-standard for web authentication.
+
+**Agents still sign per-record because they can.** This is the asymmetry: agents have private keys they manage themselves, so they can produce per-record signatures and cross-instance verification is straightforward. Humans can't, so they use the instance-attestation fallback.
+
+### Why this separation matters
+
+1. Humans can't reasonably manage Ed25519 keys themselves — passkeys are the only realistic credential for them, and passkeys can't produce Ed25519 signatures directly (WebAuthn uses its own signing primitive with hardware-bound keys that never leave the authenticator).
+2. Memory provenance must still be verifiable across instances, so we use the instance-signature fallback rather than no signature at all.
+3. Cross-instance sync (FLAIR-FEDERATION) replicates signed records — agent records carry per-principal signatures; human records carry instance signatures. Both are Ed25519 and both are verifiable; only the granularity of "who signed" differs.
 
 ### Generalizing the existing Agent table
 
@@ -565,7 +585,13 @@ All seven of the original open questions have been resolved via K&S review on 20
 
 5. ~~Single Principal vs separate principals per Claude device.~~ **RESOLVED — single Principal per human.** Confirmed by Nathan and Sherlock. One human maps to one Principal across all their Claude clients. The OAuth session, not the Principal, tracks the source client for audit purposes — client metadata (client_id, user_agent, last_ip) is stored with the session.
 
-6. ~~Server-held Ed25519 key for humans.~~ **RESOLVED — threat accepted with mitigations.** Per Sherlock: humans can't manage cryptographic keys, and passkeys can't produce Ed25519 signatures directly. Flair holds the key. Mitigations: (a) HSM-backed key storage if Harper Fabric supports it (needs research); (b) encryption-at-rest with a key derived from a secret known only to the admin principal, otherwise; (c) off-site encrypted backups; (d) integrity monitoring — any unexpected change to a human Principal's publicKey is an alert condition.
+6. ~~Server-held Ed25519 key for humans.~~ **RESOLVED — no server-held human private keys. Replaced with instance-signature attestation.** Per Nathan direction (2026-04-08), private keys for humans must not be stored on Flair at all. The design is reworked:
+   - Humans authenticate via WebAuthn passkeys (direct web) or OAuth sessions (Claude clients)
+   - Human-written memory records are NOT signed with a per-principal Ed25519 key (because no such key exists)
+   - Instead, records are signed at the **instance level** — the Flair instance that accepted the write signs the record with its instance key, attesting "I accepted this write on behalf of Principal Y at time T"
+   - Cross-instance sync verifies the instance signature against the peer's pinned public key AND verifies the claimed human Principal exists locally
+   - Trade-off: provenance for human writes is instance-attested rather than principal-attested. A compromised instance can forge records claiming to be from any human. Mitigations: OAuth session security, short-lived tokens, audit logs showing the signing instance per record, WebAuthn for direct web sessions. See § 1 "Identity vs Credential" for the full revised model.
+   - **HSM is off the table** (per Nathan). Harper Fabric does not provide HSM-backed key storage. Even if it did, the previous "encrypt the server-held human key" plan concentrated too much user-controlled cryptographic material in one place.
 
 7. ~~Bearer token entropy and format.~~ **RESOLVED — format approved.** `flair_at_<32 random bytes base62>` ≈ 42 chars, 256 bits of entropy. Stored server-side as a SHA-256 hash with an 8-char prefix retained for identification and scanning. The `flair_at_` prefix is required so secret-scanning tools (GitHub, TruffleHog, gitleaks) can detect accidentally committed tokens.
 
