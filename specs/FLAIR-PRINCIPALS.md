@@ -3,9 +3,25 @@
 ## Status
 - **Owner:** Flint
 - **Priority:** P1 — foundational to 1.0
-- **Context:** Design session with Nathan, 2026-04-07
-- **Reviewers:** Kern (architecture), Sherlock (security) — briefed before draft
+- **Context:** Design session with Nathan, 2026-04-07; K&S review 2026-04-08
+- **Reviewers:** Kern (architecture, approved with reservations), Sherlock (security, approved)
 - **Composes with:** MEMORY-MODEL-V2, FLAIR-FEDERATION, FLAIR-WEB-ADMIN
+
+## Revision Notes — 2026-04-08
+
+Changes since the 2026-04-07 draft, based on K&S review and Nathan direction:
+
+- **Trust tier enum simplified to 3 tiers.** Dropped `battle-tested`. Time is not a trust signal (long-game attacks make passive trust farmable). Aligns with companion revision to MEMORY-MODEL-V2. See Section 1 and referenced MEMORY-MODEL-V2 § 3.
+- **Invited human principals default to `unverified`**, not `corroborated`. Resolved in Kern's favor. Rationale: Sherlock suggested `corroborated`, Kern suggested `unverified`; Kern is correct. `corroborated` is a tier representing confirmed consensus from multiple sources, not a middle default. An invited human has earned no consensus yet.
+- **Added `runtime` field to Principal** per Nathan's "Flair is SSOT" directive. Other tooling (TPS mail, etc.) consults Flair to discover how to reach an agent.
+- **Hardcode `claude.com/api/mcp/auth_callback` as the only permitted OAuth redirect URI for DCR clients**, per Sherlock. Open DCR with arbitrary redirect URIs is an impersonation vector. If support for additional clients is needed later, admin allowlist, not open DCR.
+- **Accept self-attestation for WebAuthn**, per Sherlock, with the trade-off documented. Strict attestation breaks iCloud Keychain, 1Password, Bitwarden — the actual ways humans use passkeys. The security loss is bounded and documented.
+- **Recovery code escrow rejected**, per K&S agreement. The recovery path for "lost all passkeys in standalone hosted" is a fresh token issued via the Fabric deployment console (or equivalent infrastructure access). No static credentials, no paper codes.
+- **Single Principal per human across all Claude clients confirmed**, per Sherlock. OAuth session tracks the source client for audit; the underlying Principal is shared.
+- **Server-held Ed25519 key for humans — threat accepted**, per Sherlock. Mitigation: HSM-backed storage if Fabric supports it; encrypted-at-rest otherwise; off-site encrypted backups.
+- **Bearer token format `flair_at_<32 random bytes base62>` confirmed**, per Sherlock.
+- **Added forward reference to FLAIR-FEDERATION §** Signature-to-Principal Binding, per Kern. Receiving Flair instance must verify every record's Ed25519 signature matches the `publicKey` registered to the claimed `principalId`, or reject. A compromised peer cannot re-sign records under another principal's identity. This is a federation-layer requirement but referenced here because it justifies the Principal identity model.
+- **Sherlock's SOUL.md updated** with explicit trust-decision rules, "show your work" ritual, and "calibration against Kern" section. Time removed as a trust signal from his heuristics. Separate change, not in this spec.
 
 ## Summary
 
@@ -37,9 +53,21 @@ interface Principal {
   memoryNamespace: string;       // typically equals id
   subjects: string[];            // soul-level subject interests
 
-  // Trust
-  defaultTrustTier: "endorsed" | "corroborated" | "battle-tested" | "unverified";
-  // Humans default to "endorsed". Agents default to "unverified" until they earn it.
+  // Trust (3 tiers, time is never a signal — see MEMORY-MODEL-V2 § 3)
+  defaultTrustTier: "endorsed" | "corroborated" | "unverified";
+  // Admin humans (the claimer of the instance) default to "endorsed".
+  // Invited humans default to "unverified" until the admin promotes them.
+  // Agents default to "unverified" until corroborated or endorsed.
+
+  // Runtime — how external tools reach this principal
+  // Humans are typically null (they authenticate on demand via OAuth/passkey).
+  // Agents declare how they can be reached for programmatic delivery.
+  // SSOT: Flair. Other tools (TPS mail, etc.) consult this field to route messages.
+  runtime?: "openclaw" | "claude-code" | "headless" | "external" | null;
+  runtimeEndpoint?: string;      // e.g., openclaw gateway URL, HTTP callback, etc.
+
+  // Admin flag — admin principals can create other principals and promote trust tiers
+  admin: boolean;
 
   // Credentials (auth surfaces, not the same as the Ed25519 keypair)
   credentials: Credential[];
@@ -92,7 +120,9 @@ This separation matters because:
 
 ### Generalizing the existing Agent table
 
-The current `Agent` table becomes `Principal` with a kind discriminator. Migration: every existing Agent row becomes a Principal row with `kind: "agent"`, `defaultTrustTier: "battle-tested"` (existing agents have a track record), and a single Credential of kind `ed25519` referencing their existing key. No data loss.
+The current `Agent` table becomes `Principal` with a kind discriminator. Migration: every existing Agent row becomes a Principal row with `kind: "agent"`, `defaultTrustTier: "unverified"`, and a single Credential of kind `ed25519` referencing their existing key. No data loss.
+
+**On trust tier assignment during migration:** earlier drafts of this spec proposed defaulting existing agents to `battle-tested` ("they have a track record"). That tier has been removed; time-based trust is not a signal (see MEMORY-MODEL-V2 § 3 and Revision Notes). Existing agents start at `unverified` and must be promoted explicitly — either by Nathan endorsing specific agents to `endorsed`, or via distillation corroborating their outputs. The spec treats migration as a restart of the trust graph, not a carry-over. This is a feature: passive trust accrued over months under the old model was never earned through an active signal.
 
 ---
 
@@ -387,8 +417,9 @@ This section is the part that prevents shipping a functional-but-clunky product.
    - Two buttons:
      - "Connect Claude on this device" → guides through claude.ai → Settings → Connectors → Add Custom Connector
      - "I'll do that later"
+   - Small footer: "If you ever lose all your devices, you can recover access via your deployment console." → link to a short explainer page describing the Fabric recovery flow.
 
-6. **Optional:** "Want a recovery code? You can use this to get back in if you ever lose your devices." → reveal one-time code → confirm copy → mark account as recovery-protected
+6. **No recovery code offered.** Recovery is specifically *not* via a printable code or escrowed secret — that was an earlier draft. The only recovery path is regenerating a one-time setup URL via the deployment console (Fabric), which requires infrastructure access. This is stronger than a code stored anywhere and better aligned with "passkey or nothing."
 
 **Anti-goals (Nathan would hate):**
 - Multi-step wizard with progress dots ("Step 1 of 5")
@@ -499,7 +530,7 @@ All CLI commands write through the same Principal API the web UI uses. CLI is no
 
 1. Rename `Agent` table to `Principal`
 2. Add columns: `kind`, `displayName`, `status`, `defaultTrustTier`, `subjects`, `metadata`
-3. Backfill: `kind = "agent"`, `displayName = id`, `status = "active"`, `defaultTrustTier = "battle-tested"` for all existing rows
+3. Backfill: `kind = "agent"`, `displayName = id`, `status = "active"`, `defaultTrustTier = "unverified"` for all existing rows (see § 1 — "time is not a trust signal" — migration is a restart of the trust graph, not a carry-over)
 4. Create `Credential` table
 5. For each existing Agent, create a Credential row of kind `ed25519` with the agent's existing public key, label `"Primary key (migrated)"`
 6. Add a `human` Principal for Nathan via `flair principal create --kind human --display-name "Nathan"` as the first post-migration step
@@ -522,21 +553,31 @@ All CLI commands write through the same Principal API the web UI uses. CLI is no
 
 ## 9. Open Questions (For K&S)
 
-These are unresolved and waiting on input from the security/architecture review:
+All seven of the original open questions have been resolved via K&S review on 2026-04-08. Resolutions below are now authoritative unless explicitly re-opened. Two additional questions surfaced during review and are captured in §9b.
 
-1. **Recovery key escrow.** Should Flair offer an optional one-time recovery code at claim time, stored by the user out-of-band? Adds a credential type, weakens the "passkey-only" purity, but materially helps recovery in standalone hosted. (Sherlock decision.)
+1. ~~Recovery key escrow.~~ **RESOLVED — no escrow.** K&S agreed: recovery is via a fresh setup token issued through the deployment console (Fabric console for standalone hosted, rockit CLI for federated). Escrow creates a static credential that weakens the passkey-only model. Tying recovery to infrastructure access is the stronger boundary.
 
-2. **WebAuthn attestation policy.** Require attestation (rejects passkeys from unattested authenticators) or accept self-attestation (works with iCloud Keychain, 1Password, etc.)? Stricter is more secure but breaks real-world passkey flows. (Sherlock leaning, my prior is "accept self-attestation, document the trade-off.")
+2. ~~WebAuthn attestation policy.~~ **RESOLVED — accept self-attestation.** Per Sherlock: strict attestation breaks iCloud Keychain, 1Password, Bitwarden, Dashlane — the actual ways humans use passkeys. The UX cost is not worth the marginal security gain. Documented trade-off: we accept that we cannot distinguish passkeys originating in software password managers from those in hardware authenticators. For threats that require hardware-backed keys (signing high-value transactions, privileged admin ops), an explicit attestation-required ceremony can be added later as an opt-in.
 
-3. **DCR client validation.** Anyone can register an OAuth client via DCR. Should Flair restrict client_name, redirect_uri patterns, or require an admin allowlist for production? Anthropic's published callback is `claude.com/api/mcp/auth_callback` — should we hardcode that as the only valid redirect? (Sherlock decision.)
+3. ~~DCR client validation.~~ **RESOLVED — hardcode Anthropic's redirect URI as the only permitted value for 1.0.** Per Sherlock: open DCR with arbitrary redirect URIs is an impersonation vector. The permitted redirect URI is `https://claude.com/api/mcp/auth_callback` (and its legacy `https://claude.ai/api/mcp/auth_callback` alias if Anthropic still publishes it). If support for additional MCP clients is needed later, introduce an admin allowlist — **not** open DCR.
 
-4. **Trust tier defaults for humans.** Humans default to `endorsed` — but is that warranted for ALL human principals, or only the admin principal? Should an invited teammate default to `corroborated` until the admin promotes them? (Kern + Sherlock decision.)
+4. ~~Trust tier defaults for humans.~~ **RESOLVED — admin gets `endorsed`, invitees get `unverified`.** Kern and Sherlock disagreed on the invitee default (Kern: `unverified`, Sherlock: `corroborated`). Resolved in Kern's favor because: (a) `corroborated` represents confirmed consensus from multiple sources, not a middle-ground default; an invited human has earned no consensus; (b) per Nathan's direction, time/passivity is not a trust signal — an invitee waiting to accrue trust without an explicit promotion signal is exactly the anti-pattern we're protecting against. Only admin promotion moves an invitee up.
 
-5. **Single Principal vs separate principals per Claude device.** I argued earlier (and Nathan agreed) that one human → one principal across all their Claude clients. Confirming: the OAuth session tracks the source client for audit, but the underlying Principal is shared. Yes? (Confirm with Nathan.)
+5. ~~Single Principal vs separate principals per Claude device.~~ **RESOLVED — single Principal per human.** Confirmed by Nathan and Sherlock. One human maps to one Principal across all their Claude clients. The OAuth session, not the Principal, tracks the source client for audit purposes — client metadata (client_id, user_agent, last_ip) is stored with the session.
 
-6. **Server-held Ed25519 key for humans.** Humans don't manage their own Ed25519 keypair — Flair holds it server-side and uses it to sign memories on their behalf. This means a Flair instance compromise could forge memories from any human principal. Mitigation: HSM-backed key storage if Fabric supports it; otherwise file-system permissions and a recommendation to back up the encrypted store off-site. (Sherlock decision on threat acceptance.)
+6. ~~Server-held Ed25519 key for humans.~~ **RESOLVED — threat accepted with mitigations.** Per Sherlock: humans can't manage cryptographic keys, and passkeys can't produce Ed25519 signatures directly. Flair holds the key. Mitigations: (a) HSM-backed key storage if Harper Fabric supports it (needs research); (b) encryption-at-rest with a key derived from a secret known only to the admin principal, otherwise; (c) off-site encrypted backups; (d) integrity monitoring — any unexpected change to a human Principal's publicKey is an alert condition.
 
-7. **Bearer token entropy and format.** Format I'm proposing: `flair_at_<32 random bytes base62>` = ~42 chars. Sufficient? Pattern-recognizable so we can scan for accidentally committed tokens. (Sherlock confirm.)
+7. ~~Bearer token entropy and format.~~ **RESOLVED — format approved.** `flair_at_<32 random bytes base62>` ≈ 42 chars, 256 bits of entropy. Stored server-side as a SHA-256 hash with an 8-char prefix retained for identification and scanning. The `flair_at_` prefix is required so secret-scanning tools (GitHub, TruffleHog, gitleaks) can detect accidentally committed tokens.
+
+---
+
+## 9b. New Open Questions Surfaced During K&S Review
+
+1. **Signature-to-Principal binding at ingest (Kern).** Receiving Flair instances must verify that each record's Ed25519 signature matches the `publicKey` registered to the claimed `principalId` in the local Principal table — otherwise a compromised peer could "claim" a memory was written by any principal by simply re-signing it. This is primarily a federation-layer requirement and will be specified in `FLAIR-FEDERATION.md`, but it's referenced here because it justifies the decision to store each Principal's publicKey as a first-class field on the Principal record (not only on the Credential record). **Action:** ensure Principal schema has the publicKey at the top level, which it does. **Resolved by design, but must be enforced at the ingest layer in federation implementation.**
+
+2. **Lamport clocks or per-record monotonic sequence for supersede chains (Kern).** For memory records specifically, LWW-by-timestamp can tie-break unpredictably when two instances write near-simultaneously. Kern recommended adding a Lamport clock or `(sequenceNumber, instanceId)` tuple to the supersede chain. This is a federation-layer concern but affects the record shape Flair will store going forward. **Action:** flagged for FLAIR-FEDERATION design. Principal-level records (which are metadata, not memory content) may need field-level LWW or set-CRDT semantics per Kern's note — also a federation concern.
+
+3. **Migration atomicity across federated instances.** If rockit migrates to the Principal schema while hosted is still on the Agent schema, federation sync breaks. The federation handshake must include a `schema_version`. Mismatched versions → passive wait (no cross-version sync). **Action:** flagged for FLAIR-FEDERATION. This spec's migration plan assumes a single-instance migration; multi-instance coordination lives in federation.
 
 ---
 
@@ -550,7 +591,7 @@ Explicit anti-goals to keep us honest:
 4. **Asking the user to copy/paste secrets** — the only acceptable case is the bearer token shown once at creation, and only because the user explicitly created an agent credential that needs a token. Humans should never paste anything.
 5. **Showing AAGUIDs, credential IDs, raw public keys** in user-facing UI. They go in admin/debug views only.
 6. **Forcing a username distinct from display name** — the principal ID is generated, the display name is a label, that's it. No "username" concept.
-7. **"Click here to verify your email"** — there is no email verification because there is no email. Recovery is via passkey or recovery code or deployment console, not email.
+7. **"Click here to verify your email"** — there is no email verification because there is no email. Recovery is via passkey or the deployment console, never email, never a recovery code.
 8. **Five different "manage your account" pages** — one Settings page, organized by section. Don't fragment.
 9. **Notifications about every credential use** — the activity log is browseable, but we don't push a "you signed in from MacBook" email after every login. That's noise.
 10. **"For your security, you've been signed out"** without explanation — sessions live as long as their refresh tokens, full stop. If we end a session, we tell the user exactly why.
@@ -599,7 +640,7 @@ This spec is large. Suggested phasing for implementation, with each phase shippa
 
 **Phase 5 — Cross-device WebAuthn and recovery**
 - QR-based cross-device flow (mostly browser-native, minimal Flair work)
-- Recovery code generation and consumption
+- Deployment-console-initiated recovery token issuance (no escrow codes)
 - Admin promotion / demotion
 - Principal purge
 

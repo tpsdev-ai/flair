@@ -3,7 +3,7 @@
 ## Status
 - **Owner:** Flint
 - **Priority:** P1 — foundational to 1.0
-- **Context:** Design session with Nathan, 2026-04-06
+- **Context:** Design session with Nathan, 2026-04-06; trust-tier revision 2026-04-08 (drop passive/time-based trust)
 
 ## Summary
 
@@ -84,20 +84,36 @@ The data is open but the **influence** is gated. A poisoned memory exists in the
 | Tier | Source | Bootstrap? | Examples |
 |------|--------|------------|----------|
 | 1. **Endorsed** | Human promoted to permanent, or explicit approval | Yes, highest priority | `durability: permanent`, HITL-approved distillation |
-| 2. **Corroborated** | 2+ agents independently arrived at same conclusion (via DistillTribalKnowledge consensus) | Yes | `source: "tribal-distill"`, consensus score > threshold |
-| 3. **Battle-tested** | Single agent, never superseded, retrieved by others, agent has good track record | Yes, lower priority | High retrieval count, old age, never corrected |
-| 4. **Unverified** | Single agent, no corroboration, no endorsement | Search only | Fresh memories, new agents, unvalidated claims |
+| 2. **Corroborated** | N+ agents (N ≥ 2) independently arrived at same conclusion via DistillTribalKnowledge consensus | Yes | `source: "tribal-distill"`, consensus score ≥ threshold |
+| 3. **Unverified** | Single source, no corroboration, no endorsement | Search only | Fresh memories, new agents, unvalidated claims |
 
-Cross-agent bootstrap only pulls from tiers 1-3. Tier 4 stays discoverable via explicit search but doesn't auto-inject into other agents' context.
+Cross-agent bootstrap only pulls from tiers 1-2. Tier 3 stays discoverable via explicit search but never auto-injects into other agents' context.
 
-### Trust is NOT age
-Age means survival, not truth. A memory that's been around for 90 days without being superseded is durable, but stale wrong information is worse than fresh wrong information because it has the appearance of being established.
+**Note (revised 2026-04-08):** An earlier draft included a fourth tier, `Battle-tested`, sourced from time-based signals (age, retrieval count, "never been superseded"). This tier has been removed. See next section.
+
+### Trust does not grow passively
+
+**Time is not a trust signal.** Age means survival, not truth. A memory that has existed for 90 days without being superseded is *durable*, not *correct*. Stale wrong information is worse than fresh wrong information because it has acquired the appearance of being established.
+
+**The long-game attack.** Passive-trust systems are specifically vulnerable to adversaries who play a long game: an attacker plants plausible-looking memories, lets them accrue age and retrieval count, builds a "good track record" by avoiding anything obviously bad, and then weaponizes the earned trust at the moment it matters. Account age, memory age, never-superseded flags, retrieval counts — all of these are farmable by a patient adversary and cannot be used as trust inputs.
+
+**Rule:** Trust is earned exclusively through an **active signal**:
+- A human explicitly endorses the memory (human in the loop), OR
+- N+ independent sources converge on the same conclusion (consensus via distillation)
+
+An entity with no endorsement and no corroboration remains at `unverified` indefinitely, regardless of how long it has existed or how many times it has been retrieved. Trust never graduates on its own.
 
 ### What actually signals trust
-1. **Provenance** — who wrote it, and what's their track record
-2. **Corroboration** — did multiple agents independently agree (consensus via distillation)
-3. **Outcome linkage** — was the memory superseded/corrected, or has it stood unchallenged
-4. **Human endorsement** — promoted to permanent, approved during HITL review
+1. **Provenance** — who wrote it, and whether that identity has been explicitly endorsed
+2. **Corroboration** — did N+ independent sources converge on the same conclusion (consensus via distillation)
+3. **Explicit human endorsement** — promoted to permanent, approved during HITL review
+
+**Not** signals of trust, even though they might feel like it:
+- Memory age
+- Memory retrieval count
+- "Never been superseded"
+- Agent account age
+- Any metric that an attacker could accrue by waiting or by farming low-cost activity
 
 ---
 
