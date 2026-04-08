@@ -155,80 +155,96 @@ Lamport ordering governs the supersede chain — "which memory supersedes which"
 
 ## 2. Bootstrap & Pairing
 
+All user-facing operations in this section happen through the Flair CLI, which wraps Harper CLI internally. Users never type `harper deploy`, `harper set_configuration`, or any other Harper command directly. See **FLAIR-CLI.md** for the canonical command surface. This spec describes what happens under the hood.
+
 ### Instance cold start
 
-On first boot of a Flair instance (detected by absence of the instance Harper blob containing the private key):
+On first boot of a Flair instance (detected by absence of the instance Harper blob containing the private key), the following happens automatically — either triggered by `flair init` (local mode) or by `flair deploy --target fabric://...` (hosted mode). The user does not see these steps individually; they see one success indicator.
 
 1. Generate an Ed25519 keypair.
 2. Generate a random instance id (`flair_<12 random base62 chars>`).
-3. Look for an **instance key passphrase** in Harper configuration under `flair.instance_key_passphrase`. If present, encrypt the Ed25519 private key with a symmetric key derived from the passphrase (Argon2id → AEAD). If absent, store the private key unencrypted and log a warning — this is acceptable on a trusted host (rockit, Nathan's machines) but a misconfiguration on Fabric.
-4. Store the (possibly encrypted) private key in a Harper blob record under the key `instance:ed25519:private`. Store the public key under `instance:ed25519:public` (unencrypted).
-5. Store the instance id in Harper configuration at `flair.instance_id` for convenient lookup.
-6. Expose the public key via `GET /instance-identity.json` (unauthenticated — the public key is public by definition).
-7. **Do not log the instance private key, the passphrase, or any secret to stdout.** Harper Fabric surfaces stdout to platform operators; treat stdout as a semi-public audit trail.
-8. Start the HTTP listener, OAuth endpoints, memory resources, and the `/sync` WebSocket endpoint.
-9. If Flair is configured standalone (no peer configured), the instance is complete.
-10. If Flair is configured as the hub (`flair.role = "hub"`), it accepts inbound `/pair` attempts (see below) but does not initiate connections.
-11. If Flair is configured as a spoke (`flair.role = "spoke"` with `flair.hub_endpoint` set), it begins dialing outbound to the hub.
+3. Read the instance key passphrase from Harper configuration at `flair.instance_key_passphrase`. For local installs the passphrase was written there by `flair init` after auto-generating it and storing in the local OS keychain. For Fabric deploys it was written by `flair deploy` via `harper set_configuration` after auto-generating and storing in the local OS keychain. In both cases the passphrase lives in the deploying machine's keychain; Flair only sees it through Harper config.
+4. Derive a symmetric key from the passphrase (Argon2id → AEAD).
+5. Encrypt the Ed25519 private key with the symmetric key.
+6. Store the encrypted private key in a Harper blob record under the key `instance:ed25519:private`. Store the public key under `instance:ed25519:public` (unencrypted).
+7. Store the instance id in Harper configuration at `flair.instance_id` for diagnostic lookup.
+8. Expose the public key via `GET /instance-identity.json` (unauthenticated — the public key is public by definition).
+9. **Never log the instance private key, the passphrase, or any secret to stdout.** Harper Fabric surfaces stdout to platform operators; treat stdout as a semi-public audit trail.
+10. Start the HTTP listener, OAuth endpoints, memory resources, and the `/sync` WebSocket endpoint.
+11. If `flair.role` config is unset or `"standalone"`, the instance is complete.
+12. If `flair.role = "hub"`, accept inbound `/pair` attempts but do not initiate connections.
+13. If `flair.role = "spoke"` with `flair.hub_endpoint` set, begin dialing outbound to the hub.
 
-### Pairing flow — hub (Fabric)
+### Pairing a spoke to a hub — the user-facing flow
 
-The hub doesn't have CLI access, so pairing uses Harper's `set_configuration` API combined with a short-lived `/pair` endpoint:
+The entire pairing flow collapses to one command on the spoke side. This is the Nathan-grade UX target — one success/failure, no token handling, no shell variable juggling.
 
-1. **Nathan deploys Flair to Fabric:**
-   ```
-   harper deploy target=https://<cluster>.harper.fabric \
-     username=<deploy-user> password=<deploy-pass> \
-     project=flair package=<flair-package-url-or-path> \
-     restart=true
-   ```
-2. Flair boots on Fabric and enters "awaiting pairing" state. No bootstrap token exists yet.
-3. **Nathan generates a bootstrap token locally and sets it on Fabric:**
-   ```
-   # Generate a 32-byte base62 token locally
-   TOKEN=$(flair bootstrap-token-gen)
-   # Push it to Fabric as configuration
-   harper set_configuration target=https://<cluster>.harper.fabric \
-     username=<deploy-user> password=<deploy-pass> \
-     flair.pending_bootstrap_token=$TOKEN \
-     flair.pending_bootstrap_expires_at=$(date -v+15M -Iseconds)
-   ```
-   The token is never written to stdout or logs. It exists in the local shell variable on Nathan's machine and in Harper's configuration store on Fabric. When pairing completes or the TTL expires, Flair clears both config keys via `set_configuration` with empty values.
-4. **Nathan now pairs rockit to Fabric:**
-   ```
-   flair peer add wss://<cluster>.harper.fabric/sync \
-     --role spoke \
-     --bootstrap-token "$TOKEN"
-   ```
-5. rockit dials the hub's `/pair` endpoint over HTTPS (NOT the WSS sync endpoint yet — pairing is a one-shot HTTP handshake). rockit presents the token and its own instance id + public key.
-6. Fabric (hub) validates the token against `flair.pending_bootstrap_token`, checks it hasn't expired, and responds with its own instance id + public key.
-7. Both sides pin each other's public keys in their Peer tables.
-8. Fabric clears `flair.pending_bootstrap_token` via its internal `set_configuration` call. The token cannot be reused.
-9. rockit opens the WSS sync channel at `/sync` using the now-pinned hub identity.
+```bash
+# On rockit (or any other spoke machine)
+flair pair add --hub wss://<cluster>.harper.fabric/sync
+```
 
-### Pairing flow — spoke (rockit, VMs)
+That's it. The user sees:
 
-Spokes are initiated from their own CLI. The spoke-side pairing flow:
+```
+Pairing with wss://<cluster>.harper.fabric/sync...
+  ✓ Generated bootstrap token
+  ✓ Pushed token to hub config
+  ✓ Completed pair handshake
+  ✓ Pinned hub public key
+  ✓ Opened sync channel
 
-1. Nathan is on the spoke machine (rockit or a VM)
-2. He runs `flair peer add wss://<hub-endpoint>/sync --role spoke --bootstrap-token <token>`
-3. The spoke's Flair instance dials the hub's `/pair` endpoint (HTTPS, not WSS) and completes the exchange described above.
-4. The spoke records the hub as its single peer in `flair.config.yaml` and the local Peer table.
-5. The spoke begins steady-state dial-out to the hub's `/sync` endpoint and catches up.
+This spoke is now paired with the hub. Sync will begin immediately.
+```
 
-### Scenario: standalone hosted
+### What the Flair CLI does under the hood
 
-For the standalone hosted topology (Fabric only, no spokes), pairing is skipped entirely. The instance runs complete by itself. If Nathan later decides to add a local spoke, he uses the same flow as above — generate a token, `set_configuration` it on Fabric, pair from the new spoke.
+When `flair pair add --hub <endpoint>` runs on the spoke:
+
+1. **Read Fabric credentials** from the local OS keychain (stored earlier by `flair remote login <target>`). If not present, print a clear error telling the user to run `flair remote login` first.
+2. **Generate a bootstrap token locally** — 32 random bytes, base62-encoded. The token exists only in the CLI process memory for the duration of this command.
+3. **Push the token to the hub via Harper CLI wrapping:**
+   - Shell out to: `harper set_configuration target=<hub-url> username=<u> password=<p> flair.pending_bootstrap_token=<token> flair.pending_bootstrap_expires_at=<now+15min>`
+   - The Harper CLI is invoked as a subprocess; its stdout is captured and suppressed from the user unless an error occurs (progress output comes from Flair CLI's own step log).
+4. **POST to the hub's `/pair` endpoint** over HTTPS (not WSS — pairing is a one-shot HTTP handshake). The POST body contains: the bootstrap token (as proof), the spoke's instance id, and the spoke's Ed25519 public key.
+5. **Hub validates** the token against `flair.pending_bootstrap_token`, verifies it hasn't expired, and responds with its own instance id + public key.
+6. **Both sides pin each other's public keys** in their Peer tables (spoke's side: save hub's key; hub's side: save spoke's key).
+7. **Hub clears the bootstrap token** via its own internal `set_configuration` call. Token cannot be reused.
+8. **Spoke writes the hub to `~/.flair/config.yaml`** under `peers[]`.
+9. **Spoke opens the WSS sync channel** at the hub's `/sync` endpoint using the now-pinned hub identity, initiates catch-up.
+10. **CLI prints success** and exits.
+
+At no point does Nathan type the token. At no point is the token displayed. At no point is a Harper command visible to Nathan. The token's entire lifetime is: generated in the spoke CLI's memory → pushed to hub config → consumed by the pair handshake → cleared. Roughly 2 seconds end-to-end under normal network conditions.
+
+### Pairing flow — standalone hosted
+
+For the standalone hosted topology (hub only, no spokes), pairing is skipped entirely. `flair deploy --target fabric://...` produces a complete instance with `flair.role = "standalone"`. If Nathan later decides to add a spoke, he runs `flair pair add --hub <that-hub>` from the new machine — the hub doesn't need to do anything different; it just accepts a new `/pair` request the same way it would have accepted the first one.
+
+### Pairing flow — hub bootstrap (the cold start case)
+
+When Flair is first deployed to Fabric as a hub via `flair deploy --target fabric://... --role hub`, the deploy command itself handles the initial configuration:
+
+1. Flair CLI reads Fabric credentials from keychain.
+2. Flair CLI generates the instance key passphrase (random, high-entropy) and stores it in the local keychain under `ai.lifestylelab.flair.instance_passphrase_<cluster>`.
+3. Flair CLI calls `harper deploy project=flair package=<vendored-path> target=<cluster> ...`.
+4. After deploy completes, Flair CLI pushes the passphrase to Fabric config via `harper set_configuration flair.instance_key_passphrase=<value>`.
+5. Flair CLI calls `harper restart_service` to cycle Flair with the new config.
+6. Flair CLI polls the hub's `/instance-identity.json` endpoint until it returns 200 with a public key — that's the success signal.
+7. Flair CLI writes the cluster details to `~/.flair/config.yaml` as the known remote target.
+8. Flair CLI prints next-step guidance: "Your Flair hub is live at https://<cluster>.harper.fabric. Pair spokes with `flair pair add --hub wss://<cluster>.harper.fabric/sync` from each spoke machine."
+
+The hub is now ready. Nathan goes to each spoke machine and runs one `flair pair add` command. Each pair takes seconds.
 
 ### Bootstrap token properties
 
 - **Single use.** Consumed and cleared from Harper configuration on first successful pair exchange.
 - **Short TTL.** 15 minutes, enforced via `flair.pending_bootstrap_expires_at` configuration value.
 - **High entropy.** 32 random bytes, base62-encoded.
-- **Never logged.** Not in stdout, not in Harper audit logs, not persisted beyond the config key Flair clears after use.
-- **Client-generated, server-stored.** Nathan generates the token locally on a machine he trusts (rockit, his laptop) and pushes it to Fabric as configuration. This way the token never passes through a "generated by Fabric and retrieved by Nathan" step, which would have required a surface that could leak.
-- **Single outstanding token per instance.** Pushing a new token overwrites the previous one.
-- **Stored as a hash.** Flair hashes the incoming token on receipt (`set_configuration` value is the plaintext for 15 minutes; Flair immediately re-writes it as a hash via its own internal config call). Pair verification compares incoming candidate tokens against the hash. Means a leaked Harper config snapshot from within the 15-minute window could expose the plaintext, but from outside the window only the hash exists.
+- **Never logged.** Not in stdout, not in Harper audit logs, not in shell history.
+- **Lives only in process memory on the spoke during pairing.** The spoke's Flair CLI generates the token, holds it in a local variable, pushes it to the hub via `harper set_configuration`, presents it to the hub's `/pair` endpoint, then discards the local copy and relies on the hub to clear its config copy.
+- **Hub-side storage is hashed.** The hub hashes the token as soon as `set_configuration` writes it, replacing the plaintext via a follow-up `set_configuration` call during its own startup sequence. Between the initial `set_configuration` and the hash replacement (milliseconds to seconds), a Harper config snapshot could capture the plaintext — this is the only window where plaintext exists at rest. After that, only the hash exists.
+- **Single outstanding token per hub.** Pushing a new token overwrites the previous one.
+- **Idempotent retries.** If `flair pair add` fails mid-flow (network error between steps 3 and 5, for example), running it again generates a new token, overwrites the previous config value, and starts over. The user retries one command; they don't unwind half-completed state manually.
 
 ### Schema version check in the handshake
 
@@ -538,100 +554,137 @@ The sender evaluates every outbound SyncFrame against the peer's subscription. F
 
 ## 7. Harper Fabric Deployment Specifics
 
-### 7.1 Deployment story
+This section describes what Flair does on Harper Fabric. All user-facing deployment operations happen through Flair CLI (see FLAIR-CLI.md); this section covers the mechanics underneath.
 
-Flair is packaged as a **Harper Fabric app** — a Harper application component that includes Flair's resources, the openclaw-flair plugin, the OAuth 2.1 server endpoints, and flair-mcp for MCP client access.
+### 7.1 Packaging
 
-Deployment uses Harper's standard CLI:
+Flair is packaged as a **Harper Fabric app** — a Harper application component that includes:
+- Flair resources (Principal, Memory, Credential, Peer, etc.)
+- OAuth 2.1 authorization server endpoints (`/oauth/authorize`, `/oauth/token`, `/oauth/register`, `/.well-known/oauth-authorization-server`)
+- Web admin UI routes (from FLAIR-WEB-ADMIN)
+- flair-mcp HTTP remote MCP endpoint
+- The `/sync` WebSocket endpoint for federation
+- The `/pair` HTTP endpoint for one-shot pairing handshakes
+
+The flair package is vendored inside the Flair CLI distribution (see FLAIR-CLI § 1 — option C, bundled Harper Core). When the user runs `flair deploy --target fabric://...`, the CLI reaches into its own package for the flair component and pushes it to Fabric.
+
+### 7.2 Deployment is wrapped by Flair CLI
+
+Users never type `harper deploy` directly. `flair deploy --target fabric://<cluster>` shells out to:
 
 ```
 harper deploy \
   target=https://<cluster>.harper.fabric \
-  username=$HARPER_DEPLOY_USER \
-  password=$HARPER_DEPLOY_PASS \
+  username=<from-keychain> \
+  password=<from-keychain> \
   project=flair \
-  package=<path-or-url-to-flair-package> \
+  package=<vendored-flair-component-path> \
   restart=true \
   replicated=true
 ```
 
-The `harper deploy` command is the standard Harper CLI operation (aliased to `harper deploy_component`). It supports both push-based deployment (CLI pushes a package) and pull-based deployment (Harper pulls from a git repo). We use push-based for 1.0 to keep deployments explicit and audit-able from Nathan's laptop.
+Fabric credentials come from the local OS keychain (populated earlier by `flair remote login <cluster>`). The `harper` command's stdout/stderr is captured by Flair CLI; only step-level progress is surfaced to the user. If Harper errors, Flair CLI surfaces the error with context, not the raw Harper output.
 
-Credentials are passed via environment variables (`CLI_TARGET_USERNAME`, `CLI_TARGET_PASSWORD`) or inline; never committed to source.
+Push-based deployment is the 1.0 choice (CLI pushes the vendored component bundle to Fabric). Pull-based deployment (Fabric pulls from a git repo) is possible but introduces a distribution channel we'd have to maintain.
 
-### 7.2 Runtime configuration (post-deploy)
+### 7.3 Runtime configuration uses Harper's operations API
 
-Harper exposes `set_configuration` / `get_configuration` operations API commands that modify app configuration **after** deployment. This is how we set sensitive values like the bootstrap token passphrase without baking them into the deploy command:
+Harper exposes `set_configuration` / `get_configuration` as operations-API commands that modify app configuration after deployment, without redeploying. Flair CLI wraps these for every operation that needs to push a value to the hub:
 
-```
-harper set_configuration \
-  target=https://<cluster>.harper.fabric \
-  username=$HARPER_DEPLOY_USER password=$HARPER_DEPLOY_PASS \
-  flair.pending_bootstrap_token=$TOKEN \
-  flair.pending_bootstrap_expires_at=$EXPIRES_AT
+- `flair deploy` uses `set_configuration` to push the instance key passphrase and any initial role settings
+- `flair pair add` uses `set_configuration` to push the ephemeral bootstrap token
+- `flair sync status` uses `get_configuration` to read per-peer state (if stored in config rather than in Harper data)
 
-# Apply config
-harper restart_service target=https://... service=flair
-```
+Config changes that require a Flair service restart trigger `harper restart_service target=... service=flair` as a follow-up step, automatically. The user does not see either command.
 
-**Key implication:** the bootstrap token is set via `set_configuration`, not passed through the initial `harper deploy` command. This matches Nathan's guidance: "Config can be set, not part of deploy." Flair reads the config value on startup (or on a config reload) and uses it to authenticate the incoming pair request, then clears it.
+**Key property:** no sensitive runtime value is embedded in the initial `harper deploy` command. Deploy is for the code bundle; `set_configuration` is for the secrets. This is Nathan's guidance literally ("config can be set, not part of deploy"). It means the deploy command itself can be logged, replayed, or placed in CI without leaking secrets — the secrets come later, separately.
 
-### 7.3 Secret storage
+### 7.4 Secret storage on Fabric
 
-Harper Fabric does not provide a dedicated secrets manager. Secrets storage strategies for Flair on Fabric:
+Harper Fabric does not provide a dedicated secrets manager. Flair's strategy on Fabric:
 
-- **Bootstrap token** (short-lived): stored transiently in `flair.pending_bootstrap_token` via `set_configuration` for up to 15 minutes, then cleared.
-- **Instance private key** (long-lived): stored in a Harper blob record encrypted with a key derived from `flair.instance_key_passphrase` (a configuration value set once during initial deploy via `set_configuration`, never shown in logs). The passphrase is Nathan's responsibility to back up off-box. Losing it means losing the ability to decrypt the instance key and requires re-pairing.
-- **OAuth client credentials for DCR-registered clients**: stored in Harper data (Principal table's credentials), hashed where possible, encrypted-at-rest via the instance key passphrase.
-- **Per-human-principal private keys**: **not stored on Flair.** See FLAIR-PRINCIPALS for the design that replaces server-held human keys with OAuth-authenticated, instance-signed records.
-- **Bearer tokens**: stored as SHA-256 hashes in Harper data (plaintext never persisted after creation).
+| Secret | Where it lives on Fabric | How it's protected |
+|---|---|---|
+| **Instance private Ed25519 key** | Harper blob record `instance:ed25519:private` | Encrypted at rest with a key derived from `flair.instance_key_passphrase` via Argon2id → AEAD. The passphrase itself lives only in the deploying user's local OS keychain and is pushed via `set_configuration` at deploy time. |
+| **Instance key passphrase** | `flair.instance_key_passphrase` config | Stored in Harper config. Visible to admins with deploy credentials. The only mitigation is that the passphrase alone doesn't decrypt the key — you also need the blob, which requires DB access. |
+| **Bootstrap token** (during pairing) | `flair.pending_bootstrap_token` config, briefly | Stored for ≤15 minutes. Hashed in-place by Flair during its own startup sequence so that only the hash remains after the brief initial window. Cleared after successful pair. |
+| **OAuth client credentials** | Principal.credentials column | Client secrets hashed where the protocol permits; refresh tokens stored hashed. |
+| **Bearer tokens** | Credential records | Stored as SHA-256 hashes + prefix. Plaintext never persisted post-creation. |
+| **OAuth access/refresh tokens** | Issued short-lived JWTs, not stored | Signing key lives in Harper blob with similar protection to the instance key. |
+| **WebAuthn public keys** | Credential records | Not secret. Stored plaintext. |
+| **WebAuthn private keys** | Never on Flair | Hardware-bound on the authenticator, never leave it. |
+| **Per-human-principal Ed25519 private keys** | Never on Flair | Per FLAIR-PRINCIPALS § 1 revision — humans don't have them at all. Records signed by the instance on their behalf. |
 
-**Under no circumstances** should any of these secrets be written to stdout. Harper surfaces stdout to Fabric logs, which are accessible to platform operators — Nathan flagged this as a security concern.
+**Under no circumstances** does any of the above appear in stdout, Harper logs, the web admin UI debug view, or any exported backup without explicit encryption.
 
-### 7.4 No CLI access (to the Fabric-hosted instance)
+### 7.5 No CLI access on the Fabric-hosted instance
 
-The Fabric-hosted Flair instance runs unattended. All operations that would normally be CLI-initiated happen through:
+The Fabric-hosted Flair instance runs unattended. There is no shell into the box. Every operation is one of:
 
-- **Harper's operations API** (via `harper <command> target=...` from a machine with deploy credentials) for instance-level config
-- **Paired spokes** (rockit, VMs) initiating sync traffic and mail flow
-- **The web admin UI** (FLAIR-WEB-ADMIN) for principal and credential management
+- **Harper operations API calls** from a machine with deploy credentials — these are what Flair CLI wraps
+- **Sync traffic from paired spokes** — the spokes initiate and drive all inter-instance state flow
+- **Web admin UI calls** — browser-based principal and credential management (FLAIR-WEB-ADMIN)
+- **Public HTTP endpoints** — OAuth, MCP, WebAuthn, the `/sync` WSS
 
-### 7.5 Log surfacing
+There is no way to log into the Fabric-hosted Flair and run an arbitrary command. This is a feature, not a limitation — it means the attack surface is precisely the set of HTTP endpoints Flair exposes.
 
-Harper Fabric surfaces the Flair app's stdout/stderr through Harper's log facility (`read_log`, `read_transaction_log`). Operators can read logs via Harper's operations API.
+### 7.6 Log surfacing and the "stdout is semi-public" rule
 
-**Security implication:** anything Flair writes to stdout is visible to Fabric platform operators and any admin with deploy credentials. Therefore:
+Harper Fabric surfaces the Flair app's stdout/stderr through Harper's log facility (`read_log`, `read_transaction_log`, `read_audit_log`). These logs are accessible to:
+- Anyone with Fabric deploy credentials (the developer, i.e., Nathan)
+- Fabric platform operators (Harper's ops team for the hosted service)
+- Anything that can read Fabric's internal log storage
 
-- **Never log secrets** — instance private keys, bootstrap tokens, bearer tokens, OAuth codes, passphrases, WebAuthn registration challenges.
-- **Log diagnostic state only** — connection attempts, peer status, sync catch-up progress, error conditions, SLO metrics.
-- **Log the public key and instance id** — these are public by definition, and operators need to see them during bootstrap and debugging.
+Therefore:
 
-### 7.6 Persistence across Fabric restarts
+- **Never log secrets.** Instance keys, passphrases, bootstrap tokens, bearer tokens, OAuth auth codes, OAuth tokens, WebAuthn registration challenges. If you wouldn't email it, don't log it.
+- **Log operational state freely.** Connection attempts, peer status, catch-up progress, rate-limit hits, error codes, SLO metrics — all useful, none sensitive.
+- **Log public keys and instance ids.** These are public by definition and operators need to see them during bootstrap and debugging.
+- **Treat audit events specially.** Principal creation, credential issuance, credential revocation, peer pair, peer revoke — these belong in Flair's own audit log (stored in Harper data with structured retention), not in stdout.
+
+Flair CLI's `flair deploy logs --target fabric://...` wraps `harper read_log` so users can tail the hub's logs without touching Harper commands.
+
+### 7.7 Persistence across Fabric restarts
 
 Harper data persists across restarts (Harper Core behavior, inherited by Fabric). Records that survive:
 
-- All Flair database tables (Principal, Credential, Memory, Peer, Soul, etc.)
+- All Flair database tables (Principal, Credential, Memory, Peer, Soul, Audit, etc.)
 - Harper blobs (including the instance private key blob)
 - Harper configuration values
 
-Records that do NOT survive:
+Records that do NOT survive restart:
 
-- In-memory state (open WSS connections, pending ACK windows, Lamport clock counters above what's been written to disk — these recompute from persisted data on restart)
+- In-memory state (open WSS connections, pending ACK windows, in-progress OAuth flows, Lamport clock counters above what's been written to disk — these recompute from persisted data on restart)
 - Stdout log history beyond Harper's retention window
 
-### 7.7 TLS certificates
+### 7.8 TLS certificates
 
-Harper Fabric manages TLS certificates for the instance's public endpoint — either via a Fabric-provided domain (e.g. `<cluster>.harper.fabric`) or Bring Your Own Domain (BYOD) with DNS pointing at the Fabric cluster. Either path gives Flair a valid TLS cert on the `/sync` WebSocket endpoint automatically. No Let's Encrypt automation or certificate management on our side.
+Harper Fabric manages TLS certificates for the hub's public endpoint — either via a Fabric-provided domain (e.g. `<cluster>.harper.fabric`) or Bring Your Own Domain (BYOD) with DNS pointing at the Fabric cluster. Either path gives Flair a valid TLS cert on all its public endpoints (`/sync`, `/pair`, `/oauth/*`, `/mcp`, web admin) automatically.
 
-### 7.8 Blob storage
+No Let's Encrypt automation, no certificate renewal logic, no cert file management on our side. This is one of the material wins of using Fabric as the hub.
 
-Harper supports blob records as a native feature — arbitrary binary data stored alongside the relational data, persistent across restarts, queryable via the operations API. Flair uses Harper blobs for:
+### 7.9 Blob storage is used extensively
+
+Harper supports blob records as a native feature — arbitrary binary data stored alongside the relational data, persistent across restarts. Flair uses Harper blobs for:
 
 - The instance private key (encrypted)
-- Any large memory payloads that exceed comfortable inline storage
-- Audit log archives (future)
+- The OAuth signing key (encrypted)
+- Any memory payloads that exceed comfortable inline storage (rare, but enabled for future)
+- Audit log archives older than 30 days (future)
 
-Per Nathan: "Private keys would need to be in harper blobs to be replicated and persisted." We follow that guidance for the instance private key specifically.
+Per Nathan: "Private keys would need to be in harper blobs to be replicated and persisted." The instance key and OAuth signing key follow that guidance directly.
+
+### 7.10 Where Flair CLI knows Fabric-isms live
+
+Most of the Fabric-specific knowledge in Flair CLI is isolated to one module in the Flair CLI codebase (let's call it `cli/src/targets/fabric.ts` — exact path TBD at implementation time) that:
+
+- Knows how to shell out to `harper` with the right environment
+- Translates Flair CLI operations into Harper operations API calls
+- Captures Harper output and translates error messages into Flair-facing form
+- Reads Fabric credentials from the keychain
+- Handles Fabric-specific URL patterns (`fabric://<cluster>` → `https://<cluster>.harper.fabric`)
+
+The rest of Flair CLI doesn't know Fabric exists. It calls into a `Target` interface; `fabric.ts` implements that interface for Fabric; a future `local.ts` implements it for local Harper. Adding a new deployment target (Harper Cloud Cluster, self-hosted Harper, a Kubernetes Helm chart, etc.) is a new Target implementation without touching the rest of the CLI.
 
 ---
 
