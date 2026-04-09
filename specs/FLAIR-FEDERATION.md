@@ -399,6 +399,53 @@ MEMORY-MODEL-V2 deprecates the Grant table for read access but keeps it for audi
 
 Soul data is per-principal metadata — subject interests, preferences, operational config. Treated as Principal records (field-level LWW).
 
+### 4.7 Peer public key propagation (Kern's 2026-04-09 finding)
+
+In the hub-and-spoke topology (§ 1), spokes only pair directly with the hub. They don't peer with each other. But cross-spoke memory records ARE expected to flow: a memory written by `agent_anvil` on the anvil-vm spoke needs to reach rockit via the two-hop path `anvil-vm → hub → rockit`.
+
+When rockit receives a relayed record whose `originatorInstanceId` is `anvil-vm`, rockit needs to verify the signature (§ 6.1) against anvil-vm's instance public key. **But rockit has never paired with anvil-vm directly** — its Peer table only contains the hub. Without anvil-vm's public key in the local Peer table, rockit cannot verify the record and must reject it.
+
+Kern caught this gap during the 2026-04-09 review. The fix is **peer public key propagation from the hub to all spokes.**
+
+**Mechanism:**
+
+- Each time the hub adds, removes, or updates a Peer record, it broadcasts a `PeerAnnouncement` control frame to all currently-connected spokes.
+- Spokes receive the announcement, validate it (the frame is signed by the hub's instance key, which spokes have already pinned), and update their own Peer table — but with a special flag: `relay_only: true`.
+- `relay_only: true` peers are used ONLY for signature verification on relayed records. Spokes cannot initiate a sync channel with `relay_only` peers. They cannot be used for pairing. They exist in the local Peer table solely to support multi-hop verification.
+- On hub reconnect, the hub re-sends the full Peer table snapshot so spokes that were offline catch up on peer changes.
+
+**PeerAnnouncement frame format:**
+
+```typescript
+interface PeerAnnouncement {
+  type: "control";
+  control: "peer_announcement";
+  operation: "add" | "remove" | "update";
+  peer: {
+    instanceId: string;
+    publicKey: string;       // base64url
+    role: "hub" | "spoke";
+    addedAt: string;
+  };
+  hubSignature: string;      // Ed25519 signature over (operation + peer) by the hub's instance key
+}
+```
+
+**Trust model:**
+
+The hub is a trusted relay point for its spokes. When rockit joined the federation, it pinned the hub's public key. All PeerAnnouncements are signed by the hub, so rockit can verify them using the already-pinned hub key. This means:
+
+- **The hub can add any "peer" it likes to every spoke's `relay_only` list.** A compromised hub could lie about the existence of a fictional anvil-vm and use that to inject forged records. But since the hub is already trusted for channel authentication and for attesting its own human-record signatures, the additional trust to propagate peer identities doesn't expand the trust surface — compromising the hub already compromised the federation.
+- **Spokes cannot cross-verify peer announcements.** If the hub tells rockit "anvil-vm's key is K1" and tells tps-anvil "rockit's key is K2", rockit has no way to independently confirm that the anvil-vm identity is real. This is acceptable because compromising the hub is the higher-order threat.
+
+**Phase 1 scope requirement (Kern's finding):**
+
+This spec previously implied that a spoke could verify a relayed record just because the signature was valid. That's incorrect without peer public key propagation. **Peer public key propagation via PeerAnnouncement frames must be in Phase 1 scope** — without it, cross-spoke records fail verification and multi-hop sync doesn't work.
+
+**Failure mode if not implemented:**
+
+Records from anvil-vm arrive at rockit. rockit looks up `originatorInstanceId` in its Peer table, finds nothing, rejects with `NACK: UNKNOWN_ORIGINATOR`. The record is discarded. Cross-spoke knowledge never propagates. Looks like "sync works between rockit and hub" but "doesn't work between spokes" — which would be a silent data-visibility bug for users.
+
 ---
 
 ## 5. Frame Format & Wire Protocol
@@ -417,6 +464,7 @@ Not all traffic is SyncFrames. The channel also carries:
 - `HEARTBEAT` — sent every 30 seconds in STEADY_STATE if no other frames flowed; missing heartbeats trigger reconnect
 - `ACK` — optional per-frame acknowledgement (see § 5.5)
 - `NACK` — rejection with a reason code
+- `PEER_ANNOUNCEMENT` — hub-to-spoke broadcast of peer table changes (§ 4.7)
 
 Control frames have `type: "control"` and a `control` field distinguishing them from SyncFrames.
 
@@ -812,6 +860,7 @@ The token is single-use and has a 15-minute TTL. If leaked and used by an attack
 - Generate instance key on first boot
 - `flair peer add` / `flair peer list` / `flair peer revoke` CLI
 - Bootstrap token generation (not yet surfaced via web UI)
+- **Peer public key propagation (§ 4.7).** Hub broadcasts PeerAnnouncement frames to all spokes on peer table changes. Spokes maintain a `relay_only: true` Peer table entry for every other instance in the federation. Required for multi-hop verification to work at all — without it, cross-spoke records fail verification silently. (Kern's 2026-04-09 finding.)
 
 **Phase 2 — WebSocket sync channel**
 - `/sync` endpoint on hosted side
