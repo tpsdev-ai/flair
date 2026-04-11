@@ -5,15 +5,22 @@ import { wrapUntrusted } from "./content-safety.js";
 /**
  * POST /MemoryBootstrap
  *
- * One-call context builder for agent cold starts.
+ * Predictive context builder for agent session starts.
  * Returns prioritized, token-budgeted context with:
  *   1. Soul records (identity, role, preferences)
  *   2. Permanent memories (safety rules, core principles)
- *   3. Recent memories (last 24-48h standard/persistent)
+ *   3. Recent memories (adaptive window)
  *   4. Task-relevant memories (semantic search if currentTask provided)
+ *   5. Relationship context (active relationships for mentioned entities)
+ *   6. Predicted context (based on channel/surface/subject hints)
+ *
+ * Prediction: when context signals (channel, surface, subjects) are provided,
+ * the bootstrap loads more aggressively — Flair is fast enough that the
+ * bottleneck is prediction quality, not load time.
  *
  * Request:
- *   { agentId, currentTask?, maxTokens?, includeSoul?, since? }
+ *   { agentId, currentTask?, maxTokens?, includeSoul?, since?,
+ *     channel?, surface?, subjects? }
  *
  * Response:
  *   { context, sections, tokenEstimate, memoriesIncluded, memoriesAvailable }
@@ -45,6 +52,9 @@ export class BootstrapMemories extends Resource {
       maxTokens = 4000,
       includeSoul = true,
       since,
+      channel,     // e.g., "discord", "tps-mail", "claude-code"
+      surface,     // e.g., "tps-build", "tps-review", "cli-session"
+      subjects,    // e.g., ["flair", "auth"] — entities to preload context for
     } = data || {};
 
     if (!agentId) {
@@ -68,6 +78,8 @@ export class BootstrapMemories extends Resource {
       skills: [],
       permanent: [],
       recent: [],
+      predicted: [],
+      relationships: [],
       relevant: [],
       events: [],
     };
@@ -220,6 +232,75 @@ export class BootstrapMemories extends Resource {
       memoriesIncluded++;
     }
 
+    // --- 3b. Subject-predicted context ---
+    // When subjects are provided (e.g., ["flair", "auth"]), load memories
+    // tagged with those subjects that aren't already included. This is the
+    // "predictive" part — the caller knows what topics are likely relevant
+    // based on channel/surface/recent-activity.
+    const predictedSubjects: string[] = Array.isArray(subjects)
+      ? subjects.map((s: string) => s.toLowerCase())
+      : [];
+
+    if (predictedSubjects.length > 0 && tokenBudget > 200) {
+      const includedIds = new Set([
+        ...permanent.map((m: any) => m.id),
+        ...recent.filter((_: any, i: number) => i < sections.recent.length).map((m: any) => m.id),
+      ]);
+
+      const subjectMemories = activeMemories
+        .filter((m: any) =>
+          !includedIds.has(m.id) &&
+          m.subject &&
+          predictedSubjects.includes(m.subject.toLowerCase()) &&
+          m.durability !== "permanent" // already loaded
+        )
+        .sort((a: any, b: any) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+
+      const predictedBudget = Math.floor(tokenBudget * 0.3);
+      let predictedSpent = 0;
+      for (const m of subjectMemories) {
+        const line = formatMemory(m);
+        const cost = estimateTokens(line);
+        if (predictedSpent + cost > predictedBudget) continue;
+        sections.predicted.push(line);
+        predictedSpent += cost;
+        tokenBudget -= cost;
+        memoriesIncluded++;
+        includedIds.add(m.id);
+      }
+    }
+
+    // --- 3c. Active relationships for predicted subjects ---
+    if (predictedSubjects.length > 0 && tokenBudget > 100) {
+      try {
+        for (const subj of predictedSubjects) {
+          for await (const rel of (databases as any).flair.Relationship.search({
+            conditions: [
+              { attribute: "agentId", comparator: "equals", value: agentId },
+              {
+                operator: "or",
+                conditions: [
+                  { attribute: "subject", comparator: "equals", value: subj },
+                  { attribute: "object", comparator: "equals", value: subj },
+                ],
+              },
+            ],
+            operator: "and",
+          })) {
+            // Only include active relationships (no validTo or validTo in future)
+            if (rel.validTo && rel.validTo < new Date().toISOString()) continue;
+            const line = `- ${rel.subject} → ${rel.predicate} → ${rel.object}${rel.confidence < 1.0 ? ` (${Math.round(rel.confidence * 100)}%)` : ""}`;
+            const cost = estimateTokens(line);
+            if (cost > tokenBudget) break;
+            sections.relationships.push(line);
+            tokenBudget -= cost;
+          }
+        }
+      } catch {
+        // Relationship table may not exist yet
+      }
+    }
+
     // --- 4. Task-relevant memories (semantic search) ---
     if (currentTask && tokenBudget > 200) {
       let queryEmbedding: number[] | null = null;
@@ -299,6 +380,12 @@ export class BootstrapMemories extends Resource {
     if (sections.recent.length > 0) {
       parts.push("## Recent Context\n" + sections.recent.join("\n"));
     }
+    if (sections.predicted.length > 0) {
+      parts.push("## Predicted Context\n" + sections.predicted.join("\n"));
+    }
+    if (sections.relationships.length > 0) {
+      parts.push("## Active Relationships\n" + sections.relationships.join("\n"));
+    }
     if (sections.relevant.length > 0) {
       parts.push("## Relevant Knowledge\n" + sections.relevant.join("\n"));
     }
@@ -317,6 +404,8 @@ export class BootstrapMemories extends Resource {
         skills: sections.skills.length,
         permanent: sections.permanent.length,
         recent: sections.recent.length,
+        predicted: sections.predicted.length,
+        relationships: sections.relationships.length,
         relevant: sections.relevant.length,
         events: sections.events.length,
       },
