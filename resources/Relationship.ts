@@ -48,8 +48,8 @@ export class Relationship extends (databases as any).flair.Relationship {
       });
     }
 
-    const rateLimitResult = checkRateLimit(authAgent);
-    if (rateLimitResult) return rateLimitResponse(rateLimitResult);
+    const rl = checkRateLimit(authAgent);
+    if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "relationship");
 
     // Validate required fields
     if (!content.subject || typeof content.subject !== "string") {
