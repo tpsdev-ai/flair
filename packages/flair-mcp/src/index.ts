@@ -129,12 +129,16 @@ server.tool(
 
 server.tool(
   "bootstrap",
-  "Get cold-start context: soul + recent memories. Run this at the start of every session.",
+  "Get session context: soul + memories + predicted context. Run at session start. Pass subjects for predictive loading.",
   {
     maxTokens: z.coerce.number().optional().default(4000).describe("Max tokens in output"),
+    currentTask: z.string().optional().describe("Current task description — enables semantic search for relevant memories"),
+    channel: z.string().optional().describe("Channel name (discord, tps-mail, claude-code) — shapes context prediction"),
+    surface: z.string().optional().describe("Surface name (tps-build, tps-review, cli-session) — narrows prediction"),
+    subjects: z.array(z.string()).optional().describe("Entity names to preload context for (e.g., ['flair', 'auth'])"),
   },
-  async ({ maxTokens }) => {
-    const result = await flair.bootstrap({ maxTokens });
+  async ({ maxTokens, currentTask, channel, surface, subjects }) => {
+    const result = await flair.bootstrap({ maxTokens, currentTask, channel, surface, subjects });
     if (!result.context) {
       return { content: [{ type: "text", text: "No context available." }] };
     }

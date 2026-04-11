@@ -86,10 +86,20 @@ export class FlairClient {
   }
 
   /** Cold-start bootstrap — get soul + recent memories as a formatted context block. */
-  async bootstrap(opts: { maxTokens?: number } = {}): Promise<BootstrapResult> {
+  async bootstrap(opts: {
+    maxTokens?: number;
+    currentTask?: string;
+    channel?: string;
+    surface?: string;
+    subjects?: string[];
+  } = {}): Promise<BootstrapResult> {
     return this.request("POST", "/BootstrapMemories", {
       agentId: this.agentId,
       maxTokens: opts.maxTokens ?? 4000,
+      currentTask: opts.currentTask,
+      channel: opts.channel,
+      surface: opts.surface,
+      subjects: opts.subjects,
     });
   }
 
