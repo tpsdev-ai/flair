@@ -189,6 +189,15 @@ ${scope.split(" ").map((s: string) => `<div class="scope">${s}</div>`).join("")}
     const codeChallenge = data?.code_challenge ?? "";
     const codeChallengeMethod = data?.code_challenge_method ?? "S256";
 
+    // Sherlock 2026-04-11: validate redirect_uri in POST handler too.
+    // Without this, an attacker can CSRF the approval form with an arbitrary
+    // redirect_uri, stealing the authorization code via open redirect.
+    if (redirectUri !== ALLOWED_REDIRECT_URI) {
+      return new Response(JSON.stringify({ error: "invalid_redirect_uri" }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
+    }
+
     if (action === "deny") {
       const params = new URLSearchParams({ error: "access_denied", state });
       return Response.redirect(`${redirectUri}?${params}`, 302);
