@@ -1,13 +1,62 @@
+# Agent table — backward compatible with 0.x, extended for 1.0 Principals.
+# The Agent table IS the Principal table. We keep the name "Agent" for backward
+# compatibility with existing code, queries, and exports. The `kind` field
+# distinguishes humans from agents. Pre-1.0 records without `kind` are treated
+# as agents.
 type Agent @table(database: "flair") @export {
   id: ID @primaryKey
   name: String!
   role: String
-  type: String @indexed
-  publicKey: String!
+  type: String @indexed           # legacy (0.x): "agent", "tool", etc.
+
+  # 1.0 Principal fields
+  kind: String @indexed           # "human" | "agent" (default: "agent" for 0.x compat)
+  displayName: String             # human-friendly name
+  status: String @indexed         # "active" | "deactivated" (default: "active")
+  publicKey: String!              # Ed25519 public key
+  defaultTrustTier: String @indexed  # "endorsed" | "corroborated" | "unverified"
+  admin: Boolean @indexed         # admin principals can manage other principals
+  runtime: String                 # "openclaw" | "claude-code" | "headless" | "external" | null
+  runtimeEndpoint: String         # how to reach this principal programmatically
+  subjects: [String]              # soul-level subject interests
+
   createdAt: String!
   updatedAt: String
 }
 
+# Credential table — auth surfaces for Principals.
+# A Principal can have multiple credentials (passkey + bearer token + Ed25519).
+# Credentials are NOT the Ed25519 signing keypair — they're authentication methods.
+type Credential @table(database: "flair") @export {
+  id: ID @primaryKey
+  principalId: String! @indexed   # FK to Agent.id
+  kind: String! @indexed          # "webauthn" | "bearer-token" | "ed25519" | "idp"
+  label: String                   # "iPhone 16 Pro", "OpenClaw plugin", "Harper Corporate"
+  status: String @indexed         # "active" | "revoked"
+
+  # Bearer token (kind: "bearer-token")
+  tokenHash: String               # bcrypt/sha256 hash — never store raw token
+  tokenPrefix: String             # first 8 chars for identification ("flair_at_")
+
+  # WebAuthn (kind: "webauthn")
+  webauthnCredentialId: String     # base64url credential ID
+  webauthnPublicKey: String        # COSE public key
+  webauthnAaguid: String           # authenticator identifier
+  webauthnTransports: [String]     # ["internal", "hybrid", "usb"]
+  webauthnCounter: Int             # signature counter for replay detection
+
+  # IdP (kind: "idp") — for XAA enterprise auth
+  idpProvider: String              # IdP config ID
+  idpSubject: String @indexed      # stable user identifier from IdP
+  idpEmail: String                 # email from IdP claims
+
+  createdAt: String!
+  lastUsedAt: String
+  updatedAt: String
+}
+
+# Integration table — kept for backward compat with 0.x platform connections.
+# New code should use Credential instead.
 type Integration @table(database: "flair") @export {
   id: ID @primaryKey
   agentId: String! @indexed
