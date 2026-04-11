@@ -1114,6 +1114,185 @@ principal
     console.log(`✅ Principal '${id}' trust tier set to '${tier}'`);
   });
 
+// ─── flair idp ───────────────────────────────────────────────────────────────
+// XAA Enterprise IdP configuration (per FLAIR-XAA spec § 4).
+
+const idp = program.command("idp").description("Manage enterprise IdP configurations (XAA)");
+
+idp
+  .command("add")
+  .description("Register a trusted enterprise IdP")
+  .requiredOption("--name <name>", "Display name (e.g., 'Harper Corporate')")
+  .requiredOption("--issuer <url>", "IdP issuer URL (e.g., https://accounts.google.com)")
+  .requiredOption("--jwks-uri <url>", "JWKS endpoint URL")
+  .requiredOption("--client-id <id>", "Flair's client_id at this IdP")
+  .option("--required-domain <domain>", "Reject tokens without this domain (hd/tid claim)")
+  .option("--no-jit-provision", "Disable auto-creation of principals for new IdP users")
+  .option("--default-trust <tier>", "Trust tier for JIT principals", "unverified")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (opts) => {
+    const opsPort = resolveOpsPort(opts);
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      process.exit(1);
+    }
+
+    const id = `idp_${randomUUID().slice(0, 8)}`;
+    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const now = new Date().toISOString();
+
+    const record = {
+      id,
+      name: opts.name,
+      issuer: opts.issuer,
+      jwksUri: opts.jwksUri,
+      clientId: opts.clientId,
+      requiredDomain: opts.requiredDomain ?? null,
+      jitProvision: opts.jitProvision !== false,
+      defaultTrustTier: opts.defaultTrust ?? "unverified",
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ operation: "upsert", database: "flair", table: "IdpConfig", records: [record] }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`Error: ${res.status} ${text}`);
+      process.exit(1);
+    }
+
+    console.log(`✅ IdP '${opts.name}' registered (id: ${id})`);
+    console.log(`   Issuer:   ${opts.issuer}`);
+    console.log(`   JWKS:     ${opts.jwksUri}`);
+    console.log(`   Client:   ${opts.clientId}`);
+    if (opts.requiredDomain) console.log(`   Domain:   ${opts.requiredDomain}`);
+    console.log(`   JIT:      ${opts.jitProvision !== false}`);
+  });
+
+idp
+  .command("list")
+  .description("List configured IdPs")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (opts) => {
+    const opsPort = resolveOpsPort(opts);
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      process.exit(1);
+    }
+
+    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({
+        operation: "sql",
+        sql: "SELECT id, name, issuer, requiredDomain, jitProvision, enabled, createdAt FROM flair.IdpConfig ORDER BY createdAt",
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`Error: ${res.status} ${text}`);
+      process.exit(1);
+    }
+
+    const records = await res.json() as any[];
+    if (records.length === 0) {
+      console.log("No IdPs configured.");
+      return;
+    }
+
+    for (const r of records) {
+      const status = r.enabled ? "enabled" : "disabled";
+      console.log(`${r.name} (${r.id}) — ${status}`);
+      console.log(`  Issuer: ${r.issuer}`);
+      if (r.requiredDomain) console.log(`  Domain: ${r.requiredDomain}`);
+      console.log(`  JIT: ${r.jitProvision ?? true}`);
+      console.log();
+    }
+  });
+
+idp
+  .command("remove <id>")
+  .description("Remove an IdP configuration")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (id: string, opts) => {
+    const opsPort = resolveOpsPort(opts);
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      process.exit(1);
+    }
+
+    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ operation: "delete", database: "flair", table: "IdpConfig", hash_values: [id] }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`Error: ${res.status} ${text}`);
+      process.exit(1);
+    }
+
+    console.log(`✅ IdP '${id}' removed`);
+  });
+
+idp
+  .command("test <id>")
+  .description("Test IdP connectivity (fetches JWKS)")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (id: string, opts) => {
+    const opsPort = resolveOpsPort(opts);
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      process.exit(1);
+    }
+
+    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.IdpConfig WHERE id = '${id}'` }),
+    });
+
+    const records = await res.json() as any[];
+    if (records.length === 0) {
+      console.error(`IdP '${id}' not found`);
+      process.exit(1);
+    }
+
+    const cfg = records[0];
+    console.log(`Testing IdP: ${cfg.name} (${cfg.issuer})`);
+    console.log(`  JWKS endpoint: ${cfg.jwksUri}`);
+
+    try {
+      const jwksRes = await fetch(cfg.jwksUri, { signal: AbortSignal.timeout(10_000) });
+      if (!jwksRes.ok) {
+        console.error(`  ❌ JWKS fetch failed: HTTP ${jwksRes.status}`);
+        process.exit(1);
+      }
+      const jwks = await jwksRes.json() as any;
+      const keyCount = jwks.keys?.length ?? 0;
+      console.log(`  ✅ JWKS reachable — ${keyCount} key(s) found`);
+    } catch (err: any) {
+      console.error(`  ❌ JWKS fetch error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
 // ─── flair grant / revoke ─────────────────────────────────────────────────────
 
 program

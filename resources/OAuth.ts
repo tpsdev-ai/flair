@@ -1,5 +1,6 @@
 import { Resource, databases } from "@harperfast/harper";
 import { createHash, randomBytes } from "node:crypto";
+import { handleJwtBearerGrant } from "./XAA.js";
 
 /**
  * OAuth 2.1 Authorization Server for Flair.
@@ -240,11 +241,7 @@ export class OAuthToken extends Resource {
     } else if (grantType === "refresh_token") {
       return this.handleRefreshToken(data);
     } else if (grantType === "urn:ietf:params:oauth:grant-type:jwt-bearer") {
-      // XAA path — stub for now, implemented in XAA PR
-      return new Response(JSON.stringify({
-        error: "unsupported_grant_type",
-        error_description: "jwt-bearer grant type not yet implemented",
-      }), { status: 400, headers: { "content-type": "application/json" } });
+      return handleJwtBearerGrant(data);
     }
 
     return new Response(JSON.stringify({ error: "unsupported_grant_type" }), {
