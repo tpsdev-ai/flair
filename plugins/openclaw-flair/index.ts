@@ -107,6 +107,130 @@ function excerptForCapture(text: string, maxChars = 500): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
+// ─── Entity detection ────────────────────────────────────────────────────────
+// Passive entity extraction from conversation content. No setup wizards,
+// no "tell me about yourself" — Flair learns from natural conversation.
+
+interface DetectedEntity {
+  name: string;
+  kind: "person" | "project" | "service" | "org" | "concept";
+  confidence: number;
+}
+
+interface DetectedRelationship {
+  subject: string;
+  predicate: string;
+  object: string;
+  confidence: number;
+}
+
+// Person detection: "Nathan said", "ask @Kern", "my name is X", "X is the founder"
+const PERSON_PATTERNS = [
+  /\b([A-Z][a-z]{2,})\s+(?:said|asked|mentioned|decided|approved|rejected|thinks|wants|needs|prefers)\b/g,
+  /\b(?:ask|ping|tell|check with|talk to)\s+(?:@)?([A-Z][a-z]{2,})\b/g,
+  /\b(?:my name is|i'm|call me)\s+([A-Z][a-z]{2,})\b/ig,
+  /\b([A-Z][a-z]{2,})\s+(?:is the|is our|is a|was the|was our)\s+(\w+(?:\s+\w+)?)\b/g,
+];
+
+// Project/service detection: repo references, "the X project", service names
+const PROJECT_PATTERNS = [
+  /\b(?:tpsdev-ai|github\.com)\/([a-z0-9-]+)\b/g,
+  /\b(?:the|our)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\s+(?:project|repo|service|system|app|tool|plugin)\b/g,
+];
+
+// Relationship detection: "X manages Y", "X owns Y", "X depends on Y"
+const RELATIONSHIP_PATTERNS = [
+  { re: /\b([A-Z][a-z]{2,})\s+(?:manages|leads|runs|owns)\s+(?:the\s+)?([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\b/g, predicate: "manages" },
+  { re: /\b([A-Z][a-z]{2,})\s+(?:works on|is working on|maintains)\s+(?:the\s+)?([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\b/g, predicate: "works_on" },
+  { re: /\b([A-Z][a-z]{2,})\s+(?:reviews|reviewed)\s+(?:the\s+)?([A-Z][a-z]+(?:'s)?(?:\s\w+)?)\b/g, predicate: "reviews" },
+  { re: /\b([A-Z][a-z]+)\s+(?:depends on|requires|needs)\s+([A-Z][a-z]+)\b/g, predicate: "depends_on" },
+  { re: /\b([A-Z][a-z]+)\s+(?:replaces|supersedes)\s+([A-Z][a-z]+)\b/g, predicate: "replaces" },
+];
+
+// Common words that look like names but aren't
+const ENTITY_STOPWORDS = new Set([
+  "the", "this", "that", "with", "from", "into", "also", "just", "here",
+  "there", "what", "when", "where", "which", "while", "should", "would",
+  "could", "will", "does", "have", "been", "being", "make", "made",
+  "take", "taken", "like", "look", "good", "well", "much", "many",
+  "some", "each", "every", "both", "other", "such", "only", "same",
+  "than", "then", "now", "how", "all", "any", "few", "most", "very",
+  "after", "before", "between", "under", "over", "through", "during",
+  "about", "against", "above", "below", "off", "down", "out",
+  "let", "set", "get", "put", "run", "use", "try", "see", "new",
+  "old", "big", "end", "way", "day", "man", "did", "got", "had",
+  "yes", "not", "but", "for", "are", "was", "can", "may", "one",
+  "two", "its", "his", "her", "our", "has", "him", "her", "per",
+  "via", "bug", "fix", "add", "api", "url", "cli", "tcp", "ssh",
+  "keep", "next", "last", "best", "sure", "okay", "done", "want",
+  "need", "know", "think", "start", "stop", "check", "update",
+  "instead", "currently", "actually", "already", "however", "because",
+  "since", "until", "still", "right", "first", "great", "sounds",
+  "interesting", "important", "note", "issue", "pull", "push",
+  "merge", "branch", "commit", "deploy", "build", "test", "spec",
+]);
+
+function isValidEntity(name: string): boolean {
+  if (name.length < 3 || name.length > 30) return false;
+  if (ENTITY_STOPWORDS.has(name.toLowerCase())) return false;
+  if (/^\d+$/.test(name)) return false;
+  return true;
+}
+
+function detectEntities(text: string): DetectedEntity[] {
+  const entities = new Map<string, DetectedEntity>();
+
+  for (const pattern of PERSON_PATTERNS) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      const name = match[1];
+      if (!isValidEntity(name)) continue;
+      const key = name.toLowerCase();
+      if (!entities.has(key) || entities.get(key)!.confidence < 0.7) {
+        entities.set(key, { name, kind: "person", confidence: 0.7 });
+      }
+    }
+  }
+
+  for (const pattern of PROJECT_PATTERNS) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      const name = match[1];
+      if (!isValidEntity(name)) continue;
+      const key = name.toLowerCase();
+      if (!entities.has(key)) {
+        entities.set(key, { name, kind: "project", confidence: 0.8 });
+      }
+    }
+  }
+
+  return [...entities.values()];
+}
+
+function detectRelationships(text: string): DetectedRelationship[] {
+  const relationships: DetectedRelationship[] = [];
+
+  for (const { re, predicate } of RELATIONSHIP_PATTERNS) {
+    re.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      const subject = match[1];
+      const object = match[2];
+      if (!isValidEntity(subject) || !isValidEntity(object)) continue;
+      relationships.push({
+        subject: subject.toLowerCase(),
+        predicate,
+        object: object.toLowerCase(),
+        confidence: 0.6,
+      });
+    }
+  }
+
+  return relationships;
+}
+
 // ─── Plugin export ────────────────────────────────────────────────────────────
 
 export default {
@@ -358,16 +482,67 @@ export default {
           const client = getCurrentClient();
           const messages = (event.messages ?? []) as Array<{ role: string; content?: string }>;
           let stored = 0;
+          const allEntities = new Map<string, DetectedEntity>();
+          const allRelationships: DetectedRelationship[] = [];
+
           for (const msg of messages) {
             if (msg.role !== "user" && msg.role !== "assistant") continue;
             const text = typeof msg.content === "string" ? msg.content : "";
-            if (!text || !shouldCapture(text)) continue;
-            const excerpt = excerptForCapture(text);
-            await client.memory.write(excerpt, { type: "session", tags: ["auto-captured"] });
-            stored++;
-            if (stored >= 3) break;
+            if (!text || text.length < MIN_CAPTURE_LENGTH) continue;
+
+            // Traditional trigger-based capture
+            if (shouldCapture(text) && stored < 3) {
+              const excerpt = excerptForCapture(text);
+              // Tag with detected subject if available
+              const entities = detectEntities(text);
+              const subject = entities.length > 0 ? entities[0].name.toLowerCase() : undefined;
+              await client.memory.write(excerpt, {
+                type: "session",
+                tags: ["auto-captured"],
+                subject,
+              });
+              stored++;
+            }
+
+            // Entity detection — accumulate across all messages
+            for (const entity of detectEntities(text)) {
+              const key = entity.name.toLowerCase();
+              const existing = allEntities.get(key);
+              if (!existing || existing.confidence < entity.confidence) {
+                allEntities.set(key, entity);
+              }
+            }
+
+            // Relationship detection
+            for (const rel of detectRelationships(text)) {
+              allRelationships.push(rel);
+            }
           }
-          if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
+
+          // Store detected relationships via Flair's Relationship API
+          let relStored = 0;
+          for (const rel of allRelationships) {
+            if (relStored >= 5) break; // cap per session
+            try {
+              await client.request("PUT", `/Relationship/${Date.now()}-${relStored}`, {
+                subject: rel.subject,
+                predicate: rel.predicate,
+                object: rel.object,
+                confidence: rel.confidence,
+                source: "auto-detected",
+              });
+              relStored++;
+            } catch {
+              // best effort — don't fail the session over relationship storage
+            }
+          }
+
+          const total = stored + relStored;
+          if (total > 0) {
+            api.logger.info(
+              `openclaw-flair: auto-captured ${stored} memories, ${relStored} relationships, ${allEntities.size} entities detected`
+            );
+          }
         } catch (err: any) {
           api.logger.warn(`openclaw-flair: auto-capture failed: ${err.message}`);
         }
