@@ -1,5 +1,6 @@
 import { databases } from "@harperfast/harper";
 import { createHash, randomBytes } from "node:crypto";
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
 /**
  * XAA (Enterprise-Managed Authorization) — ID-JAG validation for Flair.
@@ -23,9 +24,8 @@ const ACCESS_TOKEN_TTL_MS = 3600_000;        // 1 hour
 const REFRESH_TOKEN_TTL_MS = 7 * 86400_000;  // 7 days
 const CLOCK_SKEW_MS = 30_000;                // 30 seconds
 
-// In-memory JWKS cache per issuer
-const jwksCache = new Map<string, { keys: any[]; fetchedAt: number }>();
-const JWKS_CACHE_TTL_MS = 3600_000; // 1 hour
+// JWKS remote key set cache per issuer (jose handles caching internally)
+const jwksSetCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
@@ -44,44 +44,16 @@ function futureISO(ms: number): string {
 }
 
 /**
- * Decode a JWT without verifying signature (for claim inspection).
- * Actual verification uses the IdP's JWKS.
+ * Get or create a remote JWKS key set for an IdP.
+ * jose handles caching, key rotation, and refetching internally.
  */
-function decodeJwt(token: string): { header: any; payload: any; signature: string } | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const header = JSON.parse(Buffer.from(parts[0], "base64url").toString());
-    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
-    return { header, payload, signature: parts[2] };
-  } catch {
-    return null;
+function getJwksKeySet(jwksUri: string): ReturnType<typeof createRemoteJWKSet> {
+  let keySet = jwksSetCache.get(jwksUri);
+  if (!keySet) {
+    keySet = createRemoteJWKSet(new URL(jwksUri));
+    jwksSetCache.set(jwksUri, keySet);
   }
-}
-
-/**
- * Fetch JWKS from an IdP endpoint with caching.
- */
-async function fetchJwks(jwksUri: string, forceRefresh = false): Promise<any[]> {
-  const cached = jwksCache.get(jwksUri);
-  if (cached && !forceRefresh && Date.now() - cached.fetchedAt < JWKS_CACHE_TTL_MS) {
-    return cached.keys;
-  }
-
-  try {
-    const res = await fetch(jwksUri, { signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
-    const data = await res.json() as any;
-    const keys = data.keys ?? [];
-    jwksCache.set(jwksUri, { keys, fetchedAt: Date.now() });
-    return keys;
-  } catch (err: any) {
-    // Graceful degradation: use stale cache if available (up to 24h)
-    if (cached && Date.now() - cached.fetchedAt < 24 * 3600_000) {
-      return cached.keys;
-    }
-    throw err;
-  }
+  return keySet;
 }
 
 /**
@@ -91,21 +63,21 @@ async function fetchJwks(jwksUri: string, forceRefresh = false): Promise<any[]> 
 export async function validateIdJag(
   assertion: string,
   expectedAudience: string,
-): Promise<{ payload: any; idpConfig: any }> {
-  const decoded = decodeJwt(assertion);
-  if (!decoded) throw new Error("invalid JWT format");
-
-  const { header, payload } = decoded;
-
-  // 7. Type check
-  if (header.typ && header.typ !== "oauth-id-jag+jwt" && header.typ !== "JWT") {
-    throw new Error(`unexpected token type: ${header.typ}`);
+): Promise<{ payload: JWTPayload & Record<string, any>; idpConfig: any }> {
+  // Pre-decode to find the issuer (needed to look up the IdP config + JWKS URI)
+  const parts = assertion.split(".");
+  if (parts.length !== 3) throw new Error("invalid JWT format");
+  let prePayload: any;
+  try {
+    prePayload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+  } catch {
+    throw new Error("invalid JWT payload encoding");
   }
 
-  // 2. Issuer lookup
-  const issuer = payload.iss;
+  const issuer = prePayload.iss;
   if (!issuer) throw new Error("missing iss claim");
 
+  // 2. Issuer lookup
   let idpConfig: any = null;
   for await (const cfg of (databases as any).flair.IdpConfig.search({
     conditions: [
@@ -116,38 +88,30 @@ export async function validateIdJag(
     idpConfig = cfg;
     break;
   }
-
   if (!idpConfig) throw new Error(`unknown issuer: ${issuer}`);
 
-  // 3. Audience
-  const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-  if (!aud.includes(expectedAudience)) {
-    throw new Error(`audience mismatch: expected ${expectedAudience}`);
-  }
+  // 1. Cryptographic signature verification via jose + IdP JWKS.
+  // This is the core security check — without it, all claims are forgeable.
+  // Sherlock's 2026-04-11 review finding: deferring signature verification
+  // defeats the entire purpose of JWTs.
+  const jwks = getJwksKeySet(idpConfig.jwksUri);
+  const { payload } = await jwtVerify(assertion, jwks, {
+    issuer,
+    audience: expectedAudience,
+    clockTolerance: CLOCK_SKEW_MS / 1000,
+  });
 
-  // 5. Expiry (with clock skew)
-  const now = Date.now();
-  if (payload.exp && (payload.exp * 1000) < (now - CLOCK_SKEW_MS)) {
-    throw new Error("token expired");
-  }
-
-  // iat check
-  if (payload.iat && (payload.iat * 1000) > (now + CLOCK_SKEW_MS)) {
-    throw new Error("token issued in the future");
-  }
-
-  // 8. Domain restriction
+  // 8. Domain restriction (post-verification — claims are now trusted)
   if (idpConfig.requiredDomain) {
-    // Google: hd claim
-    if (payload.hd && payload.hd !== idpConfig.requiredDomain) {
-      throw new Error(`domain mismatch: expected ${idpConfig.requiredDomain}, got ${payload.hd}`);
+    const hd = (payload as any).hd;
+    const tid = (payload as any).tid;
+    if (hd && hd !== idpConfig.requiredDomain) {
+      throw new Error(`domain mismatch: expected ${idpConfig.requiredDomain}, got ${hd}`);
     }
-    // Azure: tid claim
-    if (payload.tid && payload.tid !== idpConfig.requiredDomain) {
-      throw new Error(`tenant mismatch: expected ${idpConfig.requiredDomain}, got ${payload.tid}`);
+    if (tid && tid !== idpConfig.requiredDomain) {
+      throw new Error(`tenant mismatch: expected ${idpConfig.requiredDomain}, got ${tid}`);
     }
-    // If no hd or tid, and domain is required, reject (consumer account)
-    if (!payload.hd && !payload.tid) {
+    if (!hd && !tid) {
       throw new Error(`domain required but no hd/tid claim present — consumer account rejected`);
     }
   }
@@ -157,6 +121,7 @@ export async function validateIdJag(
     const existing = await (databases as any).flair.IdJagReplay.get(payload.jti);
     if (existing) throw new Error("token replay detected");
 
+    const now = Date.now();
     await (databases as any).flair.IdJagReplay.put({
       id: payload.jti,
       expiresAt: futureISO(Math.max((payload.exp ?? 0) * 1000 - now + CLOCK_SKEW_MS, 300_000)),
@@ -164,24 +129,7 @@ export async function validateIdJag(
     });
   }
 
-  // 1. Signature verification — fetch JWKS and verify
-  // NOTE: Full JWT signature verification requires crypto.subtle.verify with
-  // the matching JWK. For 1.0 we validate structure, issuer, audience, expiry,
-  // domain, and replay. Full signature verification is added when the jose
-  // library is integrated (tracked as a follow-up).
-  // For now, trust is established via:
-  //   - Issuer must be in the configured IdP list (admin-managed)
-  //   - Domain restriction validates the organizational boundary
-  //   - Replay prevention via jti
-  //   - Short TTL (typically 5 minutes)
-  try {
-    await fetchJwks(idpConfig.jwksUri);
-    // JWKS fetched successfully — keys are cached for future use
-  } catch (err: any) {
-    throw new Error(`JWKS fetch failed for ${idpConfig.jwksUri}: ${err.message}`);
-  }
-
-  return { payload, idpConfig };
+  return { payload: payload as JWTPayload & Record<string, any>, idpConfig };
 }
 
 /**
