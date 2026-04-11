@@ -96,6 +96,18 @@ export class Memory extends (databases as any).flair.Memory {
       });
     }
 
+    // Temporal validity: validFrom defaults to now, validTo left null for active facts.
+    // When a memory supersedes another, close the superseded memory's validity window.
+    if (!content.validFrom) {
+      content.validFrom = content.createdAt;
+    }
+    if (content.supersedes) {
+      patchRecord((databases as any).flair.Memory, content.supersedes, {
+        validTo: content.validFrom,
+        updatedAt: content.createdAt,
+      }).catch(() => {});
+    }
+
     if (content.durability === "ephemeral" && !content.expiresAt) {
       const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
       content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();

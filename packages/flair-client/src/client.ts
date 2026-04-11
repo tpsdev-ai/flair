@@ -148,11 +148,11 @@ class MemoryApi {
     return record as Memory;
   }
 
-  /** Search memories by meaning. */
-  async search(query: string, opts: { limit?: number; minScore?: number; scoring?: "composite" | "raw" } = {}): Promise<SearchResult[]> {
+  /** Search memories by meaning. Optionally filter to facts valid at a specific point in time. */
+  async search(query: string, opts: { limit?: number; minScore?: number; scoring?: "composite" | "raw"; asOf?: string } = {}): Promise<SearchResult[]> {
     const result = await this.client.request<{ results?: unknown[] }>(
       "POST", "/SemanticSearch",
-      { agentId: this.client.agentId, q: query, limit: opts.limit ?? 5, scoring: opts.scoring },
+      { agentId: this.client.agentId, q: query, limit: opts.limit ?? 5, scoring: opts.scoring, asOf: opts.asOf },
     );
     const minScore = opts.minScore ?? 0;
     return (result.results ?? [])
