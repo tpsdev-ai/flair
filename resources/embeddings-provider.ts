@@ -3,32 +3,34 @@
  *
  * Wrapper around harper-fabric-embeddings for Flair resources.
  *
- * Harper loads resources in a VM sandbox with a separate module cache from
- * the main thread. This means our import of harper-fabric-embeddings gets
- * a different (uninitialized) instance from the one Harper initialized via
- * handleApplication in config.yaml.
- *
- * Solution: we call hfe.init() ourselves on first use. The model is already
- * on disk (downloaded by Harper's plugin loader), so init just loads the
- * native binary and model file — no download needed.
+ * Harper 5.0.0 loads resources in a VM sandbox that can't statically link
+ * npm packages during module resolution (async race in getOrCreateModule).
+ * Using dynamic import() defers the module load to first use, bypassing
+ * the VM linker entirely.
  */
 
-import * as hfe from "harper-fabric-embeddings";
 import { join } from "node:path";
 
 type InitState = "uninitialized" | "ready" | "failed";
+type HFE = typeof import("harper-fabric-embeddings");
 
 let _state: InitState = "uninitialized";
 let _initError: string | undefined;
 let _warnedOnce = false;
+let _hfe: HFE | null = null;
 
 async function ensureInit(): Promise<void> {
   if (_state === "ready") return;
   if (_state === "failed") return; // Don't retry — already logged warning
 
   try {
+    // Dynamic import — deferred to avoid Harper 5.0.0 VM linker race
+    if (!_hfe) {
+      _hfe = await import("harper-fabric-embeddings");
+    }
+
     // Check if already initialized (e.g. shared context)
-    hfe.dimensions();
+    _hfe.dimensions();
     _state = "ready";
     return;
   } catch {
@@ -38,6 +40,10 @@ async function ensureInit(): Promise<void> {
     // VM sandbox / worker threads, so we use process.cwd() which points to the
     // Flair application directory.
     try {
+      if (!_hfe) {
+        _hfe = await import("harper-fabric-embeddings");
+      }
+
       const modelsDir = join(process.cwd(), "models");
 
       // Find the native addon binary explicitly to avoid __dirname-dependent
@@ -50,7 +56,7 @@ async function ensureInit(): Promise<void> {
         if (existsSync(candidate)) { addonPath = candidate; break; }
       }
 
-      await hfe.init({ modelsDir, ...(addonPath ? { addonPath } : {}) });
+      await _hfe.init({ modelsDir, ...(addonPath ? { addonPath } : {}) });
       _state = "ready";
     } catch (err: any) {
       _state = "failed";
@@ -72,17 +78,14 @@ async function ensureInit(): Promise<void> {
 export async function getEmbedding(text: string): Promise<number[] | null> {
   try {
     await ensureInit();
-    if (_state !== "ready") return null;
-    return await hfe.embed(text);
+    if (_state !== "ready" || !_hfe) return null;
+    return await _hfe.embed(text);
   } catch (err: any) {
     console.error(`[embeddings] embed failed: ${err.message}`);
     return null;
   }
 }
 
-/**
- * Check if the embedding engine is currently available.
- */
 /**
  * Check if the embedding engine is currently available.
  * If still uninitialized, attempts initialization first.
@@ -94,19 +97,22 @@ export function getMode(): "local" | "none" {
   if (_state === "ready") return "local";
   if (_state === "failed") return "none";
   // Still uninitialized — try direct check first
-  try {
-    hfe.dimensions();
-    _state = "ready";
-    return "local";
-  } catch {
-    // Not yet initialized. Trigger async init on first call so subsequent
-    // calls (including getEmbedding) will find the engine ready.
-    if (!_getModeInitAttempted) {
-      _getModeInitAttempted = true;
-      ensureInit().catch(() => {}); // fire-and-forget
+  if (_hfe) {
+    try {
+      _hfe.dimensions();
+      _state = "ready";
+      return "local";
+    } catch {
+      // fall through
     }
-    return "none";
   }
+  // Not yet initialized. Trigger async init on first call so subsequent
+  // calls (including getEmbedding) will find the engine ready.
+  if (!_getModeInitAttempted) {
+    _getModeInitAttempted = true;
+    ensureInit().catch(() => {}); // fire-and-forget
+  }
+  return "none";
 }
 
 /**
@@ -127,12 +133,12 @@ export function getStatus(): {
   error?: string;
 } {
   const mode = getMode();
-  if (mode === "local") {
+  if (mode === "local" && _hfe) {
     try {
       return {
         mode,
         model: "nomic-embed-text-v1.5",
-        dims: hfe.dimensions(),
+        dims: _hfe.dimensions(),
       };
     } catch {
       return { mode };
