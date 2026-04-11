@@ -6,8 +6,10 @@ import { join } from "node:path";
 const getRandomPort = () => 10000 + Math.floor(Math.random() * 50000);
 const STARTUP_TIMEOUT_MS = 45_000;
 
-// Use @harperfast/harper from node_modules — works on any system with Node
+// Use @harperfast/harper from node_modules — spawned under node (not bun)
+// because bun 1.3.x doesn't support uv_ip6_addr which Harper's NAPI modules need.
 const HARPER_BIN = join(process.cwd(), "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js");
+const NODE_BIN = process.env.NODE_BIN ?? "node";
 
 // External service mode: set HARPER_HTTP_URL (and optionally HARPER_OPS_URL) to
 // skip the local spawn and connect to an already-running Harper instance (e.g. Docker).
@@ -74,16 +76,17 @@ export async function startHarper(): Promise<HarperInstance> {
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
     ROOTPATH: installDir,
+    HOME: installDir,               // isolate from system Harper install (~/.harperdb)
     DEFAULTS_MODE: "dev",
     HDB_ADMIN_USERNAME: "admin",
     HDB_ADMIN_PASSWORD: "test123",
     THREADS_COUNT: "1",
-    NODE_HOSTNAME: "localhost",
+    NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
     OPERATIONSAPI_NETWORK_PORT: String(opsPort),
     HTTP_PORT: String(httpPort),
   };
 
-  const install = spawn(process.execPath, [HARPER_BIN, "install"], { cwd: process.cwd(), env });
+  const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd: process.cwd(), env });
   await new Promise<void>((resolve, reject) => {
     let output = "";
     install.stdout?.on("data", (d: Buffer) => output += d.toString());
@@ -93,7 +96,7 @@ export async function startHarper(): Promise<HarperInstance> {
     setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
   });
 
-  const proc = spawn(process.execPath, [HARPER_BIN, "dev", "."], { cwd: process.cwd(), env });
+  const proc = spawn(NODE_BIN, [HARPER_BIN, "dev", "."], { cwd: process.cwd(), env });
 
   let log = "";
   await new Promise<void>((resolve, reject) => {
