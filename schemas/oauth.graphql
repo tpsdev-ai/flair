@@ -30,6 +30,31 @@ type OAuthAuthCode @table(database: "flair") {
   createdAt: String!
 }
 
+# IdP configuration for XAA (Enterprise-Managed Authorization).
+# Stores trusted enterprise IdP endpoints for ID-JAG validation.
+type IdpConfig @table(database: "flair") @export {
+  id: ID @primaryKey                # stable UUID
+  name: String!                     # display name ("Harper Corporate")
+  issuer: String! @indexed          # must match ID-JAG `iss` (e.g., "https://accounts.google.com")
+  jwksUri: String!                  # JWKS endpoint for signature verification
+  clientId: String!                 # Flair's client_id at this IdP
+  requiredDomain: String            # domain boundary: `hd` (Google), `tid` (Azure), issuer-scoped (Okta)
+  jitProvision: Boolean             # auto-create principals on first login
+  defaultTrustTier: String          # "unverified" | "corroborated" for JIT principals
+  allowedScopes: [String]           # restrict which scopes this IdP can grant
+  enabled: Boolean @indexed
+  jwksCachedAt: String              # when JWKS was last fetched
+  createdAt: String! @indexed
+  updatedAt: String
+}
+
+# ID-JAG replay prevention — tracks used `jti` claims.
+type IdJagReplay @table(database: "flair") {
+  id: ID @primaryKey                # the jti value
+  expiresAt: String! @indexed       # TTL for cleanup
+  createdAt: String!
+}
+
 # Access + refresh tokens.
 type OAuthToken @table(database: "flair") @export {
   id: ID @primaryKey                # token ID (internal reference)
