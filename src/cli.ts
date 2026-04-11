@@ -891,6 +891,229 @@ agent
     console.log(`\n✅ Agent '${id}' removed successfully`);
   });
 
+// ─── flair principal ─────────────────────────────────────────────────────────
+// 1.0 identity management. The Principal model extends Agent — this is the
+// preferred CLI surface for managing identities going forward.
+
+const principal = program.command("principal").description("Manage principals (humans and agents)");
+
+principal
+  .command("add <id>")
+  .description("Create a new principal")
+  .option("--kind <kind>", "Principal kind: human or agent", "agent")
+  .option("--name <name>", "Display name (defaults to id)")
+  .option("--admin", "Grant admin privileges")
+  .option("--trust <tier>", "Default trust tier: endorsed, corroborated, or unverified")
+  .option("--runtime <runtime>", "Runtime: openclaw, claude-code, headless, external")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--admin-pass <pass>", "Admin password for registration")
+  .option("--keys-dir <dir>", "Directory for Ed25519 keys")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (id: string, opts) => {
+    const opsPort = resolveOpsPort(opts);
+    const keysDir: string = opts.keysDir ?? defaultKeysDir();
+    const adminPass: string | undefined = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS;
+    const adminUser = DEFAULT_ADMIN_USER;
+    const kind: string = opts.kind ?? "agent";
+    const name: string = opts.name ?? id;
+    const isAdmin: boolean = opts.admin ?? false;
+    const trustTier: string = opts.trust ?? (isAdmin ? "endorsed" : "unverified");
+    const runtime: string | undefined = opts.runtime;
+
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      process.exit(1);
+    }
+
+    // Generate Ed25519 keypair (agents always get one; humans get one for instance-attestation)
+    mkdirSync(keysDir, { recursive: true });
+    const privPath = privKeyPath(id, keysDir);
+    const pubPath = pubKeyPath(id, keysDir);
+    let pubKeyB64url: string;
+
+    if (existsSync(privPath)) {
+      console.log(`Reusing existing key: ${privPath}`);
+      const seed = new Uint8Array(readFileSync(privPath));
+      const kp = nacl.sign.keyPair.fromSeed(seed);
+      pubKeyB64url = b64url(kp.publicKey);
+    } else {
+      const kp = nacl.sign.keyPair();
+      const seed = kp.secretKey.slice(0, 32);
+      writeFileSync(privPath, Buffer.from(seed));
+      chmodSync(privPath, 0o600);
+      writeFileSync(pubPath, Buffer.from(kp.publicKey));
+      pubKeyB64url = b64url(kp.publicKey);
+      console.log(`Keypair written: ${privPath}`);
+    }
+
+    // Insert via operations API with Principal fields
+    const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+    const record = {
+      id,
+      name,
+      displayName: name,
+      kind,
+      type: kind === "human" ? "human" : "agent",
+      status: "active",
+      publicKey: pubKeyB64url,
+      defaultTrustTier: trustTier,
+      admin: isAdmin,
+      runtime: runtime ?? null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ operation: "upsert", database: "flair", table: "Agent", records: [record] }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`Error: ${res.status} ${text}`);
+      process.exit(1);
+    }
+
+    console.log(`✅ Principal '${id}' created`);
+    console.log(`   Kind:       ${kind}`);
+    console.log(`   Trust:      ${trustTier}`);
+    console.log(`   Admin:      ${isAdmin}`);
+    if (runtime) console.log(`   Runtime:    ${runtime}`);
+    console.log(`   Public key: ${pubKeyB64url}`);
+    console.log(`   Private key: ${privPath}`);
+  });
+
+principal
+  .command("list")
+  .description("List all principals")
+  .option("--kind <kind>", "Filter by kind: human or agent")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (opts) => {
+    const opsPort = resolveOpsPort(opts);
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      process.exit(1);
+    }
+
+    const kindFilter = opts.kind ? ` WHERE kind = '${opts.kind}'` : "";
+    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({
+        operation: "sql",
+        sql: `SELECT id, name, kind, status, defaultTrustTier, admin, runtime, createdAt FROM flair.Agent${kindFilter} ORDER BY createdAt`,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`Error: ${res.status} ${text}`);
+      process.exit(1);
+    }
+
+    const records = await res.json() as any[];
+    if (records.length === 0) {
+      console.log("No principals found.");
+      return;
+    }
+
+    // Table format
+    console.log(`${"ID".padEnd(20)} ${"Kind".padEnd(7)} ${"Trust".padEnd(14)} ${"Admin".padEnd(6)} ${"Status".padEnd(12)} ${"Runtime".padEnd(12)} Created`);
+    console.log("─".repeat(95));
+    for (const r of records) {
+      const kind = r.kind ?? "agent";
+      const trust = r.defaultTrustTier ?? "—";
+      const admin = r.admin ? "yes" : "no";
+      const status = r.status ?? "active";
+      const runtime = r.runtime ?? "—";
+      const created = r.createdAt?.slice(0, 10) ?? "—";
+      console.log(`${String(r.id).padEnd(20)} ${kind.padEnd(7)} ${trust.padEnd(14)} ${admin.padEnd(6)} ${status.padEnd(12)} ${runtime.padEnd(12)} ${created}`);
+    }
+  });
+
+principal
+  .command("show <id>")
+  .description("Show principal details")
+  .action(async (id: string) => {
+    const result = await api("GET", `/Agent/${id}`);
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+principal
+  .command("disable <id>")
+  .description("Deactivate a principal (revokes access, preserves data)")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (id: string, opts) => {
+    const opsPort = resolveOpsPort(opts);
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      process.exit(1);
+    }
+
+    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({
+        operation: "update",
+        database: "flair",
+        table: "Agent",
+        records: [{ id, status: "deactivated", updatedAt: new Date().toISOString() }],
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`Error: ${res.status} ${text}`);
+      process.exit(1);
+    }
+
+    console.log(`✅ Principal '${id}' deactivated`);
+  });
+
+principal
+  .command("promote <id> <tier>")
+  .description("Change a principal's trust tier (endorsed, corroborated, unverified)")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (id: string, tier: string, opts) => {
+    const validTiers = ["endorsed", "corroborated", "unverified"];
+    if (!validTiers.includes(tier)) {
+      console.error(`Error: tier must be one of: ${validTiers.join(", ")}`);
+      process.exit(1);
+    }
+
+    const opsPort = resolveOpsPort(opts);
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      process.exit(1);
+    }
+
+    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({
+        operation: "update",
+        database: "flair",
+        table: "Agent",
+        records: [{ id, defaultTrustTier: tier, updatedAt: new Date().toISOString() }],
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`Error: ${res.status} ${text}`);
+      process.exit(1);
+    }
+
+    console.log(`✅ Principal '${id}' trust tier set to '${tier}'`);
+  });
+
 // ─── flair grant / revoke ─────────────────────────────────────────────────────
 
 program
