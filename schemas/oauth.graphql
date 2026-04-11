@@ -1,0 +1,47 @@
+# OAuth 2.1 Authorization Server tables.
+# Implements: RFC 6749 (OAuth 2.0), RFC 7591 (DCR), RFC 7636 (PKCE),
+# with 1.0 constraints from FLAIR-PRINCIPALS § 2.
+
+# Registered OAuth clients (via DCR or admin).
+# 1.0: only claude.com redirect URI permitted for DCR clients.
+type OAuthClient @table(database: "flair") @export {
+  id: ID @primaryKey                # client_id
+  clientSecret: String              # hashed — only for confidential clients
+  name: String!
+  redirectUris: [String]!           # 1.0: only ["https://claude.com/api/mcp/auth_callback"]
+  grantTypes: [String]              # ["authorization_code", "refresh_token"]
+  scope: String                     # space-separated default scopes
+  registeredBy: String @indexed     # principal ID who registered, or "dcr"
+  createdAt: String! @indexed
+  updatedAt: String
+}
+
+# Authorization codes — short-lived, single-use.
+type OAuthAuthCode @table(database: "flair") {
+  id: ID @primaryKey                # the authorization code itself (random, URL-safe)
+  clientId: String! @indexed
+  principalId: String! @indexed     # who authorized
+  redirectUri: String!
+  scope: String                     # granted scopes
+  codeChallenge: String             # PKCE S256
+  codeChallengeMethod: String       # "S256"
+  expiresAt: String! @indexed       # short TTL (10 min max)
+  used: Boolean @indexed            # single-use enforcement
+  createdAt: String!
+}
+
+# Access + refresh tokens.
+type OAuthToken @table(database: "flair") @export {
+  id: ID @primaryKey                # token ID (internal reference)
+  tokenHash: String! @indexed       # SHA-256 of actual token — never store raw
+  tokenType: String! @indexed       # "access" | "refresh"
+  clientId: String! @indexed
+  principalId: String! @indexed
+  scope: String                     # space-separated granted scopes
+  expiresAt: String! @indexed
+  revokedAt: String                 # null = active
+  parentTokenId: String             # refresh token that generated this access token
+  idpIssuer: String                 # if token was issued via XAA, the IdP issuer
+  idpSubject: String                # if token was issued via XAA, the IdP subject
+  createdAt: String! @indexed
+}
