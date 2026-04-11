@@ -56,7 +56,7 @@ const CANDIDATE_MULTIPLIER = 5;
 
 export class SemanticSearch extends Resource {
   async post(data: any) {
-    const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since } = data || {};
+    const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since, asOf } = data || {};
 
     // Rate limiting — use authenticated agent ID from request context, not client-supplied body
     const rateLimitAgent: string | undefined = (this as any).request?.headers?.get?.("x-tps-agent")
@@ -182,7 +182,7 @@ export class SemanticSearch extends Resource {
           "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "lastRetrieved",
           "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
           "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject",
-          "_safetyFlags", "$distance"],
+          "validFrom", "validTo", "_safetyFlags", "$distance"],
         limit: candidateLimit,
       };
       if (conditions.length > 0) {
@@ -192,6 +192,9 @@ export class SemanticSearch extends Resource {
       for await (const record of (databases as any).flair.Memory.search(query)) {
         if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
         if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
+        // Temporal validity: if asOf is specified, only include memories valid at that point
+        if (asOf && record.validFrom && record.validFrom > asOf) continue;
+        if (asOf && record.validTo && record.validTo <= asOf) continue;
 
         const semanticScore = distanceToSimilarity(record.$distance ?? 1);
         let keywordHit = false;
@@ -222,6 +225,8 @@ export class SemanticSearch extends Resource {
       for await (const record of (databases as any).flair.Memory.search(query)) {
         if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
         if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
+        if (asOf && record.validFrom && record.validFrom > asOf) continue;
+        if (asOf && record.validTo && record.validTo <= asOf) continue;
 
         let keywordHit = false;
         if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {

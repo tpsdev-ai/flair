@@ -26,7 +26,26 @@ type Memory @table(database: "flair") {
   lastReflected: String     # ISO timestamp of last reflection pass
   supersedes: String @indexed  # ID of memory this one replaces (version chain)
   subject: String @indexed     # entity this memory is about (person, service, project)
+  validFrom: String @indexed   # ISO timestamp — when this fact became true
+  validTo: String @indexed     # ISO timestamp — when this fact stopped being true (null = still valid)
   _safetyFlags: [String]       # content safety flags from scanContent()
+}
+
+# Explicit entity-to-entity relationships with temporal validity.
+# Enables queries like "who was team lead in Q1?" or "what changed about X on date Y?"
+# Inspired by knowledge graph triples with time-bounded validity windows.
+type Relationship @table(database: "flair") {
+  id: ID @primaryKey
+  agentId: String! @indexed        # who created this relationship
+  subject: String! @indexed        # source entity (person, project, service)
+  predicate: String! @indexed      # relationship type (manages, owns, depends_on, etc.)
+  object: String! @indexed         # target entity
+  validFrom: String @indexed       # when this relationship became true
+  validTo: String @indexed         # when it ended (null = still active)
+  confidence: Float                # 0.0–1.0, how certain (1.0 = explicitly stated)
+  source: String                   # where this was learned (memory ID, conversation, etc.)
+  createdAt: String! @indexed
+  updatedAt: String
 }
 
 type Soul @table(database: "flair") {
