@@ -1397,6 +1397,156 @@ program
     console.log(`   Removed grant ID: ${grantId}`);
   });
 
+// ─── flair federation ────────────────────────────────────────────────────────
+
+const federation = program.command("federation").description("Manage federation (hub-and-spoke sync)");
+
+federation
+  .command("status")
+  .description("Show federation status and peer connections")
+  .option("--port <port>", "Harper HTTP port")
+  .action(async (opts) => {
+    try {
+      const instance = await api("GET", "/FederationInstance");
+      console.log(`Instance: ${instance.id} (${instance.role})`);
+      console.log(`Public key: ${instance.publicKey}`);
+      console.log(`Status: ${instance.status}`);
+      console.log();
+
+      const { peers } = await api("GET", "/FederationPeers");
+      if (peers.length === 0) {
+        console.log("No peers configured. Use 'flair federation pair' to connect to a hub.");
+      } else {
+        console.log(`${"Peer".padEnd(20)} ${"Role".padEnd(8)} ${"Status".padEnd(14)} ${"Last Sync".padEnd(22)} Relay`);
+        console.log("─".repeat(80));
+        for (const p of peers) {
+          const lastSync = p.lastSyncAt?.slice(0, 19) ?? "never";
+          console.log(`${p.id.padEnd(20)} ${(p.role ?? "—").padEnd(8)} ${(p.status ?? "—").padEnd(14)} ${lastSync.padEnd(22)} ${p.relayOnly ? "yes" : "no"}`);
+        }
+      }
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+federation
+  .command("pair <hub-url>")
+  .description("Pair this spoke with a hub instance")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (hubUrl: string, opts) => {
+    try {
+      const instance = await api("GET", "/FederationInstance");
+      console.log(`Local instance: ${instance.id} (${instance.role})`);
+
+      const res = await fetch(`${hubUrl}/FederationPair`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instanceId: instance.id,
+          publicKey: instance.publicKey,
+          role: "spoke",
+        }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.error(`Pairing failed: ${res.status} ${text}`);
+        process.exit(1);
+      }
+
+      const result = await res.json() as any;
+      console.log(`✅ Paired with hub: ${result.instance?.id ?? hubUrl}`);
+
+      // Record the hub as our peer locally
+      const opsPort = resolveOpsPort(opts);
+      const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+      if (adminPass) {
+        const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+        await fetch(`http://127.0.0.1:${opsPort}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({
+            operation: "upsert", database: "flair", table: "Peer",
+            records: [{
+              id: result.instance?.id ?? "hub",
+              publicKey: result.instance?.publicKey ?? "",
+              role: "hub", endpoint: hubUrl, status: "paired",
+              pairedAt: new Date().toISOString(),
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            }],
+          }),
+        });
+      }
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+federation
+  .command("sync")
+  .description("Push local changes to the hub")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (opts) => {
+    try {
+      const { peers } = await api("GET", "/FederationPeers");
+      const hub = peers.find((p: any) => p.role === "hub" && p.status !== "revoked");
+      if (!hub) {
+        console.error("No hub peer configured. Use 'flair federation pair' first.");
+        process.exit(1);
+      }
+
+      console.log(`Syncing to hub: ${hub.id}...`);
+      const since = hub.lastSyncAt ?? new Date(0).toISOString();
+      const opsPort = resolveOpsPort(opts);
+      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+      const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+      const tables = ["Memory", "Soul", "Agent", "Relationship"];
+      const records: any[] = [];
+      const instance = await api("GET", "/FederationInstance");
+
+      for (const table of tables) {
+        try {
+          const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: auth },
+            body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.${table} WHERE updatedAt > '${since}'` }),
+          });
+          if (res.ok) {
+            for (const row of await res.json() as any[]) {
+              records.push({ table, id: row.id, data: row, updatedAt: row.updatedAt ?? row.createdAt, originatorInstanceId: instance.id });
+            }
+          }
+        } catch {}
+      }
+
+      if (records.length === 0) { console.log("No changes since last sync."); return; }
+
+      const syncRes = await fetch(`${hub.endpoint ?? hub.id}/FederationSync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instanceId: instance.id, records, lamportClock: Date.now() }),
+      });
+
+      if (!syncRes.ok) {
+        console.error(`Sync failed: ${syncRes.status} ${await syncRes.text().catch(() => "")}`);
+        process.exit(1);
+      }
+
+      const result = await syncRes.json() as any;
+      console.log(`✅ Synced ${result.merged} records (${result.skipped} skipped) in ${result.durationMs}ms`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
 // ─── flair status ─────────────────────────────────────────────────────────────
 
 program
