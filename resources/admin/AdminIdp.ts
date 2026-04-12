@@ -1,5 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
-import { layout, htmlResponse } from "./layout.js";
+import { layout, htmlResponse, esc } from "./layout.js";
 
 /**
  * GET /AdminIdp — enterprise IdP configuration management.
@@ -27,9 +27,9 @@ export class AdminIdp extends Resource {
 
         tableRows += `
           <tr>
-            <td><strong>${cfg.name}</strong><br><small>${cfg.id}</small></td>
-            <td>${cfg.issuer}</td>
-            <td>${domain}</td>
+            <td><strong>${esc(cfg.name)}</strong><br><small>${esc(cfg.id)}</small></td>
+            <td>${esc(cfg.issuer)}</td>
+            <td>${esc(domain)}</td>
             <td>${jit}</td>
             <td>${status}</td>
           </tr>`;

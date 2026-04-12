@@ -1,5 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
-import { layout, htmlResponse } from "./layout.js";
+import { layout, htmlResponse, esc } from "./layout.js";
 
 /**
  * GET /AdminPrincipals — list all principals with kind, trust, status.
@@ -40,7 +40,7 @@ export class AdminPrincipals extends Resource {
 
         tableRows += `
           <tr>
-            <td><strong>${p.id}</strong><br><small>${p.displayName || p.name || ""}</small></td>
+            <td><strong>${esc(p.id)}</strong><br><small>${esc(p.displayName || p.name || "")}</small></td>
             <td>${kindBadge}</td>
             <td>${trustBadge}</td>
             <td>${statusBadge}</td>

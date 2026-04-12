@@ -1,5 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
-import { layout, htmlResponse } from "./layout.js";
+import { layout, htmlResponse, esc } from "./layout.js";
 
 /**
  * GET /AdminConnectors — OAuth clients and active sessions.
@@ -27,9 +27,9 @@ export class AdminConnectors extends Resource {
 
         tableRows += `
           <tr>
-            <td><strong>${c.name || "Unnamed"}</strong><br><small>${c.id}</small></td>
-            <td>${redirects || "—"}</td>
-            <td><span class="badge badge-gray">${source}</span></td>
+            <td><strong>${esc(c.name || "Unnamed")}</strong><br><small>${esc(c.id)}</small></td>
+            <td>${esc(redirects || "—")}</td>
+            <td><span class="badge badge-gray">${esc(source)}</span></td>
             <td>${created}</td>
           </tr>`;
       }

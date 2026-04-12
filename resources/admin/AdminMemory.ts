@@ -1,5 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
-import { layout, htmlResponse } from "./layout.js";
+import { layout, htmlResponse, esc } from "./layout.js";
 
 /**
  * GET /AdminMemory — browse and search memories.
@@ -53,10 +53,10 @@ export class AdminMemory extends Resource {
 
         tableRows += `
           <tr>
-            <td style="max-width:400px">${preview}</td>
+            <td style="max-width:400px">${esc(preview)}</td>
             <td>${durBadge}</td>
-            <td>${subjectStr}</td>
-            <td>${m.agentId ?? "—"}</td>
+            <td>${esc(subjectStr)}</td>
+            <td>${esc(m.agentId ?? "—")}</td>
             <td>${created} ${validity}</td>
           </tr>`;
       }
@@ -68,9 +68,9 @@ export class AdminMemory extends Resource {
 
       <div style="margin-bottom: 20px">
         <form method="GET" action="/AdminMemory" style="display:flex;gap:8px">
-          <input type="text" name="q" value="${query}" placeholder="Search memories..."
+          <input type="text" name="q" value="${esc(query)}" placeholder="Search memories..."
             style="flex:1;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:0.95em">
-          <input type="text" name="subject" value="${subject}" placeholder="Subject filter"
+          <input type="text" name="subject" value="${esc(subject)}" placeholder="Subject filter"
             style="width:150px;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:0.95em">
           <button type="submit" class="btn btn-primary">Search</button>
         </form>

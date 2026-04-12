@@ -5,6 +5,17 @@
 
 const VERSION = process.env.npm_package_version ?? "dev";
 
+/** Escape HTML special characters to prevent stored XSS. */
+export function esc(str: string | undefined | null): string {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 export function layout(title: string, content: string, activePage?: string): string {
   const nav = [
     { href: "/AdminDashboard", label: "Home", id: "home" },
