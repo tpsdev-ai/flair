@@ -5,15 +5,14 @@
  * Fallback: HarperDB (migration path from pre-keystore installs)
  *
  * Encryption key derived via HKDF from FLAIR_KEY_PASSPHRASE env var,
- * or a machine-specific default (hostname + username). Not high-security
- * but strictly better than plaintext in the database.
+ * or an auto-generated random passphrase stored at ~/.flair/keys/.passphrase
+ * (mode 0600). Never falls back to guessable data.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir, hostname, userInfo } from "node:os";
+import { homedir } from "node:os";
 import {
-  createHash,
   randomBytes,
   createCipheriv,
   createDecipheriv,
@@ -40,14 +39,47 @@ function keyPath(instanceId: string): string {
 }
 
 /**
+ * Path to the auto-generated passphrase file.
+ * Created on first keystore use if FLAIR_KEY_PASSPHRASE env var is not set.
+ */
+function passphrasePath(): string {
+  return join(keysDir(), ".passphrase");
+}
+
+/**
+ * Get or create the keystore passphrase.
+ * Priority: FLAIR_KEY_PASSPHRASE env var > auto-generated file.
+ * Never falls back to guessable data (hostname, username, etc.).
+ */
+function getPassphrase(): string {
+  // Explicit env var takes priority
+  if (process.env.FLAIR_KEY_PASSPHRASE) {
+    return process.env.FLAIR_KEY_PASSPHRASE;
+  }
+
+  const pp = passphrasePath();
+
+  // Read existing auto-generated passphrase
+  if (existsSync(pp)) {
+    return readFileSync(pp, "utf-8").trim();
+  }
+
+  // Generate a cryptographically random passphrase and persist it
+  const dir = keysDir();
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  const generated = randomBytes(32).toString("base64url");
+  writeFileSync(pp, generated, { mode: 0o600 });
+  return generated;
+}
+
+/**
  * Derive a 256-bit encryption key using HKDF.
- * Input keying material: FLAIR_KEY_PASSPHRASE env var, or hostname+username.
+ * Input keying material: FLAIR_KEY_PASSPHRASE env var, or auto-generated random passphrase.
  */
 function deriveKey(): Buffer {
-  const passphrase =
-    process.env.FLAIR_KEY_PASSPHRASE ??
-    `${hostname()}:${userInfo().username}:flair-keystore-default`;
-
+  const passphrase = getPassphrase();
   return Buffer.from(
     hkdfSync("sha256", passphrase, "flair-keystore-salt", "flair-key-encryption", 32),
   );

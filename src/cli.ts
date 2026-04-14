@@ -1481,10 +1481,16 @@ federation
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password")
   .option("--ops-port <port>", "Harper operations API port")
+  .option("--token <token>", "One-time pairing token from hub admin")
   .action(async (hubUrl: string, opts) => {
     try {
       const instance = await api("GET", "/FederationInstance");
       console.log(`Local instance: ${instance.id} (${instance.role})`);
+
+      if (!opts.token) {
+        console.error("Error: --token is required. Ask the hub admin to run 'flair federation token' and provide the token.");
+        process.exit(1);
+      }
 
       // Load secret key and sign the pairing request
       const secretKey = await loadInstanceSecretKey(instance.id, opts);
@@ -1492,6 +1498,7 @@ federation
         instanceId: instance.id,
         publicKey: instance.publicKey,
         role: "spoke",
+        pairingToken: opts.token,
       };
       const signedBody = signRequestBody(pairBody, secretKey);
 
@@ -1531,6 +1538,47 @@ federation
           }),
         });
       }
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+federation
+  .command("token")
+  .description("Generate a one-time pairing token (run on the hub)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--ttl <minutes>", "Token TTL in minutes (default: 60)", "60")
+  .action(async (opts) => {
+    try {
+      const { randomBytes } = await import("node:crypto");
+      const token = randomBytes(24).toString("base64url");
+      const ttlMinutes = parseInt(opts.ttl, 10) || 60;
+      const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+
+      const opsPort = resolveOpsPort(opts);
+      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+      const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+
+      await fetch(`http://127.0.0.1:${opsPort}/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: auth },
+        body: JSON.stringify({
+          operation: "upsert", database: "flair", table: "PairingToken",
+          records: [{
+            id: token,
+            createdAt: new Date().toISOString(),
+            expiresAt,
+          }],
+        }),
+      });
+
+      console.log(`Pairing token (expires in ${ttlMinutes}m):`);
+      console.log(`  ${token}`);
+      console.log(`\nGive this to the spoke admin to run:`);
+      console.log(`  flair federation pair <this-hub-url> --token ${token}`);
     } catch (err: any) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
