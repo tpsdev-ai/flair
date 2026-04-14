@@ -13,6 +13,8 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypto";
+import { keystore } from "./keystore.js";
+import { canonicalize, signBody } from "../resources/federation-crypto.js";
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
@@ -1397,6 +1399,49 @@ program
     console.log(`   Removed grant ID: ${grantId}`);
   });
 
+// ─── Federation signing helpers ──────────────────────────────────────────────
+
+/**
+ * Load the Ed25519 secret key for the local federation instance.
+ * Tries keystore first, then falls back to DB-stored seed (migration path).
+ */
+async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: string; opsPort?: string | number; port?: string | number }): Promise<Uint8Array> {
+  // Try keystore first
+  const seed = keystore.getPrivateKeySeed(instanceId);
+  if (seed) {
+    return nacl.sign.keyPair.fromSeed(seed).secretKey;
+  }
+
+  // Fallback: check DB for legacy _keySeed
+  const opsPort = resolveOpsPort(opts);
+  const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+  const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+  const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: auth },
+    body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.Instance WHERE id = '${instanceId}'` }),
+  });
+  if (res.ok) {
+    const rows = await res.json() as any[];
+    if (rows[0]?._keySeed) {
+      const seedFromDb = Buffer.from(rows[0]._keySeed, "base64url");
+      // Migrate to keystore
+      keystore.setPrivateKeySeed(instanceId, new Uint8Array(seedFromDb));
+      return nacl.sign.keyPair.fromSeed(new Uint8Array(seedFromDb)).secretKey;
+    }
+  }
+
+  throw new Error(`No private key found for instance ${instanceId}. Re-run 'flair federation status' to regenerate.`);
+}
+
+/**
+ * Sign a request body and return a new body with the signature field added.
+ */
+function signRequestBody(body: Record<string, any>, secretKey: Uint8Array): Record<string, any> {
+  const sig = signBody(body, secretKey);
+  return { ...body, signature: sig };
+}
+
 // ─── flair federation ────────────────────────────────────────────────────────
 
 const federation = program.command("federation").description("Manage federation (hub-and-spoke sync)");
@@ -1441,14 +1486,19 @@ federation
       const instance = await api("GET", "/FederationInstance");
       console.log(`Local instance: ${instance.id} (${instance.role})`);
 
+      // Load secret key and sign the pairing request
+      const secretKey = await loadInstanceSecretKey(instance.id, opts);
+      const pairBody: Record<string, any> = {
+        instanceId: instance.id,
+        publicKey: instance.publicKey,
+        role: "spoke",
+      };
+      const signedBody = signRequestBody(pairBody, secretKey);
+
       const res = await fetch(`${hubUrl}/FederationPair`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          instanceId: instance.id,
-          publicKey: instance.publicKey,
-          role: "spoke",
-        }),
+        body: JSON.stringify(signedBody),
       });
 
       if (!res.ok) {
@@ -1528,10 +1578,15 @@ federation
 
       if (records.length === 0) { console.log("No changes since last sync."); return; }
 
+      // Sign the sync request with our instance key
+      const secretKey = await loadInstanceSecretKey(instance.id, opts);
+      const syncBody: Record<string, any> = { instanceId: instance.id, records, lamportClock: Date.now() };
+      const signedSyncBody = signRequestBody(syncBody, secretKey);
+
       const syncRes = await fetch(`${hub.endpoint ?? hub.id}/FederationSync`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instanceId: instance.id, records, lamportClock: Date.now() }),
+        body: JSON.stringify(signedSyncBody),
       });
 
       if (!syncRes.ok) {

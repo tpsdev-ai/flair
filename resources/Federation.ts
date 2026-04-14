@@ -1,6 +1,10 @@
 import { Resource, databases } from "@harperfast/harper";
 import { createHash, randomBytes } from "node:crypto";
 import nacl from "tweetnacl";
+import { canonicalize, signBody, verifyBodySignature } from "./federation-crypto.js";
+
+// Re-export for consumers that import from Federation.ts
+export { canonicalize, signBody, verifyBodySignature };
 
 /**
  * Federation resource — hub-and-spoke sync for Flair instances.
@@ -102,9 +106,19 @@ export class FederationInstance extends Resource {
 
       await (databases as any).flair.Instance.put(instance);
 
-      // Store the private key seed (first 32 bytes of secretKey)
-      // In production this would go to keychain; for now it's in Harper data
-      // TODO: move to OS keychain per FLAIR-CLI spec
+      // Store private key seed in encrypted keystore (not in DB)
+      try {
+        const { keystore } = await import("../src/keystore.js");
+        const seed = kp.secretKey.slice(0, 32);
+        keystore.setPrivateKeySeed(id, seed);
+      } catch {
+        // Keystore unavailable (e.g. in test/restricted env) — log warning
+        console.warn("[federation] Could not store key seed in keystore — falling back to DB");
+        await (databases as any).flair.Instance.put({
+          ...instance,
+          _keySeed: Buffer.from(kp.secretKey.slice(0, 32)).toString("base64url"),
+        });
+      }
     }
 
     return {
@@ -124,11 +138,24 @@ export class FederationInstance extends Resource {
  */
 export class FederationPair extends Resource {
   async post(data: any) {
-    const { instanceId, publicKey, role, endpoint } = data || {};
+    const { instanceId, publicKey, role, endpoint, signature } = data || {};
 
     if (!instanceId || !publicKey) {
       return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), {
         status: 400, headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Verify signature — the pairing body must be signed with the private key
+    // corresponding to the publicKey in the body (proves key ownership).
+    if (!signature) {
+      return new Response(JSON.stringify({ error: "signature required — request must be signed" }), {
+        status: 401, headers: { "content-type": "application/json" },
+      });
+    }
+    if (!verifyBodySignature(data, publicKey)) {
+      return new Response(JSON.stringify({ error: "invalid signature — key ownership proof failed" }), {
+        status: 401, headers: { "content-type": "application/json" },
       });
     }
 
@@ -191,7 +218,7 @@ export class FederationPair extends Resource {
  */
 export class FederationSync extends Resource {
   async post(data: any) {
-    const { instanceId, records, lamportClock } = data || {};
+    const { instanceId, records, lamportClock, signature } = data || {};
 
     if (!instanceId || !Array.isArray(records)) {
       return new Response(JSON.stringify({ error: "instanceId and records[] required" }), {
@@ -204,6 +231,18 @@ export class FederationSync extends Resource {
     if (!peer || peer.status === "revoked") {
       return new Response(JSON.stringify({ error: "unknown or revoked peer" }), {
         status: 403, headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Verify request signature against peer's pinned public key
+    if (!signature) {
+      return new Response(JSON.stringify({ error: "signature required — sync requests must be signed" }), {
+        status: 401, headers: { "content-type": "application/json" },
+      });
+    }
+    if (!verifyBodySignature(data, peer.publicKey)) {
+      return new Response(JSON.stringify({ error: "invalid signature — request not from claimed peer" }), {
+        status: 401, headers: { "content-type": "application/json" },
       });
     }
 
