@@ -76,7 +76,7 @@ function decryptSeed(data: Buffer): Uint8Array {
   const iv = data.subarray(0, 12);
   const tag = data.subarray(12, 28);
   const ciphertext = data.subarray(28);
-  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  const decipher = createDecipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
   decipher.setAuthTag(tag);
   const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   return new Uint8Array(decrypted);
