@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.5.0 (2026-04-15)
+
+### 🚀 Features
+
+**Identity & Access Control**
+- **Principal model:** trust-tiered identity with human/agent kinds, credential management, admin controls (#208)
+- **OAuth 2.1 server:** authorization code flow with PKCE, dynamic client registration, token endpoint (#209)
+- **XAA (Enterprise-Managed Authorization):** IdP-based access control via jwt-bearer grant, supports Google Workspace, Azure AD/Entra, Okta/Auth0 (#211)
+- **Web admin UI:** server-rendered HTML pages for managing principals, connectors, IdPs, instance config, memory, and relationships (#212)
+
+**Memory**
+- **Temporal validity:** `validFrom`/`validTo` on memories with auto-close when superseded (#205)
+- **Relationship table:** entity-to-entity triples (subject/predicate/object) with temporal bounds and confidence (#205)
+- **Predictive bootstrap:** accepts `channel`, `surface`, `subjects` context signals to preload relevant memories and relationships (#206)
+- **Auto entity detection:** passive extraction of people, tools, projects from memory content during writes (#207)
+
+**Federation**
+- **Hub-and-spoke sync:** push/pull record synchronization between Flair instances (#213)
+- **Signed sync protocol:** Ed25519 request signatures on all federation operations, verified against pinned peer keys (#213)
+- **Encrypted keystore:** AES-256-GCM encrypted private key storage at `~/.flair/keys/`, auto-generated random passphrase (#213)
+- **Pairing tokens:** one-time tokens for peer registration, TTL-limited, single-use (#213)
+- **Originator enforcement:** spokes can only push records they originated, hubs can relay (#213)
+- **Timestamp ceiling:** rejects records with `updatedAt` >5 minutes in the future (#213)
+- **CLI:** `flair federation status`, `flair federation pair`, `flair federation sync`, `flair federation token` (#213)
+
+**Infrastructure**
+- **Harper 5.0.0 stable:** upgraded from beta.8, VM module loader fix for native plugin imports (#204)
+
+### 🐛 Bug Fixes
+- **Stored XSS in web admin:** all dynamic content escaped via `esc()` helper (#212)
+- **OAuth open redirect:** CSRF with arbitrary redirect_uri blocked (#209)
+- **JWT signature verification:** jose `jwtVerify` with proper algorithm pinning (#211)
+- **GCM auth tag length:** explicit `authTagLength: 16` on decipher for Semgrep compliance (#213)
+- **Keystore fail-closed:** refuses to create federation identity without secure key storage (#213)
+
+### 📖 Documentation
+- **CHANGELOG:** updated through 0.5.0
+
+### 🔧 Infrastructure
+- **9 CI checks per commit:** unit tests, integration tests, type check, dep audit, Semgrep SAST, CodeQL SAST, Socket supply chain, Docker from-scratch
+- **13 federation security tests:** canonicalization, sign/verify, tamper detection, keystore encryption
+
+### 📦 Packages
+- `@tpsdev-ai/flair` 0.5.0
+- `@tpsdev-ai/flair-client` 0.4.3
+- `@tpsdev-ai/flair-mcp` 0.4.4
+- `@tpsdev-ai/openclaw-flair` 0.4.1
+
+---
+
 ## 0.4.16 (2026-04-05)
 
 ### 🚀 Features
