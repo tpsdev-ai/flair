@@ -3200,4 +3200,20 @@ program
     }
   });
 
-await program.parseAsync();
+// Run CLI only when this is the entry point (not when imported for testing)
+if (import.meta.main) {
+  await program.parseAsync();
+}
+
+// ─── Exported for testing ─────────────────────────────────────────────────────
+export {
+  resolveKeyPath,
+  buildEd25519Auth,
+  readPortFromConfig,
+  resolveHttpPort,
+  resolveOpsPort,
+  signRequestBody,
+  b64,
+  b64url,
+  program,
+};
