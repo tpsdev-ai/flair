@@ -1,5 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
-import { layout, htmlResponse } from "./layout.js";
+import { layout, htmlResponse } from "./admin-layout.js";
 
 /**
  * GET /AdminDashboard — admin home page with system overview.
