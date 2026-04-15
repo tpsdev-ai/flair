@@ -21,8 +21,36 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { FlairClient } from "@tpsdev-ai/flair-client";
+import { FlairClient, FlairError } from "@tpsdev-ai/flair-client";
 import { z } from "zod";
+
+// ─── Error helpers ──────────────────────────────────────────────────────────
+
+function classifyError(err: unknown, flairUrl: string): string {
+  if (err instanceof FlairError) {
+    const { status, body } = err;
+    if (status === 400) return `validation_error: ${body}`;
+    if (status === 401 || status === 403) return `auth_error: ${body}`;
+    if (status === 413) return `payload_too_large: ${body}`;
+    if (status === 429) return "rate_limited — retry after a moment";
+    if (status >= 500) return `server_error (retriable): ${body}`;
+    return `http_error (${status}): ${body}`;
+  }
+  if (err instanceof Error) {
+    if (err.name.includes("Abort") || err.name.includes("Timeout")) {
+      return "timeout — the server took too long. This often happens with large content that requires embedding. Try shorter content or retry.";
+    }
+    if (err instanceof TypeError && err.message.includes("fetch")) {
+      return `connection_error (retriable): could not reach Flair at ${flairUrl}. Is it running?`;
+    }
+    return `unexpected_error: ${err.message}`;
+  }
+  return `unexpected_error: ${String(err)}`;
+}
+
+function errorResult(err: unknown, flairUrl: string) {
+  return { content: [{ type: "text" as const, text: classifyError(err, flairUrl) }], isError: true };
+}
 
 // ─── Client setup ────────────────────────────────────────────────────────────
 
@@ -55,19 +83,23 @@ server.tool(
     limit: z.coerce.number().optional().default(5).describe("Max results (default 5)"),
   },
   async ({ query, limit }) => {
-    const results = await flair.memory.search(query, { limit });
-    if (results.length === 0) {
-      return { content: [{ type: "text", text: "No relevant memories found." }] };
+    try {
+      const results = await flair.memory.search(query, { limit });
+      if (results.length === 0) {
+        return { content: [{ type: "text", text: "No relevant memories found." }] };
+      }
+      const text = results
+        .map((r, i) => {
+          const date = r.createdAt ? r.createdAt.slice(0, 10) : "";
+          const idStr = r.id ? `id:${r.id}` : "";
+          const meta = [date, r.type, idStr].filter(Boolean).join(", ");
+          return `${i + 1}. ${r.content}${meta ? ` (${meta})` : ""}`;
+        })
+        .join("\n");
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
     }
-    const text = results
-      .map((r, i) => {
-        const date = r.createdAt ? r.createdAt.slice(0, 10) : "";
-        const idStr = r.id ? `id:${r.id}` : "";
-        const meta = [date, r.type, idStr].filter(Boolean).join(", ");
-        return `${i + 1}. ${r.content}${meta ? ` (${meta})` : ""}`;
-      })
-      .join("\n");
-    return { content: [{ type: "text", text }] };
   },
 );
 
@@ -78,27 +110,42 @@ server.tool(
     content: z.string().describe("What to remember"),
     type: z.enum(["session", "lesson", "decision", "preference", "fact", "goal"]).optional().default("session"),
     durability: z.enum(["permanent", "persistent", "standard", "ephemeral"]).optional().default("standard")
-      .describe("permanent=inviolable, persistent=key decisions, standard=default, ephemeral=auto-expires 72h"),
-    tags: z.union([
-      z.array(z.string()),
-      z.string().transform(s => s.startsWith("[") ? JSON.parse(s) : s.split(",").map(t => t.trim()).filter(Boolean)),
-    ]).optional().describe("Optional tags — array or comma-separated string"),
+      .describe(
+        "permanent — inviolable facts, identity, explicit never-forget (e.g., 'my name is Nathan')\n" +
+        "persistent — key decisions and lessons to recall weeks later (e.g., 'PR review process')\n" +
+        "standard — default working memory, recent context (e.g., 'discussed auth flow today')\n" +
+        "ephemeral — scratch state, auto-expires 72h (e.g., 'currently debugging issue #42')",
+      ),
+    tags: z.array(z.string()).optional().describe("Array of tag strings"),
   },
   async ({ content, type, durability, tags }) => {
-    const result = await flair.memory.write(content, {
-      type: type as any,
-      durability: durability as any,
-      tags,
-      dedup: true,
-      dedupThreshold: 0.95,
-    });
-    // Check if dedup returned an existing memory (different ID than what we generated)
-    const generatedPrefix = `${agentId}-`;
-    const wasDeduped = result.id && !result.id.startsWith(generatedPrefix);
-    if (wasDeduped) {
-      return { content: [{ type: "text", text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}` }] };
+    try {
+      const result = await flair.memory.write(content, {
+        type: type as any,
+        durability: durability as any,
+        tags,
+        dedup: true,
+        dedupThreshold: 0.95,
+      });
+      // Check if dedup returned an existing memory (different ID than what we generated)
+      const generatedPrefix = `${agentId}-`;
+      const wasDeduped = result.id && !result.id.startsWith(generatedPrefix);
+      if (wasDeduped) {
+        return { content: [{ type: "text", text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}` }] };
+      }
+      const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
+      const tagStr = tags && tags.length > 0 ? tags.join(", ") : "none";
+      const text = [
+        `Memory stored (id: ${result.id})`,
+        `Preview: ${preview}`,
+        `Size: ${content.length} chars`,
+        `Tags: ${tagStr}`,
+        `Type: ${type}, Durability: ${durability}`,
+      ].join("\n");
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
     }
-    return { content: [{ type: "text", text: `Memory stored (id: ${result.id})` }] };
   },
 );
 
@@ -109,9 +156,13 @@ server.tool(
     id: z.string().describe("Memory ID"),
   },
   async ({ id }) => {
-    const mem = await flair.memory.get(id);
-    if (!mem) return { content: [{ type: "text", text: `Memory ${id} not found.` }] };
-    return { content: [{ type: "text", text: `${mem.content}\n\n(type: ${mem.type}, durability: ${mem.durability}, created: ${mem.createdAt})` }] };
+    try {
+      const mem = await flair.memory.get(id);
+      if (!mem) return { content: [{ type: "text", text: `Memory ${id} not found.` }] };
+      return { content: [{ type: "text", text: `${mem.content}\n\n(type: ${mem.type}, durability: ${mem.durability}, created: ${mem.createdAt})` }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
   },
 );
 
@@ -122,8 +173,12 @@ server.tool(
     id: z.string().describe("Memory ID to delete"),
   },
   async ({ id }) => {
-    await flair.memory.delete(id);
-    return { content: [{ type: "text", text: `Memory ${id} deleted.` }] };
+    try {
+      await flair.memory.delete(id);
+      return { content: [{ type: "text", text: `Memory ${id} deleted.` }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
   },
 );
 
@@ -138,11 +193,15 @@ server.tool(
     subjects: z.array(z.string()).optional().describe("Entity names to preload context for (e.g., ['flair', 'auth'])"),
   },
   async ({ maxTokens, currentTask, channel, surface, subjects }) => {
-    const result = await flair.bootstrap({ maxTokens, currentTask, channel, surface, subjects });
-    if (!result.context) {
-      return { content: [{ type: "text", text: "No context available." }] };
+    try {
+      const result = await flair.bootstrap({ maxTokens, currentTask, channel, surface, subjects });
+      if (!result.context) {
+        return { content: [{ type: "text", text: "No context available." }] };
+      }
+      return { content: [{ type: "text", text: result.context }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
     }
-    return { content: [{ type: "text", text: result.context }] };
   },
 );
 
@@ -154,8 +213,12 @@ server.tool(
     value: z.string().describe("Entry value — personality trait, project context, coding standards, etc."),
   },
   async ({ key, value }) => {
-    await flair.soul.set(key, value);
-    return { content: [{ type: "text", text: `Soul entry '${key}' set.` }] };
+    try {
+      await flair.soul.set(key, value);
+      return { content: [{ type: "text", text: `Soul entry '${key}' set.` }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
   },
 );
 
@@ -166,9 +229,13 @@ server.tool(
     key: z.string().describe("Entry key"),
   },
   async ({ key }) => {
-    const entry = await flair.soul.get(key);
-    if (!entry) return { content: [{ type: "text", text: `No soul entry for '${key}'.` }] };
-    return { content: [{ type: "text", text: entry.value }] };
+    try {
+      const entry = await flair.soul.get(key);
+      if (!entry) return { content: [{ type: "text", text: `No soul entry for '${key}'.` }] };
+      return { content: [{ type: "text", text: entry.value }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
   },
 );
 
