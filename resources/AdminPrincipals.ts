@@ -1,5 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
-import { layout, htmlResponse, esc } from "./layout.js";
+import { layout, htmlResponse, esc } from "./admin-layout.js";
 
 /**
  * GET /AdminPrincipals — list all principals with kind, trust, status.
