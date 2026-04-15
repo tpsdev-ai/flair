@@ -143,6 +143,10 @@ async function api(method: string, path: string, body?: any): Promise<any> {
   const token = process.env.FLAIR_TOKEN;
   if (token) {
     authHeader = `Bearer ${token}`;
+  } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
+    // Admin Basic auth — used by federation, backup, and other admin CLI commands
+    const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD!;
+    authHeader = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
   } else {
     // Extract agentId from body (POST/PUT) or URL query params (GET)
     let agentId = process.env.FLAIR_AGENT_ID || (body && typeof body === "object" ? body.agentId : undefined);

@@ -129,7 +129,10 @@ server.http(async (request: any, nextLayer: any) => {
     url.pathname === "/A2AAdapter" ||
     url.pathname === "/AgentCard" ||
     url.pathname.startsWith("/A2AAdapter/") ||
-    url.pathname.startsWith("/AgentCard/")
+    url.pathname.startsWith("/AgentCard/") ||
+    // Federation endpoints handle their own auth via Ed25519 body signatures
+    url.pathname === "/FederationPair" ||
+    url.pathname === "/FederationSync"
   ) return nextLayer(request);
 
   // Skip re-entry: if we already swapped auth to Basic, pass through
