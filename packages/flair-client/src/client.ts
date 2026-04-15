@@ -21,7 +21,7 @@ import type {
 } from "./types.js";
 
 const DEFAULT_URL = "http://localhost:19926";
-const DEFAULT_TIMEOUT = 10_000;
+const DEFAULT_TIMEOUT = 30_000;
 
 export class FlairClient {
   readonly url: string;
