@@ -377,6 +377,7 @@ export class FederationPeers extends Resource {
           id: p.id,
           role: p.role,
           status: p.status,
+          endpoint: p.endpoint,
           lastSyncAt: p.lastSyncAt,
           relayOnly: p.relayOnly,
           pairedAt: p.pairedAt,
