@@ -128,7 +128,14 @@ server.http(async (request: any, nextLayer: any) => {
     url.pathname.startsWith("/AgentCard/") ||
     // Federation endpoints handle their own auth via Ed25519 body signatures
     url.pathname === "/FederationPair" ||
-    url.pathname === "/FederationSync"
+    url.pathname === "/FederationSync" ||
+    // OAuth 2.1 public endpoints (spec requires no pre-auth)
+    url.pathname === "/OAuthRegister" ||
+    url.pathname === "/OAuthAuthorize" ||
+    url.pathname === "/OAuthToken" ||
+    url.pathname === "/OAuthRevoke" ||
+    url.pathname === "/.well-known/oauth-authorization-server" ||
+    url.pathname === "/OAuthMetadata"
   ) return nextLayer(request);
 
   // Skip re-entry: if we already swapped auth to Basic, pass through
