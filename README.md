@@ -64,11 +64,35 @@ Not all memories are equal:
 | `standard` | ✅ Allowed | None | Working memory (default) |
 | `ephemeral` | ✅ Allowed | 24h | Scratch space, temp context |
 
+### Temporal Validity
+Memories can be time-bounded with `validFrom` and `validTo` fields. Expired memories are excluded from search and bootstrap automatically — no manual cleanup.
+
+### Relationship Graph
+Entity-to-entity triples with temporal bounds. Model structured knowledge — "Flint works-with Anvil since 2024-01-01" — queryable alongside semantic memory.
+
 ### Real-Time Feeds
 Subscribe to memory or soul changes via WebSocket/SSE. Useful for dashboards, cross-agent sync, or audit trails.
 
 ### Multi-Agent
 One Flair instance serves any number of agents. Each agent has its own keys, memories, and soul. Agents can't read each other's data without explicit access grants.
+
+### OAuth 2.1 Authorization Server
+Built-in OAuth 2.1 server with PKCE, dynamic client registration, and a standards-compliant token endpoint. Agents and services can delegate auth to Flair without a separate IdP.
+
+### XAA (Enterprise-Managed Authorization)
+IdP integration for Google Workspace, Azure AD, and Okta. Bind agent identities to enterprise accounts — access follows your org's user lifecycle.
+
+### Web Admin
+Server-rendered admin UI for managing principals, connectors, IdPs, and instance configuration. No separate dashboard service.
+
+### Federation
+Hub-and-spoke sync between Flair instances using signed requests and pairing tokens. Originator enforcement prevents replay across federated nodes. Share memories across offices without giving any node raw access.
+
+### Predictive Bootstrap
+Context-signal-aware preloading. Bootstrap reads active project context, recent activity, and agent role to select the most relevant memories — not just the most recent ones.
+
+### Auto Entity Detection
+Passive extraction of entities from memory content on write. Entities are indexed automatically — no tagging required. Feeds the relationship graph without agent intervention.
 
 ## Quick Start
 
@@ -299,7 +323,7 @@ Integration tests spin up a real Harper instance on a random port, run the test 
 
 ### Test Coverage
 
-**212 tests** across 19 test files, covering 7 CI checks on every commit.
+**203+ unit tests** across 19 test files, covering 7 CI checks on every commit.
 
 | Category | Tests | What's covered |
 |----------|-------|----------------|
@@ -329,6 +353,14 @@ Flair is in active development and daily use. We dogfood it — the agents that 
 - ✅ Real-time feeds (WebSocket/SSE)
 - ✅ Agent-scoped data isolation
 - ✅ Cold start bootstrap with adaptive time window
+- ✅ Predictive bootstrap (context-signal-aware preloading)
+- ✅ Temporal validity (`validFrom`/`validTo` on memories)
+- ✅ Relationship graph (entity-to-entity triples with temporal bounds)
+- ✅ Auto entity detection (passive extraction from memory content)
+- ✅ OAuth 2.1 authorization server (PKCE, dynamic client registration, token endpoint)
+- ✅ XAA enterprise authorization (Google Workspace, Azure AD, Okta)
+- ✅ Web admin UI (principals, connectors, IdPs, instance config)
+- ✅ Federation (hub-and-spoke sync with signed requests and pairing tokens)
 - ✅ OpenClaw memory plugin
 - ✅ MCP server for Claude Code / Cursor / Windsurf
 - ✅ Lightweight client library (`@tpsdev-ai/flair-client`)

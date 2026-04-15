@@ -8,18 +8,16 @@ import { getEmbedding } from "./embeddings-provider.js";
 //
 // FLAIR_ADMIN_TOKEN env var is still accepted for backwards compat but
 // emits a deprecation warning on first use.
-let _adminPass: string | null = null;
+//
+// No permanent cache — env vars are read on every call. This is a no-op
+// performance-wise (env reads are fast) but means a process restart with a
+// different password works immediately without stale state.
 let _deprecationWarned = false;
 
-function getAdminPass(): string {
-  if (_adminPass) return _adminPass;
-
+function getAdminPass(): string | null {
   // Primary source: Harper's own admin password (set at startup via env)
   const primary = process.env.HDB_ADMIN_PASSWORD ?? process.env.FLAIR_ADMIN_PASSWORD;
-  if (primary) {
-    _adminPass = primary;
-    return _adminPass;
-  }
+  if (primary) return primary;
 
   // Backwards compat: FLAIR_ADMIN_TOKEN (deprecated — never write to disk)
   if (process.env.FLAIR_ADMIN_TOKEN) {
@@ -27,13 +25,11 @@ function getAdminPass(): string {
       console.warn("[auth] DEPRECATION: FLAIR_ADMIN_TOKEN is deprecated. Use HDB_ADMIN_PASSWORD instead.");
       _deprecationWarned = true;
     }
-    _adminPass = process.env.FLAIR_ADMIN_TOKEN;
-    return _adminPass;
+    return process.env.FLAIR_ADMIN_TOKEN;
   }
 
-  const msg = "[auth] FATAL: no admin password found. Set HDB_ADMIN_PASSWORD env var.";
-  console.error(msg);
-  throw new Error(msg);
+  // No admin password configured — return null and let callers fall through
+  return null;
 }
 
 const WINDOW_MS = 30_000;
@@ -147,7 +143,8 @@ server.http(async (request: any, nextLayer: any) => {
     try {
       const decoded = Buffer.from(header.slice(6), "base64").toString("utf-8");
       const [user, pass] = decoded.split(":");
-      if (user === "admin" && pass === getAdminPass()) {
+      const adminPass = getAdminPass();
+      if (adminPass !== null && user === "admin" && pass === adminPass) {
         // Mark as verified and set Harper user directly
         (request as any)._tpsAuthVerified = true;
         try {
@@ -209,12 +206,20 @@ server.http(async (request: any, nextLayer: any) => {
   // pipeline (passport) authenticates the request with full permissions including
   // HNSW vector search. This requires HDB_ADMIN_PASSWORD to be set.
   // NOTE: server.getUser() alone doesn't grant HNSW permissions in Harper v5.
-  try {
-    const superAuth = "Basic " + btoa("admin:" + getAdminPass());
-    request.headers.set("authorization", superAuth);
-    if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
-  } catch {
-    // No admin password — try server.getUser as fallback (limited permissions)
+  const adminPass = getAdminPass();
+  if (adminPass !== null) {
+    try {
+      const superAuth = "Basic " + btoa("admin:" + adminPass);
+      request.headers.set("authorization", superAuth);
+      if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
+    } catch {
+      // Header manipulation failed — fall back to getUser
+      try {
+        request.user = await (server as any).getUser("admin", null, request);
+      } catch {}
+    }
+  } else {
+    // No admin password configured — try server.getUser as fallback (limited permissions)
     try {
       request.user = await (server as any).getUser("admin", null, request);
     } catch {}
