@@ -56,7 +56,7 @@ type IdJagReplay @table(database: "flair") {
 }
 
 # Access + refresh tokens.
-type OAuthToken @table(database: "flair") @export {
+type OAuthToken @table(database: "flair") {
   id: ID @primaryKey                # token ID (internal reference)
   tokenHash: String! @indexed       # SHA-256 of actual token — never store raw
   tokenType: String! @indexed       # "access" | "refresh"
