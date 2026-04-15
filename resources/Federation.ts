@@ -111,13 +111,10 @@ export class FederationInstance extends Resource {
         const { keystore } = await import("../src/keystore.js");
         const seed = kp.secretKey.slice(0, 32);
         keystore.setPrivateKeySeed(id, seed);
-      } catch {
-        // Keystore unavailable (e.g. in test/restricted env) — log warning
-        console.warn("[federation] Could not store key seed in keystore — falling back to DB");
-        await (databases as any).flair.Instance.put({
-          ...instance,
-          _keySeed: Buffer.from(kp.secretKey.slice(0, 32)).toString("base64url"),
-        });
+      } catch (err) {
+        // Fail closed — never store plaintext keys in the database
+        console.error("[federation] FATAL: Could not store key seed in keystore. Federation identity not created.", err);
+        throw new Error("Keystore unavailable — cannot create federation identity without secure key storage");
       }
     }
 
