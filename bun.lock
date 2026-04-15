@@ -8,6 +8,7 @@
         "@harperfast/harper": "5.0.0",
         "commander": "14.0.3",
         "harper-fabric-embeddings": "0.2.2",
+        "jose": "^6.2.2",
         "tweetnacl": "1.0.3",
       },
       "devDependencies": {

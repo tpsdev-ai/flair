@@ -13,6 +13,8 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypto";
+import { keystore } from "./keystore.js";
+import { canonicalize, signBody } from "../resources/federation-crypto.js";
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
@@ -1395,6 +1397,257 @@ program
 
     console.log(`✅ Grant revoked: '${toAgent}' can no longer read '${fromAgent}'s memories`);
     console.log(`   Removed grant ID: ${grantId}`);
+  });
+
+// ─── Federation signing helpers ──────────────────────────────────────────────
+
+/**
+ * Load the Ed25519 secret key for the local federation instance.
+ * Tries keystore first, then falls back to DB-stored seed (migration path).
+ */
+async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: string; opsPort?: string | number; port?: string | number }): Promise<Uint8Array> {
+  // Try keystore first
+  const seed = keystore.getPrivateKeySeed(instanceId);
+  if (seed) {
+    return nacl.sign.keyPair.fromSeed(seed).secretKey;
+  }
+
+  // Fallback: check DB for legacy _keySeed
+  const opsPort = resolveOpsPort(opts);
+  const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+  const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+  const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: auth },
+    body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.Instance WHERE id = '${instanceId}'` }),
+  });
+  if (res.ok) {
+    const rows = await res.json() as any[];
+    if (rows[0]?._keySeed) {
+      const seedFromDb = Buffer.from(rows[0]._keySeed, "base64url");
+      // Migrate to keystore
+      keystore.setPrivateKeySeed(instanceId, new Uint8Array(seedFromDb));
+      return nacl.sign.keyPair.fromSeed(new Uint8Array(seedFromDb)).secretKey;
+    }
+  }
+
+  throw new Error(`No private key found for instance ${instanceId}. Re-run 'flair federation status' to regenerate.`);
+}
+
+/**
+ * Sign a request body and return a new body with the signature field added.
+ */
+function signRequestBody(body: Record<string, any>, secretKey: Uint8Array): Record<string, any> {
+  const sig = signBody(body, secretKey);
+  return { ...body, signature: sig };
+}
+
+// ─── flair federation ────────────────────────────────────────────────────────
+
+const federation = program.command("federation").description("Manage federation (hub-and-spoke sync)");
+
+federation
+  .command("status")
+  .description("Show federation status and peer connections")
+  .option("--port <port>", "Harper HTTP port")
+  .action(async (opts) => {
+    try {
+      const instance = await api("GET", "/FederationInstance");
+      console.log(`Instance: ${instance.id} (${instance.role})`);
+      console.log(`Public key: ${instance.publicKey}`);
+      console.log(`Status: ${instance.status}`);
+      console.log();
+
+      const { peers } = await api("GET", "/FederationPeers");
+      if (peers.length === 0) {
+        console.log("No peers configured. Use 'flair federation pair' to connect to a hub.");
+      } else {
+        console.log(`${"Peer".padEnd(20)} ${"Role".padEnd(8)} ${"Status".padEnd(14)} ${"Last Sync".padEnd(22)} Relay`);
+        console.log("─".repeat(80));
+        for (const p of peers) {
+          const lastSync = p.lastSyncAt?.slice(0, 19) ?? "never";
+          console.log(`${p.id.padEnd(20)} ${(p.role ?? "—").padEnd(8)} ${(p.status ?? "—").padEnd(14)} ${lastSync.padEnd(22)} ${p.relayOnly ? "yes" : "no"}`);
+        }
+      }
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+federation
+  .command("pair <hub-url>")
+  .description("Pair this spoke with a hub instance")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--token <token>", "One-time pairing token from hub admin")
+  .action(async (hubUrl: string, opts) => {
+    try {
+      const instance = await api("GET", "/FederationInstance");
+      console.log(`Local instance: ${instance.id} (${instance.role})`);
+
+      if (!opts.token) {
+        console.error("Error: --token is required. Ask the hub admin to run 'flair federation token' and provide the token.");
+        process.exit(1);
+      }
+
+      // Load secret key and sign the pairing request
+      const secretKey = await loadInstanceSecretKey(instance.id, opts);
+      const pairBody: Record<string, any> = {
+        instanceId: instance.id,
+        publicKey: instance.publicKey,
+        role: "spoke",
+        pairingToken: opts.token,
+      };
+      const signedBody = signRequestBody(pairBody, secretKey);
+
+      const res = await fetch(`${hubUrl}/FederationPair`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(signedBody),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.error(`Pairing failed: ${res.status} ${text}`);
+        process.exit(1);
+      }
+
+      const result = await res.json() as any;
+      console.log(`✅ Paired with hub: ${result.instance?.id ?? hubUrl}`);
+
+      // Record the hub as our peer locally
+      const opsPort = resolveOpsPort(opts);
+      const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+      if (adminPass) {
+        const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+        await fetch(`http://127.0.0.1:${opsPort}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({
+            operation: "upsert", database: "flair", table: "Peer",
+            records: [{
+              id: result.instance?.id ?? "hub",
+              publicKey: result.instance?.publicKey ?? "",
+              role: "hub", endpoint: hubUrl, status: "paired",
+              pairedAt: new Date().toISOString(),
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            }],
+          }),
+        });
+      }
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+federation
+  .command("token")
+  .description("Generate a one-time pairing token (run on the hub)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--ttl <minutes>", "Token TTL in minutes (default: 60)", "60")
+  .action(async (opts) => {
+    try {
+      const { randomBytes } = await import("node:crypto");
+      const token = randomBytes(24).toString("base64url");
+      const ttlMinutes = parseInt(opts.ttl, 10) || 60;
+      const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+
+      const opsPort = resolveOpsPort(opts);
+      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+      const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+
+      await fetch(`http://127.0.0.1:${opsPort}/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: auth },
+        body: JSON.stringify({
+          operation: "upsert", database: "flair", table: "PairingToken",
+          records: [{
+            id: token,
+            createdAt: new Date().toISOString(),
+            expiresAt,
+          }],
+        }),
+      });
+
+      console.log(`Pairing token (expires in ${ttlMinutes}m):`);
+      console.log(`  ${token}`);
+      console.log(`\nGive this to the spoke admin to run:`);
+      console.log(`  flair federation pair <this-hub-url> --token ${token}`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+federation
+  .command("sync")
+  .description("Push local changes to the hub")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .action(async (opts) => {
+    try {
+      const { peers } = await api("GET", "/FederationPeers");
+      const hub = peers.find((p: any) => p.role === "hub" && p.status !== "revoked");
+      if (!hub) {
+        console.error("No hub peer configured. Use 'flair federation pair' first.");
+        process.exit(1);
+      }
+
+      console.log(`Syncing to hub: ${hub.id}...`);
+      const since = hub.lastSyncAt ?? new Date(0).toISOString();
+      const opsPort = resolveOpsPort(opts);
+      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+      const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+      const tables = ["Memory", "Soul", "Agent", "Relationship"];
+      const records: any[] = [];
+      const instance = await api("GET", "/FederationInstance");
+
+      for (const table of tables) {
+        try {
+          const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: auth },
+            body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.${table} WHERE updatedAt > '${since}'` }),
+          });
+          if (res.ok) {
+            for (const row of await res.json() as any[]) {
+              records.push({ table, id: row.id, data: row, updatedAt: row.updatedAt ?? row.createdAt, originatorInstanceId: instance.id });
+            }
+          }
+        } catch {}
+      }
+
+      if (records.length === 0) { console.log("No changes since last sync."); return; }
+
+      // Sign the sync request with our instance key
+      const secretKey = await loadInstanceSecretKey(instance.id, opts);
+      const syncBody: Record<string, any> = { instanceId: instance.id, records, lamportClock: Date.now() };
+      const signedSyncBody = signRequestBody(syncBody, secretKey);
+
+      const syncRes = await fetch(`${hub.endpoint ?? hub.id}/FederationSync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(signedSyncBody),
+      });
+
+      if (!syncRes.ok) {
+        console.error(`Sync failed: ${syncRes.status} ${await syncRes.text().catch(() => "")}`);
+        process.exit(1);
+      }
+
+      const result = await syncRes.json() as any;
+      console.log(`✅ Synced ${result.merged} records (${result.skipped} skipped) in ${result.durationMs}ms`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
   });
 
 // ─── flair status ─────────────────────────────────────────────────────────────
