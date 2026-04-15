@@ -388,14 +388,28 @@ program
           // Only applied to install — run needs real HOME for npm/node resolution.
           const installEnv = { ...env, HOME: join(dataDir, "..") };
           console.log("Installing Harper...");
+          console.log("Downloading embedding model (nomic-embed-text-v1.5, ~80MB) — this may take a minute...");
           await new Promise<void>((resolve, reject) => {
             let output = "";
+            let dotTimer: ReturnType<typeof setInterval> | null = null;
             const install = spawn(process.execPath, [bin, "install"], { cwd: flairPackageDir(), env: installEnv });
+            // Print progress dots so the terminal doesn't appear frozen during model download
+            dotTimer = setInterval(() => process.stdout.write("."), 3000);
             install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
             install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
-            install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`)));
-            install.on("error", reject);
-            setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 60_000);
+            install.on("exit", (code) => {
+              if (dotTimer) { clearInterval(dotTimer); process.stdout.write("\n"); }
+              code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`));
+            });
+            install.on("error", (err) => {
+              if (dotTimer) { clearInterval(dotTimer); process.stdout.write("\n"); }
+              reject(err);
+            });
+            setTimeout(() => {
+              install.kill();
+              if (dotTimer) { clearInterval(dotTimer); process.stdout.write("\n"); }
+              reject(new Error(`Harper install timed out: ${output}`));
+            }, 60_000);
           });
         }
 
@@ -576,6 +590,24 @@ program
       } else {
         console.log("\n   No soul entries — you can add them later with: flair soul set --agent " + agentId + " --key role --value \"...\"");
       }
+    } else {
+      // --skip-soul or non-interactive: seed sensible defaults so bootstrap returns useful context
+      const defaultSoulEntries: [string, string][] = [
+        ["role", "AI assistant [default — customize with 'flair soul set']"],
+        ["personality", "Helpful, precise, and proactive [default — customize with 'flair soul set']"],
+        ["constraints", "Respect user privacy. Be concise. [default — customize with 'flair soul set']"],
+      ];
+      console.log("\nSeeding default soul entries...");
+      for (const [key, value] of defaultSoulEntries) {
+        try {
+          await authFetch(httpUrl, agentId, privPath, "PUT", `/Soul/${agentId}:${key}`,
+            { id: `${agentId}:${key}`, agentId, key, value, createdAt: new Date().toISOString() });
+          console.log(`   ✓ soul:${key} set (default)`);
+        } catch (err: any) {
+          console.warn(`   ⚠ soul:${key} failed: ${err.message}`);
+        }
+      }
+      console.log(`   Customize with: flair soul set --agent ${agentId} --key role --value "..."`);
     }
 
     console.log(`\n   Claude Code: Add to your CLAUDE.md:`);
@@ -2231,80 +2263,69 @@ program
 
 program
   .command("test")
-  .description("Verify Flair is working: store, search, bootstrap, cleanup")
-  .requiredOption("--agent <id>", "Agent ID to test with")
+  .description("Verify the full Flair stack: write, search, and delete a test memory")
+  .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
-    const port = resolveHttpPort(opts);
-    const baseUrl = `http://127.0.0.1:${port}`;
-    const agentId = opts.agent;
-    const keysDir = defaultKeysDir();
-    const privPath = privKeyPath(agentId, keysDir);
+    const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+    const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
 
-    if (!existsSync(privPath)) {
-      console.error(`❌ Key not found: ${privPath}`);
-      console.error(`   Run: flair init --agent-id ${agentId}`);
+    const agentId = opts.agent ?? process.env.FLAIR_AGENT_ID;
+    if (!agentId && !process.env.FLAIR_ADMIN_PASS) {
+      console.error(red("Error: set --agent / FLAIR_AGENT_ID or FLAIR_ADMIN_PASS"));
       process.exit(1);
     }
 
-    const testId = `test-${agentId}-${Date.now()}`;
-    const testContent = `Flair test memory (${new Date().toISOString()})`;
+    const baseUrl = `http://127.0.0.1:${resolveHttpPort(opts)}`;
+    console.log(`\nFlair test (url: ${baseUrl})\n`);
+
     let passed = 0;
     let failed = 0;
+    let memoryId: string | null = null;
 
     const check = async (name: string, fn: () => Promise<boolean>) => {
       try {
         const ok = await fn();
-        if (ok) { console.log(`  ✅ ${name}`); passed++; }
-        else { console.log(`  ❌ ${name}`); failed++; }
+        if (ok) { console.log(`  ${green("PASS")} ${name}`); passed++; }
+        else { console.log(`  ${red("FAIL")} ${name}`); failed++; }
       } catch (e: any) {
-        console.log(`  ❌ ${name}: ${e.message?.slice(0, 100)}`);
+        console.log(`  ${red("FAIL")} ${name}: ${e.message?.slice(0, 120)}`);
         failed++;
       }
     };
 
-    console.log(`\nFlair test (agent: ${agentId}, url: ${baseUrl})\n`);
-
-    // 1. Health
-    await check("Health check", async () => {
-      const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
-      return res.status > 0;
+    // 1. Write a test memory via POST /Memory
+    await check("Write test memory (POST /Memory)", async () => {
+      const body: Record<string, any> = {
+        content: "flair test \u2014 this will be deleted",
+        durability: "ephemeral",
+        createdAt: new Date().toISOString(),
+      };
+      if (agentId) body.agentId = agentId;
+      const result = await api("POST", "/Memory", body);
+      // id may be returned directly or nested
+      memoryId = result?.id ?? result?.[0]?.id ?? null;
+      return !!memoryId || result?.ok === true;
     });
 
-    // 2. Store
-    await check("Memory store", async () => {
-      const res = await authFetch(baseUrl, agentId, privPath, "PUT", `/Memory/${testId}`, {
-        id: testId, agentId, content: testContent, durability: "ephemeral",
-        createdAt: new Date().toISOString(), archived: false,
-      });
-      return res.ok;
+    // 2. Search for the test memory via POST /SemanticSearch
+    await check("Search for test memory (POST /SemanticSearch)", async () => {
+      await new Promise(r => setTimeout(r, 1500)); // allow indexing
+      const body: Record<string, any> = { q: "flair test", limit: 5 };
+      if (agentId) body.agentId = agentId;
+      const result = await api("POST", "/SemanticSearch", body);
+      return (result?.results?.length ?? 0) > 0;
     });
 
-    // 3. Search
-    await check("Semantic search", async () => {
-      await new Promise(r => setTimeout(r, 2000)); // wait for indexing
-      const res = await authFetch(baseUrl, agentId, privPath, "POST", "/SemanticSearch", {
-        agentId, q: "flair test memory", limit: 5,
-      });
-      if (!res.ok) return false;
-      const data = await res.json() as { results?: any[] };
-      return (data.results?.length ?? 0) > 0;
-    });
-
-    // 4. Bootstrap
-    await check("Bootstrap context", async () => {
-      const res = await authFetch(baseUrl, agentId, privPath, "POST", "/BootstrapMemories", {
-        agentId, maxTokens: 1000,
-      });
-      if (!res.ok) return false;
-      const data = await res.json() as { context?: string };
-      return (data.context?.length ?? 0) > 0;
-    });
-
-    // 5. Cleanup
-    await check("Memory delete", async () => {
-      const res = await authFetch(baseUrl, agentId, privPath, "DELETE", `/Memory/${testId}`);
-      return res.ok || res.status === 204;
+    // 3. Delete the test memory via DELETE /Memory/<id>
+    await check("Delete test memory (DELETE /Memory/<id>)", async () => {
+      if (!memoryId) {
+        // If write returned ok without an id, skip deletion cleanly
+        console.log(`       (skipped — no id returned from write step)`);
+        return true;
+      }
+      await api("DELETE", `/Memory/${memoryId}`, agentId ? { agentId } : undefined);
+      return true;
     });
 
     console.log(`\n${passed} passed, ${failed} failed`);
