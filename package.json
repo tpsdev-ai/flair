@@ -36,6 +36,8 @@
     "SECURITY.md"
   ],
   "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prebuild": "npm run clean",
     "build": "tsc -p tsconfig.json --noCheck",
     "build:cli": "tsc -p tsconfig.cli.json --noCheck",
     "prepublishOnly": "npm run build && npm run build:cli",
