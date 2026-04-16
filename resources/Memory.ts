@@ -147,11 +147,22 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async put(content: any) {
-    // Reindex migration bypass: admin-driven repair walks re-PUT each existing
-    // record to populate secondary indices left empty by an incomplete Harper
-    // index backfill. The caller passes _reindex=true to preserve every field
-    // byte-for-byte (no updatedAt bump, no embedding regen, no safety rescan).
+    // Reindex migration bypass: admin-only escape hatch used by the
+    // MemoryReindex admin endpoint to re-PUT each existing record byte-for-byte
+    // (no updatedAt bump, no embedding regen, no safety rescan) so Harper
+    // repopulates secondary indices. Because this skips content safety and
+    // auditability, it must be gated to admins. Internal calls (no auth
+    // context) pass through, matching the pattern used in delete().
     if (content._reindex === true) {
+      const ctx = (this as any).getContext?.();
+      const request = ctx?.request ?? ctx;
+      const actorId = request?.tpsAgent;
+      if (actorId && !(await isAdmin(actorId))) {
+        return new Response(JSON.stringify({ error: "reindex_admin_only" }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       delete content._reindex;
       return super.put(content);
     }
