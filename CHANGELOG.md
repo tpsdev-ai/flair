@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 (2026-04-16)
+
+### 🐛 Bug Fixes
+- **`flair status` auth:** retries with admin credentials when Harper returns 401 (`authorizeLocal: true` instances)
+- **CI:** Docker image updated to Harper 5.0.0 stable, native embedding binary + model pre-installed, `continue-on-error` removed
+
+---
+
 ## 0.5.0 (2026-04-15)
 
 ### 🚀 Features
