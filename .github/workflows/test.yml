@@ -19,6 +19,14 @@ jobs:
             grep 'file:' package.json
             exit 1
           fi
+      - name: "Check for compiled artifacts in resources/"
+        run: |
+          JS_FILES=$(find resources -name '*.js' -not -path 'resources/node_modules/*' 2>/dev/null)
+          if [ -n "$JS_FILES" ]; then
+            echo "ERROR: compiled .js files found in resources/ — these should not be committed"
+            echo "$JS_FILES"
+            exit 1
+          fi
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
