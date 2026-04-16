@@ -40,6 +40,7 @@
     "build:cli": "tsc -p tsconfig.cli.json --noCheck",
     "prepublishOnly": "npm run build && npm run build:cli",
     "test": "bun test",
+    "test:e2e": "playwright test",
     "release": "./scripts/release.sh"
   },
   "publishConfig": {
@@ -56,6 +57,7 @@
     "tweetnacl": "1.0.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@types/node": "24.11.0",
     "bun-types": "1.3.11",
     "typescript": "5.9.3"
