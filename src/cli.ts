@@ -1686,6 +1686,224 @@ federation
     }
   });
 
+// ─── flair rem ───────────────────────────────────────────────────────────────
+// Memory hygiene and reflection: light (NREM), rapid (REM), restorative (deep).
+
+const rem = program.command("rem").description("Memory hygiene and reflection");
+
+rem
+  .command("light")
+  .description("NREM — quick cleanup: delete expired, archive old, consolidate candidates")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--agent <id>", "Agent ID (or FLAIR_AGENT_ID env)")
+  .option("--dry-run", "Preview changes without applying them")
+  .action(async (opts) => {
+    const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+    const dryRun = !!opts.dryRun;
+
+    console.log(`\n-- rem light${dryRun ? " (dry run)" : ""} --`);
+    if (agentId) console.log(`Agent: ${agentId}`);
+
+    try {
+      // Step 1: Maintenance — expire + archive
+      const maint = await api("POST", "/MemoryMaintenance", {
+        ...(agentId ? { agentId } : {}),
+        dryRun,
+      });
+
+      if (maint.error) {
+        console.error(`Maintenance error: ${maint.error}`);
+        process.exit(1);
+      }
+
+      const s = maint.stats ?? {};
+      console.log("\nCleanup");
+      console.log(`  Expired (deleted): ${s.expired ?? 0}`);
+      console.log(`  Archived (soft):   ${s.archived ?? 0}`);
+      console.log(`  Total scanned:     ${s.total ?? 0}`);
+      if (s.errors) console.log(`  Errors:            ${s.errors}`);
+
+      // Step 2: Consolidation candidates
+      if (!agentId) {
+        console.log("\nConsolidation skipped — no agent ID (pass --agent or set FLAIR_AGENT_ID)");
+        return;
+      }
+
+      const consol = await api("POST", "/ConsolidateMemories", {
+        agentId,
+        scope: "all",
+      });
+
+      if (consol.error) {
+        console.error(`Consolidation error: ${consol.error}`);
+        process.exit(1);
+      }
+
+      const candidates = consol.candidates ?? [];
+      const promote = candidates.filter((c: any) => c.suggestion === "promote");
+      const archive = candidates.filter((c: any) => c.suggestion === "archive");
+
+      console.log("\nConsolidation candidates");
+      console.log(`  Promote: ${promote.length}`);
+      console.log(`  Archive: ${archive.length}`);
+
+      if (promote.length > 0) {
+        console.log("\n  Promote:");
+        for (const c of promote) {
+          console.log(`    [${c.memory?.id ?? "?"}] ${c.reason}`);
+        }
+      }
+      if (archive.length > 0) {
+        console.log("\n  Archive:");
+        for (const c of archive) {
+          console.log(`    [${c.memory?.id ?? "?"}] ${c.reason}`);
+        }
+      }
+
+      console.log(`\nDone.${dryRun ? " No changes applied (dry run)." : ""}`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+rem
+  .command("rapid")
+  .description("REM — reflection/learning: generate a structured LLM reflection prompt")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--agent <id>", "Agent ID (or FLAIR_AGENT_ID env)")
+  .option("--focus <type>", "lessons_learned | patterns | decisions | errors", "lessons_learned")
+  .option("--since <date>", "ISO timestamp lower bound (default: 24h ago)")
+  .action(async (opts) => {
+    const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+    if (!agentId) {
+      console.error("Error: --agent <id> or FLAIR_AGENT_ID env required");
+      process.exit(1);
+    }
+
+    console.log(`\n-- rem rapid --`);
+    console.log(`Agent: ${agentId}  Focus: ${opts.focus}`);
+
+    try {
+      const body: Record<string, any> = {
+        agentId,
+        focus: opts.focus,
+      };
+      if (opts.since) body.since = opts.since;
+
+      const result = await api("POST", "/ReflectMemories", body);
+
+      if (result.error) {
+        console.error(`Reflection error: ${result.error}`);
+        process.exit(1);
+      }
+
+      console.log(`\nSource memories: ${result.count ?? 0}`);
+      if (result.suggestedTags?.length) {
+        console.log(`Tags: ${result.suggestedTags.join(", ")}`);
+      }
+
+      console.log("\n--- Reflection Prompt ---");
+      console.log(result.prompt ?? "(no prompt returned)");
+      console.log("--- End Prompt ---\n");
+      console.log("Feed the prompt above to your LLM, then write insights back with:");
+      console.log("  flair memory add --agent <id> --content <insight> --durability persistent");
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+rem
+  .command("restorative")
+  .description("Deep audit: full maintenance + consolidation (olderThan=7d) + reflection")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--agent <id>", "Agent ID (or FLAIR_AGENT_ID env)")
+  .option("--dry-run", "Preview maintenance changes without applying them")
+  .action(async (opts) => {
+    const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+    const dryRun = !!opts.dryRun;
+
+    console.log(`\n== rem restorative${dryRun ? " (dry run)" : ""} ==`);
+    if (agentId) console.log(`Agent: ${agentId}`);
+
+    try {
+      // Step 1: Maintenance
+      console.log("\n[1/3] Maintenance...");
+      const maint = await api("POST", "/MemoryMaintenance", {
+        ...(agentId ? { agentId } : {}),
+        dryRun,
+      });
+
+      if (maint.error) {
+        console.error(`Maintenance error: ${maint.error}`);
+        process.exit(1);
+      }
+
+      const s = maint.stats ?? {};
+      console.log(`  Expired: ${s.expired ?? 0}  Archived: ${s.archived ?? 0}  Scanned: ${s.total ?? 0}${s.errors ? `  Errors: ${s.errors}` : ""}`);
+
+      // Step 2: Consolidation (skip if no agentId)
+      if (agentId) {
+        console.log("\n[2/3] Consolidation (scope=all, olderThan=7d)...");
+        const consol = await api("POST", "/ConsolidateMemories", {
+          agentId,
+          scope: "all",
+          olderThan: "7d",
+        });
+
+        if (consol.error) {
+          console.error(`Consolidation error: ${consol.error}`);
+          process.exit(1);
+        }
+
+        const candidates = consol.candidates ?? [];
+        const promote = candidates.filter((c: any) => c.suggestion === "promote");
+        const archive = candidates.filter((c: any) => c.suggestion === "archive");
+
+        console.log(`  Promote candidates: ${promote.length}  Archive candidates: ${archive.length}`);
+        for (const c of promote) {
+          console.log(`    promote [${c.memory?.id ?? "?"}] ${c.reason}`);
+        }
+        for (const c of archive) {
+          console.log(`    archive [${c.memory?.id ?? "?"}] ${c.reason}`);
+        }
+      } else {
+        console.log("\n[2/3] Consolidation skipped — no agent ID");
+      }
+
+      // Step 3: Reflection
+      if (agentId) {
+        console.log("\n[3/3] Reflection (scope=all)...");
+        const reflect = await api("POST", "/ReflectMemories", {
+          agentId,
+          scope: "all",
+        });
+
+        if (reflect.error) {
+          console.error(`Reflection error: ${reflect.error}`);
+          process.exit(1);
+        }
+
+        console.log(`  Source memories: ${reflect.count ?? 0}`);
+        if (reflect.suggestedTags?.length) {
+          console.log(`  Tags: ${reflect.suggestedTags.join(", ")}`);
+        }
+
+        console.log("\n--- Reflection Prompt ---");
+        console.log(reflect.prompt ?? "(no prompt returned)");
+        console.log("--- End Prompt ---");
+      } else {
+        console.log("\n[3/3] Reflection skipped — no agent ID");
+      }
+
+      console.log(`\nRestorative cycle complete.${dryRun ? " No changes applied (dry run)." : ""}`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
 // ─── flair status ─────────────────────────────────────────────────────────────
 
 program
