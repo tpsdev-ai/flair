@@ -103,6 +103,11 @@ jobs:
         env:
           FLAIR_PORT: "9926"
           FLAIR_ADMIN_PASS: admin123
+      - name: Playwright E2E tests
+        run: bunx playwright test
+        env:
+          FLAIR_URL: http://localhost:9926
+          FLAIR_ADMIN_PASS: admin123
 
   typecheck:
     name: Type Check
