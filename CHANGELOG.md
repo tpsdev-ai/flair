@@ -44,9 +44,9 @@
 
 ### 📦 Packages
 - `@tpsdev-ai/flair` 0.5.0
-- `@tpsdev-ai/flair-client` 0.4.3
-- `@tpsdev-ai/flair-mcp` 0.4.4
-- `@tpsdev-ai/openclaw-flair` 0.4.1
+- `@tpsdev-ai/flair-client` 0.5.0
+- `@tpsdev-ai/flair-mcp` 0.5.0
+- `@tpsdev-ai/openclaw-flair` 0.5.0
 
 ---
 
