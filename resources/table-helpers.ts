@@ -39,8 +39,31 @@ export function patchRecordSilent(
 // Always use patchRecord() or patchRecordSilent().
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── RULE ──────────────────────────────────────────────────────────────────────
-// Never call `tables.X.put(partial)` directly anywhere in Flair resources.
-// Harper put() = FULL RECORD REPLACEMENT. Missing fields are deleted permanently.
-// Always use patchRecord() or patchRecordSilent().
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Detach ctx.transaction while `fn` runs, then restore.
+ *
+ * Why: when a request does two table reads in sequence (e.g. MemoryGrant.search
+ * then Memory.search), the first generator drains and leaves its transaction
+ * CLOSED at the tail of ctx.transaction's linked chain. Harper's txnForContext
+ * (Table.js ~3633) walks that chain when opening a transaction for the second
+ * table and inherits the CLOSED state onto the fresh transaction — which then
+ * silently reads zero rows.
+ *
+ * Clearing ctx.transaction forces Harper to build a brand-new ImmediateTransaction
+ * for the inner call. Table.search captures that transaction synchronously into
+ * its result generator's closure, so the saved chain can be restored immediately
+ * without affecting the streaming read.
+ *
+ * Use this whenever a resource method reads one table, then reads another in
+ * the same request context.
+ */
+export function withDetachedTxn<T>(ctx: any, fn: () => T): T {
+  if (!ctx) return fn();
+  const saved = ctx.transaction;
+  ctx.transaction = undefined;
+  try {
+    return fn();
+  } finally {
+    ctx.transaction = saved;
+  }
+}
