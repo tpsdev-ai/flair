@@ -1,5 +1,5 @@
 import { databases } from "@harperfast/harper";
-import { patchRecord } from "./table-helpers.js";
+import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanContent, isStrictMode } from "./content-safety.js";
@@ -45,21 +45,30 @@ export class Memory extends (databases as any).flair.Memory {
       ? { attribute: "agentId", comparator: "equals", value: allowedOwners[0] }
       : { conditions: allowedOwners.map(id => ({ attribute: "agentId", comparator: "equals", value: id })), operator: "or" };
 
-    // Harper passes `query` as a RequestTarget (extends URLSearchParams) with pathname, id, etc.
-    // Table.search() reads `target.conditions` from it. We inject our scope condition there.
+    // Harper passes `query` as a RequestTarget (extends URLSearchParams). Table.search()
+    // reads `target.conditions`; when that is unset, it iterates URLSearchParams entries
+    // as conditions instead. We inject our scope condition into `.conditions`, which
+    // means URL params (except agentId, which we always enforce) must also be translated
+    // to conditions or they'll be silently dropped.
     if (query && typeof query === "object" && !Array.isArray(query)) {
-      const existing = query.conditions ?? [];
-      query.conditions = Array.isArray(existing)
-        ? [agentIdCondition, ...existing]
-        : [agentIdCondition, existing];
-      return super.search(query);
+      const existing: any[] = [];
+      if (Array.isArray(query.conditions) && query.conditions.length > 0) {
+        existing.push(...query.conditions);
+      } else if (typeof (query as any).entries === "function") {
+        for (const [k, v] of (query as any).entries()) {
+          if (k === "agentId") continue;
+          existing.push({ attribute: k, comparator: "equals", value: v });
+        }
+      }
+      query.conditions = [agentIdCondition, ...existing];
+      return withDetachedTxn(ctx, () => super.search(query));
     }
 
     // Fallback: plain array or no query (internal calls)
     const conditions = Array.isArray(query) && query.length > 0
       ? [agentIdCondition, ...query]
       : [agentIdCondition];
-    return super.search(conditions);
+    return withDetachedTxn(ctx, () => super.search(conditions));
   }
 
   async post(content: any, context?: any) {
@@ -138,6 +147,15 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async put(content: any) {
+    // Reindex migration bypass: admin-driven repair walks re-PUT each existing
+    // record to populate secondary indices left empty by an incomplete Harper
+    // index backfill. The caller passes _reindex=true to preserve every field
+    // byte-for-byte (no updatedAt bump, no embedding regen, no safety rescan).
+    if (content._reindex === true) {
+      delete content._reindex;
+      return super.put(content);
+    }
+
     const now = new Date().toISOString();
     content.updatedAt = now;
     // Set defaults that post() sets — put() is also used for new records via CLI

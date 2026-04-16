@@ -1,6 +1,6 @@
 import { Resource, databases } from "@harperfast/harper";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
-import { patchRecord } from "./table-helpers.js";
+import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { wrapUntrusted } from "./content-safety.js";
 
@@ -189,7 +189,11 @@ export class SemanticSearch extends Resource {
         query.conditions = conditions;
       }
 
-      for await (const record of (databases as any).flair.Memory.search(query)) {
+      // MemoryGrant.search above left a closed transaction in ctx's chain —
+      // detach it so Harper builds a fresh transaction for this Memory read.
+      const ctx = (this as any).getContext?.();
+      const memoryResults = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(query));
+      for await (const record of memoryResults) {
         if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
         if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
         // Temporal validity: if asOf is specified, only include memories valid at that point
@@ -222,7 +226,11 @@ export class SemanticSearch extends Resource {
       // Full scan is only used when there's no query embedding (e.g. tag-only
       // or subject-only searches, or when the embedding engine is unavailable).
       const query: any = conditions.length > 0 ? { conditions } : {};
-      for await (const record of (databases as any).flair.Memory.search(query)) {
+      // MemoryGrant.search above left a closed transaction in ctx's chain —
+      // detach it so Harper builds a fresh transaction for this Memory read.
+      const ctx = (this as any).getContext?.();
+      const memoryResults = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(query));
+      for await (const record of memoryResults) {
         if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
         if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
         if (asOf && record.validFrom && record.validFrom > asOf) continue;
