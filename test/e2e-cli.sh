@@ -18,7 +18,7 @@ echo "=== E2E CLI Test ==="
 
 # Wait for Harper
 for i in $(seq 1 60); do
-  if curl -sf "http://localhost:${PORT}/Health" > /dev/null 2>&1; then
+  if curl -sf -u "admin:${ADMIN_PASS}" "http://localhost:${PORT}/Health" > /dev/null 2>&1; then
     echo "Harper ready (${i}s)"
     break
   fi

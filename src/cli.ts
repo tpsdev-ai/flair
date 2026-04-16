@@ -1701,9 +1701,19 @@ program
     let healthy = false;
     let healthData: any = null;
 
-    // 1. Basic health check (unauthenticated — just { ok: true })
+    // 1. Basic health check — try unauthenticated first, then with admin auth
     try {
-      const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
+      let res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok && res.status === 401) {
+        // Harper requires auth (authorizeLocal: true) — retry with admin credentials
+        const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+        if (adminPass) {
+          res = await fetch(`${baseUrl}/Health`, {
+            headers: { Authorization: `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}` },
+            signal: AbortSignal.timeout(5000),
+          });
+        }
+      }
       healthy = res.ok;
     } catch { /* unreachable */ }
 
