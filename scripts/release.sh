@@ -181,8 +181,11 @@ echo "🔨 Building..."
 echo "  ✓ All packages built"
 
 # 5. Test
+# Scope matches CI's test job split: unit + integration under bun. Playwright
+# e2e specs live under test/e2e/ and fail to load under bun — they're run via
+# `bunx playwright test` against a live server in CI, not locally here.
 echo "🧪 Running tests..."
-(cd "$ROOT" && bun test) || { echo "❌ Tests failed"; exit 1; }
+(cd "$ROOT" && bun test test/unit/ test/integration/) || { echo "❌ Tests failed"; exit 1; }
 echo "  ✓ Tests passed"
 
 # 6. Commit version bump (explicit paths — no -A)
