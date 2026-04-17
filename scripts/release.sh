@@ -22,6 +22,15 @@ VERSION="${1:?Usage: release.sh <version> [--publish|--dry]}"
 MODE="${2:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# VERSION is interpolated into node -e heredocs and git/gh commands below.
+# Anchored semver-ish pattern: digits, dots, optional pre-release (-rc.1,
+# -alpha, etc.). Rejects quotes, backticks, semicolons — nothing that could
+# break out of the string literal in `pkg.version = '$VERSION';`.
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+  echo "❌ Invalid version: '$VERSION'. Expected semver (e.g. 0.5.6 or 1.0.0-rc.1)."
+  exit 1
+fi
+
 PACKAGES=(
   "$ROOT/packages/flair-client"
   "$ROOT/packages/flair-mcp"
