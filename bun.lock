@@ -23,14 +23,14 @@
     },
     "packages/flair-client": {
       "name": "@tpsdev-ai/flair-client",
-      "version": "0.5.0",
+      "version": "0.5.6",
       "devDependencies": {
         "typescript": "5.9.3",
       },
     },
     "packages/flair-mcp": {
       "name": "@tpsdev-ai/flair-mcp",
-      "version": "0.5.0",
+      "version": "0.5.6",
       "bin": {
         "flair-mcp": "dist/index.js",
       },
@@ -45,10 +45,10 @@
     },
     "plugins/openclaw-flair": {
       "name": "@tpsdev-ai/openclaw-flair",
-      "version": "0.5.0",
+      "version": "0.5.6",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.4.3",
+        "@tpsdev-ai/flair-client": "0.5.0",
       },
       "peerDependencies": {
         "openclaw": ">=2026.3.7",
@@ -1924,6 +1924,8 @@
     "@smithy/node-http-handler/@smithy/abort-controller": ["@smithy/abort-controller@4.2.12", "", { "dependencies": { "@smithy/types": "^4.13.1", "tslib": "^2.6.2" } }, "sha512-xolrFw6b+2iYGl6EcOL7IJY71vvyZ0DJ3mcKtpykqPe2uscwtzDZJa1uVQXyP7w9Dd+kGwYnPbMsJrGISKiY/Q=="],
 
     "@smithy/util-waiter/@smithy/abort-controller": ["@smithy/abort-controller@4.2.12", "", { "dependencies": { "@smithy/types": "^4.13.1", "tslib": "^2.6.2" } }, "sha512-xolrFw6b+2iYGl6EcOL7IJY71vvyZ0DJ3mcKtpykqPe2uscwtzDZJa1uVQXyP7w9Dd+kGwYnPbMsJrGISKiY/Q=="],
+
+    "@tpsdev-ai/openclaw-flair/@tpsdev-ai/flair-client": ["@tpsdev-ai/flair-client@0.5.0", "", {}, "sha512-ryCHIj3NuyP+wyMvFioLTrISE3kIuvAh4r3iV1uB7p6wDqKelCphuzR2cMbVffE5Vkg4QcAUXkJ/BkOa4Dvs1g=="],
 
     "@types/body-parser/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
 
