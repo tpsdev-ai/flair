@@ -268,7 +268,7 @@ async function authFetch(
 }
 
 async function waitForHealth(httpPort: number, adminUser: string, adminPass: string, timeoutMs: number): Promise<void> {
-  const url = `http://127.0.0.1:${httpPort}/health`;
+  const url = `http://127.0.0.1:${httpPort}/Health`;
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
   while (Date.now() < deadline) {
@@ -278,11 +278,37 @@ async function waitForHealth(httpPort: number, adminUser: string, adminPass: str
         headers: { Authorization: `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}` },
         signal: AbortSignal.timeout(2000),
       });
-      if (res.status > 0) return;
+      // 2xx = healthy; 401 = Harper up but credentials wrong — still "reachable"
+      // enough for restart success. Anything else (5xx, 502 during shutdown) keeps polling.
+      if (res.ok || res.status === 401) return;
     } catch { /* not ready yet */ }
     await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
   }
   throw new Error(`Harper at port ${httpPort} did not respond within ${timeoutMs}ms (${attempt} attempts)`);
+}
+
+// Blocks until the given PID is gone (ESRCH from signal 0), or timeout.
+// Used during restart to confirm the old Harper process actually exited before
+// we start polling /Health — otherwise the still-shutting-down old process can
+// answer and we'd declare restart success while a gap is still ahead.
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0); } catch { return; }
+    await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
+  }
+  throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms`);
+}
+
+function readHarperPid(dataDir: string): number | null {
+  const pidFile = join(dataDir, "hdb.pid");
+  if (!existsSync(pidFile)) return null;
+  try {
+    const n = Number(readFileSync(pidFile, "utf-8").trim());
+    return Number.isInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
 }
 
 async function seedAgentViaOpsApi(
@@ -2287,8 +2313,12 @@ program
           const { execSync } = await import("node:child_process");
           // Ensure the service is loaded (init writes the plist but doesn't load it)
           try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
-          // Stop the service — KeepAlive=true in the plist auto-restarts it
+          // Capture the current PID *before* stopping so we can verify exit. Without
+          // this, waitForHealth can race against the still-shutting-down old process
+          // and return success before KeepAlive brings the new one up.
+          const oldPid = readHarperPid(defaultDataDir());
           try { execSync(`launchctl stop ${label}`, { stdio: "pipe" }); } catch {}
+          if (oldPid) await waitForProcessExit(oldPid, STARTUP_TIMEOUT_MS);
           await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
           console.log("✅ Flair restarted");
           return;
