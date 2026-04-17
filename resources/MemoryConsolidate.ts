@@ -70,14 +70,24 @@ function evaluate(record: any, now: number, olderThanMs: number): Candidate {
 
 export class ConsolidateMemories extends Resource {
   async post(data: any) {
-    const { agentId, scope = "persistent", olderThan = "30d", limit = 20 } = data || {};
+    const { agentId: bodyAgentId, scope = "persistent", olderThan = "30d", limit = 20 } = data || {};
 
-    if (!agentId) return new Response(JSON.stringify({ error: "agentId required" }), { status: 400 });
+    // See SemanticSearch / MemoryBootstrap — `this.request` isn't populated on
+    // Harper v5 Resources, so the prior actorId check was silently bypassed
+    // and bob could enumerate alice's consolidation candidates (her memory records).
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
+    const actorId: string | undefined = request?.tpsAgent;
+    const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true
+      || (actorId ? await isAdmin(actorId) : false);
 
-    const actorId = (this as any).request?.tpsAgent;
-    if (actorId && actorId !== agentId && !(await isAdmin(actorId))) {
+    if (!bodyAgentId && !actorId) {
+      return new Response(JSON.stringify({ error: "agentId required" }), { status: 400 });
+    }
+    if (actorId && !callerIsAdmin && bodyAgentId && bodyAgentId !== actorId) {
       return new Response(JSON.stringify({ error: "forbidden: can only consolidate own memories" }), { status: 403 });
     }
+    const agentId: string = (actorId && !callerIsAdmin) ? actorId : bodyAgentId;
 
     const olderThanMs = parseDuration(olderThan);
     const now = Date.now();

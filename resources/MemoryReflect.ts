@@ -38,7 +38,7 @@ const FOCUS_PROMPTS: Record<string, string> = {
 export class ReflectMemories extends Resource {
   async post(data: any) {
     const {
-      agentId,
+      agentId: bodyAgentId,
       scope = "recent",
       since,
       maxMemories = 50,
@@ -46,13 +46,23 @@ export class ReflectMemories extends Resource {
       tag,
     } = data || {};
 
-    if (!agentId) return new Response(JSON.stringify({ error: "agentId required" }), { status: 400 });
+    // Authenticated identity comes from getContext().request, not this.request
+    // (see SemanticSearch / MemoryBootstrap for the same bug class). The prior
+    // check was silently bypassed — bob could reflect on alice's memories and
+    // mutate alice's records via the lastReflected patchRecordSilent below.
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
+    const actorId: string | undefined = request?.tpsAgent;
+    const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true
+      || (actorId ? await isAdmin(actorId) : false);
 
-    // Auth: agent can only reflect on own memories unless admin
-    const actorId = (this as any).request?.tpsAgent;
-    if (actorId && actorId !== agentId && !(await isAdmin(actorId))) {
+    if (!bodyAgentId && !actorId) {
+      return new Response(JSON.stringify({ error: "agentId required" }), { status: 400 });
+    }
+    if (actorId && !callerIsAdmin && bodyAgentId && bodyAgentId !== actorId) {
       return new Response(JSON.stringify({ error: "forbidden: can only reflect on own memories" }), { status: 403 });
     }
+    const agentId: string = (actorId && !callerIsAdmin) ? actorId : bodyAgentId;
 
     const sinceDate = since ? new Date(since) : new Date(Date.now() - 24 * 3600_000);
     const memories: any[] = [];

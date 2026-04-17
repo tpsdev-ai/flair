@@ -47,7 +47,7 @@ function formatMemory(m: any, supersedes?: boolean): string {
 export class BootstrapMemories extends Resource {
   async post(data: any, _context?: any) {
     const {
-      agentId,
+      agentId: bodyAgentId,
       currentTask,
       maxTokens = 4000,
       includeSoul = true,
@@ -57,21 +57,34 @@ export class BootstrapMemories extends Resource {
       subjects,    // e.g., ["flair", "auth"] — entities to preload context for
     } = data || {};
 
-    if (!agentId) {
+    // Authenticated identity lives on getContext().request — `this.request` is
+    // NOT populated on Harper v5 Resources. Reading it returned undefined and
+    // the scope check was silently bypassed, letting a non-admin agent read
+    // another agent's soul + memories by passing the victim's id in the body.
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
+    const authenticatedAgent: string | undefined =
+      request?.tpsAgent ?? request?.headers?.get?.("x-tps-agent");
+    const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true;
+
+    if (!bodyAgentId && !authenticatedAgent) {
       return new Response(JSON.stringify({ error: "agentId required" }), {
         status: 400,
         headers: { "Content-Type": "application/json" },
       });
     }
 
-    // Defense-in-depth: agentId must match authenticated agent
-    const authenticatedAgent: string | undefined = (this as any).request?.headers?.get?.("x-tps-agent");
-    const callerIsAdmin: boolean = (this as any).request?.tpsAgentIsAdmin === true;
-    if (authenticatedAgent && !callerIsAdmin && agentId !== authenticatedAgent) {
+    if (authenticatedAgent && !callerIsAdmin && bodyAgentId && bodyAgentId !== authenticatedAgent) {
       return new Response(JSON.stringify({
         error: "forbidden: agentId must match authenticated agent",
       }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
+
+    // Pin scope to the authenticated agent for non-admins; admins can bootstrap
+    // any agentId (needed for setup scripts and UI impersonation flows).
+    const agentId: string = (authenticatedAgent && !callerIsAdmin)
+      ? authenticatedAgent
+      : bodyAgentId;
 
     const sections: Record<string, string[]> = {
       soul: [],

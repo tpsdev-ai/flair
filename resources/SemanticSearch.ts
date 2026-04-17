@@ -56,14 +56,23 @@ const CANDIDATE_MULTIPLIER = 5;
 
 export class SemanticSearch extends Resource {
   async post(data: any) {
-    const { agentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since, asOf } = data || {};
+    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since, asOf } = data || {};
 
-    // Rate limiting — use authenticated agent ID from request context, not client-supplied body
-    const rateLimitAgent: string | undefined = (this as any).request?.headers?.get?.("x-tps-agent")
-      ?? (this as any).request?.tpsAgent;
-    if (rateLimitAgent) {
+    // Authenticated identity lives on the Harper Resource context (getContext().request).
+    // `this.request` is NOT populated on Harper v5 Resources — prior reads here
+    // silently returned undefined and the defense-in-depth scope check below
+    // was bypassed, letting a non-admin agent read another agent's memories
+    // by putting the victim's id in the body.
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
+    const authenticatedAgent: string | undefined =
+      request?.tpsAgent ?? request?.headers?.get?.("x-tps-agent");
+    const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true;
+
+    // Rate limiting — use authenticated agent ID, not client-supplied body
+    if (authenticatedAgent) {
       const bucket = q && !queryEmbedding ? "embedding" : "general";
-      const rl = checkRateLimit(rateLimitAgent, bucket);
+      const rl = checkRateLimit(authenticatedAgent, bucket);
       if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "search");
     }
 
@@ -73,16 +82,21 @@ export class SemanticSearch extends Resource {
         ? new Set([(subject as string).toLowerCase()])
         : null;
 
-    // Defense-in-depth: verify agentId matches authenticated agent.
-    const authenticatedAgent: string | undefined = (this as any).request?.headers?.get?.("x-tps-agent");
-    const callerIsAdmin: boolean = (this as any).request?.tpsAgentIsAdmin === true;
-    if (authenticatedAgent && !callerIsAdmin && agentId && agentId !== authenticatedAgent) {
+    // Enforce agentId = authenticated agent for non-admins. A mismatched body
+    // agentId is a cross-agent read attempt — reject outright. Admins can query
+    // any agentId (needed for bootstrap / consolidation scripts).
+    if (authenticatedAgent && !callerIsAdmin && bodyAgentId && bodyAgentId !== authenticatedAgent) {
       return new Response(JSON.stringify({
         error: "forbidden: agentId must match authenticated agent",
       }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
 
-    // Determine searchable agent IDs (own + granted)
+    // Scope search to the authenticated agent (own + granted). For admins or
+    // unauthenticated internal calls, honor the body-supplied agentId.
+    const agentId: string | undefined = (authenticatedAgent && !callerIsAdmin)
+      ? authenticatedAgent
+      : bodyAgentId;
+
     const searchAgentIds = new Set<string>();
     if (agentId) searchAgentIds.add(agentId);
 

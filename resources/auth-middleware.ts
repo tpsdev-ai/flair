@@ -159,6 +159,12 @@ server.http(async (request: any, nextLayer: any) => {
         } catch { /* fallback: let original Basic header pass through */ }
         request.headers.set("x-tps-agent", "admin");
         if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = "admin";
+        // Basic admin auth IS admin — resource-level checks (SemanticSearch,
+        // MemoryBootstrap, MemoryReflect, MemoryConsolidate) gate cross-agent
+        // access on this flag. Prior to 0.5.5 the check was a no-op so this
+        // was never needed; now it must be set.
+        request.tpsAgent = "admin";
+        request.tpsAgentIsAdmin = true;
         return nextLayer(request);
       }
     } catch { /* fall through to Ed25519 check */ }
