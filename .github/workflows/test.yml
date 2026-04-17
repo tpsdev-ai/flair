@@ -128,6 +128,8 @@ jobs:
           node-version: "22"
       - run: bun install --frozen-lockfile
       - run: bun run build && bun run build:cli
+      - name: Verify dist/ modules import cleanly (dev surface)
+        run: node scripts/check-imports.mjs dist
       - name: Pack
         id: pack
         run: |
@@ -144,6 +146,11 @@ jobs:
           # CI we install the matching variant so Harper's embeddings component can
           # resolve it when started by `flair init`.
           npm install --no-save @node-llama-cpp/linux-x64@3
+
+          # Packaging surface guard (0.5.3 regression): every *.js in the INSTALLED
+          # tarball must import without ERR_MODULE_NOT_FOUND. Catches files-manifest
+          # gaps and cross-boundary imports that don't survive `npm pack`.
+          node "$GITHUB_WORKSPACE/scripts/check-imports.mjs" node_modules/@tpsdev-ai/flair/dist
 
           FLAIR="node $(pwd)/node_modules/@tpsdev-ai/flair/dist/cli.js"
           PORT=19999
