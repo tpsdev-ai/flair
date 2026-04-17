@@ -111,6 +111,27 @@ jobs:
           FLAIR_URL: http://localhost:9926
           FLAIR_ADMIN_PASS: admin123
 
+  pack-smoke:
+    name: Install-from-tarball smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - run: bun install --frozen-lockfile
+      - run: bun run build && bun run build:cli
+      - name: Pack and install into clean project
+        run: |
+          npm pack
+          TGZ=$(ls tpsdev-ai-flair-*.tgz)
+          TMPDIR=$(mktemp -d)
+          cp "$TGZ" "$TMPDIR/"
+          cd "$TMPDIR"
+          npm init -y > /dev/null
+          npm install "./$TGZ"
+          node ./node_modules/@tpsdev-ai/flair/dist/cli.js --version
+
   typecheck:
     name: Type Check
     runs-on: ubuntu-latest

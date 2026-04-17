@@ -14,7 +14,27 @@ import { join, resolve as resolvePath } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypto";
 import { keystore } from "./keystore.js";
-import { canonicalize, signBody } from "../resources/federation-crypto.js";
+
+// Federation crypto helpers — inlined to avoid cross-boundary imports from
+// src/ into resources/, which don't survive npm packaging (see also
+// resources/federation-crypto.ts; the two must stay in sync).
+function sortKeys(val: unknown): unknown {
+  if (val === null || val === undefined || typeof val !== "object") return val;
+  if (Array.isArray(val)) return val.map(sortKeys);
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(val as Record<string, unknown>).sort()) {
+    sorted[key] = sortKeys((val as Record<string, unknown>)[key]);
+  }
+  return sorted;
+}
+function canonicalize(obj: unknown): string {
+  return JSON.stringify(sortKeys(obj));
+}
+function signBody(body: Record<string, any>, secretKey: Uint8Array): string {
+  const message = new TextEncoder().encode(canonicalize(body));
+  const sig = nacl.sign.detached(message, secretKey);
+  return Buffer.from(sig).toString("base64url");
+}
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
