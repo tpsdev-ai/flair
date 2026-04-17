@@ -1407,8 +1407,8 @@ program
       table: "MemoryGrant",
       records: [{
         id: grantId,
-        fromAgentId: fromAgent,
-        toAgentId: toAgent,
+        ownerId: fromAgent,
+        granteeId: toAgent,
         scope,
         createdAt: new Date().toISOString(),
       }],

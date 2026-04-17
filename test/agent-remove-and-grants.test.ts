@@ -138,7 +138,7 @@ async function runGrant(opts: {
       operation: "insert",
       database: "flair",
       table: "MemoryGrant",
-      records: [{ id: grantId, fromAgentId: fromAgent, toAgentId: toAgent, scope, createdAt: new Date().toISOString() }],
+      records: [{ id: grantId, ownerId: fromAgent, granteeId: toAgent, scope, createdAt: new Date().toISOString() }],
     }),
     signal: AbortSignal.timeout(5000),
   });
@@ -347,8 +347,8 @@ describe("flair grant", () => {
     expect(req.body.operation).toBe("insert");
     expect(req.body.table).toBe("MemoryGrant");
     expect(req.body.records[0].id).toBe("flint:kern");
-    expect(req.body.records[0].fromAgentId).toBe("flint");
-    expect(req.body.records[0].toAgentId).toBe("kern");
+    expect(req.body.records[0].ownerId).toBe("flint");
+    expect(req.body.records[0].granteeId).toBe("kern");
     expect(req.body.records[0].scope).toBe("read");
   });
 
