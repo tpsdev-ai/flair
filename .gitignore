@@ -7,3 +7,4 @@ package-lock.json
 resources/*.js
 test-results/
 playwright-report/
+test/e2e/screenshots/
