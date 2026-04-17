@@ -114,6 +114,7 @@ jobs:
   pack-smoke:
     name: Install-from-tarball smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -121,16 +122,51 @@ jobs:
           bun-version: "1.3.10"
       - run: bun install --frozen-lockfile
       - run: bun run build && bun run build:cli
-      - name: Pack and install into clean project
+      - name: Pack
+        id: pack
         run: |
           npm pack
-          TGZ=$(ls tpsdev-ai-flair-*.tgz)
+          echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> $GITHUB_OUTPUT
+      - name: Install-from-tarball + daemon lifecycle round-trip
+        run: |
+          set -euo pipefail
           TMPDIR=$(mktemp -d)
-          cp "$TGZ" "$TMPDIR/"
           cd "$TMPDIR"
           npm init -y > /dev/null
-          npm install "./$TGZ"
-          node ./node_modules/@tpsdev-ai/flair/dist/cli.js --version
+          npm install "${{ steps.pack.outputs.TGZ_PATH }}"
+          # Native embedding binary — flair declares mac-arm64 as optional; on linux
+          # CI we install the matching variant so Harper's embeddings component can
+          # resolve it when started by `flair init`.
+          npm install --no-save @node-llama-cpp/linux-x64@3
+
+          FLAIR="node $(pwd)/node_modules/@tpsdev-ai/flair/dist/cli.js"
+          PORT=19999
+          export FLAIR_ADMIN_PASS=pack-smoke-admin
+
+          # Packaging guard (0.5.3 regression): tarball can execute end-to-end
+          $FLAIR --version
+
+          # Full init: installs Harper + downloads embedding model + starts daemon
+          # + generates Ed25519 keypair + seeds agent record via ops API
+          $FLAIR init --agent-id smoke --port $PORT --admin-pass "$FLAIR_ADMIN_PASS" --skip-soul
+
+          # Post-init status sanity
+          STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
+          echo "$STATUS" | grep -q "running" || { echo "FAIL: not running after init"; exit 1; }
+
+          # Restart race guard (0.5.4 regression): `flair restart` must block until
+          # Harper is actually reachable, so an immediately following `flair status`
+          # must not report unreachable.
+          $FLAIR restart --port $PORT
+          STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
+          if echo "$STATUS" | grep -q "unreachable"; then
+            echo "FAIL: unreachable immediately after restart (0.5.4 regression)"
+            exit 1
+          fi
+          echo "$STATUS" | grep -q "running" || { echo "FAIL: not running after restart"; exit 1; }
+
+          # Tear down
+          $FLAIR stop --port $PORT || true
 
   typecheck:
     name: Type Check
