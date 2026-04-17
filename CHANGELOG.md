@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 (2026-04-17)
+
+### 🐛 Bug Fixes
+- **CLI packaging (P0):** `flair` CLI threw `ERR_MODULE_NOT_FOUND` on any installed version >= 0.5.0 because `dist/cli.js` imported `../resources/federation-crypto.js`, which resolved to `<pkg>/resources/…` at install time — a path outside the published `files` manifest. Inlined the two tiny pure-fn helpers (`canonicalize`, `signBody`) directly into `src/cli.ts` so there are no cross-boundary imports from `src/` into `resources/`. Added a CI job that packs the tarball, installs it into a clean project, and runs `flair --version` so this can't silently re-break.
+
+---
+
 ## 0.5.2 (2026-04-16)
 
 ### 🐛 Bug Fixes
