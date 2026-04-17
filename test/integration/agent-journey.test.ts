@@ -231,6 +231,66 @@ describe("Authenticated agent journey", () => {
     expect(leaked.length).toBe(0);
   }, 30_000);
 
+  test("MemoryGrant: alice grants bob scope=search → bob sees alice's 50 rows", async () => {
+    // Positive-case complement to the isolation checks above. With the 0.5.5
+    // tightening, bob cannot spoof agentId in the body — so grants are the
+    // only supported cross-agent path. This test validates that the grant
+    // expansion in SemanticSearch (conditions: granteeId == auth'd agent →
+    // add grant.ownerId to searchAgentIds) actually fires end-to-end.
+    //
+    // Also pins the MemoryGrant schema field names (ownerId/granteeId) —
+    // flair 0.5.5 had a silent CLI/schema mismatch where `flair grant` wrote
+    // fromAgentId/toAgentId and grants never took effect.
+
+    // Grant bob search-scope access to alice's memories
+    const grantRes = await adminOp(harper, {
+      operation: "insert",
+      database: "flair",
+      table: "MemoryGrant",
+      records: [{
+        id: `${alice.id}:${bob.id}`,
+        ownerId: alice.id,
+        granteeId: bob.id,
+        scope: "search",
+        createdAt: new Date().toISOString(),
+      }],
+    });
+    expect(grantRes.status).toBe(200);
+
+    try {
+      // Bob queries his own scope — grant expansion should surface alice's rows
+      const res = await authFetch(harper, bob, "POST", "/SemanticSearch", {
+        agentId: bob.id,
+        subject: SUBJECT,
+        limit: 100,
+      });
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+      expect(Array.isArray(body.results)).toBe(true);
+      expect(body.results.length).toBe(50);
+      // Every row belongs to alice (bob has 0 memories of his own)
+      for (const r of body.results) expect(r.agentId).toBe(alice.id);
+    } finally {
+      // Revoke so subsequent tests see clean isolation
+      await adminOp(harper, {
+        operation: "delete",
+        database: "flair",
+        table: "MemoryGrant",
+        ids: [`${alice.id}:${bob.id}`],
+      });
+    }
+
+    // After revoke, bob's scope is empty again — the grant was load-bearing
+    const afterRes = await authFetch(harper, bob, "POST", "/SemanticSearch", {
+      agentId: bob.id,
+      subject: SUBJECT,
+      limit: 100,
+    });
+    expect(afterRes.status).toBe(200);
+    const afterBody: any = await afterRes.json();
+    expect(afterBody.results.length).toBe(0);
+  }, 60_000);
+
   test("non-admin alice cannot use the _reindex admin escape hatch", async () => {
     // Pick any alice memory; attempting to re-PUT with _reindex=true must 403
     // regardless of ownership — this path bypasses content-safety / embedding
