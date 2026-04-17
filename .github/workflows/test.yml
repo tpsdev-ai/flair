@@ -178,6 +178,21 @@ jobs:
           fi
           echo "$STATUS" | grep -q "running" || { echo "FAIL: not running after restart"; exit 1; }
 
+          # Write/search round-trip (0.5.2-class regression guard): write a
+          # memory as the smoke agent, then search for it. Exercises the
+          # authenticated PUT path, agent-scoped keyword fallback in
+          # SemanticSearch, and the full embedding pipeline if it's ready.
+          # `memory add` / `memory search` use the `api()` helper, which
+          # resolves the base URL from FLAIR_URL — set it to our custom port.
+          export FLAIR_URL=http://127.0.0.1:$PORT
+          $FLAIR memory add --agent smoke --content "pack-smoke-roundtrip-marker-unique"
+          SEARCH=$($FLAIR memory search --agent smoke --q "pack-smoke-roundtrip-marker-unique")
+          echo "$SEARCH"
+          echo "$SEARCH" | grep -q "pack-smoke-roundtrip-marker-unique" || {
+            echo "FAIL: memory write/search round-trip did not return the marker"
+            exit 1
+          }
+
           # Tear down
           $FLAIR stop --port $PORT || true
 

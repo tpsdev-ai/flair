@@ -2350,16 +2350,22 @@ program
       }
 
       const dataDir = defaultDataDir();
-      const adminPass = process.env.HDB_ADMIN_PASSWORD ?? "";
+      // Match `flair start`: accept either HDB_ADMIN_PASSWORD or FLAIR_ADMIN_PASS.
+      // Without this, `flair init --admin-pass X` (which only exports HDB_*
+      // to the initial Harper spawn) followed by `flair restart` would silently
+      // drop admin credentials — any subsequent auth'd call returns 401.
+      const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
       const env: Record<string, string> = {
         ...(process.env as Record<string, string>),
         ROOTPATH: dataDir,
         DEFAULTS_MODE: "dev",
         HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
-        HDB_ADMIN_PASSWORD: adminPass,
         HTTP_PORT: String(port),
         LOCAL_STUDIO: "false",
       };
+      if (adminPass) {
+        env.HDB_ADMIN_PASSWORD = adminPass;
+      }
 
       const proc = spawn(process.execPath, [bin, "run", "."], {
         cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
