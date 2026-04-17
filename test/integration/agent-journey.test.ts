@@ -174,6 +174,23 @@ describe("Authenticated agent journey", () => {
     expect(leakedFromAlice.length).toBe(0);
   }, 30_000);
 
+  test("admin via Basic auth can query any agent's scope (CLI path)", async () => {
+    // The `flair` CLI auths as admin via Basic when FLAIR_ADMIN_PASS is set and
+    // passes `agentId: <any>` in the body. Our new defense-in-depth check must
+    // not block this — callerIsAdmin must be true for Basic admin auth.
+    const res = await fetch(`${harper.httpURL}/SemanticSearch`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`),
+      },
+      body: JSON.stringify({ agentId: alice.id, subject: SUBJECT, limit: 100 }),
+    });
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(body.results.length).toBe(50);
+  }, 30_000);
+
   test("bob cannot bootstrap alice's session context", async () => {
     // /MemoryBootstrap returns soul + memories + relationships + events scoped
     // by agentId. Non-admin bob passing alice.id must not receive alice's data.
