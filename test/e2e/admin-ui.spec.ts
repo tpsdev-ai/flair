@@ -52,3 +52,18 @@ test.describe("Admin UI — screenshots", () => {
     });
   }
 });
+
+test.describe("Observation Center — screenshot", () => {
+  test("renders /ObservationCenter", async ({ page }) => {
+    const res = await page.goto("/ObservationCenter", { waitUntil: "domcontentloaded" });
+    expect(res, "no response for /ObservationCenter").not.toBeNull();
+    expect(res!.status(), "bad status for /ObservationCenter").toBe(200);
+    await expect(page).toHaveTitle(/Observation Center/);
+    await expect(page.locator(".hero h1")).toContainText("Observation Center");
+    await expect(page.locator("#adminPass")).toBeVisible();
+    await page.screenshot({
+      path: path.join(SCREENSHOT_DIR, "observation-center.png"),
+      fullPage: true,
+    });
+  });
+});
