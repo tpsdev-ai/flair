@@ -54,7 +54,7 @@
   "dependencies": {
     "@harperfast/harper": "5.0.1",
     "commander": "14.0.3",
-    "harper-fabric-embeddings": "0.2.2",
+    "harper-fabric-embeddings": "0.2.3",
     "jose": "^6.2.2",
     "tweetnacl": "1.0.3"
   },
@@ -70,8 +70,5 @@
   "workspaces": [
     "packages/*",
     "plugins/*"
-  ],
-  "optionalDependencies": {
-    "@node-llama-cpp/mac-arm64-metal": "3.18.1"
-  }
+  ]
 }
