@@ -123,7 +123,11 @@ export async function startHarper(): Promise<HarperInstance> {
 
   const httpURL = `http://127.0.0.1:${httpPort}`;
   const opsURL = `http://127.0.0.1:${opsPort}`;
-  await waitForHealth(httpURL);
+  // Poll both ports. Harper binds httpURL and opsURL at different moments during
+  // startup; callers hit opsURL immediately (admin seed), so returning as soon
+  // as httpURL answers was racy — agent-journey intermittently ECONNREFUSED on
+  // opsURL even though httpURL was already serving 404s.
+  await Promise.all([waitForHealth(httpURL), waitForHealth(opsURL)]);
 
   return { httpURL, opsURL, installDir, process: proc, admin: { username: "admin", password: "test123" }, external: false };
 }
