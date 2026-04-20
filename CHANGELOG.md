@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### 🧹 Cleanup
+- **Removed `flair migrate-keys`:** the `~/.tps/secrets/flair/` layout only existed while Flair lived in the TPS monorepo pre-0.1. No published user ever had that path, so the CLI command was dead code from an external perspective. Anyone still sitting on the old layout can migrate manually: `mv ~/.tps/secrets/flair/<agent>-priv.key ~/.flair/keys/<agent>.key` (strip the `-priv` suffix) and run `flair doctor` to confirm.
+
 ## 0.5.6 (2026-04-17)
 
 ### 🐛 Bug Fixes
