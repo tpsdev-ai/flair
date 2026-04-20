@@ -42,6 +42,14 @@ jobs:
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
+      # Node 22+ is required by flair's engines. Integration tests spawn Harper
+      # natively (matches how real users run Flair) instead of via the Docker
+      # image, since the `harperfast/harper:5.0.1` Docker image bundles a
+      # different build than the npm package and still exhibits the HNSW
+      # concurrent-write race that npm 5.0.1 fixed.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
       - run: bun install --frozen-lockfile
       - name: Install linux-x64 native binary for embeddings
         run: bun add --no-save @node-llama-cpp/linux-x64@3
@@ -60,7 +68,12 @@ jobs:
             "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
             -o models/nomic-embed-text-v1.5.Q4_K_M.gguf
           echo "Model downloaded ($(du -sh models/*.gguf | cut -f1))"
-      - name: Start Harper with Flair component
+      - name: Run integration tests (native Harper spawn)
+        # No HARPER_HTTP_URL — harper-lifecycle spawns Harper from node_modules
+        # per the npm-installed @harperfast/harper@5.0.1. Avoids the Docker
+        # image's stale HNSW build.
+        run: bun test test/integration/
+      - name: Start Harper with Flair component (for E2E / Playwright)
         run: |
           docker run -d \
             --name harper-flair \
@@ -91,13 +104,6 @@ jobs:
             fi
             sleep 2
           done
-      - name: Run integration tests against Docker Harper
-        run: bun test test/integration/
-        env:
-          HARPER_HTTP_URL: http://localhost:9926
-          HARPER_OPS_URL: http://localhost:9925
-          HARPER_ADMIN_USER: admin
-          HARPER_ADMIN_PASS: admin123
       - name: E2E CLI smoke test
         run: bash test/e2e-cli.sh
         env:
