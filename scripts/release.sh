@@ -173,6 +173,12 @@ node -e "
   }
 "
 
+# 3a. Refresh bun.lock so CI's --frozen-lockfile passes post-bump.
+# Omitting this was the 0.5.6 release failure: version bumps desynced the
+# lockfile, --frozen-lockfile killed every CI job at install.
+echo "🔒 Refreshing bun.lock..."
+(cd "$ROOT" && bun install) || { echo "❌ bun install failed"; exit 1; }
+
 # 4. Build
 echo "🔨 Building..."
 (cd "$ROOT" && npm run build && npm run build:cli) || { echo "❌ Build failed"; exit 1; }
@@ -194,7 +200,8 @@ git -C "$ROOT" add \
   "$ROOT/package.json" \
   "$ROOT/packages/flair-client/package.json" \
   "$ROOT/packages/flair-mcp/package.json" \
-  "$ROOT/plugins/openclaw-flair/package.json"
+  "$ROOT/plugins/openclaw-flair/package.json" \
+  "$ROOT/bun.lock"
 git -C "$ROOT" commit -m "release: v${VERSION} — align all workspace packages"
 
 if [[ "$MODE" == "--dry" ]]; then
