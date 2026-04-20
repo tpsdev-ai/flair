@@ -73,7 +73,7 @@ jobs:
             -e OPERATIONSAPI_NETWORK_PORT=9925 \
             -e HTTP_PORT=9926 \
             --entrypoint /bin/sh \
-            harperfast/harper:5.0.0 \
+            harperfast/harper:5.0.1 \
             -c "harper install && harper dev /flair"
           # Wait for Harper to be healthy (Basic auth required by Harper's authorizeLocal)
           for i in $(seq 1 60); do
