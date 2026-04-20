@@ -196,6 +196,97 @@ jobs:
           # Tear down
           $FLAIR stop --port $PORT || true
 
+  upgrade-smoke:
+    name: Upgrade from npm-stable
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - run: bun install --frozen-lockfile
+      - run: bun run build && bun run build:cli
+      - name: Pack HEAD
+        id: pack
+        run: |
+          npm pack
+          echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> $GITHUB_OUTPUT
+      - name: Install npm-stable, seed data, upgrade, verify
+        run: |
+          set -euo pipefail
+          TMPDIR=$(mktemp -d)
+          cd "$TMPDIR"
+          npm init -y > /dev/null
+
+          # 1. Install current npm-stable
+          npm install @tpsdev-ai/flair@latest
+          npm install --no-save @node-llama-cpp/linux-x64@3
+
+          BASELINE=$(node -p "require('@tpsdev-ai/flair/package.json').version")
+          HEAD_VERSION=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
+          echo "Baseline: $BASELINE — HEAD: $HEAD_VERSION"
+
+          # Same-version runs (e.g. a PR that hasn't bumped) are a no-op test;
+          # we still assert the install worked, but skip the upgrade assertion
+          # because there's no "previous" to upgrade from.
+          if [ "$BASELINE" = "$HEAD_VERSION" ]; then
+            echo "Baseline == HEAD; nothing to upgrade. Passing trivially."
+            exit 0
+          fi
+
+          FLAIR="node $(pwd)/node_modules/@tpsdev-ai/flair/dist/cli.js"
+          PORT=19998
+          export FLAIR_ADMIN_PASS=upgrade-smoke-admin
+          export FLAIR_URL=http://127.0.0.1:$PORT
+
+          # 2. Init at baseline + write marker memory
+          $FLAIR init --agent-id upgrade --port $PORT --admin-pass "$FLAIR_ADMIN_PASS" --skip-soul
+          $FLAIR memory add --agent upgrade --content "upgrade-smoke-pre-marker"
+
+          PRE=$($FLAIR memory search --agent upgrade --q "upgrade-smoke-pre-marker")
+          echo "$PRE" | grep -q "upgrade-smoke-pre-marker" || {
+            echo "FAIL: baseline write/search didn't work — setup broken, not an upgrade regression"
+            exit 1
+          }
+
+          # 3. Stop baseline, overinstall HEAD tarball
+          $FLAIR stop --port $PORT || true
+          npm install "${{ steps.pack.outputs.TGZ_PATH }}"
+          npm install --no-save @node-llama-cpp/linux-x64@3
+
+          NEW=$(node -p "require('@tpsdev-ai/flair/package.json').version")
+          [ "$NEW" = "$HEAD_VERSION" ] || { echo "FAIL: expected $HEAD_VERSION in node_modules, got $NEW"; exit 1; }
+          echo "Upgraded $BASELINE → $NEW"
+
+          # 4. Start HEAD against baseline's data dir (~/.flair by default)
+          $FLAIR start --port $PORT
+
+          STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
+          echo "$STATUS" | grep -q "running" || { echo "FAIL: HEAD didn't start after upgrade from $BASELINE"; exit 1; }
+
+          # 5. Pre-upgrade memory must still be readable (the core regression guard)
+          POST=$($FLAIR memory search --agent upgrade --q "upgrade-smoke-pre-marker")
+          echo "$POST"
+          echo "$POST" | grep -q "upgrade-smoke-pre-marker" || {
+            echo "FAIL: pre-upgrade memory lost upgrading $BASELINE → $NEW"
+            exit 1
+          }
+
+          # 6. New writes must work post-upgrade (schema didn't silently break writes)
+          $FLAIR memory add --agent upgrade --content "upgrade-smoke-post-marker"
+          POST_NEW=$($FLAIR memory search --agent upgrade --q "upgrade-smoke-post-marker")
+          echo "$POST_NEW" | grep -q "upgrade-smoke-post-marker" || {
+            echo "FAIL: post-upgrade write didn't round-trip"
+            exit 1
+          }
+
+          # Teardown
+          $FLAIR stop --port $PORT || true
+
   typecheck:
     name: Type Check
     runs-on: ubuntu-latest
