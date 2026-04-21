@@ -2850,19 +2850,31 @@ program
 // ─── Memory and Soul commands ────────────────────────────────────────────────
 
 const memory = program.command("memory").description("Manage agent memories");
-memory.command("add").requiredOption("--agent <id>").requiredOption("--content <text>")
+memory.command("add [content]").requiredOption("--agent <id>")
+  .option("--content <text>", "memory content (alias for positional arg)")
   .option("--durability <d>", "standard").option("--tags <csv>")
-  .action(async (opts) => {
+  .action(async (contentArg, opts) => {
+    const content = contentArg ?? opts.content;
+    if (!content) { console.error("error: content required (positional arg or --content)"); process.exit(1); }
     const memId = `${opts.agent}-${Date.now()}`;
     const out = await api("PUT", `/Memory/${memId}`, {
-      id: memId, agentId: opts.agent, content: opts.content, durability: opts.durability || "standard",
+      id: memId, agentId: opts.agent, content, durability: opts.durability || "standard",
       tags: opts.tags ? String(opts.tags).split(",").map((x: string) => x.trim()).filter(Boolean) : undefined,
       type: "memory", createdAt: new Date().toISOString(),
     });
     console.log(JSON.stringify(out, null, 2));
   });
-memory.command("search").requiredOption("--agent <id>").requiredOption("--q <query>").option("--tag <tag>")
-  .action(async (opts) => console.log(JSON.stringify(await api("POST", "/SemanticSearch", { agentId: opts.agent, q: opts.q, tag: opts.tag }), null, 2)));
+memory.command("search [query]").requiredOption("--agent <id>")
+  .option("--q <query>", "search query (alias for positional arg)")
+  .option("--limit <n>", "Max results", "5")
+  .option("--tag <tag>")
+  .action(async (queryArg, opts) => {
+    const q = queryArg ?? opts.q;
+    if (!q) { console.error("error: query required (positional arg or --q)"); process.exit(1); }
+    const body: Record<string, any> = { agentId: opts.agent, q, limit: parseInt(opts.limit, 10) || 5 };
+    if (opts.tag) body.tag = opts.tag;
+    console.log(JSON.stringify(await api("POST", "/SemanticSearch", body), null, 2));
+  });
 memory.command("list").requiredOption("--agent <id>").option("--tag <tag>")
   .action(async (opts) => {
     const q = new URLSearchParams({ agentId: opts.agent, ...(opts.tag ? { tag: opts.tag } : {}) }).toString();
