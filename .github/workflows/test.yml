@@ -202,6 +202,11 @@ jobs:
             exit 1
           }
 
+          # `flair test` exercises PUT /Memory + POST /SemanticSearch + DELETE
+          # against the running daemon. Guards against the 0.5.6-era regression
+          # where `flair test` POSTed to /Memory and always failed.
+          $FLAIR test --agent smoke
+
           # Deploy dry-run (FLAIR-DEPLOY guard): `flair deploy --dry-run` must
           # resolve the installed package and validate args against a Fabric
           # target. Doesn't call Fabric. Catches drift in the published `files`
