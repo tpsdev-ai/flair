@@ -356,5 +356,6 @@ jobs:
         uses: github/codeql-action/init@480db559a14342288b67e54bd959dd52dc3ee68f # v3
         with:
           languages: javascript-typescript
+          config-file: ./.github/codeql/codeql-config.yml
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@480db559a14342288b67e54bd959dd52dc3ee68f # v3
