@@ -118,18 +118,40 @@ describe("flair deploy: package resolution", () => {
 });
 
 describe("flair deploy: dry-run end-to-end", () => {
+  // Synthesize a minimal package-root so the test is independent of whether
+  // `dist/` has been built in the repo — unit tests run before build in CI.
+  function synthPkgRoot(): string {
+    const dir = mkdtempSync(join(tmpdir(), "flair-deploy-e2e-"));
+    for (const f of REQUIRED_PACKAGE_FILES) {
+      const p = join(dir, f);
+      if (f.endsWith(".yaml")) writeFileSync(p, "port: 9926\n");
+      else mkdirSync(p);
+    }
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test" }),
+    );
+    return dir;
+  }
+
   test("returns success without calling Harper", async () => {
-    const result = await deploy({
-      fabricOrg: "acme",
-      fabricCluster: "prod",
-      fabricUser: "admin",
-      fabricPassword: "pw",
-      dryRun: true,
-    });
-    expect(result.dryRun).toBe(true);
-    expect(result.url).toBe("https://prod.acme.harperfabric.com");
-    expect(result.project).toBe("flair");
-    expect(result.version).toMatch(/^\d+\.\d+/);
+    const pkgRoot = synthPkgRoot();
+    try {
+      const result = await deploy({
+        fabricOrg: "acme",
+        fabricCluster: "prod",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        dryRun: true,
+        packageRoot: pkgRoot,
+      });
+      expect(result.dryRun).toBe(true);
+      expect(result.url).toBe("https://prod.acme.harperfabric.com");
+      expect(result.project).toBe("flair");
+      expect(result.version).toBe("9.9.9-test");
+    } finally {
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
   });
 
   test("rejects invalid options before any package work", async () => {
