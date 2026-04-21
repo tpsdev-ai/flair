@@ -1953,7 +1953,82 @@ rem
 
 // ─── flair status ─────────────────────────────────────────────────────────────
 
-program
+function humanBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function relativeTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const ago = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ago) || ago < 0) return "—";
+  const mins = Math.floor(ago / 60000);
+  const hrs = Math.floor(ago / 3600000);
+  const days = Math.floor(ago / 86400000);
+  return days > 0 ? `${days}d ago` : hrs > 0 ? `${hrs}h ago` : mins > 0 ? `${mins}m ago` : "just now";
+}
+
+async function fetchHealthDetail(opts: { port?: string; url?: string; agent?: string }): Promise<{
+  healthy: boolean;
+  baseUrl: string;
+  healthData: any | null;
+}> {
+  const port = resolveHttpPort(opts);
+  const baseUrl = opts.url ?? `http://127.0.0.1:${port}`;
+  let healthy = false;
+  let healthData: any = null;
+
+  try {
+    let res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok && res.status === 401) {
+      const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+      if (adminPass) {
+        res = await fetch(`${baseUrl}/Health`, {
+          headers: { Authorization: `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}` },
+          signal: AbortSignal.timeout(5000),
+        });
+      }
+    }
+    healthy = res.ok;
+  } catch { /* unreachable */ }
+
+  if (healthy) {
+    const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+    if (agentId) {
+      const keyPath = resolveKeyPath(agentId);
+      if (keyPath) {
+        try {
+          const authHeader = buildEd25519Auth(agentId, "GET", "/HealthDetail", keyPath);
+          const res = await fetch(`${baseUrl}/HealthDetail`, {
+            headers: { Authorization: authHeader },
+            signal: AbortSignal.timeout(5000),
+          });
+          if (res.ok) healthData = await res.json().catch(() => null);
+        } catch { /* fall through */ }
+      }
+    }
+    if (!healthData) {
+      const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS;
+      if (adminPass) {
+        try {
+          const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+          const res = await fetch(`${baseUrl}/HealthDetail`, {
+            headers: { Authorization: auth },
+            signal: AbortSignal.timeout(5000),
+          });
+          if (res.ok) healthData = await res.json().catch(() => null);
+        } catch { /* fall through */ }
+      }
+    }
+  }
+
+  return { healthy, baseUrl, healthData };
+}
+
+const statusCmd = program
   .command("status")
   .description("Show Flair instance status, memory stats, and agent info")
   .option("--port <port>", "Harper HTTP port")
@@ -1961,62 +2036,7 @@ program
   .option("--json", "Output as JSON")
   .option("--agent <id>", "Agent ID for authenticated detail (or set FLAIR_AGENT_ID)")
   .action(async (opts) => {
-    const port = resolveHttpPort(opts);
-    const baseUrl = opts.url ?? `http://127.0.0.1:${port}`;
-    let healthy = false;
-    let healthData: any = null;
-
-    // 1. Basic health check — try unauthenticated first, then with admin auth
-    try {
-      let res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
-      if (!res.ok && res.status === 401) {
-        // Harper requires auth (authorizeLocal: true) — retry with admin credentials
-        const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
-        if (adminPass) {
-          res = await fetch(`${baseUrl}/Health`, {
-            headers: { Authorization: `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}` },
-            signal: AbortSignal.timeout(5000),
-          });
-        }
-      }
-      healthy = res.ok;
-    } catch { /* unreachable */ }
-
-    // 2. Try authenticated /HealthDetail for rich stats
-    if (healthy) {
-      const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
-      if (agentId) {
-        const keyPath = resolveKeyPath(agentId);
-        if (keyPath) {
-          try {
-            const authHeader = buildEd25519Auth(agentId, "GET", "/HealthDetail", keyPath);
-            const res = await fetch(`${baseUrl}/HealthDetail`, {
-              headers: { Authorization: authHeader },
-              signal: AbortSignal.timeout(5000),
-            });
-            if (res.ok) {
-              healthData = await res.json().catch(() => null);
-            }
-          } catch { /* fall through to basic output */ }
-        }
-      }
-      // Fallback: try admin basic auth if available
-      if (!healthData) {
-        const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS;
-        if (adminPass) {
-          try {
-            const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
-            const res = await fetch(`${baseUrl}/HealthDetail`, {
-              headers: { Authorization: auth },
-              signal: AbortSignal.timeout(5000),
-            });
-            if (res.ok) {
-              healthData = await res.json().catch(() => null);
-            }
-          } catch { /* fall through to basic output */ }
-        }
-      }
-    }
+    const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
 
     if (opts.json) {
       console.log(JSON.stringify({ healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData }, null, 2));
@@ -2031,7 +2051,6 @@ program
       process.exit(1);
     }
 
-    // Format uptime
     const uptimeSec = healthData?.uptimeSeconds;
     let uptimeStr = "";
     if (uptimeSec != null) {
@@ -2041,48 +2060,214 @@ program
       uptimeStr = d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
     }
 
-    // Format last write as relative time
-    let lastWriteStr = "";
-    if (healthData?.lastWrite) {
-      const ago = Date.now() - new Date(healthData.lastWrite).getTime();
-      const mins = Math.floor(ago / 60000);
-      const hrs = Math.floor(ago / 3600000);
-      const days = Math.floor(ago / 86400000);
-      lastWriteStr = days > 0 ? `${days}d ago` : hrs > 0 ? `${hrs}h ago` : mins > 0 ? `${mins}m ago` : "just now";
-    }
-
     const pid = healthData?.pid ?? "";
     const agents = healthData?.agents;
     const memories = healthData?.memories;
+    const warnings: Array<{ level: string; message: string }> = Array.isArray(healthData?.warnings) ? healthData.warnings : [];
 
     console.log(`Flair v${__pkgVersion} — 🟢 running${pid ? ` (PID ${pid}` : ""}${uptimeStr ? `, uptime ${uptimeStr})` : pid ? ")" : ""}`);
     console.log(`  URL:        ${baseUrl}`);
 
+    if (warnings.length > 0) {
+      console.log(`\n⚠ Warnings:  ${warnings.length}`);
+      for (const w of warnings) console.log(`  • ${w.level} ${w.message}`);
+    }
+
     if (memories) {
-      const embStr = memories.withEmbeddings > 0
-        ? `${memories.withEmbeddings} with embeddings`
-        : "";
-      const hashStr = memories.hashFallback > 0
-        ? `${memories.hashFallback} hash-fallback`
-        : "";
+      console.log("\nMemory:");
+      const embStr = memories.withEmbeddings > 0 ? `${memories.withEmbeddings} embedded` : "";
+      const hashStr = memories.hashFallback > 0 ? `${memories.hashFallback} hash` : "";
       const detail = [embStr, hashStr].filter(Boolean).join(", ");
-      console.log(`  Memories:   ${memories.total}${detail ? ` (${detail})` : ""}`);
+      console.log(`  Total:       ${memories.total}${detail ? ` (${detail})` : ""}`);
+      if (memories.byDurability) {
+        const d = memories.byDurability;
+        console.log(`  Durability:  ${d.permanent ?? 0} permanent / ${d.persistent ?? 0} persistent / ${d.standard ?? 0} standard / ${d.ephemeral ?? 0} ephemeral`);
+      }
+      if (typeof memories.archived === "number") console.log(`  Archived:    ${memories.archived}`);
+      if (typeof memories.expired === "number" && memories.expired > 0) console.log(`  Expired:     ${memories.expired}`);
+      if (healthData?.lastWrite) console.log(`  Last write:  ${relativeTime(healthData.lastWrite)}`);
     }
 
-    if (agents) {
-      const nameStr = agents.names?.length > 0 ? ` (${agents.names.join(", ")})` : "";
-      console.log(`  Agents:     ${agents.count}${nameStr}`);
+    if (agents && agents.count > 0) {
+      console.log("\nAgents:");
+      const nameStr = agents.names?.length > 0 ? ` — ${agents.names.join(", ")}` : "";
+      console.log(`  ${agents.count} total${nameStr}`);
+      if (agents.count > 1 && Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
+        const idW = Math.max(2, ...agents.perAgent.map((r: any) => (r.id ?? "").length));
+        console.log(`  ${"id".padEnd(idW)}  memories  last_write`);
+        for (const r of agents.perAgent) {
+          console.log(`  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${relativeTime(r.lastWriteAt)}`);
+        }
+      }
     }
 
-    if (healthData?.soulEntries != null) {
-      console.log(`  Soul:       ${healthData.soulEntries} entries`);
+    if (healthData?.relationships) {
+      const r = healthData.relationships;
+      console.log("\nRelationships:");
+      console.log(`  ${r.total} total (${r.active} active)`);
     }
 
-    if (lastWriteStr) {
-      console.log(`  Last write: ${lastWriteStr}`);
+    if (healthData?.soul && healthData.soul.total > 0) {
+      const s = healthData.soul;
+      const bp = s.byPriority ?? {};
+      console.log("\nSoul:");
+      console.log(`  ${s.total} entries — ${bp.critical ?? 0} critical / ${bp.high ?? 0} high / ${bp.standard ?? 0} standard / ${bp.low ?? 0} low`);
+    } else if (typeof healthData?.soulEntries === "number" && healthData.soulEntries > 0) {
+      console.log("\nSoul:");
+      console.log(`  ${healthData.soulEntries} entries`);
     }
 
-    console.log(`  Health:     ✅ all checks passing`);
+    if (healthData?.rem) {
+      const r = healthData.rem;
+      console.log("\nREM:");
+      if (r.lastLightAt) console.log(`  Last light:        ${relativeTime(r.lastLightAt)}`);
+      if (r.lastRapidAt) console.log(`  Last rapid:        ${relativeTime(r.lastRapidAt)}`);
+      if (r.lastRestorativeAt) console.log(`  Last restorative:  ${relativeTime(r.lastRestorativeAt)}`);
+      const nightly = r.nightlyEnabled === true ? "enabled" : r.nightlyEnabled === false ? "disabled" : "unknown";
+      console.log(`  Nightly:           ${nightly}`);
+      if (r.nightlyEnabled && r.lastNightlyAt) console.log(`  Last nightly:      ${relativeTime(r.lastNightlyAt)}`);
+      if (typeof r.pendingCandidates === "number" && r.pendingCandidates > 0) {
+        console.log(`  Pending candidates: ${r.pendingCandidates}`);
+      }
+    }
+
+    if (healthData?.federation) {
+      const f = healthData.federation;
+      console.log("\nFederation:");
+      if (f.instance) console.log(`  Instance:    ${f.instance.id} (${f.instance.role ?? "—"}, ${f.instance.status ?? "—"})`);
+      if (f.peers) console.log(`  Peers:       ${f.peers.total} (${f.peers.connected} connected / ${f.peers.disconnected} down / ${f.peers.revoked} revoked)`);
+      if (f.pendingTokens > 0) console.log(`  Pairing:     ${f.pendingTokens} unconsumed token(s)`);
+    }
+
+    if (healthData?.oauth) {
+      const o = healthData.oauth;
+      console.log("\nOAuth:");
+      console.log(`  Clients:     ${o.clients ?? 0}   IdPs: ${o.idpConfigs ?? 0}   Active tokens: ${o.activeTokens ?? 0}`);
+    }
+
+    if (healthData?.bridges) {
+      const b = healthData.bridges;
+      console.log("\nBridges:");
+      if (Array.isArray(b.installed) && b.installed.length > 0) console.log(`  Installed:   ${b.installed.join(", ")}`);
+      if (b.lastImport) console.log(`  Last import: ${relativeTime(b.lastImport)}`);
+      if (b.lastExport) console.log(`  Last export: ${relativeTime(b.lastExport)}`);
+    }
+
+    if (healthData?.disk) {
+      const d = healthData.disk;
+      console.log("\nDisk:");
+      console.log(`  Data:        ${d.dataDir} — ${humanBytes(d.dataBytes ?? 0)}`);
+      console.log(`  Snapshots:   ${d.snapshotDir} — ${humanBytes(d.snapshotBytes ?? 0)}`);
+    }
+
+    console.log("");
+    if (warnings.length > 0) console.log(`  Health:     ⚠ ${warnings.length} warning(s)`);
+    else console.log(`  Health:     ✅ all checks passing`);
+  });
+
+statusCmd
+  .command("rem")
+  .description("Show REM (memory hygiene) subsystem status")
+  .action(async function (this: Command) {
+    const opts = this.optsWithGlobals();
+    const { healthy, healthData } = await fetchHealthDetail(opts);
+    if (opts.json) {
+      console.log(JSON.stringify({ healthy, rem: healthData?.rem ?? null }, null, 2));
+      if (!healthy) process.exit(1);
+      return;
+    }
+    if (!healthy) { console.log("🔴 unreachable"); process.exit(1); }
+    const r = healthData?.rem;
+    if (!r) { console.log("REM: not configured (no log entries or platform timers found)"); return; }
+    console.log("REM:");
+    console.log(`  Last light:        ${relativeTime(r.lastLightAt)}`);
+    console.log(`  Last rapid:        ${relativeTime(r.lastRapidAt)}`);
+    console.log(`  Last restorative:  ${relativeTime(r.lastRestorativeAt)}`);
+    const nightly = r.nightlyEnabled === true ? "enabled" : r.nightlyEnabled === false ? "disabled" : "unknown";
+    console.log(`  Nightly:           ${nightly}`);
+    if (r.lastNightlyAt) console.log(`  Last nightly:      ${relativeTime(r.lastNightlyAt)} (${r.lastNightlyAt})`);
+    if (typeof r.pendingCandidates === "number") console.log(`  Pending candidates: ${r.pendingCandidates}`);
+    else console.log(`  Pending candidates: — (schema not available)`);
+  });
+
+statusCmd
+  .command("federation")
+  .description("Show federation subsystem status")
+  .action(async function (this: Command) {
+    const opts = this.optsWithGlobals();
+    const { healthy, healthData } = await fetchHealthDetail(opts);
+    if (opts.json) {
+      console.log(JSON.stringify({ healthy, federation: healthData?.federation ?? null }, null, 2));
+      if (!healthy) process.exit(1);
+      return;
+    }
+    if (!healthy) { console.log("🔴 unreachable"); process.exit(1); }
+    const f = healthData?.federation;
+    if (!f) { console.log("Federation: not configured"); return; }
+    console.log("Federation:");
+    if (f.instance) console.log(`  Instance:    ${f.instance.id} (${f.instance.role ?? "—"}, ${f.instance.status ?? "—"})`);
+    else console.log("  Instance:    —");
+    if (f.peers) console.log(`  Peers:       ${f.peers.total} (${f.peers.connected} connected / ${f.peers.disconnected} down / ${f.peers.revoked} revoked)`);
+    if (typeof f.pendingTokens === "number" && f.pendingTokens > 0) console.log(`  Pairing:     ${f.pendingTokens} unconsumed token(s)`);
+    if (Array.isArray(f.peerList) && f.peerList.length > 0) {
+      const idW = Math.max(4, ...f.peerList.map((p: any) => (p.id ?? "").length));
+      console.log(`\n  ${"peer".padEnd(idW)}  ${"role".padEnd(5)}  ${"status".padEnd(13)}  last_sync`);
+      for (const p of f.peerList) {
+        console.log(`  ${(p.id ?? "").padEnd(idW)}  ${(p.role ?? "—").padEnd(5)}  ${(p.status ?? "—").padEnd(13)}  ${p.lastSyncAt ? `${relativeTime(p.lastSyncAt)} (${p.lastSyncAt})` : "never"}`);
+      }
+    }
+  });
+
+statusCmd
+  .command("auth")
+  .description("Show OAuth / IdP subsystem status")
+  .action(async function (this: Command) {
+    const opts = this.optsWithGlobals();
+    const { healthy, healthData } = await fetchHealthDetail(opts);
+    if (opts.json) {
+      console.log(JSON.stringify({ healthy, oauth: healthData?.oauth ?? null }, null, 2));
+      if (!healthy) process.exit(1);
+      return;
+    }
+    if (!healthy) { console.log("🔴 unreachable"); process.exit(1); }
+    const o = healthData?.oauth;
+    if (!o) { console.log("OAuth: not configured"); return; }
+    console.log("OAuth:");
+    console.log(`  Clients:       ${o.clients ?? 0}`);
+    console.log(`  IdP configs:   ${o.idpConfigs ?? 0}`);
+    console.log(`  Active tokens: ${o.activeTokens ?? 0}`);
+    if (Array.isArray(o.clientList) && o.clientList.length > 0) {
+      console.log("\n  Clients:");
+      for (const c of o.clientList) {
+        console.log(`    ${c.id}  ${c.name ?? "—"}  ${c.registeredBy ?? "—"}  ${c.createdAt ?? "—"}`);
+      }
+    }
+    if (Array.isArray(o.idpList) && o.idpList.length > 0) {
+      console.log("\n  IdPs:");
+      for (const i of o.idpList) {
+        console.log(`    ${i.id}  ${i.name ?? "—"}  ${i.issuer ?? "—"}`);
+      }
+    }
+  });
+
+statusCmd
+  .command("bridges")
+  .description("Show memory bridges subsystem status")
+  .action(async function (this: Command) {
+    const opts = this.optsWithGlobals();
+    const { healthy, healthData } = await fetchHealthDetail(opts);
+    if (opts.json) {
+      console.log(JSON.stringify({ healthy, bridges: healthData?.bridges ?? null }, null, 2));
+      if (!healthy) process.exit(1);
+      return;
+    }
+    if (!healthy) { console.log("🔴 unreachable"); process.exit(1); }
+    const b = healthData?.bridges;
+    if (!b) { console.log("Bridges: none installed (no flair-bridge-* packages found)"); return; }
+    console.log("Bridges:");
+    if (Array.isArray(b.installed) && b.installed.length > 0) console.log(`  Installed:   ${b.installed.join(", ")}`);
+    if (b.lastImport) console.log(`  Last import: ${relativeTime(b.lastImport)}`);
+    if (b.lastExport) console.log(`  Last export: ${relativeTime(b.lastExport)}`);
   });
 
 // ─── flair upgrade ────────────────────────────────────────────────────────────
