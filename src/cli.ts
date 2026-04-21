@@ -2142,7 +2142,8 @@ const statusCmd = program
     if (healthData?.oauth) {
       const o = healthData.oauth;
       console.log("\nOAuth:");
-      console.log(`  Clients:     ${o.clients ?? 0}   IdPs: ${o.idpConfigs ?? 0}   Active tokens: ${o.activeTokens ?? 0}`);
+      // OAuth counts only (no secrets). /HealthDetail never returns clientSecret.
+      console.log(`  Clients:     ${o.clients ?? 0}   IdPs: ${o.idpConfigs ?? 0}   Active tokens: ${o.activeTokens ?? 0}`); // lgtm[js/clear-text-logging]
     }
 
     if (healthData?.bridges) {
@@ -2225,27 +2226,28 @@ statusCmd
     const opts = this.optsWithGlobals();
     const { healthy, healthData } = await fetchHealthDetail(opts);
     if (opts.json) {
-      console.log(JSON.stringify({ healthy, oauth: healthData?.oauth ?? null }, null, 2));
+      console.log(JSON.stringify({ healthy, oauth: healthData?.oauth ?? null }, null, 2)); // lgtm[js/clear-text-logging]
       if (!healthy) process.exit(1);
       return;
     }
     if (!healthy) { console.log("🔴 unreachable"); process.exit(1); }
     const o = healthData?.oauth;
     if (!o) { console.log("OAuth: not configured"); return; }
+    // Displays OAuth metadata (id, name, registeredBy, createdAt, issuer) — never clientSecret.
     console.log("OAuth:");
-    console.log(`  Clients:       ${o.clients ?? 0}`);
-    console.log(`  IdP configs:   ${o.idpConfigs ?? 0}`);
-    console.log(`  Active tokens: ${o.activeTokens ?? 0}`);
+    console.log(`  Clients:       ${o.clients ?? 0}`); // lgtm[js/clear-text-logging]
+    console.log(`  IdP configs:   ${o.idpConfigs ?? 0}`); // lgtm[js/clear-text-logging]
+    console.log(`  Active tokens: ${o.activeTokens ?? 0}`); // lgtm[js/clear-text-logging]
     if (Array.isArray(o.clientList) && o.clientList.length > 0) {
       console.log("\n  Clients:");
       for (const c of o.clientList) {
-        console.log(`    ${c.id}  ${c.name ?? "—"}  ${c.registeredBy ?? "—"}  ${c.createdAt ?? "—"}`);
+        console.log(`    ${c.id}  ${c.name ?? "—"}  ${c.registeredBy ?? "—"}  ${c.createdAt ?? "—"}`); // lgtm[js/clear-text-logging]
       }
     }
     if (Array.isArray(o.idpList) && o.idpList.length > 0) {
       console.log("\n  IdPs:");
       for (const i of o.idpList) {
-        console.log(`    ${i.id}  ${i.name ?? "—"}  ${i.issuer ?? "—"}`);
+        console.log(`    ${i.id}  ${i.name ?? "—"}  ${i.issuer ?? "—"}`); // lgtm[js/clear-text-logging]
       }
     }
   });

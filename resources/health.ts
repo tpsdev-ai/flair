@@ -1,9 +1,18 @@
 import { Resource, databases } from "@harperfast/harper";
-import { existsSync, statSync, readdirSync, openSync, readSync, closeSync } from "node:fs";
+import { promises as fsp } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 
 const db = databases as any;
+
+const redactHome = (p: string): string => {
+  const home = homedir();
+  return p.startsWith(home) ? "~" + p.slice(home.length) : p;
+};
+
+const exists = async (path: string): Promise<boolean> => {
+  try { await fsp.stat(path); return true; } catch { return false; }
+};
 
 /**
  * Health endpoint — unauthenticated, returns only { ok: true }.
@@ -30,6 +39,12 @@ export class HealthDetail extends Resource {
     const stats: Record<string, any> = { ok: true };
     const nowMs = Date.now();
     const warnings: Array<{ level: "warn" | "info"; message: string }> = [];
+
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
+    const callerAgent: string | undefined = request?.tpsAgent;
+    const isAdmin: boolean = request?.tpsAgentIsAdmin === true || !callerAgent;
+    stats.caller = { agentId: callerAgent ?? null, isAdmin };
 
     let memoriesList: any[] = [];
 
@@ -92,10 +107,13 @@ export class HealthDetail extends Resource {
         }
         perAgentMap.set(m.agentId, row);
       }
-      const perAgent = Array.from(perAgentMap.values()).sort((a, b) => b.memoryCount - a.memoryCount);
+      const perAgentFull = Array.from(perAgentMap.values()).sort((a, b) => b.memoryCount - a.memoryCount);
+      const perAgent = isAdmin
+        ? perAgentFull
+        : perAgentFull.filter((r) => r.id === callerAgent);
       stats.agents = {
         count: agents.length,
-        names: agents.map((a: any) => a.id).filter(Boolean),
+        names: isAdmin ? agents.map((a: any) => a.id).filter(Boolean) : undefined,
         perAgent,
       };
     } catch { stats.agents = null; }
@@ -151,12 +169,14 @@ export class HealthDetail extends Resource {
           instance: inst ? { id: inst.id, role: inst.role, status: inst.status } : null,
           peers: peersBlock,
           pendingTokens,
-          peerList: peers.map((p: any) => ({
-            id: p.id,
-            role: p.role,
-            status: p.status,
-            lastSyncAt: p.lastSyncAt ?? null,
-          })),
+          peerList: isAdmin
+            ? peers.map((p: any) => ({
+                id: p.id,
+                role: p.role,
+                status: p.status,
+                lastSyncAt: p.lastSyncAt ?? null,
+              }))
+            : undefined,
         };
         if (peers.length > 0 && peersBlock.connected === 0) {
           const oldest = peers
@@ -197,13 +217,17 @@ export class HealthDetail extends Resource {
           clients: clients.length,
           idpConfigs: idps.length,
           activeTokens: tokensAvailable ? activeTokens : 0,
-          clientList: clients.map((c: any) => ({
-            id: c.id,
-            name: c.name,
-            registeredBy: c.registeredBy ?? null,
-            createdAt: c.createdAt ?? null,
-          })),
-          idpList: idps.map((i: any) => ({ id: i.id, name: i.name, issuer: i.issuer })),
+          clientList: isAdmin
+            ? clients.map((c: any) => ({
+                id: c.id,
+                name: c.name,
+                registeredBy: c.registeredBy ?? null,
+                createdAt: c.createdAt ?? null,
+              }))
+            : undefined,
+          idpList: isAdmin
+            ? idps.map((i: any) => ({ id: i.id, name: i.name, issuer: i.issuer }))
+            : undefined,
         };
       }
     } catch { stats.oauth = null; }
@@ -214,16 +238,17 @@ export class HealthDetail extends Resource {
       const remLog = join(logsDir, "rem.jsonl");
       const nightlyLog = join(logsDir, "rem-nightly.jsonl");
 
-      const tailJsonl = (path: string, maxBytes = 256 * 1024): any[] => {
+      const tailJsonl = async (path: string, maxBytes = 256 * 1024): Promise<any[]> => {
+        let fh: import("node:fs/promises").FileHandle | null = null;
         try {
-          if (!existsSync(path)) return [];
-          const size = statSync(path).size;
-          const start = Math.max(0, size - maxBytes);
-          const len = size - start;
-          const fd = openSync(path, "r");
+          const st = await fsp.stat(path).catch(() => null);
+          if (!st) return [];
+          const start = Math.max(0, st.size - maxBytes);
+          const len = st.size - start;
+          if (len === 0) return [];
+          fh = await fsp.open(path, "r");
           const buf = Buffer.alloc(len);
-          readSync(fd, buf, 0, len, start);
-          closeSync(fd);
+          await fh.read(buf, 0, len, start);
           return buf
             .toString("utf-8")
             .split("\n")
@@ -231,9 +256,10 @@ export class HealthDetail extends Resource {
             .map((l) => { try { return JSON.parse(l); } catch { return null; } })
             .filter(Boolean);
         } catch { return []; }
+        finally { if (fh) await fh.close().catch(() => {}); }
       };
 
-      const remRecords = tailJsonl(remLog);
+      const remRecords = await tailJsonl(remLog);
       const findLast = (kind: string) => {
         for (let i = remRecords.length - 1; i >= 0; i--) {
           const r = remRecords[i];
@@ -248,14 +274,12 @@ export class HealthDetail extends Resource {
       let nightlyEnabled: boolean | null = null;
       const plat = platform();
       if (plat === "darwin") {
-        const plist = join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist");
-        nightlyEnabled = existsSync(plist);
+        nightlyEnabled = await exists(join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist"));
       } else if (plat === "linux") {
-        const timer = join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer");
-        nightlyEnabled = existsSync(timer);
+        nightlyEnabled = await exists(join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer"));
       }
 
-      const nightlyRecords = tailJsonl(nightlyLog);
+      const nightlyRecords = await tailJsonl(nightlyLog);
       const lastNightlyRec = nightlyRecords[nightlyRecords.length - 1];
       const lastNightlyAt = lastNightlyRec ? (lastNightlyRec.at ?? lastNightlyRec.ts ?? lastNightlyRec.timestamp ?? null) : null;
 
@@ -297,34 +321,36 @@ export class HealthDetail extends Resource {
       const dataDir = process.env.HDB_ROOT ?? join(homedir(), ".flair", "data");
       const snapshotDir = join(homedir(), ".flair", "snapshots");
 
-      const dirSize = (root: string, maxDepth = 6): number | null => {
-        if (!existsSync(root)) return null;
+      const dirSize = async (root: string, maxDepth = 6): Promise<number | null> => {
+        if (!(await exists(root))) return null;
         let total = 0;
-        const walk = (p: string, depth: number) => {
+        const walk = async (p: string, depth: number): Promise<void> => {
           if (depth > maxDepth) return;
           let entries: import("node:fs").Dirent[];
-          try { entries = readdirSync(p, { withFileTypes: true }); } catch { return; }
+          try { entries = await fsp.readdir(p, { withFileTypes: true }); } catch { return; }
+          const subdirs: string[] = [];
+          const files: string[] = [];
           for (const e of entries) {
             const full = join(p, e.name);
-            try {
-              if (e.isDirectory()) walk(full, depth + 1);
-              else if (e.isFile()) total += statSync(full).size;
-            } catch { /* skip */ }
+            if (e.isDirectory()) subdirs.push(full);
+            else if (e.isFile()) files.push(full);
           }
+          const sizes = await Promise.all(files.map((f) => fsp.stat(f).then((s) => s.size).catch(() => 0)));
+          total += sizes.reduce((a, b) => a + b, 0);
+          await Promise.all(subdirs.map((d) => walk(d, depth + 1)));
         };
-        walk(root, 0);
+        await walk(root, 0);
         return total;
       };
 
-      const dataBytes = dirSize(dataDir);
-      const snapshotBytes = dirSize(snapshotDir);
+      const [dataBytes, snapshotBytes] = await Promise.all([dirSize(dataDir), dirSize(snapshotDir)]);
       if (dataBytes === null && snapshotBytes === null) {
         stats.disk = null;
       } else {
         stats.disk = {
-          dataDir,
+          dataDir: isAdmin ? dataDir : redactHome(dataDir),
           dataBytes: dataBytes ?? 0,
-          snapshotDir,
+          snapshotDir: isAdmin ? snapshotDir : redactHome(snapshotDir),
           snapshotBytes: snapshotBytes ?? 0,
         };
       }
@@ -335,14 +361,15 @@ export class HealthDetail extends Resource {
       const cwd = process.cwd();
       const candidates = [join(cwd, "node_modules"), join(homedir(), ".flair", "node_modules")];
       const installed = new Set<string>();
-      for (const base of candidates) {
-        if (!existsSync(base)) continue;
+      await Promise.all(candidates.map(async (base) => {
+        if (!(await exists(base))) return;
         try {
-          for (const name of readdirSync(base)) {
+          const names = await fsp.readdir(base);
+          for (const name of names) {
             if (name.startsWith("flair-bridge-")) installed.add(name);
           }
         } catch { /* skip */ }
-      }
+      }));
       if (installed.size === 0) {
         stats.bridges = null;
       } else {
