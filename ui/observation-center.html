@@ -49,6 +49,8 @@
     function authHeader(){const p=clean(els.adminPass.value);return p?"Basic "+btoa("admin:"+p):""}
     const clean=v=>String(v??"").trim();
     const ESC_MAP={"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
+    // esc() is used in BOTH attribute and text contexts; browsers HTML-decode attribute
+    // values when reading .value, so round-trips (e.g. agentFilter.value) preserve the original.
     const esc=v=>String(v??"").replace(/[&<>"']/g,c=>ESC_MAP[c]);
     const parse=v=>{if(!v)return null;if(typeof v==="object")return v;try{return JSON.parse(v)}catch{return null}};
     const list=v=>Array.isArray(v)?v:Array.isArray(v?.items)?v.items:Array.isArray(v?.data)?v.data:[];
