@@ -2578,18 +2578,20 @@ program
       }
     };
 
-    // 1. Write a test memory via POST /Memory
-    await check("Write test memory (POST /Memory)", async () => {
+    // 1. Write a test memory via PUT /Memory/<id>.
+    // Schema only exposes PUT — POST returns 'Memory does not have a post method implemented'.
+    await check("Write test memory (PUT /Memory/<id>)", async () => {
+      const id = `flair-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const body: Record<string, any> = {
+        id,
         content: "flair test \u2014 this will be deleted",
         durability: "ephemeral",
         createdAt: new Date().toISOString(),
       };
       if (agentId) body.agentId = agentId;
-      const result = await api("POST", "/Memory", body);
-      // id may be returned directly or nested
-      memoryId = result?.id ?? result?.[0]?.id ?? null;
-      return !!memoryId || result?.ok === true;
+      await api("PUT", `/Memory/${id}`, body);
+      memoryId = id;
+      return true;
     });
 
     // 2. Search for the test memory via POST /SemanticSearch
