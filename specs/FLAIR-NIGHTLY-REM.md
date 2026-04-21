@@ -57,8 +57,8 @@ Each nightly run, in order, with a failure-stops-the-cycle guarantee:
 3. **Maintenance.** Soft-delete expired memories; soft-archive memories matching archive policy (see § 6).
 4. **Trust-tier filter.** Select memories with `trust ∈ {endorsed, corroborated, battle-tested}` from the last N days (default 7) as reflection input. Unverified memories are excluded from distillation but remain retrievable.
 5. **Distillation.** Call `/ReflectMemories` to generate candidate lessons. Store as `MemoryCandidate` rows (new table, § 7).
-6. **Diff report.** Emit a structured event: `{archived, expired, consolidatedCount, candidates, snapshotPath}`.
-7. **Operator ping.** Deliver diff via Discord webhook (if configured) or TPS mail to the agent's owner.
+6. **Diff report.** Append a structured row to `~/.flair/logs/rem-nightly.jsonl` (see § 8). Increment a pending-candidates counter surfaced by the CLI.
+7. **Optional push notification.** If (and only if) the user has configured a webhook, SMTP endpoint, or a delivery plugin, the runtime forwards the diff row to it. No delivery is attempted by default — the CLI is the source of truth and always works offline.
 
 No step touches soul. No step promotes a candidate. Promotion is a separate, explicit human/agent action (§ 5).
 
@@ -116,9 +116,11 @@ type MemoryCandidate @table(database: "flair") {
 
 Candidates persist. Rejected candidates retain full history — recurring distillations surface as `supersedes` chains so the operator sees "this same lesson keeps getting proposed and rejected."
 
-## § 8 Observability
+## § 8 Observability (pull-model, CLI-first)
 
-Every nightly run writes a structured log row:
+**Assumption:** a Flair user has a terminal. They may not have Discord, TPS mail, SMTP, or any push channel. The CLI is the universal surface; everything else is optional.
+
+Every nightly run appends one row to `~/.flair/logs/rem-nightly.jsonl`:
 
 ```json
 {
@@ -132,7 +134,14 @@ Every nightly run writes a structured log row:
 }
 ```
 
-`flair rem nightly status` shows the last 14 runs as a sparkline + table. Drift becomes visible in under 24h, not weeks.
+CLI surfaces:
+- `flair rem nightly status` — last 14 runs as a sparkline + table
+- `flair rem candidates` — one-line warning ("N candidates awaiting review") printed at the top of `flair status` when count > 0
+- `flair status` — pending-candidate count shown in the summary block
+
+Drift becomes visible the next time the operator opens a Flair CLI, no push channel required.
+
+**Push plugins (opt-in):** a Flair user can register a delivery plugin (`flair-notify-*` npm package, following the bridges convention). Built-in stubs for generic HTTPS webhook and SMTP-if-configured are planned post-1.0; in 1.0 the primary discovery path is the CLI.
 
 ## § 9 Emergency Controls
 
@@ -153,11 +162,13 @@ First time `flair rem nightly enable` is run for an agent, the next cycle runs w
 - **LLM-authored rationale.** The rationale on promote/reject is operator-written. An LLM-drafted rationale the human edits is 1.1+.
 - **Cloud-hosted scheduler.** 1.0 uses platform-native schedulers (launchd/systemd). Fabric-hosted nightly is bundled with Flair-cloud post-1.0.
 
-## § 12 Open Questions
+## § 12 Open Questions — Resolved
 
-1. **Where do candidates surface by default?** CLI (`flair rem candidates`) is minimum. Is a lightweight web UI in 1.0 scope? Leaning no — CLI is enough for the power-user audience; UI can wait.
-2. **Diff ping default channel.** Discord webhook is easy for our team but requires config. TPS mail is universal but less visible. Default to TPS mail with Discord opt-in?
-3. **Snapshot compression.** 30d of snapshots per agent × N agents × M bytes adds up. Default `tar.gz` is fine at 1.0 scale; revisit when a user has >1M memories.
+Answered by Nathan 2026-04-21T13:10Z:
+
+1. **Surface for candidates:** CLI-first. No web UI in 1.0. (`flair rem candidates` + surfaced pending count in `flair status`.)
+2. **Default diff delivery:** no push by default. Discord and TPS mail are internal to our agent fleet, not something a Flair user has. Pull-model via `~/.flair/logs/rem-nightly.jsonl` + CLI status commands is the universal surface. External push channels are optional plugins (post-1.0 built-in stubs for webhook + SMTP).
+3. **Snapshot compression:** default `tar.gz` of JSON export accepted. Revisit at >1M-memories scale.
 
 ## § 13 Implementation Notes (non-normative)
 
