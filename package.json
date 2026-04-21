@@ -30,6 +30,7 @@
   "files": [
     "dist/",
     "schemas/",
+    "ui/",
     "config.yaml",
     "LICENSE",
     "README.md",
