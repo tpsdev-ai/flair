@@ -207,6 +207,16 @@ jobs:
           # where `flair test` POSTed to /Memory and always failed.
           $FLAIR test --agent smoke
 
+          # Deploy dry-run (FLAIR-DEPLOY guard): `flair deploy --dry-run` must
+          # resolve the installed package and validate args against a Fabric
+          # target. Doesn't call Fabric. Catches drift in the published `files`
+          # array vs. what deploy packages.
+          $FLAIR deploy --dry-run \
+            --fabric-org pack-smoke-org \
+            --fabric-cluster pack-smoke-cluster \
+            --fabric-user admin \
+            --fabric-password smoke-pw
+
           # Tear down
           $FLAIR stop --port $PORT || true
 

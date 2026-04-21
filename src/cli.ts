@@ -14,6 +14,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypto";
 import { keystore } from "./keystore.js";
+import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
 // src/ into resources/, which don't survive npm packaging (see also
@@ -2616,6 +2617,86 @@ program
 
     console.log(`\n${passed} passed, ${failed} failed`);
     if (failed > 0) process.exit(1);
+  });
+
+// ─── flair deploy ─────────────────────────────────────────────────────────────
+
+program
+  .command("deploy")
+  .description("Deploy Flair as a component to a remote Harper Fabric cluster")
+  .option("--fabric-org <org>", "Fabric org (env: FABRIC_ORG)")
+  .option("--fabric-cluster <cluster>", "Fabric cluster within the org (env: FABRIC_CLUSTER)")
+  .option("--fabric-user <user>", "Fabric admin username (env: FABRIC_USER)")
+  .option("--fabric-password <pass>", "Fabric admin password (env: FABRIC_PASSWORD)")
+  .option("--fabric-token <token>", "OAuth bearer token (env: FABRIC_TOKEN) — reserved for future Fabric bearer support")
+  .option("--target <url>", "Override the Fabric URL template (https://<cluster>.<org>.harperfabric.com)")
+  .option("--project <name>", "Component name in Fabric", "flair")
+  .option("--pkg-version <semver>", "Override version label (default: installed package version)")
+  .option("--no-replicated", "Disable cluster-wide replication (default: replicated=true)")
+  .option("--no-restart", "Do not restart the component after deploy (default: restart=true)")
+  .option("--dry-run", "Resolve package, validate args, skip the deploy call")
+  .option("--package-root <dir>", "Override package root (mainly for testing)")
+  .action(async (opts) => {
+    const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+    const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+    const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+
+    const deployOpts = {
+      fabricOrg: opts.fabricOrg ?? process.env.FABRIC_ORG,
+      fabricCluster: opts.fabricCluster ?? process.env.FABRIC_CLUSTER,
+      fabricUser: opts.fabricUser ?? process.env.FABRIC_USER,
+      fabricPassword: opts.fabricPassword ?? process.env.FABRIC_PASSWORD,
+      fabricToken: opts.fabricToken ?? process.env.FABRIC_TOKEN,
+      target: opts.target,
+      project: opts.project,
+      version: opts.pkgVersion,
+      replicated: opts.replicated !== false,
+      restart: opts.restart !== false,
+      dryRun: opts.dryRun ?? false,
+      packageRoot: opts.packageRoot,
+    };
+
+    const errors = validateDeployOptions(deployOpts);
+    if (errors.length) {
+      console.error(red("flair deploy: missing required options"));
+      for (const e of errors) console.error(`  - ${e}`);
+      process.exit(1);
+    }
+
+    // Warn on password-via-flag (leaks to shell history). Env is preferred.
+    if (opts.fabricPassword && !process.env.FABRIC_PASSWORD) {
+      console.error(dim(
+        "warning: --fabric-password leaks to shell history. " +
+        "Prefer FABRIC_PASSWORD env.",
+      ));
+    }
+
+    const url = buildDeployUrl(deployOpts);
+    console.log(`${green("→")} Deploying ${deployOpts.project} to ${url}`);
+    if (deployOpts.dryRun) console.log(dim("  (dry-run: skipping API call)"));
+
+    try {
+      const result = await deployToFabric(deployOpts);
+      if (result.dryRun) {
+        console.log(`${green("✓")} dry-run OK: ${result.project} ${result.version} ready to deploy to ${result.url}`);
+        console.log(dim(`  package root: ${result.packageRoot}`));
+        return;
+      }
+      console.log(`\n${green("✓")} Flair ${result.version} deployed`);
+      console.log(`\n  URL:     ${result.url}`);
+      console.log(`  Project: ${result.project}`);
+      console.log(`\nNext steps:`);
+      console.log(dim(`  1. Set an admin password in Fabric Studio (Cluster Settings → Admin)`));
+      console.log(dim(`  2. Seed your first agent:`));
+      console.log(`     flair agent add --remote ${result.url} --name my-agent`);
+    } catch (err: any) {
+      console.error(red(`\n✗ deploy failed: ${err.message}`));
+      const hint = err.message?.toLowerCase();
+      if (hint?.includes("401") || hint?.includes("unauthoriz")) {
+        console.error(dim("  hint: check Fabric Studio → Cluster Settings → Admin for the admin password"));
+      }
+      process.exit(1);
+    }
   });
 
 // ─── flair doctor ─────────────────────────────────────────────────────────────
