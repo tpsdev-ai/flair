@@ -143,11 +143,13 @@ function spawnHarper(
   bin: string,
   args: string[],
   cwd: string,
+  env: NodeJS.ProcessEnv,
 ): Promise<void> {
   return new Promise((resolveP, rejectP) => {
     const p = spawn(process.execPath, [bin, ...args], {
       cwd,
       stdio: "inherit",
+      env,
     });
     p.on("error", rejectP);
     p.on("exit", (code) => {
@@ -192,11 +194,18 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     `project=${project}`,
     `restart=${opts.restart !== false}`,
     `replicated=${opts.replicated !== false}`,
-    `username=${opts.fabricUser}`,
-    `password=${opts.fabricPassword}`,
   ];
 
-  await spawnHarper(harperBin, args, packageRoot);
+  // Credentials go via env, not argv, so they don't appear in `ps` output
+  // for the lifetime of the Harper child process. Harper's cliOperations
+  // reads CLI_TARGET_USERNAME / CLI_TARGET_PASSWORD as env fallbacks.
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLI_TARGET_USERNAME: opts.fabricUser,
+    CLI_TARGET_PASSWORD: opts.fabricPassword,
+  };
+
+  await spawnHarper(harperBin, args, packageRoot, childEnv);
 
   return { url, project, version, packageRoot, dryRun: false };
 }
