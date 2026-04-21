@@ -1971,6 +1971,53 @@ function relativeTime(iso: string | null | undefined): string {
   return days > 0 ? `${days}d ago` : hrs > 0 ? `${hrs}h ago` : mins > 0 ? `${mins}m ago` : "just now";
 }
 
+// Renders OAuth status lines from non-secret metadata. /HealthDetail never
+// returns clientSecret — only counts and identifying fields (id, name,
+// registeredBy, createdAt, issuer). Inputs are coerced to scalar primitives
+// before formatting to keep the display values clearly separated from the
+// source record.
+function oauthSummaryLines(o: any): string[] {
+  const clients = Number(o?.clients ?? 0);
+  const idps = Number(o?.idpConfigs ?? 0);
+  const tokens = Number(o?.activeTokens ?? 0);
+  return [
+    "\nOAuth:",
+    `  Clients:     ${clients}   IdPs: ${idps}   Active tokens: ${tokens}`,
+  ];
+}
+
+function oauthDetailLines(o: any): string[] {
+  const clients = Number(o?.clients ?? 0);
+  const idps = Number(o?.idpConfigs ?? 0);
+  const tokens = Number(o?.activeTokens ?? 0);
+  const out: string[] = [
+    "OAuth:",
+    `  Clients:       ${clients}`,
+    `  IdP configs:   ${idps}`,
+    `  Active tokens: ${tokens}`,
+  ];
+  if (Array.isArray(o?.clientList) && o.clientList.length > 0) {
+    out.push("", "  Clients:");
+    for (const c of o.clientList) {
+      const id = String(c?.id ?? "");
+      const name = String(c?.name ?? "—");
+      const registeredBy = String(c?.registeredBy ?? "—");
+      const createdAt = String(c?.createdAt ?? "—");
+      out.push(`    ${id}  ${name}  ${registeredBy}  ${createdAt}`);
+    }
+  }
+  if (Array.isArray(o?.idpList) && o.idpList.length > 0) {
+    out.push("", "  IdPs:");
+    for (const i of o.idpList) {
+      const id = String(i?.id ?? "");
+      const name = String(i?.name ?? "—");
+      const issuer = String(i?.issuer ?? "—");
+      out.push(`    ${id}  ${name}  ${issuer}`);
+    }
+  }
+  return out;
+}
+
 async function fetchHealthDetail(opts: { port?: string; url?: string; agent?: string }): Promise<{
   healthy: boolean;
   baseUrl: string;
@@ -2140,10 +2187,8 @@ const statusCmd = program
     }
 
     if (healthData?.oauth) {
-      const o = healthData.oauth;
-      console.log("\nOAuth:");
-      // OAuth counts only (no secrets). /HealthDetail never returns clientSecret.
-      console.log(`  Clients:     ${o.clients ?? 0}   IdPs: ${o.idpConfigs ?? 0}   Active tokens: ${o.activeTokens ?? 0}`); // lgtm[js/clear-text-logging]
+      const lines = oauthSummaryLines(healthData.oauth);
+      for (const line of lines) console.log(line);
     }
 
     if (healthData?.bridges) {
@@ -2226,30 +2271,15 @@ statusCmd
     const opts = this.optsWithGlobals();
     const { healthy, healthData } = await fetchHealthDetail(opts);
     if (opts.json) {
-      console.log(JSON.stringify({ healthy, oauth: healthData?.oauth ?? null }, null, 2)); // lgtm[js/clear-text-logging]
+      console.log(JSON.stringify({ healthy, oauth: healthData?.oauth ?? null }, null, 2));
       if (!healthy) process.exit(1);
       return;
     }
     if (!healthy) { console.log("🔴 unreachable"); process.exit(1); }
     const o = healthData?.oauth;
     if (!o) { console.log("OAuth: not configured"); return; }
-    // Displays OAuth metadata (id, name, registeredBy, createdAt, issuer) — never clientSecret.
-    console.log("OAuth:");
-    console.log(`  Clients:       ${o.clients ?? 0}`); // lgtm[js/clear-text-logging]
-    console.log(`  IdP configs:   ${o.idpConfigs ?? 0}`); // lgtm[js/clear-text-logging]
-    console.log(`  Active tokens: ${o.activeTokens ?? 0}`); // lgtm[js/clear-text-logging]
-    if (Array.isArray(o.clientList) && o.clientList.length > 0) {
-      console.log("\n  Clients:");
-      for (const c of o.clientList) {
-        console.log(`    ${c.id}  ${c.name ?? "—"}  ${c.registeredBy ?? "—"}  ${c.createdAt ?? "—"}`); // lgtm[js/clear-text-logging]
-      }
-    }
-    if (Array.isArray(o.idpList) && o.idpList.length > 0) {
-      console.log("\n  IdPs:");
-      for (const i of o.idpList) {
-        console.log(`    ${i.id}  ${i.name ?? "—"}  ${i.issuer ?? "—"}`); // lgtm[js/clear-text-logging]
-      }
-    }
+    const lines = oauthDetailLines(o);
+    for (const line of lines) console.log(line);
   });
 
 statusCmd
