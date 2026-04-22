@@ -2274,9 +2274,25 @@ const statusCmd = program
       console.log(`  ${agents.count} total${nameStr}`);
       if (agents.count > 1 && Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
         const idW = Math.max(2, ...agents.perAgent.map((r: any) => (r.id ?? "").length));
-        console.log(`  ${"id".padEnd(idW)}  memories  last_write`);
-        for (const r of agents.perAgent) {
-          console.log(`  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${relativeTime(r.lastWriteAt)}`);
+        // Older HealthDetail responses only carry id / memoryCount / lastWriteAt.
+        // Only print the richer columns if at least one row supplies them.
+        const hasDeep = agents.perAgent.some(
+          (r: any) => typeof r.hashFallback === "number" || typeof r.writes24h === "number",
+        );
+        if (hasDeep) {
+          console.log(`  ${"id".padEnd(idW)}  memories  hash_fb  24h  last_write`);
+          for (const r of agents.perAgent) {
+            const fb = typeof r.hashFallback === "number" ? String(r.hashFallback) : "—";
+            const w24 = typeof r.writes24h === "number" ? String(r.writes24h) : "—";
+            console.log(
+              `  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${fb.padStart(7)}  ${w24.padStart(3)}  ${relativeTime(r.lastWriteAt)}`,
+            );
+          }
+        } else {
+          console.log(`  ${"id".padEnd(idW)}  memories  last_write`);
+          for (const r of agents.perAgent) {
+            console.log(`  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${relativeTime(r.lastWriteAt)}`);
+          }
         }
       }
     }
