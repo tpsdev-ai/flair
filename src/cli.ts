@@ -2233,10 +2233,13 @@ const statusCmd = program
     const memories = healthData?.memories;
     const warnings: Array<{ level: string; message: string }> = Array.isArray(healthData?.warnings) ? healthData.warnings : [];
     const hasWarn = warnings.some((w) => w.level === "warn");
+    // Header state-word stays "running" whenever the process is alive; the
+    // icon conveys health (🟢 clean / 🟡 warnings). 🔴 unreachable is already
+    // handled above by the `!healthy` early-exit. Decoupling state from
+    // health keeps the smoke-test `grep -q "running"` stable across tiers.
     const headerIcon = hasWarn ? "🟡" : "🟢";
-    const headerState = hasWarn ? "degraded" : "running";
 
-    console.log(`Flair v${__pkgVersion} — ${headerIcon} ${headerState}${pid ? ` (PID ${pid}` : ""}${uptimeStr ? `, uptime ${uptimeStr})` : pid ? ")" : ""}`);
+    console.log(`Flair v${__pkgVersion} — ${headerIcon} running${pid ? ` (PID ${pid}` : ""}${uptimeStr ? `, uptime ${uptimeStr})` : pid ? ")" : ""}`);
     console.log(`  URL:        ${baseUrl}`);
 
     if (warnings.length > 0) {
