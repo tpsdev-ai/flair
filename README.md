@@ -94,6 +94,9 @@ Context-signal-aware preloading. Bootstrap reads active project context, recent 
 ### Auto Entity Detection
 Passive extraction of entities from memory content on write. Entities are indexed automatically — no tagging required. Feeds the relationship graph without agent intervention.
 
+### Memory Bridges
+Pluggable import/export to foreign memory systems. Every agent-memory format (agentic-stack, Mem0, Letta, Anthropic memory, the next viral one) shouldn't need its own Flair PR. Bridges give you one contract with two shapes — a YAML descriptor for file-format targets or a code plugin for API targets — and a scaffold/test loop that lets an agent ship a working adapter in one pass. See [docs/bridges.md](docs/bridges.md).
+
 ## Quick Start
 
 ### Prerequisites
