@@ -6,7 +6,7 @@
  * embeddings — no OpenAI API key required.
  *
  * Implements the OpenClaw "memory" plugin slot:
- *   - memory_recall  → POST /SemanticSearch (semantic search)
+ *   - memory_search  → POST /SemanticSearch (semantic search)
  *   - memory_store   → PUT  /Memory/<id>  (write + embed)
  *   - memory_get     → GET  /Memory/<id>  (fetch by id)
  *   - before_agent_start hook → inject recent/relevant memories
@@ -314,12 +314,12 @@ export default {
     const displayAgent = isAutoMode ? "auto (per-session)" : cfg.agentId;
     api.logger.info(`openclaw-flair: registered (agent=${displayAgent}, url=${cfg.url ?? DEFAULT_URL})`);
 
-    // ── memory_recall ──────────────────────────────────────────────────────
+    // ── memory_search ──────────────────────────────────────────────────────
 
     api.registerTool(
       {
-        name: "memory_recall",
-        label: "Memory Recall",
+        name: "memory_search",
+        label: "Memory Search",
         description:
           "Search long-term memory via Flair semantic search. Use when you need context about user preferences, past decisions, or previously discussed topics.",
         parameters: Type.Object({
@@ -342,12 +342,12 @@ export default {
               details: { count: results.length, memories: results },
             };
           } catch (err: any) {
-            api.logger.warn(`openclaw-flair: recall failed: ${err.message}`);
-            return { content: [{ type: "text", text: `Memory recall unavailable: ${err.message}` }], details: { count: 0 } };
+            api.logger.warn(`openclaw-flair: search failed: ${err.message}`);
+            return { content: [{ type: "text", text: `Memory search unavailable: ${err.message}` }], details: { count: 0 } };
           }
         },
       },
-      { name: "memory_recall" },
+      { name: "memory_search" },
     );
 
     // ── memory_store ───────────────────────────────────────────────────────

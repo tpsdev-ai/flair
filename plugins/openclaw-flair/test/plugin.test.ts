@@ -43,7 +43,7 @@ describe("memory-flair plugin", () => {
     const api = createMockApi();
     plugin.register(api as any);
 
-    expect(api._tools.has("memory_recall")).toBe(true);
+    expect(api._tools.has("memory_search")).toBe(true);
     expect(api._tools.has("memory_store")).toBe(true);
     expect(api._tools.has("memory_get")).toBe(true);
   });
@@ -79,12 +79,12 @@ describe("memory-flair plugin", () => {
     expect(result.content[0].text).toContain("unavailable");
   });
 
-  test("memory_recall returns error when no agentId in auto mode", async () => {
+  test("memory_search returns error when no agentId in auto mode", async () => {
     const plugin = (await import("../index.ts")).default;
     const api = createMockApi({ agentId: "auto" });
     plugin.register(api as any);
 
-    const tool = api._tools.get("memory_recall")!;
+    const tool = api._tools.get("memory_search")!;
     const result = await tool.execute("test", { query: "hello" });
     expect(result.content[0].text).toContain("unavailable");
   });
