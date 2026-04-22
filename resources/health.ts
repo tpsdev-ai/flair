@@ -92,16 +92,30 @@ export class HealthDetail extends Resource {
     try {
       const agents: any[] = [];
       for await (const a of db.flair.Agent.search({})) agents.push(a);
-      const perAgentMap = new Map<string, { id: string; memoryCount: number; lastWriteAt: string | null }>();
+      type AgentRow = {
+        id: string;
+        memoryCount: number;
+        hashFallback: number;
+        writes24h: number;
+        lastWriteAt: string | null;
+      };
+      const blank = (id: string): AgentRow => ({
+        id, memoryCount: 0, hashFallback: 0, writes24h: 0, lastWriteAt: null,
+      });
+      const perAgentMap = new Map<string, AgentRow>();
       for (const a of agents) {
-        if (a.id) perAgentMap.set(a.id, { id: a.id, memoryCount: 0, lastWriteAt: null });
+        if (a.id) perAgentMap.set(a.id, blank(a.id));
       }
+      const cutoff24h = nowMs - 24 * 3600 * 1000;
       for (const m of memoriesList) {
         if (!m.agentId) continue;
-        const row = perAgentMap.get(m.agentId) ?? { id: m.agentId, memoryCount: 0, lastWriteAt: null };
+        const row = perAgentMap.get(m.agentId) ?? blank(m.agentId);
         row.memoryCount++;
+        if (!m.embeddingModel || m.embeddingModel === "hash-512d") row.hashFallback++;
         if (m.createdAt) {
-          if (!row.lastWriteAt || new Date(m.createdAt).getTime() > new Date(row.lastWriteAt).getTime()) {
+          const ts = new Date(m.createdAt).getTime();
+          if (ts >= cutoff24h) row.writes24h++;
+          if (!row.lastWriteAt || ts > new Date(row.lastWriteAt).getTime()) {
             row.lastWriteAt = m.createdAt;
           }
         }
