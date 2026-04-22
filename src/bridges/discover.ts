@@ -35,13 +35,25 @@ async function readYamlBridge(path: string): Promise<DiscoveredBridge | null> {
     const raw = await fsp.readFile(path, "utf-8");
     // Lightweight parse — we only pull the top-level fields we advertise.
     // Avoids pulling in a YAML dep just for discovery; a real parse happens
-    // later when the bridge runs. Tolerates single-quoted values, unquoted,
-    // or no value at all.
+    // later when the bridge runs. Deliberately string-only (no dynamic
+    // RegExp) so ReDoS lint rules stay happy. Top-level means no leading
+    // whitespace on the line — indented values (under import:/export:)
+    // are correctly ignored.
+    const lines = raw.split(/\r?\n/);
     const get = (field: string): string | undefined => {
-      const re = new RegExp(`^${field}\\s*:\\s*(.*)$`, "m");
-      const m = raw.match(re);
-      if (!m) return undefined;
-      return m[1].trim().replace(/^["']|["']$/g, "");
+      const prefix = `${field}:`;
+      for (const line of lines) {
+        if (!line.startsWith(prefix)) continue;
+        const rest = line.slice(prefix.length);
+        // Accept "name: foo", "name:foo", "name:  foo"
+        const value = rest.trim();
+        // Strip surrounding single or double quotes (yaml-ish)
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          return value.slice(1, -1);
+        }
+        return value;
+      }
+      return undefined;
     };
     const name = get("name");
     if (!name) return null;
