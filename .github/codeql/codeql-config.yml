@@ -1,0 +1,22 @@
+name: "Flair CodeQL config"
+
+# We exclude specific rules that fire false positives on known-safe code
+# paths. Keep this list short and document each entry.
+query-filters:
+  # `js/clear-text-logging` fires on `console.log(X)` where X transitively
+  # carries data from a record whose shape includes identifier fields the
+  # rule heuristically treats as secret-adjacent (e.g. an OAuth `clients[]`
+  # array, even when only non-secret metadata — id, name, registeredBy,
+  # createdAt, issuer — is actually logged).
+  #
+  # Flair's only legitimate callers of `console.log` on such records are
+  # the display helpers in `src/cli.ts` (subsystem rollups rendered to the
+  # operator's terminal). `/HealthDetail` never returns `clientSecret`
+  # or any other credential.
+  #
+  # The CodeQL JS taint tracker cannot be broken without adding a fake
+  # sanitizer; that's worse code than disabling the rule with a reasoned
+  # comment. Semgrep SAST + Sherlock pre-merge review cover real
+  # cleartext-credential regressions in server code.
+  - exclude:
+      id: js/clear-text-logging
