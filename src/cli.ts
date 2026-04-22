@@ -2111,8 +2111,11 @@ const statusCmd = program
     const agents = healthData?.agents;
     const memories = healthData?.memories;
     const warnings: Array<{ level: string; message: string }> = Array.isArray(healthData?.warnings) ? healthData.warnings : [];
+    const hasWarn = warnings.some((w) => w.level === "warn");
+    const headerIcon = hasWarn ? "🟡" : "🟢";
+    const headerState = hasWarn ? "degraded" : "running";
 
-    console.log(`Flair v${__pkgVersion} — 🟢 running${pid ? ` (PID ${pid}` : ""}${uptimeStr ? `, uptime ${uptimeStr})` : pid ? ")" : ""}`);
+    console.log(`Flair v${__pkgVersion} — ${headerIcon} ${headerState}${pid ? ` (PID ${pid}` : ""}${uptimeStr ? `, uptime ${uptimeStr})` : pid ? ")" : ""}`);
     console.log(`  URL:        ${baseUrl}`);
 
     if (warnings.length > 0) {
@@ -2126,6 +2129,15 @@ const statusCmd = program
       const hashStr = memories.hashFallback > 0 ? `${memories.hashFallback} hash` : "";
       const detail = [embStr, hashStr].filter(Boolean).join(", ");
       console.log(`  Total:       ${memories.total}${detail ? ` (${detail})` : ""}`);
+      if (memories.modelCounts && typeof memories.modelCounts === "object") {
+        const entries = Object.entries(memories.modelCounts as Record<string, number>)
+          .filter(([, n]) => n > 0)
+          .sort((a, b) => b[1] - a[1]);
+        if (entries.length > 0) {
+          const formatted = entries.map(([k, n]) => `${k}: ${n}`).join(", ");
+          console.log(`  Embeddings:  ${formatted}`);
+        }
+      }
       if (memories.byDurability) {
         const d = memories.byDurability;
         console.log(`  Durability:  ${d.permanent ?? 0} permanent / ${d.persistent ?? 0} persistent / ${d.standard ?? 0} standard / ${d.ephemeral ?? 0} ephemeral`);
@@ -3175,10 +3187,48 @@ memory.command("search [query]").requiredOption("--agent <id>")
     if (opts.tag) body.tag = opts.tag;
     console.log(JSON.stringify(await api("POST", "/SemanticSearch", body), null, 2));
   });
-memory.command("list").requiredOption("--agent <id>").option("--tag <tag>")
+memory.command("list")
+  .requiredOption("--agent <id>")
+  .option("--tag <tag>")
+  .option("--hash-fallback", "Only memories with missing or hash-fallback embeddings (for backfill triage)")
+  .option("--limit <n>", "Max rows when using --hash-fallback", "50")
   .action(async (opts) => {
     const q = new URLSearchParams({ agentId: opts.agent, ...(opts.tag ? { tag: opts.tag } : {}) }).toString();
-    console.log(JSON.stringify(await api("GET", `/Memory?${q}`), null, 2));
+    const raw = await api("GET", `/Memory?${q}`);
+    if (!opts.hashFallback) {
+      console.log(JSON.stringify(raw, null, 2));
+      return;
+    }
+    // --hash-fallback: filter to entries without a real embedding and print as a table.
+    // Same predicate HealthDetail uses: missing model or the "hash-512d" marker.
+    const all: any[] = Array.isArray(raw) ? raw : (raw?.results ?? raw?.items ?? []);
+    const fallback = all.filter((m: any) => !m.embeddingModel || m.embeddingModel === "hash-512d");
+    if (fallback.length === 0) {
+      console.log(`No hash-fallback memories for agent ${opts.agent}. All embedded.`);
+      return;
+    }
+    const limit = Math.max(1, parseInt(opts.limit, 10) || 50);
+    const rows = fallback
+      .slice()
+      .sort((a: any, b: any) => {
+        const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return tb - ta;
+      })
+      .slice(0, limit);
+    const idW = Math.max(2, ...rows.map((r: any) => String(r.id ?? "").length));
+    console.log(`${fallback.length} hash-fallback memories for agent ${opts.agent} (showing ${rows.length}):\n`);
+    console.log(`  ${"id".padEnd(idW)}  created_at            preview`);
+    for (const r of rows) {
+      const created = r.createdAt ? String(r.createdAt).slice(0, 19).replace("T", " ") : "—".padEnd(19);
+      const preview = String(r.content ?? "").replace(/\s+/g, " ").slice(0, 80);
+      console.log(`  ${String(r.id ?? "").padEnd(idW)}  ${created}  ${preview}`);
+    }
+    if (fallback.length > rows.length) {
+      console.log(`\n... ${fallback.length - rows.length} more (raise with --limit). To backfill: flair reembed --agent ${opts.agent} --stale-only`);
+    } else {
+      console.log(`\nTo backfill: flair reembed --agent ${opts.agent} --stale-only`);
+    }
   });
 
 // ─── flair search (top-level shortcut) ───────────────────────────────────────

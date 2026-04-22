@@ -53,12 +53,18 @@ export class HealthDetail extends Resource {
       for await (const m of db.flair.Memory.search({})) {
         memoriesList.push(m);
       }
-      const withEmbeddings = memoriesList.filter(
-        (m: any) => m.embeddingModel && m.embeddingModel !== "hash-512d",
-      ).length;
-      const hashFallback = memoriesList.filter(
-        (m: any) => !m.embeddingModel || m.embeddingModel === "hash-512d",
-      ).length;
+      // Per-model counts: "hash-512d" is the hash-fallback marker; any other
+      // value (or missing value) is a real embedding. Multiple distinct
+      // non-hash models means mixed vector spaces — cross-space searches
+      // return garbage unless reconciled via `flair reembed`.
+      const modelCounts: Record<string, number> = {};
+      for (const m of memoriesList) {
+        const model = m.embeddingModel || "hash-512d";
+        modelCounts[model] = (modelCounts[model] ?? 0) + 1;
+      }
+      const hashFallback = modelCounts["hash-512d"] ?? 0;
+      const withEmbeddings = memoriesList.length - hashFallback;
+      const realModels = Object.keys(modelCounts).filter((k) => k !== "hash-512d");
       const byDurability = { permanent: 0, persistent: 0, standard: 0, ephemeral: 0 } as Record<string, number>;
       let archived = 0;
       let expired = 0;
@@ -72,6 +78,7 @@ export class HealthDetail extends Resource {
         total: memoriesList.length,
         withEmbeddings,
         hashFallback,
+        modelCounts,
         byDurability,
         archived,
         expired,
@@ -83,8 +90,24 @@ export class HealthDetail extends Resource {
         if (sorted[0]) stats.lastWrite = sorted[0].createdAt;
       }
       if (expired > 0) warnings.push({ level: "warn", message: `${expired} memories have expired validTo but aren't archived` });
-      if (withEmbeddings > 0 && hashFallback > withEmbeddings) {
-        warnings.push({ level: "warn", message: "embeddings degraded — more hash-fallback writes than embedded" });
+      // Hash-fallback coverage — tiered by percentage. Thresholds are
+      // first-pass defaults; Kern's review on ops-n4n may tune them.
+      if (memoriesList.length > 0) {
+        const pct = Math.round((hashFallback / memoriesList.length) * 100);
+        if (pct >= 10) {
+          warnings.push({
+            level: "warn",
+            message: `${hashFallback}/${memoriesList.length} (${pct}%) memories are hash-fallback — run: flair reembed --stale-only --dry-run`,
+          });
+        }
+      }
+      // Mixed embedding models — searches across vector spaces return garbage.
+      if (realModels.length > 1) {
+        const list = realModels.map((k) => `${k}:${modelCounts[k]}`).join(", ");
+        warnings.push({
+          level: "warn",
+          message: `multiple embedding models in use (${list}) — cross-model search unreliable; run: flair reembed against one model`,
+        });
       }
     } catch { stats.memories = null; }
 
