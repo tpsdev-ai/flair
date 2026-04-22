@@ -339,6 +339,167 @@ async function seedAgentViaOpsApi(
   }
 }
 
+// ─── First-run soul wizard ────────────────────────────────────────────────────
+
+type SoulEntries = [string, string][];
+
+export function templateSoul(choice: string): SoulEntries {
+  const templates: Record<string, SoulEntries> = {
+    "1": [
+      ["role", "Pair programmer on this machine. Concise, direct, proactive about flagging risks before I hit them."],
+      ["project", "(fill in: the main project or repo I'm helping with — shapes what bootstrap prioritizes)"],
+      ["standards", "Match existing codebase style. Prefer editing over rewriting. Surface tradeoffs on ambiguous decisions instead of making unilateral calls."],
+    ],
+    "2": [
+      ["role", "Team agent — operates in a shared repo and coordinates with other agents. Communicate through structured channels (PRs, issues, mail), not free-form chat."],
+      ["project", "(fill in: the repo or ops flow this agent runs in)"],
+      ["standards", "Keep changes minimal and reviewable. Always open PRs, never push to main. Document decisions in the issue tracker, not in agent memory."],
+    ],
+    "3": [
+      ["role", "Research assistant. Survey sources, extract findings, write structured notes. Flag uncertainty explicitly; separate evidence from inference."],
+      ["project", "(fill in: the research area or question being tracked)"],
+      ["standards", "Cite sources inline. When sources disagree, surface the disagreement rather than picking a side silently. Prefer primary sources."],
+    ],
+  };
+  return templates[choice] ?? [];
+}
+
+async function customSoulPrompts(ask: (q: string) => Promise<string>): Promise<SoulEntries> {
+  const entries: SoulEntries = [];
+
+  console.log("\n   Three fields. Press Enter on any to skip it.\n");
+
+  console.log("   role — how the agent identifies itself and acts");
+  console.log("     \"Senior dev, concise and direct\"");
+  console.log("     \"Data-engineering sidekick, SQL-first\"");
+  console.log("     \"PM assistant — asks clarifying questions before writing specs\"");
+  const role = await ask("   > ");
+  if (role.trim()) entries.push(["role", role.trim()]);
+
+  console.log("\n   project — what the agent is currently focused on");
+  console.log("     \"LifestyleLab — building Flair and TPS\"");
+  console.log("     \"Legal discovery review, Q2 contracts\"");
+  console.log("     \"Personal automation scripts in Bash + Python\"");
+  const project = await ask("   > ");
+  if (project.trim()) entries.push(["project", project.trim()]);
+
+  console.log("\n   standards — communication or coding preferences that should persist");
+  console.log("     \"No emojis. Match existing style. Ask before risky ops.\"");
+  console.log("     \"Always cite sources. Flag uncertainty explicitly.\"");
+  console.log("     \"Typescript strict mode. Prefer composition over inheritance.\"");
+  const standards = await ask("   > ");
+  if (standards.trim()) entries.push(["standards", standards.trim()]);
+
+  return entries;
+}
+
+async function editEntries(ask: (q: string) => Promise<string>, entries: SoulEntries): Promise<SoulEntries> {
+  console.log("\n   Press Enter to keep each default, or type a replacement:");
+  const result: SoulEntries = [];
+  for (const [key, def] of entries) {
+    const preview = def.length > 60 ? def.slice(0, 57) + "..." : def;
+    console.log(`\n   ${key} [keep: ${preview}]`);
+    const input = (await ask("   > ")).trim();
+    result.push([key, input || def]);
+  }
+  return result;
+}
+
+export function parseSoulJson(raw: string): SoulEntries {
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("no JSON object found in input");
+  const parsed = JSON.parse(jsonMatch[0]);
+  const entries: SoulEntries = [];
+  if (parsed.role) entries.push(["role", String(parsed.role).trim()]);
+  if (parsed.project) entries.push(["project", String(parsed.project).trim()]);
+  if (parsed.standards) entries.push(["standards", String(parsed.standards).trim()]);
+  if (entries.length === 0) throw new Error("JSON had no role/project/standards keys");
+  return entries;
+}
+
+async function runSoulWizard(agentId: string): Promise<SoulEntries> {
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+  // Buffered ask: collects rapid input (pasted text) into one answer.
+  // Waits 200ms after last line before resolving, so pasted multiline
+  // blocks are captured as a single answer instead of spilling across prompts.
+  const ask = (q: string): Promise<string> => new Promise(resolve => {
+    let buffer = "";
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      rl.removeListener("line", onLine);
+      resolve(buffer.trim());
+    };
+    const onLine = (line: string) => {
+      buffer += (buffer ? "\n" : "") + line;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(finish, 200);
+    };
+    process.stdout.write(q);
+    rl.on("line", onLine);
+  });
+
+  console.log("\n🎭 Agent personality setup");
+  console.log("   Soul entries shape what every future session starts with.\n");
+  console.log("   What best describes this agent?");
+  console.log("     (1) Solo developer — helps you with code on this machine");
+  console.log("     (2) Team agent — runs in a shared repo / ops flow");
+  console.log("     (3) Research assistant — surveys sources, writes notes");
+  console.log("     (4) Draft from Claude — paste a Claude-generated JSON draft");
+  console.log("     (5) Custom — I'll prompt for each field with examples");
+  console.log("     (s) Skip — set up later; `flair doctor` will nudge\n");
+
+  const choice = (await ask("   Choice [1-5/s]: ")).trim().toLowerCase();
+
+  let entries: SoulEntries = [];
+
+  if (choice === "s" || choice === "skip") {
+    rl.close();
+    return [];
+  } else if (choice === "1" || choice === "2" || choice === "3") {
+    entries = templateSoul(choice);
+    console.log("\n   Template draft:");
+    for (const [k, v] of entries) console.log(`     ${k}: ${v}`);
+    const edit = (await ask("\n   Edit before saving? [y/N]: ")).trim().toLowerCase();
+    if (edit === "y" || edit === "yes") {
+      entries = await editEntries(ask, entries);
+    }
+  } else if (choice === "4") {
+    console.log("\n   Paste this prompt into your Claude session:");
+    console.log("   ─────────────────────────────────────────────────────────────");
+    console.log(`   Generate a JSON object with keys "role", "project", and`);
+    console.log(`   "standards" suitable as Flair soul entries for an agent with`);
+    console.log(`   id "${agentId}" operating in my current context. Each value`);
+    console.log(`   should be 1-2 specific sentences that shape behavior. Output`);
+    console.log(`   only the JSON object, no prose.`);
+    console.log("   ─────────────────────────────────────────────────────────────\n");
+    console.log("   Paste the resulting JSON below:");
+    const raw = await ask("   > ");
+    try {
+      entries = parseSoulJson(raw);
+      console.log("\n   Parsed draft:");
+      for (const [k, v] of entries) console.log(`     ${k}: ${v}`);
+      const edit = (await ask("\n   Edit before saving? [y/N]: ")).trim().toLowerCase();
+      if (edit === "y" || edit === "yes") {
+        entries = await editEntries(ask, entries);
+      }
+    } catch (err: any) {
+      console.log(`\n   Couldn't parse JSON (${err.message}). Falling back to custom prompts.`);
+      entries = await customSoulPrompts(ask);
+    }
+  } else {
+    // Custom (5) or unrecognized input — route to custom prompts
+    entries = await customSoulPrompts(ask);
+  }
+
+  rl.close();
+  return entries.filter(([, v]) => v.trim().length > 0);
+}
+
 // ─── Program ─────────────────────────────────────────────────────────────────
 
 // Read version from package.json at the package root
@@ -584,44 +745,15 @@ program
     console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
 
     // ── First-run soul setup ──────────────────────────────────────────────
-    // Interactive prompts to set initial personality. Skipped with --skip-soul
-    // or when stdin is not a TTY (CI, scripts, piped input).
+    // Interactive wizard to set initial personality (see runSoulWizard).
+    // Skipped with --skip-soul or when stdin is not a TTY (CI, scripts, pipe).
+    //
+    // Non-TTY / --skip-soul used to seed placeholder text like
+    // "AI assistant [default]" — it leaked into bootstrap output and
+    // confused users. Now those paths leave the soul empty and nudge the
+    // user toward `flair soul set` / `flair doctor` instead.
     if (!opts.skipSoul && process.stdin.isTTY) {
-      console.log("\n🎭 Set up agent personality (press Enter to skip any):\n");
-
-      const { createInterface } = await import("node:readline");
-      const rl = createInterface({ input: process.stdin, output: process.stdout });
-      // Buffered ask: collects rapid input (pasted text) into one answer.
-      // Waits 200ms after last line before resolving, so pasted multiline
-      // blocks are captured as a single answer instead of spilling across prompts.
-      const ask = (q: string): Promise<string> => new Promise(resolve => {
-        let buffer = "";
-        let timer: ReturnType<typeof setTimeout> | null = null;
-        const finish = () => {
-          rl.removeListener("line", onLine);
-          resolve(buffer.trim());
-        };
-        const onLine = (line: string) => {
-          buffer += (buffer ? "\n" : "") + line;
-          if (timer) clearTimeout(timer);
-          timer = setTimeout(finish, 200);
-        };
-        process.stdout.write(q);
-        rl.on("line", onLine);
-      });
-
-      const role = await ask("   What's this agent's role? (e.g., \"Senior dev, concise and direct\")\n   > ");
-      const project = await ask("   What project is it working on?\n   > ");
-      const standards = await ask("   Any coding standards or preferences?\n   > ");
-
-      rl.close();
-
-      // Write non-empty answers as soul entries
-      const soulEntries: [string, string][] = [];
-      if (role.trim()) soulEntries.push(["role", role.trim()]);
-      if (project.trim()) soulEntries.push(["project", project.trim()]);
-      if (standards.trim()) soulEntries.push(["standards", standards.trim()]);
-
+      const soulEntries = await runSoulWizard(agentId);
       if (soulEntries.length > 0) {
         console.log("");
         for (const [key, value] of soulEntries) {
@@ -633,28 +765,17 @@ program
             console.warn(`   ⚠ soul:${key} failed: ${err.message}`);
           }
         }
-        console.log(`\n   ${soulEntries.length} soul entries saved. Bootstrap will include them.`);
+        console.log(`\n   ${soulEntries.length} soul entries saved.`);
+        console.log(`   Preview what an agent will see: flair bootstrap --agent ${agentId}`);
       } else {
-        console.log("\n   No soul entries — you can add them later with: flair soul set --agent " + agentId + " --key role --value \"...\"");
+        console.log(`\n   No soul entries saved. Add later with:`);
+        console.log(`     flair soul set --agent ${agentId} --key role --value "..."`);
+        console.log(`   Or run \`flair doctor\` anytime for a nudge.`);
       }
     } else {
-      // --skip-soul or non-interactive: seed sensible defaults so bootstrap returns useful context
-      const defaultSoulEntries: [string, string][] = [
-        ["role", "AI assistant [default — customize with 'flair soul set']"],
-        ["personality", "Helpful, precise, and proactive [default — customize with 'flair soul set']"],
-        ["constraints", "Respect user privacy. Be concise. [default — customize with 'flair soul set']"],
-      ];
-      console.log("\nSeeding default soul entries...");
-      for (const [key, value] of defaultSoulEntries) {
-        try {
-          await authFetch(httpUrl, agentId, privPath, "PUT", `/Soul/${agentId}:${key}`,
-            { id: `${agentId}:${key}`, agentId, key, value, createdAt: new Date().toISOString() });
-          console.log(`   ✓ soul:${key} set (default)`);
-        } catch (err: any) {
-          console.warn(`   ⚠ soul:${key} failed: ${err.message}`);
-        }
-      }
-      console.log(`   Customize with: flair soul set --agent ${agentId} --key role --value "..."`);
+      const reason = opts.skipSoul ? "--skip-soul" : "non-interactive";
+      console.log(`\n   Soul prompts skipped (${reason}). Add entries with:`);
+      console.log(`     flair soul set --agent ${agentId} --key role --value "..."`);
     }
 
     console.log(`\n   Claude Code: Add to your CLAUDE.md:`);
