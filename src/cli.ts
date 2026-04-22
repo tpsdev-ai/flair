@@ -3463,6 +3463,83 @@ soul.command("get").argument("<id>").action(async (id) => console.log(JSON.strin
 soul.command("list").requiredOption("--agent <id>")
   .action(async (opts) => console.log(JSON.stringify(await api("GET", `/Soul?agentId=${encodeURIComponent(opts.agent)}`), null, 2)));
 
+// ─── flair bridge ────────────────────────────────────────────────────────────
+// Slice 1 of FLAIR-BRIDGES: discovery + scaffold. Runtime (import/export/test)
+// lands in follow-up PRs. See specs/FLAIR-BRIDGES.md.
+
+const bridge = program.command("bridge").description("Manage memory bridges (import/export between Flair and foreign systems)");
+
+bridge
+  .command("list")
+  .description("List installed bridges across project YAML, user YAML, npm packages, and built-ins")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { discover } = await import("./bridges/discover.js");
+    const found = await discover();
+    if (opts.json) {
+      console.log(JSON.stringify(found, null, 2));
+      return;
+    }
+    if (found.length === 0) {
+      console.log("No bridges installed.");
+      console.log("Add one with:  flair bridge scaffold <name> --file");
+      console.log("Or install from npm:  npm install flair-bridge-<name>");
+      return;
+    }
+    const nameW = Math.max(4, ...found.map((b) => b.name.length));
+    const kindW = Math.max(4, ...found.map((b) => b.kind.length));
+    const srcW = Math.max(6, ...found.map((b) => b.source.length));
+    console.log(`  ${"name".padEnd(nameW)}  ${"kind".padEnd(kindW)}  ${"source".padEnd(srcW)}  description`);
+    for (const b of found) {
+      const desc = b.description ?? "";
+      console.log(`  ${b.name.padEnd(nameW)}  ${b.kind.padEnd(kindW)}  ${b.source.padEnd(srcW)}  ${desc}`);
+    }
+  });
+
+bridge
+  .command("scaffold <name>")
+  .description("Emit starter files for a new bridge. Choose --file (YAML, declarative) or --api (TS code plugin)")
+  .option("--file", "YAML file-format bridge (shape A)")
+  .option("--api", "TypeScript API bridge (shape B)")
+  .option("--force", "Overwrite existing files")
+  .action(async (name: string, opts) => {
+    if (opts.file && opts.api) {
+      console.error("Pick one: --file or --api.");
+      process.exit(1);
+    }
+    const kind = opts.api ? "api" : "file"; // --file is default
+    const { scaffold } = await import("./bridges/scaffold.js");
+    try {
+      const result = await scaffold({ name, kind, force: !!opts.force });
+      if (result.createdFiles.length > 0) {
+        console.log(`Created ${result.createdFiles.length} file(s):`);
+        for (const p of result.createdFiles) console.log(`  + ${p}`);
+      }
+      if (result.skippedFiles.length > 0) {
+        console.log(`Skipped ${result.skippedFiles.length} existing file(s) (pass --force to overwrite):`);
+        for (const p of result.skippedFiles) console.log(`  · ${p}`);
+      }
+      console.log(`\n${result.summary}`);
+    } catch (err: any) {
+      console.error(`Scaffold failed: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+// Stubs — runtime coming in slice 2. Kept here so `flair bridge --help`
+// documents the full surface and users don't hit "unknown command".
+for (const op of ["test", "import", "export"] as const) {
+  bridge
+    .command(`${op} <name> [args...]`)
+    .description(`${op} a bridge — not yet implemented (slice 2 of FLAIR-BRIDGES)`)
+    .allowUnknownOption()
+    .action(() => {
+      console.error(`\`flair bridge ${op}\` is not yet implemented — landing in slice 2 of FLAIR-BRIDGES.`);
+      console.error(`Discovery + scaffold shipped first; runtime execution is the next PR.`);
+      process.exit(2);
+    });
+}
+
 // ─── flair backup ────────────────────────────────────────────────────────────
 
 program
