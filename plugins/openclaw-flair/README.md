@@ -6,7 +6,7 @@ Uses Flair's native Harper vector embeddings — no OpenAI API key required.
 
 ## Features
 
-- **Semantic search** via `memory_recall` → Flair's HNSW vector index
+- **Semantic search** via `memory_search` → Flair's HNSW vector index
 - **Persistent storage** via `memory_store` → Ed25519-authenticated writes
 - **Memory retrieval** via `memory_get` → fetch by ID
 - **Auto-bootstrap** — injects relevant memories into context at session start
@@ -69,7 +69,18 @@ In your OpenClaw config (`openclaw.json`):
 | `keyPath` | string | auto-resolved | Path to Ed25519 private key |
 | `autoCapture` | boolean | `true` | Auto-capture important info from conversations |
 | `autoRecall` | boolean | `true` | Inject relevant memories at session start |
-| `maxRecallResults` | number | `5` | Max results for `memory_recall` |
+| `maxRecallResults` | number | `5` | Max results for `memory_search` |
+
+## Tool naming
+
+OpenClaw's `coding` profile allows `memory_search` and `memory_get` by canonical name. `memory_store` is not a core tool name, so it's filtered out by the default profile. To surface it to the LLM, add it to your openclaw.json:
+
+```json
+"tools": {
+  "profile": "coding",
+  "alsoAllow": ["memory_store"]
+}
+```
 | `maxBootstrapTokens` | number | `4000` | Max tokens for bootstrap context injection |
 
 ## Auth
