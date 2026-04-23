@@ -39,13 +39,22 @@ export function evaluate(expression: string, record: unknown): unknown {
   return walk(tokens, record);
 }
 
+// Field names a JSONPath expression may not traverse — would expose
+// prototype internals on plain objects. The descriptor is operator-
+// authored, but treating these as off-limits keeps a malicious
+// descriptor from snooping prototype state.
+const FORBIDDEN_FIELDS = new Set(["__proto__", "constructor", "prototype"]);
+
 function walk(tokens: PathToken[], value: unknown): unknown {
   let cursor: unknown = value;
   for (const tok of tokens) {
     if (cursor == null) return undefined;
     if (tok.kind === "field") {
       if (typeof cursor !== "object") return undefined;
-      cursor = (cursor as Record<string, unknown>)[tok.name];
+      if (FORBIDDEN_FIELDS.has(tok.name)) return undefined;
+      // Use Object.prototype.hasOwnProperty to avoid inheriting from prototype
+      const obj = cursor as Record<string, unknown>;
+      cursor = Object.prototype.hasOwnProperty.call(obj, tok.name) ? obj[tok.name] : undefined;
     } else if (tok.kind === "index") {
       if (!Array.isArray(cursor)) return undefined;
       cursor = cursor[tok.index];
@@ -100,8 +109,13 @@ export function applyMap(
   mapping: Record<string, string>,
   record: unknown,
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  // Object.create(null) — no prototype chain. Assigning user-controlled
+  // keys (from the descriptor) into a regular object literal would let a
+  // malicious descriptor write to __proto__ / constructor and pollute
+  // every object in the runtime. Prototype-less out{} blocks that vector.
+  const out: Record<string, unknown> = Object.create(null);
   for (const [field, expr] of Object.entries(mapping)) {
+    if (FORBIDDEN_FIELDS.has(field)) continue; // belt + suspenders with the proto-less out
     const value = evaluate(expr, record);
     if (value === undefined) continue;
     if (typeof value === "string" && value.length === 0) continue;

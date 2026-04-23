@@ -80,3 +80,34 @@ describe("mapper: applyMap", () => {
     expect(out.tags).toEqual(["a", "b"]);
   });
 });
+
+describe("mapper: prototype-pollution defense", () => {
+  test("applyMap output has no prototype (Object.create(null))", () => {
+    const out = applyMap({ content: "$.c" }, { c: "x" });
+    expect(Object.getPrototypeOf(out)).toBeNull();
+  });
+
+  test("applyMap drops __proto__ / constructor / prototype keys silently", () => {
+    const out = applyMap(
+      { __proto__: "$.evil", constructor: "$.evil", prototype: "$.evil", content: "$.c" },
+      { c: "ok", evil: "should not land" },
+    );
+    expect(out.content).toBe("ok");
+    expect(Object.keys(out)).toEqual(["content"]);
+  });
+
+  test("walk refuses to traverse __proto__ / constructor / prototype", () => {
+    expect(evaluate("$.__proto__", { foo: "bar" })).toBeUndefined();
+    expect(evaluate("$.constructor", { foo: "bar" })).toBeUndefined();
+    expect(evaluate("$.prototype", { foo: "bar" })).toBeUndefined();
+  });
+
+  test("walk uses hasOwnProperty so prototype-inherited values are not exposed", () => {
+    class Foo { ownField = "owned"; }
+    Object.defineProperty(Foo.prototype, "inheritedField", { value: "inherited" });
+    const instance = new Foo();
+    expect(evaluate("$.ownField", instance)).toBe("owned");
+    // Inherited (non-own) property must not be reachable via the mapper
+    expect(evaluate("$.inheritedField", instance)).toBeUndefined();
+  });
+});
