@@ -3640,19 +3640,138 @@ bridge
     }
   });
 
-// `test` and `export` still stub — `test` lands with the round-trip harness
-// in slice 3, `export` lands with the export path in slice 3.
-for (const op of ["test", "export"] as const) {
-  bridge
-    .command(`${op} <name> [args...]`)
-    .description(`${op} a bridge — not yet implemented (slice 3 of FLAIR-BRIDGES)`)
-    .allowUnknownOption()
-    .action(() => {
-      console.error(`\`flair bridge ${op}\` is not yet implemented — landing in slice 3 of FLAIR-BRIDGES.`);
-      console.error(`Slice 2 ships discovery + scaffold + import (Shape A YAML); export and round-trip test are the next slice.`);
-      process.exit(2);
-    });
-}
+bridge
+  .command("export <name> <dst>")
+  .description("Export memories from Flair to a foreign system via a bridge (Shape A YAML / built-in)")
+  .requiredOption("--agent <id>", "Agent ID to export memories for (or set FLAIR_AGENT_ID)")
+  .option("--source <tag>", "Filter to memories with a matching `source:` tag (typical for round-tripping a single bridge's data)")
+  .option("--subject <subj>", "Filter to memories with a matching `subject:` tag")
+  .option("--since <iso>", "Only memories with createdAt >= this ISO-8601 timestamp")
+  .option("--cwd <dir>", "Filesystem root the descriptor's relative target paths resolve against (default: cwd)")
+  .option("--dry-run", "Validate + count + apply maps, don't write to the target")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--key <path>", "Ed25519 private key path (default: resolved from agent)")
+  .action(async (name: string, dst: string, opts) => {
+    const agentId: string = opts.agent ?? process.env.FLAIR_AGENT_ID;
+    if (!agentId) {
+      console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
+      process.exit(1);
+    }
+    const cwd: string = opts.cwd ?? dst;
+
+    const { discover } = await import("./bridges/discover.js");
+    const { builtinDiscoveryRecords } = await import("./bridges/builtins/index.js");
+    const { loadDescriptor } = await import("./bridges/runtime/load-descriptor.js");
+    const { runExport } = await import("./bridges/runtime/export-runner.js");
+    const { makeContext } = await import("./bridges/runtime/context.js");
+    const { BridgeRuntimeError } = await import("./bridges/types.js");
+
+    const found = await discover({ builtins: builtinDiscoveryRecords() });
+    const target = found.find((b) => b.name === name);
+    if (!target) {
+      console.error(`No bridge named "${name}" — run \`flair bridge list\` to see installed bridges.`);
+      process.exit(1);
+    }
+
+    let descriptor;
+    try {
+      descriptor = await loadDescriptor(target);
+    } catch (err: any) {
+      printBridgeError(err);
+      process.exit(1);
+    }
+    if (!descriptor.export) {
+      console.error(`Bridge "${name}" has no export block — cannot export through it.`);
+      process.exit(1);
+    }
+
+    const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
+    const ctx = makeContext({ bridge: name });
+
+    // Memory fetcher — paginates GET /Memory?agentId=... applying any
+    // descriptor + caller-side filters in memory. Slice 3a does the
+    // simplest thing: one round trip, no streaming. Slice 3b can move
+    // to cursor-paginated streaming if real corpora warrant it.
+    const fetchMemories = async function*(filters: import("./bridges/runtime/export-runner.js").ExportFilters) {
+      const params = new URLSearchParams({ agentId });
+      if (opts.subject) params.set("subject", opts.subject);
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      const keyPath: string | null = opts.key ?? resolveKeyPath(agentId);
+      const path = `/Memory?${params.toString()}`;
+      if (keyPath) headers["authorization"] = buildEd25519Auth(agentId, "GET", path, keyPath);
+      const res = await fetch(`${baseUrl}${path}`, { headers });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`GET /Memory → ${res.status}: ${text || res.statusText}`);
+      }
+      const raw = await res.json();
+      const all: any[] = Array.isArray(raw) ? raw : (raw?.results ?? raw?.items ?? []);
+      const sourceFilter = opts.source as string | undefined;
+      const sinceMs = opts.since ? new Date(opts.since).getTime() : null;
+      for (const m of all) {
+        if (sourceFilter && m.source !== sourceFilter) continue;
+        if (sinceMs !== null && m.createdAt && new Date(m.createdAt).getTime() < sinceMs) continue;
+        yield m as import("./bridges/types.js").BridgeMemory;
+      }
+      void filters;
+    };
+
+    let lastReportedAt = Date.now();
+    const onProgress = (ev: import("./bridges/runtime/export-runner.js").ProgressEvent): void => {
+      if (ev.type === "done") {
+        if (opts.dryRun) {
+          console.log(`\n${descriptor.name}: would export ${ev.exported} memor${ev.exported === 1 ? "y" : "ies"} from ${ev.total} total. Re-run without --dry-run to write.`);
+        } else {
+          console.log(`\n${descriptor.name}: exported ${ev.exported} memor${ev.exported === 1 ? "y" : "ies"} from ${ev.total} total.`);
+        }
+        return;
+      }
+      if (ev.type === "target-write") {
+        console.log(`  ✓ ${ev.path} (${ev.written} record${ev.written === 1 ? "" : "s"})`);
+        return;
+      }
+      if (ev.type === "target-skipped") {
+        console.log(`  · ${ev.path} skipped (${ev.reason})`);
+        return;
+      }
+      // memory-skipped events throttled to one line every 2s
+      const now = Date.now();
+      if (now - lastReportedAt < 2000) return;
+      lastReportedAt = now;
+      process.stdout.write(`\r  filtering memory ${ev.ordinal}...`.padEnd(60));
+    };
+
+    try {
+      await runExport({
+        descriptor,
+        cwd,
+        fetchMemories,
+        filters: { agentId, subject: opts.subject, source: opts.source, since: opts.since },
+        dryRun: !!opts.dryRun,
+        ctx,
+        onProgress,
+      });
+    } catch (err: any) {
+      if (err instanceof BridgeRuntimeError) {
+        printBridgeError(err);
+        process.exit(1);
+      }
+      console.error(`Bridge export failed: ${err?.message ?? err}`);
+      process.exit(1);
+    }
+  });
+
+// `test` still stubbed — round-trip harness lands in slice 3b.
+bridge
+  .command("test <name> [args...]")
+  .description("test a bridge — not yet implemented (slice 3b of FLAIR-BRIDGES)")
+  .allowUnknownOption()
+  .action(() => {
+    console.error(`\`flair bridge test\` is not yet implemented — landing in slice 3b of FLAIR-BRIDGES.`);
+    console.error(`Slice 3a ships export (Shape A YAML); the round-trip test harness pairs with it.`);
+    process.exit(2);
+  });
 
 function printBridgeError(err: unknown): void {
   // Pretty-print BridgeRuntimeError as the structured shape from §10 of the
