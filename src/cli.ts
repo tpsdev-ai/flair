@@ -2592,12 +2592,15 @@ program
       return;
     }
 
-    // Perform upgrade
+    // Perform upgrade. `latest` comes from the npm registry's HTTP
+    // response, so CodeQL (correctly) treats it as untrusted input.
+    // Use execFileSync with argv — the spec `<name>@<version>` becomes a
+    // single argument to npm, no shell to inject into.
     console.log(`\nUpgrading ${upgrades.length} package${upgrades.length > 1 ? "s" : ""}...\n`);
     for (const { pkg, latest } of upgrades) {
       try {
         console.log(`  Installing ${pkg}@${latest}...`);
-        execSync(`npm install -g ${pkg}@${latest}`, { stdio: "pipe" });
+        execFileSync("npm", ["install", "-g", `${pkg}@${latest}`], { stdio: "pipe" });
         console.log(`  ✅ ${pkg}@${latest} installed`);
       } catch (err: any) {
         console.error(`  ❌ ${pkg} upgrade failed: ${err.message}`);
