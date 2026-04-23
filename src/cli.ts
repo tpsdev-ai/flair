@@ -3467,8 +3467,10 @@ soul.command("list").requiredOption("--agent <id>")
   .action(async (opts) => console.log(JSON.stringify(await api("GET", `/Soul?agentId=${encodeURIComponent(opts.agent)}`), null, 2)));
 
 // ─── flair bridge ────────────────────────────────────────────────────────────
-// Slice 1 of FLAIR-BRIDGES: discovery + scaffold. Runtime (import/export/test)
-// lands in follow-up PRs. See specs/FLAIR-BRIDGES.md.
+// Slice 1: discovery + scaffold. Slice 2: YAML runtime + `import` for Shape A
+// + agentic-stack reference adapter as a built-in.
+// `test` and `export` are still stubbed; Shape B (npm code plugins) too.
+// See specs/FLAIR-BRIDGES.md.
 
 const bridge = program.command("bridge").description("Manage memory bridges (import/export between Flair and foreign systems)");
 
@@ -3478,7 +3480,8 @@ bridge
   .option("--json", "Output as JSON")
   .action(async (opts) => {
     const { discover } = await import("./bridges/discover.js");
-    const found = await discover();
+    const { builtinDiscoveryRecords } = await import("./bridges/builtins/index.js");
+    const found = await discover({ builtins: builtinDiscoveryRecords() });
     if (opts.json) {
       console.log(JSON.stringify(found, null, 2));
       return;
@@ -3510,6 +3513,11 @@ bridge
       console.error("Pick one: --file or --api.");
       process.exit(1);
     }
+    const { BUILTIN_BY_NAME } = await import("./bridges/builtins/index.js");
+    if (BUILTIN_BY_NAME.has(name)) {
+      console.error(`"${name}" is a built-in bridge name and can't be scaffolded — pick a different name.`);
+      process.exit(1);
+    }
     const kind = opts.api ? "api" : "file"; // --file is default
     const { scaffold } = await import("./bridges/scaffold.js");
     try {
@@ -3529,18 +3537,133 @@ bridge
     }
   });
 
-// Stubs — runtime coming in slice 2. Kept here so `flair bridge --help`
-// documents the full surface and users don't hit "unknown command".
-for (const op of ["test", "import", "export"] as const) {
+bridge
+  .command("import <name> [src]")
+  .description("Import memories from a foreign system into Flair via a bridge (Shape A YAML / built-in)")
+  .option("--agent <id>", "Default agent ID for memories that don't carry one (or set FLAIR_AGENT_ID)")
+  .option("--cwd <dir>", "Filesystem root the descriptor's relative paths resolve against (default: cwd)")
+  .option("--dry-run", "Validate + count, don't write to Flair")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--key <path>", "Ed25519 private key path (default: resolved from agent)")
+  .action(async (name: string, srcArg: string | undefined, opts) => {
+    const agentId: string | undefined = opts.agent ?? process.env.FLAIR_AGENT_ID;
+    const cwd: string = opts.cwd ?? srcArg ?? process.cwd();
+
+    const { discover } = await import("./bridges/discover.js");
+    const { builtinDiscoveryRecords } = await import("./bridges/builtins/index.js");
+    const { loadDescriptor } = await import("./bridges/runtime/load-descriptor.js");
+    const { runImport } = await import("./bridges/runtime/import-runner.js");
+    const { makeContext } = await import("./bridges/runtime/context.js");
+    const { BridgeRuntimeError } = await import("./bridges/types.js");
+
+    const found = await discover({ builtins: builtinDiscoveryRecords() });
+    const target = found.find((b) => b.name === name);
+    if (!target) {
+      console.error(`No bridge named "${name}" — run \`flair bridge list\` to see installed bridges.`);
+      process.exit(1);
+    }
+
+    let descriptor;
+    try {
+      descriptor = await loadDescriptor(target);
+    } catch (err: any) {
+      printBridgeError(err);
+      process.exit(1);
+    }
+
+    const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
+    const ctx = makeContext({ bridge: name });
+
+    // Memory POST: Ed25519-signed when an agent key is available, fall back
+    // to the shared `api()` helper otherwise. Mirrors how `flair memory add`
+    // works (see the `memory.command("add")` handler above).
+    const putMemory = async (body: import("./bridges/runtime/import-runner.js").PutMemoryBody): Promise<void> => {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      const keyPath: string | null = opts.key ?? resolveKeyPath(body.agentId);
+      if (keyPath) {
+        headers["authorization"] = buildEd25519Auth(body.agentId, "PUT", `/Memory/${body.id}`, keyPath);
+      }
+      const res = await fetch(`${baseUrl}/Memory/${encodeURIComponent(body.id)}`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`PUT /Memory/${body.id} → ${res.status}: ${text || res.statusText}`);
+      }
+    };
+
+    let lastReportedAt = Date.now();
+    let lastReportedOrdinal = 0;
+    const onProgress = (ev: import("./bridges/runtime/import-runner.js").ProgressEvent): void => {
+      // Throttle in-progress chatter to at most one line every 2s + the
+      // final summary. Avoids flooding stdout for big imports.
+      if (ev.type === "done") {
+        const noun = (n: number): string => `${n} ${n === 1 ? "memory" : "memories"}`;
+        if (opts.dryRun) {
+          console.log(`\n${descriptor.name}: would import ${noun(ev.total)}. Re-run without --dry-run to write to Flair.`);
+        } else {
+          console.log(`\n${descriptor.name}: imported ${ev.imported}/${ev.total} memories${ev.skipped > 0 ? ` (${ev.skipped} skipped)` : ""}.`);
+        }
+        return;
+      }
+      const now = Date.now();
+      if (now - lastReportedAt < 2000 && ev.ordinal - lastReportedOrdinal < 25) return;
+      lastReportedAt = now;
+      lastReportedOrdinal = ev.ordinal;
+      if (ev.type === "memory-imported") {
+        process.stdout.write(`\r  ${ev.ordinal} imported (${ev.foreignId ?? ev.flairId})`.padEnd(80));
+      } else if (ev.type === "memory-skipped") {
+        process.stdout.write(`\r  ${ev.ordinal} skipped (${ev.reason})`.padEnd(80));
+      }
+    };
+
+    try {
+      await runImport({
+        descriptor,
+        cwd,
+        agentId,
+        dryRun: !!opts.dryRun,
+        putMemory,
+        onProgress,
+        ctx,
+      });
+    } catch (err: any) {
+      if (err instanceof BridgeRuntimeError) {
+        printBridgeError(err);
+        process.exit(1);
+      }
+      console.error(`Bridge import failed: ${err?.message ?? err}`);
+      process.exit(1);
+    }
+  });
+
+// `test` and `export` still stub — `test` lands with the round-trip harness
+// in slice 3, `export` lands with the export path in slice 3.
+for (const op of ["test", "export"] as const) {
   bridge
     .command(`${op} <name> [args...]`)
-    .description(`${op} a bridge — not yet implemented (slice 2 of FLAIR-BRIDGES)`)
+    .description(`${op} a bridge — not yet implemented (slice 3 of FLAIR-BRIDGES)`)
     .allowUnknownOption()
     .action(() => {
-      console.error(`\`flair bridge ${op}\` is not yet implemented — landing in slice 2 of FLAIR-BRIDGES.`);
-      console.error(`Discovery + scaffold shipped first; runtime execution is the next PR.`);
+      console.error(`\`flair bridge ${op}\` is not yet implemented — landing in slice 3 of FLAIR-BRIDGES.`);
+      console.error(`Slice 2 ships discovery + scaffold + import (Shape A YAML); export and round-trip test are the next slice.`);
       process.exit(2);
     });
+}
+
+function printBridgeError(err: unknown): void {
+  // Pretty-print BridgeRuntimeError as the structured shape from §10 of the
+  // spec, plus a one-line human summary so the operator gets both.
+  const detail = (err as { detail?: Record<string, unknown> })?.detail;
+  if (detail && typeof detail === "object") {
+    console.error(`Bridge error: ${(detail as any).hint ?? (err as Error).message}`);
+    console.error(JSON.stringify(detail, null, 2));
+  } else {
+    console.error(`Bridge error: ${(err as Error).message ?? String(err)}`);
+  }
 }
 
 // ─── flair backup ────────────────────────────────────────────────────────────

@@ -98,7 +98,7 @@ export async function* importFromYaml(
           record: recordIndex,
           field: "map.content",
           expected: "non-empty string",
-          got: mapped.content ?? "missing",
+          got: mapped.content === undefined ? "missing" : String(mapped.content),
           hint: "every record must produce a non-empty `content`; check the source data and the 'map.content' expression",
         });
       }
