@@ -40,4 +40,22 @@ export const agenticStackDescriptor: YamlBridgeDescriptor = {
       },
     }],
   },
+  export: {
+    targets: [{
+      path: ".agent/memory/semantic/lessons.jsonl",
+      format: "jsonl",
+      // Only export memories durable enough to be worth round-tripping back
+      // into agentic-stack. ephemeral / standard scratch memory stays in Flair.
+      when: "durability in ['persistent', 'permanent']",
+      map: {
+        // Preserve the foreign id when round-tripping; if the memory was
+        // Flair-native it'll just be missing from the output (and import-side
+        // generates a new id on first import anyway).
+        id: "$.foreignId",
+        claim: "$.content",
+        topic: "$.subject",
+        tags: "$.tags[*]",
+      },
+    }],
+  },
 };
