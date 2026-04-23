@@ -124,6 +124,53 @@ export interface DiscoveredBridge {
   version?: number;
 }
 
+// ─── Parsed YAML descriptor (Shape A) ─────────────────────────────────────────
+//
+// Runtime representation of the YAML in `.flair-bridge/<name>.yaml`. The
+// loader normalizes the raw YAML into this shape and validates required
+// fields; downstream runtime code deals only in the typed object.
+
+export type YamlFormat = "jsonl" | "json" | "yaml" | "markdown-frontmatter";
+
+/**
+ * A mapping expression.
+ *
+ * Slice 2 supports only JSONPath-like lookups against the parsed record:
+ *   - "$.field"          → root-level field
+ *   - "$.nested.field"   → dotted access
+ *   - "$.array[*]"       → iterate array
+ *   - string literal (no $ prefix)   → treat as constant
+ *
+ * Slice 3 will extend with expressions (`foreignId ?? id`, etc.).
+ */
+export type MapExpression = string;
+
+export interface YamlSourceTarget {
+  path: string;
+  format: YamlFormat;
+  /** Optional filter expression evaluated over BridgeMemory fields. */
+  when?: string;
+  /** Field-to-expression mapping. Keys are BridgeMemory fields. */
+  map: Record<string, MapExpression>;
+}
+
+export interface YamlBridgeDescriptor {
+  name: string;
+  version: number;
+  kind: "file";
+  description?: string;
+  detect?: {
+    anyExists?: string[];
+    allExist?: string[];
+  };
+  import?: {
+    sources: YamlSourceTarget[];
+  };
+  export?: {
+    targets: YamlSourceTarget[];
+  };
+}
+
 // ─── Structured errors ────────────────────────────────────────────────────────
 
 export interface BridgeError {
