@@ -339,6 +339,54 @@ async function seedAgentViaOpsApi(
   }
 }
 
+// ─── Upgrade presence probes ──────────────────────────────────────────────────
+//
+// `flair upgrade` previously called `npm list -g <pkg>` to detect the installed
+// version. That assumed the default npm global prefix and failed (silently,
+// reporting "not installed") for mise / fnm / nvm / volta users whose prefix
+// lives elsewhere — including for the running flair binary itself, which is
+// clearly installed somewhere. These probes locate the package regardless of
+// install path.
+
+export function probeBinVersion(
+  execFileSync: typeof import("node:child_process").execFileSync,
+  bin: string,
+): string | null {
+  // Run the binary's --version via argv (no shell). PATH resolution still
+  // happens (so we find the binary wherever npm/mise/fnm installed it),
+  // but there's no shell-string to inject into. CodeQL-safe and simpler.
+  try {
+    const out = execFileSync(bin, ["--version"], {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (!out) return null;
+    // Accept either "0.6.0" on its own or a line containing a semver.
+    const m = out.match(/\b(\d+\.\d+\.\d+(?:[\d.a-z.-]*)?)\b/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+export function probeLibVersion(pkgName: string): string | null {
+  // Resolve the package's package.json from the running flair's module graph.
+  // If the lib is installed anywhere Node can see (including bundled as a
+  // dep of flair itself, sibling global install, or linked workspace), this
+  // finds it. If it's truly missing, require.resolve throws → null.
+  try {
+    const { createRequire } = require("node:module") as typeof import("node:module");
+    const req = createRequire(import.meta.url);
+    const pkgJsonPath = req.resolve(`${pkgName}/package.json`);
+    const { readFileSync } = require("node:fs") as typeof import("node:fs");
+    const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
+    return typeof pkg.version === "string" ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── First-run soul wizard ────────────────────────────────────────────────────
 
 type SoulEntries = [string, string][];
@@ -2462,58 +2510,97 @@ program
   .option("--check", "Only check for updates, don't install")
   .option("--restart", "Restart Flair after upgrade")
   .action(async (opts) => {
-    const { execSync } = await import("node:child_process");
+    const { execSync, execFileSync } = await import("node:child_process");
     const checkOnly = opts.check ?? false;
 
     console.log("Checking for updates...\n");
 
-    const packages = [
-      "@tpsdev-ai/flair",
-      "@tpsdev-ai/flair-client",
-      "@tpsdev-ai/flair-mcp",
+    // Per-package install probes. `npm list -g` assumed the default global
+    // prefix and silently mis-reported "not installed" for anyone using
+    // mise / fnm / nvm / volta / non-default-prefix npm — including the
+    // running flair binary itself, which was obviously installed. Each
+    // entry now has a locator that works regardless of install path:
+    //
+    //   - For packages with a bin: shell out to the bin with --version
+    //     (same PATH lookup that got them invokable in the first place).
+    //   - For library packages: require.resolve the package.json from the
+    //     running flair's module graph (works whether it's a sibling
+    //     global install or a bundled dep).
+    const packages: Array<{
+      name: string;
+      probe: () => string | null;
+    }> = [
+      {
+        name: "@tpsdev-ai/flair",
+        probe: () => probeBinVersion(execFileSync,"flair"),
+      },
+      {
+        name: "@tpsdev-ai/flair-client",
+        probe: () => probeLibVersion("@tpsdev-ai/flair-client"),
+      },
+      {
+        name: "@tpsdev-ai/flair-mcp",
+        probe: () => probeBinVersion(execFileSync,"flair-mcp"),
+      },
     ];
 
-    const upgrades: { pkg: string; installed: string; latest: string }[] = [];
+    // Three-state status per package:
+    //   current    — installed version matches registry latest
+    //   outdated   — installed version is older than latest
+    //   missing    — not detected anywhere; optionally install
+    type Status = "current" | "outdated" | "missing";
+    const findings: Array<{ name: string; installed: string | null; latest: string; status: Status }> = [];
 
-    for (const pkg of packages) {
+    for (const { name, probe } of packages) {
       try {
-        const res = await fetch(`https://registry.npmjs.org/${pkg}/latest`, { signal: AbortSignal.timeout(5000) });
+        const res = await fetch(`https://registry.npmjs.org/${name}/latest`, { signal: AbortSignal.timeout(5000) });
         if (!res.ok) continue;
         const data = await res.json() as { version?: string };
         const latest = data.version ?? "unknown";
 
-        let installed = "not installed";
-        try {
-          const out = execSync(`npm list -g ${pkg} --depth=0 2>/dev/null || true`, { encoding: "utf-8" }).trim();
-          const match = out.match(/@(\d+\.\d+[\d.a-z-]*)/);
-          installed = match ? match[1] : "not installed";
-        } catch { /* best effort */ }
+        const installed = probe();
+        const status: Status = installed === null ? "missing" : installed === latest ? "current" : "outdated";
+        findings.push({ name, installed, latest, status });
 
-        const upToDate = installed === latest;
-        const icon = upToDate ? "✅" : "⬆️";
-        console.log(`  ${icon} ${pkg}: ${installed} → ${latest}${upToDate ? " (current)" : ""}`);
-        if (!upToDate && installed !== "not installed") {
-          upgrades.push({ pkg, installed, latest });
-        }
+        const icon = status === "current" ? "✅" : status === "outdated" ? "⬆️" : "❔";
+        const installedLabel = installed ?? "not detected";
+        const suffix = status === "current" ? " (current)" : status === "missing" ? " (run: npm install -g)" : "";
+        console.log(`  ${icon} ${name}: ${installedLabel} → ${latest}${suffix}`);
       } catch { /* skip unavailable packages */ }
     }
 
-    if (upgrades.length === 0) {
+    const outdated = findings.filter((f) => f.status === "outdated");
+    const missing = findings.filter((f) => f.status === "missing");
+    const upgrades = outdated.map(({ name, installed, latest }) => ({ pkg: name, installed: installed ?? "unknown", latest }));
+
+    if (outdated.length === 0 && missing.length === 0) {
       console.log("\n✅ Everything is up to date.");
       return;
     }
 
-    if (checkOnly) {
-      console.log(`\n${upgrades.length} update${upgrades.length > 1 ? "s" : ""} available. Run: flair upgrade`);
+    if (missing.length > 0 && outdated.length === 0) {
+      console.log(`\n❔ ${missing.length} package${missing.length > 1 ? "s" : ""} not detected — all detected packages are up to date.`);
+      console.log(`   Install missing: npm install -g ${missing.map((f) => f.name).join(" ")}`);
       return;
     }
 
-    // Perform upgrade
+    if (checkOnly) {
+      console.log(`\n${outdated.length} update${outdated.length > 1 ? "s" : ""} available. Run: flair upgrade`);
+      if (missing.length > 0) {
+        console.log(`${missing.length} package${missing.length > 1 ? "s" : ""} not detected${missing.length > 0 ? ": " + missing.map((f) => f.name).join(", ") : ""}.`);
+      }
+      return;
+    }
+
+    // Perform upgrade. `latest` comes from the npm registry's HTTP
+    // response, so CodeQL (correctly) treats it as untrusted input.
+    // Use execFileSync with argv — the spec `<name>@<version>` becomes a
+    // single argument to npm, no shell to inject into.
     console.log(`\nUpgrading ${upgrades.length} package${upgrades.length > 1 ? "s" : ""}...\n`);
     for (const { pkg, latest } of upgrades) {
       try {
         console.log(`  Installing ${pkg}@${latest}...`);
-        execSync(`npm install -g ${pkg}@${latest}`, { stdio: "pipe" });
+        execFileSync("npm", ["install", "-g", `${pkg}@${latest}`], { stdio: "pipe" });
         console.log(`  ✅ ${pkg}@${latest} installed`);
       } catch (err: any) {
         console.error(`  ❌ ${pkg} upgrade failed: ${err.message}`);
