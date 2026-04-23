@@ -54,9 +54,13 @@ function walk(tokens: PathToken[], value: unknown): unknown {
       if (FORBIDDEN_FIELDS.has(tok.name)) return undefined;
       // Use Object.prototype.hasOwnProperty to avoid inheriting from prototype
       const obj = cursor as Record<string, unknown>;
+      // nosemgrep: javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop
+      // Read-only lookup with a hasOwnProperty gate + FORBIDDEN_FIELDS filter in tokenize. No pollution vector.
       cursor = Object.prototype.hasOwnProperty.call(obj, tok.name) ? obj[tok.name] : undefined;
     } else if (tok.kind === "index") {
       if (!Array.isArray(cursor)) return undefined;
+      // nosemgrep: javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop
+      // Read-only index access on a validated Array; tok.index is a Number parsed in tokenize() (non-numeric rejected). Not a pollution vector.
       cursor = cursor[tok.index];
     } else if (tok.kind === "splat") {
       if (!Array.isArray(cursor)) return undefined;
