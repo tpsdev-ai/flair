@@ -56,23 +56,52 @@ interface BridgeMemory {
 ```bash
 flair bridge list                           # installed bridges
 flair bridge scaffold <name> [--file|--api] # emit starter files
-flair bridge test <name> [--fixture <path>] # round-trip diff (coming soon)
-flair bridge import <name> <src> [opts]     # foreign → Flair (coming soon)
-flair bridge export <name> <dst> [opts]     # Flair → foreign (coming soon)
+flair bridge import <name> [src] [opts]     # foreign → Flair (Shape A YAML / built-ins)
+flair bridge test <name> [--fixture <path>] # round-trip diff (coming in slice 3)
+flair bridge export <name> <dst> [opts]     # Flair → foreign (coming in slice 3)
 ```
 
-Slice 1 of FLAIR-BRIDGES ships `list` and `scaffold`; the runtime commands (`test`, `import`, `export`) land in the next slice. Scaffold lets you author a working bridge *today* and confirm discovery; execution comes in the next release.
+`list`, `scaffold`, and `import` are live as of 0.6.0+. `test` and `export` are stubbed with pointers to slice 3.
 
-Common runtime options (for the slice-2 commands):
+Common runtime options for `import`:
 
 | Flag | Meaning |
 |------|---------|
-| `--agent <id>` | Scope to one agent (default: all agents visible to caller) |
-| `--subject <subj>` | Filter by subject tag |
-| `--since <iso>` | `validFrom >= this timestamp` |
-| `--durability <tier>` | Only `ephemeral` / `standard` / `persistent` / `permanent` |
-| `--dry-run` | Parse + validate, no writes |
-| `--allow-remote` | Required for bridges that hit a remote API |
+| `--agent <id>` | Default agent ID for memories that don't carry one (or set `FLAIR_AGENT_ID`) |
+| `--cwd <dir>` | Filesystem root the descriptor's relative paths resolve against (default: cwd) |
+| `--dry-run` | Parse + validate + count, don't write to Flair |
+| `--port <port>` | Harper HTTP port |
+| `--url <url>` | Flair base URL (overrides `--port`) |
+| `--key <path>` | Ed25519 private key path (default: resolved from agent) |
+
+## Your first import (worked example: agentic-stack)
+
+`agentic-stack` ships as a built-in. Drop into a directory that has agentic-stack lessons and run:
+
+```bash
+$ flair bridge list
+  name           kind  source   description
+  agentic-stack  file  builtin  Import agentic-stack lessons.jsonl into Flair persistent memories
+
+$ ls .agent/memory/semantic/
+lessons.jsonl
+
+$ flair bridge import agentic-stack --agent mybot --dry-run
+agentic-stack: would import 47 memories. Re-run without --dry-run to write to Flair.
+
+$ flair bridge import agentic-stack --agent mybot
+  47 imported (lesson-47)
+agentic-stack: imported 47/47 memories.
+```
+
+Each lesson lands as a Flair memory tagged `source: "agentic-stack/lessons"` with `durability: persistent`, the foreign `id` preserved as `foreignId` (so re-importing is idempotent on the same source).
+
+A few things worth knowing:
+
+- **`--agent` is required** unless your descriptor maps an `agentId` column. If you forget, `flair bridge import` errors with a one-line operator-pointer hint plus a structured `BridgeRuntimeError` JSON on stderr.
+- **`--dry-run` is your friend.** Validates the descriptor, parses every record, applies the mapping, but skips the PUT. Use it to confirm the count and check a few records before committing.
+- **Output is throttled** to one progress line every 2 seconds (or every 25 records, whichever comes first), so big imports don't flood your terminal.
+- **Errors are structured.** Every error includes `bridge`, `op`, `path`, `record`, `field`, `expected`, `got`, `hint` (per [§10 of the spec](../specs/FLAIR-BRIDGES.md#-10-error-format)). The `hint` is the part you act on; the rest is for an LLM to self-correct without operator help.
 
 ## Shape A — Declarative YAML
 
