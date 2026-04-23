@@ -348,13 +348,21 @@ async function seedAgentViaOpsApi(
 // clearly installed somewhere. These probes locate the package regardless of
 // install path.
 
-export function probeBinVersion(execSync: typeof import("node:child_process").execSync, bin: string): string | null {
-  // Shell out to the binary's own --version. Matches the way shell-PATH
-  // resolved it in the first place; works on any npm prefix.
+export function probeBinVersion(
+  execFileSync: typeof import("node:child_process").execFileSync,
+  bin: string,
+): string | null {
+  // Run the binary's --version via argv (no shell). PATH resolution still
+  // happens (so we find the binary wherever npm/mise/fnm installed it),
+  // but there's no shell-string to inject into. CodeQL-safe and simpler.
   try {
-    const out = execSync(`${bin} --version 2>/dev/null`, { encoding: "utf-8", timeout: 5000 }).trim();
+    const out = execFileSync(bin, ["--version"], {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
     if (!out) return null;
-    // Accept either "0.6.0" or a line containing a semver.
+    // Accept either "0.6.0" on its own or a line containing a semver.
     const m = out.match(/\b(\d+\.\d+\.\d+(?:[\d.a-z.-]*)?)\b/);
     return m ? m[1] : null;
   } catch {
@@ -2502,7 +2510,7 @@ program
   .option("--check", "Only check for updates, don't install")
   .option("--restart", "Restart Flair after upgrade")
   .action(async (opts) => {
-    const { execSync } = await import("node:child_process");
+    const { execSync, execFileSync } = await import("node:child_process");
     const checkOnly = opts.check ?? false;
 
     console.log("Checking for updates...\n");
@@ -2524,7 +2532,7 @@ program
     }> = [
       {
         name: "@tpsdev-ai/flair",
-        probe: () => probeBinVersion(execSync, "flair"),
+        probe: () => probeBinVersion(execFileSync,"flair"),
       },
       {
         name: "@tpsdev-ai/flair-client",
@@ -2532,7 +2540,7 @@ program
       },
       {
         name: "@tpsdev-ai/flair-mcp",
-        probe: () => probeBinVersion(execSync, "flair-mcp"),
+        probe: () => probeBinVersion(execFileSync,"flair-mcp"),
       },
     ];
 
