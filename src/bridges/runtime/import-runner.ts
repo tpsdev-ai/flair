@@ -21,7 +21,21 @@ import { importFromYaml } from "./execute.js";
 import type { BridgeContext } from "../types.js";
 
 export interface ImportRunOptions {
-  descriptor: YamlBridgeDescriptor;
+  /**
+   * Bridge name for error/progress reporting. Pass explicitly so the
+   * runner doesn't have to reach into a descriptor it may not have (code
+   * plugin path doesn't use a YAML descriptor).
+   */
+  bridgeName: string;
+  /**
+   * Source of BridgeMemory records. Exactly one must be provided:
+   *   - `descriptor`: YAML descriptor — the runner builds the iterable
+   *     via `importFromYaml(descriptor, { cwd, ctx })`
+   *   - `source`: ready-made AsyncIterable — typical for code plugins
+   *     that return their own async generator
+   */
+  descriptor?: YamlBridgeDescriptor;
+  source?: AsyncIterable<BridgeMemory>;
   /** Filesystem root the descriptor's relative paths resolve against. */
   cwd: string;
   /** Default agent ID to apply when a memory doesn't carry one. */
@@ -78,7 +92,12 @@ export async function runImport(opts: ImportRunOptions): Promise<ImportRunResult
   let imported = 0;
   let skipped = 0;
 
-  for await (const m of importFromYaml(opts.descriptor, { cwd: opts.cwd, ctx: opts.ctx })) {
+  const iterable: AsyncIterable<BridgeMemory> = opts.source
+    ?? (opts.descriptor
+      ? importFromYaml(opts.descriptor, { cwd: opts.cwd, ctx: opts.ctx })
+      : (() => { throw new BridgeRuntimeError({ bridge: opts.bridgeName, op: "import", field: "(source)", expected: "descriptor or source", got: "neither", hint: "runImport requires exactly one of opts.descriptor (YAML) or opts.source (AsyncIterable)" }); })());
+
+  for await (const m of iterable) {
     total++;
 
     const resolvedAgent = m.agentId ?? opts.agentId;
@@ -88,7 +107,7 @@ export async function runImport(opts: ImportRunOptions): Promise<ImportRunResult
       // the operator should know whether this is a descriptor bug or a
       // missing flag.
       throw new BridgeRuntimeError({
-        bridge: opts.descriptor.name,
+        bridge: opts.bridgeName,
         op: "import",
         field: "agentId",
         expected: "set on record OR provided via --agent",
@@ -134,7 +153,7 @@ export async function runImport(opts: ImportRunOptions): Promise<ImportRunResult
     } catch (err: any) {
       // Wrap PUT errors so they read consistently with other BridgeRuntimeErrors.
       throw new BridgeRuntimeError({
-        bridge: opts.descriptor.name,
+        bridge: opts.bridgeName,
         op: "import",
         record: total,
         field: "(write)",

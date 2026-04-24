@@ -3639,7 +3639,7 @@ bridge
 
     const { discover } = await import("./bridges/discover.js");
     const { builtinDiscoveryRecords } = await import("./bridges/builtins/index.js");
-    const { loadDescriptor } = await import("./bridges/runtime/load-descriptor.js");
+    const { loadBridge } = await import("./bridges/runtime/load-bridge.js");
     const { runImport } = await import("./bridges/runtime/import-runner.js");
     const { makeContext } = await import("./bridges/runtime/context.js");
     const { BridgeRuntimeError } = await import("./bridges/types.js");
@@ -3651,9 +3651,9 @@ bridge
       process.exit(1);
     }
 
-    let descriptor;
+    let loaded;
     try {
-      descriptor = await loadDescriptor(target);
+      loaded = await loadBridge(target);
     } catch (err: any) {
       printBridgeError(err);
       process.exit(1);
@@ -3690,9 +3690,9 @@ bridge
       if (ev.type === "done") {
         const noun = (n: number): string => `${n} ${n === 1 ? "memory" : "memories"}`;
         if (opts.dryRun) {
-          console.log(`\n${descriptor.name}: would import ${noun(ev.total)}. Re-run without --dry-run to write to Flair.`);
+          console.log(`\n${target.name}: would import ${noun(ev.total)}. Re-run without --dry-run to write to Flair.`);
         } else {
-          console.log(`\n${descriptor.name}: imported ${ev.imported}/${ev.total} memories${ev.skipped > 0 ? ` (${ev.skipped} skipped)` : ""}.`);
+          console.log(`\n${target.name}: imported ${ev.imported}/${ev.total} memories${ev.skipped > 0 ? ` (${ev.skipped} skipped)` : ""}.`);
         }
         return;
       }
@@ -3708,15 +3708,39 @@ bridge
     };
 
     try {
-      await runImport({
-        descriptor,
-        cwd,
-        agentId,
-        dryRun: !!opts.dryRun,
-        putMemory,
-        onProgress,
-        ctx,
-      });
+      if (loaded.kind === "yaml") {
+        await runImport({
+          bridgeName: target.name,
+          descriptor: loaded.descriptor,
+          cwd,
+          agentId,
+          dryRun: !!opts.dryRun,
+          putMemory,
+          onProgress,
+          ctx,
+        });
+      } else {
+        // Code plugin: invoke bridge.import(opts, ctx) directly; the plugin
+        // returns an AsyncIterable of BridgeMemory that runImport processes.
+        if (!loaded.plugin.import) {
+          console.error(`Bridge "${name}" is a code plugin without an import() function — can only export through it.`);
+          process.exit(1);
+        }
+        // Code-plugin options: pass through all --X flags as a single object.
+        // The plugin's declared `options` descriptor validates what it actually cares about.
+        const pluginOpts: Record<string, unknown> = { ...opts };
+        const source = loaded.plugin.import(pluginOpts, ctx);
+        await runImport({
+          bridgeName: target.name,
+          source,
+          cwd,
+          agentId,
+          dryRun: !!opts.dryRun,
+          putMemory,
+          onProgress,
+          ctx,
+        });
+      }
     } catch (err: any) {
       if (err instanceof BridgeRuntimeError) {
         printBridgeError(err);
@@ -3749,7 +3773,7 @@ bridge
 
     const { discover } = await import("./bridges/discover.js");
     const { builtinDiscoveryRecords } = await import("./bridges/builtins/index.js");
-    const { loadDescriptor } = await import("./bridges/runtime/load-descriptor.js");
+    const { loadBridge } = await import("./bridges/runtime/load-bridge.js");
     const { runExport } = await import("./bridges/runtime/export-runner.js");
     const { makeContext } = await import("./bridges/runtime/context.js");
     const { BridgeRuntimeError } = await import("./bridges/types.js");
@@ -3761,15 +3785,19 @@ bridge
       process.exit(1);
     }
 
-    let descriptor;
+    let loaded;
     try {
-      descriptor = await loadDescriptor(target);
+      loaded = await loadBridge(target);
     } catch (err: any) {
       printBridgeError(err);
       process.exit(1);
     }
-    if (!descriptor.export) {
+    if (loaded.kind === "yaml" && !loaded.descriptor.export) {
       console.error(`Bridge "${name}" has no export block — cannot export through it.`);
+      process.exit(1);
+    }
+    if (loaded.kind === "code" && !loaded.plugin.export) {
+      console.error(`Bridge "${name}" is a code plugin without an export() function — can only import through it.`);
       process.exit(1);
     }
 
@@ -3808,9 +3836,9 @@ bridge
     const onProgress = (ev: import("./bridges/runtime/export-runner.js").ProgressEvent): void => {
       if (ev.type === "done") {
         if (opts.dryRun) {
-          console.log(`\n${descriptor.name}: would export ${ev.exported} memor${ev.exported === 1 ? "y" : "ies"} from ${ev.total} total. Re-run without --dry-run to write.`);
+          console.log(`\n${target.name}: would export ${ev.exported} memor${ev.exported === 1 ? "y" : "ies"} from ${ev.total} total. Re-run without --dry-run to write.`);
         } else {
-          console.log(`\n${descriptor.name}: exported ${ev.exported} memor${ev.exported === 1 ? "y" : "ies"} from ${ev.total} total.`);
+          console.log(`\n${target.name}: exported ${ev.exported} memor${ev.exported === 1 ? "y" : "ies"} from ${ev.total} total.`);
         }
         return;
       }
@@ -3830,15 +3858,27 @@ bridge
     };
 
     try {
-      await runExport({
-        descriptor,
-        cwd,
-        fetchMemories,
-        filters: { agentId, subject: opts.subject, source: opts.source, since: opts.since },
-        dryRun: !!opts.dryRun,
-        ctx,
-        onProgress,
-      });
+      if (loaded.kind === "yaml") {
+        await runExport({
+          descriptor: loaded.descriptor,
+          cwd,
+          fetchMemories,
+          filters: { agentId, subject: opts.subject, source: opts.source, since: opts.since },
+          dryRun: !!opts.dryRun,
+          ctx,
+          onProgress,
+        });
+      } else {
+        // Code plugin export: invoke plugin.export(memoryStream, opts, ctx) directly.
+        // Plugin writes to its target however it likes (HTTP, file, etc.).
+        if (opts.dryRun) {
+          console.log(`${target.name}: dry-run not supported for code-plugin exports; aborting before invoking plugin.export().`);
+          process.exit(2);
+        }
+        const pluginOpts: Record<string, unknown> = { ...opts };
+        await loaded.plugin.export!(fetchMemories({ agentId, subject: opts.subject, source: opts.source, since: opts.since }), pluginOpts, ctx);
+        console.log(`${target.name}: code-plugin export completed. Record count not reported by the plugin.`);
+      }
     } catch (err: any) {
       if (err instanceof BridgeRuntimeError) {
         printBridgeError(err);
@@ -3860,7 +3900,7 @@ bridge
 
     const { discover } = await import("./bridges/discover.js");
     const { builtinDiscoveryRecords } = await import("./bridges/builtins/index.js");
-    const { loadDescriptor } = await import("./bridges/runtime/load-descriptor.js");
+    const { loadBridge } = await import("./bridges/runtime/load-bridge.js");
     const { runRoundTrip } = await import("./bridges/runtime/roundtrip.js");
     const { BridgeRuntimeError } = await import("./bridges/types.js");
 
@@ -3871,25 +3911,31 @@ bridge
       process.exit(1);
     }
 
-    let descriptor;
+    let loaded;
     try {
-      descriptor = await loadDescriptor(target);
+      loaded = await loadBridge(target);
     } catch (err: any) {
       printBridgeError(err);
       process.exit(1);
     }
 
+    if (loaded.kind === "code") {
+      console.error(`Bridge "${name}" is a code plugin — round-trip testing for code plugins lands in slice 3d (requires mocked fetch transport).`);
+      console.error(`For now, code plugins should ship their own tests alongside the npm package.`);
+      process.exit(2);
+    }
+
     try {
-      const result = await runRoundTrip({ descriptor, cwd, fixturePath: opts.fixture });
+      const result = await runRoundTrip({ descriptor: loaded.descriptor, cwd, fixturePath: opts.fixture });
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
         process.exit(result.passed ? 0 : 1);
       }
       if (result.passed) {
-        console.log(`✅ ${descriptor.name} round-trip passed (${result.expectedCount} record${result.expectedCount === 1 ? "" : "s"}).`);
+        console.log(`✅ ${target.name} round-trip passed (${result.expectedCount} record${result.expectedCount === 1 ? "" : "s"}).`);
         process.exit(0);
       }
-      console.log(`❌ ${descriptor.name} round-trip failed.`);
+      console.log(`❌ ${target.name} round-trip failed.`);
       console.log(`   expected ${result.expectedCount} records, got ${result.actualCount} back.`);
       if (result.missingInPass2.length > 0) {
         console.log(`   missing from re-import (${result.missingInPass2.length}):`);
@@ -3918,6 +3964,51 @@ bridge
       console.error(`Bridge test failed: ${err?.message ?? err}`);
       process.exit(1);
     }
+  });
+
+bridge
+  .command("allow <name>")
+  .description("Approve an npm code-plugin bridge for execution (required on first use; skips on subsequent invocations)")
+  .action(async (name: string) => {
+    const { allow } = await import("./bridges/runtime/allow-list.js");
+    const result = await allow(name);
+    if (result.alreadyAllowed) {
+      console.log(`${name} was already allowed — no change.`);
+      return;
+    }
+    console.log(`✓ ${name} allowed. npm code plugin execution is now enabled for this bridge.`);
+    console.log(`  Revoke anytime with: flair bridge revoke ${name}`);
+  });
+
+bridge
+  .command("revoke <name>")
+  .description("Revoke approval for an npm code-plugin bridge (future invocations will require `flair bridge allow <name>` again)")
+  .action(async (name: string) => {
+    const { revoke } = await import("./bridges/runtime/allow-list.js");
+    const result = await revoke(name);
+    if (!result.wasAllowed) {
+      console.log(`${name} was not on the allow-list — no change.`);
+      return;
+    }
+    console.log(`✓ ${name} revoked. Future invocations require \`flair bridge allow ${name}\` again.`);
+  });
+
+bridge
+  .command("allow-list")
+  .description("Show the allow-listed code-plugin bridges")
+  .option("--json", "Emit raw JSON")
+  .action(async (opts) => {
+    const { list: listAllowed } = await import("./bridges/runtime/allow-list.js");
+    const entries = await listAllowed();
+    if (opts.json) { console.log(JSON.stringify(entries, null, 2)); return; }
+    if (entries.length === 0) {
+      console.log("No code-plugin bridges are allow-listed yet.");
+      console.log("Allow one with: flair bridge allow <name>");
+      return;
+    }
+    const nameW = Math.max(4, ...entries.map((e) => e.name.length));
+    console.log(`  ${"name".padEnd(nameW)}  allowed-at`);
+    for (const e of entries) console.log(`  ${e.name.padEnd(nameW)}  ${e.allowedAt}`);
   });
 
 function printBridgeError(err: unknown): void {

@@ -5,7 +5,7 @@ import {
   builtinDiscoveryRecords,
 } from "../../src/bridges/builtins";
 import { agenticStackDescriptor } from "../../src/bridges/builtins/agentic-stack";
-import { loadDescriptor } from "../../src/bridges/runtime/load-descriptor";
+import { loadDescriptor } from "../../src/bridges/runtime/load-bridge";
 import { discover } from "../../src/bridges/discover";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

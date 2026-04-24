@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadDescriptor } from "../../src/bridges/runtime/load-descriptor";
+import { loadDescriptor } from "../../src/bridges/runtime/load-bridge";
 import { BridgeRuntimeError } from "../../src/bridges/types";
 import type { DiscoveredBridge } from "../../src/bridges/types";
 
@@ -68,7 +68,13 @@ describe("loadDescriptor: by source", () => {
     expect(desc.name).toBe("u");
   });
 
-  test("source=npm-package throws a slice-3 pointer error", async () => {
+  test("source=npm-package on the YAML-only shim throws clearly (use loadBridge() for code plugins)", async () => {
+    // As of slice 3c, npm code plugins are supported via loadBridge's "code"
+    // branch. The legacy loadDescriptor shim is YAML-only and will throw
+    // either the allow-list error (if callers hit it without the allow)
+    // or the dispatch error ("this code path expected a YAML descriptor").
+    // Either surfaces the wrong-path condition — what matters is we don't
+    // silently succeed.
     const d: DiscoveredBridge = {
       name: "mem0",
       kind: "api",
@@ -78,7 +84,5 @@ describe("loadDescriptor: by source", () => {
     let thrown: any = null;
     try { await loadDescriptor(d); } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
-    expect(thrown.detail.hint).toMatch(/slice 3/);
-    expect(thrown.detail.got).toBe("npm code plugin");
   });
 });
