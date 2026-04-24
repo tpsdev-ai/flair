@@ -3849,15 +3849,75 @@ bridge
     }
   });
 
-// `test` still stubbed — round-trip harness lands in slice 3b.
 bridge
-  .command("test <name> [args...]")
-  .description("test a bridge — not yet implemented (slice 3b of FLAIR-BRIDGES)")
-  .allowUnknownOption()
-  .action(() => {
-    console.error(`\`flair bridge test\` is not yet implemented — landing in slice 3b of FLAIR-BRIDGES.`);
-    console.error(`Slice 3a ships export (Shape A YAML); the round-trip test harness pairs with it.`);
-    process.exit(2);
+  .command("test <name>")
+  .description("Round-trip a bridge through its fixture: import → export → re-import → diff. Pass iff the stable fields (content/subject/tags/durability) match.")
+  .option("--fixture <path>", "Override the import source path (defaults to descriptor's import.sources[0].path)")
+  .option("--cwd <dir>", "Filesystem root the descriptor's relative paths resolve against (default: cwd)")
+  .option("--json", "Emit the full RoundTripResult as JSON on stdout")
+  .action(async (name: string, opts) => {
+    const cwd: string = opts.cwd ?? process.cwd();
+
+    const { discover } = await import("./bridges/discover.js");
+    const { builtinDiscoveryRecords } = await import("./bridges/builtins/index.js");
+    const { loadDescriptor } = await import("./bridges/runtime/load-descriptor.js");
+    const { runRoundTrip } = await import("./bridges/runtime/roundtrip.js");
+    const { BridgeRuntimeError } = await import("./bridges/types.js");
+
+    const found = await discover({ builtins: builtinDiscoveryRecords() });
+    const target = found.find((b) => b.name === name);
+    if (!target) {
+      console.error(`No bridge named "${name}" — run \`flair bridge list\` to see installed bridges.`);
+      process.exit(1);
+    }
+
+    let descriptor;
+    try {
+      descriptor = await loadDescriptor(target);
+    } catch (err: any) {
+      printBridgeError(err);
+      process.exit(1);
+    }
+
+    try {
+      const result = await runRoundTrip({ descriptor, cwd, fixturePath: opts.fixture });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        process.exit(result.passed ? 0 : 1);
+      }
+      if (result.passed) {
+        console.log(`✅ ${descriptor.name} round-trip passed (${result.expectedCount} record${result.expectedCount === 1 ? "" : "s"}).`);
+        process.exit(0);
+      }
+      console.log(`❌ ${descriptor.name} round-trip failed.`);
+      console.log(`   expected ${result.expectedCount} records, got ${result.actualCount} back.`);
+      if (result.missingInPass2.length > 0) {
+        console.log(`   missing from re-import (${result.missingInPass2.length}):`);
+        for (const m of result.missingInPass2.slice(0, 5)) console.log(`     - ${m.key}`);
+        if (result.missingInPass2.length > 5) console.log(`     ... ${result.missingInPass2.length - 5} more`);
+      }
+      if (result.unexpectedInPass2.length > 0) {
+        console.log(`   unexpected extras in re-import (${result.unexpectedInPass2.length}):`);
+        for (const m of result.unexpectedInPass2.slice(0, 5)) console.log(`     - ${m.key}`);
+        if (result.unexpectedInPass2.length > 5) console.log(`     ... ${result.unexpectedInPass2.length - 5} more`);
+      }
+      if (result.mismatches.length > 0) {
+        console.log(`   field mismatches (${result.mismatches.length}):`);
+        for (const m of result.mismatches.slice(0, 10)) {
+          console.log(`     - record ${m.ordinal} (${m.key}) field ${m.field}: expected ${JSON.stringify(m.expected)}, got ${JSON.stringify(m.got)}`);
+        }
+        if (result.mismatches.length > 10) console.log(`     ... ${result.mismatches.length - 10} more`);
+      }
+      console.log(`\n   Intermediate export at: ${result.tmpExportPath}`);
+      process.exit(1);
+    } catch (err: any) {
+      if (err instanceof BridgeRuntimeError) {
+        printBridgeError(err);
+        process.exit(1);
+      }
+      console.error(`Bridge test failed: ${err?.message ?? err}`);
+      process.exit(1);
+    }
   });
 
 function printBridgeError(err: unknown): void {
