@@ -182,6 +182,13 @@ export interface BridgeError {
   expected?: string;
   got?: string;
   hint: string;
+  /**
+   * Extra structured data for error classes that need more than the core
+   * fields above. Used today by trust-check failures to carry approved vs.
+   * observed location/digest so the CLI can render them side-by-side.
+   * Optional — spec §10 errors continue to work with just the core fields.
+   */
+  context?: Record<string, string>;
 }
 
 export class BridgeRuntimeError extends Error {
