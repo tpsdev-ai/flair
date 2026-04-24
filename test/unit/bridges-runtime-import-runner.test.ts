@@ -51,6 +51,7 @@ describe("runImport: end-to-end against an injected putMemory", () => {
     fixtureLessonsAt(dir, 3);
     const seen: PutMemoryBody[] = [];
     const result = await runImport({
+      bridgeName: agenticDescriptor.name,
       descriptor: agenticDescriptor,
       cwd: dir,
       agentId: "alice",
@@ -76,6 +77,7 @@ describe("runImport: end-to-end against an injected putMemory", () => {
     const seen: PutMemoryBody[] = [];
     const events: string[] = [];
     const result = await runImport({
+      bridgeName: agenticDescriptor.name,
       descriptor: agenticDescriptor,
       cwd: dir,
       agentId: "alice",
@@ -95,7 +97,8 @@ describe("runImport: end-to-end against an injected putMemory", () => {
     let thrown: any = null;
     try {
       await runImport({
-        descriptor: agenticDescriptor,
+        bridgeName: agenticDescriptor.name,
+      descriptor: agenticDescriptor,
         cwd: dir,
         // intentionally no agentId
         putMemory: async () => {},
@@ -111,7 +114,8 @@ describe("runImport: end-to-end against an injected putMemory", () => {
     let thrown: any = null;
     try {
       await runImport({
-        descriptor: agenticDescriptor,
+        bridgeName: agenticDescriptor.name,
+      descriptor: agenticDescriptor,
         cwd: dir,
         agentId: "alice",
         putMemory: async (body) => {
@@ -129,6 +133,7 @@ describe("runImport: end-to-end against an injected putMemory", () => {
     fixtureLessonsAt(dir, 2);
     let done: any = null;
     await runImport({
+      bridgeName: agenticDescriptor.name,
       descriptor: agenticDescriptor,
       cwd: dir,
       agentId: "alice",
@@ -153,6 +158,7 @@ describe("runImport: end-to-end against an injected putMemory", () => {
     };
     const seen: PutMemoryBody[] = [];
     await runImport({
+      bridgeName: desc.name,
       descriptor: desc,
       cwd: dir,
       agentId: "alice",
