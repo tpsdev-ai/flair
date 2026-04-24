@@ -4045,10 +4045,94 @@ function printBridgeError(err: unknown): void {
   // spec, plus a one-line human summary so the operator gets both.
   const detail = (err as { detail?: Record<string, unknown> })?.detail;
   if (detail && typeof detail === "object") {
+    // Trust-check failures get a dedicated, operator-facing rendering.
+    // Dumping the full spec-§10 JSON is useful when an operator is
+    // debugging a broken YAML descriptor; for trust errors it buries the
+    // one thing that matters — the command to re-approve.
+    if ((detail as any).field === "(trust)") {
+      printTrustError(detail as any);
+      return;
+    }
     console.error(`Bridge error: ${(detail as any).hint ?? (err as Error).message}`);
     console.error(JSON.stringify(detail, null, 2));
   } else {
     console.error(`Bridge error: ${(err as Error).message ?? String(err)}`);
+  }
+}
+
+function printTrustError(detail: { bridge?: string; got?: string; context?: Record<string, string> }): void {
+  const name = detail.bridge ?? "(unknown)";
+  const ctx = detail.context ?? {};
+  const reapprove = `  flair bridge allow ${name}`;
+  const bar = "─".repeat(60);
+
+  const header = (title: string) => {
+    console.error("");
+    console.error(`⚠ ${title} — ${name}`);
+    console.error(bar);
+  };
+
+  const footer = (label: string) => {
+    console.error("");
+    console.error(`${label}:`);
+    console.error(reapprove);
+    console.error("");
+  };
+
+  switch (detail.got) {
+    case "not-allowed":
+      header("Approval required");
+      console.error("This bridge is an npm code plugin — it runs arbitrary JavaScript.");
+      console.error("First-use approval is required before Flair will execute it.");
+      footer("Approve it with");
+      return;
+
+    case "path-mismatch":
+      header("Trust check failed: package location changed");
+      console.error("A different package with the same name was discovered. This is how");
+      console.error("local squatting attacks present — a planted `node_modules/flair-bridge-*`");
+      console.error("in an unrelated project tree.");
+      console.error("");
+      console.error(`  approved: ${ctx.approvedPath ?? "(unknown)"}`);
+      console.error(`            version ${ctx.approvedVersion ?? "?"} at ${ctx.approvedAt ?? "?"}`);
+      console.error(`  now:      ${ctx.observedPath ?? "(unknown)"}`);
+      footer("If the new location is intentional, re-approve");
+      return;
+
+    case "digest-mismatch":
+      header("Trust check failed: package contents changed");
+      console.error("The package.json at the approved location has changed since you");
+      console.error("approved this bridge. This fires on every upgrade — it's a trust");
+      console.error("event, not an error. If the update is intentional, re-approve.");
+      console.error("");
+      console.error(`  location:          ${ctx.packagePath ?? "(unknown)"}`);
+      console.error(`  approved version:  ${ctx.approvedVersion ?? "?"}   (at ${ctx.approvedAt ?? "?"})`);
+      console.error(`  approved digest:   sha256:${(ctx.approvedDigest ?? "").slice(0, 16)}…`);
+      console.error(`  observed digest:   sha256:${(ctx.observedDigest ?? "").slice(0, 16)}…`);
+      footer("Re-approve");
+      return;
+
+    case "entry-incomplete":
+      header("Trust check failed: approval record is incomplete");
+      console.error("The allow-list entry for this bridge is missing a location or digest.");
+      console.error("This usually means the record was created by a pre-fix Flair version");
+      console.error("(0.6.0 / 0.6.1) that only stored the name. Re-approve to upgrade.");
+      footer("Re-approve");
+      return;
+
+    case "package-missing":
+      header("Trust check failed: approved package missing on disk");
+      console.error("The package location recorded at allow-time is no longer readable.");
+      console.error("");
+      console.error(`  approved at:  ${ctx.approvedPath ?? "(unknown)"}`);
+      console.error(`  discovered:   ${ctx.discoveredPath ?? "(unknown)"}`);
+      footer("Reinstall the package, then re-approve");
+      return;
+
+    default:
+      // Unknown trust sub-reason — fall back to the raw structured print.
+      console.error(`Bridge error (trust): ${(detail as any).hint ?? detail.got ?? "unknown"}`);
+      console.error(JSON.stringify(detail, null, 2));
   }
 }
 

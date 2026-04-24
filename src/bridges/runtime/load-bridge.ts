@@ -76,12 +76,48 @@ export async function loadBridge(
             expected: verdict.reason === "not-allowed" ? "allow-listed code plugin" : "approved package at recorded location/digest",
             got: verdict.reason,
             hint: trustHint(discovered.name, verdict),
+            context: trustContext(discovered, verdict),
           });
         }
       }
       const plugin = await loadCodePlugin(discovered, { importer: opts.importer });
       return { kind: "code", plugin, source: discovered };
     }
+  }
+}
+
+function trustContext(
+  discovered: DiscoveredBridge,
+  verdict: Exclude<VerifyResult, { ok: true }>,
+): Record<string, string> {
+  switch (verdict.reason) {
+    case "not-allowed":
+      return { name: discovered.name };
+    case "path-mismatch":
+      return {
+        name: discovered.name,
+        approvedPath: verdict.entry.packageDir,
+        observedPath: verdict.observedPath,
+        approvedVersion: verdict.entry.version ?? "(unknown)",
+        approvedAt: verdict.entry.allowedAt,
+      };
+    case "digest-mismatch":
+      return {
+        name: discovered.name,
+        packagePath: verdict.entry.packageDir,
+        approvedVersion: verdict.entry.version ?? "(unknown)",
+        approvedDigest: verdict.entry.packageJsonSha256,
+        observedDigest: verdict.observedDigest,
+        approvedAt: verdict.entry.allowedAt,
+      };
+    case "entry-incomplete":
+      return { name: discovered.name };
+    case "package-missing":
+      return {
+        name: discovered.name,
+        approvedPath: verdict.entry?.packageDir ?? "(unknown)",
+        discoveredPath: discovered.path,
+      };
   }
 }
 
