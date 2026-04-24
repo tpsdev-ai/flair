@@ -1,15 +1,29 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadBridge } from "../../src/bridges/runtime/load-bridge";
+import { allow } from "../../src/bridges/runtime/allow-list";
 import { BridgeRuntimeError } from "../../src/bridges/types";
 import type { DiscoveredBridge, MemoryBridge } from "../../src/bridges/types";
 
-function sandbox(): { dir: string; cleanup: () => void } {
-  const dir = join(tmpdir(), `flair-loadbridge-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+function sandbox(): { dir: string; cleanup: () => void; makePackage: (name: string) => string } {
+  const dir = realpathSync(tmpdir());
+  const root = join(dir, `flair-loadbridge-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(root, { recursive: true });
+  return {
+    dir: root,
+    makePackage: (name: string) => {
+      const pkgDir = join(root, `pkg-${name}-${Math.random().toString(36).slice(2)}`);
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(
+        join(pkgDir, "package.json"),
+        JSON.stringify({ name: `flair-bridge-${name}`, version: "1.0.0" }, null, 2),
+      );
+      return pkgDir;
+    },
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
 }
 
 const codePlugin: MemoryBridge = {
@@ -41,7 +55,8 @@ describe("loadBridge: dispatch by source", () => {
   });
 
   test("npm-package without allow-list entry → BridgeRuntimeError pointing at `flair bridge allow`", async () => {
-    const d: DiscoveredBridge = { name: "mem0", kind: "api", source: "npm-package", path: "/fake" };
+    const pkg = sb.makePackage("mem0");
+    const d: DiscoveredBridge = { name: "mem0", kind: "api", source: "npm-package", path: pkg };
     const allowPath = join(sb.dir, "bridges-allowed.json");
     let thrown: any = null;
     try {
@@ -49,19 +64,54 @@ describe("loadBridge: dispatch by source", () => {
     } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
     expect(thrown.detail.hint).toMatch(/flair bridge allow mem0/);
+    expect(thrown.detail.got).toBe("not-allowed");
   });
 
-  test("npm-package with allow-list entry → kind=code + loaded plugin", async () => {
+  test("npm-package with matching allow-list entry → kind=code + loaded plugin", async () => {
+    const pkg = sb.makePackage("mem0");
     const allowPath = join(sb.dir, "bridges-allowed.json");
-    writeFileSync(allowPath, JSON.stringify({ allowed: [{ name: "mem0", allowedAt: new Date().toISOString() }] }));
-    const d: DiscoveredBridge = { name: "mem0", kind: "api", source: "npm-package", path: "/fake" };
+    await allow("mem0", pkg, { path: allowPath });
+    const d: DiscoveredBridge = { name: "mem0", kind: "api", source: "npm-package", path: pkg };
     const loaded = await loadBridge(d, { allowListPath: allowPath, importer: async () => ({ bridge: codePlugin }) });
     expect(loaded.kind).toBe("code");
     if (loaded.kind === "code") expect(loaded.plugin.name).toBe("mem0");
   });
 
+  test("npm-package with allow entry but squatted path → refused with path-mismatch hint", async () => {
+    const real = sb.makePackage("mem0");
+    const squat = sb.makePackage("mem0"); // different dir, same short name
+    const allowPath = join(sb.dir, "bridges-allowed.json");
+    await allow("mem0", real, { path: allowPath });
+    const d: DiscoveredBridge = { name: "mem0", kind: "api", source: "npm-package", path: squat };
+    let thrown: any = null;
+    try {
+      await loadBridge(d, { allowListPath: allowPath, importer: async () => ({ bridge: codePlugin }) });
+    } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(BridgeRuntimeError);
+    expect(thrown.detail.got).toBe("path-mismatch");
+    expect(thrown.detail.hint).toMatch(/squatting/);
+    expect(thrown.detail.hint).toMatch(/flair bridge allow mem0/);
+  });
+
+  test("npm-package with allow entry but modified package.json → refused with digest-mismatch hint", async () => {
+    const pkg = sb.makePackage("mem0");
+    const allowPath = join(sb.dir, "bridges-allowed.json");
+    await allow("mem0", pkg, { path: allowPath });
+    // Tamper with package.json after approval
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "flair-bridge-mem0", version: "9.9.9", backdoor: true }, null, 2));
+    const d: DiscoveredBridge = { name: "mem0", kind: "api", source: "npm-package", path: pkg };
+    let thrown: any = null;
+    try {
+      await loadBridge(d, { allowListPath: allowPath, importer: async () => ({ bridge: codePlugin }) });
+    } catch (e) { thrown = e; }
+    expect(thrown).toBeInstanceOf(BridgeRuntimeError);
+    expect(thrown.detail.got).toBe("digest-mismatch");
+    expect(thrown.detail.hint).toMatch(/package\.json contents changed/);
+  });
+
   test("skipAllowCheck=true bypasses the allow-list (used by `bridge list`)", async () => {
-    const d: DiscoveredBridge = { name: "mem0", kind: "api", source: "npm-package", path: "/fake" };
+    const pkg = sb.makePackage("mem0");
+    const d: DiscoveredBridge = { name: "mem0", kind: "api", source: "npm-package", path: pkg };
     const loaded = await loadBridge(d, { skipAllowCheck: true, importer: async () => ({ bridge: codePlugin }) });
     expect(loaded.kind).toBe("code");
   });

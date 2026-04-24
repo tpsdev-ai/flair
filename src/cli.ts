@@ -3968,16 +3968,41 @@ bridge
 
 bridge
   .command("allow <name>")
-  .description("Approve an npm code-plugin bridge for execution (required on first use; skips on subsequent invocations)")
+  .description("Approve an npm code-plugin bridge for execution. Approval is pinned to the package's location and package.json contents — a malicious package squatting on the same name in a different node_modules tree will be refused at load-time.")
   .action(async (name: string) => {
+    const { discover } = await import("./bridges/discover.js");
+    const { builtinDiscoveryRecords } = await import("./bridges/builtins/index.js");
     const { allow } = await import("./bridges/runtime/allow-list.js");
-    const result = await allow(name);
-    if (result.alreadyAllowed) {
-      console.log(`${name} was already allowed — no change.`);
-      return;
+
+    const found = await discover({ builtins: builtinDiscoveryRecords() });
+    const target = found.find((b) => b.name === name);
+    if (!target) {
+      console.error(`No bridge named "${name}" — run \`flair bridge list\` to see installed bridges.`);
+      process.exit(1);
     }
-    console.log(`✓ ${name} allowed. npm code plugin execution is now enabled for this bridge.`);
-    console.log(`  Revoke anytime with: flair bridge revoke ${name}`);
+    if (target.source !== "npm-package") {
+      console.error(`"${name}" is a ${target.source} bridge; only npm code plugins require allow-list approval.`);
+      console.error(`YAML and built-in bridges run via the descriptor runtime and don't execute arbitrary JS.`);
+      process.exit(1);
+    }
+
+    try {
+      const result = await allow(name, target.path);
+      if (result.alreadyAllowed) {
+        console.log(`${name} was already allowed at ${result.entry.packageDir} — no change.`);
+        return;
+      }
+      const verb = result.updated ? "re-approved" : "allowed";
+      console.log(`✓ ${name} ${verb}.`);
+      console.log(`  location: ${result.entry.packageDir}`);
+      console.log(`  version:  ${result.entry.version ?? "(not declared)"}`);
+      console.log(`  digest:   ${result.entry.packageJsonSha256.slice(0, 16)}…`);
+      console.log(`  If the package later moves or its package.json content changes, execution is refused until you re-run this command.`);
+      console.log(`  Revoke anytime with: flair bridge revoke ${name}`);
+    } catch (err: any) {
+      console.error(`Failed to approve "${name}": ${err?.message ?? err}`);
+      process.exit(1);
+    }
   });
 
 bridge
@@ -4007,8 +4032,12 @@ bridge
       return;
     }
     const nameW = Math.max(4, ...entries.map((e) => e.name.length));
-    console.log(`  ${"name".padEnd(nameW)}  allowed-at`);
-    for (const e of entries) console.log(`  ${e.name.padEnd(nameW)}  ${e.allowedAt}`);
+    const verW = Math.max(7, ...entries.map((e) => (e.version ?? "—").length));
+    console.log(`  ${"name".padEnd(nameW)}  ${"version".padEnd(verW)}  allowed-at               location / digest`);
+    for (const e of entries) {
+      console.log(`  ${e.name.padEnd(nameW)}  ${(e.version ?? "—").padEnd(verW)}  ${e.allowedAt}  ${e.packageDir}`);
+      console.log(`  ${" ".repeat(nameW)}  ${" ".repeat(verW)}  ${" ".repeat(24)}  sha256:${e.packageJsonSha256.slice(0, 16)}…`);
+    }
   });
 
 function printBridgeError(err: unknown): void {

@@ -20,7 +20,8 @@ import { BridgeRuntimeError } from "../types.js";
 import { loadYamlDescriptor } from "./yaml-loader.js";
 import { BUILTIN_BY_NAME } from "../builtins/index.js";
 import { loadCodePlugin } from "./load-plugin.js";
-import { isAllowed } from "./allow-list.js";
+import { verifyAllow } from "./allow-list.js";
+import type { VerifyResult } from "./allow-list.js";
 
 export type LoadedBridge =
   | { kind: "yaml"; descriptor: YamlBridgeDescriptor; source: DiscoveredBridge }
@@ -65,22 +66,38 @@ export async function loadBridge(
     }
     case "npm-package": {
       if (!opts.skipAllowCheck) {
-        const allowed = await isAllowed(discovered.name, { path: opts.allowListPath });
-        if (!allowed) {
+        const verdict = await verifyAllow(discovered, { path: opts.allowListPath });
+        if (!verdict.ok) {
           throw new BridgeRuntimeError({
             bridge: discovered.name,
             op: "import",
             path: discovered.path,
             field: "(trust)",
-            expected: "allow-listed code plugin",
-            got: "not allowed",
-            hint: `npm code plugins run arbitrary JavaScript. First-use approval required. Run: flair bridge allow ${discovered.name}`,
+            expected: verdict.reason === "not-allowed" ? "allow-listed code plugin" : "approved package at recorded location/digest",
+            got: verdict.reason,
+            hint: trustHint(discovered.name, verdict),
           });
         }
       }
       const plugin = await loadCodePlugin(discovered, { importer: opts.importer });
       return { kind: "code", plugin, source: discovered };
     }
+  }
+}
+
+function trustHint(name: string, verdict: Exclude<VerifyResult, { ok: true }>): string {
+  const reapprove = `flair bridge allow ${name}`;
+  switch (verdict.reason) {
+    case "not-allowed":
+      return `npm code plugins run arbitrary JavaScript. First-use approval required. Run: ${reapprove}`;
+    case "path-mismatch":
+      return `approved package lives at ${verdict.entry.packageDir}, but a different package with the same name was discovered at ${verdict.observedPath}. This is how local squatting attacks present. If the new location is intentional, re-run: ${reapprove}`;
+    case "digest-mismatch":
+      return `package.json contents changed since approval (recorded sha ${verdict.entry.packageJsonSha256.slice(0, 12)}…, observed ${verdict.observedDigest.slice(0, 12)}…). Re-run if the update is intentional: ${reapprove}`;
+    case "entry-incomplete":
+      return `allow-list entry for "${name}" is missing a location/digest (likely from a pre-fix Flair version). Re-run: ${reapprove}`;
+    case "package-missing":
+      return `package at ${verdict.entry?.packageDir ?? "(unknown)"} could not be read; allow-list verification cannot proceed`;
   }
 }
 
