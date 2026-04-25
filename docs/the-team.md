@@ -59,8 +59,10 @@ This isn't a value judgment of one runtime over another — it's about matching 
 ### Local vs API for inference
 
 - **Anvil + Pulse on the Anthropic API** — high-throughput implementation work and EA-shaped intel scanning need frontier model quality and consistent latency. Worth the API spend.
-- **Kern + Sherlock on local Ollama (`newton`)** — review work can be slower and is bursty (a few PRs/day). Self-hosted on a Mac Studio Ollama install means no rate limits, no session-locks, no third-party data exposure. **Sherlock is local-only as a deliberate privacy decision** — security findings are pre-disclosure-sensitive, not appropriate to send to any external inference provider.
+- **Kern + Sherlock on local Ollama (`newton`)** — review work can be slower and is bursty (a few PRs/day). Self-hosted on a Mac Studio Ollama install means no rate limits, no session-locks, no third-party data exposure. Both currently run **gpt-oss:120b** as primary (OpenAI's open weights, Apache 2.0), with `nemotron-3-super:120b` and `deepseek-r1:70b` in the local fallback chain. **Sherlock is local-only as a deliberate privacy decision** — security findings are pre-disclosure-sensitive, not appropriate to send to any external inference provider.
 - **Flint on Opus** — strategy + spec writing is rate-of-thought, not rate-of-tokens. Opus's reasoning depth matters more than throughput.
+
+> **Note on the migration trial period (2026-04-25 → ~2026-05-02):** during the first week after K&S moved off Gemini, we kept Gemini as the *last* fallback in the chain to catch any quality regressions. After the trial period that fallback gets removed and K&S are strictly local. If you're copying this setup, decide upfront whether you want a cloud safety net during your own migration — and remove it on a known date.
 
 ### Different hardware for different load
 
