@@ -1,0 +1,10 @@
+name: flair
+version: 0.1.0
+description: "Flair memory — agent-authored, per-agent-scoped, Ed25519-signed memory + identity layer that follows the agent across orchestrators."
+pip_dependencies:
+  - cryptography
+  - httpx
+hooks:
+  - on_session_end
+  - on_pre_compress
+  - on_memory_write
