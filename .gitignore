@@ -8,3 +8,6 @@ resources/*.js
 test-results/
 playwright-report/
 test/e2e/screenshots/
+plugins/**/__pycache__/
+plugins/**/*.pyc
+.pytest_cache/
