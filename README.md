@@ -162,17 +162,17 @@ openclaw plugins install @tpsdev-ai/openclaw-flair
 
 The plugin auto-detects your agent identity, provides `memory_store`/`memory_recall`/`memory_get` tools, and injects relevant memories at session start. See the [plugin README](plugins/openclaw-flair/README.md) for details.
 
-### Claude Code / Codex / Cursor (MCP)
+### Claude Code / Gemini CLI / OpenAI Codex CLI / Cursor (MCP)
 
-Install the MCP server for native tool integration:
+One MCP server, many CLIs. Install the MCP server for native tool integration in any MCP-capable client:
 
 ```json
-// .mcp.json in your project root
+// .mcp.json in your project root (Claude Code / Cursor format)
 {
   "mcpServers": {
     "flair": {
       "command": "npx",
-      "args": ["@tpsdev-ai/flair-mcp"],
+      "args": ["-y", "@tpsdev-ai/flair-mcp"],
       "env": { "FLAIR_AGENT_ID": "mybot" }
     }
   }
@@ -183,7 +183,9 @@ Add to your `CLAUDE.md`:
 
     At the start of every session, run mcp__flair__bootstrap before responding.
 
-Claude Code gets native tools: `memory_store`, `memory_search`, `bootstrap`, `soul_set`, and more. See the [MCP README](packages/flair-mcp/README.md) and [Claude Code guide](docs/claude-code.md).
+Your agent's memory **follows it across CLIs** — same Flair instance, same agent identity, switch from Claude Code to Gemini CLI to Codex CLI without losing state. The MCP server exposes `memory_store`, `memory_search`, `memory_get`, `memory_delete`, `bootstrap`, `soul_set`, `soul_get`.
+
+For per-CLI config snippets (Gemini CLI's `~/.gemini/settings.json`, Codex CLI's `~/.codex/config.toml`, etc.), see **[docs/mcp-clients.md](docs/mcp-clients.md)**. For a deeper Claude Code walk-through with `CLAUDE.md` patterns, see [docs/claude-code.md](docs/claude-code.md).
 
 ### JavaScript / TypeScript (Client Library)
 
