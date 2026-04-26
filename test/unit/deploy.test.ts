@@ -6,7 +6,7 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -86,9 +86,11 @@ describe("flair deploy: buildTargetUrl", () => {
 describe("flair deploy: package resolution", () => {
   test("resolvePackageRoot finds the live package from its own module", () => {
     const root = resolvePackageRoot();
-    // This test runs from inside the flair repo, so the resolved root
-    // must be the repo itself.
-    expect(root.endsWith("flair")).toBe(true);
+    // Verify we're inside the real flair package by checking package.json
+    // name, not by directory basename (which breaks when cloned to a
+    // differently-named directory).
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+    expect(pkg.name).toBe("@tpsdev-ai/flair");
   });
 
   test("validatePackageLayout accepts a proper layout", () => {
