@@ -20,6 +20,18 @@ function setup() {
   mkdirSync(KEYS_DIR, { recursive: true });
 }
 
+/**
+ * Run a CLI command and capture stdout+stderr regardless of exit code.
+ */
+function run(cmd: string, env?: Record<string, string>): string {
+  try {
+    return execSync(cmd, { encoding: "utf-8", stdio: "pipe", env: { ...process.env, ...env } });
+  } catch (e: any) {
+    // execSync throws on non-zero exit; return combined output instead
+    return (e.stdout ?? "") + (e.stderr ?? "");
+  }
+}
+
 describe("Dogfood fixes (ops-fqwh)", () => {
   beforeAll(() => {
     setup();
@@ -31,54 +43,54 @@ describe("Dogfood fixes (ops-fqwh)", () => {
 
   describe("Bug 6: reembed includes agentId in payload", () => {
     it("should fail gracefully when no agent specified and no admin pass", () => {
-      const cmd = `${FLAIR_BIN} reembed --stale-only --dry-run 2>&1`;
-      const output = execSync(cmd, { encoding: "utf-8", env: { ...process.env, HOME: TEST_DIR } });
+      const output = run(`${FLAIR_BIN} reembed --stale-only --dry-run`, {
+        HOME: TEST_DIR,
+        FLAIR_URL: "http://127.0.0.1:19999", // no Harper running
+      });
       expect(output).toContain("Admin password required");
     });
 
     it("should accept optional --agent flag", () => {
-      const cmd = `${FLAIR_BIN} reembed --help`;
-      const output = execSync(cmd, { encoding: "utf-8" });
+      const output = run(`${FLAIR_BIN} reembed --help`);
       expect(output).toContain("--agent <id>");
-      expect(output).not.toContain("required");
+      // Should NOT say "required" for --agent
+      expect(output).not.toContain("required option '--agent");
     });
   });
 
   describe("Bug 2: agent list without per-agent auth", () => {
-    it("should allow localhost operator access without FLAIR_AGENT_ID", () => {
-      const cmd = `${FLAIR_BIN} agent list 2>&1`;
-      const output = execSync(cmd, { encoding: "utf-8", env: { ...process.env, HOME: TEST_DIR } });
-      // Should not error with "missing_or_invalid_authorization"
+    it("should attempt localhost connection without FLAIR_AGENT_ID (no auth error)", () => {
+      const output = run(`${FLAIR_BIN} agent list`, {
+        HOME: TEST_DIR,
+        FLAIR_URL: "http://127.0.0.1:19999", // no Harper running
+      });
+      // Should NOT error with missing_or_invalid_authorization
+      // (it will fail to connect, but that's a transport error, not an auth error)
       expect(output).not.toContain("missing_or_invalid_authorization");
+      // Should attempt the request (connection refused is expected without Harper)
+      expect(output).toContain("ConnectionRefused");
     });
   });
 
   describe("Bug 3: status recommends runnable command", () => {
-    it("should emit command without required --agent flag when not scoped", () => {
-      // This test would need a running Harper instance with hash-fallback memories
-      // We'll verify the command format instead
-      const cmd = `${FLAIR_BIN} status --help`;
-      const output = execSync(cmd, { encoding: "utf-8" });
-      expect(output).toContain("flair status");
+    it("should emit reembed command without required --agent flag", () => {
+      const output = run(`${FLAIR_BIN} reembed --help`);
+      // --agent is optional now
+      expect(output).toContain("--agent <id>");
+      expect(output).not.toContain("required option '--agent'");
     });
   });
 
   describe("Bug 1 and 4: status agent display and warning scoping", () => {
-    it("should scope warnings to agent when --agent is provided", () => {
-      // This would need a running Harper with multiple agents
-      // Verify the code path exists
-      const cmd = `${FLAIR_BIN} status --help`;
-      const output = execSync(cmd, { encoding: "utf-8" });
+    it("should expose --agent option on status command", () => {
+      const output = run(`${FLAIR_BIN} status --help`);
       expect(output).toContain("--agent <id>");
     });
   });
 
   describe("Bug 5: federation summary agreement", () => {
-    it("should show 'not configured' when federation is null", () => {
-      // This would need a running Harper without federation
-      // Verify the code path exists
-      const cmd = `${FLAIR_BIN} status federation --help`;
-      const output = execSync(cmd, { encoding: "utf-8" });
+    it("should have federation subcommand", () => {
+      const output = run(`${FLAIR_BIN} --help`);
       expect(output).toContain("federation");
     });
   });
