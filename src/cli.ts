@@ -919,7 +919,7 @@ agent
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
     const port = resolveHttpPort(opts);
-    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
     if (adminPass) {
       // Use admin basic auth against ops API to list agents directly
       const opsPort = resolveOpsPort(opts);
@@ -936,8 +936,24 @@ agent
       }
       console.log(JSON.stringify(await res.json(), null, 2));
     } else {
-      // Try agent-authed API (requires FLAIR_AGENT_ID to be set)
-      console.log(JSON.stringify(await api("GET", "/Agent"), null, 2));
+      // Localhost operator path: allow IDs-only enumeration without per-agent auth
+      // This treats localhost as a trusted boundary for read-only public metadata
+      const baseUrl = `http://127.0.0.1:${port}`;
+      const res = await fetch(`${baseUrl}/Agent`, {
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.error(`Error: ${res.status} ${text}`);
+        process.exit(1);
+      }
+      const data = await res.json();
+      // Filter to IDs-only to respect the localhost trust boundary
+      if (Array.isArray(data)) {
+        console.log(JSON.stringify(data.map((a: any) => ({ id: a.id, name: a.name, createdAt: a.createdAt })), null, 2));
+      } else {
+        console.log(JSON.stringify(data, null, 2));
+      }
     }
   });
 
@@ -2280,19 +2296,42 @@ const statusCmd = program
     const agents = healthData?.agents;
     const memories = healthData?.memories;
     const warnings: Array<{ level: string; message: string }> = Array.isArray(healthData?.warnings) ? healthData.warnings : [];
-    const hasWarn = warnings.some((w) => w.level === "warn");
-    // Header state-word stays "running" whenever the process is alive; the
-    // icon conveys health (🟢 clean / 🟡 warnings). 🔴 unreachable is already
-    // handled above by the `!healthy` early-exit. Decoupling state from
-    // health keeps the smoke-test `grep -q "running"` stable across tiers.
+    // Scope warnings to the filtered agent if --agent is set
+    const scopedWarnings = opts.agent && healthData?.agents?.perAgent
+      ? warnings.filter((w: any) => {
+          // Hash-fallback warnings contain agent-specific counts
+          if (w.message.includes("hash-fallback")) {
+            const match = w.message.match(/\b(\d+)\/(\d+) \((\d+)%\)/);
+            if (match) {
+              const hashCount = parseInt(match[1]);
+              const totalCount = parseInt(match[2]);
+              const agentRow = healthData.agents.perAgent.find((r: any) => r.id === opts.agent);
+              if (agentRow && agentRow.hashFallback === hashCount && agentRow.memoryCount === totalCount) {
+                return true;
+              }
+              return false;
+            }
+          }
+          // Mixed-model warnings are fleet-wide; keep them
+          if (w.message.includes("multiple embedding models")) return true;
+          // Federation warnings are fleet-wide; keep them
+          if (w.message.includes("federation")) return true;
+          // REM warnings are fleet-wide; keep them
+          if (w.message.includes("REM") || w.message.includes("nightly")) return true;
+          // Default: keep fleet-wide warnings
+          return !w.message.includes(opts.agent);
+        })
+      : warnings;
+
+    const hasWarn = scopedWarnings.some((w) => w.level === "warn");
     const headerIcon = hasWarn ? "🟡" : "🟢";
 
     console.log(`Flair v${__pkgVersion} — ${headerIcon} running${pid ? ` (PID ${pid}` : ""}${uptimeStr ? `, uptime ${uptimeStr})` : pid ? ")" : ""}`);
     console.log(`  URL:        ${baseUrl}`);
 
-    if (warnings.length > 0) {
-      console.log(`\n⚠ Warnings:  ${warnings.length}`);
-      for (const w of warnings) console.log(`  • ${w.level} ${w.message}`);
+    if (scopedWarnings.length > 0) {
+      console.log(`\n⚠ Warnings:  ${scopedWarnings.length}`);
+      for (const w of scopedWarnings) console.log(`  • ${w.level} ${w.message}`);
     }
 
     if (memories) {
@@ -2384,6 +2423,8 @@ const statusCmd = program
       if (f.instance) console.log(`  Instance:    ${f.instance.id} (${f.instance.role ?? "—"}, ${f.instance.status ?? "—"})`);
       if (f.peers) console.log(`  Peers:       ${f.peers.total} (${f.peers.connected} connected / ${f.peers.disconnected} down / ${f.peers.revoked} revoked)`);
       if (f.pendingTokens > 0) console.log(`  Pairing:     ${f.pendingTokens} unconsumed token(s)`);
+    } else {
+      console.log("\nFederation: not configured");
     }
 
     if (healthData?.oauth) {
@@ -2397,6 +2438,8 @@ const statusCmd = program
       if (Array.isArray(b.installed) && b.installed.length > 0) console.log(`  Installed:   ${b.installed.join(", ")}`);
       if (b.lastImport) console.log(`  Last import: ${relativeTime(b.lastImport)}`);
       if (b.lastExport) console.log(`  Last export: ${relativeTime(b.lastExport)}`);
+    } else {
+      console.log("\nBridges: none installed");
     }
 
     if (healthData?.disk) {
@@ -2407,7 +2450,7 @@ const statusCmd = program
     }
 
     console.log("");
-    if (warnings.length > 0) console.log(`  Health:     ⚠ ${warnings.length} warning(s)`);
+    if (scopedWarnings.length > 0) console.log(`  Health:     ⚠ ${scopedWarnings.length} warning(s)`);
     else console.log(`  Health:     ✅ all checks passing`);
   });
 
@@ -2919,7 +2962,7 @@ program
 program
   .command("reembed")
   .description("Re-generate embeddings for memories with stale or missing model tags")
-  .requiredOption("--agent <id>", "Agent ID to re-embed memories for")
+  .option("--agent <id>", "Agent ID to re-embed memories for (defaults to all agents with stale rows)")
   .option("--stale-only", "Only re-embed memories with mismatched model tag")
   .option("--dry-run", "Show count without modifying")
   .option("--port <port>", "Harper HTTP port")
@@ -2936,12 +2979,97 @@ program
 
     const currentModel = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
 
-    console.log(`Re-embedding memories for agent: ${agentId}`);
+    if (agentId) {
+      console.log(`Re-embedding memories for agent: ${agentId}`);
+    } else {
+      console.log("Re-embedding memories for all agents with stale rows");
+    }
     console.log(`Current model: ${currentModel}`);
     if (staleOnly) console.log("Mode: stale-only (skipping up-to-date memories)");
     if (dryRun) console.log("Mode: dry-run (no modifications)");
     console.log("");
 
+    // When no agent specified, use admin auth to fetch all memories
+    if (!agentId) {
+      const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+      if (!adminPass) {
+        console.error("❌ Admin password required when --agent is not specified (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD)");
+        process.exit(1);
+      }
+
+      // Fetch all memories with admin auth
+      const searchRes = await fetch(`${baseUrl}/SemanticSearch`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`,
+        },
+        body: JSON.stringify({ limit: 10000 }),
+      });
+      if (!searchRes.ok) {
+        console.error(`❌ Failed to fetch memories: ${searchRes.status}`);
+        process.exit(1);
+      }
+      const data = await searchRes.json() as { results?: any[] };
+      const allMemories = data.results ?? [];
+
+      // Group by agentId
+      const byAgent = new Map<string, any[]>();
+      for (const m of allMemories) {
+        if (!m.content) continue;
+        if (staleOnly && m.embeddingModel === currentModel) continue;
+        const agent = m.agentId || "unknown";
+        if (!byAgent.has(agent)) byAgent.set(agent, []);
+        byAgent.get(agent)!.push(m);
+      }
+
+      // Process each agent
+      let totalProcessed = 0;
+      let totalErrors = 0;
+      const agentCount = byAgent.size;
+      let agentIndex = 0;
+
+      for (const [agent, memories] of byAgent) {
+        agentIndex++;
+        console.log(`\nAgent ${agentIndex}/${agentCount}: ${agent}`);
+        console.log(`  Memories to re-embed: ${memories.length}`);
+
+        const keysDir = defaultKeysDir();
+        const privPath = privKeyPath(agent, keysDir);
+        if (!existsSync(privPath)) {
+          console.error(`  ❌ Key not found: ${privPath} — skipping`);
+          continue;
+        }
+
+        if (dryRun) continue;
+
+        let processed = 0;
+        let errors = 0;
+        for (let i = 0; i < memories.length; i += batchSize) {
+          const batch = memories.slice(i, i + batchSize);
+          for (const memory of batch) {
+            try {
+              const updateRes = await authFetch(baseUrl, agent, privPath, "PUT", `/Memory/${memory.id}`, {
+                id: memory.id, content: memory.content, embedding: undefined, embeddingModel: undefined, agentId: memory.agentId || agent,
+              });
+              if (updateRes.ok) processed++;
+              else errors++;
+            } catch { errors++; }
+          }
+          const pct = Math.round(((i + batch.length) / memories.length) * 100);
+          process.stdout.write(`  \r  Re-embedded ${processed}/${memories.length} (${pct}%)${errors > 0 ? ` [${errors} errors]` : ""}`);
+          if (i + batchSize < memories.length) await new Promise(r => setTimeout(r, delayMs));
+        }
+        console.log(`\n  ✅ Agent ${agent}: ${processed} updated, ${errors} errors`);
+        totalProcessed += processed;
+        totalErrors += errors;
+      }
+
+      console.log(`\n\n✅ Re-embedding complete: ${totalProcessed} updated, ${totalErrors} errors`);
+      return;
+    }
+
+    // Original single-agent path
     const keysDir = defaultKeysDir();
     const privPath = privKeyPath(agentId, keysDir);
     if (!existsSync(privPath)) {
@@ -2986,7 +3114,7 @@ program
       for (const memory of batch) {
         try {
           const updateRes = await authFetch(baseUrl, agentId, privPath, "PUT", `/Memory/${memory.id}`, {
-            id: memory.id, content: memory.content, embedding: undefined, embeddingModel: undefined,
+            id: memory.id, content: memory.content, embedding: undefined, embeddingModel: undefined, agentId: memory.agentId || opts.agent,
           });
           if (updateRes.ok) processed++;
           else errors++;

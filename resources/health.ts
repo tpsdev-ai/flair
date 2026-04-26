@@ -147,7 +147,7 @@ export class HealthDetail extends Resource {
       const perAgentFull = Array.from(perAgentMap.values()).sort((a, b) => b.memoryCount - a.memoryCount);
       const perAgent = isAdmin
         ? perAgentFull
-        : perAgentFull.filter((r) => r.id === callerAgent);
+        : perAgentFull.filter((r) => r.id === callerAgent || r.memoryCount > 0);
       stats.agents = {
         count: agents.length,
         names: isAdmin ? agents.map((a: any) => a.id).filter(Boolean) : undefined,
