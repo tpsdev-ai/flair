@@ -2295,6 +2295,7 @@ const statusCmd = program
     const pid = healthData?.pid ?? "";
     const agents = healthData?.agents;
     const memories = healthData?.memories;
+    const warnings: Array<{ level: string; message: string }> = Array.isArray(healthData?.warnings) ? healthData.warnings : [];
     // Scope warnings to the filtered agent if --agent is set
     const scopedWarnings = opts.agent && healthData?.agents?.perAgent
       ? warnings.filter((w: any) => {
