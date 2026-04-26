@@ -2449,7 +2449,7 @@ const statusCmd = program
     }
 
     console.log("");
-    if (warnings.length > 0) console.log(`  Health:     ⚠ ${warnings.length} warning(s)`);
+    if (scopedWarnings.length > 0) console.log(`  Health:     ⚠ ${scopedWarnings.length} warning(s)`);
     else console.log(`  Health:     ✅ all checks passing`);
   });
 
