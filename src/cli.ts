@@ -109,6 +109,41 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
   return resolveHttpPort(opts) - 1;
 }
 
+// ─── Target resolution (remote Flair instance) ─────────────────────────────────
+// --target <url> (or FLAIR_TARGET env) points all CLI operations at a remote
+// Flair instance instead of localhost. This enables bootstrapping and
+// managing Fabric-deployed Flair instances.
+
+function resolveTarget(opts: { target?: string }): string | undefined {
+  return opts.target || process.env.FLAIR_TARGET || undefined;
+}
+
+/** Derive the ops API URL from a Flair base URL.
+ *  Convention: ops port = HTTP port - 1.
+ *  If target has an explicit port, use port-1.
+ *  If no explicit port: https → 442 (443-1), http → 19925 (19926-1), bare host → 19925.
+ */
+function resolveOpsUrlFromTarget(targetUrl: string): string {
+  try {
+    const url = new URL(targetUrl);
+    const port = parseInt(url.port, 10);
+    if (!isNaN(port) && port > 0) {
+      url.port = String(port - 1);
+      return url.toString().replace(/\/$/, "");
+    }
+    // No explicit port — infer from scheme
+    if (url.protocol === "https:") {
+      url.port = "442";
+    } else {
+      url.port = String(DEFAULT_OPS_PORT);
+    }
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    // Fallback: just append default ops port
+    return `${targetUrl.replace(/\/$/, "")}:${DEFAULT_OPS_PORT}`;
+  }
+}
+
 function writeConfig(port: number): void {
   const p = configPath();
   mkdirSync(join(homedir(), ".flair"), { recursive: true });
@@ -149,11 +184,12 @@ function b64url(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
-async function api(method: string, path: string, body?: any): Promise<any> {
+async function api(method: string, path: string, body?: any, options?: { baseUrl?: string }): Promise<any> {
   // Resolve port: FLAIR_URL env > ~/.flair/config.yaml > default 9926
+  // When baseUrl is provided (--target), use it directly.
   const savedPort = readPortFromConfig();
   const defaultUrl = savedPort ? `http://127.0.0.1:${savedPort}` : `http://127.0.0.1:${DEFAULT_PORT}`;
-  const base = process.env.FLAIR_URL || defaultUrl;
+  const base = options?.baseUrl ?? (process.env.FLAIR_URL || defaultUrl);
 
   // Auth resolution order:
   // 1. FLAIR_TOKEN env → Bearer token (backward compat)
@@ -331,6 +367,35 @@ async function seedAgentViaOpsApi(
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
     body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
+    throw new Error(`Operations API insert failed (${res.status}): ${text}`);
+  }
+}
+
+/** Variant of seedAgentViaOpsApi that takes a full URL string (for --target remote ops). */
+async function seedAgentViaOpsApiUrl(
+  opsUrl: string,
+  agentId: string,
+  pubKeyB64url: string,
+  adminUser: string,
+  adminPass: string,
+): Promise<void> {
+  const url = opsUrl.replace(/\/$/, "");
+  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+  const body = {
+    operation: "insert",
+    database: "flair",
+    table: "Agent",
+    records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
+  };
+  const res = await fetch(`${url}/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -564,7 +629,7 @@ program.name("flair").version(__pkgVersion, "-v, --version");
 
 program
   .command("init")
-  .description("Bootstrap a local Flair (Harper) instance for an agent")
+  .description("Bootstrap a Flair (Harper) instance for an agent")
   .option("--agent-id <id>", "Agent ID to register", "local")
   .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
   .option("--ops-port <port>", "Harper operations API port")
@@ -573,8 +638,97 @@ program
   .option("--data-dir <dir>", "Harper data directory")
   .option("--skip-start", "Skip Harper startup (assume already running)")
   .option("--skip-soul", "Skip interactive personality setup")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  .option("--remote", "When used with --target, init as hub for remote federation")
   .action(async (opts) => {
     const agentId: string = opts.agentId;
+    const target = resolveTarget(opts);
+
+    // ── Remote init: --target drives a remote Flair instance ──
+    if (target) {
+      const adminPass: string | undefined = opts.adminPass;
+      if (!adminPass) {
+        console.error("Error: --admin-pass is required with --target (remote init)");
+        process.exit(1);
+      }
+      const adminUser = DEFAULT_ADMIN_USER;
+      const baseUrl = target.replace(/\/$/, "");
+      const opsUrl = resolveOpsUrlFromTarget(baseUrl);
+      const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+      const role = opts.remote ? "hub" : undefined;
+
+      // Generate or reuse local keypair
+      const keysDir: string = opts.keysDir ?? defaultKeysDir();
+      mkdirSync(keysDir, { recursive: true });
+      const privPath = privKeyPath(agentId, keysDir);
+      const pubPath = pubKeyPath(agentId, keysDir);
+      let pubKeyB64url: string;
+
+      if (existsSync(privPath)) {
+        console.log(`Reusing existing key: ${privPath}`);
+        const seed = new Uint8Array(readFileSync(privPath));
+        const kp = nacl.sign.keyPair.fromSeed(seed);
+        pubKeyB64url = b64url(kp.publicKey);
+      } else {
+        console.log("Generating Ed25519 keypair...");
+        const kp = nacl.sign.keyPair();
+        const seed = kp.secretKey.slice(0, 32);
+        writeFileSync(privPath, Buffer.from(seed));
+        chmodSync(privPath, 0o600);
+        writeFileSync(pubPath, Buffer.from(kp.publicKey));
+        pubKeyB64url = b64url(kp.publicKey);
+        console.log(`Keypair written: ${privPath} ✓`);
+      }
+
+      // Seed agent via remote ops API
+      console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
+      await seedAgentViaOpsApiUrl(opsUrl, agentId, pubKeyB64url, adminUser, adminPass!);
+      console.log(`Agent '${agentId}' registered on remote instance ✓`);
+
+      // Write FederationInstance row if --remote (hub role)
+      if (role) {
+        console.log(`Writing FederationInstance (role=${role}) on ${baseUrl}...`);
+        const instanceId = randomUUID();
+        const instRes = await fetch(`${baseUrl}/FederationInstance`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({
+            id: instanceId,
+            publicKey: pubKeyB64url,
+            role,
+            status: "active",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!instRes.ok) {
+          const text = await instRes.text().catch(() => "");
+          console.error(`Failed to create FederationInstance: ${instRes.status} ${text}`);
+          process.exit(1);
+        }
+        console.log(`FederationInstance created: ${instanceId} (${role}) ✓`);
+      }
+
+      // Verify connectivity
+      console.log("Verifying remote connectivity...");
+      const verifyRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
+      if (!verifyRes.ok) {
+        console.error(`Remote health check failed: ${verifyRes.status}`);
+        process.exit(1);
+      }
+      console.log("Remote Flair instance healthy ✓");
+
+      console.log(`\n✅ Remote Flair initialized`);
+      console.log(`   Agent ID:    ${agentId}`);
+      console.log(`   Target:      ${baseUrl}`);
+      console.log(`   Private key: ${privPath}`);
+      if (role) console.log(`   Role:         ${role}`);
+      console.log(`\n   Export: FLAIR_URL=${baseUrl}`);
+      return;
+    }
+
+    // ── Local init (original behavior) ──
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
@@ -1718,15 +1872,18 @@ federation
   .command("status")
   .description("Show federation status and peer connections")
   .option("--port <port>", "Harper HTTP port")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .action(async (opts) => {
+    const target = resolveTarget(opts);
+    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
     try {
-      const instance = await api("GET", "/FederationInstance");
+      const instance = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
       console.log(`Instance: ${instance.id} (${instance.role})`);
       console.log(`Public key: ${instance.publicKey}`);
       console.log(`Status: ${instance.status}`);
       console.log();
 
-      const { peers } = await api("GET", "/FederationPeers");
+      const { peers } = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
       if (peers.length === 0) {
         console.log("No peers configured. Use 'flair federation pair' to connect to a hub.");
       } else {
@@ -1750,10 +1907,13 @@ federation
   .option("--admin-pass <pass>", "Admin password")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--token <token>", "One-time pairing token from hub admin")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .action(async (hubUrl: string, opts) => {
+    const target = resolveTarget(opts);
+    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
     try {
-      const instance = await api("GET", "/FederationInstance");
-      console.log(`Local instance: ${instance.id} (${instance.role})`);
+      const instance = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
+      console.log(`${target ? "Remote" : "Local"} instance: ${instance.id} (${instance.role})`);
 
       if (!opts.token) {
         console.error("Error: --token is required. Ask the hub admin to run 'flair federation token' and provide the token.");
@@ -1785,12 +1945,12 @@ federation
       const result = await res.json() as any;
       console.log(`✅ Paired with hub: ${result.instance?.id ?? hubUrl}`);
 
-      // Record the hub as our peer locally
-      const opsPort = resolveOpsPort(opts);
+      // Record the hub as our peer — locally or remotely depending on --target
       const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (adminPass) {
         const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
-        await fetch(`http://127.0.0.1:${opsPort}/`, {
+        const opsEndpoint = baseUrl ? resolveOpsUrlFromTarget(baseUrl) : `http://127.0.0.1:${resolveOpsPort(opts)}`;
+        await fetch(`${opsEndpoint}/`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: JSON.stringify({
@@ -1804,6 +1964,7 @@ federation
               updatedAt: new Date().toISOString(),
             }],
           }),
+          signal: AbortSignal.timeout(10_000),
         });
       }
     } catch (err: any) {
@@ -1819,18 +1980,21 @@ federation
   .option("--admin-pass <pass>", "Admin password")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--ttl <minutes>", "Token TTL in minutes (default: 60)", "60")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .action(async (opts) => {
+    const target = resolveTarget(opts);
+    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
     try {
       const { randomBytes } = await import("node:crypto");
       const token = randomBytes(24).toString("base64url");
       const ttlMinutes = parseInt(opts.ttl, 10) || 60;
       const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
 
-      const opsPort = resolveOpsPort(opts);
+      const opsEndpoint = baseUrl ? resolveOpsUrlFromTarget(baseUrl) : `http://127.0.0.1:${resolveOpsPort(opts)}`;
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
 
-      await fetch(`http://127.0.0.1:${opsPort}/`, {
+      await fetch(`${opsEndpoint}/`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: auth },
         body: JSON.stringify({
@@ -1841,6 +2005,7 @@ federation
             expiresAt,
           }],
         }),
+        signal: AbortSignal.timeout(10_000),
       });
 
       console.log(`Pairing token (expires in ${ttlMinutes}m):`);
@@ -1859,9 +2024,13 @@ federation
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password")
   .option("--ops-port <port>", "Harper operations API port")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .action(async (opts) => {
+    const target = resolveTarget(opts);
+    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+    const apiOpts = baseUrl ? { baseUrl } : undefined;
     try {
-      const { peers } = await api("GET", "/FederationPeers");
+      const { peers } = await api("GET", "/FederationPeers", undefined, apiOpts);
       const hub = peers.find((p: any) => p.role === "hub" && p.status !== "revoked");
       if (!hub) {
         console.error("No hub peer configured. Use 'flair federation pair' first.");
@@ -1870,19 +2039,20 @@ federation
 
       console.log(`Syncing to hub: ${hub.id}...`);
       const since = hub.lastSyncAt ?? new Date(0).toISOString();
-      const opsPort = resolveOpsPort(opts);
+      const opsEndpoint = baseUrl ? resolveOpsUrlFromTarget(baseUrl) : `http://127.0.0.1:${resolveOpsPort(opts)}`;
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
       const tables = ["Memory", "Soul", "Agent", "Relationship"];
       const records: any[] = [];
-      const instance = await api("GET", "/FederationInstance");
+      const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
 
       for (const table of tables) {
         try {
-          const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+          const res = await fetch(`${opsEndpoint}/`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: auth },
             body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.${table} WHERE updatedAt > '${since}'` }),
+            signal: AbortSignal.timeout(15_000),
           });
           if (res.ok) {
             for (const row of await res.json() as any[]) {
@@ -2203,13 +2373,14 @@ function oauthDetailLines(o: any): string[] {
   return out;
 }
 
-async function fetchHealthDetail(opts: { port?: string; url?: string; agent?: string }): Promise<{
+async function fetchHealthDetail(opts: { port?: string; url?: string; target?: string; agent?: string }): Promise<{
   healthy: boolean;
   baseUrl: string;
   healthData: any | null;
 }> {
   const port = resolveHttpPort(opts);
-  const baseUrl = opts.url ?? `http://127.0.0.1:${port}`;
+  // --target takes precedence, then --url, then FLAIR_TARGET, then FLAIR_URL, then localhost
+  const baseUrl = opts.target || opts.url || process.env.FLAIR_TARGET || (process.env.FLAIR_URL ?? `http://127.0.0.1:${port}`);
   let healthy = false;
   let healthData: any = null;
 
@@ -2265,6 +2436,7 @@ const statusCmd = program
   .description("Show Flair instance status, memory stats, and agent info")
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
   .option("--json", "Output as JSON")
   .option("--agent <id>", "Agent ID for authenticated detail (or set FLAIR_AGENT_ID)")
   .action(async (opts) => {
@@ -4703,6 +4875,8 @@ export {
   readPortFromConfig,
   resolveHttpPort,
   resolveOpsPort,
+  resolveTarget,
+  resolveOpsUrlFromTarget,
   signRequestBody,
   b64,
   b64url,
