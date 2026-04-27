@@ -120,28 +120,32 @@ function resolveTarget(opts: { target?: string }): string | undefined {
 
 /** Derive the ops API URL from a Flair base URL.
  *  Convention: ops port = HTTP port - 1.
- *  If target has an explicit port, use port-1.
- *  If no explicit port: https → 442 (443-1), http → 19925 (19926-1), bare host → 19925.
+ *  If target has an explicit port, use port-1 (validated: must be 1-65535).
+ *  If no explicit port: https → 442 (443-1), http → 19925 (19926-1), bare host → https://<host>:19925.
+ *  Throws on unparseable URLs.
  */
 function resolveOpsUrlFromTarget(targetUrl: string): string {
-  try {
-    const url = new URL(targetUrl);
-    const port = parseInt(url.port, 10);
-    if (!isNaN(port) && port > 0) {
-      url.port = String(port - 1);
-      return url.toString().replace(/\/$/, "");
-    }
-    // No explicit port — infer from scheme
-    if (url.protocol === "https:") {
-      url.port = "442";
-    } else {
-      url.port = String(DEFAULT_OPS_PORT);
-    }
+  // Normalise bare hosts: add https:// prefix so URL parser can handle them.
+  const normalised = targetUrl.includes("://") ? targetUrl : `https://${targetUrl}`;
+  const url = new URL(normalised);
+  const port = parseInt(url.port, 10);
+  if (!isNaN(port) && port > 0 && port <= 65535) {
+    const opsPort = port - 1;
+    if (opsPort < 1) throw new Error(`Derived ops port ${opsPort} is out of range; target port must be > 1`);
+    url.port = String(opsPort);
     return url.toString().replace(/\/$/, "");
-  } catch {
-    // Fallback: just append default ops port
-    return `${targetUrl.replace(/\/$/, "")}:${DEFAULT_OPS_PORT}`;
   }
+  // No valid explicit port — reject port 0 or out-of-range
+  if (url.port !== "" && url.port !== undefined) {
+    throw new Error(`Invalid target port: ${url.port} (must be 1-65535)`);
+  }
+  // No explicit port — infer from scheme
+  if (url.protocol === "https:") {
+    url.port = "442";
+  } else {
+    url.port = String(DEFAULT_OPS_PORT);
+  }
+  return url.toString().replace(/\/$/, "");
 }
 
 function writeConfig(port: number): void {
@@ -348,14 +352,20 @@ function readHarperPid(dataDir: string): number | null {
   }
 }
 
+/**
+ * Seed an agent record via the Harper operations API.
+ * Accepts either a port number (localhost) or a full URL string (--target).
+ */
 async function seedAgentViaOpsApi(
-  opsPort: number,
+  opsPortOrUrl: number | string,
   agentId: string,
   pubKeyB64url: string,
   adminUser: string,
   adminPass: string,
 ): Promise<void> {
-  const url = `http://127.0.0.1:${opsPort}/`;
+  const url = typeof opsPortOrUrl === "number"
+    ? `http://127.0.0.1:${opsPortOrUrl}/`
+    : `${opsPortOrUrl.replace(/\/$/, "")}/`;
   const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
   const body = {
     operation: "insert",
@@ -364,34 +374,6 @@ async function seedAgentViaOpsApi(
     records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
   };
   const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
-    throw new Error(`Operations API insert failed (${res.status}): ${text}`);
-  }
-}
-
-/** Variant of seedAgentViaOpsApi that takes a full URL string (for --target remote ops). */
-async function seedAgentViaOpsApiUrl(
-  opsUrl: string,
-  agentId: string,
-  pubKeyB64url: string,
-  adminUser: string,
-  adminPass: string,
-): Promise<void> {
-  const url = opsUrl.replace(/\/$/, "");
-  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
-  const body = {
-    operation: "insert",
-    database: "flair",
-    table: "Agent",
-    records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
-  };
-  const res = await fetch(`${url}/`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
     body: JSON.stringify(body),
@@ -640,6 +622,7 @@ program
   .option("--skip-soul", "Skip interactive personality setup")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--remote", "When used with --target, init as hub for remote federation")
+  .option("--force", "Skip confirmation prompt for remote writes (required with --target)")
   .action(async (opts) => {
     const agentId: string = opts.agentId;
     const target = resolveTarget(opts);
@@ -649,6 +632,11 @@ program
       const adminPass: string | undefined = opts.adminPass;
       if (!adminPass) {
         console.error("Error: --admin-pass is required with --target (remote init)");
+        process.exit(1);
+      }
+      if (!opts.force) {
+        console.error(`Error: --force is required with --target. Remote init writes to a live Flair instance at ${target}.`);
+        console.error("  Pass --force to confirm this is intended.");
         process.exit(1);
       }
       const adminUser = DEFAULT_ADMIN_USER;
@@ -682,31 +670,21 @@ program
 
       // Seed agent via remote ops API
       console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
-      await seedAgentViaOpsApiUrl(opsUrl, agentId, pubKeyB64url, adminUser, adminPass!);
+      await seedAgentViaOpsApi(opsUrl, agentId, pubKeyB64url, adminUser, adminPass!);
       console.log(`Agent '${agentId}' registered on remote instance ✓`);
 
       // Write FederationInstance row if --remote (hub role)
       if (role) {
         console.log(`Writing FederationInstance (role=${role}) on ${baseUrl}...`);
         const instanceId = randomUUID();
-        const instRes = await fetch(`${baseUrl}/FederationInstance`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify({
-            id: instanceId,
-            publicKey: pubKeyB64url,
-            role,
-            status: "active",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!instRes.ok) {
-          const text = await instRes.text().catch(() => "");
-          console.error(`Failed to create FederationInstance: ${instRes.status} ${text}`);
-          process.exit(1);
-        }
+        await api("PUT", "/FederationInstance", {
+          id: instanceId,
+          publicKey: pubKeyB64url,
+          role,
+          status: "active",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }, { baseUrl });
         console.log(`FederationInstance created: ${instanceId} (${role}) ✓`);
       }
 
