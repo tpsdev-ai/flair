@@ -118,12 +118,32 @@ function resolveTarget(opts: { target?: string }): string | undefined {
   return opts.target || process.env.FLAIR_TARGET || undefined;
 }
 
+/** Resolve the ops API target URL from --ops-target flag or FLAIR_OPS_TARGET env.
+ *  Returns undefined if neither is set (caller should fall back to derivation or localhost).
+ */
+function resolveOpsTarget(opts: { opsTarget?: string }): string | undefined {
+  return opts.opsTarget || process.env.FLAIR_OPS_TARGET || undefined;
+}
+
 /** Derive the ops API URL from a Flair base URL.
  *  Convention: ops port = HTTP port - 1.
  *  If target has an explicit port, use port-1 (validated: must be 1-65535).
  *  If no explicit port: https → 442 (443-1), http → 19925 (19926-1), bare host → https://<host>:19925.
  *  Throws on unparseable URLs.
  */
+/** Compute the effective ops API URL for remote commands.
+ *  - If --ops-target is set, use it directly (no derivation).
+ *  - Else if --target is set, derive ops URL via resolveOpsUrlFromTarget.
+ *  - Else return undefined (fall back to localhost resolution).
+ */
+function resolveEffectiveOpsUrl(opts: { target?: string; opsTarget?: string }): string | undefined {
+  const opsTarget = resolveOpsTarget(opts);
+  if (opsTarget) return opsTarget.replace(/\/$/, "");
+  const target = resolveTarget(opts);
+  if (target) return resolveOpsUrlFromTarget(target);
+  return undefined;
+}
+
 function resolveOpsUrlFromTarget(targetUrl: string): string {
   // Normalise bare hosts: add https:// prefix so URL parser can handle them.
   const normalised = targetUrl.includes("://") ? targetUrl : `https://${targetUrl}`;
@@ -622,26 +642,36 @@ program
   .option("--skip-soul", "Skip interactive personality setup")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--remote", "When used with --target, init as hub for remote federation")
+  .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .option("--force", "Skip confirmation prompt for remote writes (required with --target)")
   .action(async (opts) => {
     const agentId: string = opts.agentId;
     const target = resolveTarget(opts);
+    const opsTarget = resolveOpsTarget(opts);
 
-    // ── Remote init: --target drives a remote Flair instance ──
-    if (target) {
+    // ── Remote init: --target and/or --ops-target drive a remote Flair instance ──
+    if (target || opsTarget) {
       const adminPass: string | undefined = opts.adminPass;
       if (!adminPass) {
-        console.error("Error: --admin-pass is required with --target (remote init)");
+        console.error("Error: --admin-pass is required with --target/--ops-target (remote init)");
         process.exit(1);
       }
       if (!opts.force) {
-        console.error(`Error: --force is required with --target. Remote init writes to a live Flair instance at ${target}.`);
+        const displayTarget = target || opsTarget;
+        console.error(`Error: --force is required with --target/--ops-target. Remote init writes to a live Flair instance at ${displayTarget}.`);
         console.error("  Pass --force to confirm this is intended.");
         process.exit(1);
       }
       const adminUser = DEFAULT_ADMIN_USER;
-      const baseUrl = target.replace(/\/$/, "");
-      const opsUrl = resolveOpsUrlFromTarget(baseUrl);
+      // When -only- --ops-target is provided, attempt to derive REST URL
+      if (!target && opsTarget) {
+        console.error("Error: --ops-target requires --target as well. Pass --target <rest-url> for the REST API surface.");
+        console.error("  Currently only explicit --ops-target + --target combination is supported.");
+        process.exit(1);
+      }
+      const baseUrl = target!.replace(/\/$/, "");
+      // --ops-target overrides derivation; otherwise derive from --target
+      const opsUrl = opsTarget ? opsTarget.replace(/\/$/, "") : resolveOpsUrlFromTarget(baseUrl);
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
       const role = opts.remote ? "hub" : undefined;
 
@@ -1851,6 +1881,7 @@ federation
   .description("Show federation status and peer connections")
   .option("--port <port>", "Harper HTTP port")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .action(async (opts) => {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
@@ -1886,6 +1917,7 @@ federation
   .option("--ops-port <port>", "Harper operations API port")
   .option("--token <token>", "One-time pairing token from hub admin")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .action(async (hubUrl: string, opts) => {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
@@ -1927,7 +1959,7 @@ federation
       const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       if (adminPass) {
         const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
-        const opsEndpoint = baseUrl ? resolveOpsUrlFromTarget(baseUrl) : `http://127.0.0.1:${resolveOpsPort(opts)}`;
+        const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
         await fetch(`${opsEndpoint}/`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: auth },
@@ -1959,6 +1991,7 @@ federation
   .option("--ops-port <port>", "Harper operations API port")
   .option("--ttl <minutes>", "Token TTL in minutes (default: 60)", "60")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .action(async (opts) => {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
@@ -1968,7 +2001,7 @@ federation
       const ttlMinutes = parseInt(opts.ttl, 10) || 60;
       const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
 
-      const opsEndpoint = baseUrl ? resolveOpsUrlFromTarget(baseUrl) : `http://127.0.0.1:${resolveOpsPort(opts)}`;
+      const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
 
@@ -2003,6 +2036,7 @@ federation
   .option("--admin-pass <pass>", "Admin password")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .action(async (opts) => {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
@@ -2017,7 +2051,7 @@ federation
 
       console.log(`Syncing to hub: ${hub.id}...`);
       const since = hub.lastSyncAt ?? new Date(0).toISOString();
-      const opsEndpoint = baseUrl ? resolveOpsUrlFromTarget(baseUrl) : `http://127.0.0.1:${resolveOpsPort(opts)}`;
+      const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
       const tables = ["Memory", "Soul", "Agent", "Relationship"];
@@ -4854,6 +4888,8 @@ export {
   resolveHttpPort,
   resolveOpsPort,
   resolveTarget,
+  resolveOpsTarget,
+  resolveEffectiveOpsUrl,
   resolveOpsUrlFromTarget,
   signRequestBody,
   b64,

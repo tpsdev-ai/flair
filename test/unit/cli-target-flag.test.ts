@@ -14,6 +14,8 @@
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import {
   resolveTarget,
+  resolveOpsTarget,
+  resolveEffectiveOpsUrl,
   resolveOpsUrlFromTarget,
   resolveHttpPort,
   program,
@@ -57,6 +59,101 @@ describe("resolveTarget", () => {
 
   test("returns undefined for empty string flag (falsy)", () => {
     expect(resolveTarget({ target: "" })).toBeUndefined();
+  });
+});
+
+// ─── resolveOpsTarget ──────────────────────────────────────────────────────────
+
+describe("resolveOpsTarget", () => {
+  let origFlairOpsTarget: string | undefined;
+
+  beforeEach(() => {
+    origFlairOpsTarget = process.env.FLAIR_OPS_TARGET;
+  });
+
+  afterEach(() => {
+    if (origFlairOpsTarget === undefined) delete process.env.FLAIR_OPS_TARGET;
+    else process.env.FLAIR_OPS_TARGET = origFlairOpsTarget;
+  });
+
+  test("returns undefined when no --ops-target and no FLAIR_OPS_TARGET env", () => {
+    delete process.env.FLAIR_OPS_TARGET;
+    expect(resolveOpsTarget({})).toBeUndefined();
+  });
+
+  test("returns --ops-target flag value when provided", () => {
+    delete process.env.FLAIR_OPS_TARGET;
+    expect(resolveOpsTarget({ opsTarget: "https://fabric.harper.dev:9925" }))
+      .toBe("https://fabric.harper.dev:9925");
+  });
+
+  test("falls back to FLAIR_OPS_TARGET env when --ops-target is not set", () => {
+    process.env.FLAIR_OPS_TARGET = "https://fabric.harper.dev:9925";
+    expect(resolveOpsTarget({})).toBe("https://fabric.harper.dev:9925");
+  });
+
+  test("--ops-target flag takes precedence over FLAIR_OPS_TARGET env", () => {
+    process.env.FLAIR_OPS_TARGET = "https://env-ops.example.com:9999";
+    expect(resolveOpsTarget({ opsTarget: "https://flag-ops.example.com:9925" }))
+      .toBe("https://flag-ops.example.com:9925");
+  });
+});
+
+// ─── resolveEffectiveOpsUrl ────────────────────────────────────────────────────
+
+describe("resolveEffectiveOpsUrl", () => {
+  let origFlairTarget: string | undefined;
+  let origFlairOpsTarget: string | undefined;
+
+  beforeEach(() => {
+    origFlairTarget = process.env.FLAIR_TARGET;
+    origFlairOpsTarget = process.env.FLAIR_OPS_TARGET;
+  });
+
+  afterEach(() => {
+    if (origFlairTarget === undefined) delete process.env.FLAIR_TARGET;
+    else process.env.FLAIR_TARGET = origFlairTarget;
+    if (origFlairOpsTarget === undefined) delete process.env.FLAIR_OPS_TARGET;
+    else process.env.FLAIR_OPS_TARGET = origFlairOpsTarget;
+  });
+
+  test("returns undefined when neither --target nor --ops-target set", () => {
+    delete process.env.FLAIR_TARGET;
+    delete process.env.FLAIR_OPS_TARGET;
+    expect(resolveEffectiveOpsUrl({})).toBeUndefined();
+  });
+
+  test("derives ops URL from --target when --ops-target is not set", () => {
+    delete process.env.FLAIR_OPS_TARGET;
+    expect(resolveEffectiveOpsUrl({ target: "https://flair.example.com:9926" }))
+      .toBe("https://flair.example.com:9925");
+  });
+
+  test("uses --ops-target directly when both flags are set (Fabric path)", () => {
+    expect(resolveEffectiveOpsUrl({
+      target: "https://flair.heskew.harperfabric.com",
+      opsTarget: "https://flair.heskew.harperfabric.com:9925",
+    })).toBe("https://flair.heskew.harperfabric.com:9925");
+  });
+
+  test("uses --ops-target directly even with no --target (edge case)", () => {
+    expect(resolveEffectiveOpsUrl({
+      opsTarget: "https://ops-only.example.com:9925",
+    })).toBe("https://ops-only.example.com:9925");
+  });
+
+  test("--ops-target takes precedence over derived ops URL", () => {
+    expect(resolveEffectiveOpsUrl({
+      target: "https://flair.example.com:19926",
+      opsTarget: "https://different-ops.example.com:9925",
+    })).toBe("https://different-ops.example.com:9925");
+  });
+
+  test("FLAIR_OPS_TARGET env works with resolveEffectiveOpsUrl", () => {
+    process.env.FLAIR_OPS_TARGET = "https://env-ops.example.com:9925";
+    delete process.env.FLAIR_TARGET;
+    expect(resolveEffectiveOpsUrl({}))
+      .toBe("https://env-ops.example.com:9925");
   });
 });
 
@@ -169,6 +266,31 @@ describe("Commander program: --target option", () => {
     expect(hasOption(sync, "--target")).toBe(true);
   });
 
+  test("flair init has --ops-target option", () => {
+    const init = findCommand("init");
+    expect(hasOption(init, "--ops-target")).toBe(true);
+  });
+
+  test("flair federation status has --ops-target option", () => {
+    const status = findSubcommand("federation", "status");
+    expect(hasOption(status, "--ops-target")).toBe(true);
+  });
+
+  test("flair federation token has --ops-target option", () => {
+    const token = findSubcommand("federation", "token");
+    expect(hasOption(token, "--ops-target")).toBe(true);
+  });
+
+  test("flair federation pair has --ops-target option", () => {
+    const pair = findSubcommand("federation", "pair");
+    expect(hasOption(pair, "--ops-target")).toBe(true);
+  });
+
+  test("flair federation sync has --ops-target option", () => {
+    const sync = findSubcommand("federation", "sync");
+    expect(hasOption(sync, "--ops-target")).toBe(true);
+  });
+
   test("flair status has --target option (alias for --url)", () => {
     const status = findCommand("status");
     expect(status).not.toBeNull();
@@ -224,5 +346,55 @@ describe("api() baseUrl override routes HTTP calls to target", () => {
     expect(init).not.toBeNull();
     const hasForce = init!.options.some((o: any) => o.flags.includes("--force"));
     expect(hasForce).toBe(true);
+  });
+});
+
+// ─── ops-target override: Fabric-style non-derivable ops URL ───────────────────
+
+describe("--ops-target overrides ops URL derivation", () => {
+  test("ops-target is used directly for ops calls, separate from --target REST", () => {
+    const opsTarget = resolveOpsTarget({
+      opsTarget: "https://flair.heskew.harperfabric.com:9925",
+    });
+    expect(opsTarget).toBe("https://flair.heskew.harperfabric.com:9925");
+
+    const target = resolveTarget({
+      target: "https://flair.heskew.harperfabric.com",
+    });
+    expect(target).toBe("https://flair.heskew.harperfabric.com");
+
+    // opsTarget is a completely different URL from target — no port-1 derivation
+    expect(opsTarget).not.toBe("https://flair.heskew.harperfabric.com:442");
+  });
+
+  test("Fabric acceptance criteria: target rest + ops on separate port", () => {
+    // Simulate the Fabric use case from spec:
+    // --target https://flair.heskew.harperfabric.com
+    // --ops-target https://flair.heskew.harperfabric.com:9925
+    const baseUrl = resolveTarget({
+      target: "https://flair.heskew.harperfabric.com",
+    })!.replace(/\/$/, "");
+    const opsUrl = resolveOpsTarget({
+      opsTarget: "https://flair.heskew.harperfabric.com:9925",
+    })!.replace(/\/$/, "");
+
+    expect(baseUrl).toBe("https://flair.heskew.harperfabric.com");
+    expect(opsUrl).toBe("https://flair.heskew.harperfabric.com:9925");
+
+    // Verify no derivation contamination: opsUrl is explicit, not port-1
+    const derivedFromBase = resolveOpsUrlFromTarget(baseUrl);
+    expect(derivedFromBase).toBe("https://flair.heskew.harperfabric.com:442");
+    expect(opsUrl).not.toBe(derivedFromBase);
+  });
+
+  test("only --target (rockit-style) still derives ops URL correctly", () => {
+    // Back-compat: no --ops-target, only --target
+    const baseUrl = resolveTarget({
+      target: "https://localhost:19926",
+    })!.replace(/\/$/, "");
+    const opsUrl = resolveEffectiveOpsUrl({ target: baseUrl });
+
+    expect(baseUrl).toBe("https://localhost:19926");
+    expect(opsUrl).toBe("https://localhost:19925"); // port-1 derivation
   });
 });
