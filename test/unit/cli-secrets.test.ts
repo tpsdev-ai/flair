@@ -232,6 +232,37 @@ describe("shouldShowInlineSecretWarning helper", () => {
     expect(result).toBe(false);
   });
 
+  // Regression: fromEnv must reflect "value came from env," not "env happens
+  // to be set." When both inline and env are set, inline wins via `??` precedence,
+  // so the warning must still fire. Sherlock review on PR #306.
+  test("inline secret with env ALSO set: warning still fires (inline overrides env)", () => {
+    const optsAdminPass = "S3cur3P@ssw0rd";
+    const envAdminPass = "S0meOtherPass!";
+    const fromEnv = !optsAdminPass && !!envAdminPass; // false — inline wins
+    const result = shouldShowInlineSecretWarning(
+      "--admin-pass",
+      optsAdminPass,
+      fromEnv,
+      secretFlags
+    );
+    expect(fromEnv).toBe(false);
+    expect(result).toBe(true);
+  });
+
+  test("env-only secret (no inline): warning suppressed", () => {
+    const optsAdminPass = undefined;
+    const envAdminPass = "S0meOtherPass!";
+    const fromEnv = !optsAdminPass && !!envAdminPass; // true — env is the source
+    const result = shouldShowInlineSecretWarning(
+      "--admin-pass",
+      optsAdminPass,
+      fromEnv,
+      secretFlags
+    );
+    expect(fromEnv).toBe(true);
+    expect(result).toBe(false);
+  });
+
   test("URL flag does NOT show warning even with value from argv", () => {
     const result = shouldShowInlineSecretWarning(
       "--target",

@@ -1129,8 +1129,11 @@ program
     const dataDir: string = opts.dataDir ?? defaultDataDir();
 
     // Admin password: generate if not provided, NEVER written to disk
-    // Check if admin-pass came from argv (not env) and is a real secret
-    const adminPassFromEnv = !!process.env.FLAIR_ADMIN_PASS;
+    // Check if admin-pass came from argv (not env) and is a real secret.
+    // fromEnv is true ONLY when the resolved value came from env — i.e.,
+    // no inline override. If both inline and env are set, the inline value
+    // wins via `??` precedence, so the warning must still fire.
+    const adminPassFromEnv = !opts.adminPass && !!process.env.FLAIR_ADMIN_PASS;
     if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
       console.error(
         "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
@@ -1493,8 +1496,8 @@ agent
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
     const port = resolveHttpPort(opts);
-    // Check if admin-pass came from argv (not env) and is a real secret
-    const adminPassFromEnv = !!process.env.FLAIR_ADMIN_PASS || !!process.env.HDB_ADMIN_PASSWORD;
+    // fromEnv is true ONLY when the resolved value came from env (no inline override).
+    const adminPassFromEnv = !opts.adminPass && (!!process.env.FLAIR_ADMIN_PASS || !!process.env.HDB_ADMIN_PASSWORD);
     if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
       console.error(
         "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
@@ -1556,8 +1559,8 @@ agent
   .action(async (id: string, opts) => {
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
-    // Check if admin-pass came from argv (not env) and is a real secret
-    const adminPassFromEnv = !!process.env.FLAIR_ADMIN_PASS;
+    // fromEnv is true ONLY when the resolved value came from env (no inline override).
+    const adminPassFromEnv = !opts.adminPass && !!process.env.FLAIR_ADMIN_PASS;
     if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
       console.error(
         "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
@@ -2366,8 +2369,9 @@ federation
         process.exit(1);
       }
 
-      // Warning: inline token may leak to shell history
-      const tokenFromEnv = !!process.env.FLAIR_PAIRING_TOKEN;
+      // Warning: inline token may leak to shell history.
+      // fromEnv is true ONLY when the resolved value came from env (no inline override).
+      const tokenFromEnv = !opts.token && !!process.env.FLAIR_PAIRING_TOKEN;
       if (shouldShowInlineSecretWarning(opts.token, tokenFromEnv, new Set(["--token"]), "--token")) {
         console.error(
           "warning: --token passed inline. Consider --token-from <file> or FLAIR_PAIRING_TOKEN env " +
