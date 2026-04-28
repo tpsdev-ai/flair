@@ -2005,21 +2005,22 @@ federation
         process.exit(1);
       }
 
-      // Load secret key and sign the pairing request
+      // Load secret key and sign the pairing request. The pairing token is
+      // included in the signed body (not in an Authorization header) because
+      // Harper's auth layer claims any "Bearer X" Authorization header for
+      // itself and 401s before our resource ever runs.
       const secretKey = await loadInstanceSecretKey(instance.id, opts);
       const pairBody: Record<string, any> = {
         instanceId: instance.id,
         publicKey: instance.publicKey,
         role: "spoke",
+        pairingToken: opts.token,
       };
       const signedBody = signRequestBody(pairBody, secretKey);
 
       const res = await fetch(`${hubUrl}/FederationPair`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${opts.token}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(signedBody),
       });
 
@@ -2082,7 +2083,7 @@ federation
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
 
-      await fetch(`${opsEndpoint}/`, {
+      const opsRes = await fetch(`${opsEndpoint}/`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: auth },
         body: JSON.stringify({
@@ -2095,6 +2096,10 @@ federation
         }),
         signal: AbortSignal.timeout(10_000),
       });
+      if (!opsRes.ok) {
+        const detail = await opsRes.text().catch(() => "");
+        throw new Error(`Failed to persist pairing token (${opsRes.status}): ${detail || "no body"}`);
+      }
 
       console.log(`Pairing token (expires in ${ttlMinutes}m):`);
       console.log(`  ${token}`);
