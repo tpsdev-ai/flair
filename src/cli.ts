@@ -17,13 +17,6 @@ import { join, resolve as resolvePath } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate } from "tar";
-import { join, resolve as resolvePath } from "node:path";
-import { spawn } from "node:child_process";
-import { createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } from "node:crypto";
-import { create as tarCreate } from "tar";
-import { join, resolve as resolvePath } from "node:path";
-import { spawn } from "node:child_process";
-import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypto";
 import { keystore } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
 

@@ -7,11 +7,10 @@
  * the secret-file write.
  */
 
-import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { describe, test, expect, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
+import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdtempSync } from "node:fs";
 import {
   buildDeployTarball,
   waitForFlairRestart,
@@ -35,6 +34,11 @@ let restCalls: { url: string; method: string; headers?: any; body?: any }[] = []
 
 let origFetch: typeof fetch;
 let tmpDir = "";
+let originalCwd: string;
+
+beforeAll(() => {
+  originalCwd = process.cwd();
+});
 
 beforeEach(() => {
   opsCalls = [];
@@ -59,10 +63,18 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = origFetch;
+  // Restore CWD before removing tmpDir so other test files don't
+  // inherit a deleted working directory.
+  process.chdir(originalCwd);
   try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   // Clean up secret file if written
   const secretPath = join(process.env.HOME || "/tmp", ".tps", "secrets", "flair-fabric-hdb");
   try { rmSync(secretPath, { force: true }); } catch {}
+});
+
+afterAll(() => {
+  // Belt-and-suspenders: ensure CWD is restored after all tests in this file.
+  process.chdir(originalCwd);
 });
 
 // ── Tests ────────────────────────────────────────────────────────────────────
