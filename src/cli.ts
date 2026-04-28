@@ -2111,6 +2111,68 @@ federation
     }
   });
 
+export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number; skipped: number; error?: Error }> {
+  const target = resolveTarget(opts);
+  const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+  const apiOpts = baseUrl ? { baseUrl } : undefined;
+  try {
+    const { peers } = await api("GET", "/FederationPeers", undefined, apiOpts);
+    const hub = peers.find((p: any) => p.role === "hub" && p.status !== "revoked");
+    if (!hub) {
+      return { pushed: 0, skipped: 0, error: new Error("No hub peer configured. Use 'flair federation pair' first.") };
+    }
+
+    console.log(`Syncing to hub: ${hub.id}...`);
+    const since = hub.lastSyncAt ?? new Date(0).toISOString();
+    const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const tables = ["Memory", "Soul", "Agent", "Relationship"];
+    const records: any[] = [];
+    const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
+
+    for (const table of tables) {
+      try {
+        const res = await fetch(`${opsEndpoint}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.${table} WHERE updatedAt > '${since}'` }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (res.ok) {
+          for (const row of await res.json() as any[]) {
+            records.push({ table, id: row.id, data: row, updatedAt: row.updatedAt ?? row.createdAt, originatorInstanceId: instance.id });
+          }
+        }
+      } catch {}
+    }
+
+    if (records.length === 0) { console.log("No changes since last sync."); return { pushed: 0, skipped: 0 }; }
+
+    // Sign the sync request with our instance key
+    const secretKey = await loadInstanceSecretKey(instance.id, opts);
+    const syncBody: Record<string, any> = { instanceId: instance.id, records, lamportClock: Date.now() };
+    const signedSyncBody = signRequestBody(syncBody, secretKey);
+
+    const syncRes = await fetch(`${hub.endpoint ?? hub.id}/FederationSync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(signedSyncBody),
+    });
+
+    if (!syncRes.ok) {
+      const text = await syncRes.text().catch(() => "");
+      return { pushed: 0, skipped: 0, error: new Error(`Sync failed: ${syncRes.status} ${text}`) };
+    }
+
+    const result = await syncRes.json() as any;
+    console.log(`✅ Synced ${result.merged} records (${result.skipped} skipped) in ${result.durationMs}ms`);
+    return { pushed: result.merged ?? 0, skipped: result.skipped ?? 0 };
+  } catch (err: any) {
+    return { pushed: 0, skipped: 0, error: err instanceof Error ? err : new Error(String(err)) };
+  }
+}
+
 federation
   .command("sync")
   .description("Push local changes to the hub")
@@ -2120,66 +2182,55 @@ federation
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .action(async (opts) => {
-    const target = resolveTarget(opts);
-    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
-    const apiOpts = baseUrl ? { baseUrl } : undefined;
-    try {
-      const { peers } = await api("GET", "/FederationPeers", undefined, apiOpts);
-      const hub = peers.find((p: any) => p.role === "hub" && p.status !== "revoked");
-      if (!hub) {
-        console.error("No hub peer configured. Use 'flair federation pair' first.");
-        process.exit(1);
-      }
-
-      console.log(`Syncing to hub: ${hub.id}...`);
-      const since = hub.lastSyncAt ?? new Date(0).toISOString();
-      const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
-      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-      const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
-      const tables = ["Memory", "Soul", "Agent", "Relationship"];
-      const records: any[] = [];
-      const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
-
-      for (const table of tables) {
-        try {
-          const res = await fetch(`${opsEndpoint}/`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: auth },
-            body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.${table} WHERE updatedAt > '${since}'` }),
-            signal: AbortSignal.timeout(15_000),
-          });
-          if (res.ok) {
-            for (const row of await res.json() as any[]) {
-              records.push({ table, id: row.id, data: row, updatedAt: row.updatedAt ?? row.createdAt, originatorInstanceId: instance.id });
-            }
-          }
-        } catch {}
-      }
-
-      if (records.length === 0) { console.log("No changes since last sync."); return; }
-
-      // Sign the sync request with our instance key
-      const secretKey = await loadInstanceSecretKey(instance.id, opts);
-      const syncBody: Record<string, any> = { instanceId: instance.id, records, lamportClock: Date.now() };
-      const signedSyncBody = signRequestBody(syncBody, secretKey);
-
-      const syncRes = await fetch(`${hub.endpoint ?? hub.id}/FederationSync`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(signedSyncBody),
-      });
-
-      if (!syncRes.ok) {
-        console.error(`Sync failed: ${syncRes.status} ${await syncRes.text().catch(() => "")}`);
-        process.exit(1);
-      }
-
-      const result = await syncRes.json() as any;
-      console.log(`✅ Synced ${result.merged} records (${result.skipped} skipped) in ${result.durationMs}ms`);
-    } catch (err: any) {
-      console.error(`Error: ${err.message}`);
+    const r = await runFederationSyncOnce(opts);
+    if (r.error) {
+      console.error(`Error: ${r.error.message}`);
       process.exit(1);
     }
+  });
+
+export async function runFederationWatch(opts: any): Promise<void> {
+  const intervalMs = (parseFloat(opts.interval) || 30) * 1000;
+  let stopped = false;
+  const stop = () => { stopped = true; };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  console.log(`flair federation watch — interval ${intervalMs / 1000}s. Ctrl-C to stop.`);
+  try {
+    while (!stopped) {
+      try {
+        const r = await runFederationSyncOnce(opts);
+        const ts = new Date().toISOString();
+        if (r.error) console.error(`[${ts}] sync error: ${r.error.message}`);
+        else console.log(`[${ts}] sync ok — pushed ${r.pushed}, skipped ${r.skipped}`);
+      } catch (err: any) {
+        console.error(`[${new Date().toISOString()}] watch loop error: ${err.message}`);
+      }
+      // Sleep but exit early on signal
+      const t = Date.now();
+      while (!stopped && Date.now() - t < intervalMs) {
+        const remaining = intervalMs - (Date.now() - t);
+        await new Promise((r) => setTimeout(r, Math.min(250, remaining)));
+      }
+    }
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+  }
+  console.log("flair federation watch — stopped.");
+}
+
+federation
+  .command("watch")
+  .description("Run federation sync in a loop (foreground daemon)")
+  .option("--interval <seconds>", "Seconds between syncs", "30")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--admin-pass <pass>", "Admin password")
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--target <url>", "Remote Flair URL")
+  .option("--ops-target <url>", "Explicit ops API URL")
+  .action(async (opts) => {
+    await runFederationWatch(opts);
   });
 
 // ─── flair rem ───────────────────────────────────────────────────────────────
