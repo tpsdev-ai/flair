@@ -126,8 +126,7 @@ server.http(async (request: any, nextLayer: any) => {
     url.pathname === "/AgentCard" ||
     url.pathname.startsWith("/A2AAdapter/") ||
     url.pathname.startsWith("/AgentCard/") ||
-    // Federation endpoints handle their own auth via Ed25519 body signatures
-    url.pathname === "/FederationPair" ||
+    // FederationSync uses Ed25519 body-signature auth (handled by the resource)
     url.pathname === "/FederationSync" ||
     // OAuth 2.1 public endpoints (spec requires no pre-auth)
     url.pathname === "/OAuthRegister" ||
@@ -169,6 +168,45 @@ server.http(async (request: any, nextLayer: any) => {
       }
     } catch { /* fall through to Ed25519 check */ }
     return new Response(JSON.stringify({ error: "invalid_admin_credentials" }), { status: 401 });
+  }
+
+  // ── Bearer pairing-token auth (FederationPair only) ──────────────────────
+  // A spoke presents a one-time pairing token to authenticate for /FederationPair.
+  // The token must be valid, unconsumed, and not expired.
+  if (header.startsWith("Bearer ")) {
+    // Scope Bearer pairing-token auth to /FederationPair only
+    if (url.pathname !== "/FederationPair") {
+      return new Response(JSON.stringify({ error: "bearer_token_not_allowed_on_this_endpoint" }), { status: 401 });
+    }
+
+    const token = header.slice(7);
+
+    let pairingTokenRecord: any = null;
+    try {
+      pairingTokenRecord = await (databases as any).flair.PairingToken.get(token);
+    } catch { /* table may not exist */ }
+
+    if (!pairingTokenRecord) {
+      return new Response(JSON.stringify({ error: "invalid_or_expired_pairing_token" }), { status: 401 });
+    }
+    if (pairingTokenRecord.consumedBy) {
+      return new Response(JSON.stringify({ error: "invalid_or_expired_pairing_token" }), { status: 401 });
+    }
+    if (pairingTokenRecord.expiresAt && new Date(pairingTokenRecord.expiresAt) < new Date()) {
+      return new Response(JSON.stringify({ error: "invalid_or_expired_pairing_token" }), { status: 401 });
+    }
+
+    // Mark request as authenticated with pairing context
+    request.tpsAuthContext = { pairingToken: token, authType: "pairing-context" };
+    (request as any)._tpsAuthVerified = true;
+
+    // Also store the token in a header so downstream resources can consume it
+    request.headers.set("x-pairing-token", token);
+    if (request.headers.asObject) {
+      (request.headers.asObject as any)["x-pairing-token"] = token;
+    }
+
+    return nextLayer(request);
   }
 
   // ── Ed25519 agent auth ────────────────────────────────────────────────────

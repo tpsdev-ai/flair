@@ -136,7 +136,7 @@ export class FederationInstance extends Resource {
  */
 export class FederationPair extends Resource {
   async post(data: any) {
-    const { instanceId, publicKey, role, endpoint, signature, pairingToken } = data || {};
+    const { instanceId, publicKey, role, endpoint, signature } = data || {};
 
     if (!instanceId || !publicKey) {
       return new Response(JSON.stringify({ error: "instanceId and publicKey required" }), {
@@ -174,38 +174,41 @@ export class FederationPair extends Resource {
         updatedAt: new Date().toISOString(),
       });
     } else {
-      // New peer — require a valid pairing token
+      // New peer — require a valid pairing token (from auth context, not body)
+      // Token is validated by auth-middleware; we consume it on successful pair.
+      // Defense-in-depth: re-check before consuming.
+      const ctx = (this as any).getContext?.();
+      const request = ctx?.request ?? ctx;
+      const pairingToken =
+        request?.tpsAuthContext?.pairingToken ??
+        request?.headers?.get?.("x-pairing-token");
+
       if (!pairingToken) {
         return new Response(JSON.stringify({
-          error: "pairingToken required — generate one with 'flair federation token'",
+          error: "pairingToken required — use Authorization: Bearer <token>",
         }), { status: 401, headers: { "content-type": "application/json" } });
       }
 
-      // Validate and consume the token
-      let token: any = null;
+      // Fetch the token record for consumption
+      let tokenRecord: any = null;
       try {
-        token = await (databases as any).flair.PairingToken.get(pairingToken);
+        tokenRecord = await (databases as any).flair.PairingToken.get(pairingToken);
       } catch { /* table may not exist */ }
 
-      if (!token) {
-        return new Response(JSON.stringify({ error: "invalid pairing token" }), {
+      if (!tokenRecord || tokenRecord.consumedBy) {
+        return new Response(JSON.stringify({ error: "invalid_or_expired_pairing_token" }), {
           status: 401, headers: { "content-type": "application/json" },
         });
       }
-      if (token.consumedBy) {
-        return new Response(JSON.stringify({ error: "pairing token already used" }), {
-          status: 401, headers: { "content-type": "application/json" },
-        });
-      }
-      if (token.expiresAt && new Date(token.expiresAt) < new Date()) {
-        return new Response(JSON.stringify({ error: "pairing token expired" }), {
+      if (tokenRecord.expiresAt && new Date(tokenRecord.expiresAt) < new Date()) {
+        return new Response(JSON.stringify({ error: "invalid_or_expired_pairing_token" }), {
           status: 401, headers: { "content-type": "application/json" },
         });
       }
 
       // Consume the token
       await (databases as any).flair.PairingToken.put({
-        ...token,
+        ...tokenRecord,
         consumedBy: instanceId,
         consumedAt: new Date().toISOString(),
       });

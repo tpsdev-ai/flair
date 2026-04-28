@@ -2011,13 +2011,15 @@ federation
         instanceId: instance.id,
         publicKey: instance.publicKey,
         role: "spoke",
-        pairingToken: opts.token,
       };
       const signedBody = signRequestBody(pairBody, secretKey);
 
       const res = await fetch(`${hubUrl}/FederationPair`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${opts.token}`,
+        },
         body: JSON.stringify(signedBody),
       });
 
