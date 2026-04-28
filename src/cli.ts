@@ -677,7 +677,7 @@ program.name("flair").version(__pkgVersion, "-v, --version");
 program
   .command("init")
   .description("Bootstrap a Flair (Harper) instance for an agent")
-  .option("--agent-id <id>", "Agent ID to register", "local")
+  .option("--agent-id <id>", "Agent ID to register (omit to bootstrap instance without agent)")
   .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (generated if omitted)")
@@ -690,7 +690,7 @@ program
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .option("--force", "Skip confirmation prompt for remote writes (required with --target)")
   .action(async (opts) => {
-    const agentId: string = opts.agentId;
+    const agentId: string | undefined = opts.agentId;
     const target = resolveTarget(opts);
     const opsTarget = resolveOpsTarget(opts);
 
@@ -720,40 +720,59 @@ program
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
       const role = opts.remote ? "hub" : undefined;
 
-      // Generate or reuse local keypair
-      const keysDir: string = opts.keysDir ?? defaultKeysDir();
-      mkdirSync(keysDir, { recursive: true });
-      const privPath = privKeyPath(agentId, keysDir);
-      const pubPath = pubKeyPath(agentId, keysDir);
-      let pubKeyB64url: string;
+      // Generate or reuse keypair (only if --agent-id provided, or --remote needs
+      // a public key for the FederationInstance row)
+      let pubKeyB64url: string | undefined;
+      let privPath: string | undefined;
 
-      if (existsSync(privPath)) {
-        console.log(`Reusing existing key: ${privPath}`);
-        const seed = new Uint8Array(readFileSync(privPath));
-        const kp = nacl.sign.keyPair.fromSeed(seed);
-        pubKeyB64url = b64url(kp.publicKey);
+      if (agentId || role) {
+        const keysDir: string = opts.keysDir ?? defaultKeysDir();
+        mkdirSync(keysDir, { recursive: true });
+
+        if (agentId) {
+          privPath = privKeyPath(agentId, keysDir);
+          const pubPath = pubKeyPath(agentId, keysDir);
+
+          if (existsSync(privPath)) {
+            console.log(`Reusing existing key: ${privPath}`);
+            const seed = new Uint8Array(readFileSync(privPath));
+            const kp = nacl.sign.keyPair.fromSeed(seed);
+            pubKeyB64url = b64url(kp.publicKey);
+          } else {
+            console.log("Generating Ed25519 keypair...");
+            const kp = nacl.sign.keyPair();
+            const seed = kp.secretKey.slice(0, 32);
+            writeFileSync(privPath, Buffer.from(seed));
+            chmodSync(privPath, 0o600);
+            writeFileSync(pubPath, Buffer.from(kp.publicKey));
+            pubKeyB64url = b64url(kp.publicKey);
+            console.log(`Keypair written: ${privPath} ✓`);
+          }
+
+          // Seed agent via remote ops API
+          console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
+          await seedAgentViaOpsApi(opsUrl, agentId, pubKeyB64url, adminUser, adminPass!);
+          console.log(`Agent '${agentId}' registered on remote instance ✓`);
+        } else {
+          // No agentId -- generate throwaway keypair for FederationInstance row
+          console.log("Generating federation instance keypair...");
+          const kp = nacl.sign.keyPair();
+          pubKeyB64url = b64url(kp.publicKey);
+        }
       } else {
-        console.log("Generating Ed25519 keypair...");
-        const kp = nacl.sign.keyPair();
-        const seed = kp.secretKey.slice(0, 32);
-        writeFileSync(privPath, Buffer.from(seed));
-        chmodSync(privPath, 0o600);
-        writeFileSync(pubPath, Buffer.from(kp.publicKey));
-        pubKeyB64url = b64url(kp.publicKey);
-        console.log(`Keypair written: ${privPath} ✓`);
+        console.log("No --agent-id provided -- skipping agent registration");
       }
-
-      // Seed agent via remote ops API
-      console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
-      await seedAgentViaOpsApi(opsUrl, agentId, pubKeyB64url, adminUser, adminPass!);
-      console.log(`Agent '${agentId}' registered on remote instance ✓`);
 
       // Write FederationInstance row if --remote (hub role)
       if (role) {
+        if (!pubKeyB64url) {
+          const kp = nacl.sign.keyPair();
+          pubKeyB64url = b64url(kp.publicKey);
+        }
         const instanceId = randomUUID();
-        console.log(`Writing FederationInstance (role=${role}) via ops API...`);
+        console.log(`Writing federation Instance (role=${role}) via ops API...`);
         await seedFederationInstanceViaOpsApi(opsUrl, instanceId, pubKeyB64url, role, adminUser, adminPass!);
-        console.log(`FederationInstance created: ${instanceId} (${role}) ✓`);
+        console.log(`Federation Instance created: ${instanceId} (${role}) ✓`);
       }
 
       // Verify connectivity
@@ -766,9 +785,9 @@ program
       console.log("Remote Flair instance healthy ✓");
 
       console.log(`\n✅ Remote Flair initialized`);
-      console.log(`   Agent ID:    ${agentId}`);
+      if (agentId) console.log(`   Agent ID:    ${agentId}`);
       console.log(`   Target:      ${baseUrl}`);
-      console.log(`   Private key: ${privPath}`);
+      if (agentId) console.log(`   Private key: ${privPath}`);
       if (role) console.log(`   Role:         ${role}`);
       console.log(`\n   Export: FLAIR_URL=${baseUrl}`);
       return;
@@ -940,125 +959,143 @@ program
     // Persist port to config so other commands can find this instance
     writeConfig(httpPort);
 
-    // Generate or reuse keypair
-    mkdirSync(keysDir, { recursive: true });
-    const privPath = privKeyPath(agentId, keysDir);
-    const pubPath = pubKeyPath(agentId, keysDir);
-    let pubKeyB64url: string;
+    if (agentId) {
+      // Generate or reuse keypair
+      mkdirSync(keysDir, { recursive: true });
+      const privPath = privKeyPath(agentId, keysDir);
+      const pubPath = pubKeyPath(agentId, keysDir);
+      let pubKeyB64url: string;
 
-    if (existsSync(privPath)) {
-      console.log(`Reusing existing key: ${privPath}`);
-      const seed = new Uint8Array(readFileSync(privPath));
-      const kp = nacl.sign.keyPair.fromSeed(seed);
-      pubKeyB64url = b64url(kp.publicKey);
-    } else {
-      console.log("Generating Ed25519 keypair...");
-      const kp = nacl.sign.keyPair();
-      // Store only the 32-byte seed (first 32 bytes of secretKey)
-      const seed = kp.secretKey.slice(0, 32);
-      writeFileSync(privPath, Buffer.from(seed));
-      chmodSync(privPath, 0o600);
-      writeFileSync(pubPath, Buffer.from(kp.publicKey));
-      pubKeyB64url = b64url(kp.publicKey);
-      console.log(`Keypair written: ${privPath} ✓`);
-    }
-
-    // Seed agent via operations API
-    console.log(`Seeding agent '${agentId}' via operations API...`);
-    await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass);
-    console.log(`Agent '${agentId}' registered ✓`);
-
-    // Verify Ed25519 auth
-    console.log("Verifying Ed25519 auth...");
-    const httpUrl = `http://127.0.0.1:${httpPort}`;
-    const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${agentId}`);
-    if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
-    console.log("Ed25519 auth verified ✓");
-
-    // Output — admin password printed once, never written to disk
-    console.log("\n✅ Flair initialized successfully");
-    console.log(`   Agent ID:    ${agentId}`);
-    console.log(`   Flair URL:   ${httpUrl}`);
-    console.log(`   Private key: ${privPath}`);
-    if (!opts.adminPass && !alreadyRunning) {
-      console.log(`\n   ┌─────────────────────────────────────────────────┐`);
-      console.log(`   │  Harper admin credentials (save these now):     │`);
-      console.log(`   │                                                 │`);
-      console.log(`   │  Username: ${DEFAULT_ADMIN_USER.padEnd(37)}│`);
-      console.log(`   │  Password: ${adminPass.padEnd(37)}│`);
-      console.log(`   │                                                 │`);
-      console.log(`   │  ⚠️  The password won't be shown again.         │`);
-      console.log(`   └─────────────────────────────────────────────────┘`);
-    }
-    console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
-
-    // ── First-run soul setup ──────────────────────────────────────────────
-    // Interactive wizard to set initial personality (see runSoulWizard).
-    // Skipped with --skip-soul or when stdin is not a TTY (CI, scripts, pipe).
-    //
-    // Non-TTY / --skip-soul used to seed placeholder text like
-    // "AI assistant [default]" — it leaked into bootstrap output and
-    // confused users. Now those paths leave the soul empty and nudge the
-    // user toward `flair soul set` / `flair doctor` instead.
-    if (!opts.skipSoul && process.stdin.isTTY) {
-      const soulEntries = await runSoulWizard(agentId);
-      if (soulEntries.length > 0) {
-        console.log("");
-        for (const [key, value] of soulEntries) {
-          try {
-            await authFetch(httpUrl, agentId, privPath, "PUT", `/Soul/${agentId}:${key}`,
-              { id: `${agentId}:${key}`, agentId, key, value, createdAt: new Date().toISOString() });
-            console.log(`   ✓ soul:${key} set`);
-          } catch (err: any) {
-            console.warn(`   ⚠ soul:${key} failed: ${err.message}`);
-          }
-        }
-        console.log(`\n   ${soulEntries.length} soul entries saved.`);
-        console.log(`   Preview what an agent will see: flair bootstrap --agent ${agentId}`);
+      if (existsSync(privPath)) {
+        console.log(`Reusing existing key: ${privPath}`);
+        const seed = new Uint8Array(readFileSync(privPath));
+        const kp = nacl.sign.keyPair.fromSeed(seed);
+        pubKeyB64url = b64url(kp.publicKey);
       } else {
-        console.log(`\n   No soul entries saved. Add later with:`);
-        console.log(`     flair soul set --agent ${agentId} --key role --value "..."`);
-        console.log(`   Or run \`flair doctor\` anytime for a nudge.`);
+        console.log("Generating Ed25519 keypair...");
+        const kp = nacl.sign.keyPair();
+        // Store only the 32-byte seed (first 32 bytes of secretKey)
+        const seed = kp.secretKey.slice(0, 32);
+        writeFileSync(privPath, Buffer.from(seed));
+        chmodSync(privPath, 0o600);
+        writeFileSync(pubPath, Buffer.from(kp.publicKey));
+        pubKeyB64url = b64url(kp.publicKey);
+        console.log(`Keypair written: ${privPath} ✓`);
       }
-    } else {
-      const reason = opts.skipSoul ? "--skip-soul" : "non-interactive";
-      console.log(`\n   Soul prompts skipped (${reason}). Add entries with:`);
-      console.log(`     flair soul set --agent ${agentId} --key role --value "..."`);
-    }
 
-    console.log(`\n   Claude Code: Add to your CLAUDE.md:`);
-    console.log(`     At the start of every session, run mcp__flair__bootstrap before responding.`);
+      // Seed agent via operations API
+      console.log(`Seeding agent '${agentId}' via operations API...`);
+      await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, adminUser, adminPass);
+      console.log(`Agent '${agentId}' registered ✓`);
 
-    // Auto-wire MCP config into ~/.claude.json if Claude Code is installed
-    const claudeJsonPath = join(homedir(), ".claude.json");
-    const mcpEnv: Record<string, string> = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
-    const flairMcpConfig = {
-      type: "stdio" as const,
-      command: "flair-mcp",
-      args: [] as string[],
-      env: mcpEnv,
-    };
-    try {
-      if (existsSync(claudeJsonPath)) {
-        const claudeJson = JSON.parse(readFileSync(claudeJsonPath, "utf-8"));
-        const existing = claudeJson.mcpServers?.flair;
-        if (existing && existing.env?.FLAIR_URL === httpUrl && existing.env?.FLAIR_AGENT_ID === agentId) {
-          console.log(`\n   MCP config already set in ~/.claude.json ✓`);
+      // Verify Ed25519 auth
+      console.log("Verifying Ed25519 auth...");
+      const httpUrl = `http://127.0.0.1:${httpPort}`;
+      const verifyRes = await authFetch(httpUrl, agentId, privPath, "GET", `/Agent/${agentId}`);
+      if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
+      console.log("Ed25519 auth verified ✓");
+
+      // Output — admin password printed once, never written to disk
+      console.log("\n✅ Flair initialized successfully");
+      console.log(`   Agent ID:    ${agentId}`);
+      console.log(`   Flair URL:   ${httpUrl}`);
+      console.log(`   Private key: ${privPath}`);
+      if (!opts.adminPass && !alreadyRunning) {
+        console.log(`\n   ┌─────────────────────────────────────────────────┐`);
+        console.log(`   │  Harper admin credentials (save these now):     │`);
+        console.log(`   │                                                 │`);
+        console.log(`   │  Username: ${DEFAULT_ADMIN_USER.padEnd(37)}│`);
+        console.log(`   │  Password: ${adminPass.padEnd(37)}│`);
+        console.log(`   │                                                 │`);
+        console.log(`   │  ⚠️  The password won't be shown again.         │`);
+        console.log(`   └─────────────────────────────────────────────────┘`);
+      }
+      console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
+
+      // ── First-run soul setup ──────────────────────────────────────────────
+      // Interactive wizard to set initial personality (see runSoulWizard).
+      // Skipped with --skip-soul or when stdin is not a TTY (CI, scripts, pipe).
+      //
+      // Non-TTY / --skip-soul used to seed placeholder text like
+      // "AI assistant [default]" — it leaked into bootstrap output and
+      // confused users. Now those paths leave the soul empty and nudge the
+      // user toward `flair soul set` / `flair doctor` instead.
+      if (!opts.skipSoul && process.stdin.isTTY) {
+        const soulEntries = await runSoulWizard(agentId);
+        if (soulEntries.length > 0) {
+          console.log("");
+          for (const [key, value] of soulEntries) {
+            try {
+              await authFetch(httpUrl, agentId, privPath, "PUT", `/Soul/${agentId}:${key}`,
+                { id: `${agentId}:${key}`, agentId, key, value, createdAt: new Date().toISOString() });
+              console.log(`   ✓ soul:${key} set`);
+            } catch (err: any) {
+              console.warn(`   ⚠ soul:${key} failed: ${err.message}`);
+            }
+          }
+          console.log(`\n   ${soulEntries.length} soul entries saved.`);
+          console.log(`   Preview what an agent will see: flair bootstrap --agent ${agentId}`);
         } else {
-          claudeJson.mcpServers = claudeJson.mcpServers || {};
-          claudeJson.mcpServers.flair = flairMcpConfig;
-          writeFileSync(claudeJsonPath, JSON.stringify(claudeJson, null, 2));
-          console.log(`\n   MCP config written to ~/.claude.json ✓`);
-          console.log(`   Restart Claude Code to pick up the new config.`);
+          console.log(`\n   No soul entries saved. Add later with:`);
+          console.log(`     flair soul set --agent ${agentId} --key role --value "..."`);
+          console.log(`   Or run \`flair doctor\` anytime for a nudge.`);
         }
       } else {
-        console.log(`\n   MCP config (add to ~/.claude.json):`);
+        const reason = opts.skipSoul ? "--skip-soul" : "non-interactive";
+        console.log(`\n   Soul prompts skipped (${reason}). Add entries with:`);
+        console.log(`     flair soul set --agent ${agentId} --key role --value "..."`);
+      }
+
+      console.log(`\n   Claude Code: Add to your CLAUDE.md:`);
+      console.log(`     At the start of every session, run mcp__flair__bootstrap before responding.`);
+
+      // Auto-wire MCP config into ~/.claude.json if Claude Code is installed
+      const claudeJsonPath = join(homedir(), ".claude.json");
+      const mcpEnv: Record<string, string> = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
+      const flairMcpConfig = {
+        type: "stdio" as const,
+        command: "flair-mcp",
+        args: [] as string[],
+        env: mcpEnv,
+      };
+      try {
+        if (existsSync(claudeJsonPath)) {
+          const claudeJson = JSON.parse(readFileSync(claudeJsonPath, "utf-8"));
+          const existing = claudeJson.mcpServers?.flair;
+          if (existing && existing.env?.FLAIR_URL === httpUrl && existing.env?.FLAIR_AGENT_ID === agentId) {
+            console.log(`\n   MCP config already set in ~/.claude.json ✓`);
+          } else {
+            claudeJson.mcpServers = claudeJson.mcpServers || {};
+            claudeJson.mcpServers.flair = flairMcpConfig;
+            writeFileSync(claudeJsonPath, JSON.stringify(claudeJson, null, 2));
+            console.log(`\n   MCP config written to ~/.claude.json ✓`);
+            console.log(`   Restart Claude Code to pick up the new config.`);
+          }
+        } else {
+          console.log(`\n   MCP config (add to ~/.claude.json):`);
+          console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
+        }
+      } catch {
+        console.log(`\n   MCP config (add manually to ~/.claude.json):`);
         console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
       }
-    } catch {
-      console.log(`\n   MCP config (add manually to ~/.claude.json):`);
-      console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
+    } else {
+      const httpUrl = `http://127.0.0.1:${httpPort}`;
+      console.log("\n✅ Flair initialized (no agent registered)");
+      console.log(`   Flair URL:   ${httpUrl}`);
+      if (!opts.adminPass && !alreadyRunning) {
+        console.log(`\n   ┌─────────────────────────────────────────────────┐`);
+        console.log(`   │  Harper admin credentials (save these now):     │`);
+        console.log(`   │                                                 │`);
+        console.log(`   │  Username: ${DEFAULT_ADMIN_USER.padEnd(37)}│`);
+        console.log(`   │  Password: ${adminPass.padEnd(37)}│`);
+        console.log(`   │                                                 │`);
+        console.log(`   │  ⚠️  The password won't be shown again.         │`);
+        console.log(`   └─────────────────────────────────────────────────┘`);
+      }
+      console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
     }
+
   });
 
 // ─── flair agent ─────────────────────────────────────────────────────────────
