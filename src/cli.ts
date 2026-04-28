@@ -396,12 +396,14 @@ async function seedAgentViaOpsApi(
   agentId: string,
   pubKeyB64url: string,
   adminUser: string,
-  adminPass: string,
+  adminPass?: string,
 ): Promise<void> {
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
     : `${opsPortOrUrl.replace(/\/$/, "")}/`;
-  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+  const urlIsLocal = typeof opsPortOrUrl === "number" || isLocalBase(url);
+  // Only send Basic auth for remote targets; local targets use Harper's authorizeLocal
+  const auth = adminPass !== undefined && !urlIsLocal ? Buffer.from(`${adminUser}:${adminPass}`).toString("base64") : undefined;
   const body = {
     operation: "insert",
     database: "flair",
@@ -410,7 +412,7 @@ async function seedAgentViaOpsApi(
   };
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Basic ${auth}` } : {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
@@ -433,12 +435,14 @@ export async function seedFederationInstanceViaOpsApi(
   publicKey: string,
   role: string,
   adminUser: string,
-  adminPass: string,
+  adminPass?: string,
 ): Promise<void> {
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
     : `${opsPortOrUrl.replace(/\/$/, "")}/`;
-  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+  const urlIsLocal = typeof opsPortOrUrl === "number" || isLocalBase(url);
+  // Only send Basic auth for remote targets; local targets use Harper's authorizeLocal
+  const auth = adminPass !== undefined && !urlIsLocal ? Buffer.from(`${adminUser}:${adminPass}`).toString("base64") : undefined;
   const now = new Date().toISOString();
   const body = {
     operation: "insert",
@@ -455,7 +459,7 @@ export async function seedFederationInstanceViaOpsApi(
   };
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Basic ${auth}` } : {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
@@ -482,7 +486,7 @@ export async function callOpsApi(
   const auth = Buffer.from(`${user}:${pass}`).toString("base64");
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Basic ${auth}` } : {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000),
   });
