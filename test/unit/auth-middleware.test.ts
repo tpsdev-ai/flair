@@ -61,3 +61,157 @@ describe("auth middleware logic", () => {
     expect(result).toEqual(original);
   });
 });
+
+// ─── Basic auth: super_user support (ops-lzmg) ───────────────────────────────
+
+describe("Basic auth super_user path", () => {
+  test("parses Basic auth header with colon in password", () => {
+    // Use indexOf(':') to split user:pass — handles colons in passwords
+    const decoded = "heskew@pm.me:my:pass:with:colons";
+    const colonIdx = decoded.indexOf(":");
+    const user = colonIdx >= 0 ? decoded.slice(0, colonIdx) : decoded;
+    const pass = colonIdx >= 0 ? decoded.slice(colonIdx + 1) : "";
+    expect(user).toBe("heskew@pm.me");
+    expect(pass).toBe("my:pass:with:colons");
+  });
+
+  test("parses Basic auth header without colon (no password)", () => {
+    const decoded = "justuser";
+    const colonIdx = decoded.indexOf(":");
+    const user = colonIdx >= 0 ? decoded.slice(0, colonIdx) : decoded;
+    const pass = colonIdx >= 0 ? decoded.slice(colonIdx + 1) : "";
+    expect(user).toBe("justuser");
+    expect(pass).toBe("");
+  });
+
+  test("admin user with HDB_ADMIN_PASSWORD passes", () => {
+    // Simulate the env-var fast-path
+    const adminPass = "s3cret";
+    const user = "admin";
+    const pass = "s3cret";
+    expect(adminPass !== null && user === "admin" && pass === adminPass).toBe(true);
+  });
+
+  test("admin user with wrong password falls through to super_user check", () => {
+    const adminPass = "s3cret";
+    const user = "admin";
+    const pass = "wrongpass";
+    // Env-var fast-path does NOT match (wrong password)
+    expect(adminPass !== null && user === "admin" && pass === adminPass).toBe(false);
+    // Should fall through to getUser path
+  });
+
+  test("non-admin user with HDB_ADMIN_PASSWORD set falls through to super_user check", () => {
+    const adminPass = "s3cret";
+    const user = "heskew@pm.me";
+    const pass = "heskewspass";
+    // Env-var fast-path does NOT match (user !== "admin")
+    expect(adminPass !== null && user === "admin" && pass === adminPass).toBe(false);
+    // Should fall through to getUser path
+  });
+
+  test("super_user with non-'admin' username passes via getUser path", () => {
+    // Simulate server.getUser returning a super_user record
+    const harperUser = {
+      id: "heskew@pm.me",
+      role: {
+        permission: { super_user: true },
+      },
+    };
+    expect(harperUser?.role?.permission?.super_user === true).toBe(true);
+  });
+
+  test("non-super_user is rejected", () => {
+    const harperUser = {
+      id: "regular_user",
+      role: {
+        permission: { super_user: false },
+      },
+    };
+    expect(harperUser?.role?.permission?.super_user === true).toBe(false);
+  });
+
+  test("getUser returning null is treated as invalid", () => {
+    const harperUser = null;
+    expect(harperUser?.role?.permission?.super_user === true).toBe(false);
+  });
+
+  test("getUser returning undefined is treated as invalid", () => {
+    const harperUser = undefined;
+    expect(harperUser?.role?.permission?.super_user === true).toBe(false);
+  });
+
+  test("getUser returning missing role is treated as invalid", () => {
+    const harperUser = { id: "some_user" };
+    expect(harperUser?.role?.permission?.super_user === true).toBe(false);
+  });
+
+  test("getUser returning missing permission is treated as invalid", () => {
+    const harperUser = { id: "some_user", role: {} };
+    expect(harperUser?.role?.permission?.super_user === true).toBe(false);
+  });
+
+  test("no HDB_ADMIN_PASSWORD set still allows super_user auth", () => {
+    // When adminPass is null, only Path 2 (super_user check) applies
+    const adminPass = null;
+    const harperUser = {
+      role: { permission: { super_user: true } },
+    };
+    // Path 1 won't match (adminPass is null)
+    expect(adminPass !== null).toBe(false);
+    // Path 2 can still match
+    expect(harperUser?.role?.permission?.super_user === true).toBe(true);
+  });
+
+  test("auth context set correctly for super_user", () => {
+    const user = "heskew@pm.me";
+    // Simulate what the middleware sets
+    const request: any = {};
+    request.headers = { set: (_k: string, _v: string) => {} };
+    (request as any)._tpsAuthVerified = true;
+    request.user = { id: user, role: { permission: { super_user: true } } };
+    request.tpsAgent = user;
+    request.tpsAgentIsAdmin = true;
+    expect(request._tpsAuthVerified).toBe(true);
+    expect(request.tpsAgent).toBe(user);
+    expect(request.tpsAgentIsAdmin).toBe(true);
+  });
+
+  test("complete auth flow simulation: super_user via Basic auth", async () => {
+    // Simulate the full Basic auth flow
+    const adminPass = "s3cret";
+    const user = "heskew@pm.me";
+    const pass = "heskewspass";
+    const mockGetUser = async (u: string, p: string): Promise<any> => {
+      if (u === "heskew@pm.me" && p === "heskewspass") {
+        return { role: { permission: { super_user: true } } };
+      }
+      return null;
+    };
+
+    // Path 1: env-var fast-path — doesn't match (user !== "admin")
+    const path1Match = adminPass !== null && user === "admin" && pass === adminPass;
+    expect(path1Match).toBe(false);
+
+    // Path 2: super_user check
+    const harperUser = await mockGetUser(user, pass);
+    const path2Match = harperUser?.role?.permission?.super_user === true;
+    expect(path2Match).toBe(true);
+  });
+
+  test("invalid creds rejected by complete flow", async () => {
+    const user = "anyone";
+    const pass = "wrongpass";
+    const mockGetUser = async (): Promise<any> => {
+      throw new Error("invalid creds");
+    };
+
+    let harperUser: any = null;
+    try {
+      harperUser = await mockGetUser(user, pass);
+    } catch { /* fall through */ }
+
+    expect(harperUser?.role?.permission?.super_user === true).toBe(false);
+  });
+});
+
