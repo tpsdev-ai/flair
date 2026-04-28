@@ -8,8 +8,19 @@ import {
   readFileSync,
   chmodSync,
   renameSync,
+  cpSync,
+  rmSync,
+  mkdtempSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve as resolvePath } from "node:path";
+import { spawn } from "node:child_process";
+import { createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } from "node:crypto";
+import { create as tarCreate } from "tar";
+import { join, resolve as resolvePath } from "node:path";
+import { spawn } from "node:child_process";
+import { createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } from "node:crypto";
+import { create as tarCreate } from "tar";
 import { join, resolve as resolvePath } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID } from "node:crypto";
@@ -451,6 +462,183 @@ export async function seedFederationInstanceViaOpsApi(
   }
 }
 
+// ─── Provision Flair on Harper Fabric (ops-2kyi) ───────────────────────────
+//
+// Atomic provisioning for a fresh Harper Fabric cluster: builds a deploy
+// tarball with .env baked in, deploys via ops API, waits for restart, and
+// creates the super_user admin account.
+
+export async function callOpsApi(
+  opsUrl: string,
+  body: Record<string, unknown>,
+  user: string,
+  pass: string,
+): Promise<any> {
+  const url = `${opsUrl.replace(/\/$/, "")}/`;
+  const auth = Buffer.from(`${user}:${pass}`).toString("base64");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Ops API call failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function buildDeployTarball(
+  projectRoot: string,
+  flairAdminPass: string,
+): Promise<{ tarballB64: string }> {
+  const tmpDir = mkdtempSync(join(tmpdir(), "flair-deploy-"));
+  try {
+    // Copy deployment files into temp directory
+    const entries = ["dist", "schemas", "config.yaml", "package.json", "LICENSE", "README.md", "SECURITY.md"];
+    if (existsSync(join(projectRoot, "ui"))) entries.push("ui");
+
+    for (const entry of entries) {
+      const src = join(projectRoot, entry);
+      const dst = join(tmpDir, entry);
+      if (existsSync(src)) {
+        cpSync(src, dst, { recursive: true });
+      }
+    }
+
+    // Write .env with 600 permissions
+    const envContent = [
+      `HDB_ADMIN_PASSWORD=${flairAdminPass}`,
+      `FLAIR_ADMIN_PASSWORD=${flairAdminPass}`,
+      "",
+    ].join("\n");
+    writeFileSync(join(tmpDir, ".env"), envContent, { mode: 0o600 });
+
+    // Build compressed tarball
+    const tarballPath = join(tmpDir, "deploy.tar.gz");
+    await tarCreate(
+      { gzip: true, cwd: tmpDir, file: tarballPath, portable: true },
+      entries,
+    );
+
+    const buf = readFileSync(tarballPath);
+    return { tarballB64: buf.toString("base64") };
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+export async function waitForFlairRestart(
+  targetUrl: string,
+  maxWaitMs: number = 30_000,
+): Promise<void> {
+  const url = `${targetUrl.replace(/\/$/, "")}/FederationPair`;
+  const intervalMs = 1_000;
+  const deadline = Date.now() + maxWaitMs;
+
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(5_000),
+      });
+      const text = await res.text().catch(() => "");
+      // The resource handler responds with "instanceId and publicKey required"
+      // when the deployment is live and Flair is serving requests.
+      if (text.includes("instanceId and publicKey required")) return;
+    } catch {
+      // Not ready yet — keep polling
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`Flair did not respond within ${maxWaitMs / 1000}s`);
+}
+
+export async function provisionFabric(
+  target: string,
+  opsTarget: string,
+  clusterAdminUser: string,
+  clusterAdminPass: string,
+  flairAdminPass: string,
+): Promise<void> {
+  const projectRoot = process.cwd();
+
+  // 1. Build and deploy component tarball
+  console.log("Building deploy tarball...");
+  const { tarballB64 } = await buildDeployTarball(projectRoot, flairAdminPass);
+
+  console.log("Deploying via ops API...");
+  await callOpsApi(opsTarget, {
+    operation: "deploy_component",
+    project: "flair",
+    payload: tarballB64,
+    restart: "rolling",
+  }, clusterAdminUser, clusterAdminPass);
+
+  // 2. Wait for restart
+  console.log("Waiting for Flair to restart...");
+  await waitForFlairRestart(target);
+  console.log("Flair is running ✓");
+
+  // 3. Provision Harper super_user
+  // Since ops-lzmg is merged, the username doesn't have to be "admin".
+  // We can use the cluster-admin user directly if it's already a super_user.
+  // Check if cluster admin is already a super_user first:
+  let clusterAdminIsSuperUser = false;
+  try {
+    const userInfo = await callOpsApi(opsTarget, {
+      operation: "list_users",
+    }, clusterAdminUser, clusterAdminPass);
+    // list_users returns an array of user objects with role/permission info
+    const users = Array.isArray(userInfo) ? userInfo : [];
+    const adminRecord = users.find(
+      (u: any) => u.username === clusterAdminUser || u.user?.username === clusterAdminUser,
+    );
+    clusterAdminIsSuperUser = !!(
+      adminRecord?.role?.permission?.super_user ??
+      adminRecord?.permission?.super_user ??
+      false
+    );
+  } catch {
+    // If we can't check, assume not and proceed with add_user
+  }
+
+  if (clusterAdminIsSuperUser) {
+    console.log(`Cluster admin '${clusterAdminUser}' is already a super_user — skipping user provisioning`);
+  } else {
+    console.log(`Provisioning Harper user 'admin' as super_user...`);
+    try {
+      await callOpsApi(opsTarget, {
+        operation: "add_user",
+        username: "admin",
+        password: flairAdminPass,
+        role: "super_user",
+        active: true,
+      }, clusterAdminUser, clusterAdminPass);
+      console.log("User 'admin' created ✓");
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (msg.includes("already exists") || msg.includes("duplicate")) {
+        // Idempotent: fall back to alter_user
+        console.log("User 'admin' already exists — updating password...");
+        await callOpsApi(opsTarget, {
+          operation: "alter_user",
+          username: "admin",
+          password: flairAdminPass,
+          role: "super_user",
+          active: true,
+        }, clusterAdminUser, clusterAdminPass);
+        console.log("User 'admin' updated ✓");
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 // ─── Upgrade presence probes ──────────────────────────────────────────────────
 //
 // `flair upgrade` previously called `npm list -g <pkg>` to detect the installed
@@ -689,6 +877,9 @@ program
   .option("--remote", "When used with --target, init as hub for remote federation")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .option("--force", "Skip confirmation prompt for remote writes (required with --target)")
+  .option("--cluster-admin-user <user>", "Harper cluster admin username (env: FLAIR_CLUSTER_ADMIN_USER)")
+  .option("--cluster-admin-pass <pass>", "Harper cluster admin password (env: FLAIR_CLUSTER_ADMIN_PASS)")
+  .option("--flair-admin-pass <pass>", "Password for Flair's admin user (env: FLAIR_ADMIN_PASS; generated if omitted)")
   .action(async (opts) => {
     const agentId: string | undefined = opts.agentId;
     const target = resolveTarget(opts);
@@ -696,18 +887,6 @@ program
 
     // ── Remote init: --target and/or --ops-target drive a remote Flair instance ──
     if (target || opsTarget) {
-      const adminPass: string | undefined = opts.adminPass;
-      if (!adminPass) {
-        console.error("Error: --admin-pass is required with --target/--ops-target (remote init)");
-        process.exit(1);
-      }
-      if (!opts.force) {
-        const displayTarget = target || opsTarget;
-        console.error(`Error: --force is required with --target/--ops-target. Remote init writes to a live Flair instance at ${displayTarget}.`);
-        console.error("  Pass --force to confirm this is intended.");
-        process.exit(1);
-      }
-      const adminUser = DEFAULT_ADMIN_USER;
       // When -only- --ops-target is provided, attempt to derive REST URL
       if (!target && opsTarget) {
         console.error("Error: --ops-target requires --target as well. Pass --target <rest-url> for the REST API surface.");
@@ -717,13 +896,61 @@ program
       const baseUrl = target!.replace(/\/$/, "");
       // --ops-target overrides derivation; otherwise derive from --target
       const opsUrl = opsTarget ? opsTarget.replace(/\/$/, "") : resolveOpsUrlFromTarget(baseUrl);
-      const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+
+      // Check for cluster-admin provisioning (new atomic flow)
+      const clusterAdminUser = opts.clusterAdminUser || process.env.FLAIR_CLUSTER_ADMIN_USER;
+      const clusterAdminPass = opts.clusterAdminPass || process.env.FLAIR_CLUSTER_ADMIN_PASS;
+      let flairAdminPass = opts.flairAdminPass || process.env.FLAIR_ADMIN_PASS;
+      let didProvision = false;
+
+      if (clusterAdminUser && clusterAdminPass) {
+        // ── New provisioning path: deploy Flair to Fabric, wait, provision super_user ──
+        if (!opts.force) {
+          console.error("Error: --force is required with --target/--ops-target (remote init provisions a live Fabric instance)");
+          console.error("  Pass --force to confirm this is intended.");
+          process.exit(1);
+        }
+
+        // Generate flair admin pass if not provided
+        if (!flairAdminPass) {
+          flairAdminPass = randomBytes(24).toString("base64url");
+        }
+
+        // Write the flair admin pass to secrets directory
+        const secretsDir = join(homedir(), ".tps", "secrets");
+        mkdirSync(secretsDir, { recursive: true });
+        const secretPath = join(secretsDir, "flair-fabric-hdb");
+        writeFileSync(secretPath, flairAdminPass + "\n", { mode: 0o600 });
+        console.log(`Admin password written to ${secretPath}`);
+
+        // Atomic provisioning: deploy + wait + provision user
+        await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
+        didProvision = true;
+      } else {
+        // ── Existing behavior: --admin-pass required for already-running Flair ──
+        if (!opts.adminPass) {
+          console.error("Error: --admin-pass is required with --target/--ops-target (remote init without --cluster-admin-user/--cluster-admin-pass)");
+          console.error("  Use --cluster-admin-user and --cluster-admin-pass for automated Fabric provisioning.");
+          process.exit(1);
+        }
+        if (!opts.force) {
+          const displayTarget = target || opsTarget;
+          console.error(`Error: --force is required with --target/--ops-target. Remote init writes to a live Flair instance at ${displayTarget}.`);
+          console.error("  Pass --force to confirm this is intended.");
+          process.exit(1);
+        }
+        flairAdminPass = opts.adminPass;
+      }
+
+      const adminUser = DEFAULT_ADMIN_USER;
+      const auth = `Basic ${Buffer.from(`${adminUser}:${flairAdminPass}`).toString("base64")}`;
       const role = opts.remote ? "hub" : undefined;
 
       // Generate or reuse keypair (only if --agent-id provided, or --remote needs
       // a public key for the FederationInstance row)
       let pubKeyB64url: string | undefined;
       let privPath: string | undefined;
+      let instanceId: string | undefined;
 
       if (agentId || role) {
         const keysDir: string = opts.keysDir ?? defaultKeysDir();
@@ -751,7 +978,7 @@ program
 
           // Seed agent via remote ops API
           console.log(`Seeding agent '${agentId}' on ${baseUrl}...`);
-          await seedAgentViaOpsApi(opsUrl, agentId, pubKeyB64url, adminUser, adminPass!);
+          await seedAgentViaOpsApi(opsUrl, agentId, pubKeyB64url, adminUser, flairAdminPass);
           console.log(`Agent '${agentId}' registered on remote instance ✓`);
         } else {
           // No agentId -- generate throwaway keypair for FederationInstance row
@@ -769,27 +996,55 @@ program
           const kp = nacl.sign.keyPair();
           pubKeyB64url = b64url(kp.publicKey);
         }
-        const instanceId = randomUUID();
+        instanceId = randomUUID();
         console.log(`Writing federation Instance (role=${role}) via ops API...`);
-        await seedFederationInstanceViaOpsApi(opsUrl, instanceId, pubKeyB64url, role, adminUser, adminPass!);
+        await seedFederationInstanceViaOpsApi(opsUrl, instanceId, pubKeyB64url, role, adminUser, flairAdminPass);
         console.log(`Federation Instance created: ${instanceId} (${role}) ✓`);
       }
 
       // Verify connectivity
-      console.log("Verifying remote connectivity...");
-      const verifyRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
-      if (!verifyRes.ok) {
-        console.error(`Remote health check failed: ${verifyRes.status}`);
-        process.exit(1);
+      if (didProvision) {
+        // Use /FederationInstance with Basic auth (not /Health which false-401s on Fabric)
+        console.log("Verifying remote connectivity...");
+        const verifyRes = await fetch(`${baseUrl}/FederationInstance`, {
+          headers: { Authorization: auth },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!verifyRes.ok) {
+          const body = await verifyRes.text().catch(() => "");
+          console.error(`Remote verification failed (${verifyRes.status}): ${body}`);
+          process.exit(1);
+        }
+        console.log("✓ Hub ready at " + baseUrl);
+      } else {
+        // Existing behavior: /Health check (already-running Flair)
+        console.log("Verifying remote connectivity...");
+        const verifyRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5000) });
+        if (!verifyRes.ok) {
+          console.error(`Remote health check failed: ${verifyRes.status}`);
+          process.exit(1);
+        }
+        console.log("Remote Flair instance healthy ✓");
       }
-      console.log("Remote Flair instance healthy ✓");
 
-      console.log(`\n✅ Remote Flair initialized`);
-      if (agentId) console.log(`   Agent ID:    ${agentId}`);
-      console.log(`   Target:      ${baseUrl}`);
-      if (agentId) console.log(`   Private key: ${privPath}`);
-      if (role) console.log(`   Role:         ${role}`);
-      console.log(`\n   Export: FLAIR_URL=${baseUrl}`);
+      // Print summary
+      if (didProvision) {
+        const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf-8"));
+        const flavor = pkg.version || "(unknown)";
+        const displayTarget = target || opsTarget;
+        console.log(`\n✓ Flair hub deployed to ${displayTarget}`);
+        console.log(`  Component: flair@${flavor}`);
+        console.log(`  Admin user: ${adminUser} (pass written to ${join(homedir(), ".tps", "secrets", "flair-fabric-hdb")})`);
+        if (instanceId) console.log(`  Instance: ${instanceId} (role=${role})`);
+        console.log(`  Federation: ready — run \`flair federation token\` to mint a pairing token`);
+      } else {
+        console.log(`\n✅ Remote Flair initialized`);
+        if (agentId) console.log(`   Agent ID:    ${agentId}`);
+        console.log(`   Target:      ${baseUrl}`);
+        if (agentId) console.log(`   Private key: ${privPath}`);
+        if (role) console.log(`   Role:         ${role}`);
+        console.log(`\n   Export: FLAIR_URL=${baseUrl}`);
+      }
       return;
     }
 
