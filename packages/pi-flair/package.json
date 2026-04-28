@@ -1,0 +1,47 @@
+{
+  "name": "@tpsdev-ai/pi-flair",
+  "version": "0.1.0",
+  "description": "Flair memory extension for pi — persistent memory access from within pi sessions",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc --noCheck",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@tpsdev-ai/flair-client": "0.6.3",
+    "typebox": "^1.0.84"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tpsdev-ai/flair.git",
+    "directory": "packages/pi-flair"
+  },
+  "homepage": "https://tps.dev/#flair",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "flair",
+    "memory",
+    "semantic-search",
+    "ai",
+    "agent"
+  ],
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.0.0"
+  }
+}
