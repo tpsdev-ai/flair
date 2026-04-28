@@ -651,12 +651,12 @@ describe("Commander program structure", () => {
   });
 
   // ── init ──
-  test("init command has --agent-id option defaulting to 'local'", () => {
+  test("init command has --agent-id option (no default)", () => {
     const initCmd = findCommand(program, ["init"]);
     expect(initCmd).not.toBeNull();
     const agentIdOpt = initCmd.options.find((o: any) => o.long === "--agent-id");
     expect(agentIdOpt).not.toBeNull();
-    expect(agentIdOpt.defaultValue).toBe("local");
+    expect(agentIdOpt.defaultValue).toBeUndefined();
   });
 
   test("init command has --skip-start and --skip-soul flags", () => {
