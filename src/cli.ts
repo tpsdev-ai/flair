@@ -401,9 +401,9 @@ async function seedAgentViaOpsApi(
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
     : `${opsPortOrUrl.replace(/\/$/, "")}/`;
-  const urlIsLocal = typeof opsPortOrUrl === "number" || isLocalBase(url);
-  // Only send Basic auth for remote targets; local targets use Harper's authorizeLocal
-  const auth = adminPass !== undefined && !urlIsLocal ? Buffer.from(`${adminUser}:${adminPass}`).toString("base64") : undefined;
+  // Send Basic auth whenever the caller passed an adminPass. The caller decides
+  // when to omit it (e.g., local target with authorizeLocal=true).
+  const auth = adminPass !== undefined ? Buffer.from(`${adminUser}:${adminPass}`).toString("base64") : undefined;
   const body = {
     operation: "insert",
     database: "flair",
@@ -440,9 +440,9 @@ export async function seedFederationInstanceViaOpsApi(
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
     : `${opsPortOrUrl.replace(/\/$/, "")}/`;
-  const urlIsLocal = typeof opsPortOrUrl === "number" || isLocalBase(url);
-  // Only send Basic auth for remote targets; local targets use Harper's authorizeLocal
-  const auth = adminPass !== undefined && !urlIsLocal ? Buffer.from(`${adminUser}:${adminPass}`).toString("base64") : undefined;
+  // Send Basic auth whenever the caller passed an adminPass. The caller decides
+  // when to omit it (e.g., local target with authorizeLocal=true).
+  const auth = adminPass !== undefined ? Buffer.from(`${adminUser}:${adminPass}`).toString("base64") : undefined;
   const now = new Date().toISOString();
   const body = {
     operation: "insert",
