@@ -19,6 +19,7 @@ import {
   resolveOpsUrlFromTarget,
   resolveHttpPort,
   program,
+  seedFederationInstanceViaOpsApi,
 } from "../../src/cli.js";
 
 // ─── resolveTarget ────────────────────────────────────────────────────────────
@@ -396,5 +397,176 @@ describe("--ops-target overrides ops URL derivation", () => {
 
     expect(baseUrl).toBe("https://localhost:19926");
     expect(opsUrl).toBe("https://localhost:19925"); // port-1 derivation
+  });
+});
+
+// ─── seedFederationInstanceViaOpsApi ────────────────────────────────────────────
+
+describe("seedFederationInstanceViaOpsApi", () => {
+  test("builds correct URL, body, auth for remote ops API call", async () => {
+    // Intercept fetch to inspect what the helper sends
+    let capturedUrl: string | undefined;
+    let capturedBody: any;
+    let capturedHeaders: Record<string, string> | undefined;
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async (url: any, opts: any) => {
+      capturedUrl = typeof url === "string" ? url : url.toString();
+      capturedBody = JSON.parse(opts.body);
+      capturedHeaders = opts.headers;
+      return new Response(null, { status: 200 });
+    };
+
+    try {
+      await seedFederationInstanceViaOpsApi(
+        "https://flair.heskew.harperfabric.com:9925",
+        "test-instance-uuid",
+        "base64pubkey==",
+        "hub",
+        "admin",
+        "sekret",
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // Verify URL has trailing slash (as seedAgentViaOpsApi does)
+    expect(capturedUrl).toBe("https://flair.heskew.harperfabric.com:9925/");
+
+    // Verify auth header
+    expect(capturedHeaders!["Authorization"]).toBe(
+      "Basic " + Buffer.from("admin:sekret").toString("base64"),
+    );
+
+    // Verify body structure
+    expect(capturedBody.operation).toBe("insert");
+    expect(capturedBody.database).toBe("flair");
+    expect(capturedBody.table).toBe("FederationInstance");
+    expect(capturedBody.records).toHaveLength(1);
+    expect(capturedBody.records[0].id).toBe("test-instance-uuid");
+    expect(capturedBody.records[0].publicKey).toBe("base64pubkey==");
+    expect(capturedBody.records[0].role).toBe("hub");
+    expect(capturedBody.records[0].status).toBe("active");
+    expect(capturedBody.records[0].createdAt).toBeDefined();
+    expect(capturedBody.records[0].updatedAt).toBeDefined();
+  });
+
+  test("normalizes trailing slash on ops URL", async () => {
+    const origFetch = globalThis.fetch;
+    let capturedUrl: string | undefined;
+    globalThis.fetch = async (url: any) => {
+      capturedUrl = typeof url === "string" ? url : url.toString();
+      return new Response(null, { status: 200 });
+    };
+
+    try {
+      await seedFederationInstanceViaOpsApi(
+        "https://flair.heskew.harperfabric.com:9925/",
+        "id",
+        "pk",
+        "hub",
+        "admin",
+        "pass",
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    expect(capturedUrl).toBe("https://flair.heskew.harperfabric.com:9925/");
+  });
+
+  test("uses localhost URL when opsPortOrUrl is a number", async () => {
+    const origFetch = globalThis.fetch;
+    let capturedUrl: string | undefined;
+    globalThis.fetch = async (url: any) => {
+      capturedUrl = typeof url === "string" ? url : url.toString();
+      return new Response(null, { status: 200 });
+    };
+
+    try {
+      await seedFederationInstanceViaOpsApi(
+        19925,
+        "id",
+        "pk",
+        "hub",
+        "admin",
+        "pass",
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    expect(capturedUrl).toBe("http://127.0.0.1:19925/");
+  });
+
+  test("handles 409 conflict idempotently (does not throw)", async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      return new Response("409 Conflict — duplicate key", { status: 409 });
+    };
+
+    try {
+      // Should not throw on 409
+      await seedFederationInstanceViaOpsApi(
+        19925,
+        "existing-id",
+        "pk",
+        "hub",
+        "admin",
+        "pass",
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // If we get here without throw, test passes
+    expect(true).toBe(true);
+  });
+
+  test("handles duplicate/already-exists response idempotently", async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      return new Response("already exists", { status: 500 });
+    };
+
+    try {
+      // Should not throw because body contains "already exists"
+      await seedFederationInstanceViaOpsApi(
+        19925,
+        "existing-id",
+        "pk",
+        "hub",
+        "admin",
+        "pass",
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    expect(true).toBe(true);
+  });
+
+  test("throws on non-409 error", async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      return new Response("Internal server error", { status: 500 });
+    };
+
+    try {
+      await seedFederationInstanceViaOpsApi(
+        19925,
+        "id",
+        "pk",
+        "hub",
+        "admin",
+        "pass",
+      );
+      // Should not reach here
+      expect("should have thrown").toBe("never");
+    } catch (e: any) {
+      expect(e.message).toContain("FederationInstance insert via ops API failed (500)");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });

@@ -406,6 +406,51 @@ async function seedAgentViaOpsApi(
   }
 }
 
+// ─── FederationInstance seed via ops API ──────────────────────────────────────
+//
+// Remote init writes FederationInstance through the ops API (Basic auth with
+// admin:admin-pass), not the REST API (which needs server-side HDB_ADMIN_PASSWORD
+// — unavailable on Fabric).  Same pattern as seedAgentViaOpsApi above.
+
+export async function seedFederationInstanceViaOpsApi(
+  opsPortOrUrl: number | string,
+  instanceId: string,
+  publicKey: string,
+  role: string,
+  adminUser: string,
+  adminPass: string,
+): Promise<void> {
+  const url = typeof opsPortOrUrl === "number"
+    ? `http://127.0.0.1:${opsPortOrUrl}/`
+    : `${opsPortOrUrl.replace(/\/$/, "")}/`;
+  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+  const now = new Date().toISOString();
+  const body = {
+    operation: "insert",
+    database: "flair",
+    table: "FederationInstance",
+    records: [{
+      id: instanceId,
+      publicKey,
+      role,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    }],
+  };
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
+    throw new Error(`FederationInstance insert via ops API failed (${res.status}): ${text}`);
+  }
+}
+
 // ─── Upgrade presence probes ──────────────────────────────────────────────────
 //
 // `flair upgrade` previously called `npm list -g <pkg>` to detect the installed
@@ -705,16 +750,9 @@ program
 
       // Write FederationInstance row if --remote (hub role)
       if (role) {
-        console.log(`Writing FederationInstance (role=${role}) on ${baseUrl}...`);
         const instanceId = randomUUID();
-        await api("PUT", "/FederationInstance", {
-          id: instanceId,
-          publicKey: pubKeyB64url,
-          role,
-          status: "active",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        }, { baseUrl });
+        console.log(`Writing FederationInstance (role=${role}) via ops API...`);
+        await seedFederationInstanceViaOpsApi(opsUrl, instanceId, pubKeyB64url, role, adminUser, adminPass!);
         console.log(`FederationInstance created: ${instanceId} (${role}) ✓`);
       }
 
