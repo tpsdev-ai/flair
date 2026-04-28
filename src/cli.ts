@@ -3903,6 +3903,13 @@ program
 
 // ─── flair deploy ─────────────────────────────────────────────────────────────
 
+// NOTE on env-var naming for `flair deploy`: the FABRIC_* env vars below intentionally
+// do NOT carry the FLAIR_ prefix that the rest of the CLI uses (FLAIR_ADMIN_PASS,
+// FLAIR_TARGET, FLAIR_PAIRING_TOKEN, etc.). FABRIC_* credentials are shared with
+// the broader TPS tooling stack — multiple tools deploy to the same Harper Fabric
+// org/cluster with the same auth, and demanding a tool-specific prefix would force
+// operators to maintain duplicated env vars. Per Kern review on PR #306: the
+// inconsistency is deliberate, document it here so the next agent doesn't "fix" it.
 program
   .command("deploy")
   .description("Deploy Flair as a component to a remote Harper Fabric cluster")
@@ -5411,4 +5418,6 @@ export {
   program,
   api,
   isLocalBase,
+  isLikelyRealSecret,
+  shouldShowInlineSecretWarning,
 };

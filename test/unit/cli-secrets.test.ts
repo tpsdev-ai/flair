@@ -9,7 +9,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { program } from "../../src/cli.js";
+import { program, isLikelyRealSecret, shouldShowInlineSecretWarning } from "../../src/cli.js";
 
 // ─── Secret-bearing flag audit ──────────────────────────────────────────────────
 
@@ -118,16 +118,10 @@ describe("Secret-bearing flag audit", () => {
 // ─── Inline-secret warning: secret detection helper ────────────────────────────
 
 describe("isLikelyRealSecret helper", () => {
-  // This helper function will be added to cli.ts
-  // It checks: length >= 8 AND (alphanumeric + URL-safe chars)
-
-  function isLikelyRealSecret(value: string): boolean {
-    if (!value || value.length < 8) return false;
-    // Match typical password/token format: alphanumeric + URL-safe punct
-    // Pattern: [A-Za-z0-9._-]+ allows hyphens and underscores
-    const pattern = /^[A-Za-z0-9._-]+$/;
-    return pattern.test(value);
-  }
+  // Tests use the real exported isLikelyRealSecret from src/cli.ts so the
+  // test suite can't drift from the actual regex in production. (Per Kern
+  // review on PR #306 — the prior duplicated regex allowed `@` and `/`,
+  // letting tests pass for values the implementation would reject.)
 
   test("short strings are not considered real secrets", () => {
     expect(isLikelyRealSecret("short")).toBe(false); // len < 8
@@ -170,37 +164,10 @@ describe("isLikelyRealSecret helper", () => {
 // ─── Inline-secret warning: warning logic ───────────────────────────────────────
 
 describe("shouldShowInlineSecretWarning helper", () => {
-  // Checks:
-  // 1. Flag is a secret-bearing flag (not --target which is a URL)
-  // 2. Value came from argv (not from env)
-  // 3. Value looks like a real secret (length >= 8, URL-safe chars)
-
-  function shouldShowInlineSecretWarning(
-    flagName: string,
-    optValue: string | undefined,
-    fromEnv: boolean,
-    secretFlagNames: Set<string>
-  ): boolean {
-    // Skip if value is not provided
-    if (!optValue || optValue === "") return false;
-
-    // Skip URLs (not secrets)
-    if (flagName === "--target" || flagName === "--url") return false;
-
-    // Only warn for secret-bearing flags
-    if (!secretFlagNames.has(flagName)) return false;
-
-    // Skip if value came from env (not argv)
-    if (fromEnv) return false;
-
-    // Check if value looks like a real secret
-    if (optValue.length < 8) return false;
-
-    const secretPattern = /^[A-Za-z0-9._\-/@]+$/;
-    if (!secretPattern.test(optValue)) return false;
-
-    return true;
-  }
+  // Tests call the real exported shouldShowInlineSecretWarning from src/cli.ts
+  // (signature: optValue, fromEnv, secretFlagNames, flagName) so the test
+  // suite stays locked to the actual production behavior. Per Kern review
+  // on PR #306.
 
   const secretFlags = new Set([
     "--admin-pass",
@@ -214,20 +181,20 @@ describe("shouldShowInlineSecretWarning helper", () => {
 
   test("inline secret flag shows warning", () => {
     const result = shouldShowInlineSecretWarning(
-      "--admin-pass",
-      "S3cur3P@ssw0rd",
+      "S3cur3PSsw0rd",
       false, // from argv
-      secretFlags
+      secretFlags,
+      "--admin-pass"
     );
     expect(result).toBe(true);
   });
 
   test("env var for secret flag does NOT show warning", () => {
     const result = shouldShowInlineSecretWarning(
-      "--admin-pass",
-      "S3cur3P@ssw0rd",
+      "S3cur3PSsw0rd",
       true, // from env
-      secretFlags
+      secretFlags,
+      "--admin-pass"
     );
     expect(result).toBe(false);
   });
@@ -236,14 +203,14 @@ describe("shouldShowInlineSecretWarning helper", () => {
   // to be set." When both inline and env are set, inline wins via `??` precedence,
   // so the warning must still fire. Sherlock review on PR #306.
   test("inline secret with env ALSO set: warning still fires (inline overrides env)", () => {
-    const optsAdminPass = "S3cur3P@ssw0rd";
-    const envAdminPass = "S0meOtherPass!";
+    const optsAdminPass = "S3cur3PSsw0rd";
+    const envAdminPass = "S0meOtherPass1";
     const fromEnv = !optsAdminPass && !!envAdminPass; // false — inline wins
     const result = shouldShowInlineSecretWarning(
-      "--admin-pass",
       optsAdminPass,
       fromEnv,
-      secretFlags
+      secretFlags,
+      "--admin-pass"
     );
     expect(fromEnv).toBe(false);
     expect(result).toBe(true);
@@ -251,13 +218,13 @@ describe("shouldShowInlineSecretWarning helper", () => {
 
   test("env-only secret (no inline): warning suppressed", () => {
     const optsAdminPass = undefined;
-    const envAdminPass = "S0meOtherPass!";
+    const envAdminPass = "S0meOtherPass1";
     const fromEnv = !optsAdminPass && !!envAdminPass; // true — env is the source
     const result = shouldShowInlineSecretWarning(
-      "--admin-pass",
       optsAdminPass,
       fromEnv,
-      secretFlags
+      secretFlags,
+      "--admin-pass"
     );
     expect(fromEnv).toBe(true);
     expect(result).toBe(false);
@@ -265,52 +232,68 @@ describe("shouldShowInlineSecretWarning helper", () => {
 
   test("URL flag does NOT show warning even with value from argv", () => {
     const result = shouldShowInlineSecretWarning(
-      "--target",
       "https://flair.example.com:9926",
       false, // from argv
-      secretFlags
+      secretFlags,
+      "--target"
     );
     expect(result).toBe(false);
   });
 
   test("short value does NOT trigger warning", () => {
     const result = shouldShowInlineSecretWarning(
-      "--admin-pass",
       "short",
       false, // from argv
-      secretFlags
+      secretFlags,
+      "--admin-pass"
     );
     expect(result).toBe(false);
   });
 
   test("non-secret-like value does NOT trigger warning", () => {
     const result = shouldShowInlineSecretWarning(
-      "--admin-pass",
       "password with spaces",
       false, // from argv
-      secretFlags
+      secretFlags,
+      "--admin-pass"
     );
     expect(result).toBe(false);
   });
 
   test("non-secret flag does NOT show warning", () => {
     const result = shouldShowInlineSecretWarning(
-      "--port",
       "9926",
       false, // from argv
-      secretFlags
+      secretFlags,
+      "--port"
     );
     expect(result).toBe(false);
   });
 
   test("token flag with real token shows warning", () => {
     const result = shouldShowInlineSecretWarning(
-      "--token",
       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
       false, // from argv
-      secretFlags
+      secretFlags,
+      "--token"
     );
     expect(result).toBe(true);
+  });
+
+  // Regression for Kern's PR #306 review note: prior test had `S3cur3P@ssw0rd`
+  // which the old test-local regex accepted but the real implementation rejects
+  // (no `@` in the production charset). Confirm the real impl rejects.
+  test("regression: real impl rejects '@' chars (test-impl drift caught by Kern)", () => {
+    const result = shouldShowInlineSecretWarning(
+      "S3cur3P@ssw0rd",
+      false,
+      secretFlags,
+      "--admin-pass"
+    );
+    expect(result).toBe(false);
+    // And isLikelyRealSecret directly:
+    expect(isLikelyRealSecret("S3cur3P@ssw0rd")).toBe(false);
+    expect(isLikelyRealSecret("abc/def/ghi")).toBe(false);
   });
 });
 
