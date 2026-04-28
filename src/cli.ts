@@ -41,6 +41,56 @@ function signBody(body: Record<string, any>, secretKey: Uint8Array): string {
   return Buffer.from(sig).toString("base64url");
 }
 
+// ─── Secret detection helpers ────────────────────────
+
+/**
+ * Check if a value looks like a real secret/password/token.
+ * Triggers warning when:
+ *   - length >= 8
+ *   - contains only alphanumerics and URL-safe punctuation (._-)
+ *   - NOT a URL (doesn't contain ://)
+ */
+function isLikelyRealSecret(value: string): boolean {
+  if (!value || value.length < 8) return false;
+  if (value.includes("://")) return false; // exclude URLs
+  // Match typical password/token format: alphanumerics + URL-safe punct
+  const pattern = /^[A-Za-z0-9._-]+$/;
+  return pattern.test(value);
+}
+
+/**
+ * Determine if we should show an inline-secret warning.
+ * 
+ * @param optValue - The value from the command line option
+ * @param fromEnv - Whether the value came from an environment variable (true = no warning)
+ * @param secretFlagNames - Set of flag names that carry secrets
+ * @param flagName - The flag being checked
+ * @returns true if warning should be shown
+ */
+function shouldShowInlineSecretWarning(
+  optValue: string | undefined,
+  fromEnv: boolean,
+  secretFlagNames: Set<string>,
+  flagName: string
+): boolean {
+  // Skip if no value provided
+  if (!optValue || optValue === "") return false;
+
+  // Skip URLs (not secrets)
+  if (flagName === "--target" || flagName === "--url") return false;
+
+  // Only warn for secret-bearing flags
+  if (!secretFlagNames.has(flagName)) return false;
+
+  // Skip if value came from env (not argv)
+  if (fromEnv) return false;
+
+  // Check if value looks like a real secret
+  if (!isLikelyRealSecret(optValue)) return false;
+
+  return true;
+}
+
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
 const DEFAULT_PORT = 19926;
@@ -1079,6 +1129,14 @@ program
     const dataDir: string = opts.dataDir ?? defaultDataDir();
 
     // Admin password: generate if not provided, NEVER written to disk
+    // Check if admin-pass came from argv (not env) and is a real secret
+    const adminPassFromEnv = !!process.env.FLAIR_ADMIN_PASS;
+    if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
+      console.error(
+        "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
+        "to keep secrets out of shell history."
+      );
+    }
     const adminPass: string = opts.adminPass ?? Buffer.from(nacl.randomBytes(18)).toString("base64url");
     const adminUser = DEFAULT_ADMIN_USER;
 
@@ -1435,6 +1493,14 @@ agent
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
     const port = resolveHttpPort(opts);
+    // Check if admin-pass came from argv (not env) and is a real secret
+    const adminPassFromEnv = !!process.env.FLAIR_ADMIN_PASS || !!process.env.HDB_ADMIN_PASSWORD;
+    if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
+      console.error(
+        "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
+        "to keep secrets out of shell history."
+      );
+    }
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
     if (adminPass) {
       // Use admin basic auth against ops API to list agents directly
@@ -1490,6 +1556,14 @@ agent
   .action(async (id: string, opts) => {
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
+    // Check if admin-pass came from argv (not env) and is a real secret
+    const adminPassFromEnv = !!process.env.FLAIR_ADMIN_PASS;
+    if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
+      console.error(
+        "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
+        "to keep secrets out of shell history."
+      );
+    }
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = DEFAULT_ADMIN_USER;
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
@@ -2277,7 +2351,7 @@ federation
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password")
   .option("--ops-port <port>", "Harper operations API port")
-  .option("--token <token>", "One-time pairing token from hub admin")
+  .option("--token <token>", "One-time pairing token from hub admin (env: FLAIR_PAIRING_TOKEN)")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .action(async (hubUrl: string, opts) => {
@@ -2292,16 +2366,27 @@ federation
         process.exit(1);
       }
 
+      // Warning: inline token may leak to shell history
+      const tokenFromEnv = !!process.env.FLAIR_PAIRING_TOKEN;
+      if (shouldShowInlineSecretWarning(opts.token, tokenFromEnv, new Set(["--token"]), "--token")) {
+        console.error(
+          "warning: --token passed inline. Consider --token-from <file> or FLAIR_PAIRING_TOKEN env " +
+          "to keep secrets out of shell history."
+        );
+      }
+
       // Load secret key and sign the pairing request. The pairing token is
       // included in the signed body (not in an Authorization header) because
       // Harper's auth layer claims any "Bearer X" Authorization header for
       // itself and 401s before our resource ever runs.
       const secretKey = await loadInstanceSecretKey(instance.id, opts);
+      // Env var fallback for --token: FLAIR_PAIRING_TOKEN
+      const pairingToken = opts.token || process.env.FLAIR_PAIRING_TOKEN;
       const pairBody: Record<string, any> = {
         instanceId: instance.id,
         publicKey: instance.publicKey,
         role: "spoke",
-        pairingToken: opts.token,
+        pairingToken,
       };
       const signedBody = signRequestBody(pairBody, secretKey);
 
