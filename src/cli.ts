@@ -235,6 +235,12 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
   //    For local targets with authorizeLocal=true, skip Basic auth and let Harper handle it.
   // 3. FLAIR_AGENT_ID env + key file → Ed25519 signature (standard)
   // 4. No auth (Harper authorizeLocal handles local; remote will 401)
+  //
+  // NOTE: this function is for the Harper HTTP/REST API only. The Harper
+  // operations API (used by seedAgentViaOpsApi / seedFederationInstanceViaOpsApi)
+  // does NOT honor authorizeLocal — it always requires Basic admin auth, and
+  // those helpers send it unconditionally. authorizeLocal=true affects this
+  // path; it does not affect ops-API calls.
   let authHeader: string | undefined;
   const token = process.env.FLAIR_TOKEN;
   if (token) {
