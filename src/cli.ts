@@ -390,6 +390,11 @@ function readHarperPid(dataDir: string): number | null {
 /**
  * Seed an agent record via the Harper operations API.
  * Accepts either a port number (localhost) or a full URL string (--target).
+ *
+ * `adminPass` is typed as optional but in practice the Harper operations API
+ * always requires Basic admin auth — every existing call site passes one.
+ * The optional signature leaves headroom for a future Harper that honors
+ * `authorizeLocal` on its ops endpoint; until then, callers must pass it.
  */
 async function seedAgentViaOpsApi(
   opsPortOrUrl: number | string,
@@ -428,6 +433,11 @@ async function seedAgentViaOpsApi(
 // Remote init writes FederationInstance through the ops API (Basic auth with
 // admin:admin-pass), not the REST API (which needs server-side HDB_ADMIN_PASSWORD
 // — unavailable on Fabric).  Same pattern as seedAgentViaOpsApi above.
+//
+// `adminPass` is optional in the signature for symmetry with seedAgentViaOpsApi
+// and to keep the door open for a future Harper that honors authorizeLocal on
+// its ops endpoint. Today the Harper operations API always requires Basic admin
+// auth; every current caller passes it.
 
 export async function seedFederationInstanceViaOpsApi(
   opsPortOrUrl: number | string,
