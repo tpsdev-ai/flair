@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### ✨ UX
+
+- **`flair init` and CLI fetches no longer require `--admin-pass` for local instances with `authorizeLocal: true`** (ops-vu31): when targeting localhost (no `--target`/`FLAIR_TARGET`), the CLI now skips Basic auth and lets Harper's `authorizeLocal` trust loopback requests. Remote targets still require `--admin-pass`. Sherlock-approved with a defense-in-depth follow-up noted on the auth-middleware locality guard.
+
+### ⚠️ Behavioral Change
+
+- **Local CLI fetches now ignore `FLAIR_ADMIN_PASS` / `HDB_ADMIN_PASSWORD`** when the target is localhost. Previously, setting either of these envs would force Basic auth even on local targets. If your local Flair has `authorizeLocal: false` (the deprecated default in some setups), local CLI calls will now 401; either flip `authorizeLocal: true` in `~/.flair/config.yaml` or use `FLAIR_TOKEN` / Ed25519 agent auth instead. Remote targets are unaffected — `--admin-pass` continues to work as before.
+
 ## 0.6.3 (2026-04-26)
 
 ### 🐛 Bug Fixes

@@ -212,23 +212,40 @@ function b64url(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
+function isLocalBase(base: string): boolean {
+  try {
+    const url = new URL(base);
+    return url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
+  } catch {
+    return !base;
+  }
+}
+
 async function api(method: string, path: string, body?: any, options?: { baseUrl?: string }): Promise<any> {
   // Resolve port: FLAIR_URL env > ~/.flair/config.yaml > default 9926
   // When baseUrl is provided (--target), use it directly.
   const savedPort = readPortFromConfig();
   const defaultUrl = savedPort ? `http://127.0.0.1:${savedPort}` : `http://127.0.0.1:${DEFAULT_PORT}`;
   const base = options?.baseUrl ?? (process.env.FLAIR_URL || defaultUrl);
+  const isLocal = isLocalBase(base);
 
   // Auth resolution order:
   // 1. FLAIR_TOKEN env → Bearer token (backward compat)
-  // 2. FLAIR_AGENT_ID env + key file → Ed25519 signature (standard)
-  // 3. --agent flag extracted from body.agentId + key file → Ed25519 signature
-  // 4. No auth (will 401 on any authenticated endpoint)
+  // 2. FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD env → Basic admin auth (remote targets only).
+  //    For local targets with authorizeLocal=true, skip Basic auth and let Harper handle it.
+  // 3. FLAIR_AGENT_ID env + key file → Ed25519 signature (standard)
+  // 4. No auth (Harper authorizeLocal handles local; remote will 401)
+  //
+  // NOTE: this function is for the Harper HTTP/REST API only. The Harper
+  // operations API (used by seedAgentViaOpsApi / seedFederationInstanceViaOpsApi)
+  // does NOT honor authorizeLocal — it always requires Basic admin auth, and
+  // those helpers send it unconditionally. authorizeLocal=true affects this
+  // path; it does not affect ops-API calls.
   let authHeader: string | undefined;
   const token = process.env.FLAIR_TOKEN;
   if (token) {
     authHeader = `Bearer ${token}`;
-  } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
+  } else if (!isLocal && (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD)) {
     // Admin Basic auth — used by federation, backup, and other admin CLI commands
     const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD!;
     authHeader = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
@@ -379,18 +396,25 @@ function readHarperPid(dataDir: string): number | null {
 /**
  * Seed an agent record via the Harper operations API.
  * Accepts either a port number (localhost) or a full URL string (--target).
+ *
+ * `adminPass` is typed as optional but in practice the Harper operations API
+ * always requires Basic admin auth — every existing call site passes one.
+ * The optional signature leaves headroom for a future Harper that honors
+ * `authorizeLocal` on its ops endpoint; until then, callers must pass it.
  */
 async function seedAgentViaOpsApi(
   opsPortOrUrl: number | string,
   agentId: string,
   pubKeyB64url: string,
   adminUser: string,
-  adminPass: string,
+  adminPass?: string,
 ): Promise<void> {
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
     : `${opsPortOrUrl.replace(/\/$/, "")}/`;
-  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+  // Send Basic auth whenever the caller passed an adminPass. The caller decides
+  // when to omit it (e.g., local target with authorizeLocal=true).
+  const auth = adminPass !== undefined ? Buffer.from(`${adminUser}:${adminPass}`).toString("base64") : undefined;
   const body = {
     operation: "insert",
     database: "flair",
@@ -399,7 +423,7 @@ async function seedAgentViaOpsApi(
   };
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Basic ${auth}` } : {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
@@ -415,6 +439,11 @@ async function seedAgentViaOpsApi(
 // Remote init writes FederationInstance through the ops API (Basic auth with
 // admin:admin-pass), not the REST API (which needs server-side HDB_ADMIN_PASSWORD
 // — unavailable on Fabric).  Same pattern as seedAgentViaOpsApi above.
+//
+// `adminPass` is optional in the signature for symmetry with seedAgentViaOpsApi
+// and to keep the door open for a future Harper that honors authorizeLocal on
+// its ops endpoint. Today the Harper operations API always requires Basic admin
+// auth; every current caller passes it.
 
 export async function seedFederationInstanceViaOpsApi(
   opsPortOrUrl: number | string,
@@ -422,12 +451,14 @@ export async function seedFederationInstanceViaOpsApi(
   publicKey: string,
   role: string,
   adminUser: string,
-  adminPass: string,
+  adminPass?: string,
 ): Promise<void> {
   const url = typeof opsPortOrUrl === "number"
     ? `http://127.0.0.1:${opsPortOrUrl}/`
     : `${opsPortOrUrl.replace(/\/$/, "")}/`;
-  const auth = Buffer.from(`${adminUser}:${adminPass}`).toString("base64");
+  // Send Basic auth whenever the caller passed an adminPass. The caller decides
+  // when to omit it (e.g., local target with authorizeLocal=true).
+  const auth = adminPass !== undefined ? Buffer.from(`${adminUser}:${adminPass}`).toString("base64") : undefined;
   const now = new Date().toISOString();
   const body = {
     operation: "insert",
@@ -444,7 +475,7 @@ export async function seedFederationInstanceViaOpsApi(
   };
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Basic ${auth}` } : {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
@@ -471,7 +502,7 @@ export async function callOpsApi(
   const auth = Buffer.from(`${user}:${pass}`).toString("base64");
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Basic ${auth}` } : {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000),
   });
@@ -5289,4 +5320,6 @@ export {
   b64,
   b64url,
   program,
+  api,
+  isLocalBase,
 };
