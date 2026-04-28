@@ -1164,14 +1164,16 @@ agent
       const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
-        body: JSON.stringify({ operation: "sql", sql: "SELECT id, name, createdAt FROM flair.Agent ORDER BY createdAt" }),
+        body: JSON.stringify({ operation: "search_by_value", schema: "flair", table: "Agent", search_attribute: "id", search_type: "starts_with", search_value: "", get_attributes: ["id", "name", "createdAt"] }),
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         console.error(`Error: ${res.status} ${text}`);
         process.exit(1);
       }
-      console.log(JSON.stringify(await res.json(), null, 2));
+      const agents = await res.json() as any[];
+      agents.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
+      console.log(JSON.stringify(agents, null, 2));
     } else {
       // Localhost operator path: allow IDs-only enumeration without per-agent auth
       // This treats localhost as a trusted boundary for read-only public metadata
@@ -1505,14 +1507,20 @@ principal
       process.exit(1);
     }
 
-    const kindFilter = opts.kind ? ` WHERE kind = '${opts.kind}'` : "";
     const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const conditions = opts.kind
+      ? [{ search_attribute: "kind", search_type: "equals", search_value: opts.kind }]
+      : [{ search_attribute: "id", search_type: "starts_with", search_value: "" }];
     const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify({
-        operation: "sql",
-        sql: `SELECT id, name, kind, status, defaultTrustTier, admin, runtime, createdAt FROM flair.Agent${kindFilter} ORDER BY createdAt`,
+        operation: "search_by_conditions",
+        schema: "flair",
+        table: "Agent",
+        operator: "and",
+        conditions,
+        get_attributes: ["id", "name", "kind", "status", "defaultTrustTier", "admin", "runtime", "createdAt"],
       }),
     });
     if (!res.ok) {
@@ -1522,6 +1530,7 @@ principal
     }
 
     const records = await res.json() as any[];
+    records.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
     if (records.length === 0) {
       console.log("No principals found.");
       return;
@@ -1701,8 +1710,13 @@ idp
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify({
-        operation: "sql",
-        sql: "SELECT id, name, issuer, requiredDomain, jitProvision, enabled, createdAt FROM flair.IdpConfig ORDER BY createdAt",
+        operation: "search_by_value",
+        schema: "flair",
+        table: "IdpConfig",
+        search_attribute: "id",
+        search_type: "starts_with",
+        search_value: "",
+        get_attributes: ["id", "name", "issuer", "requiredDomain", "jitProvision", "enabled", "createdAt"],
       }),
     });
     if (!res.ok) {
@@ -1712,6 +1726,7 @@ idp
     }
 
     const records = await res.json() as any[];
+    records.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
     if (records.length === 0) {
       console.log("No IdPs configured.");
       return;
@@ -1768,20 +1783,13 @@ idp
       process.exit(1);
     }
 
-    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
-    const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: auth },
-      body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.IdpConfig WHERE id = '${id}'` }),
-    });
-
-    const records = await res.json() as any[];
-    if (records.length === 0) {
+    let cfg: any;
+    try {
+      cfg = await api("GET", `/IdpConfig/${id}`);
+    } catch {
       console.error(`IdP '${id}' not found`);
       process.exit(1);
     }
-
-    const cfg = records[0];
     console.log(`Testing IdP: ${cfg.name} (${cfg.issuer})`);
     console.log(`  JWKS endpoint: ${cfg.jwksUri}`);
 
@@ -1924,7 +1932,7 @@ async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: str
   const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: auth },
-    body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.Instance WHERE id = '${instanceId}'` }),
+    body: JSON.stringify({ operation: "search_by_value", schema: "flair", table: "Instance", search_attribute: "id", search_type: "equals", search_value: instanceId, get_attributes: ["*"] }),
   });
   if (res.ok) {
     const rows = await res.json() as any[];
@@ -2137,7 +2145,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         res = await fetch(`${opsEndpoint}/`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.${table} WHERE updatedAt > '${since}'` }),
+          body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [{ search_attribute: "updatedAt", search_type: "greater_than", search_value: since }], get_attributes: ["*"] }),
           signal: AbortSignal.timeout(15_000),
         });
       } catch (err: any) {
