@@ -2132,19 +2132,24 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
 
     for (const table of tables) {
+      let res: Response;
       try {
-        const res = await fetch(`${opsEndpoint}/`, {
+        res = await fetch(`${opsEndpoint}/`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: auth },
           body: JSON.stringify({ operation: "sql", sql: `SELECT * FROM flair.${table} WHERE updatedAt > '${since}'` }),
           signal: AbortSignal.timeout(15_000),
         });
-        if (res.ok) {
-          for (const row of await res.json() as any[]) {
-            records.push({ table, id: row.id, data: row, updatedAt: row.updatedAt ?? row.createdAt, originatorInstanceId: instance.id });
-          }
-        }
-      } catch {}
+      } catch (err: any) {
+        return { pushed: 0, skipped: 0, error: err instanceof Error ? err : new Error(String(err)) };
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        return { pushed: 0, skipped: 0, error: new Error(`SQL query failed (${res.status}): ${text}`) };
+      }
+      for (const row of await res.json() as any[]) {
+        records.push({ table, id: row.id, data: row, updatedAt: row.updatedAt ?? row.createdAt, originatorInstanceId: instance.id });
+      }
     }
 
     if (records.length === 0) { console.log("No changes since last sync."); return { pushed: 0, skipped: 0 }; }
@@ -2190,7 +2195,7 @@ federation
   });
 
 export async function runFederationWatch(opts: any): Promise<void> {
-  const intervalMs = (parseFloat(opts.interval) || 30) * 1000;
+  const intervalMs = Math.max(5, parseFloat(opts.interval) || 30) * 1000;
   let stopped = false;
   const stop = () => { stopped = true; };
   process.on("SIGINT", stop);
