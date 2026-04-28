@@ -441,7 +441,7 @@ describe("seedFederationInstanceViaOpsApi", () => {
     // Verify body structure
     expect(capturedBody.operation).toBe("insert");
     expect(capturedBody.database).toBe("flair");
-    expect(capturedBody.table).toBe("FederationInstance");
+    expect(capturedBody.table).toBe("Instance");
     expect(capturedBody.records).toHaveLength(1);
     expect(capturedBody.records[0].id).toBe("test-instance-uuid");
     expect(capturedBody.records[0].publicKey).toBe("base64pubkey==");
@@ -564,7 +564,7 @@ describe("seedFederationInstanceViaOpsApi", () => {
       // Should not reach here
       expect("should have thrown").toBe("never");
     } catch (e: any) {
-      expect(e.message).toContain("FederationInstance insert via ops API failed (500)");
+      expect(e.message).toContain("Federation Instance insert via ops API failed (500)");
     } finally {
       globalThis.fetch = origFetch;
     }

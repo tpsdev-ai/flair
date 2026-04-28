@@ -428,7 +428,7 @@ export async function seedFederationInstanceViaOpsApi(
   const body = {
     operation: "insert",
     database: "flair",
-    table: "FederationInstance",
+    table: "Instance",
     records: [{
       id: instanceId,
       publicKey,
@@ -447,7 +447,7 @@ export async function seedFederationInstanceViaOpsApi(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
-    throw new Error(`FederationInstance insert via ops API failed (${res.status}): ${text}`);
+    throw new Error(`Federation Instance insert via ops API failed (${res.status}): ${text}`);
   }
 }
 
