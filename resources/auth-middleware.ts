@@ -147,13 +147,20 @@ server.http(async (request: any, nextLayer: any) => {
 
   const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
 
-  // ── Basic admin auth ──────────────────────────────────────────────────────
-  // Allow Basic auth with the admin password for CLI operations (backup, etc.)
-  // This is checked BEFORE Ed25519 so admin tools can use simple auth.
+  // ── Basic admin / super_user auth ──────────────────────────────────────────
+  // Allow Basic auth for CLI operations (backup, etc.). Two paths:
+  // 1. HDB_ADMIN_PASSWORD env-var fast-path (user must be "admin" with exact pass)
+  // 2. Harper super_user check — any user with super_user:true permission accepted
+  // Checked BEFORE Ed25519 so admin tools can use simple auth.
   if (header.startsWith("Basic ")) {
     try {
       const decoded = Buffer.from(header.slice(6), "base64").toString("utf-8");
-      const [user, pass] = decoded.split(":");
+      const colonIdx = decoded.indexOf(":");
+      const user = colonIdx >= 0 ? decoded.slice(0, colonIdx) : decoded;
+      const pass = colonIdx >= 0 ? decoded.slice(colonIdx + 1) : "";
+
+      // Path 1: Env-var fast-path (back-compat). Only matches user==="admin"
+      // with exact HDB_ADMIN_PASSWORD. Non-match falls through to Path 2.
       const adminPass = getAdminPass();
       if (adminPass !== null && user === "admin" && pass === adminPass) {
         // Mark as verified and set Harper user directly
@@ -163,11 +170,23 @@ server.http(async (request: any, nextLayer: any) => {
         } catch { /* fallback: let original Basic header pass through */ }
         request.headers.set("x-tps-agent", "admin");
         if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = "admin";
-        // Basic admin auth IS admin — resource-level checks (SemanticSearch,
-        // MemoryBootstrap, MemoryReflect, MemoryConsolidate) gate cross-agent
-        // access on this flag. Prior to 0.5.5 the check was a no-op so this
-        // was never needed; now it must be set.
         request.tpsAgent = "admin";
+        request.tpsAgentIsAdmin = true;
+        return nextLayer(request);
+      }
+
+      // Path 2: Harper super_user check — any user with super_user:true
+      let harperUser: any = null;
+      try {
+        harperUser = await (server as any).getUser(user, pass, request);
+      } catch { /* fall through — invalid creds, non-existent user, etc. */ }
+
+      if (harperUser?.role?.permission?.super_user === true) {
+        (request as any)._tpsAuthVerified = true;
+        request.user = harperUser;
+        request.headers.set("x-tps-agent", user);
+        if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = user;
+        request.tpsAgent = user;
         request.tpsAgentIsAdmin = true;
         return nextLayer(request);
       }
