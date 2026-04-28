@@ -212,23 +212,34 @@ function b64url(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
+function isLocalBase(base: string): boolean {
+  try {
+    const url = new URL(base);
+    return url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
+  } catch {
+    return !base;
+  }
+}
+
 async function api(method: string, path: string, body?: any, options?: { baseUrl?: string }): Promise<any> {
   // Resolve port: FLAIR_URL env > ~/.flair/config.yaml > default 9926
   // When baseUrl is provided (--target), use it directly.
   const savedPort = readPortFromConfig();
   const defaultUrl = savedPort ? `http://127.0.0.1:${savedPort}` : `http://127.0.0.1:${DEFAULT_PORT}`;
   const base = options?.baseUrl ?? (process.env.FLAIR_URL || defaultUrl);
+  const isLocal = isLocalBase(base);
 
   // Auth resolution order:
   // 1. FLAIR_TOKEN env → Bearer token (backward compat)
-  // 2. FLAIR_AGENT_ID env + key file → Ed25519 signature (standard)
-  // 3. --agent flag extracted from body.agentId + key file → Ed25519 signature
-  // 4. No auth (will 401 on any authenticated endpoint)
+  // 2. FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD env → Basic admin auth (remote targets only).
+  //    For local targets with authorizeLocal=true, skip Basic auth and let Harper handle it.
+  // 3. FLAIR_AGENT_ID env + key file → Ed25519 signature (standard)
+  // 4. No auth (Harper authorizeLocal handles local; remote will 401)
   let authHeader: string | undefined;
   const token = process.env.FLAIR_TOKEN;
   if (token) {
     authHeader = `Bearer ${token}`;
-  } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
+  } else if (!isLocal && (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD)) {
     // Admin Basic auth — used by federation, backup, and other admin CLI commands
     const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD!;
     authHeader = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
@@ -5289,4 +5300,6 @@ export {
   b64,
   b64url,
   program,
+  api,
+  isLocalBase,
 };

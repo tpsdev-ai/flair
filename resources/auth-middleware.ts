@@ -142,6 +142,12 @@ server.http(async (request: any, nextLayer: any) => {
     url.pathname === "/OAuthMetadata"
   ) return nextLayer(request);
 
+  // If Harper has already authorized this request (e.g. authorizeLocal=true on localhost),
+  // trust Harper's auth decision and pass through without requiring additional headers.
+  if (request.user?.role?.permission?.super_user === true) {
+    return nextLayer(request);
+  }
+
   // Skip re-entry: if we already swapped auth to Basic, pass through
   if ((request as any)._tpsAuthVerified) return nextLayer(request);
 
