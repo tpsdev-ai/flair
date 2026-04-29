@@ -44,6 +44,18 @@
         "@types/node": "24.11.0",
       },
     },
+    "packages/pi-flair": {
+      "name": "@tpsdev-ai/pi-flair",
+      "version": "0.1.0",
+      "dependencies": {
+        "@sinclair/typebox": "0.34.48",
+        "@tpsdev-ai/flair-client": "0.6.3",
+      },
+      "devDependencies": {
+        "@types/node": "^24.0.0",
+        "typescript": "^5.0.0",
+      },
+    },
     "plugins/openclaw-flair": {
       "name": "@tpsdev-ai/openclaw-flair",
       "version": "0.6.3",
@@ -681,6 +693,8 @@
     "@tpsdev-ai/flair-mcp": ["@tpsdev-ai/flair-mcp@workspace:packages/flair-mcp"],
 
     "@tpsdev-ai/openclaw-flair": ["@tpsdev-ai/openclaw-flair@workspace:plugins/openclaw-flair"],
+
+    "@tpsdev-ai/pi-flair": ["@tpsdev-ai/pi-flair@workspace:packages/pi-flair"],
 
     "@turf/area": ["@turf/area@6.5.0", "", { "dependencies": { "@turf/helpers": "^6.5.0", "@turf/meta": "^6.5.0" } }, "sha512-xCZdiuojokLbQ+29qR6qoMD89hv+JAgWjLrwSEWL+3JV8IXKeNFl6XkEJz9HGkVpnXvQKJoRz4/liT+8ZZ5Jyg=="],
 
