@@ -17,11 +17,12 @@ export interface Client {
 
 // ---- Detection helpers ----------------------------------------------------------
 
+import { spawnSync } from "node:child_process";
+
 function claudeCodeDetect(): boolean {
   try {
     // Check if npx claude-code is available or if Claude Code is installed
-    const spawn = require("node:child_process").spawnSync;
-    const result = spawn("npm", ["list", "-g", "@anthropic-ai/claude-code"], {
+    const result = spawnSync("npm", ["list", "-g", "@anthropic-ai/claude-code"], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     return result.status === 0;
@@ -32,15 +33,14 @@ function claudeCodeDetect(): boolean {
 
 function codexDetect(): boolean {
   try {
-    const spawn = require("node:child_process").spawnSync;
     // Check if codex is available in PATH or via npx
-    const result = spawn("which", ["codex"], { stdio: ["ignore", "ignore", "ignore"] });
-    if (result.status === 0) return true;
+    const whichResult = spawnSync("which", ["codex"], { stdio: ["ignore", "ignore", "ignore"] });
+    if (whichResult.status === 0) return true;
     // Also check npm global
-    const result2 = spawn("npm", ["list", "-g", "@openai/codex"], {
+    const npmResult = spawnSync("npm", ["list", "-g", "@openai/codex"], {
       stdio: ["ignore", "ignore", "ignore"],
     });
-    return result2.status === 0;
+    return npmResult.status === 0;
   } catch {
     return false;
   }
@@ -48,15 +48,14 @@ function codexDetect(): boolean {
 
 function geminiDetect(): boolean {
   try {
-    const spawn = require("node:child_process").spawnSync;
     // Check if gemini CLI is available
-    const result = spawn("which", ["gemini"], { stdio: ["ignore", "ignore", "ignore"] });
-    if (result.status === 0) return true;
+    const whichResult = spawnSync("which", ["gemini"], { stdio: ["ignore", "ignore", "ignore"] });
+    if (whichResult.status === 0) return true;
     // Check npm global
-    const result2 = spawn("npm", ["list", "-g", "@google/generative-ai"], {
+    const npmResult = spawnSync("npm", ["list", "-g", "@google/generative-ai"], {
       stdio: ["ignore", "ignore", "ignore"],
     });
-    return result2.status === 0;
+    return npmResult.status === 0;
   } catch {
     return false;
   }
@@ -64,9 +63,8 @@ function geminiDetect(): boolean {
 
 function cursorDetect(): boolean {
   try {
-    const spawn = require("node:child_process").spawnSync;
     // Check if cursor is available in PATH
-    const result = spawn("which", ["cursor"], { stdio: ["ignore", "ignore", "ignore"] });
+    const result = spawnSync("which", ["cursor"], { stdio: ["ignore", "ignore", "ignore"] });
     return result.status === 0;
   } catch {
     return false;
@@ -76,61 +74,95 @@ function cursorDetect(): boolean {
 // ---- Internal wiring functions --------------------------------------------------
 
 function _wireClaudeCode(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
-  try {
-    // In real implementation, this would modify Claude Code's settings
-    // For now, we'll just indicate success
-    return {
-      ok: true,
-      message: `Claude Code wired for agent ${env.FLAIR_AGENT_ID} at ${env.FLAIR_URL}`,
-    };
-  } catch (e: any) {
-    return {
-      ok: false,
-      message: `Failed to wire Claude Code: ${e.message}`,
-    };
-  }
+  return {
+    ok: false,
+    message: `Manual wiring required for Claude Code:\n` +
+             `1. Locate Claude Code's settings file (usually ~/Library/Application Support/Claude/settings.json on macOS or %APPDATA%/Claude/settings.json on Windows)\n` +
+             `2. Add or update the "mcpServers" section:\n` +
+             `   {\n` +
+             `     "mcpServers": {\n` +
+             `       "flair": {\n` +
+             `         "command": "npx",\n` +
+             `         "args": ["-y", "@tpsdev-ai/flair-mcp"],\n` +
+             `         "env": {\n` +
+             `           "FLAIR_AGENT_ID": "${env.FLAIR_AGENT_ID}",\n` +
+             `           "FLAIR_URL": "${env.FLAIR_URL}"\n` +
+             `         }\n` +
+             `       }\n` +
+             `     }\n` +
+             `   }\n` +
+             `3. Restart Claude Code\n` +
+             `Note: This is a manual step - the Flair CLI cannot automatically modify Claude Code's settings due to security restrictions.`,
+  };
 }
 
 function _wireCodex(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
-  try {
-    return {
-      ok: true,
-      message: `Codex wired for agent ${env.FLAIR_AGENT_ID} at ${env.FLAIR_URL}`,
-    };
-  } catch (e: any) {
-    return {
-      ok: false,
-      message: `Failed to wire Codex: ${e.message}`,
-    };
-  }
+  return {
+    ok: false,
+    message: `Manual wiring required for Codex:\n` +
+             `1. Locate Codex's configuration (check ~/.codex/config or similar)\n` +
+             `2. Add the Flair MCP server configuration:\n` +
+             `   {\n` +
+             `     "mcpServers": {\n` +
+             `       "flair": {\n` +
+             `         "command": "npx",\n` +
+             `         "args": ["-y", "@tpsdev-ai/flair-mcp"],\n` +
+             `         "env": {\n` +
+             `           "FLAIR_AGENT_ID": "${env.FLAIR_AGENT_ID}",\n` +
+             `           "FLAIR_URL": "${env.FLAIR_URL}"\n` +
+             `         }\n` +
+             `       }\n` +
+             `     }\n` +
+             `   }\n` +
+             `3. Restart Codex\n` +
+             `Note: This is a manual step - the Flair CLI cannot automatically modify Codex's configuration due to security restrictions.`,
+  };
 }
 
 function _wireGemini(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
-  try {
-    return {
-      ok: true,
-      message: `Gemini wired for agent ${env.FLAIR_AGENT_ID} at ${env.FLAIR_URL}`,
-    };
-  } catch (e: any) {
-    return {
-      ok: false,
-      message: `Failed to wire Gemini: ${e.message}`,
-    };
-  }
+  return {
+    ok: false,
+    message: `Manual wiring required for Gemini:\n` +
+             `1. Locate Gemini's configuration (check ~/.gemini/config or similar)\n` +
+             `2. Add the Flair MCP server configuration:\n` +
+             `   {\n` +
+             `     "mcpServers": {\n` +
+             `       "flair": {\n` +
+             `         "command": "npx",\n` +
+             `         "args": ["-y", "@tpsdev-ai/flair-mcp"],\n` +
+             `         "env": {\n` +
+             `           "FLAIR_AGENT_ID": "${env.FLAIR_AGENT_ID}",\n` +
+             `           "FLAIR_URL": "${env.FLAIR_URL}"\n` +
+             `         }\n` +
+             `       }\n` +
+             `     }\n` +
+             `   }\n` +
+             `3. Restart Gemini\n` +
+             `Note: This is a manual step - the Flair CLI cannot automatically modify Gemini's configuration due to security restrictions.`,
+  };
 }
 
 function _wireCursor(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
-  try {
-    return {
-      ok: true,
-      message: `Cursor wired for agent ${env.FLAIR_AGENT_ID} at ${env.FLAIR_URL}`,
-    };
-  } catch (e: any) {
-    return {
-      ok: false,
-      message: `Failed to wire Cursor: ${e.message}`,
-    };
-  }
+  return {
+    ok: false,
+    message: `Manual wiring required for Cursor:\n` +
+             `1. Locate Cursor's settings file (usually ~/.cursor/settings.json)\n` +
+             `2. Add or update the "mcpServers" section:\n` +
+             `   {\n` +
+             `     "mcpServers": {\n` +
+             `       "flair": {\n` +
+             `         "command": "npx",\n` +
+             `         "args": ["-y", "@tpsdev-ai/flair-mcp"],\n` +
+             `         "env": {\n` +
+             `           "FLAIR_AGENT_ID": "${env.FLAIR_AGENT_ID}",\n` +
+             `           "FLAIR_URL": "${env.FLAIR_URL}"\n` +
+             `         }\n` +
+             `       }\n` +
+             `     }\n` +
+             `   }\n` +
+             `3. Restart Cursor\n` +
+             `Note: This is a manual step - the Flair CLI cannot automatically modify Cursor's settings due to security restrictions.`,
+  };
 }
 
 // ---- Exported detection & wiring array ------------------------------------------

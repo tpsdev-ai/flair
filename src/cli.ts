@@ -4071,8 +4071,9 @@ program
         const ok = await fn();
         if (ok) { console.log(`  ${green("PASS")} ${name}`); passed++; }
         else { console.log(`  ${red("FAIL")} ${name}`); failed++; }
-      } catch (e: any) {
-        console.log(`  ${red("FAIL")} ${name}: ${e.message?.slice(0, 120)}`);
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.log(`  ${red("FAIL")} ${name}: ${message?.slice(0, 120)}`);
         failed++;
       }
     };
