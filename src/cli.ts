@@ -1189,6 +1189,7 @@ program
         adminPassGenerated = true;
       }
     }
+    const adminUser = DEFAULT_ADMIN_USER;
 
     // If we generated the password, write it to ~/.flair/admin-pass
     if (adminPassGenerated) {
