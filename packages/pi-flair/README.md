@@ -80,6 +80,22 @@ pi
 | `FLAIR_AUTO_RECALL` | `true` | Auto-load bootstrap on session start |
 | `FLAIR_AUTO_CAPTURE` | `false` | Auto-save session context to memory |
 
+## Security Notes
+
+### Auto-Capture Warning
+
+When `FLAIR_AUTO_CAPTURE=true`, all assistant responses are persisted to Flair memory with **ephemeral durability**. **This includes any secrets, credentials, or tokens your LLM may output.**
+
+**Do not enable `FLAIR_AUTO_CAPTURE=true` if your sessions may output:**
+
+- API keys (`sk-`, `ghp_`, `pat_`, etc.)
+- Bearer tokens (`Bearer ` prefix)
+- Private keys (`-----BEGIN PRIVATE KEY-----`, `-----BEGIN RSA PRIVATE KEY-----`)
+- AWS/GCP/Azure credentials
+- Any other sensitive data
+
+Auto-capture is best-effort and uses `dedup: false` to ensure all content is captured. For production use, disable auto-capture and store only non-sensitive summaries manually via `memory_store`.
+
 ## How It Works
 
 ```

@@ -11,7 +11,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc --noCheck",
+    "build": "tsc",
     "prepublishOnly": "npm run build"
   },
   "publishConfig": {
@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@tpsdev-ai/flair-client": "0.6.3",
-    "typebox": "^1.0.84"
+    "@sinclair/typebox": "0.34.48"
   },
   "license": "Apache-2.0",
   "repository": {

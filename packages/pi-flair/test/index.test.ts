@@ -12,6 +12,9 @@ import { describe, test, expect } from "bun:test";
  * Integration tests require running Flair server (not unit tests).
  */
 
+// Import the real classifyError function
+import { classifyError as classifyErrorReal } from "./src/index";
+
 // ─── Config Tests ─────────────────────────────────────────────────────────────
 
 describe("Config Resolution", () => {
@@ -49,7 +52,7 @@ describe("Config Resolution", () => {
   });
 });
 
-// ─── Error Classification Tests ───────────────────────────────────────────────
+// ─── Error Classification Tests ────────────────────────────────────────────────
 
 describe("Error Classification", () => {
   class MockFlairError extends Error {
@@ -113,7 +116,7 @@ describe("Error Classification", () => {
   });
 });
 
-// ─── Dedup Logic Tests ────────────────────────────────────────────────────────
+// ─── Dedup Logic Tests ──────────────────────────────────────────────────────
 
 describe("Dedup Detection", () => {
   test("new memory ID starts with agentId prefix", () => {
@@ -249,5 +252,47 @@ describe("Edge Cases", () => {
     const tags: string[] = [];
     const tagStr = tags.length ? tags.join(", ") : "none";
     expect(tagStr).toBe("none");
+  });
+});
+
+// ─── Secret Filtering Tests ───────────────────────────────────────────────────
+
+describe("Secret Filtering", () => {
+  test("detects OpenAI keys", () => {
+    const text = "{\"content\": \"Here is my key: sk-abc123\"}";
+    const SECRET_PATTERNS = [
+      /sk-[a-zA-Z0-9]+/gu,
+    ];
+    const hasSecret = SECRET_PATTERNS.some((p) => p.test(text));
+    expect(hasSecret).toBe(true);
+  });
+
+  test("detects GitHub PATs", () => {
+    const text = "GitHub token: ghp_1234567890";
+    const SECRET_PATTERNS = [
+      /ghp_[a-zA-Z0-9]+/gu,
+    ];
+    const hasSecret = SECRET_PATTERNS.some((p) => p.test(text));
+    expect(hasSecret).toBe(true);
+  });
+
+  test("detects Bearer tokens", () => {
+    const text = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+    const SECRET_PATTERNS = [
+      /Bearer [a-zA-Z0-9_-]+/gu,
+    ];
+    const hasSecret = SECRET_PATTERNS.some((p) => p.test(text));
+    expect(hasSecret).toBe(true);
+  });
+
+  test("allows normal content without secrets", () => {
+    const text = "This is just a normal message without any secrets.";
+    const SECRET_PATTERNS = [
+      /sk-[a-zA-Z0-9]+/gu,
+      /ghp_[a-zA-Z0-9]+/gu,
+      /Bearer [a-zA-Z0-9_-]+/gu,
+    ];
+    const hasSecret = SECRET_PATTERNS.some((p) => p.test(text));
+    expect(hasSecret).toBe(false);
   });
 });

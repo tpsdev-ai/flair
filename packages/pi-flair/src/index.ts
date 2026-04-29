@@ -8,11 +8,11 @@
  *
  * Configuration:
  *   - flair_url (default: http://127.0.0.1:9926)
- *   - agent_id (required)
+ *   - agentId (required, via FLAIR_AGENT_ID env var)
  *   - max_recall_results (default: 5)
  *   - max_bootstrap_tokens (default: 4000)
  *   - auto_capture (default: false) — auto-save session context to memory
- *   - auto_recall (default: true) — auto-load bootstrap on session start
+ *   - auto_recall (default: false) — auto-load bootstrap on session start
  *
  * Usage:
  *   1. Install: pi install npm:@tpsdev-ai/pi-flair
@@ -20,13 +20,16 @@
  *      {
  *        "extensions": ["npm:@tpsdev-ai/pi-flair"],
  *        "flair_url": "http://127.0.0.1:9926",
- *        "agent_id": "my-project"
+ *        "agentId": "my-project"
  *      }
- *   3. Restart pi
+ *   3. Or use environment variables:
+ *      export FLAIR_AGENT_ID=my-agent
+ *      export FLAIR_URL=http://127.0.0.1:9926
+ *   4. Restart pi
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Type } from "typebox";
+import { Type } from "@sinclair/typebox";
 import { FlairClient, FlairError, type FlairClientConfig, type BootstrapResult } from "@tpsdev-ai/flair-client";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -52,7 +55,24 @@ interface BootstrapParams {
   maxTokens?: number;
 }
 
-// ─── Config Resolution ────────────────────────────────────────────────────────
+// ─── Secret Filtering for Auto-Capture ───────────────────────────────────────
+
+// Secret patterns to filter from auto-capture
+const SECRET_PATTERNS = [
+  /sk-[a-zA-Z0-9]+/gu,                    // OpenAI keys
+  /ghp_[a-zA-Z0-9]+/gu,                   // GitHub PATs
+  /pat_[a-zA-Z0-9]+/gu,                   // Generic PATs
+  /Bearer [a-zA-Z0-9_-]+/gu,              // Bearer tokens
+  /-----BEGIN PRIVATE KEY-----/u,         // Private keys
+  /-----BEGIN RSA PRIVATE KEY-----/u,     // RSA keys
+  /-----BEGIN EC PRIVATE KEY-----/u,      // EC keys
+];
+
+function containsSecrets(text: string): boolean {
+  return SECRET_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+// ─── Config Resolution ───────────────────────────────────────────────────────
 
 function getConfig(pi: ExtensionAPI): PluginConfig {
   // Try to load from settings
@@ -69,12 +89,12 @@ function getConfig(pi: ExtensionAPI): PluginConfig {
     max_recall_results: parseInt(process.env.FLAIR_MAX_RECALL_RESULTS || "5", 10),
     max_bootstrap_tokens: parseInt(process.env.FLAIR_MAX_BOOTSTRAP_TOKENS || "4000", 10),
     auto_capture: process.env.FLAIR_AUTO_CAPTURE === "true",
-    auto_recall: process.env.FLAIR_AUTO_RECALL !== "false", // default true
+    auto_recall: process.env.FLAIR_AUTO_RECALL === "true", // default false (user must explicitly opt-in)
   };
 }
 
 function getAgentId(config: PluginConfig, ctx: ExtensionContext): string {
-  if (config.agent_id) return config.agent_id;
+  if (config.agentId) return config.agentId;
   // Try to infer from working directory
   const cwd = ctx.cwd;
   const lastSlash = cwd.lastIndexOf("/");
@@ -85,8 +105,11 @@ function getAgentId(config: PluginConfig, ctx: ExtensionContext): string {
 }
 
 function createFlairClient(config: PluginConfig): FlairClient {
+  if (!config.agentId) {
+    throw new Error("FLAIR_AGENT_ID is required");
+  }
   return new FlairClient({
-    agentId: config.agentId || "",
+    agentId: config.agentId,
     url: config.url || "http://127.0.0.1:9926",
     keyPath: config.keyPath,
   });
@@ -126,7 +149,7 @@ export default function (pi: ExtensionAPI) {
   const config = getConfig(pi);
   const flair = createFlairClient(config);
 
-  // ─── Tools ────────────────────────────────────────────────────────────────
+  // ─── Tools ───────────────────────────────────────────────────────────────────
 
   // memory_search tool
   pi.registerTool({
@@ -259,7 +282,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ─── Auto-Recall on Session Start ───────────────────────────────────────────
+  // ─── Auto-Recall on Session Start ────────────────────────────────────────────
 
   if (config.auto_recall !== false) {
     pi.on("session_start", async (_event, ctx) => {
@@ -300,6 +323,13 @@ export default function (pi: ExtensionAPI) {
         if (lastEntry.role === "assistant" && lastEntry.content) {
           // Convert to string for storage
           const content = JSON.stringify(lastEntry.content);
+          
+          // Filter out content containing secrets
+          if (containsSecrets(content)) {
+            console.warn("Auto-capture skipped: potential secrets detected");
+            return;
+          }
+          
           if (content.length > 100) {
             try {
               await flair.memory.write(content.slice(0, 4000), {
