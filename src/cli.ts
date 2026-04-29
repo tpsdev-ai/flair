@@ -12,13 +12,14 @@ import {
   rmSync,
   mkdtempSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate } from "tar";
 import { keystore } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
+import { detectClients, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
 // src/ into resources/, which don't survive npm packaging (see also
@@ -380,7 +381,7 @@ function readHarperPid(dataDir: string): number | null {
  * Seed an agent record via the Harper operations API.
  * Accepts either a port number (localhost) or a full URL string (--target).
  */
-async function seedAgentViaOpsApi(
+export async function seedAgentViaOpsApi(
   opsPortOrUrl: number | string,
   agentId: string,
   pubKeyB64url: string,
@@ -407,6 +408,35 @@ async function seedAgentViaOpsApi(
     const text = await res.text().catch(() => "");
     if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
     throw new Error(`Operations API insert failed (${res.status}): ${text}`);
+  }
+}
+
+// Seed an agent record via the Harper REST API.
+// Uses localhost and the given HTTP port.
+export async function seedAgentViaRestApi(
+  httpPort: number,
+  agentId: string,
+  pubKeyB64url: string,
+  adminPass: string,
+): Promise<void> {
+  const baseUrl = `http://127.0.0.1:${httpPort}`;
+  const auth = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
+  const body = {
+    operation: "insert",
+    database: "flair",
+    table: "Agent",
+    records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
+  };
+  const res = await fetch(`${baseUrl}/Agent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: auth },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
+    throw new Error(`REST API insert failed (${res.status}): ${text}`);
   }
 }
 
@@ -1344,6 +1374,312 @@ program
       console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
     }
 
+  });
+
+// ─── flair install ───────────────────────────────────────────────────────────
+
+program
+  .command("install")
+  .description("One-command Flair setup — init, agent, and MCP client wiring")
+  .option("--client <client>", "MCP client(s) to wire: claude-code, codex, gemini, cursor, all, or none")
+  .option("--agent <id>", "Agent ID (defaults to hostname short-form)")
+  .option("--no-mcp", "Skip MCP wiring (init + agent only)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--data-dir <dir>", "Harper data directory")
+  .option("--keys-dir <dir>", "Directory for Ed25519 keys")
+  .option("--skip-smoke", "Skip MCP smoke test")
+  .action(async (opts) => {
+    const httpPort = resolveHttpPort(opts);
+    const opsPort = resolveOpsPort(opts);
+    const keysDir: string = opts.keysDir ?? defaultKeysDir();
+    const dataDir: string = opts.dataDir ?? defaultDataDir();
+
+    // Resolve client selection
+    const clientOpt: string | undefined = opts.client;
+    const noMcp = opts.noMcp === true;
+    const selectedClients: ClientId[] = [];
+
+    if (clientOpt === "none" || noMcp) {
+      // Skip MCP entirely — just init + agent
+    } else if (clientOpt === "all") {
+      // Wire all detected clients
+    } else if (clientOpt) {
+      // Wire a specific client
+      const valid: ClientId[] = ["claude-code", "codex", "gemini", "cursor"];
+      if (!valid.includes(clientOpt as ClientId)) {
+        console.error(`Unknown client: ${clientOpt}. Valid: claude-code, codex, gemini, cursor, all, none`);
+        process.exit(1);
+      }
+      selectedClients.push(clientOpt as ClientId);
+    }
+    // If no --client flag: interactive detection later
+
+    // ── Step 1: Ensure Flair is initialized ──
+    let alreadyInitialized = false;
+    let alreadyRunning = false;
+    let adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+    const adminUser = DEFAULT_ADMIN_USER;
+
+    // Check if Flair is already initialized (config with port exists)
+    try {
+      const cp = configPath();
+      if (existsSync(cp)) {
+        const yaml = readFileSync(cp, "utf-8");
+        if (yaml.match(/port:\s*\d+/)) {
+          alreadyInitialized = true;
+          console.log("Flair already initialized — skipping init.");
+        }
+      }
+    } catch { /* not initialized */ }
+
+    if (!alreadyInitialized) {
+      const major = parseInt(process.version.slice(1), 10);
+      if (major < 18) throw new Error(`Node.js >= 18 required (found ${process.version})`);
+
+      // Only generate a password if none provided via env (fresh install)
+      if (!adminPass) {
+        adminPass = Buffer.from(nacl.randomBytes(18)).toString("base64url");
+      }
+
+      // Check if Harper is already running on this port
+      try {
+        const res = await fetch(`http://127.0.0.1:${httpPort}/health`, { signal: AbortSignal.timeout(1000) });
+        if (res.status > 0) { alreadyRunning = true; console.log(`Harper already running on port ${httpPort} — skipping start`); }
+      } catch { /* not running */ }
+
+      if (!alreadyRunning) {
+        const bin = harperBin();
+        if (!bin) throw new Error("@harperfast/harper not found in node_modules.\nRun: npm install @harperfast/harper");
+
+        mkdirSync(dataDir, { recursive: true });
+
+        const alreadyInstalled = existsSync(join(dataDir, "harper-config.yaml"));
+
+        const harperSetConfig = JSON.stringify({
+          rootPath: dataDir,
+          http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
+          operationsApi: { network: { port: opsPort, cors: true }, domainSocket: join(dataDir, "operations-server") },
+          mqtt: { network: { port: null }, webSocket: false },
+          localStudio: { enabled: false },
+          authentication: { authorizeLocal: true, enableSessions: true },
+        });
+
+        const env: Record<string, string> = {
+          ...(process.env as Record<string, string>),
+          ROOTPATH: dataDir,
+          HARPER_SET_CONFIG: harperSetConfig,
+          DEFAULTS_MODE: "dev",
+          HDB_ADMIN_USERNAME: adminUser,
+          HDB_ADMIN_PASSWORD: adminPass,
+          THREADS_COUNT: "1",
+          NODE_HOSTNAME: "localhost",
+          HTTP_PORT: String(httpPort),
+          OPERATIONSAPI_NETWORK_PORT: String(opsPort),
+          LOCAL_STUDIO: "false",
+        };
+
+        if (alreadyInstalled) {
+          console.log("Existing Harper installation found — skipping install.");
+        } else {
+          const installEnv = { ...env, HOME: join(dataDir, "..") };
+          console.log("Installing Harper...");
+          console.log("Downloading embedding model (nomic-embed-text-v1.5, ~80MB) — this may take a minute...");
+          await new Promise<void>((resolve, reject) => {
+            let output = "";
+            let dotTimer: ReturnType<typeof setInterval> | null = null;
+            const install = spawn(process.execPath, [bin, "install"], { cwd: flairPackageDir(), env: installEnv });
+            dotTimer = setInterval(() => process.stdout.write("."), 3000);
+            install.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
+            install.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
+            install.on("exit", (code) => {
+              if (dotTimer) { clearInterval(dotTimer); process.stdout.write("\n"); }
+              code === 0 ? resolve() : reject(new Error(`Harper install failed (${code}): ${output}`));
+            });
+            install.on("error", (err) => {
+              if (dotTimer) { clearInterval(dotTimer); process.stdout.write("\n"); }
+              reject(err);
+            });
+            setTimeout(() => {
+              install.kill();
+              if (dotTimer) { clearInterval(dotTimer); process.stdout.write("\n"); }
+              reject(new Error(`Harper install timed out: ${output}`));
+            }, 60_000);
+          });
+        }
+
+        // Start Harper
+        console.log(`Starting Harper on port ${httpPort}...`);
+        const proc = spawn(process.execPath, [bin, "run", "."], { cwd: flairPackageDir(), env, detached: true, stdio: "ignore" });
+        proc.unref();
+      }
+
+      // Wait for health
+      console.log("Waiting for Harper health check...");
+      await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
+      console.log("Harper is healthy ✓");
+
+      // Write config so other commands can find this instance
+      writeConfig(httpPort);
+    } else {
+      // Flair already initialized — resolve admin pass from env or running instance
+      adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+    }
+
+    const httpUrl = `http://127.0.0.1:${httpPort}`;
+
+    // ── Step 2: Detect MCP clients ──
+    let clients = detectClients();
+
+    if (selectedClients.length > 0) {
+      // Explicit --client flag — override detection
+      if (clientOpt === "all" || clientOpt === "none" || noMcp) {
+        // all/none handled below
+      } else {
+        // Filter to only the selected client
+        clients = [{ id: selectedClients[0], label: selectedClients[0], detected: true }];
+      }
+    }
+
+    if (!clientOpt && !noMcp) {
+      // No --client flag — print detected clients
+      const detected = clients.filter(c => c.detected);
+      if (detected.length === 0) {
+        console.log("No MCP clients detected. Run with --client <name> to wire a specific client.");
+      } else {
+        console.log(`Detected MCP clients: ${detected.map(c => c.label).join(", ")}`);
+      }
+    }
+
+    // ── Step 3: Resolve agent identity ──
+    const agentId: string = opts.agent ?? (() => {
+      try {
+        const hn = hostname();
+        return hn.split(".")[0];
+      } catch {
+        return "flair-agent";
+      }
+    })();
+
+    let agentExists = false;
+
+    // Check if agent already exists locally
+    const privPath = privKeyPath(agentId, keysDir);
+    if (existsSync(privPath)) {
+      agentExists = true;
+      console.log(`Agent '${agentId}' already exists ✓`);
+    } else {
+      // Create agent
+      mkdirSync(keysDir, { recursive: true });
+      const pubPath = pubKeyPath(agentId, keysDir);
+      console.log("Generating Ed25519 keypair...");
+      const kp = nacl.sign.keyPair();
+      const seed = kp.secretKey.slice(0, 32);
+      writeFileSync(privPath, Buffer.from(seed));
+      chmodSync(privPath, 0o600);
+      writeFileSync(pubPath, Buffer.from(kp.publicKey));
+      const pubKeyB64url = b64url(kp.publicKey);
+      console.log(`Keypair written: ${privPath} ✓`);
+
+      // Seed agent - use REST API for local Harper, Ops API only when --ops-target is specified
+      if (opts.opsTarget) {
+        // Remote Harper via explicit ops target
+        console.log(`Seeding agent '${agentId}' via operations API (--ops-target)...`);
+        await seedAgentViaOpsApi(opts.opsTarget, agentId, pubKeyB64url, adminUser, adminPass);
+      } else {
+        // Local Harper - use REST API
+        console.log(`Seeding agent '${agentId}' via REST API...`);
+        await seedAgentViaRestApi(httpPort, agentId, pubKeyB64url, adminPass);
+      }
+      console.log(`Agent '${agentId}' registered ✓`);
+    }
+
+    // ── Step 4: Wire MCP clients ──
+    const mcpEnv = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
+    const wiringResults: { client: string; message: string }[] = [];
+
+    if (!noMcp && clientOpt !== "none") {
+      const toWire = clientOpt === "all"
+        ? clients.filter(c => c.detected).map(c => c.id)
+        : selectedClients.length > 0
+          ? selectedClients
+          : clients.filter(c => c.detected).map(c => c.id);
+
+      for (const clientId of toWire) {
+        let result: { ok: boolean; message: string };
+        switch (clientId) {
+          case "claude-code": result = wireClaudeCode(mcpEnv, httpUrl); break;
+          case "codex": result = wireCodex(mcpEnv); break;
+          case "gemini": result = wireGemini(mcpEnv); break;
+          case "cursor": result = wireCursor(mcpEnv); break;
+          default: result = { ok: false, message: `Unknown client: ${clientId}` };
+        }
+        wiringResults.push({ client: clientId, message: result.message });
+        console.log(`  ${result.ok ? "✓" : "✗"} ${result.message}`);
+      }
+    }
+
+    // ── Step 5: Smoke test the MCP server ──
+    if (!opts.skipSmoke && !noMcp && clientOpt !== "none" && wiringResults.length > 0) {
+      console.log("Smoke-testing MCP server...");
+      try {
+        // Launch flair-mcp and send initialize request over stdio
+        const mcpProc = spawn("npx", ["-y", "@tpsdev-ai/flair-mcp"], {
+          env: { ...process.env, FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl },
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 15_000,
+        });
+
+        // Send initialize request
+        const initMsg = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "0.1", capabilities: {}, clientInfo: { name: "flair-install", version: "1.0.0" } } });
+        mcpProc.stdin!.write(initMsg + "\n");
+        mcpProc.stdin!.end();
+
+        let stdout = "";
+        mcpProc.stdout!.on("data", (d: Buffer) => { stdout += d.toString(); });
+
+        await new Promise<void>((resolve, reject) => {
+          mcpProc.on("exit", (code) => {
+            if (code === 0 && stdout.length > 0) {
+              resolve();
+            } else {
+              reject(new Error(`MCP server exited with code ${code}`));
+            }
+          });
+          mcpProc.on("error", reject);
+          setTimeout(() => { mcpProc.kill(); reject(new Error("MCP smoke test timed out")); }, 15_000);
+        });
+
+        // Check for a valid JSON-RPC response
+        try {
+          const lines = stdout.split("\n").filter(l => l.trim());
+          for (const line of lines) {
+            const parsed = JSON.parse(line);
+            if (parsed.jsonrpc === "2.0" && parsed.id === 1 && !parsed.error) {
+              console.log("  ✓ MCP server responded");
+              break;
+            }
+          }
+        } catch {
+          console.log("  ⚠ MCP server responded but response could not be parsed");
+        }
+      } catch (err: any) {
+        console.log(`  ⚠ MCP smoke test failed: ${err.message}`);
+        console.log("  Use --skip-smoke to bypass.");
+      }
+    }
+
+    // ── Step 6: Summary ──
+    console.log("");
+    console.log("✓ Flair installed.");
+    console.log(`   Agent: ${agentId}`);
+    if (existsSync(privKeyPath(agentId, keysDir))) {
+      console.log(`   Private key: ${privKeyPath(agentId, keysDir)}`);
+    }
+    console.log(`   Local: ${httpUrl}`);
+    console.log(`   MCP: ${wiringResults.length > 0 ? wiringResults.map(r => r.client).join(", ") + " ✓ wired" : "none wired"}`);
+    console.log("");
+    console.log(`   Try it: in Claude Code, ask the agent "what do you remember about me?"`);
   });
 
 // ─── flair agent ─────────────────────────────────────────────────────────────
