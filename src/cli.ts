@@ -15,7 +15,7 @@ import {
   readdirSync,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate } from "tar";
@@ -5761,17 +5761,35 @@ function resolveMemoryDir(target: string, agentId: string): string {
     case "claude-code": {
       const cwd = process.cwd();
       const encodedCwd = encodeURIComponent(cwd).replace(/%2F/g, "/");
-      return join(homedir(), ".claude", "projects", encodedCwd, "memory");
+      const memoryDir = join(homedir(), ".claude", "projects", encodedCwd, "memory");
+      const resolved = resolve(memoryDir);
+      const expectedRoot = join(homedir(), ".claude", "projects");
+      if (!resolved.startsWith(expectedRoot + sep)) {
+        throw new Error(`Memory dir must be within ${expectedRoot}, got ${resolved}`);
+      }
+      return resolved;
     }
     case "openclaw": {
       const cwd = process.cwd();
       const encodedCwd = encodeURIComponent(cwd).replace(/%2F/g, "/");
-      return join(homedir(), ".openclaw", "projects", encodedCwd, "memory");
+      const memoryDir = join(homedir(), ".openclaw", "projects", encodedCwd, "memory");
+      const resolved = resolve(memoryDir);
+      const expectedRoot = join(homedir(), ".openclaw", "projects");
+      if (!resolved.startsWith(expectedRoot + sep)) {
+        throw new Error(`Memory dir must be within ${expectedRoot}, got ${resolved}`);
+      }
+      return resolved;
     }
     case "pi": {
       const cwd = process.cwd();
       const encodedCwd = encodeURIComponent(cwd).replace(/%2F/g, "/");
-      return join(homedir(), ".pi", "projects", encodedCwd, "memory");
+      const memoryDir = join(homedir(), ".pi", "projects", encodedCwd, "memory");
+      const resolved = resolve(memoryDir);
+      const expectedRoot = join(homedir(), ".pi", "projects");
+      if (!resolved.startsWith(expectedRoot + sep)) {
+        throw new Error(`Memory dir must be within ${expectedRoot}, got ${resolved}`);
+      }
+      return resolved;
     }
     default:
       throw new Error(`Unknown target: ${target}. Valid: claude-code, openclaw, pi`);
@@ -5860,7 +5878,7 @@ program
     
     const migratedDir = join(memoryDir, ".migrated");
     if (!dryRun) {
-      mkdirSync(migratedDir, { recursive: true });
+      mkdirSync(migratedDir, { recursive: true, mode: 0o700 });
     }
     
     console.log(`Migrating memories from ${memoryDir} to Flair (agentId=${agentId})`);
