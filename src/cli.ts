@@ -247,9 +247,10 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
           // Sign the path without query params — auth middleware verifies the clean path
           // Auth middleware verifies the full request path including query params
           authHeader = buildEd25519Auth(agentId, method, path, keyPath);
-        } catch (err: any) {
+        } catch (err: unknown) {
           // Key exists but auth build failed — warn and continue without auth
-          console.error(`Warning: Ed25519 auth failed for agent '${agentId}': ${err.message}`);
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`Warning: Ed25519 auth failed for agent '${agentId}': ${message}`);
         }
       }
     }
@@ -420,16 +421,23 @@ export async function seedAgentViaRestApi(
   adminPass: string,
 ): Promise<void> {
   const baseUrl = `http://127.0.0.1:${httpPort}`;
-  const auth = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
   const body = {
     operation: "insert",
     database: "flair",
     table: "Agent",
     records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
   };
+
+  // Only send Authorization header if adminPass is provided.
+  // Matches the auth pattern in api() which respects authorizeLocal=true.
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (adminPass) {
+    headers.Authorization = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
+  }
+
   const res = await fetch(`${baseUrl}/Agent`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: auth },
+    headers,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
@@ -642,8 +650,8 @@ export async function provisionFabric(
         active: true,
       }, clusterAdminUser, clusterAdminPass);
       console.log("User 'admin' created ✓");
-    } catch (err: any) {
-      const msg = err?.message ?? String(err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("already exists") || msg.includes("duplicate")) {
         // Idempotent: fall back to alter_user
         console.log("User 'admin' already exists — updating password...");
@@ -858,8 +866,9 @@ async function runSoulWizard(agentId: string): Promise<SoulEntries> {
       if (edit === "y" || edit === "yes") {
         entries = await editEntries(ask, entries);
       }
-    } catch (err: any) {
-      console.log(`\n   Couldn't parse JSON (${err.message}). Falling back to custom prompts.`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(`\n   Couldn't parse JSON (${message}). Falling back to custom prompts.`);
       entries = await customSoulPrompts(ask);
     }
   } else {
@@ -1307,8 +1316,9 @@ program
               await authFetch(httpUrl, agentId, privPath, "PUT", `/Soul/${agentId}:${key}`,
                 { id: `${agentId}:${key}`, agentId, key, value, createdAt: new Date().toISOString() });
               console.log(`   ✓ soul:${key} set`);
-            } catch (err: any) {
-              console.warn(`   ⚠ soul:${key} failed: ${err.message}`);
+            } catch (err: unknown) {
+              const message = err instanceof Error ? err.message : String(err);
+              console.warn(`   ⚠ soul:${key} failed: ${message}`);
             }
           }
           console.log(`\n   ${soulEntries.length} soul entries saved.`);
@@ -1561,6 +1571,12 @@ program
       }
     })();
 
+    // Validate agentId to prevent path traversal
+    const VALID_AGENT_ID = /^[a-zA-Z0-9_-]+$/;
+    if (!VALID_AGENT_ID.test(agentId)) {
+      throw new Error(`Invalid agent ID: ${agentId}. Agent ID must contain only letters, numbers, underscores, and hyphens.`);
+    }
+
     let agentExists = false;
 
     // Check if agent already exists locally
@@ -1663,8 +1679,9 @@ program
         } catch {
           console.log("  ⚠ MCP server responded but response could not be parsed");
         }
-      } catch (err: any) {
-        console.log(`  ⚠ MCP smoke test failed: ${err.message}`);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.log(`  ⚠ MCP smoke test failed: ${message}`);
         console.log("  Use --skip-smoke to bypass.");
       }
     }
@@ -2386,8 +2403,9 @@ idp
       const jwks = await jwksRes.json() as any;
       const keyCount = jwks.keys?.length ?? 0;
       console.log(`  ✅ JWKS reachable — ${keyCount} key(s) found`);
-    } catch (err: any) {
-      console.error(`  ❌ JWKS fetch error: ${err.message}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`  ❌ JWKS fetch error: ${message}`);
       process.exit(1);
     }
   });

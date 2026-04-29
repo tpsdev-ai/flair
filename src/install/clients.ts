@@ -18,55 +18,70 @@ export interface Client {
 // ---- Detection helpers ----------------------------------------------------------
 
 import { spawnSync } from "node:child_process";
+import { accessSync, constants } from "node:fs";
+
+/**
+ * Check if a command exists in PATH (cross-platform alternative to `which`).
+ * Does not spawn a child process — pure filesystem check.
+ */
+function binInPath(name: string): boolean {
+  try {
+    const sep = process.platform === "win32" ? ";" : ":";
+    const dirs = (process.env.PATH || "").split(sep);
+    const exts = process.platform === "win32" ? [".exe", ".cmd", ".bat", ".ps1"] : [];
+    for (const dir of dirs) {
+      if (!dir) continue;
+      const base = `${dir}/${name}`;
+      try { accessSync(base, constants.X_OK); return true; } catch { /* not here */ }
+      for (const ext of exts) {
+        try { accessSync(`${base}${ext}`, constants.X_OK); return true; } catch { /* not here */ }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 function claudeCodeDetect(): boolean {
   try {
-    // Check if npx claude-code is available or if Claude Code is installed
     const result = spawnSync("npm", ["list", "-g", "@anthropic-ai/claude-code"], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     return result.status === 0;
-  } catch {
+  } catch (_e: unknown) {
     return false;
   }
 }
 
 function codexDetect(): boolean {
   try {
-    // Check if codex is available in PATH or via npx
-    const whichResult = spawnSync("which", ["codex"], { stdio: ["ignore", "ignore", "ignore"] });
-    if (whichResult.status === 0) return true;
-    // Also check npm global
+    if (binInPath("codex")) return true;
     const npmResult = spawnSync("npm", ["list", "-g", "@openai/codex"], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     return npmResult.status === 0;
-  } catch {
+  } catch (_e: unknown) {
     return false;
   }
 }
 
 function geminiDetect(): boolean {
   try {
-    // Check if gemini CLI is available
-    const whichResult = spawnSync("which", ["gemini"], { stdio: ["ignore", "ignore", "ignore"] });
-    if (whichResult.status === 0) return true;
-    // Check npm global
+    if (binInPath("gemini")) return true;
     const npmResult = spawnSync("npm", ["list", "-g", "@google/generative-ai"], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     return npmResult.status === 0;
-  } catch {
+  } catch (_e: unknown) {
     return false;
   }
 }
 
 function cursorDetect(): boolean {
   try {
-    // Check if cursor is available in PATH
-    const result = spawnSync("which", ["cursor"], { stdio: ["ignore", "ignore", "ignore"] });
-    return result.status === 0;
-  } catch {
+    return binInPath("cursor");
+  } catch (_e: unknown) {
     return false;
   }
 }
@@ -167,34 +182,30 @@ function _wireCursor(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: 
 
 // ---- Exported detection & wiring array ------------------------------------------
 
-export const ALL_CLIENTS: Client[] = [
+export const ALL_CLIENTS: Omit<Client, "detected">[] = [
   {
     id: "claude-code",
     label: "Claude Code",
-    detected: claudeCodeDetect(),
     wire: _wireClaudeCode,
   },
   {
     id: "codex",
     label: "Codex",
-    detected: codexDetect(),
     wire: _wireCodex,
   },
   {
     id: "gemini",
     label: "Gemini",
-    detected: geminiDetect(),
     wire: _wireGemini,
   },
   {
     id: "cursor",
     label: "Cursor",
-    detected: cursorDetect(),
     wire: _wireCursor,
   },
 ];
 
-export function detectClients(): typeof ALL_CLIENTS {
+export function detectClients(): Client[] {
   return ALL_CLIENTS.map((client) => ({
     ...client,
     detected:
