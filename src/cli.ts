@@ -982,6 +982,7 @@ program
   .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (generated if omitted)")
+  .option("--admin-pass-file <path>", "Read admin password from file (chmod 600 recommended)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
   .option("--skip-start", "Skip Harper startup (assume already running)")
@@ -1167,19 +1168,44 @@ program
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     const dataDir: string = opts.dataDir ?? defaultDataDir();
 
-    // Admin password: generate if not provided, NEVER written to disk
-    // Check if admin-pass came from argv (not env) and is a real secret.
-    // fromEnv is true ONLY when the resolved value came from env — i.e.,
-    // no inline override. If both inline and env are set, the inline value
-    // wins via `??` precedence, so the warning must still fire.
-    const adminPassFromEnv = !opts.adminPass && !!process.env.FLAIR_ADMIN_PASS;
-    if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
+    // Admin password handling
+    // Priority: 1) --admin-pass-file (read from file), 2) env vars, 3) generate new
+    // --admin-pass is deprecated; warn if used inline (not from env)
+    const adminPassFromFile = opts.adminPassFile ? readFileSync(opts.adminPassFile, "utf-8").trim() : undefined;
+    const adminPassDeprecated = !!process.env.FLAIR_ADMIN_PASS;
+    
+    // Warn if --admin-pass is passed inline (not from env)
+    // fromEnv is false if inline value is provided
+    const adminPassPassedInline = !opts.adminPassFile && !!opts.adminPass;
+    if (shouldShowInlineSecretWarning(opts.adminPass, adminPassDeprecated, new Set(["--admin-pass"]), "--admin-pass")) {
       console.error(
-        "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
+        "warning: --admin-pass passed inline. Consider --admin-pass-file <path> or FLAIR_ADMIN_PASS env " +
         "to keep secrets out of shell history."
       );
     }
-    const adminPass: string = opts.adminPass ?? Buffer.from(nacl.randomBytes(18)).toString("base64url");
+    
+    // Resolve password: file > env > generate
+    let adminPass: string;
+    let passwordSource: "generated" | "file" | "env" = "generated";
+    
+    if (adminPassFromFile) {
+      adminPass = adminPassFromFile;
+      passwordSource = "file";
+    } else if (process.env.FLAIR_ADMIN_PASS) {
+      adminPass = process.env.FLAIR_ADMIN_PASS;
+      passwordSource = "env";
+    } else if (process.env.HDB_ADMIN_PASSWORD) {
+      adminPass = process.env.HDB_ADMIN_PASSWORD;
+      passwordSource = "env";
+    } else {
+      // Generate new password and write to file
+      adminPass = Buffer.from(nacl.randomBytes(18)).toString("base64url");
+      const passDir = join(homedir(), ".flair");
+      const passFile = join(passDir, "admin-pass");
+      mkdirSync(passDir, { recursive: true });
+      writeFileSync(passFile, adminPass + "\n", { mode: 0o600 });
+      passwordSource = "generated";
+    }
     const adminUser = DEFAULT_ADMIN_USER;
 
     // Check Node.js version
@@ -1374,20 +1400,29 @@ program
       if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
       console.log("Ed25519 auth verified ✓");
 
-      // Output — admin password printed once, never written to disk
+      // Output — admin password written to file, path shown only
       console.log("\n✅ Flair initialized successfully");
       console.log(`   Agent ID:    ${agentId}`);
       console.log(`   Flair URL:   ${httpUrl}`);
       console.log(`   Private key: ${privPath}`);
-      if (!opts.adminPass && !alreadyRunning) {
-        console.log(`\n   ┌─────────────────────────────────────────────────┐`);
-        console.log(`   │  Harper admin credentials (save these now):     │`);
-        console.log(`   │                                                 │`);
-        console.log(`   │  Username: ${DEFAULT_ADMIN_USER.padEnd(37)}│`);
-        console.log(`   │  Password: ${adminPass.padEnd(37)}│`);
-        console.log(`   │                                                 │`);
-        console.log(`   │  ⚠️  The password won't be shown again.         │`);
-        console.log(`   └─────────────────────────────────────────────────┘`);
+      
+      // Determine the password file path for display
+      let passFilePath: string;
+      if (opts.adminPassFile) {
+        passFilePath = resolvePath(opts.adminPassFile);
+      } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
+        passFilePath = "(from env var)";
+      } else {
+        passFilePath = join(homedir(), ".flair", "admin-pass");
+      }
+      
+      if (passwordSource === "generated" && !alreadyRunning) {
+        console.log(`\n   Admin password saved to: ${passFilePath}`);
+        console.log(`     chmod 600 ${passFilePath}`);
+      } else if (passwordSource === "file") {
+        console.log(`\n   Admin password read from: ${passFilePath}`);
+      } else if (passwordSource === "env") {
+        console.log(`\n   Admin password: from FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD env`);
       }
       console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
 
@@ -1463,15 +1498,24 @@ program
       const httpUrl = `http://127.0.0.1:${httpPort}`;
       console.log("\n✅ Flair initialized (no agent registered)");
       console.log(`   Flair URL:   ${httpUrl}`);
-      if (!opts.adminPass && !alreadyRunning) {
-        console.log(`\n   ┌─────────────────────────────────────────────────┐`);
-        console.log(`   │  Harper admin credentials (save these now):     │`);
-        console.log(`   │                                                 │`);
-        console.log(`   │  Username: ${DEFAULT_ADMIN_USER.padEnd(37)}│`);
-        console.log(`   │  Password: ${adminPass.padEnd(37)}│`);
-        console.log(`   │                                                 │`);
-        console.log(`   │  ⚠️  The password won't be shown again.         │`);
-        console.log(`   └─────────────────────────────────────────────────┘`);
+      
+      // Determine the password file path for display
+      let passFilePath: string;
+      if (opts.adminPassFile) {
+        passFilePath = resolvePath(opts.adminPassFile);
+      } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
+        passFilePath = "(from env var)";
+      } else {
+        passFilePath = join(homedir(), ".flair", "admin-pass");
+      }
+      
+      if (passwordSource === "generated" && !alreadyRunning) {
+        console.log(`\n   Admin password saved to: ${passFilePath}`);
+        console.log(`     chmod 600 ${passFilePath}`);
+      } else if (passwordSource === "file") {
+        console.log(`\n   Admin password read from: ${passFilePath}`);
+      } else if (passwordSource === "env") {
+        console.log(`\n   Admin password: from FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD env`);
       }
       console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
     }

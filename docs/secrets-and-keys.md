@@ -138,6 +138,61 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 - **Don't check it into git.** `.gitignore` should already exclude `~/.flair/keys/`; if you're ever tempted to share keys for "convenience," rotate first (`flair agent rotate <id>`).
 - **Backup separately**, encrypted. The `flair backup` command excludes private keys by default. Roll your own backup of `~/.flair/keys/` via age-encrypted archive if you want offsite recovery.
 
+## What about the Flair admin password?
+
+Flair's Harper database uses a single admin account (`admin` user with an auto-generated password). **The password is not printed to stdout** — it's written to `~/.flair/admin-pass` with mode `0600`, and only the file path is printed:
+
+```bash
+$ flair init
+...
+✅ Flair initialized successfully
+   ...
+   Admin password saved to: /Users/you/.flair/admin-pass
+     chmod 600 /Users/you/.flair/admin-pass
+```
+
+### Changing the admin password
+
+If you need to rotate the admin password:
+
+1. Generate a new password:
+   ```bash
+   PASS=$(openssl rand -base64 24 | tr -d '\n')
+   ```
+
+2. Write it to `~/.flair/admin-pass` (chmod 600):
+   ```bash
+   echo -n "$PASS" > ~/.flair/admin-pass
+   chmod 600 ~/.flair/admin-pass
+   ```
+
+3. Update Harper via the operations API (requires current admin auth):
+   ```bash
+   # Use the ops port (usually httpPort - 1)
+   curl -X POST http://127.0.0.1:19925/ \
+     -H 'Content-Type: application/json' \
+     -u admin:CURRENT_PASSWORD \
+     -d '{"operation":"alter_user","username":"admin","password":"'"$PASS"'"}'
+   ```
+
+4. Update Harper's `HDB_ADMIN_PASSWORD` env var in your startup script / launchd plist.
+
+### Reading the password from a file with `--admin-pass-file`
+
+For automation or to use a pre-generated password, pass `--admin-pass-file <path>`:
+
+```bash
+# Pre-generate and store
+PASS=$(openssl rand -base64 24 | tr -d '\n')
+echo -n "$PASS" > /secure/location/flair-admin-pass
+chmod 600 /secure/location/flair-admin-pass
+
+# Use it during init
+flair init --admin-pass-file /secure/location/flair-admin-pass
+```
+
+This allows operators to drop a pre-generated password into a known secure location and reference it without typing. The file must be readable by the user running `flair init`.
+
 ## What about a `flair secret` CLI?
 
 Considered, deferred. Flair could ship a thin wrapper around the OS keyring (`flair secret get/set/list`) — but the OS primitives already work and are universally trusted. Adding a Flair-shaped wrapper would mean we own the bug surface for marginal ergonomic gain. Better path: document the OS primitives well (this page) and stay focused on identity + memory.
