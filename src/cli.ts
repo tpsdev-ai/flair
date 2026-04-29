@@ -1167,21 +1167,37 @@ program
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     const dataDir: string = opts.dataDir ?? defaultDataDir();
 
-    // Admin password: generate if not provided, NEVER written to disk
-    // Check if admin-pass came from argv (not env) and is a real secret.
-    // fromEnv is true ONLY when the resolved value came from env — i.e.,
-    // no inline override. If both inline and env are set, the inline value
-    // wins via `??` precedence, so the warning must still fire.
-    const adminPassFromEnv = !opts.adminPass && !!process.env.FLAIR_ADMIN_PASS;
-    if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
-      console.error(
-        "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
-        "to keep secrets out of shell history."
-      );
-    }
-    const adminPass: string = opts.adminPass ?? Buffer.from(nacl.randomBytes(18)).toString("base64url");
-    const adminUser = DEFAULT_ADMIN_USER;
 
+    // Admin password: determine from opts, env, or generate
+    let adminPass: string;
+    let adminPassGenerated = false;
+    if (opts.adminPass) {
+      // Inline admin pass -- warn about shell history
+      if (shouldShowInlineSecretWarning(opts.adminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
+        console.error(
+          "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
+            "to keep secrets out of shell history."
+        );
+      }
+      adminPass = opts.adminPass;
+    } else {
+      const envPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+      if (envPass) {
+        adminPass = envPass;
+      } else {
+        adminPass = Buffer.from(nacl.randomBytes(18)).toString("base64url");
+        adminPassGenerated = true;
+      }
+    }
+
+    // If we generated the password, write it to ~/.flair/admin-pass
+    if (adminPassGenerated) {
+      const flairDir = join(homedir(), ".flair");
+      mkdirSync(flairDir, { recursive: true });
+      const adminPassPath = join(flairDir, "admin-pass");
+      writeFileSync(adminPassPath, adminPass, { mode: 0o600 });
+      console.log(`Admin password saved to: ${adminPassPath}`);
+    }
     // Check Node.js version
     const major = parseInt(process.version.slice(1), 10);
     if (major < 18) throw new Error(`Node.js >= 18 required (found ${process.version})`);
@@ -1384,7 +1400,7 @@ program
         console.log(`   │  Harper admin credentials (save these now):     │`);
         console.log(`   │                                                 │`);
         console.log(`   │  Username: ${DEFAULT_ADMIN_USER.padEnd(37)}│`);
-        console.log(`   │  Password: ${adminPass.padEnd(37)}│`);
+        console.log(`   │  Password: ${"[see ~/.flair/admin-pass]".padEnd(37)}│`);
         console.log(`   │                                                 │`);
         console.log(`   │  ⚠️  The password won't be shown again.         │`);
         console.log(`   └─────────────────────────────────────────────────┘`);
@@ -1468,7 +1484,7 @@ program
         console.log(`   │  Harper admin credentials (save these now):     │`);
         console.log(`   │                                                 │`);
         console.log(`   │  Username: ${DEFAULT_ADMIN_USER.padEnd(37)}│`);
-        console.log(`   │  Password: ${adminPass.padEnd(37)}│`);
+        console.log(`   │  Password: ${"[see ~/.flair/admin-pass]".padEnd(37)}│`);
         console.log(`   │                                                 │`);
         console.log(`   │  ⚠️  The password won't be shown again.         │`);
         console.log(`   └─────────────────────────────────────────────────┘`);

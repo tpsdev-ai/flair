@@ -13,6 +13,11 @@ Agents sign every request to Flair with this key. Flair refuses unsigned request
 
 **This is the only secret material Flair manages.** Lose the key file and the agent is locked out (`flair agent rotate <id>` to issue a new pair).
 
+## Flair admin password (Harper instance)
+- If not provided via `--admin-pass`, `--admin-pass-file`, `FLAIR_ADMIN_PASS`, or `HDB_ADMIN_PASSWORD`, a random password is generated and written to `~/.flair/admin-pass` (mode `0o600`). The password is **not** printed to the console.
+- The `--admin-pass-file <path>` option allows reading the password from a file (for pre-staged secrets).
+- The `--admin-pass <pass>` option is deprecated due to shell history exposure; use `--admin-pass-file` or environment variables instead. A warning is printed when this option is used.
+- Environment variables `FLAIR_ADMIN_PASS` and `HDB_ADMIN_PASSWORD` are also supported.
 ## What Flair does *not* own: API keys, tokens, third-party credentials
 
 Things that are NOT Flair's job:
