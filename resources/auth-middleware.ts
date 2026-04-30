@@ -139,7 +139,13 @@ server.http(async (request: any, nextLayer: any) => {
     url.pathname === "/OAuthToken" ||
     url.pathname === "/OAuthRevoke" ||
     url.pathname === "/.well-known/oauth-authorization-server" ||
-    url.pathname === "/OAuthMetadata"
+    url.pathname === "/OAuthMetadata" ||
+    // ObservationCenter HTML shell is public — the page itself is just markup
+    // and inline JS, with no embedded data. The JS prompts for admin-pass and
+    // auths every API call (/Agent, /SemanticSearch, /FederationPeers, etc).
+    // Without this allow-list entry, the HTML is 401-blocked on hosted Flair
+    // instances (rockit-local works only because authorizeLocal=true).
+    url.pathname === "/ObservationCenter"
   ) return nextLayer(request);
 
   // If Harper has already authorized this request (e.g. authorizeLocal=true on localhost),
