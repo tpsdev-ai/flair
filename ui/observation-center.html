@@ -3,89 +3,383 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Observation Center</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+  <title>Flair · Observation Center</title>
   <style>
-    :root{--bg:#f4efe6;--panel:rgba(255,251,243,.86);--ink:#1e241f;--muted:#697265;--line:rgba(30,36,31,.12);--accent:#0f766e;--accent-soft:rgba(15,118,110,.12);--ok:#166534;--warn:#b45309;--shadow:0 18px 48px rgba(69,58,35,.14)}
+    :root{--bg:#f4efe6;--panel:rgba(255,251,243,.86);--ink:#1e241f;--muted:#697265;--line:rgba(30,36,31,.12);--accent:#0f766e;--accent-soft:rgba(15,118,110,.12);--ok:#166534;--warn:#b45309;--danger:#9f1239;--shadow:0 18px 48px rgba(69,58,35,.14)}
     *{box-sizing:border-box}body{margin:0;min-height:100vh;font:15px/1.45 "IBM Plex Sans","Avenir Next",sans-serif;color:var(--ink);background:radial-gradient(circle at top left,rgba(15,118,110,.14),transparent 28rem),radial-gradient(circle at top right,rgba(180,83,9,.1),transparent 18rem),linear-gradient(180deg,#fcfaf5,var(--bg))}
-    .shell{max-width:1280px;margin:0 auto;padding:28px 18px 40px}.hero,.panel{background:var(--panel);border:1px solid var(--line);border-radius:22px;backdrop-filter:blur(14px);box-shadow:var(--shadow)}.hero{padding:24px;margin-bottom:18px}.hero h1,.panel h2{margin:0;font-family:"IBM Plex Serif","Iowan Old Style",serif}.hero h1{font-size:clamp(2rem,4vw,3.1rem)}.hero p,.subtle,.empty{color:var(--muted)}
-    .summary,.grid,.events,.toolbar,.layout{display:grid;gap:12px}.summary{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:18px}.chip,.card,.event{background:rgba(255,255,255,.62);border:1px solid var(--line);border-radius:16px;padding:14px}.chip strong{display:block;font-size:1.3rem}.chip span{font-size:.92rem;color:var(--muted)}
-    .toolbar{grid-template-columns:repeat(auto-fit,minmax(160px,1fr));padding:16px;margin-bottom:18px}.field{display:flex;flex-direction:column;gap:6px}.field label{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.field input,.field select,.field button{width:100%;padding:11px 12px;border-radius:12px;border:1px solid var(--line);background:#fffaf1;font:inherit;color:var(--ink)}.field button{cursor:pointer;color:#fff;background:linear-gradient(135deg,var(--accent),#115e59);border:none;font-weight:600}
-    .layout{grid-template-columns:1.05fr 1.4fr;align-items:start}.panel{padding:18px}.head,.row{display:flex;justify-content:space-between;gap:10px}.head{align-items:baseline;margin-bottom:14px}.grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}.events{max-height:72vh;overflow:auto;padding-right:4px}.card h3,.event h3{margin:0;font-size:1rem}.meta,.workspace{font-size:.9rem;color:var(--muted)}.event p{margin:8px 0 0;white-space:pre-wrap;word-break:break-word}.kind{font:0.82rem "IBM Plex Mono",monospace;color:var(--accent)}.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:.8rem;font-weight:600;background:var(--accent-soft);color:var(--accent)}.ok{background:rgba(22,101,52,.12);color:var(--ok)}.warn{background:rgba(180,83,9,.14);color:var(--warn)}
-    @media (max-width:1080px){.toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.events{max-height:none}}@media (max-width:640px){.shell{padding:18px 12px 32px}.toolbar{grid-template-columns:1fr}}
+    .shell{max-width:1280px;margin:0 auto;padding:28px 18px 40px}
+    .hero,.panel{background:var(--panel);border:1px solid var(--line);border-radius:22px;backdrop-filter:blur(14px);box-shadow:var(--shadow)}
+    .hero{padding:24px;margin-bottom:18px}.hero h1,.panel h2{margin:0;font-family:"IBM Plex Serif","Iowan Old Style",serif}.hero h1{font-size:clamp(2rem,4vw,3.1rem)}.hero p,.subtle,.empty{color:var(--muted)}
+    .summary,.grid,.events,.toolbar,.layout,.tabnav,.memlist,.peers,.bridges{display:grid;gap:12px}
+    .summary{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:18px}
+    .chip,.card,.event,.memcard,.peer,.bridge{background:rgba(255,255,255,.62);border:1px solid var(--line);border-radius:16px;padding:14px}
+    .chip strong{display:block;font-size:1.3rem}.chip span{font-size:.92rem;color:var(--muted)}
+    .toolbar{grid-template-columns:repeat(auto-fit,minmax(160px,1fr));padding:16px;margin-bottom:14px}
+    .field{display:flex;flex-direction:column;gap:6px}.field label{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+    .field input,.field select,.field button,.field textarea{width:100%;padding:11px 12px;border-radius:12px;border:1px solid var(--line);background:#fffaf1;font:inherit;color:var(--ink)}
+    .field button{cursor:pointer;color:#fff;background:linear-gradient(135deg,var(--accent),#115e59);border:none;font-weight:600}
+    .tabnav{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));padding:8px;margin-bottom:18px;gap:6px}
+    .tabnav button{cursor:pointer;background:transparent;border:1px solid transparent;border-radius:14px;padding:10px 14px;font:inherit;color:var(--muted);font-weight:600}
+    .tabnav button.active{background:rgba(255,255,255,.7);border-color:var(--line);color:var(--ink);box-shadow:0 4px 12px rgba(69,58,35,.06)}
+    .tab{display:none}.tab.active{display:block}
+    .layout{grid-template-columns:1.05fr 1.4fr;align-items:start}
+    .panel{padding:18px}.head,.row{display:flex;justify-content:space-between;gap:10px}.head{align-items:baseline;margin-bottom:14px;flex-wrap:wrap}
+    .grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+    .events,.memlist{max-height:72vh;overflow:auto;padding-right:4px}
+    .card h3,.event h3,.memcard h3,.peer h3,.bridge h3{margin:0;font-size:1rem}
+    .meta,.workspace{font-size:.9rem;color:var(--muted)}
+    .event p,.memcard p{margin:8px 0 0;white-space:pre-wrap;word-break:break-word}
+    .memcard pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-word;font:13px/1.5 "IBM Plex Mono",monospace;background:rgba(15,118,110,.04);padding:10px;border-radius:10px;max-height:14em;overflow:auto}
+    .kind,.score{font:0.82rem "IBM Plex Mono",monospace;color:var(--accent)}
+    .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:.8rem;font-weight:600;background:var(--accent-soft);color:var(--accent)}
+    .ok{background:rgba(22,101,52,.12);color:var(--ok)}.warn{background:rgba(180,83,9,.14);color:var(--warn)}.danger{background:rgba(159,18,57,.12);color:var(--danger)}
+    .mem-toolbar{grid-template-columns:1.5fr 1fr 1fr 0.7fr 0.7fr}
+    .topology{display:grid;grid-template-columns:1fr 1.2fr;gap:14px}
+    @media (max-width:1080px){.toolbar,.mem-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.layout,.topology{grid-template-columns:1fr}.events,.memlist{max-height:none}}
+    @media (max-width:640px){.shell{padding:18px 12px 32px}.toolbar,.mem-toolbar,.tabnav{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
   <div class="shell">
     <section class="hero">
-      <h1>Observation Center</h1>
-      <p>Read-only Flair dashboard for OrgEvents, roster state, and latest workspace snapshots. Polling every 5 seconds.</p>
+      <h1>Flair Observation Center</h1>
+      <p>Read-only dashboard for memories, agents, federation state, bridges, and org-wide events. Polling every 5 seconds on active tab.</p>
       <div class="summary" id="summary"></div>
     </section>
+
     <section class="panel toolbar">
       <div class="field"><label for="baseUrl">Flair URL</label><input id="baseUrl" placeholder="(same origin)"></div>
       <div class="field"><label for="adminPass">Admin password</label><input id="adminPass" type="password" placeholder="Basic admin auth"></div>
-      <div class="field"><label for="agentFilter">Agent</label><select id="agentFilter"><option value="">All agents</option></select></div>
-      <div class="field"><label for="kindFilter">Event kind</label><select id="kindFilter"><option value="">All kinds</option></select></div>
-      <div class="field"><label for="timeFilter">Time range</label><select id="timeFilter"><option value="15m">Last 15 minutes</option><option value="1h" selected>Last hour</option><option value="6h">Last 6 hours</option><option value="24h">Last 24 hours</option></select></div>
       <div class="field"><label>&nbsp;</label><button id="refresh">Refresh now</button></div>
     </section>
-    <div class="layout">
-      <section class="panel">
-        <div class="head"><div><h2>Agent Grid</h2><p class="subtle">Status is derived from recent OrgEvents and workspace snapshots.</p></div><p class="subtle" id="agentStatus">Loading agents…</p></div>
-        <div class="grid" id="agentGrid"></div>
+
+    <nav class="panel tabnav" role="tablist">
+      <button data-tab="agents" class="active" role="tab">Agents</button>
+      <button data-tab="memories" role="tab">Memories</button>
+      <button data-tab="federation" role="tab">Federation</button>
+      <button data-tab="bridges" role="tab">Bridges</button>
+      <button data-tab="activity" role="tab">Activity</button>
+    </nav>
+
+    <!-- ── Agents tab ──────────────────────────────────────────────────── -->
+    <section class="tab active" id="tab-agents">
+      <section class="panel toolbar">
+        <div class="field"><label for="agentFilter">Agent</label><select id="agentFilter"><option value="">All agents</option></select></div>
+        <div class="field"><label for="kindFilter">Event kind</label><select id="kindFilter"><option value="">All kinds</option></select></div>
+        <div class="field"><label for="timeFilter">Time range</label><select id="timeFilter"><option value="15m">Last 15m</option><option value="1h" selected>Last hour</option><option value="6h">Last 6h</option><option value="24h">Last 24h</option></select></div>
+      </section>
+      <div class="layout">
+        <section class="panel">
+          <div class="head"><div><h2>Agent Grid</h2><p class="subtle">Status derived from recent OrgEvents and workspace snapshots.</p></div><p class="subtle" id="agentStatus">Loading agents…</p></div>
+          <div class="grid" id="agentGrid"></div>
+        </section>
+        <section class="panel">
+          <div class="head"><div><h2>Agent-scoped events</h2><p class="subtle">Events visible to <code>anvil</code> via <code>/OrgEventCatchup/anvil</code>.</p></div><p class="subtle" id="feedStatus">Waiting for first poll…</p></div>
+          <div class="events" id="eventFeed"></div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ── Memories tab ────────────────────────────────────────────────── -->
+    <section class="tab" id="tab-memories">
+      <section class="panel toolbar mem-toolbar">
+        <div class="field"><label for="memQuery">Search (semantic)</label><input id="memQuery" placeholder="freetext query…"></div>
+        <div class="field"><label for="memAgent">Agent</label><select id="memAgent"><option value="">All</option></select></div>
+        <div class="field"><label for="memDurability">Durability</label><select id="memDurability"><option value="">Any</option><option value="permanent">permanent</option><option value="persistent">persistent</option><option value="standard">standard</option><option value="ephemeral">ephemeral</option></select></div>
+        <div class="field"><label for="memLimit">Limit</label><input id="memLimit" type="number" value="20" min="1" max="100"></div>
+        <div class="field"><label>&nbsp;</label><button id="memSearch">Search</button></div>
       </section>
       <section class="panel">
-        <div class="head"><div><h2>Event Feed</h2><p class="subtle">Events visible to <code>anvil</code> via <code>/OrgEventCatchup/anvil</code>.</p></div><p class="subtle" id="feedStatus">Waiting for first poll…</p></div>
-        <div class="events" id="eventFeed"></div>
+        <div class="head"><div><h2>Memories</h2><p class="subtle">Semantic search via <code>/SemanticSearch</code>. Empty query returns recent memories.</p></div><p class="subtle" id="memStatus">Enter a query and click Search.</p></div>
+        <div class="memlist" id="memList"></div>
       </section>
-    </div>
+    </section>
+
+    <!-- ── Federation tab ──────────────────────────────────────────────── -->
+    <section class="tab" id="tab-federation">
+      <div class="topology">
+        <section class="panel">
+          <div class="head"><h2>This instance</h2></div>
+          <div id="fedInstance"><p class="subtle">Loading…</p></div>
+        </section>
+        <section class="panel">
+          <div class="head"><div><h2>Peers</h2><p class="subtle">Hub + spoke connections.</p></div><p class="subtle" id="fedPeerStatus"></p></div>
+          <div class="peers" id="fedPeers"></div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ── Bridges tab ─────────────────────────────────────────────────── -->
+    <section class="tab" id="tab-bridges">
+      <section class="panel">
+        <div class="head"><div><h2>Memory Bridges</h2><p class="subtle">Pluggable import/export adapters.</p></div><p class="subtle" id="bridgeStatus">Loading…</p></div>
+        <div class="bridges" id="bridgeList"></div>
+      </section>
+    </section>
+
+    <!-- ── Activity tab ────────────────────────────────────────────────── -->
+    <section class="tab" id="tab-activity">
+      <section class="panel toolbar">
+        <div class="field"><label for="actAgent">Agent</label><select id="actAgent"><option value="">All</option></select></div>
+        <div class="field"><label for="actKind">Kind</label><select id="actKind"><option value="">All</option></select></div>
+        <div class="field"><label for="actTime">Time range</label><select id="actTime"><option value="15m">Last 15m</option><option value="1h" selected>Last hour</option><option value="6h">Last 6h</option><option value="24h">Last 24h</option></select></div>
+      </section>
+      <section class="panel">
+        <div class="head"><div><h2>Org-wide events</h2><p class="subtle">All OrgEvent rows visible to admin.</p></div><p class="subtle" id="actStatus">Loading…</p></div>
+        <div class="events" id="actFeed"></div>
+      </section>
+    </section>
   </div>
+
   <script>
-    const state={anchorAgent:"anvil",agents:[],events:[],workspace:{},latestPoll:null,timer:null};
-    const els={summary:document.querySelector("#summary"),baseUrl:document.querySelector("#baseUrl"),adminPass:document.querySelector("#adminPass"),agentFilter:document.querySelector("#agentFilter"),kindFilter:document.querySelector("#kindFilter"),timeFilter:document.querySelector("#timeFilter"),refresh:document.querySelector("#refresh"),agentGrid:document.querySelector("#agentGrid"),eventFeed:document.querySelector("#eventFeed"),agentStatus:document.querySelector("#agentStatus"),feedStatus:document.querySelector("#feedStatus")};
-    const SS_PASS="flair.observation.adminPass",SS_URL="flair.observation.baseUrl";
-    const storedPass=sessionStorage.getItem(SS_PASS);if(storedPass)els.adminPass.value=storedPass;
-    const storedUrl=sessionStorage.getItem(SS_URL);if(storedUrl)els.baseUrl.value=storedUrl;
-    function authHeader(){const p=clean(els.adminPass.value);return p?"Basic "+btoa("admin:"+p):""}
-    const clean=v=>String(v??"").trim();
-    const ESC_MAP={"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
-    // esc() is used in BOTH attribute and text contexts; browsers HTML-decode attribute
-    // values when reading .value, so round-trips (e.g. agentFilter.value) preserve the original.
-    const esc=v=>String(v??"").replace(/[&<>"']/g,c=>ESC_MAP[c]);
-    const parse=v=>{if(!v)return null;if(typeof v==="object")return v;try{return JSON.parse(v)}catch{return null}};
-    const list=v=>Array.isArray(v)?v:Array.isArray(v?.items)?v.items:Array.isArray(v?.data)?v.data:[];
-    const eventKind=e=>clean(e?.kind||e?.type||e?.status||"unknown");
-    const eventText=e=>clean(e?.summary||e?.detail||e?.message||"");
-    const eventAgents=e=>[e?.authorId,...(Array.isArray(e?.targetIds)?e.targetIds:[])].map(clean).filter(Boolean);
-    const timeAgo=iso=>{const diff=Date.now()-new Date(iso).getTime();if(!Number.isFinite(diff))return"unknown";const m=Math.round(diff/6e4);if(m<1)return"just now";if(m<60)return`${m}m ago`;const h=Math.round(m/60);if(h<24)return`${h}h ago`;return`${Math.round(h/24)}d ago`};
-    const rangeMs=()=>({"15m":9e5,"1h":36e5,"6h":216e5,"24h":864e5}[els.timeFilter.value]||36e5);
-    const rangeStart=()=>new Date(Date.now()-rangeMs());
-    async function getJson(url){const headers={accept:"application/json"};const auth=authHeader();if(auth)headers.authorization=auth;const res=await fetch(url,{headers});if(res.status===401){sessionStorage.removeItem(SS_PASS);els.adminPass.value="";throw new Error("401 unauthorized — enter admin password and refresh")}if(!res.ok)throw new Error(`${res.status} ${res.statusText}`);return res.json()}
-    async function loadRoster(baseUrl){return list(await getJson(baseUrl+"/Agent"))}
-    async function loadWorkspace(baseUrl,agentIds){const rows=await Promise.all(agentIds.map(async id=>{try{return[id,await getJson(baseUrl+"/WorkspaceLatest/"+encodeURIComponent(id))]}catch{return[id,null]}}));state.workspace=Object.fromEntries(rows)}
-    function deriveAgent(agent){
-      const id=clean(agent.id||agent.agentId||agent.name);
-      const related=state.events.filter(event=>eventAgents(event).includes(id));
-      const latest=related.at(-1);
-      const ws=state.workspace[id];
-      const snapshot=parse(ws?.snapshot);
-      const lastAt=clean(latest?.createdAt||ws?.timestamp||ws?.createdAt||agent.updatedAt||agent.createdAt);
-      const online=lastAt&&(Date.now()-new Date(lastAt).getTime())<6e5;
-      return{id,name:clean(agent.name||id),role:clean(agent.role||agent.type||"agent"),status:online?"online":"offline",lastAt,currentTask:clean(parse(latest?.detail)?.taskId||latest?.refId||latest?.summary||"idle"),latestKind:eventKind(latest),workspace:clean(snapshot?.gitBranch||ws?.gitBranch||ws?.path||"unavailable")};
+    // ── Constants + state ───────────────────────────────────────────────
+    const SS_PASS = "flair.observation.adminPass";
+    const SS_URL  = "flair.observation.baseUrl";
+    const ESC_MAP = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
+    const state = {
+      tab: "agents",
+      timer: null,
+      anchorAgent: "anvil",
+      agents: [],
+      events: [],
+      workspace: {},
+      memories: [],
+      federationInstance: null,
+      federationPeers: [],
+      bridges: [],
+      orgEvents: [],
+      latestPoll: null,
+    };
+
+    const els = {};
+    [
+      "summary","baseUrl","adminPass","refresh",
+      "agentFilter","kindFilter","timeFilter","agentGrid","agentStatus","eventFeed","feedStatus",
+      "memQuery","memAgent","memDurability","memLimit","memSearch","memList","memStatus",
+      "fedInstance","fedPeers","fedPeerStatus",
+      "bridgeList","bridgeStatus",
+      "actAgent","actKind","actTime","actFeed","actStatus",
+    ].forEach(k => { els[k] = document.querySelector("#" + k); });
+    const tabs = [...document.querySelectorAll(".tabnav button")];
+
+    // ── Auth + utilities ────────────────────────────────────────────────
+    const clean = v => String(v ?? "").trim();
+    const esc   = v => String(v ?? "").replace(/[&<>"']/g, c => ESC_MAP[c]);
+    const parse = v => { if (!v) return null; if (typeof v === "object") return v; try { return JSON.parse(v); } catch { return null; } };
+    const list  = v => Array.isArray(v) ? v : Array.isArray(v?.items) ? v.items : Array.isArray(v?.data) ? v.data : Array.isArray(v?.results) ? v.results : [];
+    const eventKind   = e => clean(e?.kind || e?.type || e?.status || "unknown");
+    const eventText   = e => clean(e?.summary || e?.detail || e?.message || "");
+    const eventAgents = e => [e?.authorId, ...(Array.isArray(e?.targetIds) ? e.targetIds : [])].map(clean).filter(Boolean);
+    const timeAgo = iso => { const d = Date.now() - new Date(iso).getTime(); if (!Number.isFinite(d)) return "unknown"; const m = Math.round(d/6e4); if (m<1) return "just now"; if (m<60) return `${m}m ago`; const h = Math.round(m/60); if (h<24) return `${h}h ago`; return `${Math.round(h/24)}d ago`; };
+
+    function authHeader() { const p = clean(els.adminPass.value); return p ? "Basic " + btoa("admin:" + p) : ""; }
+    function baseUrl()    { return clean(els.baseUrl.value).replace(/\/$/, ""); }
+    function rangeMs(sel) { return ({"15m":9e5,"1h":36e5,"6h":216e5,"24h":864e5})[sel] || 36e5; }
+
+    sessionStorage.getItem(SS_PASS) && (els.adminPass.value = sessionStorage.getItem(SS_PASS));
+    sessionStorage.getItem(SS_URL)  && (els.baseUrl.value  = sessionStorage.getItem(SS_URL));
+
+    async function api(path, opts = {}) {
+      const headers = { accept: "application/json", ...(opts.headers || {}) };
+      const auth = authHeader();
+      if (auth) headers.authorization = auth;
+      if (opts.body && typeof opts.body !== "string") {
+        headers["content-type"] = "application/json";
+        opts.body = JSON.stringify(opts.body);
+      }
+      const res = await fetch(baseUrl() + path, { ...opts, headers });
+      if (res.status === 401) { sessionStorage.removeItem(SS_PASS); els.adminPass.value = ""; throw new Error("401 unauthorized — enter admin password"); }
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const ct = res.headers.get("content-type") || "";
+      return ct.includes("application/json") ? res.json() : res.text();
     }
-    function filteredEvents(){const agent=els.agentFilter.value,kind=els.kindFilter.value,start=rangeStart();return state.events.filter(e=>{if(new Date(e.createdAt||0)<start)return false;if(agent&&!eventAgents(e).includes(agent))return false;if(kind&&eventKind(e)!==kind)return false;return true}).slice().reverse()}
-    function renderSummary(cards,events){const items=[["Agents",cards.length],["Online",cards.filter(c=>c.status==="online").length],["Events",events.length],["Last Poll",state.latestPoll?timeAgo(state.latestPoll):"never"]];els.summary.innerHTML=items.map(([l,v])=>`<div class="chip"><strong>${v}</strong><span>${l}</span></div>`).join("")}
-    function renderFilters(){const agents=state.agents.map(a=>clean(a.id||a.agentId||a.name)).filter(Boolean).sort();const kinds=[...new Set(state.events.map(eventKind).filter(Boolean))].sort();const chosenAgent=els.agentFilter.value,chosenKind=els.kindFilter.value;els.agentFilter.innerHTML=`<option value="">All agents</option>`+agents.map(id=>`<option value="${esc(id)}" ${id===chosenAgent?"selected":""}>${esc(id)}</option>`).join("");els.kindFilter.innerHTML=`<option value="">All kinds</option>`+kinds.map(kind=>`<option value="${esc(kind)}" ${kind===chosenKind?"selected":""}>${esc(kind)}</option>`).join("")}
-    function renderAgents(cards){els.agentStatus.textContent=`${cards.length} agents via /Agent`;els.agentGrid.innerHTML=cards.length?cards.map(agent=>`<article class="card"><div class="row"><h3>${esc(agent.name)}</h3><span class="badge ${agent.status==="online"?"ok":"warn"}">${esc(agent.status)}</span></div><div class="meta">${esc(agent.role)}</div><div class="row"><span class="kind">${esc(agent.latestKind)}</span><span class="meta">${agent.lastAt?timeAgo(agent.lastAt):"no signal"}</span></div><p><strong>Current task:</strong> ${esc(agent.currentTask)}</p><div class="workspace">Workspace: ${esc(agent.workspace)}</div></article>`).join(""):`<div class="empty">No agents found.</div>`}
-    function renderEvents(events){els.feedStatus.textContent=`${events.length} matching events`;els.eventFeed.innerHTML=events.length?events.map(event=>`<article class="event"><div class="row"><h3>${esc(clean(event.summary||eventKind(event)))}</h3><span class="meta">${timeAgo(event.createdAt)}</span></div><div class="row"><span class="kind">${esc(eventKind(event))}</span><span class="badge">${esc(eventAgents(event).join(", "))||"org-wide"}</span></div><p>${esc(eventText(event))||"No detail provided."}</p></article>`).join(""):`<div class="empty">No events match the current filters.</div>`}
-    function render(){renderFilters();const cards=state.agents.map(deriveAgent);const events=filteredEvents();renderSummary(cards,events);renderAgents(cards);renderEvents(events)}
-    async function refresh(){const baseUrl=clean(els.baseUrl.value).replace(/\/$/,"");const since=rangeStart().toISOString();els.feedStatus.textContent="Polling Flair…";try{const [agents,events]=await Promise.all([loadRoster(baseUrl),getJson(`${baseUrl}/OrgEventCatchup/${encodeURIComponent(state.anchorAgent)}?since=${encodeURIComponent(since)}`)]);state.agents=agents;state.events=list(events).sort((a,b)=>clean(a.createdAt).localeCompare(clean(b.createdAt)));await loadWorkspace(baseUrl,state.agents.map(a=>clean(a.id||a.agentId||a.name)).filter(Boolean));state.latestPoll=new Date().toISOString();render()}catch(error){els.feedStatus.textContent=`Poll failed: ${error.message}`}}
-    function schedule(){clearInterval(state.timer);state.timer=setInterval(refresh,5e3)}
-    [els.agentFilter,els.kindFilter,els.timeFilter].forEach(el=>el.addEventListener("change",()=>{render();if(el===els.timeFilter)refresh()}));
-    els.refresh.addEventListener("click",refresh);
-    els.baseUrl.addEventListener("change",()=>{sessionStorage.setItem(SS_URL,clean(els.baseUrl.value));refresh();schedule()});
-    els.adminPass.addEventListener("change",()=>{sessionStorage.setItem(SS_PASS,clean(els.adminPass.value));refresh()});
-    refresh();schedule();
+
+    // ── Tab switching ───────────────────────────────────────────────────
+    function setTab(name) {
+      state.tab = name;
+      tabs.forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+      document.querySelectorAll(".tab").forEach(s => s.classList.toggle("active", s.id === "tab-" + name));
+      refresh();
+    }
+    tabs.forEach(b => b.addEventListener("click", () => setTab(b.dataset.tab)));
+
+    // ── Agents tab ──────────────────────────────────────────────────────
+    async function loadAgentsTab() {
+      const since = new Date(Date.now() - rangeMs(els.timeFilter.value)).toISOString();
+      const [agents, events] = await Promise.all([
+        api("/Agent").then(list),
+        api(`/OrgEventCatchup/${encodeURIComponent(state.anchorAgent)}?since=${encodeURIComponent(since)}`).then(list),
+      ]);
+      state.agents = agents;
+      state.events = events.sort((a,b) => clean(a.createdAt).localeCompare(clean(b.createdAt)));
+      const ids = agents.map(a => clean(a.id || a.agentId || a.name)).filter(Boolean);
+      const rows = await Promise.all(ids.map(async id => { try { return [id, await api("/WorkspaceLatest/" + encodeURIComponent(id))]; } catch { return [id, null]; } }));
+      state.workspace = Object.fromEntries(rows);
+    }
+    function deriveAgent(agent) {
+      const id = clean(agent.id || agent.agentId || agent.name);
+      const related = state.events.filter(e => eventAgents(e).includes(id));
+      const latest = related.at(-1);
+      const ws = state.workspace[id];
+      const snap = parse(ws?.snapshot);
+      const lastAt = clean(latest?.createdAt || ws?.timestamp || ws?.createdAt || agent.updatedAt || agent.createdAt);
+      const online = lastAt && (Date.now() - new Date(lastAt).getTime()) < 6e5;
+      return { id, name: clean(agent.name || id), role: clean(agent.role || agent.type || "agent"), status: online ? "online" : "offline", lastAt, currentTask: clean(parse(latest?.detail)?.taskId || latest?.refId || latest?.summary || "idle"), latestKind: eventKind(latest), workspace: clean(snap?.gitBranch || ws?.gitBranch || ws?.path || "unavailable") };
+    }
+    function renderAgentsTab() {
+      // populate filter dropdowns
+      const agentIds = state.agents.map(a => clean(a.id || a.agentId || a.name)).filter(Boolean).sort();
+      const kinds = [...new Set(state.events.map(eventKind).filter(Boolean))].sort();
+      els.agentFilter.innerHTML = `<option value="">All agents</option>` + agentIds.map(id => `<option value="${esc(id)}" ${id===els.agentFilter.value?"selected":""}>${esc(id)}</option>`).join("");
+      els.kindFilter.innerHTML = `<option value="">All kinds</option>` + kinds.map(k => `<option value="${esc(k)}" ${k===els.kindFilter.value?"selected":""}>${esc(k)}</option>`).join("");
+      // agent cards
+      const cards = state.agents.map(deriveAgent);
+      els.agentStatus.textContent = `${cards.length} agents via /Agent`;
+      els.agentGrid.innerHTML = cards.length ? cards.map(a => `<article class="card"><div class="row"><h3>${esc(a.name)}</h3><span class="badge ${a.status==="online"?"ok":"warn"}">${esc(a.status)}</span></div><div class="meta">${esc(a.role)}</div><div class="row"><span class="kind">${esc(a.latestKind)}</span><span class="meta">${a.lastAt?timeAgo(a.lastAt):"no signal"}</span></div><p><strong>Current task:</strong> ${esc(a.currentTask)}</p><div class="workspace">Workspace: ${esc(a.workspace)}</div></article>`).join("") : `<div class="empty">No agents found.</div>`;
+      // event feed (filtered)
+      const start = new Date(Date.now() - rangeMs(els.timeFilter.value));
+      const filteredEvents = state.events.filter(e => {
+        if (new Date(e.createdAt || 0) < start) return false;
+        if (els.agentFilter.value && !eventAgents(e).includes(els.agentFilter.value)) return false;
+        if (els.kindFilter.value && eventKind(e) !== els.kindFilter.value) return false;
+        return true;
+      }).slice().reverse();
+      els.feedStatus.textContent = `${filteredEvents.length} matching events`;
+      els.eventFeed.innerHTML = filteredEvents.length ? filteredEvents.map(e => `<article class="event"><div class="row"><h3>${esc(clean(e.summary||eventKind(e)))}</h3><span class="meta">${timeAgo(e.createdAt)}</span></div><div class="row"><span class="kind">${esc(eventKind(e))}</span><span class="badge">${esc(eventAgents(e).join(", "))||"org-wide"}</span></div><p>${esc(eventText(e))||"No detail provided."}</p></article>`).join("") : `<div class="empty">No events match.</div>`;
+      // summary chips
+      els.summary.innerHTML = [["Agents", cards.length], ["Online", cards.filter(c=>c.status==="online").length], ["Events", filteredEvents.length], ["Last Poll", state.latestPoll ? timeAgo(state.latestPoll) : "never"]].map(([l,v]) => `<div class="chip"><strong>${v}</strong><span>${l}</span></div>`).join("");
+    }
+
+    // ── Memories tab ────────────────────────────────────────────────────
+    async function loadMemoriesTab() {
+      const q = clean(els.memQuery.value);
+      const limit = Math.max(1, Math.min(100, Number(els.memLimit.value) || 20));
+      els.memStatus.textContent = "Searching…";
+      const body = { q: q || "", limit };
+      if (els.memAgent.value) body.agentId = els.memAgent.value;
+      if (els.memDurability.value) body.durability = els.memDurability.value;
+      const res = await api("/SemanticSearch", { method: "POST", body });
+      state.memories = list(res);
+    }
+    function renderMemoriesTab() {
+      // populate agent dropdown from agents we already loaded
+      const agentIds = state.agents.map(a => clean(a.id || a.agentId || a.name)).filter(Boolean).sort();
+      const cur = els.memAgent.value;
+      els.memAgent.innerHTML = `<option value="">All</option>` + agentIds.map(id => `<option value="${esc(id)}" ${id===cur?"selected":""}>${esc(id)}</option>`).join("");
+      els.memStatus.textContent = `${state.memories.length} result${state.memories.length===1?"":"s"}`;
+      els.memList.innerHTML = state.memories.length ? state.memories.map(m => {
+        const tags = [m.durability && `<span class="badge">${esc(m.durability)}</span>`, m.archived && `<span class="badge warn">archived</span>`, m._safetyFlags && `<span class="badge danger">flagged</span>`].filter(Boolean).join(" ");
+        const score = m._score != null ? `<span class="score">score ${Number(m._score).toFixed(2)}</span>` : "";
+        return `<article class="memcard"><div class="row"><h3>${esc(m.id || "(no id)")}</h3>${score}</div><div class="row"><span class="meta">${esc(m.agentId||"")} · ${m.createdAt?timeAgo(m.createdAt):""}</span><span>${tags}</span></div><pre>${esc(m.content || "")}</pre></article>`;
+      }).join("") : `<div class="empty">No memories returned.</div>`;
+    }
+
+    // ── Federation tab ──────────────────────────────────────────────────
+    async function loadFederationTab() {
+      const [inst, peers] = await Promise.all([
+        api("/FederationInstance").catch(() => null),
+        api("/FederationPeers").catch(() => ({ peers: [] })),
+      ]);
+      state.federationInstance = inst;
+      state.federationPeers = list(peers) || (peers && peers.peers) || [];
+    }
+    function renderFederationTab() {
+      const inst = state.federationInstance;
+      els.fedInstance.innerHTML = inst ? `<div class="card"><div class="row"><h3>${esc(inst.id || "(no id)")}</h3><span class="badge ${inst.status==="active"?"ok":"warn"}">${esc(inst.status||"unknown")}</span></div><div class="meta">role: ${esc(inst.role||"unknown")}</div><div class="meta" style="word-break:break-all">pubkey: <code>${esc(inst.publicKey||"")}</code></div></div>` : `<div class="empty">No federation instance configured.</div>`;
+      els.fedPeerStatus.textContent = `${state.federationPeers.length} peer(s)`;
+      els.fedPeers.innerHTML = state.federationPeers.length ? state.federationPeers.map(p => {
+        const status = p.status || "unknown";
+        const cls = status==="paired"||status==="connected" ? "ok" : status==="revoked" ? "danger" : "warn";
+        const sync = p.lastSyncAt ? `last sync ${timeAgo(p.lastSyncAt)}` : "never synced";
+        return `<article class="peer"><div class="row"><h3>${esc(p.id||"(no id)")}</h3><span class="badge ${cls}">${esc(status)}</span></div><div class="meta">role: ${esc(p.role||"")}${p.endpoint?` · <code>${esc(p.endpoint)}</code>`:""}</div><div class="meta">${esc(sync)}${p.relayOnly?" · relay-only":""}</div></article>`;
+      }).join("") : `<div class="empty">No peers configured. Use 'flair federation pair' on a spoke.</div>`;
+    }
+
+    // ── Bridges tab ─────────────────────────────────────────────────────
+    async function loadBridgesTab() {
+      // Try a few likely endpoint shapes; bridges API may have evolved.
+      let res = null;
+      for (const path of ["/Bridges", "/Bridge", "/bridges"]) {
+        try { res = await api(path); break; } catch {}
+      }
+      state.bridges = list(res);
+    }
+    function renderBridgesTab() {
+      els.bridgeStatus.textContent = `${state.bridges.length} bridge(s)`;
+      els.bridgeList.innerHTML = state.bridges.length ? state.bridges.map(b => {
+        const status = b.status || b.state || "unknown";
+        const cls = status==="active"||status==="allowed" ? "ok" : status==="denied"||status==="error" ? "danger" : "warn";
+        return `<article class="bridge"><div class="row"><h3>${esc(b.name||b.id||"(no name)")}</h3><span class="badge ${cls}">${esc(status)}</span></div><div class="meta">${esc(b.kind||b.type||"")}${b.version?` · v${esc(b.version)}`:""}</div><div class="meta">${esc(b.summary||b.description||"")}</div></article>`;
+      }).join("") : `<div class="empty">No bridges registered (or /Bridges endpoint unavailable on this instance).</div>`;
+    }
+
+    // ── Activity tab ────────────────────────────────────────────────────
+    async function loadActivityTab() {
+      const since = new Date(Date.now() - rangeMs(els.actTime.value)).toISOString();
+      // Prefer /OrgEvent (admin-wide); fall back to /OrgEventCatchup/anvil.
+      let events;
+      try { events = list(await api(`/OrgEvent?since=${encodeURIComponent(since)}`)); }
+      catch { events = list(await api(`/OrgEventCatchup/anvil?since=${encodeURIComponent(since)}`)); }
+      state.orgEvents = events.sort((a,b) => clean(a.createdAt).localeCompare(clean(b.createdAt)));
+    }
+    function renderActivityTab() {
+      const agentIds = state.agents.map(a => clean(a.id || a.agentId || a.name)).filter(Boolean).sort();
+      const kinds = [...new Set(state.orgEvents.map(eventKind).filter(Boolean))].sort();
+      els.actAgent.innerHTML = `<option value="">All</option>` + agentIds.map(id => `<option value="${esc(id)}" ${id===els.actAgent.value?"selected":""}>${esc(id)}</option>`).join("");
+      els.actKind.innerHTML = `<option value="">All</option>` + kinds.map(k => `<option value="${esc(k)}" ${k===els.actKind.value?"selected":""}>${esc(k)}</option>`).join("");
+      const filtered = state.orgEvents.filter(e => {
+        if (els.actAgent.value && !eventAgents(e).includes(els.actAgent.value)) return false;
+        if (els.actKind.value && eventKind(e) !== els.actKind.value) return false;
+        return true;
+      }).slice().reverse();
+      els.actStatus.textContent = `${filtered.length} matching events`;
+      els.actFeed.innerHTML = filtered.length ? filtered.map(e => `<article class="event"><div class="row"><h3>${esc(clean(e.summary||eventKind(e)))}</h3><span class="meta">${timeAgo(e.createdAt)}</span></div><div class="row"><span class="kind">${esc(eventKind(e))}</span><span class="badge">${esc(eventAgents(e).join(", "))||"org-wide"}</span></div><p>${esc(eventText(e))||"No detail provided."}</p></article>`).join("") : `<div class="empty">No events match.</div>`;
+    }
+
+    // ── Refresh dispatcher ─────────────────────────────────────────────
+    async function refresh() {
+      try {
+        // Always keep the agent roster fresh (used by multiple tabs for filters).
+        if (state.tab !== "memories" || !state.agents.length) {
+          try { state.agents = list(await api("/Agent")); } catch {}
+        }
+        if (state.tab === "agents")     await loadAgentsTab();
+        if (state.tab === "memories")   { /* memories load on Search click only */ }
+        if (state.tab === "federation") await loadFederationTab();
+        if (state.tab === "bridges")    await loadBridgesTab();
+        if (state.tab === "activity")   await loadActivityTab();
+        state.latestPoll = new Date().toISOString();
+      } catch (err) {
+        // Surface error in the active tab's status field.
+        const sel = { agents: els.feedStatus, memories: els.memStatus, federation: els.fedPeerStatus, bridges: els.bridgeStatus, activity: els.actStatus }[state.tab];
+        if (sel) sel.textContent = `Failed: ${err.message}`;
+      }
+      // Render whichever tab is visible.
+      if (state.tab === "agents")     renderAgentsTab();
+      if (state.tab === "memories")   renderMemoriesTab();
+      if (state.tab === "federation") renderFederationTab();
+      if (state.tab === "bridges")    renderBridgesTab();
+      if (state.tab === "activity")   renderActivityTab();
+    }
+
+    function schedule() { clearInterval(state.timer); state.timer = setInterval(refresh, 5e3); }
+
+    // ── Wire interactions ───────────────────────────────────────────────
+    els.refresh.addEventListener("click", refresh);
+    els.baseUrl.addEventListener("change", () => { sessionStorage.setItem(SS_URL, clean(els.baseUrl.value)); refresh(); schedule(); });
+    els.adminPass.addEventListener("change", () => { sessionStorage.setItem(SS_PASS, clean(els.adminPass.value)); refresh(); });
+    [els.agentFilter, els.kindFilter, els.timeFilter].forEach(el => el.addEventListener("change", () => { renderAgentsTab(); if (el === els.timeFilter) refresh(); }));
+    [els.actAgent, els.actKind, els.actTime].forEach(el => el.addEventListener("change", () => { renderActivityTab(); if (el === els.actTime) refresh(); }));
+    els.memSearch.addEventListener("click", async () => {
+      try { await loadMemoriesTab(); } catch (err) { els.memStatus.textContent = `Search failed: ${err.message}`; return; }
+      renderMemoriesTab();
+    });
+    els.memQuery.addEventListener("keydown", e => { if (e.key === "Enter") els.memSearch.click(); });
+
+    // Boot
+    refresh();
+    schedule();
   </script>
 </body>
 </html>
