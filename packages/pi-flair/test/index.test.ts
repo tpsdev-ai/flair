@@ -13,7 +13,7 @@ import { describe, test, expect } from "bun:test";
  */
 
 // Import the real classifyError function
-import { classifyError as classifyErrorReal } from "./src/index";
+import { classifyError as classifyErrorReal } from "../src/index";
 
 // ─── Config Tests ─────────────────────────────────────────────────────────────
 

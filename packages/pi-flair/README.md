@@ -77,7 +77,7 @@ pi
 | `FLAIR_KEY_PATH` | auto-resolved | Path to Ed25519 private key |
 | `FLAIR_MAX_RECALL_RESULTS` | `5` | Max results for memory_search |
 | `FLAIR_MAX_BOOTSTRAP_TOKENS` | `4000` | Max tokens in bootstrap output |
-| `FLAIR_AUTO_RECALL` | `true` | Auto-load bootstrap on session start |
+| `FLAIR_AUTO_RECALL` | `false` | Auto-load bootstrap on session start (opt-in) |
 | `FLAIR_AUTO_CAPTURE` | `false` | Auto-save session context to memory |
 
 ## Security Notes

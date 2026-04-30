@@ -59,10 +59,10 @@ interface BootstrapParams {
 
 // Secret patterns to filter from auto-capture
 const SECRET_PATTERNS = [
-  /sk-[a-zA-Z0-9]+/gu,                    // OpenAI keys
-  /ghp_[a-zA-Z0-9]+/gu,                   // GitHub PATs
-  /pat_[a-zA-Z0-9]+/gu,                   // Generic PATs
-  /Bearer [a-zA-Z0-9_-]+/gu,              // Bearer tokens
+  /sk-[a-zA-Z0-9]+/u,                    // OpenAI keys
+  /ghp_[a-zA-Z0-9_.-]+/u,                 // GitHub PATs (includes dots for JWT-like tokens)
+  /pat_[a-zA-Z0-9_.-]+/u,                 // Generic PATs (includes dots for JWT-like tokens)
+  /Bearer [a-zA-Z0-9_.-]+/u,              // Bearer tokens (includes dots for JWTs)
   /-----BEGIN PRIVATE KEY-----/u,         // Private keys
   /-----BEGIN RSA PRIVATE KEY-----/u,     // RSA keys
   /-----BEGIN EC PRIVATE KEY-----/u,      // EC keys
@@ -98,10 +98,14 @@ function getAgentId(config: PluginConfig, ctx: ExtensionContext): string {
   // Try to infer from working directory
   const cwd = ctx.cwd;
   const lastSlash = cwd.lastIndexOf("/");
+  let agentId: string;
   if (lastSlash >= 0) {
-    return cwd.slice(lastSlash + 1);
+    agentId = cwd.slice(lastSlash + 1);
+  } else {
+    agentId = cwd;
   }
-  return cwd;
+  console.warn(`Flair: agentId not configured, falling back to cwd segment "${agentId}". Set FLAIR_AGENT_ID to silence this warning.`);
+  return agentId;
 }
 
 function createFlairClient(config: PluginConfig): FlairClient {
@@ -117,7 +121,12 @@ function createFlairClient(config: PluginConfig): FlairClient {
 
 // ─── Error Classification ─────────────────────────────────────────────────────
 
-function classifyError(err: unknown, flairUrl: string): string {
+/**
+ * Classify an error into a user-friendly message.
+ * @param err - The error to classify
+ * @param flairUrl - The Flair server URL for connection error messages
+ */
+export function classifyError(err: unknown, flairUrl: string): string {
   if (err instanceof FlairError) {
     const { status, body } = err;
     if (status === 400) return `validation_error: ${body}`;
