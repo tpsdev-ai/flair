@@ -261,7 +261,7 @@ describe("Secret Filtering", () => {
   test("detects OpenAI keys", () => {
     const text = "{\"content\": \"Here is my key: sk-abc123\"}";
     const SECRET_PATTERNS = [
-      /sk-[a-zA-Z0-9]+/gu,
+      /sk-[a-zA-Z0-9]+/u,
     ];
     const hasSecret = SECRET_PATTERNS.some((p) => p.test(text));
     expect(hasSecret).toBe(true);
@@ -270,7 +270,7 @@ describe("Secret Filtering", () => {
   test("detects GitHub PATs", () => {
     const text = "GitHub token: ghp_1234567890";
     const SECRET_PATTERNS = [
-      /ghp_[a-zA-Z0-9]+/gu,
+      /ghp_[a-zA-Z0-9_.-]+/u,                 // includes dots for JWT-like tokens
     ];
     const hasSecret = SECRET_PATTERNS.some((p) => p.test(text));
     expect(hasSecret).toBe(true);
@@ -279,7 +279,7 @@ describe("Secret Filtering", () => {
   test("detects Bearer tokens", () => {
     const text = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
     const SECRET_PATTERNS = [
-      /Bearer [a-zA-Z0-9_-]+/gu,
+      /Bearer [a-zA-Z0-9_.-]+/u,              // includes dots for JWTs
     ];
     const hasSecret = SECRET_PATTERNS.some((p) => p.test(text));
     expect(hasSecret).toBe(true);
@@ -288,9 +288,9 @@ describe("Secret Filtering", () => {
   test("allows normal content without secrets", () => {
     const text = "This is just a normal message without any secrets.";
     const SECRET_PATTERNS = [
-      /sk-[a-zA-Z0-9]+/gu,
-      /ghp_[a-zA-Z0-9]+/gu,
-      /Bearer [a-zA-Z0-9_-]+/gu,
+      /sk-[a-zA-Z0-9]+/u,
+      /ghp_[a-zA-Z0-9_.-]+/u,                 // includes dots for JWT-like tokens
+      /Bearer [a-zA-Z0-9_.-]+/u,              // includes dots for JWTs
     ];
     const hasSecret = SECRET_PATTERNS.some((p) => p.test(text));
     expect(hasSecret).toBe(false);
