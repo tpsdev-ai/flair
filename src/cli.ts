@@ -984,6 +984,7 @@ program
   .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (generated if omitted)")
+  .option("--admin-pass-file <path>", "Read admin password from file (chmod 600 recommended)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
   .option("--skip-start", "Skip Harper startup (assume already running)")
@@ -1169,21 +1170,71 @@ program
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     const dataDir: string = opts.dataDir ?? defaultDataDir();
 
-    // Admin password: generate if not provided, NEVER written to disk
-    // Check if admin-pass came from argv (not env) and is a real secret.
-    // fromEnv is true ONLY when the resolved value came from env — i.e.,
-    // no inline override. If both inline and env are set, the inline value
-    // wins via `??` precedence, so the warning must still fire.
-    const adminPassFromEnv = !opts.adminPass && !!process.env.FLAIR_ADMIN_PASS;
-    if (shouldShowInlineSecretWarning(opts.adminPass, adminPassFromEnv, new Set(["--admin-pass"]), "--admin-pass")) {
+    // Admin password: determine from opts, env, or generate
+    // Priority: 1) --admin-pass-file, 2) env vars, 3) generate new
+    let adminPass: string;
+    let passwordSource: "generated" | "file" | "env" = "generated";
+    
+    // Warn if --admin-pass is passed inline (not from env)
+    if (shouldShowInlineSecretWarning(opts.adminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
       console.error(
-        "warning: --admin-pass passed inline. Consider --admin-pass-from <file> or FLAIR_ADMIN_PASS env " +
+        "warning: --admin-pass passed inline. Consider --admin-pass-file <path> or FLAIR_ADMIN_PASS env " +
         "to keep secrets out of shell history."
       );
     }
-    const adminPass: string = opts.adminPass ?? Buffer.from(nacl.randomBytes(18)).toString("base64url");
+    
+    // Read from file if provided
+    if (opts.adminPassFile) {
+      if (!existsSync(opts.adminPassFile)) {
+        console.error(`Error: --admin-pass-file path does not exist: ${opts.adminPassFile}`);
+        process.exit(1);
+      }
+      const fileContent = readFileSync(opts.adminPassFile, "utf-8");
+      adminPass = fileContent.trim();
+      if (!adminPass) {
+        console.error(`Error: admin password file is empty or contains only whitespace: ${opts.adminPassFile}`);
+        process.exit(1);
+      }
+      passwordSource = "file";
+    } else if (process.env.FLAIR_ADMIN_PASS) {
+      adminPass = process.env.FLAIR_ADMIN_PASS;
+      passwordSource = "env";
+    } else if (process.env.HDB_ADMIN_PASSWORD) {
+      adminPass = process.env.HDB_ADMIN_PASSWORD;
+      passwordSource = "env";
+    } else if (opts.adminPass) {
+      // Inline admin pass (deprecated)
+      adminPass = opts.adminPass;
+      // Don't generate - don't write to file
+      passwordSource = "env"; // Treat same as env for display purposes
+    } else {
+      // Generate new password and write to file atomically
+      adminPass = Buffer.from(nacl.randomBytes(18)).toString("base64url");
+      passwordSource = "generated";
+      
+      // Atomic write: create temp file in same dir, then rename
+      const flairDir = join(homedir(), ".flair");
+      mkdirSync(flairDir, { recursive: true });
+      const adminPassPath = join(flairDir, "admin-pass");
+      const tempPath = mkdtempSync(join(flairDir, ".admin-pass.tmp-"));
+      const finalTempPath = join(tempPath, "admin-pass");
+      try {
+        writeFileSync(finalTempPath, adminPass + "\n", { mode: 0o600 });
+        renameSync(finalTempPath, adminPassPath);
+        rmSync(tempPath, { recursive: true, force: true });
+      } catch (err) {
+        // Clean up temp dir on failure
+        try { rmSync(tempPath, { recursive: true, force: true }); } catch {}
+        throw err;
+      }
+    }
     const adminUser = DEFAULT_ADMIN_USER;
-
+    
+    // If we generated the password, report where it was saved
+    if (passwordSource === "generated") {
+      const adminPassPath = join(homedir(), ".flair", "admin-pass");
+      console.log(`Admin password saved to: ${adminPassPath}`);
+    }
     // Check Node.js version
     const major = parseInt(process.version.slice(1), 10);
     if (major < 18) throw new Error(`Node.js >= 18 required (found ${process.version})`);
@@ -1381,12 +1432,18 @@ program
       console.log(`   Agent ID:    ${agentId}`);
       console.log(`   Flair URL:   ${httpUrl}`);
       console.log(`   Private key: ${privPath}`);
-      if (!opts.adminPass && !alreadyRunning) {
+      
+      // Display admin credentials when password was generated or from a file
+      // Do NOT display when from env (to avoid showing the env var value)
+      if (passwordSource !== "env" && !alreadyRunning) {
+        const passDisplay = passwordSource === "file"
+          ? opts.adminPassFile ?? "(file path)"
+          : "~/.flair/admin-pass";
         console.log(`\n   ┌─────────────────────────────────────────────────┐`);
         console.log(`   │  Harper admin credentials (save these now):     │`);
         console.log(`   │                                                 │`);
         console.log(`   │  Username: ${DEFAULT_ADMIN_USER.padEnd(37)}│`);
-        console.log(`   │  Password: ${adminPass.padEnd(37)}│`);
+        console.log(`   │  Password: ${passDisplay.padEnd(37)}│`);
         console.log(`   │                                                 │`);
         console.log(`   │  ⚠️  The password won't be shown again.         │`);
         console.log(`   └─────────────────────────────────────────────────┘`);
@@ -1465,12 +1522,18 @@ program
       const httpUrl = `http://127.0.0.1:${httpPort}`;
       console.log("\n✅ Flair initialized (no agent registered)");
       console.log(`   Flair URL:   ${httpUrl}`);
-      if (!opts.adminPass && !alreadyRunning) {
+      
+      // Display admin credentials when password was generated or from a file
+      // Do NOT display when from env (to avoid showing the env var value)
+      if (passwordSource !== "env" && !alreadyRunning) {
+        const passDisplay = passwordSource === "file"
+          ? opts.adminPassFile ?? "(file path)"
+          : "~/.flair/admin-pass";
         console.log(`\n   ┌─────────────────────────────────────────────────┐`);
         console.log(`   │  Harper admin credentials (save these now):     │`);
         console.log(`   │                                                 │`);
         console.log(`   │  Username: ${DEFAULT_ADMIN_USER.padEnd(37)}│`);
-        console.log(`   │  Password: ${adminPass.padEnd(37)}│`);
+        console.log(`   │  Password: ${passDisplay.padEnd(37)}│`);
         console.log(`   │                                                 │`);
         console.log(`   │  ⚠️  The password won't be shown again.         │`);
         console.log(`   └─────────────────────────────────────────────────┘`);
@@ -1542,8 +1605,28 @@ program
       if (major < 18) throw new Error(`Node.js >= 18 required (found ${process.version})`);
 
       // Only generate a password if none provided via env (fresh install)
+      // If we generate, write it atomically to ~/.flair/admin-pass
+      let adminPassGenerated = false;
       if (!adminPass) {
         adminPass = Buffer.from(nacl.randomBytes(18)).toString("base64url");
+        adminPassGenerated = true;
+        
+        // Atomic write: create temp file in same dir, then rename
+        const flairDir = join(homedir(), ".flair");
+        mkdirSync(flairDir, { recursive: true });
+        const adminPassPath = join(flairDir, "admin-pass");
+        const tempPath = mkdtempSync(join(flairDir, ".admin-pass.tmp-"));
+        const finalTempPath = join(tempPath, "admin-pass");
+        try {
+          writeFileSync(finalTempPath, adminPass + "\n", { mode: 0o600 });
+          renameSync(finalTempPath, adminPassPath);
+          rmSync(tempPath, { recursive: true, force: true });
+        } catch (err) {
+          // Clean up temp dir on failure
+          try { rmSync(tempPath, { recursive: true, force: true }); } catch {}
+          throw err;
+        }
+        console.log(`Admin password saved to: ${adminPassPath}`);
       }
 
       // Check if Harper is already running on this port

@@ -5,7 +5,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
@@ -309,5 +310,132 @@ describe("flair status", () => {
     const { healthy, agentCount } = await getStatus(httpServer.url);
     expect(healthy).toBe(true);
     expect(agentCount).toBeNull();
+  });
+});
+
+describe("local init admin password handling", () => {
+  let tmpDir: string;
+  let oldEnv: NodeJS.ProcessEnv;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+    oldEnv = { ...process.env };
+    // Set HOME to temp dir so that .flair directory is isolated
+    process.env.HOME = tmpDir;
+    // Unset any Flair-related env vars that might affect the test
+    delete process.env.FLAIR_ADMIN_PASS;
+    delete process.env.HDB_ADMIN_PASSWORD;
+    delete process.env.FLAIR_TARGET;
+    delete process.env.FLAIR_OPS_TARGET;
+    delete process.env.FLAIR_CLUSTER_ADMIN_USER;
+    delete process.env.FLAIR_CLUSTER_ADMIN_PASS;
+  });
+
+  afterEach(() => {
+    process.env = oldEnv;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("does not print generated admin password to stdout", async () => {
+    // Run flair init with --skip-start and --skip-soul to avoid Harper startup and soul wizard
+    const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn("bun", ["src/cli.ts", "init", "--skip-start", "--skip-soul"], {
+        cwd: ".",
+        env: process.env,
+      });
+      let out = "";
+      let err = "";
+      child.stdout?.on("data", (data) => {
+        out += data.toString();
+      });
+      child.stderr?.on("data", (data) => {
+        err += data.toString();
+      });
+      child.on("close", (code) => {
+        if (code !== 0) {
+          reject(new Error(`flair init exited with code ${code}`));
+          return;
+        }
+        resolve({ stdout: out, stderr: err });
+      });
+    });
+
+    // Read the generated admin password file
+    const adminPassPath = join(tmpDir, ".flair", "admin-pass");
+    expect(existsSync(adminPassPath)).toBe(true);
+    const adminPass = readFileSync(adminPassPath, "utf8").trim();
+    expect(adminPass.length).toBeGreaterThan(0);
+    // Ensure the file is not world-readable (mode 0o600)
+    const stats = statSync(adminPassPath);
+    expect(stats.mode & 0o777).toBe(0o600);
+
+    // Assert that the admin password is not in stdout
+    expect(stdout).not.toContain(adminPass);
+    // Also assert that it's not in stderr (though warnings may be there)
+    expect(stderr).not.toContain(adminPass);
+  });
+
+  it("respects admin password from environment variable", async () => {
+    const testPass = "testenvpass123";
+    process.env.FLAIR_ADMIN_PASS = testPass;
+
+    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn("bun", ["src/cli.ts", "init", "--skip-start", "--skip-soul"], {
+        cwd: ".",
+        env: process.env,
+      });
+      let out = "";
+      let err = "";
+      child.stdout?.on("data", (data) => {
+        out += data.toString();
+      });
+      child.stderr?.on("data", (data) => {
+        err += data.toString();
+      });
+      child.on("close", (code) => {
+        if (code !== 0) {
+          reject(new Error(`flair init exited with code ${code}`));
+          return;
+        }
+        resolve({ stdout: out, stderr: err });
+      });
+    });
+
+    const adminPassPath = join(tmpDir, ".flair", "admin-pass");
+    expect(existsSync(adminPassPath)).toBe(false); // Because we provided password via env, not generated
+    // The admin password should not be printed
+    expect(stdout).not.toContain(testPass);
+  });
+
+  it("respects admin password from deprecated --admin-pass option (with warning)", async () => {
+    const testPass = "testinlinepass123";
+    const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn("bun", ["src/cli.ts", "init", "--skip-start", "--skip-soul", "--admin-pass", testPass], {
+        cwd: ".",
+        env: process.env,
+      });
+      let out = "";
+      let err = "";
+      child.stdout?.on("data", (data) => {
+        out += data.toString();
+      });
+      child.stderr?.on("data", (data) => {
+        err += data.toString();
+      });
+      child.on("close", (code) => {
+        if (code !== 0) {
+          reject(new Error(`flair init exited with code ${code}`));
+          return;
+        }
+        resolve({ stdout: out, stderr: err });
+      });
+    });
+
+    const adminPassPath = join(tmpDir, ".flair", "admin-pass");
+    expect(existsSync(adminPassPath)).toBe(false); // Not generated
+    // The password should not be in stdout
+    expect(stdout).not.toContain(testPass);
+    // But a warning should be in stderr about inline admin pass
+    expect(stderr).toContain("warning: --admin-pass passed inline");
   });
 });
