@@ -30,7 +30,16 @@ function classifyError(err: unknown, flairUrl: string): string {
   if (err instanceof FlairError) {
     const { status, body } = err;
     if (status === 400) return `validation_error: ${body}`;
-    if (status === 401 || status === 403) return `auth_error: ${body}`;
+    if (status === 401 || status === 403) {
+      // Auth failure on a previously-working session usually means the daemon
+      // restarted (config reload, Harper alter_user, port change). Tell the
+      // operator how to recover instead of just surfacing the raw 401 body.
+      return `auth_error: ${body}\n` +
+        `(Hint: this often follows a Flair daemon restart. Try:\n` +
+        `  1. Restart your MCP host (Claude Code, Cursor, etc) to spawn a fresh flair-mcp.\n` +
+        `  2. Check daemon: 'flair status' or 'curl ${flairUrl}/Health'.\n` +
+        `  3. Verify your agent key still matches the registered Agent record.)`;
+    }
     if (status === 413) return `payload_too_large: ${body}`;
     if (status === 429) return "rate_limited — retry after a moment";
     if (status >= 500) return `server_error (retriable): ${body}`;
@@ -41,7 +50,10 @@ function classifyError(err: unknown, flairUrl: string): string {
       return "timeout — the server took too long. This often happens with large content that requires embedding. Try shorter content or retry.";
     }
     if (err instanceof TypeError && err.message.includes("fetch")) {
-      return `connection_error (retriable): could not reach Flair at ${flairUrl}. Is it running?`;
+      return `connection_error (retriable): could not reach Flair at ${flairUrl}. Is it running?\n` +
+        `(Diagnostics:\n` +
+        `  - 'curl ${flairUrl}/Health' — if this responds 200 or 401, daemon is up + this is an auth issue not a connection one.\n` +
+        `  - 'launchctl list | grep flair' (macOS) or 'systemctl status flair' (Linux).)`;
     }
     return `unexpected_error: ${err.message}`;
   }
@@ -51,6 +63,38 @@ function classifyError(err: unknown, flairUrl: string): string {
 function errorResult(err: unknown, flairUrl: string) {
   return { content: [{ type: "text" as const, text: classifyError(err, flairUrl) }], isError: true };
 }
+
+// ─── Parent-exit watcher ────────────────────────────────────────────────────
+//
+// flair-mcp runs as a child of an MCP host (Claude Code, Cursor, etc) over
+// stdio. When the host exits cleanly it should close stdin/stdout — but in
+// practice we've seen flair-mcp processes orphaned for weeks (PID 1 as
+// parent), holding stale tokens and consuming RAM.
+//
+// Poll process.ppid every 5s. If it drops to 1 (init), the parent died and
+// we got reparented — exit cleanly. Cheap, cross-platform, no native deps.
+
+const PARENT_POLL_INTERVAL_MS = Number(process.env.FLAIR_MCP_PARENT_POLL_MS ?? 5000);
+const initialPpid = process.ppid;
+setInterval(() => {
+  // ppid === 1 means init/launchd has adopted us — original parent died.
+  if (process.ppid === 1 && initialPpid !== 1) {
+    console.error("flair-mcp: parent process died (re-parented to init); exiting cleanly.");
+    process.exit(0);
+  }
+}, PARENT_POLL_INTERVAL_MS).unref();
+
+// Also handle stdin EOF — MCP host closing the pipe means session ended.
+// (StdioServerTransport handles this internally for the MCP protocol, but
+// belt-and-suspenders: if stdin closes we exit, full stop.)
+process.stdin.on("close", () => {
+  console.error("flair-mcp: stdin closed; exiting cleanly.");
+  process.exit(0);
+});
+process.stdin.on("end", () => {
+  console.error("flair-mcp: stdin EOF; exiting cleanly.");
+  process.exit(0);
+});
 
 // ─── Client setup ────────────────────────────────────────────────────────────
 
