@@ -2833,10 +2833,23 @@ federation
       }
       // Any HTTP response (including 401) means the peer is reachable + responding.
       // We're checking the network path, not auth; 401 is expected for unauth probes.
+      // Use new URL() to avoid path-swallowing when endpoint includes a query
+      // (Sherlock review on #314).
+      let probeUrl: URL;
+      try {
+        probeUrl = new URL("/Health", endpoint);
+      } catch {
+        results.push({ host: p.id, port: null, status: "fail", detail: `${p.role ?? "—"} invalid endpoint URL` });
+        continue;
+      }
+      if (probeUrl.protocol !== "http:" && probeUrl.protocol !== "https:") {
+        results.push({ host: p.id, port: null, status: "fail", detail: `${p.role ?? "—"} unsupported protocol ${probeUrl.protocol}` });
+        continue;
+      }
       try {
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), timeoutMs);
-        const res = await fetch(`${endpoint.replace(/\/$/, "")}/Health`, { signal: ctrl.signal });
+        const res = await fetch(probeUrl, { signal: ctrl.signal });
         clearTimeout(t);
         results.push({ host: p.id, port: null, status: "ok", detail: `${p.role ?? "—"} HTTP ${res.status}` });
       } catch (e: any) {
@@ -3136,12 +3149,18 @@ federation
 // subcommand with safety: dry-run is the default, --apply required to delete.
 function parseDuration(spec: string): number | null {
   // Accept forms like "30d", "12h", "90m". Returns milliseconds.
+  // Rejects zero and sub-1-minute durations: a 0-ms cutoff would equal Date.now()
+  // and prune every non-hub peer (Sherlock review on #314).
   const m = spec.match(/^(\d+)\s*([smhd])$/i);
   if (!m) return null;
   const n = Number(m[1]);
   const unit = m[2].toLowerCase();
   const mul = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000, d: 24 * 60 * 60 * 1000 }[unit] ?? null;
-  return mul == null ? null : n * mul;
+  if (mul == null) return null;
+  const ms = n * mul;
+  const ONE_MINUTE = 60 * 1000;
+  if (ms < ONE_MINUTE) return null;
+  return ms;
 }
 
 federation
@@ -3159,7 +3178,7 @@ federation
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
     const olderThanMs = parseDuration(opts.olderThan);
     if (olderThanMs == null) {
-      console.error(`Error: invalid --older-than '${opts.olderThan}'. Use forms like 30d, 12h, 90m.`);
+      console.error(`Error: invalid or unsafe --older-than '${opts.olderThan}'. Use forms like 30d, 12h, 90m. Minimum 1 minute.`);
       process.exit(2);
     }
     const cutoff = Date.now() - olderThanMs;
@@ -3174,8 +3193,10 @@ federation
     }
 
     const candidates = peers.filter(p => {
-      // Hub-protection: never prune.
-      if (p.role === "hub") return false;
+      // Hub-protection: never prune. Case-insensitive; null/undefined role is
+      // treated as "unknown — refuse to prune to be safe" (Sherlock review on #314).
+      const role = (p.role ?? "").toString().toLowerCase();
+      if (role === "hub" || role === "") return false;
       // Include filter.
       if (opts.include && !String(p.id ?? "").startsWith(opts.include)) return false;
       // Stale threshold: a peer with NO lastSyncAt is treated as having been
@@ -3257,6 +3278,9 @@ federation
     }
 
     // 1. Write tagged ephemeral memory locally (mirror `flair memory add`).
+    // The whole post-write block is wrapped in try/finally so cleanup runs on
+    // every exit path (Sherlock review on #314: previous early-exits leaked
+    // the probe memory).
     const memId = `${agentId}-${Date.now()}-fed-verify`;
     try {
       await api("PUT", `/Memory/${encodeURIComponent(memId)}`, {
@@ -3271,81 +3295,114 @@ federation
       console.log(`1. Wrote local memory: ${memId}`);
     } catch (e: any) {
       console.error(`1. Local write FAILED: ${e.message}`);
+      // No memory was written — nothing to clean up. Direct exit is safe.
       process.exit(1);
     }
 
-    // 2. List peers to probe.
-    let peers: any[] = [];
+    // From here, memId is committed and MUST be cleaned up regardless of how
+    // we leave this block.
+    let exitCode = 0;
     try {
-      const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
-      peers = r.peers ?? [];
-      if (opts.peer) peers = peers.filter(p => p.id === opts.peer);
-    } catch (e: any) {
-      console.error(`Failed to list peers: ${e.message}`);
-    }
-    if (peers.length === 0) {
-      console.log("(no peers to probe)");
-      return;
-    }
-    console.log(`2. Probing ${peers.length} peer(s) over ${opts.wait}s window…`);
+      // 2. List peers to probe.
+      let peers: any[] = [];
+      try {
+        const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+        peers = r.peers ?? [];
+        if (opts.peer) peers = peers.filter(p => p.id === opts.peer);
+      } catch (e: any) {
+        console.error(`Failed to list peers: ${e.message}`);
+      }
+      if (peers.length === 0) {
+        console.log("(no peers to probe)");
+        // Still falls through to finally for cleanup.
+      } else {
+        console.log(`2. Probing ${peers.length} peer(s) over ${opts.wait}s window…`);
 
-    // 3. Poll each peer until found OR window elapses.
-    const started = Date.now();
-    const found = new Set<string>();
-    const failed = new Set<string>();
-    while (Date.now() - started < waitMs && (found.size + failed.size) < peers.length) {
-      for (const p of peers) {
-        if (found.has(p.id) || failed.has(p.id)) continue;
-        const endpoint = p.endpoint;
-        if (!endpoint) {
-          // Tunnel-paired — no direct endpoint to probe. Mark as skipped.
-          failed.add(p.id);
-          console.log(`   ${p.id}  SKIP (no endpoint — tunnel-paired)`);
-          continue;
+        // 3. Poll each peer until found OR window elapses.
+        const started = Date.now();
+        const found = new Set<string>();
+        const failed = new Set<string>();
+        while (Date.now() - started < waitMs && (found.size + failed.size) < peers.length) {
+          for (const p of peers) {
+            if (found.has(p.id) || failed.has(p.id)) continue;
+            const endpoint = p.endpoint;
+            if (!endpoint) {
+              // Tunnel-paired — no direct endpoint to probe. Mark as skipped.
+              failed.add(p.id);
+              console.log(`   ${p.id}  SKIP (no endpoint — tunnel-paired)`);
+              continue;
+            }
+            // Reject non-http(s) endpoints to keep the probe surface small.
+            // (Sherlock review on #314 — protocol allowlist.)
+            let probeUrl: URL;
+            try {
+              probeUrl = new URL("/SemanticSearch", endpoint);
+            } catch {
+              failed.add(p.id);
+              console.log(`   ${p.id}  FAIL (invalid endpoint URL: ${endpoint})`);
+              continue;
+            }
+            if (probeUrl.protocol !== "http:" && probeUrl.protocol !== "https:") {
+              failed.add(p.id);
+              console.log(`   ${p.id}  FAIL (unsupported endpoint protocol: ${probeUrl.protocol})`);
+              continue;
+            }
+            try {
+              const res = await fetch(probeUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ q: tag, limit: 5 }),
+                signal: AbortSignal.timeout(5000),
+              });
+              if (res.status === 401) {
+                // Auth-gated — can't verify without admin creds for the peer.
+                // Fail the probe with diagnostic.
+                failed.add(p.id);
+                console.log(`   ${p.id}  FAIL (HTTP 401 — peer auth-gated; needs cross-instance admin auth)`);
+                continue;
+              }
+              if (!res.ok) {
+                failed.add(p.id);
+                console.log(`   ${p.id}  FAIL (HTTP ${res.status})`);
+                continue;
+              }
+              const data = await res.json().catch(() => ({}));
+              const results = (data as any).results ?? [];
+              if (results.some((r: any) => (r.content ?? "").includes(tag))) {
+                const elapsed = Math.floor((Date.now() - started) / 1000);
+                console.log(`   ${p.id}  OK (memory found after ${elapsed}s)`);
+                found.add(p.id);
+              }
+            } catch {
+              // Don't mark failed yet — peer might just be slow. Retry next iteration.
+            }
+          }
+          await new Promise(res => setTimeout(res, 5000));
         }
-        try {
-          const res = await fetch(`${endpoint.replace(/\/$/, "")}/SemanticSearch`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ q: tag, limit: 5 }),
-            signal: AbortSignal.timeout(5000),
-          });
-          if (res.status === 401) {
-            // Auth-gated — can't verify without admin creds for the peer.
-            // Fail the probe with diagnostic.
+
+        // Anything still pending is a timeout failure.
+        for (const p of peers) {
+          if (!found.has(p.id) && !failed.has(p.id)) {
             failed.add(p.id);
-            console.log(`   ${p.id}  FAIL (HTTP 401 — peer auth-gated; needs cross-instance admin auth)`);
-            continue;
+            console.log(`   ${p.id}  FAIL (timeout — memory did not propagate within ${opts.wait}s)`);
           }
-          if (!res.ok) {
-            failed.add(p.id);
-            console.log(`   ${p.id}  FAIL (HTTP ${res.status})`);
-            continue;
-          }
-          const data = await res.json().catch(() => ({}));
-          const results = (data as any).results ?? [];
-          if (results.some((r: any) => (r.content ?? "").includes(tag))) {
-            const elapsed = Math.floor((Date.now() - started) / 1000);
-            console.log(`   ${p.id}  OK (memory found after ${elapsed}s)`);
-            found.add(p.id);
-          }
-        } catch (e: any) {
-          // Don't mark failed yet — peer might just be slow. Retry next iteration.
+        }
+
+        // 5. Summary + diagnostics on failure.
+        if (failed.size > 0) {
+          console.log(`── FAIL: ${failed.size}/${peers.length} peer(s) did not see the memory ──`);
+          console.log(`Diagnostics to run next:`);
+          console.log(`  flair federation status     # confirm peers are paired + lastSyncAt is recent`);
+          console.log(`  flair federation reachability  # confirm peers are HTTP-reachable`);
+          console.log(`  launchctl list | grep fed-sync  # confirm federation-sync daemon is running (macOS)`);
+          console.log(`  curl <peer-endpoint>/Health  # raw probe`);
+          exitCode = 1;
+        } else {
+          console.log(`── PASS: memory propagated to all ${peers.length} peer(s) ──`);
         }
       }
-      await new Promise(res => setTimeout(res, 5000));
-    }
-
-    // Anything still pending is a timeout failure.
-    for (const p of peers) {
-      if (!found.has(p.id) && !failed.has(p.id)) {
-        failed.add(p.id);
-        console.log(`   ${p.id}  FAIL (timeout — memory did not propagate within ${opts.wait}s)`);
-      }
-    }
-
-    // 4. Cleanup: delete the local probe memory.
-    if (memId) {
+    } finally {
+      // 4. Cleanup: delete the local probe memory. Runs on EVERY exit path.
       try {
         await api("DELETE", `/Memory/${encodeURIComponent(memId)}`, undefined, baseUrl ? { baseUrl } : undefined);
         console.log(`4. Cleanup: deleted local memory ${memId}`);
@@ -3353,18 +3410,7 @@ federation
         console.log(`4. Cleanup: could NOT delete local memory ${memId} (manual cleanup needed)`);
       }
     }
-
-    // 5. Summary + diagnostics on failure.
-    if (failed.size > 0) {
-      console.log(`── FAIL: ${failed.size}/${peers.length} peer(s) did not see the memory ──`);
-      console.log(`Diagnostics to run next:`);
-      console.log(`  flair federation status     # confirm peers are paired + lastSyncAt is recent`);
-      console.log(`  flair federation reachability  # confirm peers are HTTP-reachable`);
-      console.log(`  launchctl list | grep fed-sync  # confirm federation-sync daemon is running (macOS)`);
-      console.log(`  curl <peer-endpoint>/Health  # raw probe`);
-      process.exit(1);
-    }
-    console.log(`── PASS: memory propagated to all ${peers.length} peer(s) ──`);
+    if (exitCode !== 0) process.exit(exitCode);
   });
 
 // ─── flair rem ───────────────────────────────────────────────────────────────
