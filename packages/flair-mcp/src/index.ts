@@ -74,7 +74,19 @@ function errorResult(err: unknown, flairUrl: string) {
 // Poll process.ppid every 5s. If it drops to 1 (init), the parent died and
 // we got reparented — exit cleanly. Cheap, cross-platform, no native deps.
 
-const PARENT_POLL_INTERVAL_MS = Number(process.env.FLAIR_MCP_PARENT_POLL_MS ?? 5000);
+// Clamp the poll interval to a safe range. `process.env.FOO ?? 5000` is NOT
+// safe on its own: `??` only falls through on null/undefined, so an empty-string
+// override (`FLAIR_MCP_PARENT_POLL_MS=`) yields `Number("") === 0` and creates
+// a tight CPU-busy loop. Validate explicitly. (Sherlock review on #315.)
+const PARENT_POLL_INTERVAL_MS = (() => {
+  const raw = process.env.FLAIR_MCP_PARENT_POLL_MS;
+  const parsed = raw != null ? Number(raw) : NaN;
+  const FLOOR_MS = 100;
+  const CEILING_MS = 30_000;
+  return Number.isFinite(parsed) && parsed >= FLOOR_MS && parsed <= CEILING_MS
+    ? parsed
+    : 5000;
+})();
 const initialPpid = process.ppid;
 setInterval(() => {
   // ppid === 1 means init/launchd has adopted us — original parent died.
