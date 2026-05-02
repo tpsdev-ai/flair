@@ -2787,6 +2787,84 @@ federation
     }
   });
 
+// `flair federation reachability` — probe local instance + all paired peers.
+// Productizes ~/ops/scripts/flair-boot-probe.sh: a single command that tells
+// you whether memories CAN flow across the federation right now. Read-only;
+// no mutations, no side effects beyond a single tagged status read per peer.
+federation
+  .command("reachability")
+  .description("Probe local Flair + each paired peer for reachability (read-only)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  .option("--quiet", "Suppress output on full success")
+  .option("--json", "Emit machine-readable JSON instead of text")
+  .option("--peer-timeout <seconds>", "HTTP timeout per peer probe (default 5)", "5")
+  .action(async (opts) => {
+    const target = resolveTarget(opts);
+    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+    const timeoutMs = (Number(opts.peerTimeout) || 5) * 1000;
+    type Result = { host: string; port: number | null; status: "ok" | "fail" | "skip"; detail: string };
+    const results: Result[] = [];
+
+    // 1. Local probe.
+    try {
+      const inst = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
+      results.push({ host: "local", port: null, status: "ok", detail: `instance ${inst.id} (${inst.role}, ${inst.status})` });
+    } catch (e: any) {
+      results.push({ host: "local", port: null, status: "fail", detail: e.message });
+    }
+
+    // 2. Per-peer probes. For each peer with an `endpoint` (URL), probe it.
+    // Peers without an endpoint are reverse-tunnel-paired (the spoke can't
+    // reach the hub directly without the tunnel) and we skip.
+    let peers: any[] = [];
+    try {
+      const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+      peers = r.peers ?? [];
+    } catch (e: any) {
+      results.push({ host: "/FederationPeers", port: null, status: "fail", detail: e.message });
+    }
+
+    for (const p of peers) {
+      const endpoint = p.endpoint as string | undefined;
+      if (!endpoint) {
+        results.push({ host: p.id, port: null, status: "skip", detail: `${p.role ?? "—"} (no endpoint — needs tunnel)` });
+        continue;
+      }
+      // Any HTTP response (including 401) means the peer is reachable + responding.
+      // We're checking the network path, not auth; 401 is expected for unauth probes.
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), timeoutMs);
+        const res = await fetch(`${endpoint.replace(/\/$/, "")}/Health`, { signal: ctrl.signal });
+        clearTimeout(t);
+        results.push({ host: p.id, port: null, status: "ok", detail: `${p.role ?? "—"} HTTP ${res.status}` });
+      } catch (e: any) {
+        const msg = e.name === "AbortError" ? `timeout after ${opts.peerTimeout}s` : e.message;
+        results.push({ host: p.id, port: null, status: "fail", detail: `${p.role ?? "—"} ${msg}` });
+      }
+    }
+
+    const failures = results.filter(r => r.status === "fail").length;
+
+    if (opts.json) {
+      console.log(JSON.stringify({ ts: new Date().toISOString(), failures, results }, null, 2));
+    } else if (!(opts.quiet && failures === 0)) {
+      console.log(`── Flair reachability — ${new Date().toISOString()} ──`);
+      for (const r of results) {
+        const tag = r.status === "ok" ? "OK  " : r.status === "skip" ? "SKIP" : "FAIL";
+        console.log(`${tag} ${r.host.padEnd(40)} ${r.detail}`);
+      }
+      if (failures > 0) {
+        console.log(`── ${failures} path(s) FAILED ──`);
+      } else {
+        console.log("── all reachable ──");
+      }
+    }
+
+    if (failures > 0) process.exit(1);
+  });
+
 federation
   .command("pair <hub-url>")
   .description("Pair this spoke with a hub instance")
