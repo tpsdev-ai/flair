@@ -57,7 +57,14 @@ export async function loadBridge(
           hint: `built-in "${discovered.name}" not in the registry — likely code drift between discover.ts and builtins/index.ts`,
         });
       }
-      return { kind: "yaml", descriptor: builtin.descriptor, source: discovered };
+      // Dispatch on the type of descriptorOrPlugin
+      if (typeof (builtin.descriptorOrPlugin as MemoryBridge).import === "function") {
+        // Code plugin (MemoryBridge)
+        return { kind: "code", plugin: builtin.descriptorOrPlugin as MemoryBridge, source: discovered };
+      } else {
+        // YAML descriptor
+        return { kind: "yaml", descriptor: builtin.descriptorOrPlugin as YamlBridgeDescriptor, source: discovered };
+      }
     }
     case "project-yaml":
     case "user-yaml": {
