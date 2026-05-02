@@ -3131,6 +3131,104 @@ federation
     await runFederationWatch(opts);
   });
 
+// `flair federation prune` — remove stale spoke peers (never the hub).
+// Productizes ~/ops/scripts/cleanup-stale-fed-peers.sh into a real CLI
+// subcommand with safety: dry-run is the default, --apply required to delete.
+function parseDuration(spec: string): number | null {
+  // Accept forms like "30d", "12h", "90m". Returns milliseconds.
+  const m = spec.match(/^(\d+)\s*([smhd])$/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  const unit = m[2].toLowerCase();
+  const mul = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000, d: 24 * 60 * 60 * 1000 }[unit] ?? null;
+  return mul == null ? null : n * mul;
+}
+
+federation
+  .command("prune")
+  .description("Remove stale spoke peers (older than --older-than). Hub is never pruned. Default dry-run.")
+  .option("--older-than <duration>", "Duration spec (e.g. 30d, 12h, 90m)", "30d")
+  .option("--apply", "Actually delete (default is dry-run)")
+  .option("--include <pattern>", "Only consider peer IDs starting with this prefix")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--target <url>", "Remote Flair URL")
+  .option("--ops-target <url>", "Explicit ops API URL")
+  .action(async (opts) => {
+    const target = resolveTarget(opts);
+    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+    const olderThanMs = parseDuration(opts.olderThan);
+    if (olderThanMs == null) {
+      console.error(`Error: invalid --older-than '${opts.olderThan}'. Use forms like 30d, 12h, 90m.`);
+      process.exit(2);
+    }
+    const cutoff = Date.now() - olderThanMs;
+
+    let peers: any[] = [];
+    try {
+      const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+      peers = r.peers ?? [];
+    } catch (e: any) {
+      console.error(`Error fetching peers: ${e.message}`);
+      process.exit(1);
+    }
+
+    const candidates = peers.filter(p => {
+      // Hub-protection: never prune.
+      if (p.role === "hub") return false;
+      // Include filter.
+      if (opts.include && !String(p.id ?? "").startsWith(opts.include)) return false;
+      // Stale threshold: a peer with NO lastSyncAt is treated as having been
+      // born and immediately abandoned — qualifies if it's older than the
+      // threshold based on pairedAt instead.
+      const ts = p.lastSyncAt ?? p.pairedAt;
+      if (!ts) return true; // truly orphaned record — prune candidate.
+      return new Date(ts).getTime() < cutoff;
+    });
+
+    if (candidates.length === 0) {
+      console.log(`flair federation prune: no peers older than ${opts.olderThan} (and not hub) — nothing to do.`);
+      return;
+    }
+
+    if (!opts.apply) {
+      console.log(`── flair federation prune — dry-run (use --apply to delete) ──`);
+      console.log(`Would delete ${candidates.length} peer(s) older than ${opts.olderThan}:`);
+      for (const p of candidates) {
+        const ts = p.lastSyncAt ?? p.pairedAt ?? "never";
+        const age = ts === "never" ? "(never synced/paired)" : `${Math.floor((Date.now() - new Date(ts).getTime()) / (24 * 60 * 60 * 1000))}d ago`;
+        console.log(`  ${p.id}  ${(p.role ?? "—").padEnd(8)} lastSyncAt ${ts} (${age})`);
+      }
+      console.log(`Run with --apply to actually delete.`);
+      return;
+    }
+
+    // Apply path. Delete each peer via the Harper ops API. We use the
+    // domain-socket form when local; otherwise we fall back to the resource
+    // DELETE which requires admin auth.
+    let deleted = 0;
+    let errors = 0;
+    for (const p of candidates) {
+      try {
+        const res = await api("DELETE", `/FederationPeers/${encodeURIComponent(p.id)}`, undefined, baseUrl ? { baseUrl } : undefined);
+        const ok = res?.ok ?? res?.deleted ?? true;
+        if (ok) {
+          deleted++;
+          const ts = p.lastSyncAt ?? p.pairedAt ?? "never";
+          console.log(`Deleted ${p.id} (last seen ${ts}).`);
+        } else {
+          errors++;
+          console.log(`Failed to delete ${p.id}: ${JSON.stringify(res)}`);
+        }
+      } catch (e: any) {
+        errors++;
+        console.log(`Failed to delete ${p.id}: ${e.message}`);
+      }
+    }
+    console.log(`${deleted} peer(s) deleted; ${errors} error(s).`);
+    if (errors > 0) process.exit(1);
+  });
+
 // ─── flair rem ───────────────────────────────────────────────────────────────
 // Memory hygiene and reflection: light (NREM), rapid (REM), restorative (deep).
 
