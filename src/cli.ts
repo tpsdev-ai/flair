@@ -3631,6 +3631,87 @@ rem
     }
   });
 
+// ─── flair rem candidates ─────────────────────────────────────────────────────
+// Slice 1 of FLAIR-NIGHTLY-REM (ops-2qq). Lists staged distillations from the
+// MemoryCandidate table. Empty until the nightly cycle (later slice) starts
+// populating. Per spec § 5: candidates are NEVER auto-promoted; this command
+// is the operator's review surface.
+
+rem
+  .command("candidates")
+  .description("List staged memory candidates from the FLAIR-NIGHTLY-REM cycle (pending review)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--agent <id>", "Agent ID (or FLAIR_AGENT_ID env)")
+  .option("--status <s>", "Filter by status: pending | promoted | rejected (default: pending)")
+  .option("--json", "Output as JSON for scripting")
+  .action(async (opts) => {
+    const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+    const status = opts.status ?? "pending";
+    const validStatuses = new Set(["pending", "promoted", "rejected"]);
+    if (!validStatuses.has(status)) {
+      console.error(`Error: --status must be one of: pending, promoted, rejected (got: ${status})`);
+      process.exit(1);
+    }
+
+    if (!agentId) {
+      console.error("Error: --agent is required (or set FLAIR_AGENT_ID)");
+      process.exit(1);
+    }
+
+    try {
+      const result = await api("POST", "/MemoryCandidate/search_by_conditions", {
+        operator: "and",
+        conditions: [
+          { search_attribute: "agentId", search_type: "equals", search_value: agentId },
+          { search_attribute: "status", search_type: "equals", search_value: status },
+        ],
+        get_attributes: ["id", "claim", "generatedBy", "generatedAt", "status", "target", "reviewerId", "decidedAt", "supersedes"],
+      });
+
+      // search_by_conditions returns either an array or { error }; tolerate both shapes
+      const candidates: any[] = Array.isArray(result) ? result : (result?.results ?? []);
+
+      if (opts.json) {
+        console.log(JSON.stringify({ agentId, status, count: candidates.length, candidates }, null, 2));
+        return;
+      }
+
+      console.log(`\n-- rem candidates (agent=${agentId}, status=${status}) --\n`);
+
+      if (candidates.length === 0) {
+        console.log(`No ${status} candidates.`);
+        if (status === "pending") {
+          console.log("\n(Run `flair rem nightly enable` to start the nightly distillation cycle that populates this table.)");
+        }
+        return;
+      }
+
+      // Sort newest-first by generatedAt
+      candidates.sort((a, b) => String(b.generatedAt ?? "").localeCompare(String(a.generatedAt ?? "")));
+
+      for (const c of candidates) {
+        const tag = c.status === "promoted"
+          ? `[promoted → ${c.target ?? "?"} by ${c.reviewerId ?? "?"} @ ${relativeTime(c.decidedAt)}]`
+          : c.status === "rejected"
+            ? `[rejected by ${c.reviewerId ?? "?"} @ ${relativeTime(c.decidedAt)}]`
+            : `[pending — ${c.generatedBy ?? "?"} @ ${relativeTime(c.generatedAt)}]`;
+        console.log(`  ${c.id}  ${tag}`);
+        console.log(`    ${c.claim}`);
+        if (c.supersedes) console.log(`    (supersedes ${c.supersedes} — recurring proposal)`);
+        console.log("");
+      }
+
+      console.log(`${candidates.length} candidate${candidates.length > 1 ? "s" : ""}.`);
+      if (status === "pending") {
+        console.log(`Promote: flair rem promote <id> --rationale "<why>" --to (soul|memory)`);
+        console.log(`Reject:  flair rem reject <id> --reason "<why>"`);
+      }
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
 // ─── flair status ─────────────────────────────────────────────────────────────
 
 function humanBytes(n: number): string {

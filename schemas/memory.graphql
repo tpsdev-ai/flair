@@ -68,3 +68,29 @@ type MemoryGrant @table(database: "flair") @export {
   filter: String
   createdAt: String
 }
+
+# MemoryCandidate — staged distillations from the FLAIR-NIGHTLY-REM cycle.
+# Per specs/FLAIR-NIGHTLY-REM.md § 7. Slice 1 of ops-2qq adds the schema +
+# `flair rem candidates` listing command. Future slices wire the nightly
+# cycle that populates this table and the promote/reject endpoints.
+#
+# Inviolable contract: candidates are NEVER auto-promoted. Promotion is a
+# separate, deliberate action (`flair rem promote <id> --rationale "<why>"`)
+# that requires both --rationale and --to (soul|memory). Rejected candidates
+# retain their decision history so recurring false-positives become visible
+# via the `supersedes` chain.
+type MemoryCandidate @table(database: "flair") {
+  id: ID @primaryKey
+  agentId: String! @indexed
+  claim: String!                   # distilled lesson text
+  sourceMemoryIds: [String]        # episodic memories feeding the distillation
+  rationalePrompt: String          # the prompt given to the distillation LLM
+  generatedBy: String              # model identifier (e.g. "claude-opus-4-7")
+  generatedAt: String! @indexed
+  status: String! @indexed         # pending | promoted | rejected
+  target: String                   # soul | memory (set on promote)
+  reviewerId: String               # who decided (agentId or human admin)
+  reviewRationale: String          # required on promote/reject (no rubber-stamp)
+  decidedAt: String
+  supersedes: String @indexed      # previous rejected candidate this replaces
+}
