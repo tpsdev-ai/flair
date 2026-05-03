@@ -14,7 +14,8 @@
   ],
   "scripts": {
     "build": "tsc --noCheck",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');const p='dist/index.js';if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair-mcp: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}\""
   },
   "publishConfig": {
     "access": "public"

@@ -44,7 +44,8 @@
     "prepublishOnly": "npm run build && npm run build:cli",
     "test": "bun test",
     "test:e2e": "playwright test",
-    "release": "./scripts/release.sh"
+    "release": "./scripts/release.sh",
+    "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');const p='dist/cli.js';if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}\""
   },
   "publishConfig": {
     "access": "public"
