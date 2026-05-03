@@ -99,6 +99,7 @@ export class BootstrapMemories extends Resource {
     let tokenBudget = maxTokens;
     let memoriesIncluded = 0;
     let memoriesAvailable = 0;
+    let memoriesTruncated = 0;
 
     // --- 1. Soul records (budgeted — prioritized by key importance) ---
     // Soul is who you are, but we still need to respect token budgets.
@@ -207,6 +208,8 @@ export class BootstrapMemories extends Resource {
         sections.permanent.push(line);
         tokenBudget -= cost;
         memoriesIncluded++;
+      } else {
+        memoriesTruncated++;
       }
     }
 
@@ -238,7 +241,10 @@ export class BootstrapMemories extends Resource {
     for (const m of recent) {
       const line = formatMemory(m);
       const cost = estimateTokens(line);
-      if (recentSpent + cost > recentBudget) continue;
+      if (recentSpent + cost > recentBudget) {
+        memoriesTruncated++;
+        continue;
+      }
       sections.recent.push(line);
       recentSpent += cost;
       tokenBudget -= cost;
@@ -274,7 +280,10 @@ export class BootstrapMemories extends Resource {
       for (const m of subjectMemories) {
         const line = formatMemory(m);
         const cost = estimateTokens(line);
-        if (predictedSpent + cost > predictedBudget) continue;
+        if (predictedSpent + cost > predictedBudget) {
+          memoriesTruncated++;
+          continue;
+        }
         sections.predicted.push(line);
         predictedSpent += cost;
         tokenBudget -= cost;
@@ -427,6 +436,7 @@ export class BootstrapMemories extends Resource {
       memoryTokens,
       memoriesIncluded,
       memoriesAvailable,
+      memoriesTruncated,
     };
   }
 }
