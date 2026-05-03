@@ -132,6 +132,7 @@ describe("formats: markdown-frontmatter", () => {
       type: "fact",
       createdAt: expect.any(String),
       derivedFrom: [p],
+      foreignId: p,
     });
   });
 
@@ -146,6 +147,7 @@ describe("formats: markdown-frontmatter", () => {
       type: "fact",
       createdAt: expect.any(String),
       derivedFrom: [p],
+      foreignId: p,
     });
   });
 

@@ -167,6 +167,7 @@ function* parseMarkdownFrontmatter(
         subject: path.split("/").pop()?.replace(/\.md$/i, "") ?? "",
         createdAt: new Date().toISOString(),
         derivedFrom: [path],
+        foreignId: path,
       },
       recordIndex: 1,
     };
@@ -213,12 +214,22 @@ function* parseMarkdownFrontmatter(
   const content = lines.slice(i).join("\n");
   
   // Build record from front-matter with defaults
+  let createdAt: string;
+  if (fm.date instanceof Date) {
+    createdAt = fm.date.toISOString();
+  } else if (typeof fm.date === "string") {
+    createdAt = fm.date;
+  } else {
+    createdAt = new Date().toISOString();
+  }
+  
   const record: Record<string, unknown> = {
     content,
     type: typeof fm.type === "string" ? fm.type : "fact",
     subject: typeof fm.title === "string" ? fm.title : path.split("/").pop()?.replace(/\.md$/i, "") ?? "",
-    createdAt: typeof fm.date === "string" ? fm.date : new Date().toISOString(),
+    createdAt,
     derivedFrom: [path],
+    foreignId: path, // Stable identifier for idempotent imports
   };
   
   // Handle tags - can be array or string
