@@ -5203,6 +5203,20 @@ program
   });
 
 // ─── flair bootstrap ─────────────────────────────────────────────────────────
+//
+// `flair bootstrap` prints agent context (soul, memories) and a structured budget
+// footer summarizing token usage and memory inclusion/truncation. The footer is
+// parseable for downstream agents to react to budget pressure.
+//
+// Budget footer format (printed to stderr):
+//   [budget: <used>/<max> tokens, <included> included, <truncated> truncated]
+//
+// Fields:
+//   - tokens: estimated tokens used / max budget
+//   - included: number of memories/soul entries included in context
+//   - truncated: number of memories excluded due to token budget
+//
+// When truncated &gt; 0, the agent should consider asking for more context or reducing scope.
 
 program
   .command("bootstrap")
@@ -5236,6 +5250,12 @@ program
         console.error("No context available.");
         process.exit(1);
       }
+      // Print budget footer to stderr (parseable, won't interfere with context output)
+      const tokensUsed = result.tokenEstimate ?? 0;
+      const maxTokens = parseInt(opts.maxTokens, 10);
+      const included = result.memoriesIncluded ?? 0;
+      const truncated = result.memoriesTruncated ?? 0;
+      console.error(`[budget: ${tokensUsed}/${maxTokens} tokens, ${included} included, ${truncated} truncated]`);
     } catch (err: any) {
       console.error(`Bootstrap failed: ${err.message}`);
       process.exit(1);
