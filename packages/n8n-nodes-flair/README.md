@@ -2,14 +2,13 @@
 
 n8n community node — use [Flair](https://github.com/tpsdev-ai/flair) as your AI Agent's memory backend.
 
-## Status
+## Nodes
 
-**0.1.0 — scaffold.** Credential type only; nodes ship in subsequent releases:
-
-- `FlairChatMemory` (Memory port, conversation buffer) — coming in 0.2.0
-- `FlairSearch` (Tool port, knowledge search) — coming in 0.3.0
-
-See [spec](https://github.com/tpsdev-ai/flair/blob/main/specs/N8N-NODE-q3qf.md) for the implementation plan.
+- **Flair Chat Memory** — n8n AI Agent Memory port. Stores chat history in Flair, replayable across runs and readable from Claude Code, OpenClaw, and any other Flair client. LangChain `BufferWindowMemory` under the hood.
+- **Flair Search** — n8n AI Agent Tool port. Two operations:
+  - *Semantic Search* — finds memories ranked by similarity to a natural-language query.
+  - *Get By Subject* — lists memories filtered by subject, ordered by recency.
+  - *Get By Tag* — coming in a follow-up once `flair-client.memory.list` exposes a `tags` filter (tracked in the [spec](https://github.com/tpsdev-ai/flair/blob/main/specs/N8N-NODE-q3qf.md) §6).
 
 ## Installation
 
