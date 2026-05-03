@@ -18,6 +18,8 @@ npm install @tpsdev-ai/n8n-nodes-flair
 
 Then restart your n8n instance. The Flair API credential will appear under **Credentials** → **New** → **Flair API**.
 
+Full setup walkthrough, subject/sessionId patterns, and security guidance are in [`docs/n8n.md`](https://github.com/tpsdev-ai/flair/blob/main/docs/n8n.md) in the Flair repo.
+
 ## Credential setup
 
 1. **Base URL** — your Flair instance, e.g. `http://localhost:9926`
