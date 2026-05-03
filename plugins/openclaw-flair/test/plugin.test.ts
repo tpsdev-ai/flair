@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 function createMockApi(config: Record<string, unknown> = {}) {
   const tools = new Map<string, { execute: Function }>();
   const hooks = new Map<string, Function[]>();
+  const contextEngines = new Map<string, Function>();
 
   return {
     pluginConfig: {
@@ -30,9 +31,13 @@ function createMockApi(config: Record<string, unknown> = {}) {
       list.push(handler);
       hooks.set(event, list);
     },
+    registerContextEngine(id: string, factory: Function) {
+      contextEngines.set(id, factory);
+    },
     // Test helpers
     _tools: tools,
     _hooks: hooks,
+    _contextEngines: contextEngines,
   };
 }
 
@@ -275,5 +280,214 @@ describe("syncWorkspaceToFlair — workspace file → Flair soul logic", () => {
     expect(keys).toContain("user-context");
     expect(keys).not.toContain("agents");
     expect(keys).not.toContain("user");
+  });
+});
+
+// ─── FlairBehavioralAnchorEngine — context engine tests ──────────────────────
+// The engine reads ~/.openclaw/workspace-<agentId>/{IDENTITY,SOUL,AGENTS}.md
+// and returns their concatenated contents as a systemPromptAddition. Tests
+// override HOME to point at a temp dir so we can write fake workspace files.
+
+describe("FlairBehavioralAnchorEngine — anchor re-injection", () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "tps-anchor-engine-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    if (originalHome !== undefined) process.env.HOME = originalHome;
+    else delete process.env.HOME;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  test("plugin registers a context engine with id 'flair'", async () => {
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    expect(api._contextEngines.has("flair")).toBe(true);
+  });
+
+  test("assemble returns systemPromptAddition when anchor files exist", async () => {
+    const wsDir = join(tmpHome, ".openclaw", "workspace-test-agent");
+    mkdirSync(wsDir, { recursive: true });
+    writeFileSync(join(wsDir, "SOUL.md"), "I am the test agent.");
+    writeFileSync(join(wsDir, "IDENTITY.md"), "Test identity.");
+    writeFileSync(join(wsDir, "AGENTS.md"), "Test workspace rules.");
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const factory = api._contextEngines.get("flair")!;
+    const engine = factory();
+    const result = await engine.assemble({ messages: [{ role: "user", content: "hi" }] });
+
+    expect(result.systemPromptAddition).toBeDefined();
+    expect(result.systemPromptAddition).toContain("Behavioral Anchors");
+    expect(result.systemPromptAddition).toContain("I am the test agent.");
+    expect(result.systemPromptAddition).toContain("Test identity.");
+    expect(result.systemPromptAddition).toContain("Test workspace rules.");
+    expect(result.estimatedTokens).toBeGreaterThan(0);
+  });
+
+  test("assemble returns no systemPromptAddition when workspace dir absent", async () => {
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const factory = api._contextEngines.get("flair")!;
+    const engine = factory();
+    const result = await engine.assemble({ messages: [] });
+
+    expect(result.systemPromptAddition).toBeUndefined();
+    expect(result.estimatedTokens).toBe(0);
+    expect(result.messages).toEqual([]);
+  });
+
+  test("assemble passes messages through unmodified", async () => {
+    const wsDir = join(tmpHome, ".openclaw", "workspace-test-agent");
+    mkdirSync(wsDir, { recursive: true });
+    writeFileSync(join(wsDir, "SOUL.md"), "Soul content.");
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const factory = api._contextEngines.get("flair")!;
+    const engine = factory();
+    const messagesIn = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ];
+    const result = await engine.assemble({ messages: messagesIn });
+
+    expect(result.messages).toBe(messagesIn);
+  });
+
+  test("ingest is a no-op", async () => {
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const engine = api._contextEngines.get("flair")!();
+    const result = await engine.ingest({ sessionId: "s", message: { role: "user", content: "x" } });
+    expect(result.ingested).toBe(false);
+  });
+
+  test("compact is a no-op (host owns compaction)", async () => {
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const engine = api._contextEngines.get("flair")!();
+    const result = await engine.compact({ sessionId: "s", sessionFile: "/tmp/x" });
+    expect(result.ok).toBe(true);
+    expect(result.compacted).toBe(false);
+    expect(result.reason).toContain("host owns compaction");
+  });
+
+  test("info declares ownsCompaction=false", async () => {
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const engine = api._contextEngines.get("flair")!();
+    expect(engine.info.id).toBe("flair");
+    expect(engine.info.ownsCompaction).toBe(false);
+  });
+
+  test("rebuilds anchor cache when source file mtime changes", async () => {
+    const wsDir = join(tmpHome, ".openclaw", "workspace-test-agent");
+    mkdirSync(wsDir, { recursive: true });
+    writeFileSync(join(wsDir, "SOUL.md"), "first version");
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const engine = api._contextEngines.get("flair")!();
+    const r1 = await engine.assemble({ messages: [] });
+    expect(r1.systemPromptAddition).toContain("first version");
+
+    // Change the file with a guaranteed-different mtime
+    const futureMtime = new Date(Date.now() + 60_000);
+    writeFileSync(join(wsDir, "SOUL.md"), "second version");
+    const { utimesSync } = require("node:fs");
+    utimesSync(join(wsDir, "SOUL.md"), futureMtime, futureMtime);
+
+    const r2 = await engine.assemble({ messages: [] });
+    expect(r2.systemPromptAddition).toContain("second version");
+    expect(r2.systemPromptAddition).not.toContain("first version");
+  });
+
+  test("factory throws when no agentId resolvable in auto mode", async () => {
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi({ agentId: "auto" });
+    delete process.env.FLAIR_AGENT_ID;
+    plugin.register(api as any);
+
+    const factory = api._contextEngines.get("flair")!;
+    expect(() => factory()).toThrow(/no agentId available/);
+  });
+
+  // Per Sherlock review of PR #317
+  test("symlink escape: refuses to read SOUL.md → /etc/passwd-style symlinks", async () => {
+    const wsDir = join(tmpHome, ".openclaw", "workspace-test-agent");
+    mkdirSync(wsDir, { recursive: true });
+    // Create a target outside the workspace dir
+    const outsideTarget = join(tmpHome, "outside-target.md");
+    writeFileSync(outsideTarget, "SECRET_DO_NOT_LEAK");
+    // Symlink SOUL.md inside wsDir to it
+    const { symlinkSync } = require("node:fs");
+    symlinkSync(outsideTarget, join(wsDir, "SOUL.md"));
+    // Also write a normal IDENTITY.md so we can confirm the rest still loads
+    writeFileSync(join(wsDir, "IDENTITY.md"), "real-identity-content");
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const engine = api._contextEngines.get("flair")!();
+    const result = await engine.assemble({ messages: [] });
+
+    expect(result.systemPromptAddition ?? "").not.toContain("SECRET_DO_NOT_LEAK");
+    expect(result.systemPromptAddition ?? "").toContain("real-identity-content");
+    // Warning logged for the rejected symlink
+    const warnCalls = (api.logger.warn as any).mock.calls;
+    const sawSymlinkWarn = warnCalls.some((args: any[]) =>
+      String(args[0]).includes("symlink escape"),
+    );
+    expect(sawSymlinkWarn).toBe(true);
+  });
+
+  // Per Sherlock review of PR #317
+  test("size cap: anchor file content truncated at MAX_ANCHOR_FILE_CHARS", async () => {
+    const wsDir = join(tmpHome, ".openclaw", "workspace-test-agent");
+    mkdirSync(wsDir, { recursive: true });
+    // 12000 chars of a unique sentinel ("ZQ") — past the 8000-char cap.
+    // ZQ is chosen so it doesn't collide with anything in ANCHOR_HEADER.
+    const sentinel = "ZQ";
+    const oversized = sentinel.repeat(6000); // 12000 chars
+    writeFileSync(join(wsDir, "SOUL.md"), oversized);
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const engine = api._contextEngines.get("flair")!();
+    const result = await engine.assemble({ messages: [] });
+
+    // Count sentinel occurrences in systemPromptAddition. With cap=8000 chars
+    // and sentinel length 2, expected count ≤ 4000 (and significantly more
+    // than 0 — confirming we got a substantial chunk, not zero).
+    const sysPrompt = result.systemPromptAddition ?? "";
+    const sentinelMatches = sysPrompt.match(new RegExp(sentinel, "g")) ?? [];
+    expect(sentinelMatches.length).toBeLessThanOrEqual(4000);
+    expect(sentinelMatches.length).toBeGreaterThan(3500); // ≈ 8000/2 minus header overhead
   });
 });
