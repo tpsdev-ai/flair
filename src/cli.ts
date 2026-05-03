@@ -3698,6 +3698,54 @@ function oauthDetailLines(o: any): string[] {
   return out;
 }
 
+// Common localhost ports a running Flair daemon might be on. Used by
+// discoverLocalFlairPort when the configured URL is unreachable, to detect
+// config-vs-daemon port drift (ops-mbdi). Order is ad-hoc — first hit wins.
+//
+// 9926: original default (long-running rockit installs predate the bump)
+// 19926: current default (DEFAULT_PORT)
+// 19925: ops-anvil VM secondary
+const LOCAL_FLAIR_PROBE_PORTS = [9926, 19926, 19925];
+
+export function isLocalhostUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    // URL.hostname keeps brackets around IPv6 (e.g. "[::1]") so match both forms.
+    return (
+      u.hostname === "127.0.0.1" ||
+      u.hostname === "localhost" ||
+      u.hostname === "::1" ||
+      u.hostname === "[::1]"
+    );
+  } catch { return false; }
+}
+
+/**
+ * When a configured-localhost URL is unreachable, probe a small candidate-port
+ * set to detect a daemon listening on a different port (config drift). Returns
+ * the first responsive port, or null if none. Excludes the original port from
+ * the probe set so we don't repeat the failed call.
+ *
+ * Runs sequentially with a 500ms timeout per probe — typical 3-port sweep
+ * completes in <1.5s on a healthy box, faster on an unhealthy one.
+ */
+export async function discoverLocalFlairPort(originalUrl: string): Promise<number | null> {
+  if (!isLocalhostUrl(originalUrl)) return null;
+  let originalPort: number | null = null;
+  try { originalPort = Number(new URL(originalUrl).port) || null; } catch { /* ignore */ }
+  for (const port of LOCAL_FLAIR_PROBE_PORTS) {
+    if (port === originalPort) continue;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(500) });
+      // Treat 401 (auth required) the same as 200 — the daemon is alive,
+      // we just can't see /Health without admin auth. The point is to detect
+      // "something is listening" not "we have full access".
+      if (res.ok || res.status === 401) return port;
+    } catch { /* port not listening, try next */ }
+  }
+  return null;
+}
+
 async function fetchHealthDetail(opts: { port?: string; url?: string; target?: string; agent?: string }): Promise<{
   healthy: boolean;
   baseUrl: string;
@@ -3767,8 +3815,18 @@ const statusCmd = program
   .action(async (opts) => {
     const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
 
+    // When unreachable on a localhost URL, probe candidate ports to detect
+    // config-vs-daemon port drift (ops-mbdi). Surface the actually-listening
+    // port with a fix recipe — better UX than just "unreachable."
+    let discoveredPort: number | null = null;
+    if (!healthy && isLocalhostUrl(baseUrl)) {
+      discoveredPort = await discoverLocalFlairPort(baseUrl);
+    }
+
     if (opts.json) {
-      console.log(JSON.stringify({ healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData }, null, 2));
+      const out: any = { healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData };
+      if (discoveredPort != null) out.discoveredPort = discoveredPort;
+      console.log(JSON.stringify(out, null, 2));
       if (!healthy) process.exit(1);
       return;
     }
@@ -3776,7 +3834,16 @@ const statusCmd = program
     if (!healthy) {
       console.log(`Flair v${__pkgVersion} — 🔴 unreachable`);
       console.log(`  URL:  ${baseUrl}`);
-      console.log(`\n  Run: flair start  or  flair doctor`);
+      if (discoveredPort != null) {
+        const altUrl = `http://127.0.0.1:${discoveredPort}`;
+        console.log(`\n  ⚠ Found a Flair daemon listening on port ${discoveredPort} (URL: ${altUrl}).`);
+        console.log(`    Your config points at ${baseUrl} — drift detected.`);
+        console.log(`\n  Quick fix: FLAIR_URL=${altUrl} flair status`);
+        console.log(`  Permanent fix: edit ~/.flair/config.yaml to set port: ${discoveredPort}`);
+        console.log(`  Or: flair doctor (when port-drift detection lands there)`);
+      } else {
+        console.log(`\n  Run: flair start  or  flair doctor`);
+      }
       process.exit(1);
     }
 
