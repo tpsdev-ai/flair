@@ -35,6 +35,7 @@ PACKAGES=(
   "$ROOT/packages/flair-client"
   "$ROOT/packages/flair-mcp"
   "$ROOT/packages/openclaw-flair"
+  "$ROOT/packages/pi-flair"
   "$ROOT"
 )
 
@@ -42,6 +43,7 @@ PACKAGE_JSONS=(
   "$ROOT/packages/flair-client/package.json"
   "$ROOT/packages/flair-mcp/package.json"
   "$ROOT/packages/openclaw-flair/package.json"
+  "$ROOT/packages/pi-flair/package.json"
   "$ROOT/package.json"
 )
 
@@ -106,6 +108,9 @@ if [[ "$MODE" == "--publish" ]]; then
   echo "  Publishing @tpsdev-ai/openclaw-flair..."
   (cd "$ROOT/packages/openclaw-flair" && npm publish) || { echo "⚠️  openclaw-flair publish failed (may need build step)"; }
 
+  echo "  Publishing @tpsdev-ai/pi-flair..."
+  (cd "$ROOT/packages/pi-flair" && npm publish) || { echo "⚠️  pi-flair publish failed (may need build step)"; }
+
   echo "🏷️  Tagging v${VERSION} on main..."
   git -C "$ROOT" tag -a "v${VERSION}" -m "Release v${VERSION}"
   git -C "$ROOT" push origin "v${VERSION}"
@@ -160,18 +165,20 @@ for pkg in "${PACKAGES[@]}"; do
   echo "  ✓ $name → $VERSION"
 done
 
-# 3. Update internal dependency (flair-mcp → flair-client)
+# 3. Update internal dependencies (flair-mcp + pi-flair both depend on flair-client)
 echo "🔗 Aligning internal dependencies..."
-node -e "
-  const fs = require('fs');
-  const path = '$ROOT/packages/flair-mcp/package.json';
-  const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
-  if (pkg.dependencies?.['@tpsdev-ai/flair-client']) {
-    pkg.dependencies['@tpsdev-ai/flair-client'] = '$VERSION';
-    fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
-    console.log('  ✓ flair-mcp → flair-client: $VERSION');
-  }
-"
+for INTERNAL_DEPENDENT in "$ROOT/packages/flair-mcp/package.json" "$ROOT/packages/pi-flair/package.json"; do
+  node -e "
+    const fs = require('fs');
+    const path = '$INTERNAL_DEPENDENT';
+    const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+    if (pkg.dependencies?.['@tpsdev-ai/flair-client']) {
+      pkg.dependencies['@tpsdev-ai/flair-client'] = '$VERSION';
+      fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
+      console.log('  ✓ ' + pkg.name + ' → flair-client: $VERSION');
+    }
+  "
+done
 
 # 3a. Refresh bun.lock so CI's --frozen-lockfile passes post-bump.
 # Omitting this was the 0.5.6 release failure: version bumps desynced the
@@ -201,6 +208,7 @@ git -C "$ROOT" add \
   "$ROOT/packages/flair-client/package.json" \
   "$ROOT/packages/flair-mcp/package.json" \
   "$ROOT/packages/openclaw-flair/package.json" \
+  "$ROOT/packages/pi-flair/package.json" \
   "$ROOT/bun.lock"
 git -C "$ROOT" commit -m "release: v${VERSION} — align all workspace packages"
 
