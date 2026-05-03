@@ -1,0 +1,56 @@
+{
+  "name": "@tpsdev-ai/n8n-nodes-flair",
+  "version": "0.1.0",
+  "description": "n8n community node — use Flair as your AI Agent's memory backend. Includes FlairChatMemory (Memory port) and FlairSearch (Tool port).",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && npm run build:assets",
+    "build:assets": "node -e \"require('fs').cpSync('src/credentials','dist/credentials',{recursive:true,filter:p=>!p.endsWith('.ts')});require('fs').cpSync('src/nodes','dist/nodes',{recursive:true,filter:p=>!p.endsWith('.ts')})\"",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/FlairApi.credentials.js"
+    ],
+    "nodes": []
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tpsdev-ai/flair.git",
+    "directory": "packages/n8n-nodes-flair"
+  },
+  "homepage": "https://tps.dev/#flair",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "flair",
+    "ai",
+    "agent",
+    "memory",
+    "langchain"
+  ],
+  "dependencies": {
+    "@tpsdev-ai/flair-client": "0.7.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "devDependencies": {
+    "n8n-workflow": "1.119.0",
+    "typescript": "5.9.3"
+  }
+}
