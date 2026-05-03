@@ -187,6 +187,17 @@ Your agent's memory **follows it across CLIs** — same Flair instance, same age
 
 For per-CLI config snippets (Gemini CLI's `~/.gemini/settings.json`, Codex CLI's `~/.codex/config.toml`, etc.), see **[docs/mcp-clients.md](docs/mcp-clients.md)**. For a deeper Claude Code walk-through with `CLAUDE.md` patterns, see [docs/claude-code.md](docs/claude-code.md).
 
+### n8n (community node)
+
+Use Flair as the memory backend for n8n's AI Agent. Same memories readable from Claude Code and OpenClaw — that's the point.
+
+```bash
+# In n8n: Settings → Community Nodes → Install
+@tpsdev-ai/n8n-nodes-flair
+```
+
+Two nodes ship: **Flair Chat Memory** (Memory port, conversation buffer) and **Flair Search** (Tool port, semantic search + get-by-subject). Setup walkthrough, subject/sessionId patterns, and security guidance in **[docs/n8n.md](docs/n8n.md)**.
+
 ### JavaScript / TypeScript (Client Library)
 
 For custom integrations, use the lightweight client — no Harper, no embeddings, just HTTP + auth:
