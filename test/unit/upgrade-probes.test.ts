@@ -1,5 +1,8 @@
-import { describe, test, expect } from "bun:test";
-import { probeBinVersion, probeLibVersion } from "../../src/cli";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { probeBinVersion, probeLibVersion, probeOpenclawPluginVersion } from "../../src/cli";
 
 // execFileSync takes (file, args, opts) and returns Buffer|string. Tests
 // inject a fake that ignores input and returns a fixed string (or throws).
@@ -56,5 +59,53 @@ describe("probeLibVersion", () => {
   test("returns null for a package that's not installed anywhere Node can find it", () => {
     const version = probeLibVersion("this-package-does-not-exist-anywhere-3f8c2a1b");
     expect(version).toBeNull();
+  });
+});
+
+describe("probeOpenclawPluginVersion", () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), "tps-openclaw-probe-"));
+    originalHome = process.env.HOME;
+    process.env.HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    if (originalHome !== undefined) process.env.HOME = originalHome;
+    else delete process.env.HOME;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  test("reads version from ~/.openclaw/extensions/<name>/package.json", () => {
+    const extDir = join(tmpHome, ".openclaw", "extensions", "openclaw-flair");
+    mkdirSync(extDir, { recursive: true });
+    writeFileSync(join(extDir, "package.json"), JSON.stringify({ name: "@tpsdev-ai/openclaw-flair", version: "0.7.0" }));
+    expect(probeOpenclawPluginVersion("openclaw-flair")).toBe("0.7.0");
+  });
+
+  test("returns null when ~/.openclaw doesn't exist (openclaw not installed)", () => {
+    expect(probeOpenclawPluginVersion("openclaw-flair")).toBeNull();
+  });
+
+  test("returns null when extension dir exists but no package.json", () => {
+    const extDir = join(tmpHome, ".openclaw", "extensions", "openclaw-flair");
+    mkdirSync(extDir, { recursive: true });
+    expect(probeOpenclawPluginVersion("openclaw-flair")).toBeNull();
+  });
+
+  test("returns null when package.json is malformed", () => {
+    const extDir = join(tmpHome, ".openclaw", "extensions", "openclaw-flair");
+    mkdirSync(extDir, { recursive: true });
+    writeFileSync(join(extDir, "package.json"), "{ this is not valid json");
+    expect(probeOpenclawPluginVersion("openclaw-flair")).toBeNull();
+  });
+
+  test("returns null when package.json has no version field", () => {
+    const extDir = join(tmpHome, ".openclaw", "extensions", "openclaw-flair");
+    mkdirSync(extDir, { recursive: true });
+    writeFileSync(join(extDir, "package.json"), JSON.stringify({ name: "@tpsdev-ai/openclaw-flair" }));
+    expect(probeOpenclawPluginVersion("openclaw-flair")).toBeNull();
   });
 });

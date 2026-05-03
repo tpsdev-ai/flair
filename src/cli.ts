@@ -801,6 +801,34 @@ export function probeLibVersion(pkgName: string): string | null {
   }
 }
 
+/**
+ * Read the version of an OpenClaw plugin from `~/.openclaw/extensions/<name>/package.json`.
+ *
+ * `flair upgrade` uses this to surface the installed `@tpsdev-ai/openclaw-flair`
+ * version even though it isn't a globally-installed bin or a flair lib dep.
+ * Returns null if openclaw isn't installed, the extension isn't installed, or
+ * the package.json can't be parsed.
+ *
+ * @param extensionName — the directory name under `~/.openclaw/extensions/`
+ *                        (typically the plugin name without scope, e.g. `openclaw-flair`)
+ */
+export function probeOpenclawPluginVersion(extensionName: string): string | null {
+  try {
+    const { existsSync, readFileSync } = require("node:fs") as typeof import("node:fs");
+    const { homedir } = require("node:os") as typeof import("node:os");
+    const { resolve } = require("node:path") as typeof import("node:path");
+    // process.env.HOME first so tests can override; homedir() as fallback —
+    // homedir() doesn't honor runtime HOME changes (caches at module load).
+    const home = process.env.HOME ?? homedir();
+    const pkgJsonPath = resolve(home, ".openclaw", "extensions", extensionName, "package.json");
+    if (!existsSync(pkgJsonPath)) return null;
+    const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
+    return typeof pkg.version === "string" ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── First-run soul wizard ────────────────────────────────────────────────────
 
 type SoulEntries = [string, string][];
@@ -4116,9 +4144,11 @@ program
   .description("Upgrade Flair and related packages to latest versions")
   .option("--check", "Only check for updates, don't install")
   .option("--restart", "Restart Flair after upgrade")
+  .option("--all", "Show transitive packages (e.g. flair-client) in the listing — verbose mode for debugging dep versions")
   .action(async (opts) => {
     const { execSync, execFileSync } = await import("node:child_process");
     const checkOnly = opts.check ?? false;
+    const showAll = opts.all ?? false;
 
     console.log("Checking for updates...\n");
 
@@ -4133,32 +4163,56 @@ program
     //   - For library packages: require.resolve the package.json from the
     //     running flair's module graph (works whether it's a sibling
     //     global install or a bundled dep).
+    //   - For openclaw plugins: read ~/.openclaw/extensions/<name>/package.json
+    //     directly (the OpenClaw plugin install layout — not on $PATH, not in
+    //     flair's module graph).
+    //
+    // Default UI shows only end-user-facing packages: flair, flair-mcp,
+    // openclaw-flair. flair-client is a transitive dep of flair-mcp and
+    // showing it as a top-level upgrade item invites a misleading
+    // "❔ missing — install with npm install -g" suggestion for users who
+    // installed flair without flair-mcp (ops-h5cd). --all opts in.
+    type ProbeKind = "bin" | "lib" | "openclaw-plugin";
     const packages: Array<{
       name: string;
       probe: () => string | null;
+      kind: ProbeKind;
+      transitive?: boolean; // hide from default UI; shown only with --all
     }> = [
       {
         name: "@tpsdev-ai/flair",
+        kind: "bin",
         probe: () => probeBinVersion(execFileSync,"flair"),
       },
       {
-        name: "@tpsdev-ai/flair-client",
-        probe: () => probeLibVersion("@tpsdev-ai/flair-client"),
+        name: "@tpsdev-ai/flair-mcp",
+        kind: "bin",
+        probe: () => probeBinVersion(execFileSync,"flair-mcp"),
       },
       {
-        name: "@tpsdev-ai/flair-mcp",
-        probe: () => probeBinVersion(execFileSync,"flair-mcp"),
+        name: "@tpsdev-ai/openclaw-flair",
+        kind: "openclaw-plugin",
+        probe: () => probeOpenclawPluginVersion("openclaw-flair"),
+      },
+      {
+        name: "@tpsdev-ai/flair-client",
+        kind: "lib",
+        probe: () => probeLibVersion("@tpsdev-ai/flair-client"),
+        transitive: true,
       },
     ];
 
-    // Three-state status per package:
+    // Three-state status per package, plus a fourth for openclaw-plugin
+    // packages that aren't installed (since openclaw is optional):
     //   current    — installed version matches registry latest
     //   outdated   — installed version is older than latest
-    //   missing    — not detected anywhere; optionally install
-    type Status = "current" | "outdated" | "missing";
-    const findings: Array<{ name: string; installed: string | null; latest: string; status: Status }> = [];
+    //   missing    — not detected; default packages → install advised
+    //   optional   — openclaw plugin; openclaw isn't installed (don't nag)
+    type Status = "current" | "outdated" | "missing" | "optional";
+    const findings: Array<{ name: string; installed: string | null; latest: string; status: Status; kind: ProbeKind }> = [];
 
-    for (const { name, probe } of packages) {
+    for (const { name, probe, kind, transitive } of packages) {
+      if (transitive && !showAll) continue;
       try {
         const res = await fetch(`https://registry.npmjs.org/${name}/latest`, { signal: AbortSignal.timeout(5000) });
         if (!res.ok) continue;
@@ -4166,19 +4220,44 @@ program
         const latest = data.version ?? "unknown";
 
         const installed = probe();
-        const status: Status = installed === null ? "missing" : installed === latest ? "current" : "outdated";
-        findings.push({ name, installed, latest, status });
+        let status: Status;
+        if (installed === null) {
+          // openclaw-plugin packages are optional — if openclaw isn't
+          // installed, don't surface a misleading "install with npm" advice.
+          status = kind === "openclaw-plugin" ? "optional" : "missing";
+        } else if (installed === latest) {
+          status = "current";
+        } else {
+          status = "outdated";
+        }
+        findings.push({ name, installed, latest, status, kind });
 
-        const icon = status === "current" ? "✅" : status === "outdated" ? "⬆️" : "❔";
-        const installedLabel = installed ?? "not detected";
-        const suffix = status === "current" ? " (current)" : status === "missing" ? " (run: npm install -g)" : "";
+        const icon = status === "current" ? "✅"
+          : status === "outdated" ? "⬆️"
+          : status === "optional" ? "○"
+          : "❔";
+        const installedLabel = installed ?? (status === "optional" ? "not installed (openclaw not detected)" : "not detected");
+        const suffix = status === "current" ? " (current)"
+          : status === "missing" ? " (run: npm install -g)"
+          : status === "optional" ? " (install via: openclaw plugins install @tpsdev-ai/openclaw-flair)"
+          : "";
         console.log(`  ${icon} ${name}: ${installedLabel} → ${latest}${suffix}`);
       } catch { /* skip unavailable packages */ }
     }
 
     const outdated = findings.filter((f) => f.status === "outdated");
     const missing = findings.filter((f) => f.status === "missing");
-    const upgrades = outdated.map(({ name, installed, latest }) => ({ pkg: name, installed: installed ?? "unknown", latest }));
+    // openclaw plugins upgrade through `openclaw plugins install`, not `npm
+    // install -g` (npm-installed wouldn't connect to OpenClaw's gateway slot).
+    // Split outdated into npm-upgradeable vs openclaw-plugin so we can use
+    // the right command for each.
+    const npmUpgrades = outdated
+      .filter((f) => f.kind !== "openclaw-plugin")
+      .map(({ name, installed, latest }) => ({ pkg: name, installed: installed ?? "unknown", latest }));
+    const openclawUpgrades = outdated
+      .filter((f) => f.kind === "openclaw-plugin")
+      .map(({ name, installed, latest }) => ({ pkg: name, installed: installed ?? "unknown", latest }));
+    const totalUpgrades = npmUpgrades.length + openclawUpgrades.length;
 
     if (outdated.length === 0 && missing.length === 0) {
       console.log("\n✅ Everything is up to date.");
@@ -4202,12 +4281,30 @@ program
     // Perform upgrade. `latest` comes from the npm registry's HTTP
     // response, so CodeQL (correctly) treats it as untrusted input.
     // Use execFileSync with argv — the spec `<name>@<version>` becomes a
-    // single argument to npm, no shell to inject into.
-    console.log(`\nUpgrading ${upgrades.length} package${upgrades.length > 1 ? "s" : ""}...\n`);
-    for (const { pkg, latest } of upgrades) {
+    // single argument to the upgrade command, no shell to inject into.
+    console.log(`\nUpgrading ${totalUpgrades} package${totalUpgrades > 1 ? "s" : ""}...\n`);
+    for (const { pkg, latest } of npmUpgrades) {
       try {
         console.log(`  Installing ${pkg}@${latest}...`);
         execFileSync("npm", ["install", "-g", `${pkg}@${latest}`], { stdio: "pipe" });
+        console.log(`  ✅ ${pkg}@${latest} installed`);
+      } catch (err: any) {
+        console.error(`  ❌ ${pkg} upgrade failed: ${err.message}`);
+      }
+    }
+    for (const { pkg, latest } of openclawUpgrades) {
+      // OpenClaw plugins upgrade via `openclaw plugins install --force --pin`.
+      // Requires openclaw on PATH; if not, surface the manual recipe instead
+      // of a confusing failure.
+      try {
+        execFileSync("openclaw", ["--version"], { stdio: "pipe", timeout: 2000 });
+      } catch {
+        console.error(`  ❌ ${pkg} upgrade skipped: openclaw not on PATH. Install manually: openclaw plugins install ${pkg}@${latest} --force --pin`);
+        continue;
+      }
+      try {
+        console.log(`  Installing ${pkg}@${latest} via openclaw...`);
+        execFileSync("openclaw", ["plugins", "install", `${pkg}@${latest}`, "--force", "--pin"], { stdio: "pipe" });
         console.log(`  ✅ ${pkg}@${latest} installed`);
       } catch (err: any) {
         console.error(`  ❌ ${pkg} upgrade failed: ${err.message}`);
