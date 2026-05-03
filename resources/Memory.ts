@@ -2,7 +2,7 @@ import { databases } from "@harperfast/harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin } from "./auth-middleware.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
-import { scanContent, isStrictMode } from "./content-safety.js";
+import { scanFields, isStrictMode } from "./content-safety.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 
 export class Memory extends (databases as any).flair.Memory {
@@ -122,9 +122,10 @@ export class Memory extends (databases as any).flair.Memory {
       content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
     }
 
-    // Content safety scan
-    if (content.content) {
-      const safety = scanContent(content.content);
+    // Content safety scan — covers content + summary (defense-in-depth for
+    // agent-set summaries, ops-i2jb).
+    if (content.content || content.summary) {
+      const safety = scanFields(content, ["content", "summary"]);
       if (!safety.safe) {
         if (isStrictMode()) {
           return new Response(JSON.stringify({
@@ -173,9 +174,9 @@ export class Memory extends (databases as any).flair.Memory {
     content.archived = content.archived ?? false;
     content.createdAt = content.createdAt ?? now;
 
-    // Content safety scan on updated content
-    if (content.content) {
-      const safety = scanContent(content.content);
+    // Content safety scan on updated content + summary (ops-i2jb).
+    if (content.content || content.summary) {
+      const safety = scanFields(content, ["content", "summary"]);
       if (!safety.safe) {
         if (isStrictMode()) {
           return new Response(JSON.stringify({
@@ -186,7 +187,7 @@ export class Memory extends (databases as any).flair.Memory {
         }
         content._safetyFlags = safety.flags;
       } else {
-        // Clear previous flags if content is now clean
+        // Clear previous flags if both fields are now clean
         content._safetyFlags = null;
       }
     }
