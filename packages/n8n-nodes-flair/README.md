@@ -23,9 +23,9 @@ Then restart your n8n instance. The Flair API credential will appear under **Cre
 
 1. **Base URL** — your Flair instance, e.g. `http://localhost:9926`
 2. **Agent ID** — the logical identity that will own memories written from this n8n workspace. Workflows that share an Agent ID share memory ownership.
-3. **Admin Token** — your Flair admin token. **This grants read/write access to the entire instance.** For production with untrusted workflow inputs, wait for Ed25519 per-agent auth (post-1.0).
+3. **Admin Password** — your Flair (Harper) admin password. **This grants read/write access to the entire instance.** For production with untrusted workflow inputs, wait for Ed25519 per-agent auth (post-1.0).
 
-The credential test hits `/Health` — you'll know it works when the test succeeds.
+The credential test hits `/Memory` (auth-required) — you'll know it works when the test succeeds.
 
 ## License
 

@@ -13,7 +13,7 @@ describe("FlairApi credential", () => {
     const names = cred.properties.map((p) => p.name);
     expect(names).toContain("baseUrl");
     expect(names).toContain("agentId");
-    expect(names).toContain("adminToken");
+    expect(names).toContain("adminPassword");
   });
 
   test("baseUrl defaults to localhost:9926", () => {
@@ -22,10 +22,10 @@ describe("FlairApi credential", () => {
     expect(baseUrl.required).toBe(true);
   });
 
-  test("adminToken is masked (password type)", () => {
-    const tok = cred.properties.find((p) => p.name === "adminToken")!;
-    expect((tok as any).typeOptions?.password).toBe(true);
-    expect(tok.required).toBe(true);
+  test("adminPassword is masked (password type)", () => {
+    const pw = cred.properties.find((p) => p.name === "adminPassword")!;
+    expect((pw as any).typeOptions?.password).toBe(true);
+    expect(pw.required).toBe(true);
   });
 
   test("agentId is required (memory ownership scope)", () => {
@@ -33,15 +33,22 @@ describe("FlairApi credential", () => {
     expect(agentId.required).toBe(true);
   });
 
-  test("authenticates via Bearer header", () => {
+  test("authenticates via Basic header (admin:adminPassword base64)", () => {
     expect(cred.authenticate.type).toBe("generic");
     const headers = (cred.authenticate.properties as any).headers;
-    expect(headers.Authorization).toContain("Bearer");
-    expect(headers.Authorization).toContain("$credentials.adminToken");
+    expect(headers.Authorization).toContain("Basic");
+    // Header constructs admin:<password> via n8n expression then base64-encodes
+    expect(headers.Authorization).toContain("admin:");
+    expect(headers.Authorization).toContain("$credentials.adminPassword");
+    expect(headers.Authorization).toContain("base64");
+    // Bearer must NOT be used — Flair admin auth is Basic
+    expect(headers.Authorization).not.toContain("Bearer");
   });
 
-  test("test request hits /Health on the configured baseUrl", () => {
-    expect(cred.test.request.url).toBe("/Health");
+  test("test request hits /Memory (auth-required) on the configured baseUrl", () => {
+    // /Health is unauthenticated and would silently pass with bad creds —
+    // /Memory returns 401 without a valid Authorization header.
+    expect(cred.test.request.url).toBe("/Memory");
     expect(cred.test.request.baseURL).toContain("$credentials.baseUrl");
   });
 });
