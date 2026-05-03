@@ -18,7 +18,10 @@ describe("builtins: registry", () => {
   });
 
   test("BUILTIN_BY_NAME maps by discovered name", () => {
-    expect(BUILTIN_BY_NAME.get("agentic-stack")?.descriptor).toBe(agenticStackDescriptor);
+    const builtin = BUILTIN_BY_NAME.get("agentic-stack");
+    expect(builtin).toBeDefined();
+    // For yaml bridges, descriptorOrPlugin is the descriptor
+    expect((builtin?.descriptorOrPlugin as any)?.name).toBe("agentic-stack");
     expect(BUILTIN_BY_NAME.get("does-not-exist")).toBeUndefined();
   });
 
@@ -36,7 +39,9 @@ describe("builtins: registry", () => {
 
 describe("builtins: agentic-stack descriptor shape", () => {
   test("has required top-level fields", () => {
-    const d = agenticStackDescriptor;
+    const builtin = BUILTIN_BY_NAME.get("agentic-stack");
+    expect(builtin).toBeDefined();
+    const d = builtin?.descriptorOrPlugin as any;
     expect(d.name).toBe("agentic-stack");
     expect(d.version).toBe(1);
     expect(d.kind).toBe("file");
@@ -44,11 +49,15 @@ describe("builtins: agentic-stack descriptor shape", () => {
   });
 
   test("declares detection paths", () => {
-    expect(agenticStackDescriptor.detect?.anyExists).toContain(".agent/AGENTS.md");
+    const builtin = BUILTIN_BY_NAME.get("agentic-stack");
+    const d = builtin?.descriptorOrPlugin as any;
+    expect(d.detect?.anyExists).toContain(".agent/AGENTS.md");
   });
 
   test("import.sources maps content from $.claim", () => {
-    const src = agenticStackDescriptor.import?.sources[0];
+    const builtin = BUILTIN_BY_NAME.get("agentic-stack");
+    const d = builtin?.descriptorOrPlugin as any;
+    const src = d.import?.sources[0];
     expect(src).toBeDefined();
     expect(src?.path).toMatch(/lessons\.jsonl$/);
     expect(src?.format).toBe("jsonl");
@@ -64,7 +73,7 @@ describe("builtins: loadDescriptor returns the registered descriptor", () => {
     const records = builtinDiscoveryRecords();
     const agentic = records.find((r) => r.name === "agentic-stack")!;
     const loaded = await loadDescriptor(agentic);
-    expect(loaded).toBe(agenticStackDescriptor);
+    expect(loaded?.name).toBe("agentic-stack");
   });
 });
 

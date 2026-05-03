@@ -115,17 +115,47 @@ describe("formats: yaml", () => {
   });
 });
 
-describe("formats: markdown-frontmatter defers to slice 2b", () => {
+describe("formats: markdown-frontmatter", () => {
   let dir: string;
   beforeEach(() => { dir = tmp(); });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  test("throws a spec-pointing error", async () => {
+  test("parses markdown with front-matter", async () => {
     const p = join(dir, "f.md");
-    writeFileSync(p, "---\ntitle: x\n---\n\nbody\n");
-    let thrown: any = null;
-    try { await collect(parseRecords("t", p, "markdown-frontmatter")); } catch (e) { thrown = e; }
-    expect(thrown).toBeInstanceOf(BridgeRuntimeError);
-    expect(thrown.detail.hint).toMatch(/slice 2b/);
+    writeFileSync(p, "---\ntitle: x\ntags: [a, b]\n---\n\nbody content\n");
+    const out = await collect(parseRecords("t", p, "markdown-frontmatter"));
+    expect(out).toHaveLength(1);
+    expect(out[0].record).toEqual({
+      content: "\nbody content\n",
+      subject: "x",
+      tags: ["a", "b"],
+      type: "fact",
+      createdAt: expect.any(String),
+      derivedFrom: [p],
+      foreignId: p,
+    });
+  });
+
+  test("handles markdown without front-matter", async () => {
+    const p = join(dir, "f.md");
+    writeFileSync(p, "just\ncontent\n");
+    const out = await collect(parseRecords("t", p, "markdown-frontmatter"));
+    expect(out).toHaveLength(1);
+    expect(out[0].record).toEqual({
+      content: "just\ncontent\n",
+      subject: "f",
+      type: "fact",
+      createdAt: expect.any(String),
+      derivedFrom: [p],
+      foreignId: p,
+    });
+  });
+
+  test("parses scalar tags as single-element array", async () => {
+    const p = join(dir, "f.md");
+    writeFileSync(p, "---\ntags: single\n---\n\ncontent\n");
+    const out = await collect(parseRecords("t", p, "markdown-frontmatter"));
+    expect(out).toHaveLength(1);
+    expect(out[0].record.tags).toEqual(["single"]); 
   });
 });

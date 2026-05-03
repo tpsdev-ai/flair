@@ -5450,6 +5450,7 @@ bridge
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--key <path>", "Ed25519 private key path (default: resolved from agent)")
+  .option("--source <path>", "Source directory (for directory-based imports like markdown)")
   .action(async (name: string, srcArg: string | undefined, opts) => {
     const agentId: string | undefined = opts.agent ?? process.env.FLAIR_AGENT_ID;
     const cwd: string = opts.cwd ?? srcArg ?? process.cwd();
