@@ -3740,6 +3740,173 @@ rem
     }
   });
 
+// ─── flair rem promote ───────────────────────────────────────────────────────
+// Slice 2 of FLAIR-NIGHTLY-REM (ops-2qq). Promote a candidate to either Soul
+// or persistent Memory. Both --rationale and --to are required (spec § 5: no
+// rubber-stamp). When --to=soul, --key is also required so the resulting
+// Soul row has a meaningful identifier.
+//
+// Trust-tier policy is enforced by the caller's authentication today (1.0):
+// admin pass → any promote; agent key → can write to own Memory/Soul. Server-
+// side trust-tier enforcement (endorsed agents → memory only, never soul) is
+// scoped for slice 2b when agent-routed promotion lands. For now, the
+// human-operator workflow is the supported path.
+
+rem
+  .command("promote")
+  .description("Promote a memory candidate to Soul or persistent Memory (rationale required)")
+  .argument("<candidate-id>", "MemoryCandidate id to promote")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--rationale <text>", "Why this candidate is being promoted (required, no rubber-stamp)")
+  .option("--to <target>", "Promotion target: 'soul' or 'memory'")
+  .option("--key <key>", "Soul key (required when --to=soul; e.g. 'lessons', 'preference-X')")
+  .option("--reviewer <id>", "Reviewer agent id (default: FLAIR_AGENT_ID or 'admin')")
+  .action(async (candidateId, opts) => {
+    if (!opts.rationale || !opts.rationale.trim()) {
+      console.error("Error: --rationale is required (per spec § 5: no rubber-stamp)");
+      process.exit(1);
+    }
+    if (!opts.to || (opts.to !== "soul" && opts.to !== "memory")) {
+      console.error("Error: --to must be 'soul' or 'memory'");
+      process.exit(1);
+    }
+    if (opts.to === "soul" && (!opts.key || !opts.key.trim())) {
+      console.error("Error: --key is required when --to=soul (gives the Soul entry a meaningful identifier)");
+      process.exit(1);
+    }
+    const reviewerId = opts.reviewer || process.env.FLAIR_AGENT_ID || "admin";
+
+    try {
+      // Fetch the candidate
+      const candidate = await api("GET", `/MemoryCandidate/${encodeURIComponent(candidateId)}`);
+      if (!candidate || candidate.error) {
+        console.error(`Error: candidate ${candidateId} not found`);
+        process.exit(1);
+      }
+      if (candidate.status === "promoted") {
+        console.error(`Error: candidate ${candidateId} already promoted (target=${candidate.target}, reviewer=${candidate.reviewerId})`);
+        process.exit(1);
+      }
+      if (candidate.status === "rejected") {
+        console.error(`Error: candidate ${candidateId} was rejected. Use a fresh candidate or reset status manually.`);
+        process.exit(1);
+      }
+
+      const decidedAt = new Date().toISOString();
+
+      // Write the resulting Soul or Memory entry
+      if (opts.to === "memory") {
+        const memId = `${candidate.agentId}-promoted-${Date.now()}`;
+        const memWrite = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, {
+          id: memId,
+          agentId: candidate.agentId,
+          content: candidate.claim,
+          durability: "persistent",
+          tags: ["nightly-rem-promoted", `from:${candidateId}`],
+          derivedFrom: candidate.sourceMemoryIds ?? [],
+          promotionStatus: "approved",
+          promotedAt: decidedAt,
+          promotedBy: reviewerId,
+          createdAt: decidedAt,
+        });
+        if (memWrite?.error) {
+          console.error(`Error writing Memory: ${memWrite.error}`);
+          process.exit(1);
+        }
+        console.log(`✅ Wrote Memory ${memId} (durability=persistent)`);
+      } else {
+        // soul
+        const soulId = `${candidate.agentId}-${opts.key}`;
+        const soulWrite = await api("PUT", `/Soul/${encodeURIComponent(soulId)}`, {
+          id: soulId,
+          agentId: candidate.agentId,
+          key: opts.key,
+          value: candidate.claim,
+          priority: "standard",
+          durability: "persistent",
+          createdAt: decidedAt,
+          updatedAt: decidedAt,
+        });
+        if (soulWrite?.error) {
+          console.error(`Error writing Soul: ${soulWrite.error}`);
+          process.exit(1);
+        }
+        console.log(`✅ Wrote Soul ${soulId} (key=${opts.key})`);
+      }
+
+      // Update the candidate row
+      const upd = await api("PUT", `/MemoryCandidate/${encodeURIComponent(candidateId)}`, {
+        ...candidate,
+        status: "promoted",
+        target: opts.to,
+        reviewerId,
+        reviewRationale: opts.rationale,
+        decidedAt,
+      });
+      if (upd?.error) {
+        console.error(`Warning: candidate row update returned: ${upd.error}`);
+      }
+      console.log(`✅ Candidate ${candidateId} marked promoted → ${opts.to}, reviewer=${reviewerId}`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+// ─── flair rem reject ────────────────────────────────────────────────────────
+// Reject a candidate with a required --reason. Per spec § 5, rejected
+// candidates retain full decision history so recurring proposals are visible
+// via the supersedes chain.
+
+rem
+  .command("reject")
+  .description("Reject a memory candidate with a required reason")
+  .argument("<candidate-id>", "MemoryCandidate id to reject")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--reason <text>", "Why this candidate is being rejected (required)")
+  .option("--reviewer <id>", "Reviewer agent id (default: FLAIR_AGENT_ID or 'admin')")
+  .action(async (candidateId, opts) => {
+    if (!opts.reason || !opts.reason.trim()) {
+      console.error("Error: --reason is required");
+      process.exit(1);
+    }
+    const reviewerId = opts.reviewer || process.env.FLAIR_AGENT_ID || "admin";
+
+    try {
+      const candidate = await api("GET", `/MemoryCandidate/${encodeURIComponent(candidateId)}`);
+      if (!candidate || candidate.error) {
+        console.error(`Error: candidate ${candidateId} not found`);
+        process.exit(1);
+      }
+      if (candidate.status === "promoted") {
+        console.error(`Error: candidate ${candidateId} already promoted (cannot reject after promotion)`);
+        process.exit(1);
+      }
+      if (candidate.status === "rejected") {
+        console.log(`(candidate ${candidateId} was already rejected on ${candidate.decidedAt} by ${candidate.reviewerId})`);
+        return;
+      }
+
+      const decidedAt = new Date().toISOString();
+      const upd = await api("PUT", `/MemoryCandidate/${encodeURIComponent(candidateId)}`, {
+        ...candidate,
+        status: "rejected",
+        reviewerId,
+        reviewRationale: opts.reason,
+        decidedAt,
+      });
+      if (upd?.error) {
+        console.error(`Error: candidate row update failed: ${upd.error}`);
+        process.exit(1);
+      }
+      console.log(`✅ Candidate ${candidateId} rejected by ${reviewerId}`);
+      console.log(`   Reason: ${opts.reason}`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
 // ─── flair status ─────────────────────────────────────────────────────────────
 
 function humanBytes(n: number): string {
