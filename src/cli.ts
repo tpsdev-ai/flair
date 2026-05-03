@@ -5488,6 +5488,86 @@ memory.command("add [content]").requiredOption("--agent <id>")
     const out = await api("PUT", `/Memory/${memId}`, body);
     console.log(JSON.stringify(out, null, 2));
   });
+// ─── flair memory write-task-summary ────────────────────────────────────────
+// Slice 1 of FLAIR-AGENT-CONTEXT-TIERS-B (ops-9wji-B / ops-3xyd). Standalone
+// helper that any agent harness (or a manual operator) can invoke at task
+// close to capture a structured task summary as a persistent Memory row
+// before resetting the session.
+//
+// The shape of this row matters: tags=['task-summary','auto-on-reset'] +
+// subject='task:<beads-id>' + summary populated. Slice 3+4 (harness
+// integrations) will call this as part of the reset pipeline; slice 5+6
+// (operator surfaces) will surface promote/restore controls. Today, this
+// command is independently useful — operator can capture a manual summary
+// at any time.
+//
+// Returns the memory id on stdout (single line, parseable) so the harness
+// can plumb it into the next-dispatch system message.
+
+memory.command("write-task-summary")
+  .description("Capture a structured task summary as a persistent Memory row (used by session-reset harness; standalone-callable by operators)")
+  .requiredOption("--agent <id>", "Agent the summary belongs to")
+  .requiredOption("--beads <ops-id>", "Bead/PR/task identifier this summary is about (e.g. ops-3xyd)")
+  .requiredOption("--outcome <s>", "Outcome of the task: merged | rejected | abandoned")
+  .option("--summary <text>", "Multi-sentence dense compression (populates Memory.summary; will be the agent's read-time view)")
+  .option("--files-touched <csv>", "Comma-separated list of files touched during the task (becomes part of content)")
+  .option("--lessons <text>", "Lessons learned during the task (becomes part of content)")
+  .option("--derived-from <csv>", "Comma-separated list of source Memory IDs this summary was distilled from")
+  .action(async (opts) => {
+    const validOutcomes = new Set(["merged", "rejected", "abandoned"]);
+    if (!validOutcomes.has(opts.outcome)) {
+      console.error(`Error: --outcome must be one of: merged, rejected, abandoned (got: ${opts.outcome})`);
+      process.exit(1);
+    }
+    if (!opts.summary && !opts.lessons && !opts.filesTouched) {
+      console.error("Error: at least one of --summary, --lessons, --files-touched is required (otherwise the summary has no content)");
+      process.exit(1);
+    }
+
+    // Build the structured content block. Format chosen to be parseable + readable
+    // — the agent reads it back on bootstrap of the next session.
+    const lines: string[] = [];
+    lines.push(`task: ${opts.beads}`);
+    lines.push(`outcome: ${opts.outcome}`);
+    if (opts.filesTouched) lines.push(`files: ${opts.filesTouched}`);
+    if (opts.lessons) {
+      lines.push("");
+      lines.push("lessons:");
+      lines.push(opts.lessons);
+    }
+    if (opts.summary) {
+      lines.push("");
+      lines.push("summary:");
+      lines.push(opts.summary);
+    }
+    const content = lines.join("\n");
+
+    const memId = `${opts.agent}-task-${opts.beads}-${Date.now()}`;
+    const body: any = {
+      id: memId,
+      agentId: opts.agent,
+      content,
+      durability: "persistent",
+      tags: ["task-summary", "auto-on-reset"],
+      subject: `task:${opts.beads}`,
+      type: "task-summary",
+      createdAt: new Date().toISOString(),
+    };
+    if (opts.summary) body.summary = opts.summary;
+    if (opts.derivedFrom) {
+      body.derivedFrom = String(opts.derivedFrom).split(",").map((x: string) => x.trim()).filter(Boolean);
+    }
+
+    const out = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, body);
+    if (out?.error) {
+      console.error(`Error writing task summary: ${out.error}`);
+      process.exit(1);
+    }
+    // Print just the memory id on stdout so the harness can capture it
+    // without parsing a JSON blob.
+    console.log(memId);
+  });
+
 memory.command("search [query]").requiredOption("--agent <id>")
   .option("--q <query>", "search query (alias for positional arg)")
   .option("--limit <n>", "Max results", "5")
