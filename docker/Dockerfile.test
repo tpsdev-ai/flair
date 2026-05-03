@@ -24,7 +24,6 @@ COPY src/ ./src/
 COPY resources/ ./resources/
 COPY schemas/ ./schemas/
 COPY packages/ ./packages/
-COPY plugins/ ./plugins/
 
 # Install dependencies
 RUN bun install --frozen-lockfile

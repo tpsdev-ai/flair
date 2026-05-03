@@ -34,14 +34,14 @@ fi
 PACKAGES=(
   "$ROOT/packages/flair-client"
   "$ROOT/packages/flair-mcp"
-  "$ROOT/plugins/openclaw-flair"
+  "$ROOT/packages/openclaw-flair"
   "$ROOT"
 )
 
 PACKAGE_JSONS=(
   "$ROOT/packages/flair-client/package.json"
   "$ROOT/packages/flair-mcp/package.json"
-  "$ROOT/plugins/openclaw-flair/package.json"
+  "$ROOT/packages/openclaw-flair/package.json"
   "$ROOT/package.json"
 )
 
@@ -104,7 +104,7 @@ if [[ "$MODE" == "--publish" ]]; then
   (cd "$ROOT" && npm publish) || { echo "❌ flair publish failed"; exit 1; }
 
   echo "  Publishing @tpsdev-ai/openclaw-flair..."
-  (cd "$ROOT/plugins/openclaw-flair" && npm publish) || { echo "⚠️  openclaw-flair publish failed (may need build step)"; }
+  (cd "$ROOT/packages/openclaw-flair" && npm publish) || { echo "⚠️  openclaw-flair publish failed (may need build step)"; }
 
   echo "🏷️  Tagging v${VERSION} on main..."
   git -C "$ROOT" tag -a "v${VERSION}" -m "Release v${VERSION}"
@@ -200,7 +200,7 @@ git -C "$ROOT" add \
   "$ROOT/package.json" \
   "$ROOT/packages/flair-client/package.json" \
   "$ROOT/packages/flair-mcp/package.json" \
-  "$ROOT/plugins/openclaw-flair/package.json" \
+  "$ROOT/packages/openclaw-flair/package.json" \
   "$ROOT/bun.lock"
 git -C "$ROOT" commit -m "release: v${VERSION} — align all workspace packages"
 

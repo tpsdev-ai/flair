@@ -25,10 +25,10 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tpsdev-ai/flair.git",
-    "directory": "plugins/openclaw-flair"
+    "url": "git+https://github.com/tpsdev-ai/flair.git",
+    "directory": "packages/openclaw-flair"
   },
-  "homepage": "https://github.com/tpsdev-ai/flair/tree/main/plugins/openclaw-flair",
+  "homepage": "https://github.com/tpsdev-ai/flair/tree/main/packages/openclaw-flair",
   "openclaw": {
     "extensions": [
       "./index.ts"

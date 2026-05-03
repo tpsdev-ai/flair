@@ -132,7 +132,7 @@ For the flair-mcp server: in `~/.codex/config.toml`, the `[mcp_servers.flair.env
 
 ### Hermes (Nous Research)
 
-Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). The Flair plugin (`plugins/hermes-flair/`) reads `FLAIR_AGENT_ID` and `FLAIR_KEY_PATH` from env or `$HERMES_HOME/flair.json`. Per the plugin's own `get_config_schema()`, secret fields go to `.env`, non-secret fields go to JSON.
+Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). The Flair plugin (`packages/hermes-flair/`) reads `FLAIR_AGENT_ID` and `FLAIR_KEY_PATH` from env or `$HERMES_HOME/flair.json`. Per the plugin's own `get_config_schema()`, secret fields go to `.env`, non-secret fields go to JSON.
 
 ## What to do with the Flair private key itself
 
@@ -168,4 +168,4 @@ This is a different threat model from password-based or API-key-based memory ser
 
 - [`docs/auth.md`](auth.md) — full auth scheme and signature format
 - [`docs/mcp-clients.md`](mcp-clients.md) — wiring the flair-mcp server into Claude Code / Gemini CLI / Codex CLI
-- [`plugins/hermes-flair/README.md`](../plugins/hermes-flair/README.md) — Hermes-specific plugin auth notes
+- [`packages/hermes-flair/README.md`](../packages/hermes-flair/README.md) — Hermes-specific plugin auth notes

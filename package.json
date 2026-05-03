@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tpsdev-ai/flair.git"
+    "url": "git+https://github.com/tpsdev-ai/flair.git"
   },
   "homepage": "https://github.com/tpsdev-ai/flair",
   "bugs": {
@@ -73,7 +73,6 @@
     "harper-fabric-embeddings"
   ],
   "workspaces": [
-    "packages/*",
-    "plugins/*"
+    "packages/*"
   ]
 }
