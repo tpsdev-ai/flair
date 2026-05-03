@@ -160,7 +160,7 @@ One command. Zero config.
 openclaw plugins install @tpsdev-ai/openclaw-flair
 ```
 
-The plugin auto-detects your agent identity, provides `memory_store`/`memory_recall`/`memory_get` tools, and injects relevant memories at session start. See the [plugin README](plugins/openclaw-flair/README.md) for details.
+The plugin auto-detects your agent identity, provides `memory_store`/`memory_recall`/`memory_get` tools, and injects relevant memories at session start. See the [plugin README](packages/openclaw-flair/README.md) for details.
 
 ### Claude Code / Gemini CLI / OpenAI Codex CLI / Cursor (MCP)
 

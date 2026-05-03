@@ -156,7 +156,7 @@ The MCP server has no client-side flags beyond these env vars; everything else (
 
 ## What about Hermes (Nous Research)?
 
-Hermes uses its own Python-native `MemoryProvider` ABC instead of MCP. It has its own Flair integration in [`plugins/hermes-flair/`](../plugins/hermes-flair). Same backend, same agent isolation, different plug shape.
+Hermes uses its own Python-native `MemoryProvider` ABC instead of MCP. It has its own Flair integration in [`packages/hermes-flair/`](../packages/hermes-flair). Same backend, same agent isolation, different plug shape.
 
 Future MCP-capable agent CLIs (and there are more landing every month) will work out of the box with the MCP server above — no per-framework adapter required from us.
 
