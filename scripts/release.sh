@@ -36,6 +36,7 @@ PACKAGES=(
   "$ROOT/packages/flair-mcp"
   "$ROOT/packages/openclaw-flair"
   "$ROOT/packages/pi-flair"
+  "$ROOT/packages/n8n-nodes-flair"
   "$ROOT"
 )
 
@@ -44,6 +45,7 @@ PACKAGE_JSONS=(
   "$ROOT/packages/flair-mcp/package.json"
   "$ROOT/packages/openclaw-flair/package.json"
   "$ROOT/packages/pi-flair/package.json"
+  "$ROOT/packages/n8n-nodes-flair/package.json"
   "$ROOT/package.json"
 )
 
@@ -94,6 +96,7 @@ if [[ "$MODE" == "--publish" ]]; then
   (cd "$ROOT" && npm run build && npm run build:cli) || { echo "❌ Build failed"; exit 1; }
   (cd "$ROOT/packages/flair-client" && npm run build) || { echo "❌ flair-client build failed"; exit 1; }
   (cd "$ROOT/packages/flair-mcp" && npm run build) || { echo "❌ flair-mcp build failed"; exit 1; }
+  (cd "$ROOT/packages/n8n-nodes-flair" && npm run build) || { echo "❌ n8n-nodes-flair build failed"; exit 1; }
 
   echo "🚀 Publishing to npm..."
   echo "  Publishing @tpsdev-ai/flair-client..."
@@ -110,6 +113,9 @@ if [[ "$MODE" == "--publish" ]]; then
 
   echo "  Publishing @tpsdev-ai/pi-flair..."
   (cd "$ROOT/packages/pi-flair" && npm publish) || { echo "⚠️  pi-flair publish failed (may need build step)"; }
+
+  echo "  Publishing @tpsdev-ai/n8n-nodes-flair..."
+  (cd "$ROOT/packages/n8n-nodes-flair" && npm publish) || { echo "⚠️  n8n-nodes-flair publish failed"; }
 
   echo "🏷️  Tagging v${VERSION} on main..."
   git -C "$ROOT" tag -a "v${VERSION}" -m "Release v${VERSION}"
@@ -165,9 +171,13 @@ for pkg in "${PACKAGES[@]}"; do
   echo "  ✓ $name → $VERSION"
 done
 
-# 3. Update internal dependencies (flair-mcp + pi-flair both depend on flair-client)
+# 3. Update internal dependencies (flair-mcp + pi-flair + n8n-nodes-flair all
+#    depend on flair-client)
 echo "🔗 Aligning internal dependencies..."
-for INTERNAL_DEPENDENT in "$ROOT/packages/flair-mcp/package.json" "$ROOT/packages/pi-flair/package.json"; do
+for INTERNAL_DEPENDENT in \
+    "$ROOT/packages/flair-mcp/package.json" \
+    "$ROOT/packages/pi-flair/package.json" \
+    "$ROOT/packages/n8n-nodes-flair/package.json"; do
   node -e "
     const fs = require('fs');
     const path = '$INTERNAL_DEPENDENT';
@@ -191,6 +201,7 @@ echo "🔨 Building..."
 (cd "$ROOT" && npm run build && npm run build:cli) || { echo "❌ Build failed"; exit 1; }
 (cd "$ROOT/packages/flair-client" && npm run build) || { echo "❌ flair-client build failed"; exit 1; }
 (cd "$ROOT/packages/flair-mcp" && npm run build) || { echo "❌ flair-mcp build failed"; exit 1; }
+(cd "$ROOT/packages/n8n-nodes-flair" && npm run build) || { echo "❌ n8n-nodes-flair build failed"; exit 1; }
 echo "  ✓ All packages built"
 
 # 5. Test
@@ -209,6 +220,7 @@ git -C "$ROOT" add \
   "$ROOT/packages/flair-mcp/package.json" \
   "$ROOT/packages/openclaw-flair/package.json" \
   "$ROOT/packages/pi-flair/package.json" \
+  "$ROOT/packages/n8n-nodes-flair/package.json" \
   "$ROOT/bun.lock"
 git -C "$ROOT" commit -m "release: v${VERSION} — align all workspace packages"
 
