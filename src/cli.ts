@@ -5472,15 +5472,20 @@ const memory = program.command("memory").description("Manage agent memories");
 memory.command("add [content]").requiredOption("--agent <id>")
   .option("--content <text>", "memory content (alias for positional arg)")
   .option("--durability <d>", "standard").option("--tags <csv>")
+  .option("--summary <text>", "agent-set multi-sentence dense compression (3-tier chain: subject → summary → content; ops-wkoh)")
+  .option("--subject <text>", "one-line title / entity this memory is about")
   .action(async (contentArg, opts) => {
     const content = contentArg ?? opts.content;
     if (!content) { console.error("error: content required (positional arg or --content)"); process.exit(1); }
     const memId = `${opts.agent}-${Date.now()}`;
-    const out = await api("PUT", `/Memory/${memId}`, {
+    const body: any = {
       id: memId, agentId: opts.agent, content, durability: opts.durability || "standard",
       tags: opts.tags ? String(opts.tags).split(",").map((x: string) => x.trim()).filter(Boolean) : undefined,
       type: "memory", createdAt: new Date().toISOString(),
-    });
+    };
+    if (opts.summary) body.summary = opts.summary;
+    if (opts.subject) body.subject = opts.subject;
+    const out = await api("PUT", `/Memory/${memId}`, body);
     console.log(JSON.stringify(out, null, 2));
   });
 memory.command("search [query]").requiredOption("--agent <id>")
