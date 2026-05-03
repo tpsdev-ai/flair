@@ -165,6 +165,62 @@ describe("MemoryApi", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(result.content).toBe("short");
   });
+
+  test("list defaults include agentId, no other params", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.list();
+
+    const url = (mockFetch as any).mock.calls[0][0] as string;
+    expect(url).toContain("/Memory?");
+    expect(url).toContain("agentId=test");
+    expect(url).not.toContain("limit=");
+    expect(url).not.toContain("type=");
+    expect(url).not.toContain("subject=");
+  });
+
+  test("list passes subject filter through to URL", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.list({ subject: "project-x" });
+
+    const url = (mockFetch as any).mock.calls[0][0] as string;
+    expect(url).toContain("subject=project-x");
+  });
+
+  test("list combines all filters in URL", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.list({
+      limit: 10,
+      type: "session",
+      durability: "ephemeral",
+      subject: "chat:abc",
+    });
+
+    const url = (mockFetch as any).mock.calls[0][0] as string;
+    expect(url).toContain("limit=10");
+    expect(url).toContain("type=session");
+    expect(url).toContain("durability=ephemeral");
+    expect(url).toContain("subject=chat%3Aabc");
+  });
+
+  test("list URL-encodes subject special characters", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.list({ subject: "n8n workflow & test" });
+
+    const url = (mockFetch as any).mock.calls[0][0] as string;
+    expect(url).toContain("subject=n8n+workflow+%26+test");
+  });
 });
 
 describe("SoulApi", () => {
