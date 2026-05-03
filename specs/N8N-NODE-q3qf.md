@@ -191,13 +191,17 @@ This is a regular n8n Action node (not a sub-node), so it implements `INodeType.
 
 ---
 
-## 6. flair-client gap to close BEFORE implementation
+## 6. flair-client extensions to land BEFORE implementation
 
-`FlairChatMessageHistory.getMessages()` and `FlairSearch.Get By Subject`/`Get By Tag` need `client.memory.list({ subject?, type?, tags?, limit, order })`.
+`FlairChatMessageHistory.getMessages()` and `FlairSearch.Get By Subject`/`Get By Tag` need richer filters on `client.memory.list()`.
 
-Today the client exposes `search(semantic)`, `get(id)`, `write()`, `delete(id)` — no list-by-conditions surface. Implementer's first task: add `list()` to `MemoryClient` that wraps `POST /Memory/search` with `conditions` (or whatever the canonical Memory list path is — verify against current `resources/Memory.ts`).
+The client already exposes `list({ limit, type, durability })` against `GET /Memory?...`, which goes through Memory.search()'s scoping override. What's missing for the n8n use case:
 
-This is a **prereq PR** in the flair monorepo, not in `n8n-nodes-flair`. Suggest naming: `feat(flair-client): memory.list() with conditions` — small scope, K&S ensemble standard. After it lands, the n8n node can dep on `@tpsdev-ai/flair-client@^0.7.1`.
+- **`subject?: string`** — chat-history adapter scopes by subject. **PR-1 (this is small and self-contained, K&S-approved).**
+- **`tags?: string[]`** — `FlairSearch.Get By Tag` operation. PR-4 scope; client-side post-filter is an acceptable v1 fallback.
+- **`order?: 'createdAt-asc' | 'createdAt-desc'`** — chat history wants chronological ordering. Harper exposes sort via URL function-call syntax (`?sort(createdAt,desc)`), but Memory.search()'s override doesn't currently lift it cleanly. May need a small Memory.ts change in PR-3 alongside the chat-message adapter — defer until that consumer surfaces the actual ordering pain. Client-side reverse on a small chat window is the v1 fallback.
+
+PR-1 (subject) ships ahead of the node code; ordering and tags ride with their consumer node.
 
 ---
 
