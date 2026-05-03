@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/pi-flair",
-  "version": "0.1.0",
+  "version": "0.7.0",
   "description": "Flair memory extension for pi — persistent memory access from within pi sessions",
   "type": "module",
   "main": "dist/index.js",
@@ -21,7 +21,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@tpsdev-ai/flair-client": "0.6.3",
+    "@tpsdev-ai/flair-client": "0.7.0",
     "@sinclair/typebox": "0.34.48"
   },
   "license": "Apache-2.0",
