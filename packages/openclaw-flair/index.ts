@@ -22,6 +22,28 @@ import { FlairClient } from "@tpsdev-ai/flair-client";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveAgentId } from "./key-resolver.js";
 
+// ─── Defense-in-depth: agentId path-traversal guard (ops-pnwq) ───────────────
+// agentId flows into resolve() to compose ~/.openclaw/workspace-<agentId>/...
+// resolve() normalizes "../" but doesn't reject — an attacker-controlled
+// agentId of "../../../etc" could traverse out of the workspace dir.
+// Today's threat surface is low (agentId comes from plugin config or session
+// context, both within the agent's host trust boundary), but a fail-closed
+// regex guard is cheap and surfaces invalid input rather than silently
+// mangling. Per Sherlock review of PR #317 (filed as ops-pnwq).
+const AGENT_ID_PATTERN = /^[a-z0-9_-]{1,64}$/i;
+
+export function isValidAgentId(agentId: string | null | undefined): boolean {
+  return typeof agentId === "string" && AGENT_ID_PATTERN.test(agentId);
+}
+
+export function assertValidAgentId(agentId: string | null | undefined): asserts agentId is string {
+  if (!isValidAgentId(agentId)) {
+    throw new Error(
+      `openclaw-flair: invalid agentId ${JSON.stringify(agentId)} — must match ${AGENT_ID_PATTERN} (1-64 chars, alphanumeric + underscore + hyphen)`,
+    );
+  }
+}
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 interface FlairMemoryConfig {
@@ -58,6 +80,7 @@ async function syncWorkspaceToFlair(
   agentId: string,
   logger: { info: Function; warn: Function },
 ): Promise<number> {
+  assertValidAgentId(agentId);
   const workspace = resolve(homedir(), ".openclaw", `workspace-${agentId}`);
   if (!existsSync(workspace)) return 0;
 
@@ -282,7 +305,11 @@ class FlairBehavioralAnchorEngine {
   constructor(
     private agentId: string,
     private logger: { info: Function; warn: Function },
-  ) {}
+  ) {
+    // Defense-in-depth: agentId flows into resolve() to compose the workspace
+    // path. Reject malformed input at construction time (ops-pnwq).
+    assertValidAgentId(agentId);
+  }
 
   async ingest(): Promise<{ ingested: boolean }> {
     return { ingested: false };
@@ -392,6 +419,9 @@ export default {
     function getClient(agentId?: string): FlairClient {
       const id = agentId || (cfg.agentId && cfg.agentId !== "auto" ? cfg.agentId : null) || currentAgentId || fallbackAgentId;
       if (!id || id === "auto") throw new Error("no agentId available — set agentId in plugin config, FLAIR_AGENT_ID env var, or ensure OpenClaw provides it via session context (before_agent_start)");
+      // Defense-in-depth: validate before flowing into FlairClient + workspace
+      // path composition (ops-pnwq).
+      assertValidAgentId(id);
       let client = clientPool.get(id);
       if (!client) {
         client = new FlairClient({
