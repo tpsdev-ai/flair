@@ -187,13 +187,27 @@ class MemoryApi {
     }
   }
 
-  /** List recent memories. */
-  async list(opts: { limit?: number; type?: MemoryType; durability?: Durability } = {}): Promise<Memory[]> {
+  /**
+   * List recent memories. All filters combine with AND.
+   *
+   * Note: this hits Harper's REST `GET /Memory?...` path; non-condition
+   * URL params (limit) are parsed by Harper directly, condition params
+   * (subject, type, durability) are translated to equality conditions
+   * by Memory.search()'s scoping override.
+   */
+  async list(opts: {
+    limit?: number;
+    type?: MemoryType;
+    durability?: Durability;
+    /** Filter by subject (entity the memory is about). Indexed; efficient. */
+    subject?: string;
+  } = {}): Promise<Memory[]> {
     const params = new URLSearchParams();
     params.set("agentId", this.client.agentId);
     if (opts.limit) params.set("limit", String(opts.limit));
     if (opts.type) params.set("type", opts.type);
     if (opts.durability) params.set("durability", opts.durability);
+    if (opts.subject) params.set("subject", opts.subject);
     return this.client.request("GET", `/Memory?${params}`);
   }
 
