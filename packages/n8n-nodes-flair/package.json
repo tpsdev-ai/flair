@@ -23,7 +23,8 @@
       "dist/credentials/FlairApi.credentials.js"
     ],
     "nodes": [
-      "dist/nodes/FlairChatMemory/FlairChatMemory.node.js"
+      "dist/nodes/FlairChatMemory/FlairChatMemory.node.js",
+      "dist/nodes/FlairSearch/FlairSearch.node.js"
     ]
   },
   "engines": {
@@ -46,7 +47,8 @@
     "langchain"
   ],
   "dependencies": {
-    "@tpsdev-ai/flair-client": "0.7.0"
+    "@tpsdev-ai/flair-client": "0.7.0",
+    "zod": "3.25.76"
   },
   "peerDependencies": {
     "n8n-workflow": "*",
