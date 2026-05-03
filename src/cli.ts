@@ -2787,6 +2787,97 @@ federation
     }
   });
 
+// `flair federation reachability` — probe local instance + all paired peers.
+// Productizes ~/ops/scripts/flair-boot-probe.sh: a single command that tells
+// you whether memories CAN flow across the federation right now. Read-only;
+// no mutations, no side effects beyond a single tagged status read per peer.
+federation
+  .command("reachability")
+  .description("Probe local Flair + each paired peer for reachability (read-only)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  .option("--quiet", "Suppress output on full success")
+  .option("--json", "Emit machine-readable JSON instead of text")
+  .option("--peer-timeout <seconds>", "HTTP timeout per peer probe (default 5)", "5")
+  .action(async (opts) => {
+    const target = resolveTarget(opts);
+    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+    const timeoutMs = (Number(opts.peerTimeout) || 5) * 1000;
+    type Result = { host: string; port: number | null; status: "ok" | "fail" | "skip"; detail: string };
+    const results: Result[] = [];
+
+    // 1. Local probe.
+    try {
+      const inst = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
+      results.push({ host: "local", port: null, status: "ok", detail: `instance ${inst.id} (${inst.role}, ${inst.status})` });
+    } catch (e: any) {
+      results.push({ host: "local", port: null, status: "fail", detail: e.message });
+    }
+
+    // 2. Per-peer probes. For each peer with an `endpoint` (URL), probe it.
+    // Peers without an endpoint are reverse-tunnel-paired (the spoke can't
+    // reach the hub directly without the tunnel) and we skip.
+    let peers: any[] = [];
+    try {
+      const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+      peers = r.peers ?? [];
+    } catch (e: any) {
+      results.push({ host: "/FederationPeers", port: null, status: "fail", detail: e.message });
+    }
+
+    for (const p of peers) {
+      const endpoint = p.endpoint as string | undefined;
+      if (!endpoint) {
+        results.push({ host: p.id, port: null, status: "skip", detail: `${p.role ?? "—"} (no endpoint — needs tunnel)` });
+        continue;
+      }
+      // Any HTTP response (including 401) means the peer is reachable + responding.
+      // We're checking the network path, not auth; 401 is expected for unauth probes.
+      // Use new URL() to avoid path-swallowing when endpoint includes a query
+      // (Sherlock review on #314).
+      let probeUrl: URL;
+      try {
+        probeUrl = new URL("/Health", endpoint);
+      } catch {
+        results.push({ host: p.id, port: null, status: "fail", detail: `${p.role ?? "—"} invalid endpoint URL` });
+        continue;
+      }
+      if (probeUrl.protocol !== "http:" && probeUrl.protocol !== "https:") {
+        results.push({ host: p.id, port: null, status: "fail", detail: `${p.role ?? "—"} unsupported protocol ${probeUrl.protocol}` });
+        continue;
+      }
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), timeoutMs);
+        const res = await fetch(probeUrl, { signal: ctrl.signal });
+        clearTimeout(t);
+        results.push({ host: p.id, port: null, status: "ok", detail: `${p.role ?? "—"} HTTP ${res.status}` });
+      } catch (e: any) {
+        const msg = e.name === "AbortError" ? `timeout after ${opts.peerTimeout}s` : e.message;
+        results.push({ host: p.id, port: null, status: "fail", detail: `${p.role ?? "—"} ${msg}` });
+      }
+    }
+
+    const failures = results.filter(r => r.status === "fail").length;
+
+    if (opts.json) {
+      console.log(JSON.stringify({ ts: new Date().toISOString(), failures, results }, null, 2));
+    } else if (!(opts.quiet && failures === 0)) {
+      console.log(`── Flair reachability — ${new Date().toISOString()} ──`);
+      for (const r of results) {
+        const tag = r.status === "ok" ? "OK  " : r.status === "skip" ? "SKIP" : "FAIL";
+        console.log(`${tag} ${r.host.padEnd(40)} ${r.detail}`);
+      }
+      if (failures > 0) {
+        console.log(`── ${failures} path(s) FAILED ──`);
+      } else {
+        console.log("── all reachable ──");
+      }
+    }
+
+    if (failures > 0) process.exit(1);
+  });
+
 federation
   .command("pair <hub-url>")
   .description("Pair this spoke with a hub instance")
@@ -3051,6 +3142,275 @@ federation
   .option("--ops-target <url>", "Explicit ops API URL")
   .action(async (opts) => {
     await runFederationWatch(opts);
+  });
+
+// `flair federation prune` — remove stale spoke peers (never the hub).
+// Productizes ~/ops/scripts/cleanup-stale-fed-peers.sh into a real CLI
+// subcommand with safety: dry-run is the default, --apply required to delete.
+function parseDuration(spec: string): number | null {
+  // Accept forms like "30d", "12h", "90m". Returns milliseconds.
+  // Rejects zero and sub-1-minute durations: a 0-ms cutoff would equal Date.now()
+  // and prune every non-hub peer (Sherlock review on #314).
+  const m = spec.match(/^(\d+)\s*([smhd])$/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  const unit = m[2].toLowerCase();
+  const mul = { s: 1000, m: 60 * 1000, h: 60 * 60 * 1000, d: 24 * 60 * 60 * 1000 }[unit] ?? null;
+  if (mul == null) return null;
+  const ms = n * mul;
+  const ONE_MINUTE = 60 * 1000;
+  if (ms < ONE_MINUTE) return null;
+  return ms;
+}
+
+federation
+  .command("prune")
+  .description("Remove stale spoke peers (older than --older-than). Hub is never pruned. Default dry-run.")
+  .option("--older-than <duration>", "Duration spec (e.g. 30d, 12h, 90m)", "30d")
+  .option("--apply", "Actually delete (default is dry-run)")
+  .option("--include <pattern>", "Only consider peer IDs starting with this prefix")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--target <url>", "Remote Flair URL")
+  .option("--ops-target <url>", "Explicit ops API URL")
+  .action(async (opts) => {
+    const target = resolveTarget(opts);
+    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+    const olderThanMs = parseDuration(opts.olderThan);
+    if (olderThanMs == null) {
+      console.error(`Error: invalid or unsafe --older-than '${opts.olderThan}'. Use forms like 30d, 12h, 90m. Minimum 1 minute.`);
+      process.exit(2);
+    }
+    const cutoff = Date.now() - olderThanMs;
+
+    let peers: any[] = [];
+    try {
+      const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+      peers = r.peers ?? [];
+    } catch (e: any) {
+      console.error(`Error fetching peers: ${e.message}`);
+      process.exit(1);
+    }
+
+    const candidates = peers.filter(p => {
+      // Hub-protection: never prune. Case-insensitive; null/undefined role is
+      // treated as "unknown — refuse to prune to be safe" (Sherlock review on #314).
+      const role = (p.role ?? "").toString().toLowerCase();
+      if (role === "hub" || role === "") return false;
+      // Include filter.
+      if (opts.include && !String(p.id ?? "").startsWith(opts.include)) return false;
+      // Stale threshold: a peer with NO lastSyncAt is treated as having been
+      // born and immediately abandoned — qualifies if it's older than the
+      // threshold based on pairedAt instead.
+      const ts = p.lastSyncAt ?? p.pairedAt;
+      if (!ts) return true; // truly orphaned record — prune candidate.
+      return new Date(ts).getTime() < cutoff;
+    });
+
+    if (candidates.length === 0) {
+      console.log(`flair federation prune: no peers older than ${opts.olderThan} (and not hub) — nothing to do.`);
+      return;
+    }
+
+    if (!opts.apply) {
+      console.log(`── flair federation prune — dry-run (use --apply to delete) ──`);
+      console.log(`Would delete ${candidates.length} peer(s) older than ${opts.olderThan}:`);
+      for (const p of candidates) {
+        const ts = p.lastSyncAt ?? p.pairedAt ?? "never";
+        const age = ts === "never" ? "(never synced/paired)" : `${Math.floor((Date.now() - new Date(ts).getTime()) / (24 * 60 * 60 * 1000))}d ago`;
+        console.log(`  ${p.id}  ${(p.role ?? "—").padEnd(8)} lastSyncAt ${ts} (${age})`);
+      }
+      console.log(`Run with --apply to actually delete.`);
+      return;
+    }
+
+    // Apply path. Delete each peer via the Harper ops API. We use the
+    // domain-socket form when local; otherwise we fall back to the resource
+    // DELETE which requires admin auth.
+    let deleted = 0;
+    let errors = 0;
+    for (const p of candidates) {
+      try {
+        const res = await api("DELETE", `/FederationPeers/${encodeURIComponent(p.id)}`, undefined, baseUrl ? { baseUrl } : undefined);
+        const ok = res?.ok ?? res?.deleted ?? true;
+        if (ok) {
+          deleted++;
+          const ts = p.lastSyncAt ?? p.pairedAt ?? "never";
+          console.log(`Deleted ${p.id} (last seen ${ts}).`);
+        } else {
+          errors++;
+          console.log(`Failed to delete ${p.id}: ${JSON.stringify(res)}`);
+        }
+      } catch (e: any) {
+        errors++;
+        console.log(`Failed to delete ${p.id}: ${e.message}`);
+      }
+    }
+    console.log(`${deleted} peer(s) deleted; ${errors} error(s).`);
+    if (errors > 0) process.exit(1);
+  });
+
+// `flair federation verify` — end-to-end roundtrip: write a tagged memory
+// locally, wait for federation push, probe peers for the tag. Productizes
+// ~/ops/scripts/verify-fed-sync.sh. Cleans up the test memory at the end.
+federation
+  .command("verify")
+  .description("End-to-end check: write a tagged memory locally and verify it shows up on each peer")
+  .option("--peer <id>", "Verify only against this peer ID (default: all hubs + spokes)")
+  .option("--wait <seconds>", "How long to wait for federation push (default 60)", "60")
+  .option("--tag <prefix>", "Memory tag prefix (default: fed-verify)", "fed-verify")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--target <url>", "Remote Flair URL")
+  .action(async (opts) => {
+    const target = resolveTarget(opts);
+    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+    const waitMs = (Number(opts.wait) || 60) * 1000;
+    const tag = `${opts.tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    console.log(`── flair federation verify — ${new Date().toISOString()} ──`);
+    console.log(`Tag: ${tag}, wait window: ${opts.wait}s`);
+
+    // Resolve agent ID for the local write.
+    const agentId = process.env.FLAIR_AGENT_ID;
+    if (!agentId) {
+      console.error("Error: FLAIR_AGENT_ID not set. Set it or use 'flair agent default <id>'.");
+      process.exit(1);
+    }
+
+    // 1. Write tagged ephemeral memory locally (mirror `flair memory add`).
+    // The whole post-write block is wrapped in try/finally so cleanup runs on
+    // every exit path (Sherlock review on #314: previous early-exits leaked
+    // the probe memory).
+    const memId = `${agentId}-${Date.now()}-fed-verify`;
+    try {
+      await api("PUT", `/Memory/${encodeURIComponent(memId)}`, {
+        id: memId,
+        agentId,
+        content: `${tag} — federation verify probe written at ${new Date().toISOString()}`,
+        type: "memory",
+        durability: "ephemeral",
+        tags: ["federation-verify", tag],
+        createdAt: new Date().toISOString(),
+      }, baseUrl ? { baseUrl } : undefined);
+      console.log(`1. Wrote local memory: ${memId}`);
+    } catch (e: any) {
+      console.error(`1. Local write FAILED: ${e.message}`);
+      // No memory was written — nothing to clean up. Direct exit is safe.
+      process.exit(1);
+    }
+
+    // From here, memId is committed and MUST be cleaned up regardless of how
+    // we leave this block.
+    let exitCode = 0;
+    try {
+      // 2. List peers to probe.
+      let peers: any[] = [];
+      try {
+        const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+        peers = r.peers ?? [];
+        if (opts.peer) peers = peers.filter(p => p.id === opts.peer);
+      } catch (e: any) {
+        console.error(`Failed to list peers: ${e.message}`);
+      }
+      if (peers.length === 0) {
+        console.log("(no peers to probe)");
+        // Still falls through to finally for cleanup.
+      } else {
+        console.log(`2. Probing ${peers.length} peer(s) over ${opts.wait}s window…`);
+
+        // 3. Poll each peer until found OR window elapses.
+        const started = Date.now();
+        const found = new Set<string>();
+        const failed = new Set<string>();
+        while (Date.now() - started < waitMs && (found.size + failed.size) < peers.length) {
+          for (const p of peers) {
+            if (found.has(p.id) || failed.has(p.id)) continue;
+            const endpoint = p.endpoint;
+            if (!endpoint) {
+              // Tunnel-paired — no direct endpoint to probe. Mark as skipped.
+              failed.add(p.id);
+              console.log(`   ${p.id}  SKIP (no endpoint — tunnel-paired)`);
+              continue;
+            }
+            // Reject non-http(s) endpoints to keep the probe surface small.
+            // (Sherlock review on #314 — protocol allowlist.)
+            let probeUrl: URL;
+            try {
+              probeUrl = new URL("/SemanticSearch", endpoint);
+            } catch {
+              failed.add(p.id);
+              console.log(`   ${p.id}  FAIL (invalid endpoint URL: ${endpoint})`);
+              continue;
+            }
+            if (probeUrl.protocol !== "http:" && probeUrl.protocol !== "https:") {
+              failed.add(p.id);
+              console.log(`   ${p.id}  FAIL (unsupported endpoint protocol: ${probeUrl.protocol})`);
+              continue;
+            }
+            try {
+              const res = await fetch(probeUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ q: tag, limit: 5 }),
+                signal: AbortSignal.timeout(5000),
+              });
+              if (res.status === 401) {
+                // Auth-gated — can't verify without admin creds for the peer.
+                // Fail the probe with diagnostic.
+                failed.add(p.id);
+                console.log(`   ${p.id}  FAIL (HTTP 401 — peer auth-gated; needs cross-instance admin auth)`);
+                continue;
+              }
+              if (!res.ok) {
+                failed.add(p.id);
+                console.log(`   ${p.id}  FAIL (HTTP ${res.status})`);
+                continue;
+              }
+              const data = await res.json().catch(() => ({}));
+              const results = (data as any).results ?? [];
+              if (results.some((r: any) => (r.content ?? "").includes(tag))) {
+                const elapsed = Math.floor((Date.now() - started) / 1000);
+                console.log(`   ${p.id}  OK (memory found after ${elapsed}s)`);
+                found.add(p.id);
+              }
+            } catch {
+              // Don't mark failed yet — peer might just be slow. Retry next iteration.
+            }
+          }
+          await new Promise(res => setTimeout(res, 5000));
+        }
+
+        // Anything still pending is a timeout failure.
+        for (const p of peers) {
+          if (!found.has(p.id) && !failed.has(p.id)) {
+            failed.add(p.id);
+            console.log(`   ${p.id}  FAIL (timeout — memory did not propagate within ${opts.wait}s)`);
+          }
+        }
+
+        // 5. Summary + diagnostics on failure.
+        if (failed.size > 0) {
+          console.log(`── FAIL: ${failed.size}/${peers.length} peer(s) did not see the memory ──`);
+          console.log(`Diagnostics to run next:`);
+          console.log(`  flair federation status     # confirm peers are paired + lastSyncAt is recent`);
+          console.log(`  flair federation reachability  # confirm peers are HTTP-reachable`);
+          console.log(`  launchctl list | grep fed-sync  # confirm federation-sync daemon is running (macOS)`);
+          console.log(`  curl <peer-endpoint>/Health  # raw probe`);
+          exitCode = 1;
+        } else {
+          console.log(`── PASS: memory propagated to all ${peers.length} peer(s) ──`);
+        }
+      }
+    } finally {
+      // 4. Cleanup: delete the local probe memory. Runs on EVERY exit path.
+      try {
+        await api("DELETE", `/Memory/${encodeURIComponent(memId)}`, undefined, baseUrl ? { baseUrl } : undefined);
+        console.log(`4. Cleanup: deleted local memory ${memId}`);
+      } catch {
+        console.log(`4. Cleanup: could NOT delete local memory ${memId} (manual cleanup needed)`);
+      }
+    }
+    if (exitCode !== 0) process.exit(exitCode);
   });
 
 // ─── flair rem ───────────────────────────────────────────────────────────────
