@@ -434,4 +434,60 @@ describe("FlairBehavioralAnchorEngine — anchor re-injection", () => {
     const factory = api._contextEngines.get("flair")!;
     expect(() => factory()).toThrow(/no agentId available/);
   });
+
+  // Per Sherlock review of PR #317
+  test("symlink escape: refuses to read SOUL.md → /etc/passwd-style symlinks", async () => {
+    const wsDir = join(tmpHome, ".openclaw", "workspace-test-agent");
+    mkdirSync(wsDir, { recursive: true });
+    // Create a target outside the workspace dir
+    const outsideTarget = join(tmpHome, "outside-target.md");
+    writeFileSync(outsideTarget, "SECRET_DO_NOT_LEAK");
+    // Symlink SOUL.md inside wsDir to it
+    const { symlinkSync } = require("node:fs");
+    symlinkSync(outsideTarget, join(wsDir, "SOUL.md"));
+    // Also write a normal IDENTITY.md so we can confirm the rest still loads
+    writeFileSync(join(wsDir, "IDENTITY.md"), "real-identity-content");
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const engine = api._contextEngines.get("flair")!();
+    const result = await engine.assemble({ messages: [] });
+
+    expect(result.systemPromptAddition ?? "").not.toContain("SECRET_DO_NOT_LEAK");
+    expect(result.systemPromptAddition ?? "").toContain("real-identity-content");
+    // Warning logged for the rejected symlink
+    const warnCalls = (api.logger.warn as any).mock.calls;
+    const sawSymlinkWarn = warnCalls.some((args: any[]) =>
+      String(args[0]).includes("symlink escape"),
+    );
+    expect(sawSymlinkWarn).toBe(true);
+  });
+
+  // Per Sherlock review of PR #317
+  test("size cap: anchor file content truncated at MAX_ANCHOR_FILE_CHARS", async () => {
+    const wsDir = join(tmpHome, ".openclaw", "workspace-test-agent");
+    mkdirSync(wsDir, { recursive: true });
+    // 12000 chars of a unique sentinel ("ZQ") — past the 8000-char cap.
+    // ZQ is chosen so it doesn't collide with anything in ANCHOR_HEADER.
+    const sentinel = "ZQ";
+    const oversized = sentinel.repeat(6000); // 12000 chars
+    writeFileSync(join(wsDir, "SOUL.md"), oversized);
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const engine = api._contextEngines.get("flair")!();
+    const result = await engine.assemble({ messages: [] });
+
+    // Count sentinel occurrences in systemPromptAddition. With cap=8000 chars
+    // and sentinel length 2, expected count ≤ 4000 (and significantly more
+    // than 0 — confirming we got a substantial chunk, not zero).
+    const sysPrompt = result.systemPromptAddition ?? "";
+    const sentinelMatches = sysPrompt.match(new RegExp(sentinel, "g")) ?? [];
+    expect(sentinelMatches.length).toBeLessThanOrEqual(4000);
+    expect(sentinelMatches.length).toBeGreaterThan(3500); // ≈ 8000/2 minus header overhead
+  });
 });

@@ -14,7 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
@@ -249,6 +249,12 @@ function detectRelationships(text: string): DetectedRelationship[] {
 
 const ANCHOR_FILES = ["IDENTITY.md", "SOUL.md", "AGENTS.md"];
 
+// Per-file size cap. Aligned with MAX_SOUL_VALUE used by the existing
+// soul-sync path so both surfaces enforce the same ceiling. Files that exceed
+// this are silently truncated; the warning lives in the workspace owner's
+// purview (they wrote the giant file).
+const MAX_ANCHOR_FILE_CHARS = 8000;
+
 const ANCHOR_HEADER = [
   "## Behavioral Anchors (re-injected every turn)",
   "",
@@ -315,12 +321,37 @@ class FlairBehavioralAnchorEngine {
 
     if (needRebuild) {
       const sections: string[] = [];
+      // Realpath the workspace root so the containment check works on hosts
+      // where the wsDir path itself contains symlinks (e.g. macOS /tmp →
+      // /private/tmp). Skip silently if wsDir doesn't exist — the per-file
+      // realpath below will also bail.
+      let wsRealRoot: string | null = null;
+      try { wsRealRoot = realpathSync(wsDir); } catch { /* missing */ }
+      const wsPrefix = wsRealRoot ? wsRealRoot + "/" : null;
+
       for (const p of paths) {
         try {
-          const raw = readFileSync(p, "utf8");
-          const name = p.split("/").pop()!;
+          // Symlink containment: realpath the source, ensure it stays inside
+          // wsDir. Without this, an attacker with workspace-dir write access
+          // could symlink SOUL.md → /etc/passwd and leak arbitrary files into
+          // the system prompt every turn (Sherlock review of PR #317).
+          let resolved: string;
+          try {
+            resolved = realpathSync(p);
+          } catch {
+            continue; // missing file or broken symlink — skip
+          }
+          if (!wsPrefix || !resolved.startsWith(wsPrefix)) {
+            this.logger.warn(`openclaw-flair: skipping anchor symlink escape ${p} → ${resolved}`);
+            continue;
+          }
+          // Per-file size cap: align with MAX_SOUL_VALUE (8000 chars) used by
+          // the existing soul-sync path. Prevents self-inflicted token-budget
+          // exhaustion if an anchor file grows unbounded.
+          const raw = readFileSync(resolved, "utf8").slice(0, MAX_ANCHOR_FILE_CHARS);
+          const name = resolved.split("/").pop()!;
           sections.push(`### ${name}\n${raw.trim()}`);
-        } catch { /* file missing — skip silently */ }
+        } catch { /* read failed for non-symlink reasons — skip silently */ }
       }
       if (sections.length === 0) {
         this.cache = { content: "", mtimes };
