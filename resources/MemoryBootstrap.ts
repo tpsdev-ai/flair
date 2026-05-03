@@ -238,7 +238,6 @@ export class BootstrapMemories extends Resource {
     // Budget: up to 40% of remaining for recent
     const recentBudget = Math.floor(tokenBudget * 0.4);
     let recentSpent = 0;
-    const recentTotal = recent.length;
     for (const m of recent) {
       const line = formatMemory(m);
       const cost = estimateTokens(line);
@@ -278,7 +277,6 @@ export class BootstrapMemories extends Resource {
 
       const predictedBudget = Math.floor(tokenBudget * 0.3);
       let predictedSpent = 0;
-      const predictedTotal = subjectMemories.length;
       for (const m of subjectMemories) {
         const line = formatMemory(m);
         const cost = estimateTokens(line);
