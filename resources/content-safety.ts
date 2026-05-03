@@ -61,6 +61,27 @@ export function scanContent(text: string): SafetyResult {
 }
 
 /**
+ * Scan multiple string fields on a record, returning a merged SafetyResult.
+ * Non-string / empty fields are skipped. Flags are de-duplicated across fields.
+ */
+export function scanFields(
+  record: Record<string, any>,
+  fields: readonly string[],
+): SafetyResult {
+  const flags: string[] = [];
+  const seen = new Set<string>();
+  for (const field of fields) {
+    const value = record[field];
+    if (typeof value !== "string" || value.length === 0) continue;
+    const result = scanContent(value);
+    for (const flag of result.flags) {
+      if (!seen.has(flag)) { flags.push(flag); seen.add(flag); }
+    }
+  }
+  return { safe: flags.length === 0, flags };
+}
+
+/**
  * Check if strict mode is enabled (rejects flagged writes).
  */
 export function isStrictMode(): boolean {
