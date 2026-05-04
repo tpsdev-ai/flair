@@ -221,6 +221,40 @@ describe("MemoryApi", () => {
     const url = (mockFetch as any).mock.calls[0][0] as string;
     expect(url).toContain("subject=n8n+workflow+%26+test");
   });
+  test("list with empty tags array has no tags param", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.list({ tags: [] });
+
+    const url = (mockFetch as any).mock.calls[0][0] as string;
+    expect(url).not.toContain("tags=");
+  });
+
+  test("list with one tag appends tags param", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.list({ tags: ["foo"] });
+
+    const url = (mockFetch as any).mock.calls[0][0] as string;
+    expect(url).toContain("tags=foo");
+  });
+
+  test("list with multiple tags appends repeated tags params (not comma-joined)", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.list({ tags: ["foo", "bar"] });
+
+    const url = (mockFetch as any).mock.calls[0][0] as string;
+    expect(url).toMatch(/tags=foo.*tags=bar/);
+    expect(url).not.toContain("tags=foo,bar");
+  });
+
 });
 
 describe("SoulApi", () => {

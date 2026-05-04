@@ -196,6 +196,7 @@ class MemoryApi {
    * by Memory.search()'s scoping override.
    */
   async list(opts: {
+    tags?: string[];
     limit?: number;
     type?: MemoryType;
     durability?: Durability;
@@ -205,6 +206,9 @@ class MemoryApi {
     const params = new URLSearchParams();
     params.set("agentId", this.client.agentId);
     if (opts.limit) params.set("limit", String(opts.limit));
+    if (opts.tags && opts.tags.length) {
+      for (const t of opts.tags) params.append("tags", t);
+    }
     if (opts.type) params.set("type", opts.type);
     if (opts.durability) params.set("durability", opts.durability);
     if (opts.subject) params.set("subject", opts.subject);

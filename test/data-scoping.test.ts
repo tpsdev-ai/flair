@@ -240,6 +240,34 @@ describe("Memory.search() / WorkspaceState.search() — collection scoping", () 
     expect(JSON.stringify(r.query.conditions)).toContain("attacker");
     expect(JSON.stringify(r.query.conditions)).not.toContain("starts_with");
   });
+  // ── URL param → conditions translation (mirrors Memory.search query iteration) ─
+  function paramsToConditions(entries: Iterable<[string, string]>): Array<{attribute: string; comparator: string; value: string}> {
+    const conditions: Array<{attribute: string; comparator: string; value: string}> = [];
+    for (const [k, v] of entries) {
+      if (k === "agentId") continue;
+      if (k === "tags") { conditions.push({ attribute: k, comparator: "contains", value: v }); }
+      else { conditions.push({ attribute: k, comparator: "equals", value: v }); }
+    }
+    return conditions;
+  }
+
+  it("uses contains comparator for tags, equals for other params", () => {
+    const entries: [string, string][] = [
+      ["type", "lesson"],
+      ["tags", "important"],
+      ["tags", "urgent"],
+      ["durability", "persistent"],
+      ["agentId", "should-be-skipped"],
+    ];
+    const conditions = paramsToConditions(entries);
+    expect(conditions).toEqual([
+      { attribute: "type", comparator: "equals", value: "lesson" },
+      { attribute: "tags", comparator: "contains", value: "important" },
+      { attribute: "tags", comparator: "contains", value: "urgent" },
+      { attribute: "durability", comparator: "equals", value: "persistent" },
+    ]);
+  });
+
 });
 
 describe("SQL/GraphQL endpoint blocking (non-admin)", () => {
