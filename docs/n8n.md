@@ -96,12 +96,12 @@ The Flair Search node currently exposes Semantic Search and Get By Subject. **Ge
 
 ## Worked examples
 
-Two example workflows ship in the package's `examples/` directory:
+Two example workflows are coming in a follow-up release (`ops-q3qf-followup-examples`); they're authored inside a real n8n instance and round-tripped via Export so they import cleanly:
 
 - **`chat-memory-demo.json`** — Webhook → AI Agent (Claude + Flair Chat Memory) → Respond. Demonstrates the conversation-buffer use case. Run twice with the same input to see memory replay.
 - **`knowledge-search-demo.json`** — Schedule → AI Agent (Claude + Flair Chat Memory + Flair Search as Tool) → action. Demonstrates the structured-knowledge-search use case.
 
-Import via **Workflows → Import from File** in n8n.
+In the interim, follow the [Setup](#setup-5-minutes) and [Subject and SessionId guidance](#subject-and-sessionid-guidance) sections — wiring is straightforward without an example file.
 
 ## Compared to other Flair surfaces
 
