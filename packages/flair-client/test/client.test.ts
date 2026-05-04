@@ -255,6 +255,41 @@ describe("MemoryApi", () => {
     expect(url).not.toContain("tags=foo,bar");
   });
 
+  test("list with order asc contains sort(createdAt) param", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.list({ order: "createdAt-asc" });
+
+    const url = (mockFetch as any).mock.calls[0][0] as string;
+    // URLSearchParams encodes parens: sort(createdAt) → sort%28createdAt%29
+    expect(url).toContain("sort%28createdAt%29=");
+  });
+
+  test("list with order desc contains sort(createdAt,desc) param", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.list({ order: "createdAt-desc" });
+
+    const url = (mockFetch as any).mock.calls[0][0] as string;
+    // URLSearchParams encodes parens + comma: sort(createdAt,desc) → sort%28createdAt%2Cdesc%29
+    expect(url).toContain("sort%28createdAt%2Cdesc%29=");
+  });
+
+  test("list with no order has no sort param", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("[]", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.list();
+
+    const url = (mockFetch as any).mock.calls[0][0] as string;
+    expect(url).not.toContain("sort");
+  });
+
 });
 
 describe("SoulApi", () => {
