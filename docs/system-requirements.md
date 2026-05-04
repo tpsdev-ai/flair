@@ -17,7 +17,7 @@ Flair runs Harper v5 (a Node.js HTTP+storage runtime) plus a small CLI/MCP layer
 |---|---|---|---|---|---|
 | rockit (Mac mini, 16 GB) | 740 MB daemon + ~175 MB across 4 flair-mcp clients = ~915 MB total | 163 MB | 25.9.0 | 35 min | Hub for rockit↔Fabric pair; local agent count: 4 (flint, kern, sherlock, ember). |
 | pulse (Linux VM, 19 GB pool) | 500 MB | 88 MB | 22.22.0 | 3d 20h | Spoke; 1 agent (pulse). |
-| tps-anvil (Linux VM, 19 GB pool) | (not running) | 71 MB | 22.22.1 | — | ops-fl87 — Linux deps issue, P1 backlog. |
+| tps-anvil (Linux VM, 19 GB pool) | (not running) | 71 MB | 22.22.1 | — | Linux deps issue, P1 backlog. |
 
 ## What drives the numbers
 

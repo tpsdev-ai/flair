@@ -359,3 +359,10 @@ jobs:
           config-file: ./.github/codeql/codeql-config.yml
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@480db559a14342288b67e54bd959dd52dc3ee68f # v3
+
+  doclint:
+    name: "Doc/Code Lint: implementation-term leaks"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - run: chmod +x ./scripts/check-impl-term-leaks.sh && ./scripts/check-impl-term-leaks.sh

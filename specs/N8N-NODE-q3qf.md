@@ -1,3 +1,4 @@
+**Internal planning doc — Bead IDs and version markers are for team coordination; do not appear in user-facing surfaces.**
 # Spec: `@tpsdev-ai/n8n-nodes-flair` (ops-q3qf)
 
 **Goal:** ship a community-published n8n node package that lets n8n workflows use Flair as their AI-Agent memory backend, plus a worked-example workflow. The 1.0 narrative move: orchestrator-agnostic memory across Claude Code / OpenClaw / n8n.
