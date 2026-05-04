@@ -11,9 +11,9 @@ import type {
  * SECURITY NOTE: the admin password grants read/write to the entire Flair
  * instance, not just the specified agentId. The blast radius is the whole
  * memory store. This is acceptable for v1 / proof-of-concept where the
- * operator controls the n8n workflow inputs, but Ed25519 per-agent auth
- * (ops-q3qf-followup) should land before any deployment with sensitive
- * memories from untrusted workflow inputs.
+ * operator controls the n8n workflow inputs, but planned Ed25519 per-agent
+ * auth should land before any deployment with sensitive memories from
+ * untrusted workflow inputs.
  *
  * The agentId field controls memory ownership — workflows that share an
  * agentId share memory ownership, allowing "this assistant remembers"
@@ -59,7 +59,7 @@ export class FlairApi implements ICredentialType {
       default: '',
       required: true,
       description:
-        "Flair (Harper) admin password. Sensitive: grants read/write to the entire instance. Use Ed25519 per-agent auth (post-1.0) for production with untrusted workflow inputs.",
+        "Flair (Harper) admin password. Sensitive: grants read/write to the entire instance. Use Ed25519 per-agent auth (planned) for production with untrusted workflow inputs.",
     },
   ];
 

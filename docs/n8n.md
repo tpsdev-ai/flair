@@ -13,7 +13,7 @@ Flair is the right pick when you want:
 | **Shape** | Tagged + typed memories with semantic search, plus chat-buffer compatibility | Conversation-buffer only (LangChain `BaseMessage` records) |
 | **Cross-orchestrator** | Same memory readable from Claude Code, OpenClaw, n8n | n8n-internal schema; nothing else reads it |
 | **Cross-instance** | Hub-spoke federation built-in (rockit ↔ Fabric, etc.) | Single-instance unless you self-build replication |
-| **Identity** | Ed25519 per-agent (post-1.0) or admin-token (v1) | n8n credential per workflow |
+| **Identity** | Ed25519 per-agent (planned) or admin-token (v1) | n8n credential per workflow |
 
 If your AI Agent only needs to remember the last N turns of a single chat in a single n8n instance, Postgres-as-memory is fine. If you want the same memory to inform a Claude Code conversation tomorrow, or to persist across n8n redeploys via federated Flair, this package is the path.
 
@@ -82,7 +82,7 @@ Patterns:
 
 > **The admin password gives every workflow with this credential read/write access to the entire Flair instance**, not just the configured Agent ID. The blast radius is the whole memory store. Treat the credential as highly sensitive: n8n encrypts credentials at rest, but any n8n admin or backup restore can extract it.
 
-For production deployments where untrusted workflow inputs reach Flair, wait for **Ed25519 per-agent authentication** — tracked as `ops-q3qf-followup` in the spec. v1 (admin password) is appropriate when:
+For production deployments where untrusted workflow inputs reach Flair, wait for **Ed25519 per-agent authentication** (planned). v1 (admin password) is appropriate when:
 
 - The n8n instance is single-tenant and operator-controlled
 - Workflow inputs are trusted (your own CRM, your own webhook source)
@@ -96,12 +96,12 @@ The Flair Search node currently exposes Semantic Search and Get By Subject. **Ge
 
 ## Worked examples
 
-Two example workflows ship in the package's `examples/` directory:
+Two example workflows are coming in a follow-up release; they're authored inside a real n8n instance and round-tripped via Export so they import cleanly:
 
 - **`chat-memory-demo.json`** — Webhook → AI Agent (Claude + Flair Chat Memory) → Respond. Demonstrates the conversation-buffer use case. Run twice with the same input to see memory replay.
 - **`knowledge-search-demo.json`** — Schedule → AI Agent (Claude + Flair Chat Memory + Flair Search as Tool) → action. Demonstrates the structured-knowledge-search use case.
 
-Import via **Workflows → Import from File** in n8n.
+In the interim, follow the [Setup](#setup-5-minutes) and [Subject and SessionId guidance](#subject-and-sessionid-guidance) sections — wiring is straightforward without an example file.
 
 ## Compared to other Flair surfaces
 
