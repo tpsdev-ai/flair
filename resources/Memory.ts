@@ -57,7 +57,7 @@ export class Memory extends (databases as any).flair.Memory {
       } else if (typeof (query as any).entries === "function") {
         for (const [k, v] of (query as any).entries()) {
           if (k === "agentId") continue;
-          existing.push({ attribute: k, comparator: "equals", value: v });
+          if (k === "tags") { existing.push({ attribute: k, comparator: "contains", value: v }); } else { existing.push({ attribute: k, comparator: "equals", value: v }); }
         }
       }
       query.conditions = [agentIdCondition, ...existing];
