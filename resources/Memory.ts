@@ -57,6 +57,10 @@ export class Memory extends (databases as any).flair.Memory {
       } else if (typeof (query as any).entries === "function") {
         for (const [k, v] of (query as any).entries()) {
           if (k === "agentId") continue;
+          // Skip function-call URL params (e.g. sort(createdAt), sort(createdAt,desc)).
+          // They have empty values and are already handled by Harper's parseQuery which
+          // populates query.sort/query.limit directly from the URL string.
+          if (/^sort\(/.test(k) || v === "") continue;
           if (k === "tags") { existing.push({ attribute: k, comparator: "contains", value: v }); } else { existing.push({ attribute: k, comparator: "equals", value: v }); }
         }
       }

@@ -202,6 +202,8 @@ class MemoryApi {
     durability?: Durability;
     /** Filter by subject (entity the memory is about). Indexed; efficient. */
     subject?: string;
+    /** Server-side chronological ordering. Harper function-call syntax: ?sort(createdAt) or ?sort(createdAt,desc). */
+    order?: "createdAt-asc" | "createdAt-desc";
   } = {}): Promise<Memory[]> {
     const params = new URLSearchParams();
     params.set("agentId", this.client.agentId);
@@ -212,6 +214,11 @@ class MemoryApi {
     if (opts.type) params.set("type", opts.type);
     if (opts.durability) params.set("durability", opts.durability);
     if (opts.subject) params.set("subject", opts.subject);
+    if (opts.order === "createdAt-desc") {
+      params.append("sort(createdAt,desc)", "");
+    } else if (opts.order === "createdAt-asc") {
+      params.append("sort(createdAt)", "");
+    }
     return this.client.request("GET", `/Memory?${params}`);
   }
 
