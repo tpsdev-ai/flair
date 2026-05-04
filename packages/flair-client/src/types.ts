@@ -1,3 +1,7 @@
+import type { KeyObject } from "node:crypto";
+
+export type { KeyObject };
+
 /** Memory durability levels. */
 export type Durability = "permanent" | "persistent" | "standard" | "ephemeral";
 
@@ -53,6 +57,9 @@ export interface FlairClientConfig {
   agentId?: string;
   /** Path to Ed25519 private key file. Auto-resolved if omitted. */
   keyPath?: string;
+  /** In-memory Ed25519 private key (PEM string or pre-loaded KeyObject).
+   *  Bypasses keyPath/file resolution. Wins over keyPath when both are supplied. */
+  privateKey?: string | KeyObject;
   /** Request timeout in ms. Default: 10000 */
   timeoutMs?: number;
   /** Admin username for Basic auth fallback (standalone deployments). Falls back to FLAIR_ADMIN_USER env var. */

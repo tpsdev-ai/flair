@@ -9,6 +9,7 @@
  */
 
 import type { KeyObject } from "node:crypto";
+import { createPrivateKey } from "node:crypto";
 import { loadPrivateKey, resolveKeyPath, signRequest } from "./auth.js";
 import type {
   FlairClientConfig,
@@ -32,6 +33,7 @@ export class FlairClient {
   private privateKey: KeyObject | null = null;
   private keyResolved = false;
   private keyPath: string | undefined;
+  private rawPrivateKey: string | KeyObject | undefined;
   private timeoutMs: number;
   private basicAuth: string | null = null;
 
@@ -39,6 +41,9 @@ export class FlairClient {
     this.url = (config.url ?? process.env.FLAIR_URL ?? DEFAULT_URL).replace(/\/$/, "");
     this.agentId = config.agentId || process.env.FLAIR_AGENT_ID || "";
     this.keyPath = config.keyPath;
+    if (config.privateKey !== undefined) {
+      this.rawPrivateKey = config.privateKey;
+    }
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT;
     // Basic auth fallback for standalone deployments without Ed25519 keys
     const adminUser = config.adminUser ?? process.env.FLAIR_ADMIN_USER;
@@ -53,6 +58,15 @@ export class FlairClient {
   private resolveKey(): KeyObject | null {
     if (this.keyResolved) return this.privateKey;
     this.keyResolved = true;
+    // In-memory key takes priority over file-based resolution.
+    if (this.rawPrivateKey) {
+      if (typeof this.rawPrivateKey === "string") {
+        this.privateKey = createPrivateKey(this.rawPrivateKey);
+      } else {
+        this.privateKey = this.rawPrivateKey;
+      }
+      return this.privateKey;
+    }
     const path = resolveKeyPath(this.agentId, this.keyPath);
     if (path) {
       // Key file exists — failure to parse is a hard error.

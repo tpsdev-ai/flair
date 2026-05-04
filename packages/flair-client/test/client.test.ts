@@ -1,4 +1,4 @@
-import { describe, test, expect, mock, beforeEach } from "bun:test";
+import { describe, test, expect, mock, beforeEach, spyOn } from "bun:test";
 
 // Mock fetch globally
 const originalFetch = globalThis.fetch;
@@ -11,6 +11,8 @@ beforeEach(() => {
 
 // Import after mock setup
 const { FlairClient, FlairError } = await import("../src/client.js");
+const authMod = await import("../src/auth.js");
+import { generateKeyPairSync } from "node:crypto";
 
 describe("FlairClient", () => {
   test("constructor uses default URL when none provided", () => {
@@ -339,5 +341,77 @@ describe("bootstrap", () => {
     expect(result.context).toContain("Identity");
     const call = (mockFetch as any).mock.calls[0];
     expect(call[0]).toContain("/BootstrapMemories");
+  });
+});
+
+describe("privateKey config option", () => {
+  let resolveKeyPathSpy: ReturnType<typeof spyOn>;
+  let loadPrivateKeySpy: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    // Prevent any actual file reads when privateKey is supplied
+    resolveKeyPathSpy = spyOn(authMod, "resolveKeyPath").mockImplementation(() => null);
+    loadPrivateKeySpy = spyOn(authMod, "loadPrivateKey").mockImplementation(() => {
+      throw new Error("loadPrivateKey should not be called when privateKey is set");
+    });
+  });
+
+  test("privateKey as PEM string resolves to KeyObject without reading files", async () => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const pem = privateKey.export({ format: "pem", type: "pkcs8" });
+
+    const client = new FlairClient({ agentId: "test", privateKey: pem as any });
+
+    // Trigger lazy resolution via health() call
+    await client.health();
+    // fetch was called — signing succeeded with the PEM key
+    expect(mockFetch).toHaveBeenCalled();
+    // resolveKeyPath and loadPrivateKey must never be called
+    expect(resolveKeyPathSpy).toHaveBeenCalledTimes(0);
+    expect(loadPrivateKeySpy).toHaveBeenCalledTimes(0);
+  });
+
+  test("privateKey as KeyObject is used directly without reading files", async () => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+
+    const client = new FlairClient({ agentId: "test", privateKey: privateKey });
+
+    await client.health();
+    expect(mockFetch).toHaveBeenCalled();
+    expect(resolveKeyPathSpy).toHaveBeenCalledTimes(0);
+    expect(loadPrivateKeySpy).toHaveBeenCalledTimes(0);
+  });
+
+  test("privateKey wins when both privateKey and keyPath are supplied", async () => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const pem = privateKey.export({ format: "pem", type: "pkcs8" });
+
+    const client = new FlairClient({
+      agentId: "test",
+      privateKey: pem as any,
+      keyPath: "/nonexistent/path/to/key.key",
+    });
+
+    await client.health();
+    expect(mockFetch).toHaveBeenCalled();
+    // resolveKeyPath should never be called — privateKey short-circuits
+    expect(resolveKeyPathSpy).toHaveBeenCalledTimes(0);
+  });
+
+  test("without privateKey, falls back to keyPath resolution (existing behavior)", async () => {
+    // Restore original implementation, then spy again to count calls
+    resolveKeyPathSpy.mockRestore();
+    loadPrivateKeySpy.mockRestore();
+
+    const resolveSpy = spyOn(authMod, "resolveKeyPath").mockImplementation(() => null);
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.health();
+
+    // resolveKeyPath SHOULD be called (no privateKey → file fallback)
+    expect(resolveSpy).toHaveBeenCalledTimes(1);
+    expect(resolveSpy).toHaveBeenCalledWith("test", undefined);
+
+    resolveSpy.mockRestore();
   });
 });
