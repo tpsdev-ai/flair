@@ -1,3 +1,4 @@
+**Internal planning doc — Bead IDs and version markers are for team coordination; do not appear in user-facing surfaces.**
 # Spec: Ed25519 per-agent auth in `@tpsdev-ai/n8n-nodes-flair`
 
 **Goal:** Add Ed25519 per-agent authentication to the n8n Flair credential, alongside the existing v1 admin-password mode. Sherlock flagged this as required before any production deployment with sensitive memories or untrusted workflow inputs (PR #333 review carry-forward).
