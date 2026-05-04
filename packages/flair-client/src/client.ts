@@ -204,10 +204,12 @@ class MemoryApi {
   /**
    * List recent memories. All filters combine with AND.
    *
-   * Note: this hits Harper's REST `GET /Memory?...` path; non-condition
-   * URL params (limit) are parsed by Harper directly, condition params
-   * (subject, type, durability) are translated to equality conditions
-   * by Memory.search()'s scoping override.
+   * Uses Harper's `POST /Memory/search_by_conditions` endpoint with an
+   * explicit conditions array. The Memory.search() override injects the
+   * agentId scoping condition.
+   *
+   * Note: `order` is applied client-side after retrieval. Harper's
+   * search_by_conditions does not accept a sort/order field in the body.
    */
   async list(opts: {
     tags?: string[];
@@ -216,24 +218,46 @@ class MemoryApi {
     durability?: Durability;
     /** Filter by subject (entity the memory is about). Indexed; efficient. */
     subject?: string;
-    /** Server-side chronological ordering. Harper function-call syntax: ?sort(createdAt) or ?sort(createdAt,desc). */
+    /** Chronological ordering applied client-side after retrieval.
+     *  Server-side sort is not available via search_by_conditions. */
     order?: "createdAt-asc" | "createdAt-desc";
   } = {}): Promise<Memory[]> {
-    const params = new URLSearchParams();
-    params.set("agentId", this.client.agentId);
-    if (opts.limit) params.set("limit", String(opts.limit));
-    if (opts.tags && opts.tags.length) {
-      for (const t of opts.tags) params.append("tags", t);
+    // Build conditions array — agentId is always scoped
+    const conditions: Array<{ search_attribute: string; search_type: string; search_value: unknown }> = [
+      { search_attribute: "agentId", search_type: "equals", search_value: this.client.agentId },
+    ];
+
+    if (opts.subject) {
+      conditions.push({ search_attribute: "subject", search_type: "equals", search_value: opts.subject });
     }
-    if (opts.type) params.set("type", opts.type);
-    if (opts.durability) params.set("durability", opts.durability);
-    if (opts.subject) params.set("subject", opts.subject);
-    if (opts.order === "createdAt-desc") {
-      params.append("sort(createdAt,desc)", "");
-    } else if (opts.order === "createdAt-asc") {
-      params.append("sort(createdAt)", "");
+    for (const tag of opts.tags ?? []) {
+      conditions.push({ search_attribute: "tags", search_type: "contains", search_value: tag });
     }
-    return this.client.request("GET", `/Memory?${params}`);
+    if (opts.type) {
+      conditions.push({ search_attribute: "type", search_type: "equals", search_value: opts.type });
+    }
+    if (opts.durability) {
+      conditions.push({ search_attribute: "durability", search_type: "equals", search_value: opts.durability });
+    }
+
+    const body: Record<string, unknown> = {
+      operator: "and",
+      conditions,
+      get_attributes: ["*"],
+    };
+    if (opts.limit) body.limit = opts.limit;
+
+    const result = await this.client.request("POST", "/Memory/search_by_conditions", body);
+    // search_by_conditions returns either an array or { results: [...] }
+    const memories: Memory[] = Array.isArray(result) ? result : (result?.results ?? []);
+
+    // Client-side sort (Harper's search_by_conditions does not accept sort in body)
+    if (opts.order) {
+      const dir = opts.order === "createdAt-desc" ? -1 : 1;
+      memories.sort((a, b) => dir * (a.createdAt > b.createdAt ? 1 : a.createdAt < b.createdAt ? -1 : 0));
+    }
+
+    return memories;
   }
 
   /** Delete a memory. */

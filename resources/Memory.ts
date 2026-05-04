@@ -45,27 +45,17 @@ export class Memory extends (databases as any).flair.Memory {
       ? { attribute: "agentId", comparator: "equals", value: allowedOwners[0] }
       : { conditions: allowedOwners.map(id => ({ attribute: "agentId", comparator: "equals", value: id })), operator: "or" };
 
-    // Harper passes `query` as a RequestTarget (extends URLSearchParams). Table.search()
-    // reads `target.conditions`; when that is unset, it iterates URLSearchParams entries
-    // as conditions instead. We inject our scope condition into `.conditions`, which
-    // means URL params (except agentId, which we always enforce) must also be translated
-    // to conditions or they'll be silently dropped.
+    // Harper passes `query` as a RequestTarget (extends URLSearchParams) or a
+    // conditions array. For URL-based GET /Memory?... calls, URL params are no
+    // longer translated to conditions here — callers should use
+    // POST /Memory/search_by_conditions with an explicit conditions array.
+    // For programmatic calls with a conditions array, we wrap with the agentId scope.
     if (query && typeof query === "object" && !Array.isArray(query)) {
-      const existing: any[] = [];
       if (Array.isArray(query.conditions) && query.conditions.length > 0) {
-        existing.push(...query.conditions);
-      } else if (typeof (query as any).entries === "function") {
-        for (const [k, v] of (query as any).entries()) {
-          if (k === "agentId") continue;
-          // Skip function-call URL params (e.g. sort(createdAt), sort(createdAt,desc)).
-          // They have empty values and are already handled by Harper's parseQuery which
-          // populates query.sort/query.limit directly from the URL string.
-          if (/^sort\(/.test(k) || v === "") continue;
-          if (k === "tags") { existing.push({ attribute: k, comparator: "contains", value: v }); } else { existing.push({ attribute: k, comparator: "equals", value: v }); }
-        }
+        query.conditions = [agentIdCondition, ...query.conditions];
+        return withDetachedTxn(ctx, () => super.search(query));
       }
-      query.conditions = [agentIdCondition, ...existing];
-      return withDetachedTxn(ctx, () => super.search(query));
+      // Fallback: no conditions array present — just scope and pass through
     }
 
     // Fallback: plain array or no query (internal calls)
