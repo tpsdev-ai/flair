@@ -361,12 +361,8 @@ jobs:
         uses: github/codeql-action/analyze@480db559a14342288b67e54bd959dd52dc3ee68f # v3
 
   doclint:
-    name: Doc/Code Lint: implementation-term leaks
+    name: "Doc/Code Lint: implementation-term leaks"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
-        with:
-          bun-version: "1.3.10"
-      - run: bun install --frozen-lockfile
-      - run: ./scripts/check-impl-term-leaks.sh
+      - run: chmod +x ./scripts/check-impl-term-leaks.sh && ./scripts/check-impl-term-leaks.sh
