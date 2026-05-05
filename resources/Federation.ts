@@ -1,7 +1,8 @@
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases, server } from "@harperfast/harper";
 import { createHash, randomBytes } from "node:crypto";
 import nacl from "tweetnacl";
 import { canonicalize, signBody, verifyBodySignature } from "./federation-crypto.js";
+import { initFederationCleanup } from "./federation-cleanup.js";
 
 // Re-export for consumers that import from Federation.ts
 export { canonicalize, signBody, verifyBodySignature };
@@ -243,27 +244,16 @@ export class FederationPair extends Resource {
       });
 
       // Drop the bootstrap user that was created alongside this pairing token.
-      // Failure here is non-fatal: a cleanup cron (PR-5) will catch stragglers.
+      // Failure here is non-fatal: the cleanup sweep (PR-5) will catch stragglers.
       try {
         const bootstrapUsername = `pair-bootstrap-${pairingToken.slice(0, 8)}`;
-        const opsPort = process.env.FLAIR_OPS_PORT
-          ? Number(process.env.FLAIR_OPS_PORT)
-          : (process.env.FLAIR_PORT ? Number(process.env.FLAIR_PORT) - 1 : 19925);
-        const opsUrl = `http://127.0.0.1:${opsPort}/`;
-        const adminPass = process.env.HDB_ADMIN_PASSWORD ?? process.env.FLAIR_ADMIN_PASSWORD ?? "";
-        const auth = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
-        const dropRes = await fetch(opsUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify({ operation: "drop_user", username: bootstrapUsername }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!dropRes.ok) {
-          const detail = await dropRes.text().catch(() => "");
-          console.warn(`[federation] drop_user ${bootstrapUsername} failed (${dropRes.status}): ${detail} — cleanup cron will retry`);
-        }
+        await server.operation(
+          { operation: "drop_user", username: bootstrapUsername },
+          ctx,
+          false,
+        );
       } catch (err: any) {
-        console.warn(`[federation] drop_user failed (network): ${err?.message} — cleanup cron will retry`);
+        console.warn(`[federation] drop_user failed: ${err?.message} — cleanup sweep will retry`);
       }
     }
 
@@ -431,3 +421,7 @@ export class FederationPeers extends Resource {
     return { peers };
   }
 }
+
+// ── Module initialisation ────────────────────────────────────────────────────
+// Start the cleanup sweep (PR-5). Only active on hub instances.
+initFederationCleanup();
