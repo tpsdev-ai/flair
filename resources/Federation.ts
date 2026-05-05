@@ -429,11 +429,9 @@ export class FederationPeers extends Resource {
 // will start on the next event loop tick and runs only on hub instances.
 if (typeof setTimeout !== "undefined") {
   setTimeout(() => {
-    try {
-      initFederationCleanup();
-    } catch (err: any) {
+    initFederationCleanup().catch((err: any) => {
       // Swallow — in test/resource-env the Harper databases may not be bound.
       // In production, initFederationCleanup handles its own error paths.
-    }
+    });
   }, 0);
 }
