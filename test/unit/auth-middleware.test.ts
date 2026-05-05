@@ -302,7 +302,7 @@ describe("flair_pair_initiator Basic auth", () => {
     if (pathname === "/FederationPair" && username.startsWith("pair-bootstrap-")) {
       // getUser succeeded and returned a flair_pair_initiator record
       if (
-        harperUser?.role === "flair_pair_initiator" &&
+        harperUser?.role?.role === "flair_pair_initiator" &&
         harperUser?.active === true
       ) {
         return "accepted";
@@ -314,7 +314,7 @@ describe("flair_pair_initiator Basic auth", () => {
   }
 
   const PAIR_USER: any = {
-    role: "flair_pair_initiator",
+    role: { role: "flair_pair_initiator" },
     active: true,
   };
 
@@ -360,7 +360,7 @@ describe("flair_pair_initiator Basic auth", () => {
   });
 
   test("disabled (active=false) user → 401", () => {
-    const disabledUser = { role: "flair_pair_initiator", active: false };
+    const disabledUser = { role: { role: "flair_pair_initiator" }, active: false };
     const result = simulateAuthMiddleware({
       pathname: "/FederationPair",
       username: "pair-bootstrap-abcd1234",
@@ -406,6 +406,20 @@ describe("flair_pair_initiator Basic auth", () => {
     const username = `pair-bootstrap-${tokenId.slice(0, 8)}`;
     expect(username).toBe("pair-bootstrap-abcdefgh");
     expect(username.startsWith("pair-bootstrap-")).toBe(true);
+  });
+
+  test("flat-string role rejected (Harper returns role as object, not string)", () => {
+    // Real Harper user records have role as { role: "...", permission: {...} },
+    // NOT a flat string. This test guards against the regression where the
+    // auth middleware checked pairUser?.role === "flair_pair_initiator" instead
+    // of pairUser?.role?.role === "flair_pair_initiator".
+    const result = simulateAuthMiddleware({
+      pathname: "/FederationPair",
+      username: "pair-bootstrap-abcd1234",
+      password: "correct-password",
+      harperUser: { role: "flair_pair_initiator", active: true }, // wrong shape
+    });
+    expect(result).toBe("rejected");
   });
 });
 
