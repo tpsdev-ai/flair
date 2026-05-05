@@ -1,17 +1,3 @@
-/**
- * openclaw-flair — OpenClaw Memory Plugin backed by Flair
- *
- * Replaces the built-in MEMORY.md / memory-lancedb system with Flair as the
- * single source of truth for agent memory. Uses Flair's native Harper
- * embeddings — no OpenAI API key required.
- *
- * Implements the OpenClaw "memory" plugin slot:
- *   - memory_search  → POST /SemanticSearch (semantic search)
- *   - memory_store   → PUT  /Memory/<id>  (write + embed)
- *   - memory_get     → GET  /Memory/<id>  (fetch by id)
- *   - before_agent_start hook → inject recent/relevant memories
- *   - agent_end hook → auto-capture from conversation
- */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -19,14 +5,6 @@ import { resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { FlairClient } from "@tpsdev-ai/flair-client";
 import { resolveAgentId } from "./key-resolver.js";
-// ─── Defense-in-depth: agentId path-traversal guard (ops-pnwq) ───────────────
-// agentId flows into resolve() to compose ~/.openclaw/workspace-<agentId>/...
-// resolve() normalizes "../" but doesn't reject — an attacker-controlled
-// agentId of "../../../etc" could traverse out of the workspace dir.
-// Today's threat surface is low (agentId comes from plugin config or session
-// context, both within the agent's host trust boundary), but a fail-closed
-// regex guard is cheap and surfaces invalid input rather than silently
-// mangling. Per Sherlock review of PR #317 (filed as ops-pnwq).
 const AGENT_ID_PATTERN = /^[a-z0-9_-]{1,64}$/i;
 export function isValidAgentId(agentId) {
     return typeof agentId === "string" && AGENT_ID_PATTERN.test(agentId);
@@ -39,7 +17,6 @@ export function assertValidAgentId(agentId) {
 const DEFAULT_URL = "http://127.0.0.1:19926";
 const DEFAULT_MAX_RECALL = 5;
 const DEFAULT_MAX_BOOTSTRAP_TOKENS = 4000;
-// ─── Workspace sync helpers ───────────────────────────────────────────────────
 const WORKSPACE_SOUL_FILES = {
     "SOUL.md": "soul",
     "IDENTITY.md": "identity",
@@ -80,16 +57,12 @@ async function syncWorkspaceToFlair(client, agentId, logger) {
     }
     return synced;
 }
-// ─── Auto-capture helpers ─────────────────────────────────────────────────────
-// Auto-capture triggers — conservative patterns that indicate genuinely
-// important context, not casual conversation. The LLM has memory_store
-// for explicit saves; auto-capture is a safety net for things it misses.
 const CAPTURE_TRIGGERS = [
     /\b(remember this|note for future|important lesson|key decision|for the record)\b/i,
     /\b(my name is|call me|i go by)\b/i,
     /\b(we decided|final decision|agreed to|commitment:)\b/i,
 ];
-const MIN_CAPTURE_LENGTH = 30; // skip very short messages
+const MIN_CAPTURE_LENGTH = 30;
 function shouldCapture(text) {
     if (text.length < MIN_CAPTURE_LENGTH)
         return false;
@@ -98,19 +71,16 @@ function shouldCapture(text) {
 function excerptForCapture(text, maxChars = 500) {
     return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
-// Person detection: "Nathan said", "ask @Kern", "my name is X", "X is the founder"
 const PERSON_PATTERNS = [
     /\b([A-Z][a-z]{2,})\s+(?:said|asked|mentioned|decided|approved|rejected|thinks|wants|needs|prefers)\b/g,
     /\b(?:ask|ping|tell|check with|talk to)\s+(?:@)?([A-Z][a-z]{2,})\b/g,
     /\b(?:my name is|i'm|call me)\s+([A-Z][a-z]{2,})\b/ig,
     /\b([A-Z][a-z]{2,})\s+(?:is the|is our|is a|was the|was our)\s+(\w+(?:\s+\w+)?)\b/g,
 ];
-// Project/service detection: repo references, "the X project", service names
 const PROJECT_PATTERNS = [
     /\b(?:tpsdev-ai|github\.com)\/([a-z0-9-]+)\b/g,
     /\b(?:the|our)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\s+(?:project|repo|service|system|app|tool|plugin)\b/g,
 ];
-// Relationship detection: "X manages Y", "X owns Y", "X depends on Y"
 const RELATIONSHIP_PATTERNS = [
     { re: /\b([A-Z][a-z]{2,})\s+(?:manages|leads|runs|owns)\s+(?:the\s+)?([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\b/g, predicate: "manages" },
     { re: /\b([A-Z][a-z]{2,})\s+(?:works on|is working on|maintains)\s+(?:the\s+)?([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\b/g, predicate: "works_on" },
@@ -118,7 +88,6 @@ const RELATIONSHIP_PATTERNS = [
     { re: /\b([A-Z][a-z]+)\s+(?:depends on|requires|needs)\s+([A-Z][a-z]+)\b/g, predicate: "depends_on" },
     { re: /\b([A-Z][a-z]+)\s+(?:replaces|supersedes)\s+([A-Z][a-z]+)\b/g, predicate: "replaces" },
 ];
-// Common words that look like names but aren't
 const ENTITY_STOPWORDS = new Set([
     "the", "this", "that", "with", "from", "into", "also", "just", "here",
     "there", "what", "when", "where", "which", "while", "should", "would",
@@ -199,26 +168,7 @@ function detectRelationships(text) {
     }
     return relationships;
 }
-// ─── Behavioral anchor context engine ─────────────────────────────────────────
-// Re-injects file-loaded behavioral anchors (SOUL.md/IDENTITY.md/AGENTS.md) as
-// a system-prompt addition on every turn. Per AGENT-CONTEXT-DURABILITY-TIERS:
-// these are PERMANENT-tier, provenance=file-loaded; conversation turns CANNOT
-// override them.
-//
-// Workspace path: ~/.openclaw/workspace-<agentId>. The same files are also
-// synced to Flair as soul: entries (see syncWorkspaceToFlair above) — that path
-// captures the content for retrieval; this path keeps the rules in-prompt every
-// turn so they don't drift across long sessions.
-//
-// Replaces the standalone `flair-context-engine` plugin (retired 2026-05-03).
-// Anchor re-injection was the only feature that earned its slot per the
-// ops-czop audit; the rest was noise (compaction-extract regex, auto-ingest
-// dead path) or duplicates (HEARTBEAT_OK filter is built into openclaw).
 const ANCHOR_FILES = ["IDENTITY.md", "SOUL.md", "AGENTS.md"];
-// Per-file size cap. Aligned with MAX_SOUL_VALUE used by the existing
-// soul-sync path so both surfaces enforce the same ceiling. Files that exceed
-// this are silently truncated; the warning lives in the workspace owner's
-// purview (they wrote the giant file).
 const MAX_ANCHOR_FILE_CHARS = 8000;
 const ANCHOR_HEADER = [
     "## Behavioral Anchors (re-injected every turn)",
@@ -241,8 +191,6 @@ class FlairBehavioralAnchorEngine {
     constructor(agentId, logger) {
         this.agentId = agentId;
         this.logger = logger;
-        // Defense-in-depth: agentId flows into resolve() to compose the workspace
-        // path. Reject malformed input at construction time (ops-pnwq).
         assertValidAgentId(agentId);
     }
     async ingest() {
@@ -251,13 +199,7 @@ class FlairBehavioralAnchorEngine {
     async compact() {
         return { ok: true, compacted: false, reason: "anchor-only engine — host owns compaction" };
     }
-    // Messages typed as any[] — the contract is from openclaw/plugin-sdk's
-    // ContextEngine.assemble (messages: AgentMessage[]); this engine just passes
-    // them through, so importing AgentMessage from @mariozechner/pi-agent-core
-    // would add a transitive dep just to satisfy a pass-through type. Duck-typed.
     async assemble(params) {
-        // process.env.HOME first so tests can override; homedir() as fallback
-        // because process.env.HOME may not be set in some launchd contexts.
         const home = process.env.HOME ?? homedir();
         const wsDir = resolve(home, ".openclaw", `workspace-${this.agentId}`);
         const paths = ANCHOR_FILES.map((f) => resolve(wsDir, f));
@@ -281,41 +223,30 @@ class FlairBehavioralAnchorEngine {
         }
         if (needRebuild) {
             const sections = [];
-            // Realpath the workspace root so the containment check works on hosts
-            // where the wsDir path itself contains symlinks (e.g. macOS /tmp →
-            // /private/tmp). Skip silently if wsDir doesn't exist — the per-file
-            // realpath below will also bail.
             let wsRealRoot = null;
             try {
                 wsRealRoot = realpathSync(wsDir);
             }
-            catch { /* missing */ }
+            catch { }
             const wsPrefix = wsRealRoot ? wsRealRoot + "/" : null;
             for (const p of paths) {
                 try {
-                    // Symlink containment: realpath the source, ensure it stays inside
-                    // wsDir. Without this, an attacker with workspace-dir write access
-                    // could symlink SOUL.md → /etc/passwd and leak arbitrary files into
-                    // the system prompt every turn (Sherlock review of PR #317).
                     let resolved;
                     try {
                         resolved = realpathSync(p);
                     }
                     catch {
-                        continue; // missing file or broken symlink — skip
+                        continue;
                     }
                     if (!wsPrefix || !resolved.startsWith(wsPrefix)) {
                         this.logger.warn(`openclaw-flair: skipping anchor symlink escape ${p} → ${resolved}`);
                         continue;
                     }
-                    // Per-file size cap: align with MAX_SOUL_VALUE (8000 chars) used by
-                    // the existing soul-sync path. Prevents self-inflicted token-budget
-                    // exhaustion if an anchor file grows unbounded.
                     const raw = readFileSync(resolved, "utf8").slice(0, MAX_ANCHOR_FILE_CHARS);
                     const name = resolved.split("/").pop();
                     sections.push(`### ${name}\n${raw.trim()}`);
                 }
-                catch { /* read failed for non-symlink reasons — skip silently */ }
+                catch { }
             }
             if (sections.length === 0) {
                 this.cache = { content: "", mtimes };
@@ -335,23 +266,18 @@ class FlairBehavioralAnchorEngine {
         };
     }
 }
-// ─── Plugin export ────────────────────────────────────────────────────────────
 export default {
     kind: "memory",
     register(api) {
         try {
             const cfg = (api.pluginConfig ?? {});
             const isAutoMode = !cfg.agentId || cfg.agentId === "auto";
-            // Client pool: one FlairClient per agentId, created lazily
             const clientPool = new Map();
-            // Resolve fallback agentId once at registration time
             const fallbackAgentId = resolveAgentId();
             function getClient(agentId) {
                 const id = agentId || (cfg.agentId && cfg.agentId !== "auto" ? cfg.agentId : null) || currentAgentId || fallbackAgentId;
                 if (!id || id === "auto")
                     throw new Error("no agentId available — set agentId in plugin config, FLAIR_AGENT_ID env var, or ensure OpenClaw provides it via session context (before_agent_start)");
-                // Defense-in-depth: validate before flowing into FlairClient + workspace
-                // path composition (ops-pnwq).
                 assertValidAgentId(id);
                 let client = clientPool.get(id);
                 if (!client) {
@@ -377,11 +303,8 @@ export default {
                 api.logger.info("openclaw-flair: auto mode — agentId will be resolved from session context");
             }
             const maxRecall = cfg.maxRecallResults ?? DEFAULT_MAX_RECALL;
-            const autoCapture = cfg.autoCapture ?? false; // opt-in — trust the LLM to use memory_store
+            const autoCapture = cfg.autoCapture ?? false;
             const autoRecall = cfg.autoRecall ?? true;
-            // Per-session agentId — resolved from session context at runtime.
-            // In auto mode, each session gets its own agentId from before_agent_start.
-            // With explicit config, all sessions use the configured agentId.
             let currentAgentId = isAutoMode ? (fallbackAgentId ?? undefined) : cfg.agentId;
             const configuredAgentId = cfg.agentId && cfg.agentId !== "auto" ? cfg.agentId : null;
             api.on("before_agent_start", async (event, ctx) => {
@@ -389,12 +312,10 @@ export default {
                 if (!eventAgentId)
                     return;
                 if (isAutoMode) {
-                    // Auto mode: always adopt the session's agentId — each session is its own agent
                     currentAgentId = eventAgentId;
                     api.logger.info(`openclaw-flair: session agentId="${eventAgentId}"`);
                 }
                 else if (eventAgentId === configuredAgentId) {
-                    // Explicit mode: only accept matching agentId
                     currentAgentId = eventAgentId;
                 }
                 if (eventAgentId) {
@@ -414,7 +335,6 @@ export default {
             }
             const displayAgent = isAutoMode ? "auto (per-session)" : cfg.agentId;
             api.logger.info(`openclaw-flair: registered (agent=${displayAgent}, url=${cfg.url ?? DEFAULT_URL})`);
-            // ── memory_search ──────────────────────────────────────────────────────
             api.registerTool({
                 name: "memory_search",
                 label: "Memory Search",
@@ -445,7 +365,6 @@ export default {
                     }
                 },
             }, { name: "memory_search" });
-            // ── memory_store ───────────────────────────────────────────────────────
             api.registerTool({
                 name: "memory_store",
                 label: "Memory Store",
@@ -475,7 +394,6 @@ export default {
                     try {
                         const client = getCurrentClient();
                         const memId = `${client.agentId}-${Date.now()}`;
-                        // If superseding an old memory, archive it
                         if (supersedes) {
                             try {
                                 const old = await client.memory.get(supersedes);
@@ -489,7 +407,6 @@ export default {
                                 }
                             }
                             catch {
-                                // Old memory not found — continue with the write
                             }
                         }
                         const result = await client.memory.write(text, {
@@ -497,7 +414,7 @@ export default {
                             tags,
                             durability: durability,
                             type: type,
-                            dedup: !supersedes, // skip dedup when explicitly superseding
+                            dedup: !supersedes,
                             dedupThreshold: 0.7,
                         });
                         const wasDeduped = result.id !== memId;
@@ -514,7 +431,6 @@ export default {
                     }
                 },
             }, { name: "memory_store" });
-            // ── memory_get ─────────────────────────────────────────────────────────
             api.registerTool({
                 name: "memory_get",
                 label: "Memory Get",
@@ -539,7 +455,6 @@ export default {
                     }
                 },
             }, { name: "memory_get" });
-            // ── Lifecycle: auto-recall on session start ────────────────────────────
             if (autoRecall) {
                 api.on("before_agent_start", async (event, ctx) => {
                     try {
@@ -559,7 +474,6 @@ export default {
                     }
                 });
             }
-            // ── Lifecycle: auto-capture on session end ────────────────────────────
             if (autoCapture) {
                 api.on("agent_end", async (event) => {
                     try {
@@ -574,10 +488,8 @@ export default {
                             const text = typeof msg.content === "string" ? msg.content : "";
                             if (!text || text.length < MIN_CAPTURE_LENGTH)
                                 continue;
-                            // Traditional trigger-based capture
                             if (shouldCapture(text) && stored < 3) {
                                 const excerpt = excerptForCapture(text);
-                                // Tag with detected subject if available
                                 const entities = detectEntities(text);
                                 const subject = entities.length > 0 ? entities[0].name.toLowerCase() : undefined;
                                 await client.memory.write(excerpt, {
@@ -587,7 +499,6 @@ export default {
                                 });
                                 stored++;
                             }
-                            // Entity detection — accumulate across all messages
                             for (const entity of detectEntities(text)) {
                                 const key = entity.name.toLowerCase();
                                 const existing = allEntities.get(key);
@@ -595,16 +506,14 @@ export default {
                                     allEntities.set(key, entity);
                                 }
                             }
-                            // Relationship detection
                             for (const rel of detectRelationships(text)) {
                                 allRelationships.push(rel);
                             }
                         }
-                        // Store detected relationships via Flair's Relationship API
                         let relStored = 0;
                         for (const rel of allRelationships) {
                             if (relStored >= 5)
-                                break; // cap per session
+                                break;
                             try {
                                 await client.request("PUT", `/Relationship/${Date.now()}-${relStored}`, {
                                     subject: rel.subject,
@@ -616,7 +525,6 @@ export default {
                                 relStored++;
                             }
                             catch {
-                                // best effort — don't fail the session over relationship storage
                             }
                         }
                         const total = stored + relStored;
@@ -629,10 +537,6 @@ export default {
                     }
                 });
             }
-            // ── Context engine: behavioral anchor re-injection ─────────────────────
-            // Registered as the "flair" context engine. The host invokes assemble()
-            // per turn; we return a systemPromptAddition that pins SOUL/IDENTITY/AGENTS
-            // at the top of the prompt so they don't drift across long sessions.
             if (typeof api.registerContextEngine === "function") {
                 api.registerContextEngine("flair", () => {
                     const id = currentAgentId || configuredAgentId || fallbackAgentId;
