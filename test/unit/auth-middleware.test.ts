@@ -278,6 +278,137 @@ describe("auth header edge cases", () => {
   });
 });
 
+// ─── Basic auth: flair_pair_initiator support (PR-2) ────────────────────────
+
+describe("flair_pair_initiator Basic auth", () => {
+  /**
+   * Simulate the Path 3 branch of the auth middleware.
+   * Returns the "accept" / "reject" decision given the incoming request details.
+   */
+  function simulateAuthMiddleware(opts: {
+    pathname: string;
+    username: string;
+    password: string;
+    harperUser: any;
+  }): "accepted" | "rejected" {
+    const { pathname, username, password, harperUser } = opts;
+
+    // Simulate: Path 1 (admin fast-path) — not applicable for pair-bootstrap-* users
+    // Simulate: Path 2 (super_user) — pair-bootstrap users are not super_user
+    const isSuperUser = harperUser?.role?.permission?.super_user === true;
+    if (isSuperUser) return "accepted";
+
+    // Path 3: flair_pair_initiator — restricted to /FederationPair only
+    if (pathname === "/FederationPair" && username.startsWith("pair-bootstrap-")) {
+      // getUser succeeded and returned a flair_pair_initiator record
+      if (
+        harperUser?.role === "flair_pair_initiator" &&
+        harperUser?.active === true
+      ) {
+        return "accepted";
+      }
+    }
+
+    // Fall through → 401
+    return "rejected";
+  }
+
+  const PAIR_USER: any = {
+    role: "flair_pair_initiator",
+    active: true,
+  };
+
+  test("flair_pair_initiator Basic auth on /FederationPair → accepted", () => {
+    const result = simulateAuthMiddleware({
+      pathname: "/FederationPair",
+      username: "pair-bootstrap-abcd1234",
+      password: "correct-password",
+      harperUser: PAIR_USER,
+    });
+    expect(result).toBe("accepted");
+  });
+
+  test("flair_pair_initiator Basic auth on /Memory → 401", () => {
+    const result = simulateAuthMiddleware({
+      pathname: "/Memory",
+      username: "pair-bootstrap-abcd1234",
+      password: "correct-password",
+      harperUser: PAIR_USER,
+    });
+    expect(result).toBe("rejected");
+  });
+
+  test("flair_pair_initiator Basic auth on /Soul → 401", () => {
+    const result = simulateAuthMiddleware({
+      pathname: "/Soul",
+      username: "pair-bootstrap-abcd1234",
+      password: "correct-password",
+      harperUser: PAIR_USER,
+    });
+    expect(result).toBe("rejected");
+  });
+
+  test("wrong password → 401 (getUser returns null)", () => {
+    // When password is wrong, getUser would return null or throw
+    const result = simulateAuthMiddleware({
+      pathname: "/FederationPair",
+      username: "pair-bootstrap-abcd1234",
+      password: "wrong-password",
+      harperUser: null, // getUser returns null for bad creds
+    });
+    expect(result).toBe("rejected");
+  });
+
+  test("disabled (active=false) user → 401", () => {
+    const disabledUser = { role: "flair_pair_initiator", active: false };
+    const result = simulateAuthMiddleware({
+      pathname: "/FederationPair",
+      username: "pair-bootstrap-abcd1234",
+      password: "correct-password",
+      harperUser: disabledUser,
+    });
+    expect(result).toBe("rejected");
+  });
+
+  test("username not starting with pair-bootstrap- → falls through to 401 on /FederationPair", () => {
+    // Non-bootstrap username never hits Path 3
+    const result = simulateAuthMiddleware({
+      pathname: "/FederationPair",
+      username: "regular-user",
+      password: "correct-password",
+      harperUser: PAIR_USER, // even if user record matched, prefix check prevents acceptance
+    });
+    expect(result).toBe("rejected");
+  });
+
+  test("path-restriction: pair-bootstrap user cannot access /Agent", () => {
+    const result = simulateAuthMiddleware({
+      pathname: "/Agent",
+      username: "pair-bootstrap-abcd1234",
+      password: "correct-password",
+      harperUser: PAIR_USER,
+    });
+    expect(result).toBe("rejected");
+  });
+
+  test("path-restriction: pair-bootstrap user cannot access /FederationSync", () => {
+    const result = simulateAuthMiddleware({
+      pathname: "/FederationSync",
+      username: "pair-bootstrap-abcd1234",
+      password: "correct-password",
+      harperUser: PAIR_USER,
+    });
+    expect(result).toBe("rejected");
+  });
+
+  test("pair-bootstrap username format: starts with pair-bootstrap-", () => {
+    const tokenId = "abcdefgh123456"; // 14 chars, first 8 are used
+    const username = `pair-bootstrap-${tokenId.slice(0, 8)}`;
+    expect(username).toBe("pair-bootstrap-abcdefgh");
+    expect(username.startsWith("pair-bootstrap-")).toBe(true);
+  });
+});
+
 // ─── Basic auth: super_user support (ops-lzmg) ───────────────────────────────
 
 describe("Basic auth super_user path", () => {

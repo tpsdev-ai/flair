@@ -202,6 +202,29 @@ server.http(async (request: any, nextLayer: any) => {
         request.tpsAgentIsAdmin = true;
         return nextLayer(request);
       }
+
+      // Path 3: flair_pair_initiator — restricted to /FederationPair only.
+      // Bootstrap credentials (pair-bootstrap-<id>) may only be used on this
+      // one endpoint. Any other path must fall through to 401.
+      if (url.pathname === "/FederationPair" && user.startsWith("pair-bootstrap-")) {
+        let pairUser: any = null;
+        try {
+          pairUser = await (server as any).getUser(user, pass, request);
+        } catch { /* fall through */ }
+
+        if (
+          pairUser?.role === "flair_pair_initiator" &&
+          pairUser?.active === true
+        ) {
+          (request as any)._tpsAuthVerified = true;
+          request.user = pairUser;
+          request.headers.set("x-tps-agent", user);
+          if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = user;
+          request.tpsAgent = user;
+          request.tpsAgentIsAdmin = false;
+          return nextLayer(request);
+        }
+      }
     } catch { /* fall through to Ed25519 check */ }
     return new Response(JSON.stringify({ error: "invalid_admin_credentials" }), { status: 401 });
   }
