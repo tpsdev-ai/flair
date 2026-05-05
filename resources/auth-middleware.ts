@@ -213,7 +213,7 @@ server.http(async (request: any, nextLayer: any) => {
         } catch { /* fall through */ }
 
         if (
-          pairUser?.role === "flair_pair_initiator" &&
+          pairUser?.role?.role === "flair_pair_initiator" &&
           pairUser?.active === true
         ) {
           (request as any)._tpsAuthVerified = true;
