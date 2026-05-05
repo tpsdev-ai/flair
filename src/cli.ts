@@ -3101,11 +3101,11 @@ federation
   .option("--ttl <minutes>", "Token TTL in minutes (default: 60)", "60")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
+  .option("--format <format>", "Output format: json (default) or text (bare token, deprecated)", "json")
   .action(async (opts) => {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
     try {
-      const { randomBytes } = await import("node:crypto");
       const token = randomBytes(24).toString("base64url");
       const ttlMinutes = parseInt(opts.ttl, 10) || 60;
       const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
@@ -3114,6 +3114,7 @@ federation
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
       const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
 
+      // 1. Persist the PairingToken record
       const opsRes = await fetch(`${opsEndpoint}/`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: auth },
@@ -3132,10 +3133,65 @@ federation
         throw new Error(`Failed to persist pairing token (${opsRes.status}): ${detail || "no body"}`);
       }
 
-      console.log(`Pairing token (expires in ${ttlMinutes}m):`);
-      console.log(`  ${token}`);
-      console.log(`\nGive this to the spoke admin to run:`);
-      console.log(`  flair federation pair <this-hub-url> --token ${token}`);
+      // 2. Create bootstrap user for this token
+      const bootstrapPassword = randomBytes(32).toString("base64url");
+      const bootstrapUsername = `pair-bootstrap-${token.slice(0, 8)}`;
+
+      let addUserRes: Response;
+      try {
+        addUserRes = await fetch(`${opsEndpoint}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({
+            operation: "add_user",
+            username: bootstrapUsername,
+            password: bootstrapPassword,
+            role: "flair_pair_initiator",
+            active: true,
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch (err: any) {
+        // Network failure creating bootstrap user — roll back PairingToken
+        await fetch(`${opsEndpoint}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({
+            operation: "delete",
+            database: "flair",
+            table: "PairingToken",
+            hash_value: token,
+          }),
+          signal: AbortSignal.timeout(10_000),
+        }).catch(() => {});
+        throw new Error(`Failed to create bootstrap user (network): ${err.message}`);
+      }
+
+      if (!addUserRes.ok) {
+        // add_user failed — roll back PairingToken so the two stay in sync
+        await fetch(`${opsEndpoint}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({
+            operation: "delete",
+            database: "flair",
+            table: "PairingToken",
+            hash_value: token,
+          }),
+          signal: AbortSignal.timeout(10_000),
+        }).catch(() => {});
+        const detail = await addUserRes.text().catch(() => "");
+        throw new Error(`Failed to create bootstrap user (${addUserRes.status}): ${detail || "no body"}`);
+      }
+
+      // 3. Output
+      const format = (opts.format ?? "json").toLowerCase();
+      if (format === "text") {
+        process.stderr.write(`[DEPRECATION] --format text is deprecated. Default output is now JSON.\n`);
+        console.log(token);
+      } else {
+        console.log(JSON.stringify({ token, user: bootstrapUsername, password: bootstrapPassword, expiresAt }, null, 2));
+      }
     } catch (err: any) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
