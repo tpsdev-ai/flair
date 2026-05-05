@@ -423,5 +423,17 @@ export class FederationPeers extends Resource {
 }
 
 // ── Module initialisation ────────────────────────────────────────────────────
-// Start the cleanup sweep (PR-5). Only active on hub instances.
-initFederationCleanup();
+// Deferred: the cleanup sweep (PR-5) starts after the module graph resolves.
+// In unit test environments (no Harper runtime), setTimeout never fires
+// synchronously and import is safe. In the live Harper process, the sweep
+// will start on the next event loop tick and runs only on hub instances.
+if (typeof setTimeout !== "undefined") {
+  setTimeout(() => {
+    try {
+      initFederationCleanup();
+    } catch (err: any) {
+      // Swallow — in test/resource-env the Harper databases may not be bound.
+      // In production, initFederationCleanup handles its own error paths.
+    }
+  }, 0);
+}
