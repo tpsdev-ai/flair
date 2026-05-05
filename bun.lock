@@ -65,10 +65,13 @@
     },
     "packages/openclaw-flair": {
       "name": "@tpsdev-ai/openclaw-flair",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
         "@tpsdev-ai/flair-client": "0.5.0",
+      },
+      "devDependencies": {
+        "typescript": "5.9.3",
       },
       "peerDependencies": {
         "openclaw": ">=2026.3.7",

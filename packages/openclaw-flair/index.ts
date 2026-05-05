@@ -407,7 +407,7 @@ export default {
 
   register(api: OpenClawPluginApi) {
     try {
-    const cfg = (api.pluginConfig ?? {}) as FlairMemoryConfig;
+    const cfg = (api.pluginConfig ?? {}) as unknown as FlairMemoryConfig;
     const isAutoMode = !cfg.agentId || cfg.agentId === "auto";
 
     // Client pool: one FlairClient per agentId, created lazily
