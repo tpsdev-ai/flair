@@ -168,7 +168,8 @@ export async function runCleanupTick(
         false, // bypass Harper permission checks
       );
       console.log(
-        `[federation-cleanup] dropped user, tid=${tokenId.slice(0, 8)}`,
+        "[federation-cleanup] dropped user",
+        { tid: tokenId.slice(0, 8) },
       );
     } catch (err: any) {
       const msg = err?.message ?? "";
@@ -181,8 +182,8 @@ export async function runCleanupTick(
         // Idempotent — user already gone, no action needed
       } else {
         console.error(
-          `[federation-cleanup] drop_user error, tid=${tokenId.slice(0, 8)}:`,
-          err?.message ?? err,
+          "[federation-cleanup] drop_user error",
+          { tid: tokenId.slice(0, 8), err: String(err?.message ?? err) },
         );
       }
     }
@@ -202,12 +203,13 @@ export async function runCleanupTick(
           false,
         );
         console.log(
-          `[federation-cleanup] deleted expired token, tid=${tokenId.slice(0, 8)}`,
+          "[federation-cleanup] deleted expired token",
+          { tid: tokenId.slice(0, 8) },
         );
       } catch (err: any) {
         console.error(
-          `[federation-cleanup] delete token error, tid=${tokenId.slice(0, 8)}:`,
-          err?.message ?? err,
+          "[federation-cleanup] delete token error",
+          { tid: tokenId.slice(0, 8), err: String(err?.message ?? err) },
         );
       }
     }
@@ -215,7 +217,8 @@ export async function runCleanupTick(
     // Consumed tokens: keep record for audit trail
     if (consumed) {
       console.log(
-        `[federation-cleanup] keeping audit record, tid=${tokenId.slice(0, 8)} (consumed by ${token.consumedBy})`,
+        "[federation-cleanup] keeping audit record",
+        { tid: tokenId.slice(0, 8), consumedBy: token.consumedBy },
       );
     }
   }
