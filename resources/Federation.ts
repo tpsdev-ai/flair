@@ -210,6 +210,19 @@ export class FederationPair extends Resource {
         });
       }
 
+      // PR-4: bind authenticated bootstrap user to specific pairing token
+      const ctx = (this as any).getContext?.() ?? {};
+      const authedUser = ctx.request?.tpsAgent;
+      const isAdmin = ctx.request?.tpsAgentIsAdmin === true;
+      if (!isAdmin && authedUser) {
+        const expectedBootstrap = `pair-bootstrap-${pairingToken.slice(0, 8)}`;
+        if (authedUser !== expectedBootstrap) {
+          return new Response(JSON.stringify({
+            error: "bootstrap_user_token_mismatch",
+          }), { status: 401, headers: { "content-type": "application/json" } });
+        }
+      }
+
       // Consume the token
       await (databases as any).flair.PairingToken.put({
         ...tokenRecord,
