@@ -753,6 +753,96 @@ export async function provisionFabric(
   }
 }
 
+// ─── flair_pair_initiator role ──────────────────────────────────────────────
+//
+// Hub instances need a `flair_pair_initiator` role so that bootstrap credentials
+// (created in PR-2) can pass platform auth on Harper Fabric before reaching the
+// FederationPair resource handler.  The role carries no table permissions itself
+// — the resource's own allowCreate bypass handles route-level access once the
+// request gets through the auth gate.
+
+/** Canonical permission spec for flair_pair_initiator. */
+const PAIR_INITIATOR_PERMISSION = {
+  super_user: false,
+  cluster_user: false,
+  structure_user: false,
+  flair: {
+    tables: {
+      Memory:       { read: false, insert: false, update: false, delete: false },
+      Soul:         { read: false, insert: false, update: false, delete: false },
+      Agent:        { read: false, insert: false, update: false, delete: false },
+      Workspace:    { read: false, insert: false, update: false, delete: false },
+      Event:        { read: false, insert: false, update: false, delete: false },
+      OAuth:        { read: false, insert: false, update: false, delete: false },
+      Instance:     { read: false, insert: false, update: false, delete: false },
+      Peer:         { read: false, insert: false, update: false, delete: false },
+      PairingToken: { read: false, insert: false, update: false, delete: false },
+      SyncLog:      { read: false, insert: false, update: false, delete: false },
+    },
+  },
+} as const;
+
+/**
+ * Idempotently ensures the `flair_pair_initiator` role exists on the Harper
+ * instance at `opsUrl` with the canonical permission spec.
+ *
+ * - If the role is absent → `add_role`
+ * - If it exists with different permissions → `alter_role` to bring it into spec
+ * - If it already matches → no-op
+ */
+export async function ensureFlairPairInitiatorRole(
+  opsUrl: string,
+  adminUser: string,
+  adminPass: string,
+): Promise<void> {
+  const ROLE_NAME = "flair_pair_initiator";
+
+  // 1. Check for existing role
+  let roles: any[] = [];
+  try {
+    const result = await callOpsApi(opsUrl, { operation: "list_roles" }, adminUser, adminPass);
+    roles = Array.isArray(result) ? result : [];
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`ensureFlairPairInitiatorRole: list_roles failed: ${msg}`);
+  }
+
+  const existing = roles.find(
+    (r: any) => r.role === ROLE_NAME || r.name === ROLE_NAME,
+  );
+
+  if (!existing) {
+    // 2a. Role absent → create it
+    console.log(`Creating role '${ROLE_NAME}'...`);
+    await callOpsApi(opsUrl, {
+      operation: "add_role",
+      role: ROLE_NAME,
+      permission: PAIR_INITIATOR_PERMISSION,
+    }, adminUser, adminPass);
+    console.log(`Role '${ROLE_NAME}' created ✓`);
+    return;
+  }
+
+  // 2b. Role exists — check if permissions match the canonical spec
+  const existingPerm = existing.permission ?? existing.role?.permission;
+  const canonicalStr = JSON.stringify(PAIR_INITIATOR_PERMISSION);
+  const existingStr  = JSON.stringify(existingPerm);
+
+  if (existingStr === canonicalStr) {
+    console.log(`Role '${ROLE_NAME}' already exists with correct permissions — skipping`);
+    return;
+  }
+
+  // 2c. Permissions differ → bring into spec via alter_role
+  console.log(`Role '${ROLE_NAME}' exists but permissions differ — updating...`);
+  await callOpsApi(opsUrl, {
+    operation: "alter_role",
+    role: ROLE_NAME,
+    permission: PAIR_INITIATOR_PERMISSION,
+  }, adminUser, adminPass);
+  console.log(`Role '${ROLE_NAME}' updated ✓`);
+}
+
 // ─── Upgrade presence probes ──────────────────────────────────────────────────
 //
 // `flair upgrade` previously called `npm list -g <pkg>` to detect the installed
@@ -1070,6 +1160,13 @@ program
         // Atomic provisioning: deploy + wait + provision user
         await provisionFabric(baseUrl, opsUrl, clusterAdminUser, clusterAdminPass, flairAdminPass);
         didProvision = true;
+
+        // Hub instances (--remote) receive federation pair requests and need
+        // the flair_pair_initiator role so bootstrap credentials can pass
+        // platform auth before reaching the FederationPair resource handler.
+        if (opts.remote) {
+          await ensureFlairPairInitiatorRole(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
+        }
       } else {
         // ── Existing behavior: --admin-pass required for already-running Flair ──
         if (!opts.adminPass) {
