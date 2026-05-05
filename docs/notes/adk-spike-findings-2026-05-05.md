@@ -228,7 +228,7 @@ This is a `Tool` (callable by the agent model), not a service. Shipped implement
 
 | Package | Source | Description |
 |---|---|---|
-| `google-adk-redis` (0.1.5) | https://github.com/redis-developer/adk-redis | Redis integration — implements Memory, Sessions, and Search tools |
+| `google-adk-redis` (0.0.4) | https://github.com/redis-developer/adk-redis | Redis integration — implements Memory, Sessions, and Search tools |
 | `google-adk-community` (0.4.1) | PyPI | Community extensions (specifics unknown without install) |
 
 ### Shipped session backends (for reference)
@@ -295,20 +295,16 @@ memory = VertexAiRagMemoryService(
 In the ADK CLI web server (`adk web`), memory_service is injected at the server level:
 
 ```python
-class FastApiAdkRunner:
-    def __init__(
-        self,
-        *,
-        agent_loader: BaseAgentLoader,
-        session_service: BaseSessionService,
-        memory_service: BaseMemoryService,      # <-- injected here
-        artifact_service: BaseArtifactService,
-        credential_service: BaseCredentialService,
-        # ...
-    ):
+```python
+# WARNING: FastApiAdkRunner class name requires verification — not located in adk-python @ v1.32.0.
+# The adk-python main branch has `Runner` and `InMemoryRunner` in `google/adk/runners.py`,
+# and `adk_web_server.py` handles the HTTP entry point without a FastAPI-specific runner class.
+# The memory_service injection pattern (runner → InvocationContext → ctx) is correct,
+# but the specific class name may be internal, renamed, or from a different ADK version.
+# Verified against: https://github.com/google/adk-python (main branch, 2026-05-05)
 ```
 
-The runner then injects `memory_service` into each `InvocationContext`, making it available to all agents via `ctx.search_memory()`, `ctx.add_session_to_memory()`, etc.
+The runner pattern injects `memory_service` into each `InvocationContext`, making it available to all agents via `ctx.search_memory()`, `ctx.add_session_to_memory()`, etc.
 
 ### Session-scoped config
 
