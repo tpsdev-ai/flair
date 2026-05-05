@@ -3003,13 +3003,73 @@ federation
     if (failures > 0) process.exit(1);
   });
 
+/** Parse a JSON triple file for --token-from.
+ *  Expected shape: { "token": "...", "user": "pair-bootstrap-<id>", "password": "...", "expiresAt": "<ISO>" }
+ *  Returns the triple on success. Validation failures exit(1).
+ */
+function parseTokenFromFile(filePath: string): {
+  token: string; user: string; password: string; expiresAt: string;
+} {
+  let raw: string;
+  if (filePath === "-") {
+    raw = readFileSync("/dev/stdin", "utf-8");
+  } else {
+    if (!existsSync(filePath)) {
+      console.error(`Error: --token-from file not found: ${filePath}`);
+      process.exit(1);
+    }
+    raw = readFileSync(filePath, "utf-8");
+  }
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.error(`Error: --token-from file is not valid JSON: ${filePath}`);
+    process.exit(1);
+  }
+
+  // Validate all four fields present and non-empty
+  const required = ["token", "user", "password", "expiresAt"] as const;
+  for (const field of required) {
+    if (!parsed[field] || typeof parsed[field] !== "string" || parsed[field].trim() === "") {
+      console.error(`Error: --token-from JSON is missing or has empty required field "${field}"`);
+      process.exit(1);
+    }
+  }
+
+  // Validate expiresAt is a parseable date and is in the future
+  const expiry = new Date(parsed.expiresAt);
+  if (isNaN(expiry.getTime())) {
+    console.error(`Error: --token-from JSON has invalid expiresAt date: "${parsed.expiresAt}"`);
+    process.exit(1);
+  }
+  const now = new Date();
+  if (expiry <= now) {
+    console.error(`Error: --token-from JSON has expired token (expiresAt: ${parsed.expiresAt})`);
+    process.exit(1);
+  }
+  const fiveMin = 5 * 60 * 1000;
+  if (expiry.getTime() - now.getTime() < fiveMin) {
+    console.error(`warning: pairing token expires in less than 5 minutes (expiresAt: ${parsed.expiresAt})`);
+  }
+
+  return {
+    token: parsed.token.trim(),
+    user: parsed.user.trim(),
+    password: parsed.password.trim(),
+    expiresAt: parsed.expiresAt.trim(),
+  };
+}
+
 federation
   .command("pair <hub-url>")
   .description("Pair this spoke with a hub instance")
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password")
   .option("--ops-port <port>", "Harper operations API port")
-  .option("--token <token>", "One-time pairing token from hub admin (env: FLAIR_PAIRING_TOKEN)")
+  .option("--token <token>", "One-time pairing token from hub admin (env: FLAIR_PAIRING_TOKEN) [deprecated: use --token-from]")
+  .option("--token-from <file>", "Read bootstrap triple from JSON file (use '-' for stdin)")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .action(async (hubUrl: string, opts) => {
@@ -3019,28 +3079,40 @@ federation
       const instance = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
       console.log(`${target ? "Remote" : "Local"} instance: ${instance.id} (${instance.role})`);
 
-      if (!opts.token) {
-        console.error("Error: --token is required. Ask the hub admin to run 'flair federation token' and provide the token.");
+      // Determine token source: --token-from wins if both specified
+      if (opts.tokenFrom && opts.token) {
+        console.error("warning: --token-from takes precedence over --token. The --token flag is deprecated; use --token-from <file> instead.");
+      }
+
+      let pairingToken: string;
+      let authHeader: string | undefined;
+
+      if (opts.tokenFrom) {
+        // ── Bootstrap triple path (--token-from) ──
+        const triple = parseTokenFromFile(opts.tokenFrom);
+        pairingToken = triple.token;
+        authHeader = `Basic ${Buffer.from(`${triple.user}:${triple.password}`).toString("base64")}`;
+        console.log(`Using bootstrap user: ${triple.user}`);
+      } else if (opts.token) {
+        // ── Bare token path (--token) — deprecated ──
+        pairingToken = opts.token || process.env.FLAIR_PAIRING_TOKEN;
+        console.error("warning: --token is deprecated. Use --token-from <file> to keep credentials out of shell history.");
+
+        // Warning: inline token may leak to shell history.
+        const tokenFromEnv = !opts.token && !!process.env.FLAIR_PAIRING_TOKEN;
+        if (shouldShowInlineSecretWarning(opts.token, tokenFromEnv, new Set(["--token"]), "--token")) {
+          console.error(
+            "warning: --token passed inline. Consider --token-from <file> or FLAIR_PAIRING_TOKEN env " +
+            "to keep secrets out of shell history."
+          );
+        }
+      } else {
+        console.error("Error: --token or --token-from is required. Ask the hub admin to run 'flair federation token' and provide the token.");
         process.exit(1);
       }
 
-      // Warning: inline token may leak to shell history.
-      // fromEnv is true ONLY when the resolved value came from env (no inline override).
-      const tokenFromEnv = !opts.token && !!process.env.FLAIR_PAIRING_TOKEN;
-      if (shouldShowInlineSecretWarning(opts.token, tokenFromEnv, new Set(["--token"]), "--token")) {
-        console.error(
-          "warning: --token passed inline. Consider --token-from <file> or FLAIR_PAIRING_TOKEN env " +
-          "to keep secrets out of shell history."
-        );
-      }
-
-      // Load secret key and sign the pairing request. The pairing token is
-      // included in the signed body (not in an Authorization header) because
-      // Harper's auth layer claims any "Bearer X" Authorization header for
-      // itself and 401s before our resource ever runs.
+      // Load secret key and sign the pairing request.
       const secretKey = await loadInstanceSecretKey(instance.id, opts);
-      // Env var fallback for --token: FLAIR_PAIRING_TOKEN
-      const pairingToken = opts.token || process.env.FLAIR_PAIRING_TOKEN;
       const pairBody: Record<string, any> = {
         instanceId: instance.id,
         publicKey: instance.publicKey,
@@ -3049,9 +3121,14 @@ federation
       };
       const signedBody = signRequestBody(pairBody, secretKey);
 
+      const fetchHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (authHeader) {
+        fetchHeaders.Authorization = authHeader;
+      }
+
       const res = await fetch(`${hubUrl}/FederationPair`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: fetchHeaders,
         body: JSON.stringify(signedBody),
       });
 
@@ -7358,4 +7435,5 @@ export {
   isLocalBase,
   isLikelyRealSecret,
   shouldShowInlineSecretWarning,
+  parseTokenFromFile,
 };
