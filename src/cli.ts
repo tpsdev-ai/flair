@@ -3391,7 +3391,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     console.log(`✅ Synced ${totalMerged} records (${totalSkipped} skipped) across ${totalBatches} batches`);
     return { pushed: totalMerged, skipped: totalSkipped };
   } catch (err: any) {
-    return { pushed: 0, skipped: 0, error: err instanceof Error ? err : new Error(String(err)) };
+    return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
   }
 }
 
