@@ -3323,9 +3323,18 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const syncBody: Record<string, any> = { instanceId: instance.id, records, lamportClock: Date.now() };
     const signedSyncBody = signRequestBody(syncBody, secretKey);
 
+    // Build TPS-Ed25519 Authorization header for Path 5 auth middleware.
+    // Message format must match auth-middleware Path 5: ${instanceId}:${ts}:${nonce}:${method}:${path}
+    const ts = Date.now();
+    const nonce = Buffer.from(nacl.randomBytes(12)).toString("base64url");
+    const message = `${instance.id}:${ts}:${nonce}:POST:/FederationSync`;
+    const sig = nacl.sign.detached(Buffer.from(message, "utf-8"), secretKey);
+    const signatureB64 = Buffer.from(sig).toString("base64");
+    const authHeader = `TPS-Ed25519 ${instance.id}:${ts}:${nonce}:${signatureB64}`;
+
     const syncRes = await fetch(`${hub.endpoint ?? hub.id}/FederationSync`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Authorization: authHeader },
       body: JSON.stringify(signedSyncBody),
     });
 
