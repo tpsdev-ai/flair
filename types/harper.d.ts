@@ -1,6 +1,8 @@
 declare module "@harperfast/harper" {
   export const server: {
     http: (handler: (request: any, next: any) => any, options?: any) => void;
+    operation: (operation: Record<string, unknown>, context: any, authorize?: boolean) => Promise<any>;
+    getUser: (username: string, password: string | null, request: any) => Promise<any>;
   };
   export const tables: Record<string, any>;
   export const databases: Record<string, any>;
