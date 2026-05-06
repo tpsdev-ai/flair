@@ -183,11 +183,9 @@ server.tool(
         dedup: true,
         dedupThreshold: 0.95,
       });
-      // Check if dedup returned an existing memory (different ID than what we generated)
-      const generatedPrefix = `${agentId}-`;
-      const wasDeduped = result.id && !result.id.startsWith(generatedPrefix);
-      if (wasDeduped) {
-        return { content: [{ type: "text", text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}` }] };
+      // Signal when dedup returned an existing memory instead of writing.
+      if ((result as any).deduped) {
+        return { content: [{ type: "text", text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}\n(no new entry written)` }] };
       }
       const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
       const tagStr = tags && tags.length > 0 ? tags.join(", ") : "none";

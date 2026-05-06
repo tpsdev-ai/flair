@@ -19,6 +19,9 @@ export interface Memory {
   subject?: string;
   createdAt: string;
   updatedAt?: string;
+  /** Set to true when write() returned an existing near-duplicate instead of
+   *  creating a new entry. Omitted/undefined for new writes. */
+  deduped?: boolean;
 }
 
 /** A soul entry (persistent personality/values). */

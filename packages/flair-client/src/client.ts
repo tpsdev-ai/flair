@@ -150,9 +150,10 @@ class MemoryApi {
       // dedup checks inflate scores above the threshold.
       const existing = await this.search(content, { limit: 1, minScore: threshold, scoring: "raw" });
       if (existing.length > 0) {
-        // Return the existing memory instead of creating a duplicate
+        // Return the existing memory instead of creating a duplicate.
+        // Flag deduped so callers know this write was suppressed.
         const match = await this.get(existing[0].id);
-        if (match) return match;
+        if (match) return { ...match, deduped: true };
       }
     }
 
