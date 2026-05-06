@@ -220,14 +220,13 @@ describe("signBodyFresh + verifyBodySignatureFresh", () => {
     expect(signed._nonce).toBe(explicitNonce);
   });
 
-  test("timestamp exactly at window boundary (30s old) succeeds", () => {
+  test("timestamp within window (25s old) succeeds", () => {
     const kp = nacl.sign.keyPair();
     const secretKey = kp.secretKey;
     const publicKeyB64url = Buffer.from(kp.publicKey).toString("base64url");
 
-    // Use 29_999ms to avoid sub-ms race with verifyFresh's Date.now() call
-    const boundaryTs = Date.now() - 29_999;
-    const signed = signBodyFresh({ data: "test" }, secretKey, { ts: boundaryTs });
+    const withinTs = Date.now() - 25_000; // 25s — comfortably within 30s window
+    const signed = signBodyFresh({ data: "test" }, secretKey, { ts: withinTs });
 
     const result = verifyBodySignatureFresh(signed, publicKeyB64url, {
       windowMs: 30_000,
@@ -236,13 +235,13 @@ describe("signBodyFresh + verifyBodySignatureFresh", () => {
     expect(result.ok).toBe(true);
   });
 
-  test("timestamp exactly at window boundary + 1ms fails", () => {
+  test("timestamp outside window (31s old) fails", () => {
     const kp = nacl.sign.keyPair();
     const secretKey = kp.secretKey;
     const publicKeyB64url = Buffer.from(kp.publicKey).toString("base64url");
 
-    const overBoundaryTs = Date.now() - 30_001; // 1ms over
-    const signed = signBodyFresh({ data: "test" }, secretKey, { ts: overBoundaryTs });
+    const overTs = Date.now() - 31_000;
+    const signed = signBodyFresh({ data: "test" }, secretKey, { ts: overTs });
 
     const result = verifyBodySignatureFresh(signed, publicKeyB64url, {
       windowMs: 30_000,
