@@ -3303,8 +3303,35 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
     const tables = ["Memory", "Soul", "Agent", "Relationship"];
-    const records: any[] = [];
     const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
+    const secretKey = await loadInstanceSecretKey(instance.id, opts);
+    const hubUrl = hub.endpoint ?? hub.id;
+
+    // ── Batching constants ──────────────────────────────────────────────
+    // 2MB JSON budget (server cap is 10MB; 2MB leaves headroom for headers
+    // and signature metadata) + 200 records max per batch.
+    const BUDGET_BYTES = 2_000_000;
+    const BUDGET_RECORDS = 200;
+
+    // ── sendBatch helper ────────────────────────────────────────────────
+    async function sendBatch(batch: any[]): Promise<{ merged: number; skipped: number }> {
+      const syncBody: Record<string, any> = { instanceId: instance.id, records: batch, lamportClock: Date.now() };
+      const signedSyncBody = signBodyFresh(syncBody, secretKey);
+      const syncRes = await fetch(`${hubUrl}/FederationSync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(signedSyncBody),
+      });
+      if (!syncRes.ok) {
+        const text = await syncRes.text().catch(() => "");
+        throw new Error(`Sync batch failed: ${syncRes.status} ${text}`);
+      }
+      return await syncRes.json() as { merged: number; skipped: number };
+    }
+
+    let totalMerged = 0;
+    let totalSkipped = 0;
+    let totalBatches = 0;
 
     for (const table of tables) {
       let res: Response;
@@ -3316,38 +3343,53 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           signal: AbortSignal.timeout(15_000),
         });
       } catch (err: any) {
-        return { pushed: 0, skipped: 0, error: err instanceof Error ? err : new Error(String(err)) };
+        return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
       }
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        return { pushed: 0, skipped: 0, error: new Error(`SQL query failed (${res.status}): ${text}`) };
+        return { pushed: totalMerged, skipped: totalSkipped, error: new Error(`SQL query failed (${res.status}): ${text}`) };
       }
-      for (const row of await res.json() as any[]) {
-        records.push({ table, id: row.id, data: row, updatedAt: row.updatedAt ?? row.createdAt, originatorInstanceId: instance.id });
+
+      // Stream-collect records into batches
+      const rows = await res.json() as any[];
+      if (rows.length === 0) continue;
+
+      let batch: any[] = [];
+      let batchBytes = 0;
+
+      for (const row of rows) {
+        const sr = { table, id: row.id, data: row, updatedAt: row.updatedAt ?? row.createdAt, originatorInstanceId: instance.id };
+        const srBytes = JSON.stringify(sr).length;
+
+        if (batch.length >= BUDGET_RECORDS || (batch.length > 0 && batchBytes + srBytes > BUDGET_BYTES)) {
+          const result = await sendBatch(batch);
+          totalMerged += result.merged;
+          totalSkipped += result.skipped;
+          totalBatches++;
+          batch = [];
+          batchBytes = 0;
+        }
+
+        batch.push(sr);
+        batchBytes += srBytes;
+      }
+
+      // Send final partial batch for this table
+      if (batch.length > 0) {
+        const result = await sendBatch(batch);
+        totalMerged += result.merged;
+        totalSkipped += result.skipped;
+        totalBatches++;
       }
     }
 
-    if (records.length === 0) { console.log("No changes since last sync."); return { pushed: 0, skipped: 0 }; }
-
-    // Sign the sync request with our instance key (fresh signing with anti-replay)
-    const secretKey = await loadInstanceSecretKey(instance.id, opts);
-    const syncBody: Record<string, any> = { instanceId: instance.id, records, lamportClock: Date.now() };
-    const signedSyncBody = signBodyFresh(syncBody, secretKey);
-
-    const syncRes = await fetch(`${hub.endpoint ?? hub.id}/FederationSync`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(signedSyncBody),
-    });
-
-    if (!syncRes.ok) {
-      const text = await syncRes.text().catch(() => "");
-      return { pushed: 0, skipped: 0, error: new Error(`Sync failed: ${syncRes.status} ${text}`) };
+    if (totalBatches === 0) {
+      console.log("No changes since last sync.");
+      return { pushed: 0, skipped: 0 };
     }
 
-    const result = await syncRes.json() as any;
-    console.log(`✅ Synced ${result.merged} records (${result.skipped} skipped) in ${result.durationMs}ms`);
-    return { pushed: result.merged ?? 0, skipped: result.skipped ?? 0 };
+    console.log(`✅ Synced ${totalMerged} records (${totalSkipped} skipped) across ${totalBatches} batches`);
+    return { pushed: totalMerged, skipped: totalSkipped };
   } catch (err: any) {
     return { pushed: 0, skipped: 0, error: err instanceof Error ? err : new Error(String(err)) };
   }
