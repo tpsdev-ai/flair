@@ -13,53 +13,75 @@ Spoke A ──[signed sync]──▶ Hub ◀──[signed sync]── Spoke B
 - **Hub:** accepts sync pushes from paired spokes, can relay records between peers
 - **Spoke:** pushes local changes to the hub, receives changes from other spokes via the hub
 
-## Setup
+## Pairing a New Spoke (Bootstrap-User Flow)
 
-### 1. Initialize the hub
+Pairing connects a spoke to a hub with mutual key pinning and an auth-aware handshake that works across all Harper topologies, including Harper Fabric.
 
-The hub is a standard Flair instance. Set its role during init:
+### Step-by-step
+
+**1. Hub admin generates a pairing token triple**
+
+On the hub machine, the admin runs `flair federation token`. The command emits a JSON triple containing a one-time bootstrap credential:
 
 ```bash
-# On the hub machine
-flair init --remote
-flair federation status
-# Shows: Instance: flair_abc123 (hub)
+flair federation token --admin-pass <hub-admin-password>
 ```
 
-### 2. Generate a pairing token
+Output (a single JSON object):
 
-The hub admin generates a one-time token for each spoke:
-
-```bash
-# On the hub machine
-flair federation token --admin-pass <password>
-# Output:
-# Pairing token (expires in 60m):
-#   A1B2C3D4E5F6...
-#
-# Give this to the spoke admin to run:
-#   flair federation pair <hub-url> --token A1B2C3D4E5F6...
+```json
+{"token":"<one-time-pairing-token>","user":"<bootstrap-username>","password":"<bootstrap-password>","expiresAt":"<ISO-8601-timestamp>"}
 ```
 
 Tokens expire after 60 minutes by default. Use `--ttl <minutes>` to adjust.
 
-### 3. Pair a spoke
+**2. Hub admin shares the triple with the spoke admin**
 
-The spoke admin runs the pair command with the token:
+The JSON triple is shared out-of-band (secure file transfer, password manager, or similar). It must be stored as a plain JSON file on the spoke side or piped via stdin.
+
+**3. Spoke admin runs the pair command**
+
+On the spoke machine:
 
 ```bash
-# On the spoke machine
-flair federation pair https://hub.example.com:19926 --token A1B2C3D4E5F6...
-# Output: ✅ Paired with hub: flair_abc123
+# From a file
+flair federation pair <hub-url> --token-from /path/to/triple.json
+
+# From stdin
+cat triple.json | flair federation pair <hub-url> --token-from -
 ```
 
-Pairing:
-- Proves the spoke owns its claimed Ed25519 key (signature verification)
-- Pins the spoke's public key on the hub (prevents impersonation)
-- Pins the hub's public key on the spoke
-- Consumes the one-time token
+**4. Behind the scenes**
 
-### 4. Sync
+- The bootstrap user authenticates at the platform layer (works on standalone deployments and Harper Fabric alike).
+- The resource handler validates the pairing token, the signed request body, and the binding between the bootstrap user and the token.
+- On success the hub creates a `Peer` record for the spoke and removes the temporary bootstrap user. The spoke records the hub as its peer.
+
+After pairing, both instances pin each other's Ed25519 public keys and are ready to sync.
+
+## Why the Bootstrap-User Flow?
+
+Earlier designs relied on `allowCreate=true` combined with body-only authentication. That approach works on single-component deployments but breaks on Harper Fabric, where the platform authentication gate fires before the resource handler sees the request. The bootstrap-user flow (Option B) makes the pair handshake auth-aware so it operates correctly on all Harper topologies: standalone, Fabric single-node, and Fabric multi-node.
+
+## Fabric Pairing Example
+
+When the hub runs on Harper Fabric, adapt the hub URL to the Fabric pattern:
+
+```bash
+# 1. Hub admin generates the triple (on the Fabric host)
+ssh hub-host
+flair federation token --admin-pass <hub-admin-password> > /tmp/pair-triple.json
+
+# 2. Transfer the triple to the spoke admin (out-of-band)
+scp hub-host:/tmp/pair-triple.json ./pair-triple.json
+
+# 3. Spoke admin pairs using the Fabric URL
+flair federation pair https://<fabric-node>:9926/<instance-name> --token-from ./pair-triple.json
+```
+
+Replace `<fabric-node>`, `<instance-name>`, and `<hub-admin-password>` with your actual values.
+
+## Sync
 
 Push local changes to the hub:
 
@@ -104,13 +126,48 @@ Records with `updatedAt` more than 5 minutes in the future are rejected. This pr
 | Command | Description |
 |---------|-------------|
 | `flair federation status` | Show instance identity and peer connections |
-| `flair federation pair <hub-url> --token <token>` | Pair this spoke with a hub |
+| `flair federation pair <hub-url> --token-from <file>` | Pair this spoke with a hub using a token triple file (or `-` for stdin) |
 | `flair federation sync` | Push local changes to the hub |
-| `flair federation token [--ttl <min>]` | Generate a one-time pairing token (hub only) |
+| `flair federation token [--ttl <min>]` | Generate a one-time pairing token triple (hub only) |
 
 ## Conflict Resolution
 
 Federation uses record-level last-write-wins (LWW) with ISO timestamp comparison. When two instances modify the same record, the one with the later `updatedAt` wins. Field-level LWW is planned for a future version.
+
+## Troubleshooting
+
+### config.yaml port drift
+
+If the hub's configured port in `config.yaml` differs from the port the spoke is targeting, federation requests fail with a connection error. Verify the port matches between the spoke's pair URL and the hub's `config.yaml` (`federation.port` or the instance's listen port).
+
+```bash
+# On the hub, confirm the listening port
+grep -E 'port|federation' ~/.flair/config.yaml
+```
+
+### Local FederationInstance fetch needs auth
+
+When troubleshooting on the hub, fetching `/federation/instances/<id>` locally (e.g. via `curl localhost`) may return a 401 if the request does not carry the authentication headers the platform layer expects. On Fabric this gate is enforced even on localhost. Use the CLI tooling (`flair federation status`) instead of raw HTTP calls for local inspection.
+
+### `flair_pair_initiator` role not found on hub
+
+If pairing fails with a role-not-found error, the hub instance may be missing the `flair_pair_initiator` role. This role is created automatically during `flair init --remote` but can be lost if the database was reset or migrated manually. Re-run `flair init --remote` on the hub to restore default roles, then retry pairing.
+
+### Bootstrap user not deleted on Fabric
+
+After a successful pairing, the temporary bootstrap user is automatically deleted. If it persists on a Fabric deployment, check that the hub's Harper operations log does not show a rollback or permission error during the cleanup step. Manually removing the stale bootstrap user via the Harper Studio is safe if needed — it is never used after pairing completes.
+
+### Stale Peer record on spoke
+
+If a spoke was previously paired with a different hub (or the hub's identity key changed), the spoke may retain a stale `Peer` record pointing to the old hub. Remove the stale record before pairing with the new hub:
+
+```bash
+# Show current peers
+flair federation status
+
+# Remove a specific peer (replace <instanceId>)
+flair federation unpin <instanceId>
+```
 
 ## Limitations (1.0)
 
