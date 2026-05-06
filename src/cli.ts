@@ -2871,9 +2871,20 @@ async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: str
  * Sign a request body and return a new body with the signature field added.
  */
 function signRequestBody(body: Record<string, any>, secretKey: Uint8Array): Record<string, any> {
-  const sig = signBody(body, secretKey);
-  return { ...body, signature: sig };
+  // Fresh signing with anti-replay: embeds _ts and _nonce before signing.
+  // Equivalent to federation-crypto.ts signBodyFresh — duplicated here because
+  // the CLI module has its own local signBody for dependency isolation.
+  const freshBody = {
+    ...body,
+    _ts: Date.now(),
+    _nonce: Buffer.from(nacl.randomBytes(16)).toString("base64url"),
+  };
+  const sig = signBody(freshBody, secretKey);
+  return { ...freshBody, signature: sig };
 }
+
+// Alias: signBodyFresh for clarity at call sites
+const signBodyFresh = signRequestBody;
 
 // ─── flair federation ────────────────────────────────────────────────────────
 
@@ -3119,7 +3130,7 @@ federation
         role: "spoke",
         pairingToken,
       };
-      const signedBody = signRequestBody(pairBody, secretKey);
+      const signedBody = signBodyFresh(pairBody, secretKey);
 
       const fetchHeaders: Record<string, string> = { "Content-Type": "application/json" };
       if (authHeader) {
@@ -3318,23 +3329,14 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
 
     if (records.length === 0) { console.log("No changes since last sync."); return { pushed: 0, skipped: 0 }; }
 
-    // Sign the sync request with our instance key
+    // Sign the sync request with our instance key (fresh signing with anti-replay)
     const secretKey = await loadInstanceSecretKey(instance.id, opts);
     const syncBody: Record<string, any> = { instanceId: instance.id, records, lamportClock: Date.now() };
-    const signedSyncBody = signRequestBody(syncBody, secretKey);
-
-    // Build TPS-Ed25519 Authorization header for Path 5 auth middleware.
-    // Message format must match auth-middleware Path 5: ${instanceId}:${ts}:${nonce}:${method}:${path}
-    const ts = Date.now();
-    const nonce = Buffer.from(nacl.randomBytes(12)).toString("base64url");
-    const message = `${instance.id}:${ts}:${nonce}:POST:/FederationSync`;
-    const sig = nacl.sign.detached(Buffer.from(message, "utf-8"), secretKey);
-    const signatureB64 = Buffer.from(sig).toString("base64");
-    const authHeader = `TPS-Ed25519 ${instance.id}:${ts}:${nonce}:${signatureB64}`;
+    const signedSyncBody = signBodyFresh(syncBody, secretKey);
 
     const syncRes = await fetch(`${hub.endpoint ?? hub.id}/FederationSync`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: authHeader },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(signedSyncBody),
     });
 

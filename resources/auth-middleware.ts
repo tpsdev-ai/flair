@@ -1,7 +1,6 @@
 import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
-import nacl from "tweetnacl";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -127,9 +126,9 @@ server.http(async (request: any, nextLayer: any) => {
     url.pathname === "/AgentCard" ||
     url.pathname.startsWith("/A2AAdapter/") ||
     url.pathname.startsWith("/AgentCard/") ||
-    // FederationSync auth is handled by Path 5 (spoke Ed25519) below —
-    // it is NOT in the allowlist; requests must present a valid TPS-Ed25519
-    // header from a paired spoke peer to reach the FederationSync resource.
+    // FederationSync uses Ed25519 body-signature auth with anti-replay, validated
+    // by the resource handler (allowCreate=true, same pattern as FederationPair).
+    url.pathname === "/FederationSync" ||
     // FederationPair uses one-time PairingToken in the request body, validated
     // by the resource itself (allowCreate=true on the Resource lets anonymous
     // POST through Harper's role gate). Bearer can't be used here because
@@ -229,67 +228,6 @@ server.http(async (request: any, nextLayer: any) => {
       }
     } catch { /* fall through to Ed25519 check */ }
     return new Response(JSON.stringify({ error: "invalid_admin_credentials" }), { status: 401 });
-  }
-
-  // ── Path 5: spoke instance Ed25519 auth (FederationSync only) ────────────
-  // Spoke instances authenticate using their own Ed25519 keypair (the same one
-  // used to sign pair body signatures). The pinned publicKey is looked up from
-  // the Peer table. Path-restricted: a spoke's Ed25519 cannot be used on any
-  // other endpoint.
-  if (url.pathname === "/FederationSync") {
-    const tpsHeader = header.match(/^TPS-Ed25519\s+([^:]+):(\d+):([^:]+):(.+)$/);
-    if (tpsHeader) {
-      const [, instanceId, tsRaw, nonce, signatureB64] = tpsHeader;
-      const ts = Number(tsRaw);
-      const now = Date.now();
-
-      // Anti-replay: timestamp window ±30s
-      if (!Number.isFinite(ts) || Math.abs(now - ts) > WINDOW_MS) {
-        return new Response(JSON.stringify({ error: "stale_or_future_timestamp" }), { status: 401 });
-      }
-
-      // Nonce dedup — namespaced key to avoid collision with agent nonces
-      for (const [k, sigTs] of nonceSeen.entries()) {
-        if (now - sigTs > WINDOW_MS) nonceSeen.delete(k);
-      }
-      const nonceKey = `spoke:${instanceId}:${nonce}`;
-      if (nonceSeen.has(nonceKey)) {
-        return new Response(JSON.stringify({ error: "nonce_replay_detected" }), { status: 401 });
-      }
-
-      // Look up the spoke in the Peer table
-      let peer: any = null;
-      try {
-        peer = await (databases as any).flair.Peer.get(instanceId);
-      } catch { /* table miss */ }
-      if (!peer || peer.status === "revoked" || peer.role !== "spoke") {
-        return new Response(JSON.stringify({ error: "unknown_or_revoked_peer" }), { status: 401 });
-      }
-
-      // Verify the signature against the pinned publicKey
-      const message = `${instanceId}:${tsRaw}:${nonce}:${request.method}:${url.pathname}`;
-      const valid = nacl.sign.detached.verify(
-        Buffer.from(message, "utf-8"),
-        Buffer.from(signatureB64, "base64"),
-        Buffer.from(peer.publicKey, "base64url"),
-      );
-      if (!valid) {
-        return new Response(JSON.stringify({ error: "invalid_signature" }), { status: 401 });
-      }
-
-      // Record nonce, set synthetic user for Harper downstream
-      nonceSeen.set(nonceKey, ts);
-      (request as any)._tpsAuthVerified = true;
-      request.user = {
-        username: `spoke-${instanceId}`,
-        role: { role: "flair_sync_initiator", permission: { super_user: false } },
-        active: true,
-      };
-      request.headers.set("x-tps-spoke", instanceId);
-      request.tpsAgent = `spoke-${instanceId}`;
-      request.tpsAgentIsAdmin = false;
-      return nextLayer(request);
-    }
   }
 
   // ── Ed25519 agent auth ────────────────────────────────────────────────────
