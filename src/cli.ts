@@ -13,6 +13,7 @@ import {
   rmSync,
   mkdtempSync,
   readdirSync,
+  statSync,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
@@ -1848,8 +1849,8 @@ program
       if (clientOpt === "all" || clientOpt === "none" || noMcp) {
         // all/none handled below
       } else {
-        // Filter to only the selected client
-        clients = [{ id: selectedClients[0], label: selectedClients[0], detected: true }];
+        // Filter to only the selected client (preserving wire function from detectClients)
+        clients = clients.filter(c => selectedClients.includes(c.id));
       }
     }
 
@@ -1926,7 +1927,7 @@ program
       for (const clientId of toWire) {
         let result: { ok: boolean; message: string };
         switch (clientId) {
-          case "claude-code": result = wireClaudeCode(mcpEnv, httpUrl); break;
+          case "claude-code": result = wireClaudeCode(mcpEnv); break;
           case "codex": result = wireCodex(mcpEnv); break;
           case "gemini": result = wireGemini(mcpEnv); break;
           case "cursor": result = wireCursor(mcpEnv); break;
@@ -4065,7 +4066,8 @@ rem
       const candidateData = (candidate && !candidate.error) ? candidate : null;
       const decision = decideCandidateAction(candidateData, "promote");
       if (!decision.ok) {
-        console.error(`Error: candidate ${candidateId} ${decision.message}`);
+        const msg: string = (decision as { ok: false; message: string }).message;
+        console.error(`Error: candidate ${candidateId} ${msg}`);
         process.exit(1);
       }
 
@@ -4155,11 +4157,12 @@ rem
       const candidateData = (candidate && !candidate.error) ? candidate : null;
       const decision = decideCandidateAction(candidateData, "reject");
       if (!decision.ok) {
-        if (decision.severity === "info") {
-          console.log(`(candidate ${candidateId} ${decision.message})`);
+        const _d = decision as { ok: false; severity: "error" | "info"; message: string };
+        if (_d.severity === "info") {
+          console.log(`(candidate ${candidateId} ${_d.message})`);
           return;
         }
-        console.error(`Error: candidate ${candidateId} ${decision.message}`);
+        console.error(`Error: candidate ${candidateId} ${_d.message}`);
         process.exit(1);
       }
 
@@ -7000,7 +7003,7 @@ program
 
     const rawOutputPath = opts.output ?? join(homedir(), ".flair", "exports", `${agentId}-${Date.now()}.json`);
     // Canonicalize to prevent path traversal (e.g. ../../etc/passwd)
-    const outputPath = resolvePath(rawOutputPath);
+    const outputPath = resolve(rawOutputPath);
     mkdirSync(join(outputPath, ".."), { recursive: true });
     const fileMode = privateKey ? 0o600 : 0o644;
     writeFileSync(outputPath, JSON.stringify(exportData, null, 2), { mode: fileMode });

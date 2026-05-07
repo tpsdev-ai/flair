@@ -88,6 +88,8 @@ export interface MemoryBridge {
   name: string;
   version: number;
   kind: BridgeKind;
+  /** Human-readable description of the bridge for UI/cli display. */
+  description?: string;
   /** Describes CLI/env options the bridge accepts. */
   options?: Record<string, BridgeOptionSpec>;
 
