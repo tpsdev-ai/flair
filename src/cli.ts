@@ -3306,7 +3306,6 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
     const tables = ["Memory", "Soul", "Agent", "Relationship"];
     const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
-    const secretKey = await loadInstanceSecretKey(instance.id, opts);
     const hubUrl = hub.endpoint ?? hub.id;
 
     // ── Batching constants ──────────────────────────────────────────────
@@ -3316,7 +3315,12 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const BUDGET_RECORDS = 200;
 
     // ── sendBatch helper ────────────────────────────────────────────────
+    // Secret key is lazy-loaded: only needed when there are records to send.
+    // Loading earlier would cause a spurious error when SQL queries fail
+    // (e.g. 401) before we know we have records.
+    let secretKey: Uint8Array | undefined;
     async function sendBatch(batch: any[]): Promise<{ merged: number; skipped: number }> {
+      if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
       const syncBody: Record<string, any> = { instanceId: instance.id, records: batch, lamportClock: Date.now() };
       const signedSyncBody = signBodyFresh(syncBody, secretKey);
       const syncRes = await fetch(`${hubUrl}/FederationSync`, {
