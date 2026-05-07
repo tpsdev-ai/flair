@@ -48,8 +48,10 @@ export function makeContext(opts: MakeContextOptions): BridgeContext {
     });
   };
 
+  const wrappedFetch = ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init)) as typeof fetch;
+
   return {
-    fetch: (input, init) => fetch(input, init),
+    fetch: wrappedFetch,
     log: {
       debug: log("debug"),
       info: log("info"),
