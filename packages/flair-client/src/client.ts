@@ -248,9 +248,9 @@ class MemoryApi {
     };
     if (opts.limit) body.limit = opts.limit;
 
-    const result = await this.client.request("POST", "/Memory/search_by_conditions", body);
+    const result = await this.client.request<unknown>("POST", "/Memory/search_by_conditions", body);
     // search_by_conditions returns either an array or { results: [...] }
-    const memories: Memory[] = Array.isArray(result) ? result : (result?.results ?? []);
+    const memories: Memory[] = Array.isArray(result) ? result : ((result as { results?: Memory[] })?.results ?? []);
 
     // Client-side sort (Harper's search_by_conditions does not accept sort in body)
     if (opts.order) {
