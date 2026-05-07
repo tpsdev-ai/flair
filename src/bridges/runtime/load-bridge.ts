@@ -75,15 +75,17 @@ export async function loadBridge(
       if (!opts.skipAllowCheck) {
         const verdict = await verifyAllow(discovered, { path: opts.allowListPath });
         if (!verdict.ok) {
+          const reason = (verdict as { ok: false; reason: string }).reason;
+          const failVerdict = verdict as Exclude<VerifyResult, { ok: true }>;
           throw new BridgeRuntimeError({
             bridge: discovered.name,
             op: "import",
             path: discovered.path,
             field: "(trust)",
-            expected: verdict.reason === "not-allowed" ? "allow-listed code plugin" : "approved package at recorded location/digest",
-            got: verdict.reason,
-            hint: trustHint(discovered.name, verdict),
-            context: trustContext(discovered, verdict),
+            expected: reason === "not-allowed" ? "allow-listed code plugin" : "approved package at recorded location/digest",
+            got: reason,
+            hint: trustHint(discovered.name, failVerdict),
+            context: trustContext(discovered, failVerdict),
           });
         }
       }

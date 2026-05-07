@@ -8,6 +8,8 @@
  */
 
 import { promises as fsp } from "node:fs";
+
+import type { YamlFormat } from "../types.js";
 import yaml from "js-yaml";
 import { BridgeRuntimeError } from "../types.js";
 

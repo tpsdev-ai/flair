@@ -322,6 +322,42 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bunx tsc --noEmit -p tsconfig.check.json
 
+  typecheck-strict:
+    name: "Type Check (strict)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - run: bun install --frozen-lockfile
+      # Root resources (tsconfig.check.json has @harperfast/harper paths override
+      # so harper's raw .ts internals don't pollute the output)
+      - name: Type check root (resources)
+        run: npx tsc --noEmit -p tsconfig.check.json
+      # Root CLI entry point (tsconfig.cli.json — strict: false, matches build:cli)
+      - name: Type check root CLI
+        run: npx tsc --noEmit -p tsconfig.cli.json
+      # Workspace packages: check every package that has a tsconfig.json.
+      # Collect all failures so the full picture is visible, then hard-fail
+      # if any package had type errors.
+      - name: Type check workspace packages
+        run: |
+          FAIL=0
+          for pkg in packages/*/; do
+            if [ -f "$pkg/tsconfig.json" ]; then
+              echo "::group::Type check: $pkg"
+              (cd "$pkg" && npx tsc --noEmit) || FAIL=1
+              echo "::endgroup::"
+            else
+              echo "Skipping $pkg (no tsconfig.json)"
+            fi
+          done
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::One or more workspace packages have type errors"
+            exit 1
+          fi
+
   audit:
     name: Dependency Audit
     runs-on: ubuntu-latest
