@@ -149,7 +149,7 @@ export function classifyError(err: unknown, flairUrl: string): string {
 }
 
 function errorResult(err: unknown, flairUrl: string) {
-  return { content: [{ type: "text" as const, text: classifyError(err, flairUrl) }], isError: true };
+  return { content: [{ type: "text" as const, text: classifyError(err, flairUrl) }], details: {}, isError: true };
 }
 
 // ─── Extension Entry Point ────────────────────────────────────────────────────
@@ -182,7 +182,7 @@ export default function (pi: ExtensionAPI) {
         const limit = (params.limit as number | undefined) ?? config.max_recall_results;
         const results = await flair.memory.search(query, { limit });
         if (results.length === 0) {
-          return { content: [{ type: "text", text: "No relevant memories found." }] };
+          return { content: [{ type: "text", text: "No relevant memories found." }], details: {} };
         }
         const text = results
           .map((r, i) => {
@@ -192,7 +192,7 @@ export default function (pi: ExtensionAPI) {
             return `${i + 1}. ${r.content}${meta ? ` (${meta})` : ""}`;
           })
           .join("\n");
-        return { content: [{ type: "text", text }] };
+        return { content: [{ type: "text", text }], details: {} };
       } catch (err) {
         return errorResult(err, flair.url);
       }
@@ -242,7 +242,7 @@ export default function (pi: ExtensionAPI) {
         const wasDeduped = result.id && !result.id.startsWith(generatedPrefix);
         
         if (wasDeduped) {
-          return { content: [{ type: "text", text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}` }] };
+          return { content: [{ type: "text", text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}` }], details: {} };
         }
         
         const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
@@ -255,7 +255,7 @@ export default function (pi: ExtensionAPI) {
           `Durability: ${durability}`,
         ].join("\n");
         
-        return { content: [{ type: "text", text }] };
+        return { content: [{ type: "text", text }], details: {} };
       } catch (err) {
         return errorResult(err, flair.url);
       }
@@ -282,9 +282,9 @@ export default function (pi: ExtensionAPI) {
         const maxTokens = (params.maxTokens as number | undefined) ?? config.max_bootstrap_tokens;
         const result = await flair.bootstrap({ maxTokens });
         if (!result.context) {
-          return { content: [{ type: "text", text: "No context available." }] };
+          return { content: [{ type: "text", text: "No context available." }], details: {} };
         }
-        return { content: [{ type: "text", text: result.context }] };
+        return { content: [{ type: "text", text: result.context }], details: {} };
       } catch (err) {
         return errorResult(err, flair.url);
       }
@@ -310,7 +310,7 @@ export default function (pi: ExtensionAPI) {
             timestamp: Date.now(),
           });
           
-          ctx.ui.notify("Flair: context loaded", "success");
+          ctx.ui.notify("Flair: context loaded", "info");
         } else {
           ctx.ui.notify("Flair: no context available", "info");
         }
@@ -329,9 +329,9 @@ export default function (pi: ExtensionAPI) {
       const branch = ctx.sessionManager.getBranch();
       if (branch.length >= 2) {
         const lastEntry = branch[branch.length - 2];
-        if (lastEntry.role === "assistant" && lastEntry.content) {
+        if (lastEntry.type === "message" && lastEntry.message.role === "assistant" && lastEntry.message.content) {
           // Convert to string for storage
-          const content = JSON.stringify(lastEntry.content);
+          const content = JSON.stringify(lastEntry.message.content);
           
           // Filter out content containing secrets
           if (containsSecrets(content)) {
