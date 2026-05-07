@@ -3290,6 +3290,8 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
   const target = resolveTarget(opts);
   const baseUrl = target ? target.replace(/\/$/, "") : undefined;
   const apiOpts = baseUrl ? { baseUrl } : undefined;
+  let totalMerged = 0;
+  let totalSkipped = 0;
   try {
     const { peers } = await api("GET", "/FederationPeers", undefined, apiOpts);
     const hub = peers.find((p: any) => p.role === "hub" && p.status !== "revoked");
@@ -3329,8 +3331,6 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       return await syncRes.json() as { merged: number; skipped: number };
     }
 
-    let totalMerged = 0;
-    let totalSkipped = 0;
     let totalBatches = 0;
 
     for (const table of tables) {
