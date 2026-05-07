@@ -338,6 +338,12 @@ jobs:
       # Root CLI entry point (tsconfig.cli.json — strict: false, matches build:cli)
       - name: Type check root CLI
         run: npx tsc --noEmit -p tsconfig.cli.json
+      # Build flair-client so workspace consumers (n8n-nodes-flair, pi-flair,
+      # openclaw-flair) can resolve @tpsdev-ai/flair-client emitted types.
+      # Without this, workspace tsc fails with "Cannot find module" because
+      # Bun workspace symlinks point at source, not emitted .d.ts files.
+      - name: Build flair-client
+        run: cd packages/flair-client && bun run build
       # Workspace packages: check every package that has a tsconfig.json.
       # Collect all failures so the full picture is visible, then hard-fail
       # if any package had type errors.
