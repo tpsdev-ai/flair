@@ -292,6 +292,12 @@ jobs:
           STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
           echo "$STATUS" | grep -q "running" || { echo "FAIL: HEAD didn't start after upgrade from $BASELINE"; exit 1; }
 
+          # 4a. Run the documented post-upgrade migration: re-embed all memories
+          # so their stored vectors match the running Harper version's expected
+          # shape. Required when bumping @harperfast/harper across versions where
+          # HNSW storage internals changed (e.g. 5.0.1 → 5.0.9). See CHANGELOG.
+          $FLAIR reembed --port $PORT
+
           # 5. Pre-upgrade memory must still be readable (the core regression guard)
           POST=$($FLAIR memory search --agent upgrade --q "upgrade-smoke-pre-marker")
           echo "$POST"

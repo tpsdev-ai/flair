@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.8.0 (2026-05-07) — BREAKING
+
+### ⚠️ Required migration: `flair reembed` after upgrade from 0.7.x
+
+**If you have existing Flair data written by `@tpsdev-ai/flair@0.7.x`, run `flair reembed` once after upgrading to 0.8.0 before semantic search will work.**
+
+```sh
+# 1. Stop your old install
+flair stop
+
+# 2. Install 0.8.0
+npm install -g @tpsdev-ai/flair@0.8.0
+
+# 3. Start against your existing data dir
+flair start
+
+# 4. Re-encode every memory's embedding so it matches the new index format
+FLAIR_ADMIN_PASS=<your-admin-pass> flair reembed
+```
+
+Why: 0.8.0 ships with `@harperfast/harper@5.0.9` (was 5.0.1 in 0.7.x). Harper's HNSW vector-index storage internals changed across that version range, and embeddings written under 5.0.1 come back in a shape that 5.0.9's cosine path rejects (`Cosine distance comparison requires an array`). `flair reembed` re-computes every memory's embedding via the running version's pipeline and writes it back through the proper PUT path — one-time, idempotent, takes ~30s for 500 memories.
+
+Zero-data-loss: contents, durability, retrieval counts, and all other fields are preserved. Only the stored embedding column is rebuilt. New writes after 0.8.0 work without migration.
+
+Per the pre-1.0 versioning policy, this minor bump is breaking on purpose.
+
+### 🐛 Bug Fixes
+
+- **`flair reembed` no longer hits `/SemanticSearch` to enumerate memories.** The previous implementation called the very endpoint that breaks during a Harper upgrade, so it couldn't recover from the condition it was meant to fix. Now uses the Harper ops API directly (`search_by_conditions` on `flair.Memory`) so the migration path works even when the vector index is in an incompatible state.
+
+- **`flair reembed --agent <id>` also bypasses `/SemanticSearch` when an admin pass is available.** Falls back to the auth-fetch SemanticSearch path only when no admin pass is set (compatible with version-matched data).
+
+### 🛠 CI
+
+- **`Upgrade from npm-stable` job now runs `flair reembed` after upgrade**, mirroring the documented migration. Catches storage-format breakage at PR time instead of release-time.
+
+- **`test/unit/federation-pair-role.test.ts` restores `globalThis.fetch` in `afterEach`** — the previous mock leaked into integration tests, masquerading as Harper-unhealthy timeouts when running the full suite.
+
 ## Unreleased
 
 ### 🛠 Chores
