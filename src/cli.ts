@@ -6228,7 +6228,8 @@ memory.command("hygiene")
 
     console.log("");
     console.log(`Match summary (${apply ? "APPLY" : "dry-run"}):`);
-    for (const c of ["compact-id", "test-content", "tiny"]) {
+    const allCategories: HygieneCategory[] = ["compact-id", "test-content", "tiny"];
+    for (const c of allCategories) {
       const n = matched.get(c)?.size ?? 0;
       const enabledMark = enabled.has(c) ? "✓" : "·";
       console.log(`  ${enabledMark} ${c.padEnd(13)} ${n.toString().padStart(5)} rows`);
