@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1 (2026-05-08)
+
+### 🐛 Bug Fixes
+
+- **`@tpsdev-ai/openclaw-flair@0.8.0` shipped with a stale `flair-client@0.5.0` dependency** (caught post-merge by Kern review on #367). Anyone `npm install @tpsdev-ai/openclaw-flair@0.8.0` resolved a 3-version-old client paired with the new server. 0.8.1 bumps the dep to match the current major release. No code changes; metadata-only fix.
+
+- **bun.lock regenerated cleanly** so any internal `flair-client@0.7.0`/`@0.5.0` resolution remnants are gone. `bun install --frozen-lockfile` now resolves consistently across every workspace package.
+
 ## 0.8.0 (2026-05-07) — BREAKING
 
 ### ⚠️ Required migration: `flair reembed` after upgrade from 0.7.x
