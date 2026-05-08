@@ -6111,6 +6111,164 @@ memory.command("list")
     }
   });
 
+// ─── flair memory hygiene ────────────────────────────────────────────────────
+// Detect + remove junk memory rows that accumulate over time. Surfaced from
+// the 2026-05-07 manual cleanup (ops-ucyy): rockit had 627 records, ~250 of
+// them were noise — `*-compact-*` ID fragments from an old pipeline, pangram
+// test content ("the quick brown fox..." / "Flair 251 test ..."), and
+// near-empty rows (<25 chars). We did the cleanup ad-hoc with raw curl + jq;
+// this command bundles those patterns + future ones as an operator tool that
+// dry-runs by default.
+//
+// Three pattern categories, each toggle-able:
+//   --pattern compact-id   : ids matching /-compact-/ (legacy pipeline output)
+//   --pattern test-content : content matching pangram / known test strings
+//   --pattern tiny         : content shorter than 25 chars
+//
+// Default is all three, dry-run. Flip --apply to actually delete. Always
+// requires admin pass to read across agent scopes (uses ops API).
+//
+// Federation note: this only deletes on the local instance. ops-esun
+// (federation distributed-delete via tombstones) is the systemic answer for
+// fan-out — until that lands, run `flair memory hygiene` on each peer.
+
+// Exported for unit testing — keeps the predicate logic separable from
+// the CLI plumbing, ops-API fetching, and confirmation flow.
+export const HYGIENE_TEST_CONTENT_PATTERNS: RegExp[] = [
+  /quick brown fox/i,
+  /flair\s*251\s*test/i,
+  /^upgrade-smoke-(pre|post)-marker$/i,
+];
+
+export interface HygieneRow { id: string; content?: string }
+export type HygieneCategory = "compact-id" | "test-content" | "tiny";
+export interface HygieneOptions { enabled: Set<HygieneCategory>; tinyThreshold: number }
+
+/** Categorize a single memory row against the enabled hygiene patterns.
+ *  Returns the list of categories the row matches; empty array means clean.
+ *  Pure function — easy to unit test and reason about. */
+export function categorizeForHygiene(row: HygieneRow, opts: HygieneOptions): HygieneCategory[] {
+  const cats: HygieneCategory[] = [];
+  if (opts.enabled.has("compact-id") && typeof row.id === "string" && row.id.includes("-compact-")) {
+    cats.push("compact-id");
+  }
+  if (opts.enabled.has("test-content") && typeof row.content === "string" && HYGIENE_TEST_CONTENT_PATTERNS.some((p) => p.test(row.content!))) {
+    cats.push("test-content");
+  }
+  if (opts.enabled.has("tiny") && typeof row.content === "string" && row.content.length < opts.tinyThreshold) {
+    cats.push("tiny");
+  }
+  return cats;
+}
+
+memory.command("hygiene")
+  .description("Detect and (with --apply) remove junk memory rows from the local instance")
+  .option("--apply", "Actually delete the matched rows (default: dry-run)")
+  .option("--pattern <list>", "Comma-separated patterns to match: compact-id,test-content,tiny (default: all)")
+  .option("--tiny-threshold <n>", "Char length below which content is 'tiny'", "25")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--ops-port <port>", "Harper ops API port (default: HTTP - 1)")
+  .action(async (opts) => {
+    const opsPort = resolveOpsPort(opts);
+    const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+    if (!adminPass) {
+      console.error("❌ Admin password required (set FLAIR_ADMIN_PASS or HDB_ADMIN_PASSWORD).");
+      process.exit(1);
+    }
+
+    const enabled = new Set(
+      (opts.pattern ?? "compact-id,test-content,tiny").split(",").map((s: string) => s.trim()).filter(Boolean),
+    );
+    const tinyThreshold = Math.max(0, Number(opts.tinyThreshold) || 25);
+    const apply: boolean = !!opts.apply;
+
+    const opsAuth = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
+    async function ops(body: unknown): Promise<unknown> {
+      const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: opsAuth },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!res.ok) {
+        throw new Error(`ops API failed (${res.status}): ${await res.text().catch(() => "")}`);
+      }
+      return res.json();
+    }
+
+    // Fetch all rows via ops API. Bypasses /SemanticSearch (vector index) the
+    // same way `flair reembed` does, so this command works even when the
+    // cosine path is broken — exactly the conditions hygiene is most needed.
+    console.log("Scanning Memory table...");
+    const raw = await ops({
+      operation: "search_by_conditions",
+      database: "flair",
+      table: "Memory",
+      operator: "and",
+      conditions: [{ search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" }],
+      get_attributes: ["id", "agentId", "content", "createdAt"],
+      limit: 100000,
+    });
+    const rows: any[] = Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
+    console.log(`  ${rows.length} total memories scanned.`);
+
+    // Match each pattern. Counts by category, single id list for the delete.
+    const matched = new Map<HygieneCategory, Set<string>>();
+    const allIds = new Set<string>();
+    const hygieneOpts: HygieneOptions = { enabled: enabled as Set<HygieneCategory>, tinyThreshold };
+
+    for (const r of rows) {
+      const categories = categorizeForHygiene(r, hygieneOpts);
+      for (const c of categories) {
+        if (!matched.has(c)) matched.set(c, new Set());
+        matched.get(c)!.add(r.id);
+        allIds.add(r.id);
+      }
+    }
+
+    console.log("");
+    console.log(`Match summary (${apply ? "APPLY" : "dry-run"}):`);
+    for (const c of ["compact-id", "test-content", "tiny"]) {
+      const n = matched.get(c)?.size ?? 0;
+      const enabledMark = enabled.has(c) ? "✓" : "·";
+      console.log(`  ${enabledMark} ${c.padEnd(13)} ${n.toString().padStart(5)} rows`);
+    }
+    console.log(`  ────────────────────────────`);
+    console.log(`    total unique ${allIds.size.toString().padStart(5)} rows`);
+
+    if (allIds.size === 0) {
+      console.log("\n✅ Nothing to clean.");
+      return;
+    }
+
+    if (!apply) {
+      console.log("\n(dry-run) — re-run with --apply to delete the matched rows.");
+      return;
+    }
+
+    // Delete in chunks (Harper accepts batches of hash_values).
+    const ids = Array.from(allIds);
+    const chunkSize = 200;
+    let deleted = 0;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const batch = ids.slice(i, i + chunkSize);
+      const result = await ops({
+        operation: "delete",
+        database: "flair",
+        table: "Memory",
+        hash_values: batch,
+      }) as { message?: string };
+      const m = /(\d+)\s*of\s*\d+\s*records/.exec(result.message ?? "");
+      deleted += m ? Number(m[1]) : batch.length;
+      process.stdout.write(`\r  Deleting ${deleted}/${ids.length} (${Math.round((deleted / ids.length) * 100)}%)`);
+    }
+    console.log(`\n\n✅ Deleted ${deleted} rows.`);
+    console.log("");
+    console.log("Note: this is a local-instance delete. Federated peers will keep their copies until");
+    console.log("ops-esun (tombstone-based distributed delete) lands. Until then, run `flair memory");
+    console.log("hygiene --apply` on each peer to fan out.");
+  });
+
 // ─── flair search (top-level shortcut) ───────────────────────────────────────
 
 program
