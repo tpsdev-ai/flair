@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { ensureFlairPairInitiatorRole } from "../../src/cli";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -50,8 +50,17 @@ describe("ensureFlairPairInitiatorRole", () => {
   // Track which operations were sent to the mock ops API
   let capturedBodies: Array<Record<string, unknown>> = [];
 
+  // Save the original fetch so we can restore it after each test. Without this,
+  // the mock leaks to subsequent test files and breaks integration tests that
+  // need real fetch (manifests as "Unexpected fetch call #N" against Harper).
+  const origFetch = globalThis.fetch;
+
   beforeEach(() => {
     capturedBodies = [];
+  });
+
+  afterEach(() => {
+    globalThis.fetch = origFetch;
   });
 
   /**

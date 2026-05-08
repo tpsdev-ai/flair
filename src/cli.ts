@@ -5231,21 +5231,40 @@ program
         process.exit(1);
       }
 
-      // Fetch all memories with admin auth
-      const searchRes = await fetch(`${baseUrl}/SemanticSearch`, {
+      // Fetch every memory via the Harper ops API (search_by_conditions on the
+      // Memory table) rather than POST /SemanticSearch. SemanticSearch goes
+      // through the HNSW cosine index, which throws "Cosine distance comparison
+      // requires an array" against rows whose stored embedding shape is
+      // incompatible with the running Harper version (e.g. data written under
+      // @harperfast/harper@5.0.1 read under 5.0.9). The ops API bypasses the
+      // vector index — exactly what we need when the goal is to replace every
+      // embedding with a freshly-computed one. Without this path, `flair
+      // reembed` could not recover from the very condition it exists to fix.
+      const opsPort = resolveOpsPort(opts);
+      const opsAuth = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
+      // Harper rejects empty-value conditions ("not indexed for nulls"). Use
+      // `createdAt > 1970-01-01` as the "select all" pattern: every Memory row
+      // has a createdAt, the index is built, and the comparison is total.
+      const searchRes = await fetch(`http://127.0.0.1:${opsPort}/`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`,
-        },
-        body: JSON.stringify({ limit: 10000 }),
+        headers: { "Content-Type": "application/json", Authorization: opsAuth },
+        body: JSON.stringify({
+          operation: "search_by_conditions",
+          database: "flair",
+          table: "Memory",
+          operator: "and",
+          conditions: [{ search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" }],
+          get_attributes: ["*"],
+          limit: 100000,
+        }),
+        signal: AbortSignal.timeout(60_000),
       });
       if (!searchRes.ok) {
-        console.error(`❌ Failed to fetch memories: ${searchRes.status}`);
+        console.error(`❌ Failed to fetch memories via ops API: ${searchRes.status}`);
         process.exit(1);
       }
-      const data = await searchRes.json() as { results?: any[] };
-      const allMemories = data.results ?? [];
+      const raw = await searchRes.json() as unknown;
+      const allMemories: any[] = Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
 
       // Group by agentId
       const byAgent = new Map<string, any[]>();
@@ -5303,7 +5322,11 @@ program
       return;
     }
 
-    // Original single-agent path
+    // Single-agent path. Same rationale as above: fetch via the ops API
+    // (search_by_value on agentId) so the vector index isn't in the read path.
+    // This requires admin pass — fall back to the old SemanticSearch fetch only
+    // if no admin pass is available, since that path still works on
+    // version-matched data and requires only the agent's own key.
     const keysDir = defaultKeysDir();
     const privPath = privKeyPath(agentId, keysDir);
     if (!existsSync(privPath)) {
@@ -5311,15 +5334,41 @@ program
       process.exit(1);
     }
 
-    const searchRes = await authFetch(baseUrl, agentId, privPath, "POST", "/SemanticSearch", {
-      agentId, limit: 10000,
-    });
-    if (!searchRes.ok) {
-      console.error(`❌ Failed to fetch memories: ${searchRes.status}`);
-      process.exit(1);
+    const adminPassSingle = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+    let allMemories: any[] = [];
+    if (adminPassSingle) {
+      const opsPort = resolveOpsPort(opts);
+      const opsAuth = `Basic ${Buffer.from(`admin:${adminPassSingle}`).toString("base64")}`;
+      const searchRes = await fetch(`http://127.0.0.1:${opsPort}/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: opsAuth },
+        body: JSON.stringify({
+          operation: "search_by_value",
+          database: "flair",
+          table: "Memory",
+          search_attribute: "agentId",
+          search_value: agentId,
+          get_attributes: ["*"],
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!searchRes.ok) {
+        console.error(`❌ Failed to fetch memories via ops API: ${searchRes.status}`);
+        process.exit(1);
+      }
+      const raw = await searchRes.json() as unknown;
+      allMemories = Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
+    } else {
+      const searchRes = await authFetch(baseUrl, agentId, privPath, "POST", "/SemanticSearch", {
+        agentId, limit: 10000,
+      });
+      if (!searchRes.ok) {
+        console.error(`❌ Failed to fetch memories: ${searchRes.status}`);
+        process.exit(1);
+      }
+      const data = await searchRes.json() as { results?: any[] };
+      allMemories = data.results ?? [];
     }
-    const data = await searchRes.json() as { results?: any[] };
-    const allMemories = data.results ?? [];
 
     const candidates = allMemories.filter((m: any) => {
       if (!m.content) return false;
