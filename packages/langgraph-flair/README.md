@@ -40,7 +40,7 @@ LangGraph's `BaseStore` uses hierarchical namespaces (`["users", "profiles"]`) a
 
 | LangGraph | Flair |
 |-----------|-------|
-| `namespace: ["users", "profiles"]` | `tags: ["lg-ns:users/profiles", "lg-ns-part:users", "lg-ns-part:profiles"]` |
+| `namespace: ["users", "profiles"]` | `tags: ["lg-ns:users/profiles"]` |
 | `key: "user123"` | id suffix: `lg:<agentId>:users/profiles:user123` |
 | `value: { name: "Alice" }` | `content: '{"name":"Alice"}'` |
 | `search.query: "..."` | semantic search via Flair's HNSW index |
@@ -74,6 +74,7 @@ const store = new FlairStore({
 
 - LangGraph's `IndexConfig` (custom embedding model, per-field indexing) is ignored. Flair has its own embedding pipeline (`nomic-embed-text-v1.5`, 768-dim) and embeds the full content blob. If you need per-field embeddings, pre-extract and store as separate items.
 - `search.filter` operators (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`) are applied client-side after retrieving the namespace prefix. Tag-based pre-filtering (the namespace) keeps this bounded; high-fanout filters across many memories will be slower.
+- Namespace-prefix matching uses the full joined-path tag (`lg-ns:users/profiles`). Items in `["users", "profiles", "u123"]` are reachable via the `["users", "profiles"]` prefix because the search routine post-filters parsed namespaces against the requested prefix — but searching by a *single label anywhere in the namespace* (e.g. "all items with `profiles` somewhere") isn't supported. LangGraph's `BaseStore.search` API doesn't expose this surface either, so there's no read path that would benefit; if a future LangGraph extension adds it we'll add a derived index then.
 - `listNamespaces` returns namespaces seen in your stored memories (best-effort scan). Empty namespaces aren't enumerable.
 
 ## License

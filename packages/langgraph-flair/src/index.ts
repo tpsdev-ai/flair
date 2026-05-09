@@ -101,14 +101,20 @@ type Operation =
 
 const NS_SEP = "/"; // LangGraph forbids periods in namespace labels
 const TAG_PREFIX_FULL = "lg-ns:";
-const TAG_PREFIX_PART = "lg-ns-part:";
 
+/** Single namespace tag — the joined-path form (e.g. "lg-ns:users/profiles").
+ *
+ *  We previously also wrote per-segment tags (lg-ns-part:users, lg-ns-part:
+ *  profiles) for "contains-label" queries, but LangGraph's BaseStore.search
+ *  contract takes a `namespacePrefix` array — there's no surface for "items
+ *  containing this label anywhere." The per-part tags inflated the Harper
+ *  tag index with no read path. Dropped per Kern's review on #370.
+ *
+ *  If a future LangGraph extension exposes a "search by label" API, we can
+ *  add a derived index then — until then, dead storage is worse than a
+ *  documented gap. */
 function nsTags(namespace: string[]): string[] {
-  const tags = [`${TAG_PREFIX_FULL}${namespace.join(NS_SEP)}`];
-  for (const part of namespace) {
-    tags.push(`${TAG_PREFIX_PART}${part}`);
-  }
-  return tags;
+  return [`${TAG_PREFIX_FULL}${namespace.join(NS_SEP)}`];
 }
 
 function memoryId(agentId: string, namespace: string[], key: string): string {
@@ -131,8 +137,11 @@ function isListNs(op: Operation): op is ListNamespacesOperation {
 /**
  * Apply a single LangGraph filter operator. Mirrors BaseStore's documented
  * surface: $eq (default), $ne, $gt, $gte, $lt, $lte. Bare values are $eq.
+ *
+ * Exported for unit testing (Kern review on #370 — non-trivial logic with
+ * 7 branches must have coverage).
  */
-function matchesFilter(value: any, condition: any): boolean {
+export function matchesFilter(value: any, condition: any): boolean {
   if (condition === null || typeof condition !== "object") {
     return value === condition;
   }
@@ -150,7 +159,8 @@ function matchesFilter(value: any, condition: any): boolean {
   return true;
 }
 
-function matchesAllFilters(value: Record<string, any>, filter: Record<string, any> | undefined): boolean {
+/** Apply all field filters in a search request. Logical AND across fields. */
+export function matchesAllFilters(value: Record<string, any>, filter: Record<string, any> | undefined): boolean {
   if (!filter) return true;
   for (const [field, condition] of Object.entries(filter)) {
     if (!matchesFilter(value[field], condition)) return false;
