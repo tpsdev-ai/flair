@@ -19,6 +19,7 @@ import type {
   YamlBridgeDescriptor,
 } from "../types.js";
 import { agenticStackDescriptor } from "./agentic-stack.js";
+import { chatgptMemoryBridge } from "./chatgpt.js";
 import { markdownMemoryBridge } from "./markdown.js";
 
 export interface BuiltinBridge {
@@ -59,6 +60,7 @@ function builtinPlugin(p: MemoryBridge): BuiltinBridge {
 /** All bridges shipped inside @tpsdev-ai/flair. Order doesn't matter. */
 export const BUILTINS: BuiltinBridge[] = [
   builtinDescriptor(agenticStackDescriptor),
+  builtinPlugin(chatgptMemoryBridge),
   builtinPlugin(markdownMemoryBridge),
 ];
 
