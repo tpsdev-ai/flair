@@ -99,6 +99,21 @@ Blocks at stage time:
 
 Available in `ops/scripts/git-hooks/install.sh`. Required for any agent or operator with commit access.
 
+### Flair pre-commit hook (`scripts/git-hooks/`)
+
+Mirrors the CI test-unit gates locally so issues are caught at `git commit` time, not after the runner round-trip:
+
+```bash
+./scripts/git-hooks/install.sh
+```
+
+Runs three checks before each commit:
+- `check-workspace-deps.mjs` — workspace internal-dep version lockstep
+- `check-dep-ages.mjs` — supply-chain bake-time (≥7 days for external pinned deps)
+- `check-impl-term-leaks.sh` — no Bead refs / impl labels in user-facing docs
+
+Each check matches a CI gate exactly so the local and remote outcomes can't drift. Bypass with `git commit --no-verify` when warranted (rare; CI will still catch you). Skip just the dep-ages check (the slowest one, ~2-5s of registry fetches) with `FLAIR_PRECOMMIT_SKIP_DEP_AGES=1 git commit`.
+
 ---
 
 ## Adopting this policy in a downstream project
@@ -132,4 +147,5 @@ The script has no external dependencies — node 18+ is enough.
 - `notes/dogfood-log.md` — internal incidents that have shaped this policy
 - `scripts/check-workspace-deps.mjs` — the workspace-internal dep consistency gate
 - `scripts/check-dep-ages.mjs` — the bake-time dep guard
-- `ops/scripts/git-hooks/pre-commit-secret-guard.sh` — pre-commit secret blocker
+- `ops/scripts/git-hooks/pre-commit-secret-guard.sh` — pre-commit secret blocker (cross-repo)
+- `scripts/git-hooks/pre-commit` + `scripts/git-hooks/install.sh` — flair-specific pre-commit (mirrors test-unit CI gates)
