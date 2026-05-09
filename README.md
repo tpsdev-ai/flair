@@ -12,25 +12,31 @@ Most agent memory systems store *facts*. Flair stores facts AND the agent's iden
 ┌──────────────────────────────────────────────────────────────────┐
 │  same agent, same memory, every harness                          │
 │                                                                  │
-│  Claude Code ─┐                                                  │
-│  Cursor ──────┤                                                  │
-│  Codex CLI ───┼──[ flair-mcp ]─┐                                 │
-│  Gemini CLI ──┤                │                                 │
-│  Continue.dev ┤                │     ┌─────────────────────┐     │
-│  Goose ───────┘                ├──▶  │  Flair (rockit)     │     │
-│  LangGraph ──[ langgraph-flair]┤     │  Ed25519 / HNSW /   │     │
-│  OpenClaw ───[ openclaw-flair ]┤     │  Soul + Memory      │     │
-│  n8n ────────[ n8n-nodes-flair]┤     └──────────┬──────────┘     │
-│  Hermes ─────[ hermes-flair   ]┤                │ federation     │
-│  Pi agent ───[ pi-flair       ]┘                │ (hub/spoke)    │
-│                                                  ▼                │
-│                                        ┌─────────────────────┐    │
-│                                        │  Flair (Fabric hub) │    │
-│                                        └─────────────────────┘    │
+│  Claude Code  ─┐                                                 │
+│  Cursor       ─┤                                                 │
+│  Codex CLI    ─┼─[ flair-mcp ]─┐                                 │
+│  Gemini CLI   ─┤               │                                 │
+│  Continue.dev ─┤               │   ┌──────────────────────┐      │
+│  Goose        ─┘               ├─▶ │  Flair (rockit)      │      │
+│  LangGraph   ─[ langgraph-flair ]──│  Ed25519 / HNSW /    │      │
+│  OpenClaw    ─[ openclaw-flair  ]──│  Soul + Memory       │      │
+│  n8n         ─[ n8n-nodes-flair ]──└──────────┬───────────┘      │
+│  Hermes      ─[ hermes-flair    ]─┘           │ federation       │
+│  Pi agent    ─[ pi-flair        ]─┘           │ (hub/spoke)      │
+│                                               ▼                  │
+│                                    ┌──────────────────────┐      │
+│                                    │  Flair (Fabric hub)  │      │
+│                                    └──────────────────────┘      │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 11 harness surfaces today. Pick whichever you're shipping in; the memory layer doesn't care. **[See the full integrations catalog →](docs/integrations.md)**
+
+## What it looks like
+
+![Flair: write a memory, find it by meaning, list of supported harnesses](docs/assets/flair-demo.gif)
+
+`flair memory add` writes a memory; `flair search` finds it by meaning, not keywords. The same memory is then visible to every harness in the catalog above.
 
 ## How Flair compares
 
