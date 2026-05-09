@@ -21,6 +21,7 @@ import type {
 import { agenticStackDescriptor } from "./agentic-stack.js";
 import { chatgptMemoryBridge } from "./chatgpt.js";
 import { markdownMemoryBridge } from "./markdown.js";
+import { mem0MemoryBridge } from "./mem0.js";
 
 export interface BuiltinBridge {
   /** The discovery record surfaced in `flair bridge list`. */
@@ -62,6 +63,7 @@ export const BUILTINS: BuiltinBridge[] = [
   builtinDescriptor(agenticStackDescriptor),
   builtinPlugin(chatgptMemoryBridge),
   builtinPlugin(markdownMemoryBridge),
+  builtinPlugin(mem0MemoryBridge),
 ];
 
 /** Map name → descriptor/plugin for O(1) runtime lookup. */
