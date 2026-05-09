@@ -4,23 +4,70 @@
 [![Docker Test](https://github.com/tpsdev-ai/flair/actions/workflows/docker-test.yml/badge.svg)](https://github.com/tpsdev-ai/flair/actions/workflows/docker-test.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-**Identity, memory, and soul for AI agents. Runs standalone or as part of a [TPS](https://tps.dev) office.**
+> **The memory system that gives agents a durable identity, not just durable facts. Federated. Crypto-isolated. Yours.**
 
-Agents forget everything between sessions. Flair gives them a persistent sense of self — who they are, what they know, how they think — backed by cryptographic identity and semantic search.
+Most agent memory systems store *facts*. Flair stores facts AND the agent's identity — its character, its values, its accumulated way of working. Same agent, different orchestrator: memory follows. Same network, different machine: memory federates. Same instance, different agents: memory is crypto-isolated end-to-end.
 
-Built on [Harper](https://harper.fast). Single process. No sidecars. Zero external API calls for embeddings.
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  same agent, same memory, every harness                          │
+│                                                                  │
+│  Claude Code ─┐                                                  │
+│  Cursor ──────┤                                                  │
+│  Codex CLI ───┼──[ flair-mcp ]─┐                                 │
+│  Gemini CLI ──┤                │                                 │
+│  Continue.dev ┤                │     ┌─────────────────────┐     │
+│  Goose ───────┘                ├──▶  │  Flair (rockit)     │     │
+│  LangGraph ──[ langgraph-flair]┤     │  Ed25519 / HNSW /   │     │
+│  OpenClaw ───[ openclaw-flair ]┤     │  Soul + Memory      │     │
+│  n8n ────────[ n8n-nodes-flair]┤     └──────────┬──────────┘     │
+│  Hermes ─────[ hermes-flair   ]┤                │ federation     │
+│  Pi agent ───[ pi-flair       ]┘                │ (hub/spoke)    │
+│                                                  ▼                │
+│                                        ┌─────────────────────┐    │
+│                                        │  Flair (Fabric hub) │    │
+│                                        └─────────────────────┘    │
+└──────────────────────────────────────────────────────────────────┘
+```
 
-## Why
+11 harness surfaces today. Pick whichever you're shipping in; the memory layer doesn't care. **[See the full integrations catalog →](docs/integrations.md)**
+
+## How Flair compares
+
+| | Flair | Mem0 | Honcho | Letta (MemGPT) | Built-ins (OAI/Anthropic/Google) |
+|---|---|---|---|---|---|
+| **License** | Apache 2.0 | Apache 2.0 | AGPL-3.0 | Apache 2.0 | proprietary |
+| **Self-host** | yes | yes (Docker) | yes (Docker) | yes | no |
+| **Managed cloud also offered** | no | yes (app.mem0.ai) | yes (app.honcho.dev) | no | only mode |
+| **Identity model** | **Ed25519 per agent (crypto-pinned)** | tenant-isolation | per-user soft tenant | runtime-bound | account-scoped |
+| **Federation (peer-to-peer)** | **yes — hub/spoke validated** | no | no | no | no |
+| **Cross-orchestrator** | **11+ harnesses, same memory** | several | several | runtime-bound | vendor-locked |
+| **Semantic search** | in-process (nomic-embed, no API calls) | yes | yes | yes | varies |
+| **Soul / persistent character** | **first-class** | optional | persona-shaped | optional | no |
+
+Mem0, Honcho, and Letta are all open-source and self-hostable — credit where it's due. That's why we don't lead with "open source" as the differentiator. The cells in **bold** are the ones that, in our reading, no other system can claim cleanly today: crypto-pinned per-agent identity, peer-to-peer federation, the breadth of cross-orchestrator integrations, and soul as a first-class primitive.
+
+The honest gaps:
+
+- Mem0's **cloud sync UX** is more polished if you're OK with their hosting.
+- Honcho's **persona model** is more developed if rich personality modeling is your priority.
+- Letta's **runtime integration** is tighter if you're building on their agent loop.
+
+If you need any of those specifically, use them. If you need crypto-pinned identity + federation + cross-orchestrator breadth + soul-as-a-feature — that's the gap Flair fills.
+
+## Why this exists
 
 Every agent framework gives you chat history. None of them give you *identity*.
 
 An agent that can't remember what it learned yesterday, can't prove who it is to another agent, and loses its personality on restart isn't really an agent. It's a stateless function with a system prompt.
 
-Flair fixes that:
+Flair fixes that with three primitives:
 
-- **Identity** — Ed25519 key pairs. Agents sign every request. No passwords, no API keys, no shared secrets.
-- **Memory** — Persistent knowledge with semantic search. Write a lesson learned today, find it six months from now by meaning, not keywords.
-- **Soul** — Personality, values, procedures. The stuff that makes an agent *that agent*, not just another LLM wrapper.
+- **Identity** — Ed25519 key pairs. Agents sign every request. No passwords, no API keys, no shared secrets. Cross-agent reads are refused at the server, not by client convention.
+- **Memory** — Persistent knowledge with semantic search (in-process [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF), 768-dim, no API calls). Tiered durability (`permanent` / `persistent` / `standard` / `ephemeral`). Temporal validity. Decay-and-retrieval-aware composite scoring.
+- **Soul** — Personality, values, procedures. The stuff that makes an agent *that agent*. Re-injected every turn via the context-engine plugin so it doesn't drift across long sessions.
+
+Built on [Harper](https://harper.fast). Single process. No sidecars. Zero external API calls for embeddings. **[Supply-chain policy](docs/supply-chain-policy.md)** documents the bake-time + dep-pinning we run to keep this honest.
 
 ## How It Works
 
