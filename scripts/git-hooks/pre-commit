@@ -1,0 +1,73 @@
+#!/bin/sh
+# Pre-commit hook for the Flair monorepo.
+#
+# Runs the same lints the CI test-unit job runs, locally, before the commit
+# lands. Catches the staleness/leak/age classes 60s earlier than CI and
+# without burning a runner round-trip.
+#
+# Each check matches a CI gate exactly so they can't drift:
+#   - check-workspace-deps.mjs  → CI test-unit (workspace internal-dep lockstep)
+#   - check-dep-ages.mjs         → CI test-unit (supply-chain bake time, ≥7d)
+#   - check-impl-term-leaks.sh   → CI Doc/Code Lint (no Bead refs in user-facing docs)
+#
+# Install:
+#   ./scripts/git-hooks/install.sh           (from inside the flair repo)
+#
+# Bypass (rarely warranted):
+#   git commit --no-verify
+# Don't make a habit of it. CI will catch you anyway.
+#
+# Performance:
+#   The dep-ages check makes one HTTP request per pinned external dep
+#   (currently 6). Total ~2-5s on a warm registry. If that's painful,
+#   set FLAIR_PRECOMMIT_SKIP_DEP_AGES=1 (the CI job will still catch
+#   anything you missed).
+
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+red()   { printf '\033[31m%s\033[0m\n' "$1" >&2; }
+yellow(){ printf '\033[33m%s\033[0m\n' "$1" >&2; }
+green() { printf '\033[32m%s\033[0m\n' "$1" >&2; }
+
+FAIL=0
+
+if [ -f scripts/check-workspace-deps.mjs ]; then
+    if ! node scripts/check-workspace-deps.mjs >/dev/null 2>&1; then
+        red "✗ workspace-deps consistency check failed"
+        node scripts/check-workspace-deps.mjs >&2 || true
+        FAIL=1
+    else
+        green "✓ workspace-deps consistency"
+    fi
+fi
+
+if [ -f scripts/check-dep-ages.mjs ] && [ -z "$FLAIR_PRECOMMIT_SKIP_DEP_AGES" ]; then
+    if ! node scripts/check-dep-ages.mjs >/dev/null 2>&1; then
+        red "✗ dep-ages bake-time check failed"
+        node scripts/check-dep-ages.mjs >&2 || true
+        FAIL=1
+    else
+        green "✓ dep-ages bake-time"
+    fi
+fi
+
+if [ -f scripts/check-impl-term-leaks.sh ]; then
+    if ! bash scripts/check-impl-term-leaks.sh >/dev/null 2>&1; then
+        red "✗ impl-term-leaks lint failed"
+        bash scripts/check-impl-term-leaks.sh >&2 || true
+        FAIL=1
+    else
+        green "✓ no impl-term leaks"
+    fi
+fi
+
+if [ "$FAIL" = "1" ]; then
+    red ""
+    red "Pre-commit hook blocked this commit. CI would catch the same issues —"
+    red "fix them now or run with --no-verify if you genuinely need to bypass."
+    exit 1
+fi
+
+exit 0
