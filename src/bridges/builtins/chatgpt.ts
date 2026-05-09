@@ -172,8 +172,8 @@ export const chatgptMemoryBridge: MemoryBridge = {
   description: "Import a ChatGPT memory dump (memory.json from an OpenAI data export) into Flair",
   options: {
     source: {
-      kind: "string",
-      description: "Path to memory.json (or to the OpenAI-export directory containing it). Required.",
+      description: "Path to memory.json (or to the OpenAI-export directory containing it).",
+      required: true,
     },
   },
   import: importChatGPT,
