@@ -20,6 +20,7 @@ import type {
 } from "../types.js";
 import { agenticStackDescriptor } from "./agentic-stack.js";
 import { markdownMemoryBridge } from "./markdown.js";
+import { mem0MemoryBridge } from "./mem0.js";
 
 export interface BuiltinBridge {
   /** The discovery record surfaced in `flair bridge list`. */
@@ -60,6 +61,7 @@ function builtinPlugin(p: MemoryBridge): BuiltinBridge {
 export const BUILTINS: BuiltinBridge[] = [
   builtinDescriptor(agenticStackDescriptor),
   builtinPlugin(markdownMemoryBridge),
+  builtinPlugin(mem0MemoryBridge),
 ];
 
 /** Map name → descriptor/plugin for O(1) runtime lookup. */
