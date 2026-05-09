@@ -12,21 +12,21 @@ Most agent memory systems store *facts*. Flair stores facts AND the agent's iden
 ┌──────────────────────────────────────────────────────────────────┐
 │  same agent, same memory, every harness                          │
 │                                                                  │
-│  Claude Code ─┐                                                  │
-│  Cursor ──────┤                                                  │
-│  Codex CLI ───┼──[ flair-mcp ]─┐                                 │
-│  Gemini CLI ──┤                │                                 │
-│  Continue.dev ┤                │     ┌─────────────────────┐     │
-│  Goose ───────┘                ├──▶  │  Flair (rockit)     │     │
-│  LangGraph ──[ langgraph-flair]┤     │  Ed25519 / HNSW /   │     │
-│  OpenClaw ───[ openclaw-flair ]┤     │  Soul + Memory      │     │
-│  n8n ────────[ n8n-nodes-flair]┤     └──────────┬──────────┘     │
-│  Hermes ─────[ hermes-flair   ]┤                │ federation     │
-│  Pi agent ───[ pi-flair       ]┘                │ (hub/spoke)    │
-│                                                  ▼                │
-│                                        ┌─────────────────────┐    │
-│                                        │  Flair (Fabric hub) │    │
-│                                        └─────────────────────┘    │
+│  Claude Code  ─┐                                                 │
+│  Cursor       ─┤                                                 │
+│  Codex CLI    ─┼─[ flair-mcp ]─┐                                 │
+│  Gemini CLI   ─┤               │                                 │
+│  Continue.dev ─┤               │   ┌──────────────────────┐      │
+│  Goose        ─┘               ├─▶ │  Flair (rockit)      │      │
+│  LangGraph   ─[ langgraph-flair ]──│  Ed25519 / HNSW /    │      │
+│  OpenClaw    ─[ openclaw-flair  ]──│  Soul + Memory       │      │
+│  n8n         ─[ n8n-nodes-flair ]──└──────────┬───────────┘      │
+│  Hermes      ─[ hermes-flair    ]─┘           │ federation       │
+│  Pi agent    ─[ pi-flair        ]─┘           │ (hub/spoke)      │
+│                                               ▼                  │
+│                                    ┌──────────────────────┐      │
+│                                    │  Flair (Fabric hub)  │      │
+│                                    └──────────────────────┘      │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
