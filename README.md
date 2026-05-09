@@ -36,22 +36,24 @@ Most agent memory systems store *facts*. Flair stores facts AND the agent's iden
 
 | | Flair | Mem0 | Honcho | Letta (MemGPT) | Built-ins (OAI/Anthropic/Google) |
 |---|---|---|---|---|---|
-| **Open source** | Apache 2.0 | partial | proprietary | yes | no |
-| **Self-host** | yes | partial | no | yes | no |
+| **License** | Apache 2.0 | Apache 2.0 | AGPL-3.0 | Apache 2.0 | proprietary |
+| **Self-host** | yes | yes (Docker) | yes (Docker) | yes | no |
+| **Managed cloud also offered** | no | yes (app.mem0.ai) | yes (app.honcho.dev) | no | only mode |
 | **Identity model** | **Ed25519 per agent (crypto-pinned)** | tenant-isolation | per-user soft tenant | runtime-bound | account-scoped |
 | **Federation (peer-to-peer)** | **yes — hub/spoke validated** | no | no | no | no |
 | **Cross-orchestrator** | **11+ harnesses, same memory** | several | several | runtime-bound | vendor-locked |
-| **Semantic search** | yes (in-process, nomic-embed) | yes (cloud) | yes (cloud) | yes | varies |
+| **Semantic search** | in-process (nomic-embed, no API calls) | yes | yes | yes | varies |
 | **Soul / persistent character** | **first-class** | optional | persona-shaped | optional | no |
-| **No SaaS lock-in** | **yes** | conditional | no | yes | no |
 
-The cells in **bold** are the ones that, in our reading, no other system can claim cleanly today. The honest gaps:
+Mem0, Honcho, and Letta are all open-source and self-hostable — credit where it's due. That's why we don't lead with "open source" as the differentiator. The cells in **bold** are the ones that, in our reading, no other system can claim cleanly today: crypto-pinned per-agent identity, peer-to-peer federation, the breadth of cross-orchestrator integrations, and soul as a first-class primitive.
+
+The honest gaps:
 
 - Mem0's **cloud sync UX** is more polished if you're OK with their hosting.
 - Honcho's **persona model** is more developed if rich personality modeling is your priority.
 - Letta's **runtime integration** is tighter if you're building on their agent loop.
 
-If you need any of those specifically, use them. If you need crypto-pinned identity + federation + cross-orchestrator + open source — that's the gap Flair fills.
+If you need any of those specifically, use them. If you need crypto-pinned identity + federation + cross-orchestrator breadth + soul-as-a-feature — that's the gap Flair fills.
 
 ## Why this exists
 
