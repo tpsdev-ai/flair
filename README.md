@@ -32,6 +32,12 @@ Most agent memory systems store *facts*. Flair stores facts AND the agent's iden
 
 11 harness surfaces today. Pick whichever you're shipping in; the memory layer doesn't care. **[See the full integrations catalog →](docs/integrations.md)**
 
+## What it looks like
+
+![Flair: write a memory, find it by meaning, list of supported harnesses](docs/assets/flair-demo.gif)
+
+`flair memory add` writes a memory; `flair search` finds it by meaning, not keywords. The same memory is then visible to every harness in the catalog above.
+
 ## How Flair compares
 
 | | Flair | Mem0 | Honcho | Letta (MemGPT) | Built-ins (OAI/Anthropic/Google) |
