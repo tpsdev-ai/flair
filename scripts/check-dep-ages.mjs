@@ -51,6 +51,36 @@ if (!Number.isFinite(MIN_AGE_DAYS) || MIN_AGE_DAYS < 0) {
   process.exit(2);
 }
 
+/**
+ * Keep-current allow-list — packages we deliberately want at the latest
+ * published version regardless of bake time. The expectation: deps in this
+ * list are tightly coupled to Flair's runtime correctness (Harper bug fixes
+ * and security patches land here), and we'd rather take the bake-time risk
+ * than miss a needed fix. The package owners are also high-trust — if any
+ * of these is compromised, the broader ecosystem is in a bad state, and
+ * our 7-day delay wouldn't have saved us anyway.
+ *
+ * Add a package here only when:
+ *   - the upstream is well-known and high-volume (gets eyeballs fast)
+ *   - we have a direct reason to want patches as soon as published (security,
+ *     correctness, or a known bug we're tracking)
+ *   - we accept that a freshly-malicious version could land in our build
+ *     before broader detection
+ *
+ * Not a long list. Document in docs/supply-chain-policy.md alongside any
+ * additions — the doc is the audit trail.
+ *
+ * Override per-run via FLAIR_DEP_KEEP_CURRENT="pkg1,pkg2,@scope/pkg3" env.
+ */
+const DEFAULT_KEEP_CURRENT = new Set([
+  "@harperfast/harper",
+  "harper-fabric-embeddings",
+]);
+const KEEP_CURRENT = new Set([
+  ...DEFAULT_KEEP_CURRENT,
+  ...(process.env.FLAIR_DEP_KEEP_CURRENT ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+]);
+
 function readPkg(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -77,6 +107,7 @@ for (const { pkg, path } of allPkgs) {
   const deps = pkg.dependencies ?? {};
   for (const [name, version] of Object.entries(deps)) {
     if (name.startsWith("@tpsdev-ai/")) continue; // workspace-internal — exempt
+    if (KEEP_CURRENT.has(name)) continue;          // explicitly kept-current — exempt
     if (typeof version !== "string") continue;
     if (version.startsWith("workspace:")) continue;
     if (version.startsWith("file:") || version.startsWith("link:")) continue;
@@ -97,10 +128,16 @@ for (const { pkg, path } of allPkgs) {
 
 if (toCheck.size === 0) {
   console.log("✓ No external pinned production deps to check.");
+  if (KEEP_CURRENT.size > 0) {
+    console.log(`(${KEEP_CURRENT.size} packages on the keep-current allow-list: ${[...KEEP_CURRENT].sort().join(", ")})`);
+  }
   process.exit(0);
 }
 
 console.log(`Checking ${toCheck.size} pinned production deps against ${MIN_AGE_DAYS}-day bake-time policy...`);
+if (KEEP_CURRENT.size > 0) {
+  console.log(`Keep-current allow-list (${KEEP_CURRENT.size} packages, exempt from bake-time): ${[...KEEP_CURRENT].sort().join(", ")}`);
+}
 console.log("");
 
 // ── Fetch publish dates from the npm registry ────────────────────────────────

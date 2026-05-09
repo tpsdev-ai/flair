@@ -17,6 +17,24 @@ We don't pull in any newly-published dep version for **at least 7 days** after i
 - Workspace-internal `@tpsdev-ai/*` deps are exempt. We publish ourselves; we have direct visibility into our own changes; our 0.8.0 → 0.8.1 patch turnaround was same-day and we want to keep that latitude.
 - Tunable via `FLAIR_DEP_MIN_AGE_DAYS` env var if a specific run needs a different threshold. Don't bypass; document the exception.
 
+#### 1a. Keep-current allow-list
+
+Some deps are tightly coupled to Flair's runtime correctness — Harper bug fixes and security patches land in `@harperfast/harper`, embedding-pipeline fixes land in `harper-fabric-embeddings`. We accept the bake-time risk and pull these eagerly. Current allow-list:
+
+| Package | Why kept current |
+|---------|------------------|
+| `@harperfast/harper` | Foundational. Vector-index and HNSW correctness fixes land here; we want them ASAP. High-volume upstream, fast detection if compromised. |
+| `harper-fabric-embeddings` | Embedding model loader. Coupled to Harper version. Same trust-and-volume reasoning. |
+
+Adding to this list is a deliberate decision. The bar:
+- The upstream is well-known and high-volume (gets eyeballs fast).
+- We have a direct reason to want patches as soon as published (a known bug we're tracking, a security patch we need, or correctness coupling).
+- We accept that a freshly-malicious version could land in our build before broader detection.
+
+Document any addition here, in this section, alongside the package name. The doc is the audit trail.
+
+Override per-run via `FLAIR_DEP_KEEP_CURRENT="pkg1,pkg2,@scope/pkg3"` env (additive — adds to the default allow-list, doesn't replace it).
+
 ### 2. Exact-version pinning for production deps
 
 Every `dependencies` entry in any `package.json` must be a single concrete version (`"5.0.9"`), not a range (`"^5.0"`, `"~5.0.9"`, `">=5"`). Range specifiers expose us to silent supply-chain swaps every install — exactly the surface attackers exploit.
@@ -48,7 +66,7 @@ Every PR runs the Socket.dev Supply Chain check. Failure blocks merge. The Socke
 Only Nathan publishes to npm (per the existing MFA boundary). Flint preps the release commit + version bump + CHANGELOG; Nathan runs `./scripts/release.sh <ver> --publish` from his laptop.
 
 - Rockit is not logged into npm by design.
-- The post-publish smoke verification (filed as `ops-wbe9`) will once-add an automated round-trip check after each publish to ensure cross-package resolution works on the actually-published artifacts.
+- A planned post-publish smoke job will add an automated round-trip check after each publish to ensure cross-package resolution works on the actually-published artifacts.
 
 ---
 
