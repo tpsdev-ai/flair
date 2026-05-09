@@ -1,0 +1,44 @@
+{
+  "name": "@tpsdev-ai/langgraph-flair",
+  "version": "0.8.1",
+  "description": "LangGraph BaseStore adapter backed by Flair — durable agent memory with crypto-pinned identity, federation, and cross-orchestrator portability.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "langgraph",
+    "langchain",
+    "flair",
+    "memory",
+    "agent",
+    "store"
+  ],
+  "homepage": "https://github.com/tpsdev-ai/flair/tree/main/packages/langgraph-flair",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tpsdev-ai/flair.git",
+    "directory": "packages/langgraph-flair"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@tpsdev-ai/flair-client": "0.8.1"
+  },
+  "peerDependencies": {
+    "@langchain/langgraph-checkpoint": ">=0.0.10"
+  }
+}
