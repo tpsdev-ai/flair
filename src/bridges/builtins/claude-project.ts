@@ -1,28 +1,27 @@
 /**
  * Built-in bridge: claude-project
  *
- * Imports Claude memories into Flair. Claude's memory (Settings →
- * Capabilities → "View and edit your memory") is **UI-only** — there is
- * no `memory.json` in the Claude data export. The standard data export
- * (Settings → Privacy → Export data) yields `conversations.jsonl` plus
- * project + file artifacts, but memory is not included.
+ * Imports Claude memories into Flair.
  *
- * The actual user workflow (per Anthropic's official import/export memory
- * help article) is:
- *   1. Open Claude → Settings → Capabilities → "View and edit your memory"
- *   2. Copy the entire memory profile
- *   3. Paste into a .txt or .md file
- *   4. Run: flair bridge import claude-project --source memory.txt --agent <id>
+ * Verified workflow (authoritative source — claude.com/import-memory,
+ * verified 2026-05-10): Anthropic's published memory-import flow is
+ * copy-paste only. The user runs an extraction prompt in Claude, copies
+ * the result, and pastes it into Claude's memory settings (or, in our
+ * case, into a local file we then import).
  *
- * Alternatively, a user can ask Claude in-chat: "Write out your memories
- * of me verbatim, exactly as they appear in your memory." Then save the
- * response.
+ * Less-certain (third-party sources disagree, Anthropic's data-export
+ * help article does not publish the file list): whether the standard
+ * Claude data-export ZIP (Settings → Privacy → Export data) contains a
+ * `memories.json` file. The bridge hedges by accepting either path:
+ *   - Primary: the copy-paste workflow → user-staged .txt/.md/.json
+ *   - Fallback: an extracted data-export directory whose memories file
+ *     is named `memories.json` (auto-discovered alongside the user-staged
+ *     names — see `findMemoryFileInDir` below)
  *
  * Primary input: plain text (.txt or .md) — bullet-prefixed or raw lines.
  * Fallback input: JSON containing `{ memories: [...] }` or top-level array.
- * Optional: a `project.json` file alongside (in the same directory or as
- * the source itself) supplying `{ name: "..." }` to label the imported
- * memories with a project subject + foreignId.
+ * Optional: a `project.json` file alongside supplying `{ name: "..." }`
+ * to label the imported memories with a project subject + foreignId.
  *
  * Round-trip: one-way. Claude's memory store is closed.
  *
@@ -30,7 +29,8 @@
  *   flair bridge import claude-project --source memory.txt --agent <id>
  *   flair bridge import claude-project --source memory.json --agent <id>
  *   flair bridge import claude-project --source ./claude-export --agent <id>
- *     (where ./claude-export contains memory.txt|.md|.json plus optional project.json)
+ *     (where ./claude-export contains memory.{txt,md,json} or memories.json,
+ *      plus optional project.json)
  */
 
 import { promises as fsp } from "node:fs";
@@ -67,10 +67,19 @@ function parsePlainText(raw: string): string[] {
 }
 
 // Best-effort discovery of the "memory file" inside a directory source.
-// Tries memory.txt, memory.md, memory.json (in that order). Returns the
-// first that exists, or null if none are present.
+// Order:
+//   1. memory.txt    — user-staged from the copy-paste workflow (most common)
+//   2. memory.md     — user-staged markdown variant
+//   3. memory.json   — user-staged JSON wrapper
+//   4. memories.json — possible filename inside an Anthropic data-export
+//                      ZIP. Anthropic's data-export help article doesn't
+//                      publish the ZIP file list and third-party tools
+//                      disagree on whether this file is present; including
+//                      it here is a cheap hedge so the bridge handles either
+//                      reality without a follow-up patch.
+// Returns the first that exists, or null if none are present.
 async function findMemoryFileInDir(dir: string): Promise<string | null> {
-  for (const name of ["memory.txt", "memory.md", "memory.json"]) {
+  for (const name of ["memory.txt", "memory.md", "memory.json", "memories.json"]) {
     const candidate = join(dir, name);
     try {
       const stat = await fsp.stat(candidate);

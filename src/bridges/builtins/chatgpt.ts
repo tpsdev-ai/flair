@@ -1,13 +1,14 @@
 /**
  * Built-in bridge: chatgpt
  *
- * Imports ChatGPT memories into Flair. ChatGPT's official data export
- * (Settings → Data Controls → Export My Data) contains conversations.json
- * and chat.html only — there is **no memories file**. ChatGPT memories live
- * exclusively in the Settings UI.
+ * Imports ChatGPT memories into Flair.
  *
- * The actual user workflow (per the Anthropic-published ChatGPT→Claude
- * migration guide) is:
+ * Verified workflow (authoritative source — Anthropic's
+ * claude.com/import-memory page describing the ChatGPT→Claude migration,
+ * verified 2026-05-10): the canonical user path for moving ChatGPT
+ * memories is the text-paste workflow. Anthropic publishes the extraction
+ * prompt and frames the migration as copy-paste, not file-import:
+ *
  *   1. Run this prompt in ChatGPT:
  *        "Please share all the memories you have stored about me. List
  *        each memory as a separate bullet point, using plain language."
@@ -15,15 +16,23 @@
  *   3. Paste into a .txt or .md file
  *   4. Run: flair bridge import chatgpt --source memories.txt --agent <id>
  *
+ * Less-certain (OpenAI's data-export help article was not directly
+ * fetchable during verification; third-party guides disagree on whether
+ * ChatGPT memories appear in the OpenAI data-export ZIP at all). The
+ * bridge does NOT auto-discover anything inside a directory source for
+ * this reason — no Anthropic-published source identifies a known memories
+ * filename inside the ChatGPT export, and silently picking up a wrong
+ * file would be worse than asking the user to point at the file
+ * explicitly. Directory inputs throw with workflow guidance pointing
+ * back at the extraction prompt.
+ *
  * Primary input: plain text file. One memory per line, optionally bullet-
  * prefixed (-, *, •, 1., 1)). Empty lines are skipped.
  *
  * Fallback input: JSON file containing { memories: [...] } or a top-level
- * array. This path supports third-party tool exports (e.g., browser
- * extensions that scrape memory UI into JSON) that follow that shape.
+ * array. Supports third-party tools that scrape memory UI into JSON.
  *
- * Round-trip: one-way. ChatGPT's memory store is closed — no useful
- * destination for export.
+ * Round-trip: one-way. ChatGPT's memory store is closed.
  *
  * Usage:
  *   flair bridge import chatgpt --source memories.txt --agent <id>
@@ -108,7 +117,7 @@ async function* importChatGPT(
       field: "source",
       expected: "a file (not a directory)",
       got: "directory",
-      hint: "OpenAI's ChatGPT export does not include a memories file — memories are UI-only. Run the extraction prompt in ChatGPT (\"List all memories you have about me as bullet points\"), paste the result into a .txt file, and pass that file as --source.",
+      hint: "Point --source at a specific file, not a directory. The canonical workflow (per Anthropic's published ChatGPT→Claude migration guide) is the text-paste path: run the extraction prompt in ChatGPT (\"List all memories you have about me as bullet points\"), paste the result into a .txt file, and pass that file as --source.",
     });
   }
 

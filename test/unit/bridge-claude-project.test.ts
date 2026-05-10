@@ -120,6 +120,35 @@ describe("claude-project bridge: plain-text input (primary workflow)", () => {
       expect(out[0].content).toBe("md content");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
+  it("auto-discovers memories.json (Anthropic-export hedge) when other names absent", async () => {
+    // Hedges against the unverified question of whether Anthropic's
+    // data-export ZIP contains a memories.json file. If it does, we handle
+    // it; if it doesn't, no harm done.
+    const dir = mkdtempSync(join(tmpdir(), "flair-claude-test-"));
+    try {
+      writeFileSync(join(dir, "memories.json"), JSON.stringify({
+        memories: [{ id: "anth-1", content: "from anthropic export" }],
+      }));
+      const out = await collectMemories({ source: dir }, fakeCtx());
+      expect(out).toHaveLength(1);
+      expect(out[0].content).toBe("from anthropic export");
+      expect(out[0].foreignId).toBe("claude-project:unknown:anth-1");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("memory.txt takes precedence over memories.json when both are present", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-claude-test-"));
+    try {
+      writeFileSync(join(dir, "memory.txt"), "- user-staged text wins\n");
+      writeFileSync(join(dir, "memories.json"), JSON.stringify({
+        memories: [{ id: "json", content: "this should NOT be picked" }],
+      }));
+      const out = await collectMemories({ source: dir }, fakeCtx());
+      expect(out).toHaveLength(1);
+      expect(out[0].content).toBe("user-staged text wins");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
 
 // ─── JSON fallback path ───────────────────────────────────────────────────────
