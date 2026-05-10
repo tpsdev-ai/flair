@@ -32,7 +32,17 @@ import {
   NodeConnectionTypes,
 } from "n8n-workflow";
 
-import { FlairClient } from "@tpsdev-ai/flair-client";
+// flair-client is published ESM-only. n8n nodes compile to CJS and load via
+// `require`, so a static `import { FlairClient } from "@tpsdev-ai/flair-client"`
+// crashes at boot on Node 24+ with "No exports main defined" because the
+// flair-client package only declares an `import` condition in its exports
+// map. The `import type` line emits no runtime require, and the dynamic
+// import inside `makeClient` is the standard CJS→ESM interop path.
+//
+// Filed: ops follow-up to ship a dual ESM/CJS build of flair-client so
+// static imports work too. Until then this dynamic-import pattern is the
+// load-bearing fix.
+import type { FlairClient } from "@tpsdev-ai/flair-client";
 
 interface FlairCredentials {
   baseUrl: string;
@@ -40,8 +50,9 @@ interface FlairCredentials {
   adminPassword: string;
 }
 
-function makeClient(credentials: FlairCredentials): FlairClient {
-  return new FlairClient({
+async function makeClient(credentials: FlairCredentials): Promise<FlairClient> {
+  const mod = await import("@tpsdev-ai/flair-client");
+  return new mod.FlairClient({
     url: credentials.baseUrl,
     agentId: credentials.agentId,
     adminUser: "admin",
@@ -151,7 +162,7 @@ export class FlairWrite implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const credentials = (await this.getCredentials("flairApi")) as unknown as FlairCredentials;
-    const flair = makeClient(credentials);
+    const flair = await makeClient(credentials);
     const inputs = this.getInputData();
     const out: INodeExecutionData[] = [];
 

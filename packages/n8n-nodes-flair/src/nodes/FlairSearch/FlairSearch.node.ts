@@ -10,7 +10,10 @@ import {
   NodeConnectionTypes,
 } from "n8n-workflow";
 
-import { FlairClient } from "@tpsdev-ai/flair-client";
+// See FlairWrite.node.ts header for the rationale on dynamic-import.
+// flair-client is ESM-only; static `import` from a CJS-compiled n8n node
+// crashes at boot on Node 24+ with "No exports main defined".
+import type { FlairClient } from "@tpsdev-ai/flair-client";
 
 interface FlairCredentials {
   baseUrl: string;
@@ -20,8 +23,9 @@ interface FlairCredentials {
 
 type Operation = "search" | "getBySubject";
 
-function makeClient(credentials: FlairCredentials): FlairClient {
-  return new FlairClient({
+async function makeClient(credentials: FlairCredentials): Promise<FlairClient> {
+  const mod = await import("@tpsdev-ai/flair-client");
+  return new mod.FlairClient({
     url: credentials.baseUrl,
     agentId: credentials.agentId,
     adminUser: "admin",
@@ -156,7 +160,7 @@ export class FlairSearch implements INodeType {
     const credentials = (await this.getCredentials("flairApi")) as unknown as FlairCredentials;
     const operation = this.getNodeParameter("operation", itemIndex) as Operation;
     const limit = this.getNodeParameter("limit", itemIndex, 5) as number;
-    const flair = makeClient(credentials);
+    const flair = await makeClient(credentials);
 
     if (operation === "search") {
       const tool = new DynamicStructuredTool({
@@ -193,7 +197,7 @@ export class FlairSearch implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const credentials = (await this.getCredentials("flairApi")) as unknown as FlairCredentials;
-    const flair = makeClient(credentials);
+    const flair = await makeClient(credentials);
     const inputs = this.getInputData();
     const out: INodeExecutionData[] = [];
 

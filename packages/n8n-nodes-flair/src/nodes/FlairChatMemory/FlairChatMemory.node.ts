@@ -7,7 +7,10 @@ import {
   NodeConnectionTypes,
 } from "n8n-workflow";
 
-import { FlairClient } from "@tpsdev-ai/flair-client";
+// See FlairWrite.node.ts header for the rationale on dynamic-import.
+// flair-client is ESM-only; static import from CJS-compiled n8n node
+// crashes at boot on Node 24+ with "No exports main defined".
+import type { FlairClient } from "@tpsdev-ai/flair-client";
 
 import { FlairChatMessageHistory } from "./FlairChatMessageHistory";
 
@@ -89,7 +92,8 @@ export class FlairChatMemory implements INodeType {
 
     const composedSubject = sessionKey ? `${subject}:${sessionKey}` : subject;
 
-    const flair = new FlairClient({
+    const flairMod = await import("@tpsdev-ai/flair-client");
+    const flair = new flairMod.FlairClient({
       url: credentials.baseUrl,
       agentId: credentials.agentId,
       adminUser: "admin",
