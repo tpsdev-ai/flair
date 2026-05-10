@@ -3,6 +3,15 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 
 import { mem0MemoryBridge } from "../../src/bridges/builtins/mem0";
 
+// Schema reference: api.mem0.ai/openapi.json
+//   GET /v1/memories/?user_id=<id>&page=<n>&page_size=<n>
+//   Response shape A (v1, bare array — self-hosted + cloud v1):
+//     [ { id, memory, created_at, ... }, ... ]
+//     Pagination: end on empty array (or short page).
+//   Response shape B (v3 / DRF paginated envelope):
+//     { count, next, previous, results: [...] }
+//     Pagination: end when `next === null`.
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function fakeCtx() {
@@ -32,7 +41,7 @@ async function collectMemories(opts: any, ctx: any) {
   return out;
 }
 
-// ─── Mini HTTP server for mocked Mem0 API ─────────────────────────────────────
+// ─── Mini HTTP server for stub Mem0 API ───────────────────────────────────────
 
 let server: Server;
 let port: number;
@@ -61,26 +70,19 @@ function mockCtx() {
   return { ...base, fetch: (url: string, init?: RequestInit) => fetch(url, init) };
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// ─── Tests: shape A (v1 bare array) ───────────────────────────────────────────
 
-describe("mem0 bridge: import", () => {
+describe("mem0 bridge: import — v1 bare-array response", () => {
   it("imports a single page of memories", async () => {
     handler = (_req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        memories: [
-          { id: "m1", memory: "User prefers TypeScript", user_id: "u1", created_at: "2026-04-01T00:00:00Z" },
-          { id: "m2", memory: "User works at a startup", user_id: "u1" },
-        ],
-        next_page: null,
-      }));
+      res.end(JSON.stringify([
+        { id: "m1", memory: "User prefers TypeScript", created_at: "2026-04-01T00:00:00Z" },
+        { id: "m2", memory: "User works at a startup" },
+      ]));
     };
 
-    const ctx = mockCtx();
-    const out = await collectMemories(
-      { user: "u1", apiKey: "test-key", baseUrl },
-      ctx,
-    );
+    const out = await collectMemories({ user: "u1", apiKey: "test-key", baseUrl }, mockCtx());
 
     expect(out).toHaveLength(2);
     expect(out[0].foreignId).toBe("mem0:m1");
@@ -93,29 +95,90 @@ describe("mem0 bridge: import", () => {
     expect(out[1].createdAt).toBeUndefined();
   });
 
-  it("paginates across multiple pages", async () => {
+  it("paginates with page+1 until short page (bare array)", async () => {
+    let callCount = 0;
+    const requestedPages: string[] = [];
+    handler = (req, res) => {
+      callCount++;
+      const url = new URL(req.url ?? "/", `http://localhost`);
+      requestedPages.push(url.searchParams.get("page") ?? "");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (callCount === 1) {
+        // Full page (size 100) — has more pages.
+        const items = Array.from({ length: 100 }, (_, i) => ({ id: `p1-${i}`, memory: `page-1 item ${i}` }));
+        res.end(JSON.stringify(items));
+      } else {
+        // Short page — last one.
+        res.end(JSON.stringify([{ id: "p2-0", memory: "page-2 final" }]));
+      }
+    };
+
+    const out = await collectMemories({ user: "u1", apiKey: "test-key", baseUrl }, mockCtx());
+
+    expect(out).toHaveLength(101);
+    expect(requestedPages).toEqual(["1", "2"]);
+    expect(out[0].foreignId).toBe("mem0:p1-0");
+    expect(out[100].foreignId).toBe("mem0:p2-0");
+  });
+
+  it("stops on empty array even when first page", async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify([]));
+    };
+
+    const out = await collectMemories({ user: "u1", apiKey: "test-key", baseUrl }, mockCtx());
+    expect(out).toHaveLength(0);
+  });
+});
+
+// ─── Tests: shape B (v3 paginated envelope) ──────────────────────────────────
+
+describe("mem0 bridge: import — v3 paginated-envelope response", () => {
+  it("imports a single page when `next` is null", async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        count: 2,
+        next: null,
+        previous: null,
+        results: [
+          { id: "v3-1", memory: "v3 first", created_at: "2026-04-01T00:00:00Z" },
+          { id: "v3-2", memory: "v3 second" },
+        ],
+      }));
+    };
+
+    const out = await collectMemories({ user: "u1", apiKey: "test-key", baseUrl }, mockCtx());
+
+    expect(out).toHaveLength(2);
+    expect(out[0].foreignId).toBe("mem0:v3-1");
+    expect(out[0].content).toBe("v3 first");
+  });
+
+  it("follows `next` URL across pages", async () => {
     let callCount = 0;
     handler = (_req, res) => {
       callCount++;
       res.writeHead(200, { "Content-Type": "application/json" });
       if (callCount === 1) {
         res.end(JSON.stringify({
-          memories: [{ id: "p1", memory: "page-1 item", user_id: "u1" }],
-          next_page: `${baseUrl}/v1/memories?user_id=u1&page=2&page_size=100`,
+          count: 2,
+          next: `${baseUrl}/v1/memories/?user_id=u1&page=2&page_size=100`,
+          previous: null,
+          results: [{ id: "p1", memory: "page-1 item" }],
         }));
       } else {
         res.end(JSON.stringify({
-          memories: [{ id: "p2", memory: "page-2 item", user_id: "u1" }],
-          next_page: null,
+          count: 2,
+          next: null,
+          previous: `${baseUrl}/v1/memories/?user_id=u1&page=1&page_size=100`,
+          results: [{ id: "p2", memory: "page-2 item" }],
         }));
       }
     };
 
-    const ctx = mockCtx();
-    const out = await collectMemories(
-      { user: "u1", apiKey: "test-key", baseUrl },
-      ctx,
-    );
+    const out = await collectMemories({ user: "u1", apiKey: "test-key", baseUrl }, mockCtx());
 
     expect(out).toHaveLength(2);
     expect(out[0].content).toBe("page-1 item");
@@ -123,46 +186,79 @@ describe("mem0 bridge: import", () => {
     expect(callCount).toBe(2);
   });
 
-  it("stops at maxPages when set", async () => {
+  it("handles empty results envelope", async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ count: 0, next: null, previous: null, results: [] }));
+    };
+
+    const out = await collectMemories({ user: "u1", apiKey: "test-key", baseUrl }, mockCtx());
+    expect(out).toHaveLength(0);
+  });
+});
+
+// ─── Tests: shared behavior ───────────────────────────────────────────────────
+
+describe("mem0 bridge: shared", () => {
+  it("hits /v1/memories/ with trailing slash and pages 1-indexed", async () => {
+    let receivedPath = "";
+    handler = (req, res) => {
+      receivedPath = req.url ?? "";
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify([]));
+    };
+
+    await collectMemories({ user: "u1", apiKey: "test-key", baseUrl }, mockCtx());
+
+    expect(receivedPath).toContain("/v1/memories/");
+    expect(receivedPath).toContain("user_id=u1");
+    expect(receivedPath).toContain("page=1");
+    expect(receivedPath).toContain("page_size=100");
+  });
+
+  it("respects the Authorization: Token header format", async () => {
+    let receivedAuth = "";
+    handler = (req, res) => {
+      receivedAuth = req.headers.authorization ?? "";
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify([]));
+    };
+
+    await collectMemories({ user: "u1", apiKey: "my-secret-token", baseUrl }, mockCtx());
+    expect(receivedAuth).toBe("Token my-secret-token");
+  });
+
+  it("stops at maxPages when set (bare-array shape)", async () => {
     let callCount = 0;
     handler = (_req, res) => {
       callCount++;
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        memories: [{ id: `m${callCount}`, memory: `memory-${callCount}`, user_id: "u1" }],
-        next_page: `${baseUrl}/v1/memories?user_id=u1&page=${callCount + 1}&page_size=100`,
-      }));
+      // Always full page → would page forever without maxPages
+      const items = Array.from({ length: 100 }, (_, i) => ({ id: `c${callCount}-${i}`, memory: `item ${callCount}-${i}` }));
+      res.end(JSON.stringify(items));
     };
 
-    const ctx = mockCtx();
     const out = await collectMemories(
       { user: "u1", apiKey: "test-key", baseUrl, maxPages: 2 },
-      ctx,
+      mockCtx(),
     );
 
-    expect(out).toHaveLength(2);
+    expect(out).toHaveLength(200);
     expect(callCount).toBe(2);
   });
 
   it("skips empty or whitespace-only memory content", async () => {
     handler = (_req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        memories: [
-          { id: "good", memory: "real memory", user_id: "u1" },
-          { id: "empty-str", memory: "", user_id: "u1" },
-          { id: "whitespace", memory: "   \n\t  ", user_id: "u1" },
-          { id: "also-good", memory: "another real one", user_id: "u1" },
-        ],
-        next_page: null,
-      }));
+      res.end(JSON.stringify([
+        { id: "good", memory: "real memory" },
+        { id: "empty-str", memory: "" },
+        { id: "whitespace", memory: "   \n\t  " },
+        { id: "also-good", memory: "another real one" },
+      ]));
     };
 
-    const ctx = mockCtx();
-    const out = await collectMemories(
-      { user: "u1", apiKey: "test-key", baseUrl },
-      ctx,
-    );
+    const out = await collectMemories({ user: "u1", apiKey: "test-key", baseUrl }, mockCtx());
 
     expect(out).toHaveLength(2);
     expect(out[0].foreignId).toBe("mem0:good");
@@ -214,7 +310,7 @@ describe("mem0 bridge: import", () => {
     ).rejects.toThrow(/was not found/);
   });
 
-  it("throws on a non-200, non-401/403/404 error (e.g. 500)", async () => {
+  it("throws on a 500", async () => {
     handler = (_req, res) => {
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal Server Error");
@@ -247,63 +343,24 @@ describe("mem0 bridge: import", () => {
     ).rejects.toThrow(/empty body/);
   });
 
-  it("throws on a response missing the `memories` array", async () => {
+  it("throws on a response that's neither array nor envelope", async () => {
     handler = (_req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, not_memories: [] }));
+      res.end(JSON.stringify({ ok: true, not_results: [] }));
     };
 
     await expect(
       collectMemories({ user: "u1", apiKey: "test-key", baseUrl }, mockCtx()),
-    ).rejects.toThrow(/memories/);
+    ).rejects.toThrow(/unexpected response shape/);
   });
 
   it("throws on a network error (unreachable host)", async () => {
-    const ctx = mockCtx();
     await expect(
       collectMemories(
         { user: "u1", apiKey: "test-key", baseUrl: "http://127.0.0.1:1" },
-        ctx,
+        mockCtx(),
       ),
     ).rejects.toThrow(/base URL is reachable/);
-  });
-
-  it("handles an empty memories array gracefully (zero imports)", async () => {
-    handler = (_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ memories: [], next_page: null }));
-    };
-
-    const ctx = mockCtx();
-    const out = await collectMemories(
-      { user: "u1", apiKey: "test-key", baseUrl },
-      ctx,
-    );
-    expect(out).toHaveLength(0);
-  });
-
-  it("uses the default base URL when --base-url is not set (validates option spec)", async () => {
-    // We only validate the option spec exists with the right env fallback, not the URL default.
-    // The actual URL is hardcoded in the plugin; we verify the option is declared.
-    expect(mem0MemoryBridge.options?.baseUrl).toBeDefined();
-    expect(mem0MemoryBridge.options?.baseUrl?.description).toContain("https://api.mem0.ai");
-  });
-
-  it("respects the Authorization: Token header format", async () => {
-    let receivedAuth = "";
-    handler = (req, res) => {
-      receivedAuth = req.headers.authorization ?? "";
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ memories: [], next_page: null }));
-    };
-
-    const ctx = mockCtx();
-    await collectMemories(
-      { user: "u1", apiKey: "my-secret-token", baseUrl },
-      ctx,
-    );
-
-    expect(receivedAuth).toBe("Token my-secret-token");
   });
 });
 

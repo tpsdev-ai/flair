@@ -2,19 +2,33 @@
  * Built-in bridge: mem0
  *
  * Imports memories from a Mem0 instance (cloud at api.mem0.ai or self-hosted)
- * into Flair. Pulls every memory for a given user_id via the Mem0 REST API,
- * paginating until exhausted. Each imported row becomes one Flair memory
- * tagged `source:mem0` + `import:mem0`, durability `persistent`.
+ * into Flair. Pulls every memory for a given user_id via the Mem0 v1 GET
+ * /v1/memories/ endpoint, paginating with page/page_size until exhausted.
+ * Each imported row becomes one Flair memory tagged `source:mem0` +
+ * `import:mem0`, durability `persistent`.
  *
  * One-way import (we don't sync back). This backs the "switch off SaaS
  * memory in 30 seconds" positioning.
  *
+ * API schema (verified against api.mem0.ai/openapi.json on 2026-05-10):
+ *   GET /v1/memories/?user_id=<id>&page=<n>&page_size=<n>
+ *   Authorization: Token <api-key>
+ *
+ *   Response shape A (v1, bare array — self-hosted + cloud v1):
+ *     [ { id, memory, created_at, ... }, ... ]
+ *     Pagination ends when an empty array is returned.
+ *
+ *   Response shape B (v3 / DRF-style paginated envelope):
+ *     { count, next, previous, results: [...] }
+ *     Pagination ends when `next` is null.
+ *
+ *   The bridge auto-detects which shape the server returns and handles both.
+ *
  * Why a Shape B (code) bridge and not Shape A (YAML descriptor):
- *   - The Mem0 API requires bearer-auth headers and paginated GET requests
- *     with a `next_page` cursor. The Shape A file-based parser can't drive
- *     a REST API, so a code plugin is the right fit.
- *   - Error handling needs to distinguish 401 (bad key) from network
- *     failures from malformed responses — easier to express in TS.
+ *   - The Mem0 API requires bearer-auth headers and pagination.
+ *   - The Shape A file-based parser can't drive a REST API.
+ *   - Error handling needs to distinguish 401/403/404 from network failures
+ *     from malformed responses — easier to express in TS.
  *
  * Usage:
  *   flair bridge import mem0 --user <id> --api-key <key> --agent <flair-id>
@@ -28,15 +42,22 @@ import { BridgeRuntimeError } from "../types.js";
 interface Mem0Memory {
   id: string;
   memory: string;
-  user_id: string;
   created_at?: string;
   updated_at?: string;
   metadata?: Record<string, unknown>;
 }
 
-interface Mem0Page {
-  memories: Mem0Memory[];
-  next_page: string | null;
+interface Mem0PaginatedEnvelope {
+  count?: number;
+  next?: string | null;
+  previous?: string | null;
+  results: Mem0Memory[];
+}
+
+type Mem0Response = Mem0Memory[] | Mem0PaginatedEnvelope;
+
+function isPaginatedEnvelope(body: Mem0Response): body is Mem0PaginatedEnvelope {
+  return !Array.isArray(body) && typeof body === "object" && body !== null && Array.isArray((body as any).results);
 }
 
 async function* importMem0(
@@ -72,6 +93,7 @@ async function* importMem0(
     : "https://api.mem0.ai";
 
   const maxPages = typeof opts.maxPages === "number" ? opts.maxPages : 0;
+  const pageSize = 100;
 
   ctx.log.info("starting mem0 import", {
     user_id: userId,
@@ -80,7 +102,8 @@ async function* importMem0(
 
   let pageCount = 0;
   let totalKept = 0;
-  let cursor: string | null = `${baseUrl}/v1/memories?user_id=${encodeURIComponent(userId)}&page=1&page_size=100`;
+  let pageNum = 1;
+  let cursor: string | null = `${baseUrl}/v1/memories/?user_id=${encodeURIComponent(userId)}&page=${pageNum}&page_size=${pageSize}`;
 
   while (cursor !== null) {
     if (maxPages > 0 && pageCount >= maxPages) {
@@ -159,7 +182,7 @@ async function* importMem0(
       });
     }
 
-    let page: Mem0Page;
+    let body: Mem0Response;
     try {
       const text = await res.text();
       if (text.trim() === "") {
@@ -173,7 +196,7 @@ async function* importMem0(
           hint: "the Mem0 API returned an empty body — check the instance is healthy",
         });
       }
-      page = JSON.parse(text) as Mem0Page;
+      body = JSON.parse(text);
     } catch (err: any) {
       if (err instanceof BridgeRuntimeError) throw err;
       throw new BridgeRuntimeError({
@@ -181,26 +204,39 @@ async function* importMem0(
         op: "import",
         path: cursor,
         field: "(response)",
-        expected: "valid JSON { memories: [...], next_page: string|null }",
+        expected: "valid JSON: bare array OR { results: [...], next: string|null }",
         got: "parse error",
         hint: `could not parse response: ${err?.message ?? err}`,
       });
     }
 
-    if (!Array.isArray(page?.memories)) {
+    let mems: Mem0Memory[];
+    let nextCursor: string | null;
+
+    if (Array.isArray(body)) {
+      // v1 bare-array shape — page until we get an empty array.
+      mems = body;
+      nextCursor = mems.length === 0 || mems.length < pageSize
+        ? null
+        : `${baseUrl}/v1/memories/?user_id=${encodeURIComponent(userId)}&page=${pageNum + 1}&page_size=${pageSize}`;
+      pageNum++;
+    } else if (isPaginatedEnvelope(body)) {
+      // v3 / DRF-style envelope — use server-provided next URL.
+      mems = body.results;
+      nextCursor = typeof body.next === "string" && body.next.length > 0 ? body.next : null;
+    } else {
       throw new BridgeRuntimeError({
         bridge: "mem0",
         op: "import",
         path: cursor,
         field: "(response)",
-        expected: "{ memories: [...] }",
-        got: typeof page,
-        hint: `unexpected response shape — got ${typeof page}, expected an object with a "memories" array`,
+        expected: "bare array OR { results: [...], next: string|null }",
+        got: typeof body,
+        hint: `unexpected response shape — got ${typeof body}, expected an array or paginated envelope`,
       });
     }
 
-    const mems = page.memories;
-    ctx.log.debug("received page", { count: mems.length, next: page.next_page });
+    ctx.log.debug("received page", { count: mems.length, next: nextCursor });
 
     for (const m of mems) {
       const content = typeof m?.memory === "string" ? m.memory : "";
@@ -216,7 +252,7 @@ async function* importMem0(
     }
 
     pageCount++;
-    cursor = page.next_page;
+    cursor = nextCursor;
   }
 
   ctx.log.info("mem0 import complete", { pages: pageCount, kept: totalKept });
