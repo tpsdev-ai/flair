@@ -9,6 +9,9 @@ import { layout, htmlResponse, esc } from "./admin-layout.js";
  *   - Identity: id, agentId, subject, contentHash
  *   - Tags (with source:* / import:* highlighted as origin chips)
  *   - Lineage: derivedFrom, parentId, supersedes (+ reverse: what supersedes this)
+ *   - Federation: _originatorInstanceId, _syncedFrom, _syncedAt — set by
+ *     Federation sync write path (resources/Federation.ts) when a record
+ *     arrives from a peer. Local-origin memories don't have these.
  *   - Lifecycle: createdAt, updatedAt, validFrom, validTo, expiresAt,
  *     archived/archivedAt/archivedBy, promotionStatus/promotedBy/promotedAt
  *   - Usage: retrievalCount, lastRetrieved
@@ -16,7 +19,7 @@ import { layout, htmlResponse, esc } from "./admin-layout.js";
  *
  * "memory that follows the agent across orchestrators" — the provenance pane
  * makes that legible: every memory shows where it came from, what it derived
- * from, and what it superseded.
+ * from, what it superseded, and which peer it synced from.
  */
 export class AdminMemory extends Resource {
   async get() {
@@ -172,6 +175,42 @@ export class AdminMemory extends Resource {
     return htmlResponse(layout(`Memory ${id.slice(0, 8)}…`, content, "memory"));
   }
 
+  // ─── Federation provenance card ────────────────────────────────────────────
+
+  /**
+   * Surface the federation-write fields stamped by resources/Federation.ts
+   * (lines 392–394) when a record arrived from a peer. Local-origin
+   * memories don't have these fields set; we render an explicit
+   * "local origin" note in that case so the absence is legible.
+   */
+  renderFederationInfo(m: any): string {
+    const orig = m._originatorInstanceId;
+    const from = m._syncedFrom;
+    const at = m._syncedAt;
+
+    if (!orig && !from && !at) {
+      return "<em style='color:#888'>local origin — not synced from a peer</em>";
+    }
+
+    const rows: string[] = [];
+    if (orig) {
+      rows.push(`<dt style="color:#666">Originator instance</dt><dd><code>${esc(orig)}</code></dd>`);
+    }
+    if (from && from !== orig) {
+      // syncedFrom and originator differ when a hub relayed from a third spoke
+      rows.push(`<dt style="color:#666">Synced from peer</dt><dd><code>${esc(from)}</code> <small style="color:#888">(relayed)</small></dd>`);
+    } else if (from) {
+      rows.push(`<dt style="color:#666">Synced from peer</dt><dd><code>${esc(from)}</code></dd>`);
+    }
+    if (at) {
+      rows.push(`<dt style="color:#666">Synced at</dt><dd>${esc(at)}</dd>`);
+    }
+
+    return `<dl style="display:grid;grid-template-columns:200px 1fr;gap:8px;margin-top:8px">
+      ${rows.join("\n      ")}
+    </dl>`;
+  }
+
   // ─── Provenance pane HTML ──────────────────────────────────────────────────
 
   renderProvenancePane(m: any, supersededBy: any[], derivatives: any[]): string {
@@ -276,6 +315,11 @@ export class AdminMemory extends Resource {
           <dt style="color:#666">Valid to</dt><dd>${esc(m.validTo ?? "still valid")}</dd>
           <dt style="color:#666">Expires</dt><dd>${esc(m.expiresAt ?? "never")}</dd>
         </dl>
+      </div>
+
+      <div class="card">
+        <h3>Federation</h3>
+        ${this.renderFederationInfo(m)}
       </div>
 
       <div class="card">
