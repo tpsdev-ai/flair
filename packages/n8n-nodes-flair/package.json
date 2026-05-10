@@ -24,7 +24,8 @@
     ],
     "nodes": [
       "dist/nodes/FlairChatMemory/FlairChatMemory.node.js",
-      "dist/nodes/FlairSearch/FlairSearch.node.js"
+      "dist/nodes/FlairSearch/FlairSearch.node.js",
+      "dist/nodes/FlairWrite/FlairWrite.node.js"
     ]
   },
   "engines": {

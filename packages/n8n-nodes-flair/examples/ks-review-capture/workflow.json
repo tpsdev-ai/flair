@@ -1,0 +1,194 @@
+{
+  "name": "K&S review capture → Flair",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "trigger-schedule",
+      "name": "Every 5 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "command": "ls -1 /Users/squeued/.tps/mail/flint/new/*.json 2>/dev/null || true"
+      },
+      "id": "list-inbox",
+      "name": "List inbox files",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "stdout",
+        "options": {}
+      },
+      "id": "split-paths",
+      "name": "Split file paths",
+      "type": "n8n-nodes-base.itemLists",
+      "typeVersion": 3,
+      "position": [680, 300],
+      "notesInFlow": true,
+      "notes": "stdout is one filename per line; Item Lists 'Split Out Items' produces one item per line."
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $json.stdout }}",
+        "options": {}
+      },
+      "id": "read-file",
+      "name": "Read mail JSON",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "fromJson",
+        "destinationKey": "mail",
+        "options": {}
+      },
+      "id": "parse-json",
+      "name": "Parse JSON",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "from-is-ks",
+              "leftValue": "={{ $json.mail.from }}",
+              "rightValue": "kern,sherlock",
+              "operator": {
+                "type": "string",
+                "operation": "containedInList"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-ks",
+      "name": "Filter K&S only",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Dedup: skip mails we've already written to Flair.\n// Uses workflow static data as a compact processed-id set.\nconst staticData = $getWorkflowStaticData('global');\nstaticData.processedIds = staticData.processedIds || {};\n\nconst out = [];\nfor (const item of $input.all()) {\n  const mail = item.json.mail;\n  const id = mail.id;\n  if (!id || staticData.processedIds[id]) continue;\n  staticData.processedIds[id] = new Date().toISOString();\n  // Trim the static-data set if it gets large (keep last 5000 ids)\n  const ids = Object.keys(staticData.processedIds);\n  if (ids.length > 5000) {\n    const sortedByTime = ids.sort((a, b) => (staticData.processedIds[a] < staticData.processedIds[b] ? -1 : 1));\n    for (const old of sortedByTime.slice(0, 1000)) delete staticData.processedIds[old];\n  }\n  out.push({ json: { mail } });\n}\nreturn out;\n"
+      },
+      "id": "dedup",
+      "name": "Skip already-written",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format the memory before write: build content, derive tags, set subject.\n// `mail` shape: { id, from, to, timestamp, body, headers }\nfor (const item of $input.all()) {\n  const m = item.json.mail;\n  const ts = m.timestamp || new Date().toISOString();\n  const day = ts.slice(0, 10);\n  // Try to extract a PR number from the body for foreignKey tagging\n  const prMatch = (m.body || '').match(/#(\\d{2,5})/);\n  const prTag = prMatch ? `pr:${prMatch[1]}` : null;\n  // Compose the memory body\n  const content = [\n    `${m.from} review note (${day}):`,\n    '',\n    m.body,\n  ].join('\\n');\n  // Tags\n  const tags = [\n    'source:tps-mail',\n    'kind:review',\n    `agent:${m.from}`,\n    `date:${day}`,\n    prTag,\n  ].filter(Boolean).join(', ');\n  const subject = prTag ? `pr-${prMatch[1]}` : `${m.from}-${day}`;\n  item.json = {\n    ...item.json,\n    content,\n    tags,\n    subject,\n  };\n}\nreturn $input.all();\n"
+      },
+      "id": "format",
+      "name": "Format memory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "content": "={{ $json.content }}",
+        "subject": "={{ $json.subject }}",
+        "tags": "={{ $json.tags }}",
+        "durability": "persistent",
+        "type": "decision",
+        "skipEmpty": true
+      },
+      "id": "flair-write",
+      "name": "Flair Write",
+      "type": "@tpsdev-ai/n8n-nodes-flair.flairWrite",
+      "typeVersion": 1,
+      "position": [2000, 300],
+      "credentials": {
+        "flairApi": {
+          "id": "REPLACE-ME",
+          "name": "Flair (rockit)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 5 min": {
+      "main": [
+        [{ "node": "List inbox files", "type": "main", "index": 0 }]
+      ]
+    },
+    "List inbox files": {
+      "main": [
+        [{ "node": "Split file paths", "type": "main", "index": 0 }]
+      ]
+    },
+    "Split file paths": {
+      "main": [
+        [{ "node": "Read mail JSON", "type": "main", "index": 0 }]
+      ]
+    },
+    "Read mail JSON": {
+      "main": [
+        [{ "node": "Parse JSON", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse JSON": {
+      "main": [
+        [{ "node": "Filter K&S only", "type": "main", "index": 0 }]
+      ]
+    },
+    "Filter K&S only": {
+      "main": [
+        [{ "node": "Skip already-written", "type": "main", "index": 0 }]
+      ]
+    },
+    "Skip already-written": {
+      "main": [
+        [{ "node": "Format memory", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format memory": {
+      "main": [
+        [{ "node": "Flair Write", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "flair",
+      "createdAt": "2026-05-10T19:30:00.000Z"
+    },
+    {
+      "name": "dogfood",
+      "createdAt": "2026-05-10T19:30:00.000Z"
+    }
+  ]
+}
