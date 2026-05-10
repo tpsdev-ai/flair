@@ -1,35 +1,36 @@
 /**
  * Built-in bridge: chatgpt
  *
- * Imports a ChatGPT memory dump into Flair memories. The path that ships in
- * v1 is the file-export shape — when a user requests their ChatGPT data
- * archive, the export contains a `memory.json` (or older exports may have
- * memory inlined into `user.json`). Each memory in the dump becomes one
- * Flair memory tagged `source: "chatgpt/memory"`.
+ * Imports ChatGPT memories into Flair. ChatGPT's official data export
+ * (Settings → Data Controls → Export My Data) contains conversations.json
+ * and chat.html only — there is **no memories file**. ChatGPT memories live
+ * exclusively in the Settings UI.
  *
- * Round-trip: this is a one-way import. ChatGPT's memory store is closed,
- * so the export side is omitted (it'd have nowhere useful to write to).
+ * The actual user workflow (per the Anthropic-published ChatGPT→Claude
+ * migration guide) is:
+ *   1. Run this prompt in ChatGPT:
+ *        "Please share all the memories you have stored about me. List
+ *        each memory as a separate bullet point, using plain language."
+ *   2. Copy the resulting bulleted text block
+ *   3. Paste into a .txt or .md file
+ *   4. Run: flair bridge import chatgpt --source memories.txt --agent <id>
  *
- * Why a Shape B (code) bridge and not Shape A (YAML descriptor):
- * - The OpenAI export wraps memories under `{ memories: [...] }`. The Shape A
- *   JSON parser treats the whole document as one record (it doesn't traverse
- *   nested paths). A code plugin can unwrap cleanly.
- * - We're lenient about field names — `content` first, then `text`, then
- *   `body`, then bare-string. Easier to express in TS than in a YAML
- *   fallback chain.
+ * Primary input: plain text file. One memory per line, optionally bullet-
+ * prefixed (-, *, •, 1., 1)). Empty lines are skipped.
  *
- * Source shapes accepted:
- *   1. A directory containing `memory.json` (the OpenAI export root)
- *   2. A direct path to `memory.json`
- *   3. The wrapper `{ memories: [...] }` OR a top-level array
+ * Fallback input: JSON file containing { memories: [...] } or a top-level
+ * array. This path supports third-party tool exports (e.g., browser
+ * extensions that scrape memory UI into JSON) that follow that shape.
+ *
+ * Round-trip: one-way. ChatGPT's memory store is closed — no useful
+ * destination for export.
  *
  * Usage:
- *   flair bridge import chatgpt --cwd ./openai-export --agent <id>
- *   flair bridge import chatgpt --cwd ./openai-export --agent <id> --dry-run
+ *   flair bridge import chatgpt --source memories.txt --agent <id>
+ *   flair bridge import chatgpt --source memories.json --agent <id>  (third-party JSON)
  */
 
 import { promises as fsp } from "node:fs";
-import { join } from "node:path";
 import type { BridgeContext, BridgeMemory, MemoryBridge } from "../types.js";
 import { BridgeRuntimeError } from "../types.js";
 
@@ -41,15 +42,31 @@ interface RawChatGPTMemory {
   created_at?: string;
 }
 
+// Strip common bullet/numbered-list prefixes from a line.
+// Examples: "- foo" → "foo"; "* foo" → "foo"; "• foo" → "foo";
+//   "1. foo" → "foo"; "1) foo" → "foo"; "  - foo" → "foo".
+function stripBulletPrefix(line: string): string {
+  const trimmed = line.trim();
+  // Markdown bullets + unicode bullet
+  const bulletMatch = trimmed.match(/^([-*•])\s+(.*)$/);
+  if (bulletMatch) return bulletMatch[2];
+  // Numbered list: "1. ", "1) ", "12. ", etc.
+  const numberedMatch = trimmed.match(/^\d+[.)]\s+(.*)$/);
+  if (numberedMatch) return numberedMatch[1];
+  return trimmed;
+}
+
+function parsePlainText(raw: string): string[] {
+  return raw
+    .split(/\r?\n/)
+    .map(stripBulletPrefix)
+    .filter((line) => line.length > 0);
+}
+
 async function* importChatGPT(
   opts: Record<string, unknown>,
   ctx: BridgeContext,
 ): AsyncIterable<BridgeMemory> {
-  // Resolve source. Caller passes `--source <path>` pointing at either
-  // the memory.json file directly OR the OpenAI export directory containing
-  // it. Absolute paths win; relative paths resolve against process.cwd
-  // (matching the markdown bridge's convention — BridgeContext doesn't
-  // carry a cwd field as of v1).
   const { isAbsolute, resolve } = await import("node:path");
   const sourceArg = typeof opts.source === "string" ? opts.source : "";
   if (!sourceArg) {
@@ -58,26 +75,40 @@ async function* importChatGPT(
       op: "import",
       path: "(unset)",
       field: "source",
-      expected: "path to memory.json or to the OpenAI export directory",
+      expected: "path to a .txt/.md/.json file containing your ChatGPT memories",
       got: "missing",
-      hint: "pass --source <path>; example: flair bridge import chatgpt --source ./openai-export --agent <id>",
+      hint: "pass --source <path>; example: flair bridge import chatgpt --source memories.txt --agent <id>",
     });
   }
-  const sourceAbs = isAbsolute(sourceArg) ? sourceArg : resolve(process.cwd(), sourceArg);
+  const filePath = isAbsolute(sourceArg) ? sourceArg : resolve(process.cwd(), sourceArg);
 
-  let filePath: string;
+  // Stat first — directory inputs are not supported for chatgpt because
+  // OpenAI's data export contains no memories file. Surface that explicitly
+  // rather than silently failing on a missing memory.json.
+  let isDir = false;
   try {
-    const stat = await fsp.stat(sourceAbs);
-    filePath = stat.isDirectory() ? join(sourceAbs, "memory.json") : sourceAbs;
+    const stat = await fsp.stat(filePath);
+    isDir = stat.isDirectory();
   } catch (err: any) {
     throw new BridgeRuntimeError({
       bridge: "chatgpt",
       op: "import",
-      path: sourceAbs,
+      path: filePath,
       field: "source",
-      expected: "readable file or directory containing memory.json",
+      expected: "readable .txt/.md/.json file",
       got: err?.code ?? "ENOENT",
       hint: `could not resolve source: ${err?.message ?? err}`,
+    });
+  }
+  if (isDir) {
+    throw new BridgeRuntimeError({
+      bridge: "chatgpt",
+      op: "import",
+      path: filePath,
+      field: "source",
+      expected: "a file (not a directory)",
+      got: "directory",
+      hint: "OpenAI's ChatGPT export does not include a memories file — memories are UI-only. Run the extraction prompt in ChatGPT (\"List all memories you have about me as bullet points\"), paste the result into a .txt file, and pass that file as --source.",
     });
   }
 
@@ -98,41 +129,56 @@ async function* importChatGPT(
     });
   }
 
-  let parsed: any;
+  // Detect input shape. Try JSON parse first; if it fails AND the file
+  // doesn't have a .json extension, fall back to plain-text line parse.
+  // This makes JSON the sticky path for users who clearly meant JSON
+  // (so we don't silently treat broken JSON as 1-line "memories"), and
+  // text the natural path for the migration-prompt workflow.
+  const isJsonExt = /\.(json)$/i.test(filePath);
+
+  let memories: Array<RawChatGPTMemory | string> = [];
+
+  let parsed: any = null;
+  let jsonParseErr: any = null;
   try {
     parsed = JSON.parse(raw);
   } catch (err: any) {
-    throw new BridgeRuntimeError({
-      bridge: "chatgpt",
-      op: "import",
-      path: filePath,
-      field: "(document)",
-      expected: "valid JSON",
-      got: "parse error",
-      hint: `JSON parse failed: ${err?.message ?? err}`,
-    });
+    jsonParseErr = err;
   }
 
-  // Accept either { memories: [...] } or a top-level array. Anything else
-  // is unexpected; surface a helpful error rather than silently importing 0.
-  const memories: RawChatGPTMemory[] = Array.isArray(parsed)
-    ? parsed
-    : Array.isArray(parsed?.memories)
-      ? parsed.memories
-      : Array.isArray(parsed?.user_memory) // older exports occasionally use this
-        ? parsed.user_memory
-        : [];
-
-  if (!Array.isArray(parsed) && !Array.isArray(parsed?.memories) && !Array.isArray(parsed?.user_memory)) {
+  if (parsed !== null) {
+    // Parsed as JSON — accept { memories: [...] } or top-level array.
+    if (Array.isArray(parsed)) {
+      memories = parsed;
+    } else if (Array.isArray(parsed?.memories)) {
+      memories = parsed.memories;
+    } else if (Array.isArray(parsed?.user_memory)) {
+      memories = parsed.user_memory; // older third-party shape
+    } else {
+      throw new BridgeRuntimeError({
+        bridge: "chatgpt",
+        op: "import",
+        path: filePath,
+        field: "(document)",
+        expected: "{ memories: [...] } or top-level array",
+        got: typeof parsed,
+        hint: `JSON parsed but shape is unexpected — keys at root: ${Object.keys(parsed ?? {}).join(", ") || "none"}. If you meant to pass a plain-text bullet list, save it as .txt instead of .json.`,
+      });
+    }
+  } else if (isJsonExt) {
+    // Extension says JSON but parse failed — surface that, don't silently fall back.
     throw new BridgeRuntimeError({
       bridge: "chatgpt",
       op: "import",
       path: filePath,
       field: "(document)",
-      expected: "{ memories: [...] } or top-level array",
-      got: typeof parsed,
-      hint: `unexpected shape — keys at root: ${Object.keys(parsed ?? {}).join(", ") || "none"}`,
+      expected: "valid JSON (file has .json extension)",
+      got: "parse error",
+      hint: `JSON parse failed: ${jsonParseErr?.message ?? jsonParseErr}. If you meant plain text, rename to .txt.`,
     });
+  } else {
+    // Plain-text path.
+    memories = parsePlainText(raw);
   }
 
   ctx.log.info("found memories", { count: memories.length });
@@ -153,10 +199,11 @@ async function* importChatGPT(
       continue;
     }
     kept++;
+    const objM = typeof m === "object" && m !== null ? m as RawChatGPTMemory : null;
     yield {
-      foreignId: typeof m?.id === "string" ? `chatgpt:${m.id}` : `chatgpt:idx-${i}`,
-      content,
-      createdAt: typeof m?.created_at === "string" ? m.created_at : undefined,
+      foreignId: typeof objM?.id === "string" ? `chatgpt:${objM.id}` : `chatgpt:idx-${i}`,
+      content: content.trim(),
+      createdAt: typeof objM?.created_at === "string" ? objM.created_at : undefined,
       tags: ["source:chatgpt", "import:chatgpt"],
       durability: "persistent",
     };
@@ -169,10 +216,10 @@ export const chatgptMemoryBridge: MemoryBridge = {
   name: "chatgpt",
   version: 1,
   kind: "file",
-  description: "Import a ChatGPT memory dump (memory.json from an OpenAI data export) into Flair",
+  description: "Import ChatGPT memories (paste-the-prompt-output workflow) into Flair",
   options: {
     source: {
-      description: "Path to memory.json (or to the OpenAI-export directory containing it).",
+      description: "Path to a .txt/.md file with one memory per line/bullet, OR a .json file with { memories: [...] }.",
       required: true,
     },
   },

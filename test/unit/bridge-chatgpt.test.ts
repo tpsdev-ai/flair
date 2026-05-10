@@ -1,15 +1,11 @@
 import { describe, it, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// We import from the dist'd plugin to mirror how the bridge runtime loads
-// it at runtime. That said, the parsing logic is pure — we exercise it
-// directly via the same code path.
 import { chatgptMemoryBridge } from "../../src/bridges/builtins/chatgpt";
 
-// Minimal stub of BridgeContext. The chatgpt bridge only uses ctx.log and
-// ctx.fetch (transitively, via no actual external HTTP — chatgpt is file-only).
+// Minimal stub of BridgeContext.
 function fakeCtx() {
   const logs: Array<{ level: string; msg: string; meta?: any }> = [];
   return {
@@ -25,7 +21,7 @@ function fakeCtx() {
       set: async () => {},
       del: async () => {},
     },
-    logs, // exposed for assertions
+    logs,
   };
 }
 
@@ -37,37 +33,156 @@ async function collectMemories(opts: any, ctx: any) {
   return out;
 }
 
-describe("chatgpt bridge: import", () => {
+// ─── Plain-text path (primary user workflow) ──────────────────────────────────
+
+describe("chatgpt bridge: plain-text input (primary user workflow)", () => {
+  it("imports a bullet-list (- prefix) — the migration-prompt output shape", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
+    try {
+      const path = join(dir, "memories.txt");
+      writeFileSync(path,
+        "- User prefers TypeScript\n" +
+        "- User runs newton on M3 Ultra\n" +
+        "- User's coffee order is a flat white\n",
+      );
+      const out = await collectMemories({ source: path }, fakeCtx());
+      expect(out).toHaveLength(3);
+      expect(out[0].content).toBe("User prefers TypeScript");
+      expect(out[0].foreignId).toBe("chatgpt:idx-0");
+      expect(out[0].tags).toContain("source:chatgpt");
+      expect(out[0].durability).toBe("persistent");
+      expect(out[2].content).toBe("User's coffee order is a flat white");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("imports a numbered list (1. / 1) prefix)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
+    try {
+      const path = join(dir, "memories.txt");
+      writeFileSync(path,
+        "1. First memory\n" +
+        "2. Second memory\n" +
+        "3) Third with paren\n",
+      );
+      const out = await collectMemories({ source: path }, fakeCtx());
+      expect(out).toHaveLength(3);
+      expect(out[0].content).toBe("First memory");
+      expect(out[1].content).toBe("Second memory");
+      expect(out[2].content).toBe("Third with paren");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("handles unicode bullets (•) and asterisk (*)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
+    try {
+      const path = join(dir, "memories.txt");
+      writeFileSync(path,
+        "• Unicode bullet memory\n" +
+        "* Asterisk bullet memory\n",
+      );
+      const out = await collectMemories({ source: path }, fakeCtx());
+      expect(out).toHaveLength(2);
+      expect(out[0].content).toBe("Unicode bullet memory");
+      expect(out[1].content).toBe("Asterisk bullet memory");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("imports raw lines without bullet prefixes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
+    try {
+      const path = join(dir, "memories.txt");
+      writeFileSync(path,
+        "First memory line\n" +
+        "Second memory line\n",
+      );
+      const out = await collectMemories({ source: path }, fakeCtx());
+      expect(out).toHaveLength(2);
+      expect(out[0].content).toBe("First memory line");
+      expect(out[1].content).toBe("Second memory line");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("skips empty lines and trims whitespace", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
+    try {
+      const path = join(dir, "memories.txt");
+      writeFileSync(path,
+        "- First\n" +
+        "\n" +
+        "  \n" +
+        "- Second\n" +
+        "\n",
+      );
+      const out = await collectMemories({ source: path }, fakeCtx());
+      expect(out).toHaveLength(2);
+      expect(out[0].content).toBe("First");
+      expect(out[1].content).toBe("Second");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("handles CRLF line endings", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
+    try {
+      const path = join(dir, "memories.txt");
+      writeFileSync(path, "- One\r\n- Two\r\n");
+      const out = await collectMemories({ source: path }, fakeCtx());
+      expect(out).toHaveLength(2);
+      expect(out[0].content).toBe("One");
+      expect(out[1].content).toBe("Two");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("works with .md extension (markdown bullets)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
+    try {
+      const path = join(dir, "memories.md");
+      writeFileSync(path,
+        "# My ChatGPT memories\n" +
+        "\n" +
+        "- markdown one\n" +
+        "- markdown two\n",
+      );
+      const out = await collectMemories({ source: path }, fakeCtx());
+      // The h1 line is treated as content (no bullet stripping for #).
+      // Operator can clean it before import; for now we keep it lenient.
+      expect(out.length).toBeGreaterThanOrEqual(2);
+      expect(out.find((m) => m.content === "markdown one")).toBeDefined();
+      expect(out.find((m) => m.content === "markdown two")).toBeDefined();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+// ─── JSON fallback path (third-party tool exports) ────────────────────────────
+
+describe("chatgpt bridge: JSON fallback (third-party tool exports)", () => {
   it("imports memories from { memories: [...] } wrapper", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
     try {
-      writeFileSync(join(dir, "memory.json"), JSON.stringify({
+      const path = join(dir, "memories.json");
+      writeFileSync(path, JSON.stringify({
         memories: [
           { id: "abc", content: "User uses TypeScript", created_at: "2026-04-15T00:00:00Z" },
           { id: "def", content: "User runs newton on M3 Ultra" },
         ],
       }));
-      const ctx = fakeCtx();
-      const out = await collectMemories({ source: dir }, ctx);
+      const out = await collectMemories({ source: path }, fakeCtx());
       expect(out).toHaveLength(2);
       expect(out[0].content).toBe("User uses TypeScript");
       expect(out[0].foreignId).toBe("chatgpt:abc");
       expect(out[0].createdAt).toBe("2026-04-15T00:00:00Z");
-      expect(out[0].tags).toContain("source:chatgpt");
-      expect(out[0].tags).toContain("import:chatgpt");
-      expect(out[0].durability).toBe("persistent");
       expect(out[1].foreignId).toBe("chatgpt:def");
-      expect(out[1].createdAt).toBeUndefined(); // missing in fixture
+      expect(out[1].createdAt).toBeUndefined();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it("imports from a top-level array (no wrapper)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
     try {
-      writeFileSync(join(dir, "memory.json"), JSON.stringify([
+      const path = join(dir, "memories.json");
+      writeFileSync(path, JSON.stringify([
         { id: "x", content: "raw array shape" },
       ]));
-      const out = await collectMemories({ source: dir }, fakeCtx());
+      const out = await collectMemories({ source: path }, fakeCtx());
       expect(out).toHaveLength(1);
       expect(out[0].content).toBe("raw array shape");
     } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -76,35 +191,37 @@ describe("chatgpt bridge: import", () => {
   it("supports `text` and `body` field-name fallbacks", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
     try {
-      writeFileSync(join(dir, "memory.json"), JSON.stringify({
+      const path = join(dir, "memories.json");
+      writeFileSync(path, JSON.stringify({
         memories: [
-          { id: "1", text: "older export shape uses 'text'" },
+          { id: "1", text: "older shape uses 'text'" },
           { id: "2", body: "even older 'body'" },
         ],
       }));
-      const out = await collectMemories({ source: dir }, fakeCtx());
+      const out = await collectMemories({ source: path }, fakeCtx());
       expect(out).toHaveLength(2);
-      expect(out[0].content).toBe("older export shape uses 'text'");
+      expect(out[0].content).toBe("older shape uses 'text'");
       expect(out[1].content).toBe("even older 'body'");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("accepts a bare-string memory entry", async () => {
+  it("accepts a bare-string memory entry inside JSON", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
     try {
-      writeFileSync(join(dir, "memory.json"), JSON.stringify(["bare string memory"]));
-      const out = await collectMemories({ source: dir }, fakeCtx());
+      const path = join(dir, "memories.json");
+      writeFileSync(path, JSON.stringify(["bare string memory"]));
+      const out = await collectMemories({ source: path }, fakeCtx());
       expect(out).toHaveLength(1);
       expect(out[0].content).toBe("bare string memory");
-      // bare-string entries get an idx-based foreignId
       expect(out[0].foreignId).toBe("chatgpt:idx-0");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("skips entries with empty/missing content", async () => {
+  it("skips JSON entries with empty/missing content", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
     try {
-      writeFileSync(join(dir, "memory.json"), JSON.stringify({
+      const path = join(dir, "memories.json");
+      writeFileSync(path, JSON.stringify({
         memories: [
           { id: "good", content: "real content" },
           { id: "empty", content: "" },
@@ -112,48 +229,58 @@ describe("chatgpt bridge: import", () => {
           { id: "whitespace", content: "   \n\t  " },
         ],
       }));
-      const out = await collectMemories({ source: dir }, fakeCtx());
+      const out = await collectMemories({ source: path }, fakeCtx());
       expect(out).toHaveLength(1);
       expect(out[0].foreignId).toBe("chatgpt:good");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+});
 
-  it("accepts a direct file path (not just a directory)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
-    try {
-      const filePath = join(dir, "custom-name.json");
-      writeFileSync(filePath, JSON.stringify({ memories: [{ id: "1", content: "from custom path" }] }));
-      const out = await collectMemories({ source: filePath }, fakeCtx());
-      expect(out).toHaveLength(1);
-      expect(out[0].content).toBe("from custom path");
-    } finally { rmSync(dir, { recursive: true, force: true }); }
-  });
+// ─── Error paths ──────────────────────────────────────────────────────────────
 
-  it("throws a helpful error when --source is missing", async () => {
+describe("chatgpt bridge: error paths", () => {
+  it("throws when --source is missing", async () => {
     await expect(collectMemories({}, fakeCtx())).rejects.toThrow(/--source/);
   });
 
-  it("throws a helpful error when source path does not exist", async () => {
-    await expect(collectMemories({ source: "/nonexistent/path/that/should/not/exist" }, fakeCtx()))
-      .rejects.toThrow(/could not resolve source/);
+  it("throws when source path does not exist", async () => {
+    await expect(
+      collectMemories({ source: "/nonexistent/path/that/should/not/exist" }, fakeCtx()),
+    ).rejects.toThrow(/could not resolve source/);
   });
 
-  it("throws a helpful error when JSON is malformed", async () => {
+  it("throws a helpful error when source is a directory", async () => {
+    // OpenAI's data export directory contains no memories file. We must
+    // reject directories explicitly with the correct workflow guidance.
     const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
     try {
-      writeFileSync(join(dir, "memory.json"), "not valid json {");
-      await expect(collectMemories({ source: dir }, fakeCtx())).rejects.toThrow(/JSON parse failed/);
+      await expect(collectMemories({ source: dir }, fakeCtx()))
+        .rejects.toThrow(/extraction prompt|UI-only|memories file/i);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it("throws a helpful error when document shape is unexpected", async () => {
+  it("throws when .json file has malformed JSON (no fallback to text)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
     try {
-      writeFileSync(join(dir, "memory.json"), JSON.stringify({ unrelated_field: "value" }));
-      await expect(collectMemories({ source: dir }, fakeCtx())).rejects.toThrow(/unexpected shape/);
+      const path = join(dir, "memories.json");
+      writeFileSync(path, "not valid json {");
+      await expect(collectMemories({ source: path }, fakeCtx()))
+        .rejects.toThrow(/JSON parse failed/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("throws when JSON document has unexpected shape", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-chatgpt-test-"));
+    try {
+      const path = join(dir, "memories.json");
+      writeFileSync(path, JSON.stringify({ unrelated_field: "value" }));
+      await expect(collectMemories({ source: path }, fakeCtx()))
+        .rejects.toThrow(/unexpected/);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+// ─── Metadata ─────────────────────────────────────────────────────────────────
 
 describe("chatgpt bridge: metadata", () => {
   it("registers as a 'file' kind builtin", () => {
@@ -163,6 +290,7 @@ describe("chatgpt bridge: metadata", () => {
   });
   it("declares a `source` option", () => {
     expect(chatgptMemoryBridge.options?.source).toBeDefined();
+    expect(chatgptMemoryBridge.options?.source?.required).toBe(true);
   });
   it("does NOT declare an export side (one-way bridge)", () => {
     expect(chatgptMemoryBridge.export).toBeUndefined();
