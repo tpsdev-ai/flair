@@ -65,10 +65,17 @@ export class FlairApi implements ICredentialType {
 
   authenticate: IAuthenticateGeneric = {
     type: 'generic',
+    // Use n8n's built-in HTTP Basic auth handling — it base64-encodes
+    // username:password internally. Avoids relying on Buffer being in n8n's
+    // expression sandbox (it isn't always, depending on n8n version).
+    // Earlier the credential used a custom expression with `Buffer.from(...)`
+    // which silently produced an empty Authorization header on installs
+    // where Buffer wasn't whitelisted in the expression engine, causing
+    // "Authorization failed" with valid credentials (2026-05-11 incident).
     properties: {
-      headers: {
-        Authorization:
-          "=Basic {{ Buffer.from('admin:' + $credentials.adminPassword).toString('base64') }}",
+      auth: {
+        username: 'admin',
+        password: '={{ $credentials.adminPassword }}',
       },
     },
   };
