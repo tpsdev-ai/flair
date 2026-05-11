@@ -37,6 +37,7 @@ PACKAGES=(
   "$ROOT/packages/openclaw-flair"
   "$ROOT/packages/pi-flair"
   "$ROOT/packages/n8n-nodes-flair"
+  "$ROOT/packages/langgraph-flair"
   "$ROOT"
 )
 
@@ -46,6 +47,7 @@ PACKAGE_JSONS=(
   "$ROOT/packages/openclaw-flair/package.json"
   "$ROOT/packages/pi-flair/package.json"
   "$ROOT/packages/n8n-nodes-flair/package.json"
+  "$ROOT/packages/langgraph-flair/package.json"
   "$ROOT/package.json"
 )
 
@@ -116,6 +118,9 @@ if [[ "$MODE" == "--publish" ]]; then
 
   echo "  Publishing @tpsdev-ai/n8n-nodes-flair..."
   (cd "$ROOT/packages/n8n-nodes-flair" && npm publish) || { echo "⚠️  n8n-nodes-flair publish failed"; }
+
+  echo "  Publishing @tpsdev-ai/langgraph-flair..."
+  (cd "$ROOT/packages/langgraph-flair" && npm publish) || { echo "⚠️  langgraph-flair publish failed (may need build step)"; }
 
   echo "🏷️  Tagging v${VERSION} on main..."
   git -C "$ROOT" tag -a "v${VERSION}" -m "Release v${VERSION}"

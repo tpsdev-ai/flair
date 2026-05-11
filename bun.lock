@@ -24,20 +24,20 @@
     },
     "packages/flair-client": {
       "name": "@tpsdev-ai/flair-client",
-      "version": "0.8.1",
+      "version": "0.8.2",
       "devDependencies": {
         "typescript": "5.9.3",
       },
     },
     "packages/flair-mcp": {
       "name": "@tpsdev-ai/flair-mcp",
-      "version": "0.8.1",
+      "version": "0.8.2",
       "bin": {
         "flair-mcp": "dist/index.js",
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.27.1",
-        "@tpsdev-ai/flair-client": "0.8.1",
+        "@tpsdev-ai/flair-client": "0.8.2",
         "zod": "4.3.6",
       },
       "devDependencies": {
@@ -46,9 +46,9 @@
     },
     "packages/langgraph-flair": {
       "name": "@tpsdev-ai/langgraph-flair",
-      "version": "0.8.1",
+      "version": "0.8.2",
       "dependencies": {
-        "@tpsdev-ai/flair-client": "0.8.1",
+        "@tpsdev-ai/flair-client": "0.8.2",
       },
       "peerDependencies": {
         "@langchain/langgraph-checkpoint": ">=0.0.10",
@@ -56,7 +56,7 @@
     },
     "packages/n8n-nodes-flair": {
       "name": "@tpsdev-ai/n8n-nodes-flair",
-      "version": "0.8.1",
+      "version": "0.8.2",
       "dependencies": {
         "@tpsdev-ai/flair-client": "0.8.1",
         "zod": "3.25.76",
@@ -75,10 +75,10 @@
     },
     "packages/openclaw-flair": {
       "name": "@tpsdev-ai/openclaw-flair",
-      "version": "0.8.1",
+      "version": "0.8.2",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.8.1",
+        "@tpsdev-ai/flair-client": "0.8.2",
       },
       "devDependencies": {
         "typescript": "5.9.3",
@@ -89,7 +89,7 @@
     },
     "packages/pi-flair": {
       "name": "@tpsdev-ai/pi-flair",
-      "version": "0.8.1",
+      "version": "0.8.2",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
         "@tpsdev-ai/flair-client": "0.8.1",
