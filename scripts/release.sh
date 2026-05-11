@@ -182,7 +182,9 @@ echo "🔗 Aligning internal dependencies..."
 for INTERNAL_DEPENDENT in \
     "$ROOT/packages/flair-mcp/package.json" \
     "$ROOT/packages/pi-flair/package.json" \
-    "$ROOT/packages/n8n-nodes-flair/package.json"; do
+    "$ROOT/packages/n8n-nodes-flair/package.json" \
+    "$ROOT/packages/openclaw-flair/package.json" \
+    "$ROOT/packages/langgraph-flair/package.json"; do
   node -e "
     const fs = require('fs');
     const path = '$INTERNAL_DEPENDENT';
