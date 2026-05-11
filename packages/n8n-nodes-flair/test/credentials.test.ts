@@ -33,16 +33,18 @@ describe("FlairApi credential", () => {
     expect(agentId.required).toBe(true);
   });
 
-  test("authenticates via Basic header (admin:adminPassword base64)", () => {
+  test("authenticates via n8n's native HTTP Basic auth", () => {
+    // Uses n8n's built-in auth.username / auth.password under
+    // IAuthenticateGeneric — n8n handles base64 internally. Avoids
+    // relying on Buffer being in n8n's expression sandbox (it isn't
+    // always, see commit fixing 2026-05-11 incident).
     expect(cred.authenticate.type).toBe("generic");
-    const headers = (cred.authenticate.properties as any).headers;
-    expect(headers.Authorization).toContain("Basic");
-    // Header constructs admin:<password> via n8n expression then base64-encodes
-    expect(headers.Authorization).toContain("admin:");
-    expect(headers.Authorization).toContain("$credentials.adminPassword");
-    expect(headers.Authorization).toContain("base64");
-    // Bearer must NOT be used — Flair admin auth is Basic
-    expect(headers.Authorization).not.toContain("Bearer");
+    const auth = (cred.authenticate.properties as any).auth;
+    expect(auth).toBeDefined();
+    expect(auth.username).toBe("admin");
+    expect(auth.password).toContain("$credentials.adminPassword");
+    // No header-based Authorization — n8n constructs it from auth.{username,password}
+    expect((cred.authenticate.properties as any).headers).toBeUndefined();
   });
 
   test("test request hits /Memory (auth-required) on the configured baseUrl", () => {

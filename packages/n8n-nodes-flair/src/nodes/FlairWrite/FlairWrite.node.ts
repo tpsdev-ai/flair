@@ -50,8 +50,20 @@ interface FlairCredentials {
   adminPassword: string;
 }
 
+// Wrap dynamic import in Function() so TypeScript (compiled to CommonJS
+// for n8n consumption) doesn't downlevel `await import(...)` to a `require()`
+// call. The downleveled require() hits flair-client's ESM-only exports map
+// and Node 24+ rejects it (which is what bit us in n8n at runtime —
+// commit 31dd2b3 "fixed" this via dynamic import but TSC compiled it right
+// back to require under `module: "CommonJS"`).
+// The Function() trick keeps the import as a true native dynamic import in
+// the emitted JS, which Node honors as ESM regardless of caller's module
+// type. Standard CJS-to-ESM interop pattern.
+const importFlairClient = (): Promise<typeof import("@tpsdev-ai/flair-client")> =>
+  (new Function("return import('@tpsdev-ai/flair-client')") as () => Promise<any>)();
+
 async function makeClient(credentials: FlairCredentials): Promise<FlairClient> {
-  const mod = await import("@tpsdev-ai/flair-client");
+  const mod = await importFlairClient();
   return new mod.FlairClient({
     url: credentials.baseUrl,
     agentId: credentials.agentId,
