@@ -46,9 +46,9 @@
     },
     "packages/langgraph-flair": {
       "name": "@tpsdev-ai/langgraph-flair",
-      "version": "0.8.1",
+      "version": "0.8.2",
       "dependencies": {
-        "@tpsdev-ai/flair-client": "0.8.1",
+        "@tpsdev-ai/flair-client": "0.8.2",
       },
       "peerDependencies": {
         "@langchain/langgraph-checkpoint": ">=0.0.10",
@@ -78,7 +78,7 @@
       "version": "0.8.2",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.8.1",
+        "@tpsdev-ai/flair-client": "0.8.2",
       },
       "devDependencies": {
         "typescript": "5.9.3",
@@ -2087,11 +2087,7 @@
 
     "@slack/web-api/form-data": ["form-data@4.0.5", "", { "dependencies": { "asynckit": "^0.4.0", "combined-stream": "^1.0.8", "es-set-tostringtag": "^2.1.0", "hasown": "^2.0.2", "mime-types": "^2.1.12" } }, "sha512-8RipRLol37bNs2bhoV67fiTEvdTrbMUYcFTiy3+wuuOnUog2QBHCZWXDRijWQfAkhBj2Uf5UnVaiWwA5vdd82w=="],
 
-    "@tpsdev-ai/langgraph-flair/@tpsdev-ai/flair-client": ["@tpsdev-ai/flair-client@0.8.1", "", {}, "sha512-Bac3A6IBqHVAwMznuct3v9fIU1sFJFknavqi2kv4FlRqtvVvyTG3V9PCHDrtFcbecSwmdaUzkwdbnj/ZWNbZaw=="],
-
     "@tpsdev-ai/n8n-nodes-flair/zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
-
-    "@tpsdev-ai/openclaw-flair/@tpsdev-ai/flair-client": ["@tpsdev-ai/flair-client@0.8.1", "", {}, "sha512-Bac3A6IBqHVAwMznuct3v9fIU1sFJFknavqi2kv4FlRqtvVvyTG3V9PCHDrtFcbecSwmdaUzkwdbnj/ZWNbZaw=="],
 
     "@types/body-parser/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
 
