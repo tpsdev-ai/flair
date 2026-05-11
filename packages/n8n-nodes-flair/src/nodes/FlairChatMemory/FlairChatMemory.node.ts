@@ -92,7 +92,12 @@ export class FlairChatMemory implements INodeType {
 
     const composedSubject = sessionKey ? `${subject}:${sessionKey}` : subject;
 
-    const flairMod = await import("@tpsdev-ai/flair-client");
+    // See FlairWrite.node.ts for the rationale on Function-wrapped dynamic
+    // import (prevents TSC from downleveling to require() under
+    // module: "CommonJS").
+    const flairMod = await (new Function(
+      "return import('@tpsdev-ai/flair-client')",
+    ) as () => Promise<typeof import("@tpsdev-ai/flair-client")>)();
     const flair = new flairMod.FlairClient({
       url: credentials.baseUrl,
       agentId: credentials.agentId,

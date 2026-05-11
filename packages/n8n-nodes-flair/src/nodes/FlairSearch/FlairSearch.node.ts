@@ -23,8 +23,14 @@ interface FlairCredentials {
 
 type Operation = "search" | "getBySubject";
 
+// See FlairWrite.node.ts for the rationale on Function-wrapped dynamic
+// import (prevents TSC from downleveling to require() under
+// module: "CommonJS").
+const importFlairClient = (): Promise<typeof import("@tpsdev-ai/flair-client")> =>
+  (new Function("return import('@tpsdev-ai/flair-client')") as () => Promise<any>)();
+
 async function makeClient(credentials: FlairCredentials): Promise<FlairClient> {
-  const mod = await import("@tpsdev-ai/flair-client");
+  const mod = await importFlairClient();
   return new mod.FlairClient({
     url: credentials.baseUrl,
     agentId: credentials.agentId,
