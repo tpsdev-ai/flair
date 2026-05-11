@@ -44,6 +44,12 @@ Notes on each step:
    ```
    Or, if you ship a community-nodes-enabled n8n, add it via the in-app community node installer.
 
+   **Required env var on the n8n host**:
+   ```
+   NODE_FUNCTION_ALLOW_BUILTIN=fs,path
+   ```
+   The Code node that reads the TPS-mail inbox needs `fs` + `path` from Node's standard library. n8n blocks built-ins by default (sensible for multi-tenant cloud installs); self-hosted operators need to opt in. If unset, the workflow fails with `Cannot find module 'fs'` at the first node.
+
 2. **Configure the Flair credential**:
    - Settings → Credentials → New → Flair API
    - Base URL: `http://127.0.0.1:9926` (or your Flair host)
