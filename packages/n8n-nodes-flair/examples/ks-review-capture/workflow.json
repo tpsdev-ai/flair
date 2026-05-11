@@ -30,31 +30,12 @@
     },
     {
       "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "typeValidation": "strict",
-            "version": 2
-          },
-          "conditions": [
-            {
-              "id": "from-is-ks",
-              "leftValue": "={{ $json.mail.from }}",
-              "rightValue": "kern,sherlock",
-              "operator": {
-                "type": "string",
-                "operation": "containedInList"
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
+        "jsCode": "// Filter to K&S only. Could use n8n's Filter node, but the\n// containedInList operator's rightValue parsing varies across n8n\n// versions — easier to keep the predicate explicit here.\nconst KS = new Set(['kern', 'sherlock']);\nreturn $input.all().filter((item) => KS.has(item.json.mail?.from));\n"
       },
       "id": "filter-ks",
       "name": "Filter K&S only",
-      "type": "n8n-nodes-base.filter",
-      "typeVersion": 2.2,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [680, 300]
     },
     {
