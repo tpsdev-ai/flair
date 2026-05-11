@@ -15,13 +15,32 @@ const exists = async (path: string): Promise<boolean> => {
 };
 
 /**
- * Health endpoint — unauthenticated, returns only { ok: true }.
+ * Health endpoint — truly public, returns only { ok: true }.
+ *
+ * `allowRead() { return true }` opens Harper's role gate for anonymous GETs,
+ * which is what makes /Health work for callers outside `authorizeLocal`'s
+ * localhost-bypass. Without this, Harper's intrinsic Basic-auth gate fires
+ * BEFORE our HTTP middleware can apply the /Health bypass list in
+ * auth-middleware.ts, so remote callers (e.g., from rockit hitting a Fabric-
+ * hosted Flair) get a 401 even though the Resource handler is intentionally
+ * unauthenticated. Symptom matched: Fabric returned 401 + WWW-Authenticate:
+ * Basic on /Health while rockit-localhost returned 200 — the difference was
+ * Harper's localhost-auto-auth, not anything in our code.
+ *
+ * Same pattern as `FederationPair.allowCreate(){ return true }` (PR #299):
+ * declare the Resource anonymously-accessible at the Harper layer; let the
+ * handler itself enforce whatever it needs (in this case, nothing — /Health
+ * is intentionally and always public).
  *
  * Rich stats (memory counts, agent names, etc.) are behind /HealthDetail
  * which requires authentication. This prevents information leakage on
  * publicly exposed instances.
  */
 export class Health extends Resource {
+  // Anyone can call /Health — no auth, no role check. Truly public.
+  allowRead(_user: any) {
+    return true;
+  }
   async get() {
     return { ok: true };
   }
