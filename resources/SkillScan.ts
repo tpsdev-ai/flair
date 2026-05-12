@@ -1,5 +1,5 @@
 import { Resource } from "@harperfast/harper";
-import { scanSkillContent } from "./scan/skill-scanner";
+import { scanSkillContent } from "./scan/skill-scanner.js";
 
 /**
  * POST /SkillScan/
