@@ -1,6 +1,9 @@
 {
   "id": "openclaw-flair",
   "kind": "memory",
+  "activation": {
+    "onStartup": true
+  },
   "uiHints": {
     "url": {
       "label": "Flair URL",
