@@ -60,7 +60,7 @@ flair status
 You should see something like:
 
 ```
-Flair v0.6.0 — 🟢 running (PID 12345, uptime 1m)
+Flair v0.8.3 — 🟢 running (PID 12345, uptime 1m)
   URL:        http://127.0.0.1:19926
 
 Memory:
