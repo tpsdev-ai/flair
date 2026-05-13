@@ -47,12 +47,17 @@ export class AdminMemory extends Resource {
       if (subject) {
         conditions.push({ attribute: "subject", comparator: "equals", value: subject.toLowerCase() });
       }
-      conditions.push({ attribute: "archived", comparator: "not_equal", value: true });
 
+      // Note: Harper's `not_equal true` predicate doesn't match rows where
+      // `archived` is `false` *or* unset — boolean comparators behave
+      // unevenly across boolean / undefined / null storage states. We skip
+      // archived rows in the JS-side filter loop below instead, so the list
+      // view actually returns non-archived memories rather than zero.
       const searchQuery: any = conditions.length > 0 ? { conditions } : {};
       let count = 0;
 
       for await (const m of (databases as any).flair.Memory.search(searchQuery)) {
+        if (m.archived === true) continue;
         if (m.expiresAt && Date.parse(m.expiresAt) < Date.now()) continue;
         if (query && !String(m.content || "").toLowerCase().includes(query.toLowerCase())) continue;
         memories.push(m);
