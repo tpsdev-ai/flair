@@ -1,17 +1,62 @@
 import { Resource } from "@harperfast/harper";
 import { layout, htmlResponse } from "./admin-layout.js";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+/**
+ * Resolve the public URL operators reach this Flair on.
+ *
+ * Production deployments (Fabric, VPS-hosted, behind any reverse proxy)
+ * should set `FLAIR_PUBLIC_URL` in their launchd / systemd unit. The
+ * admin pane then shows the URL operators actually type — not the
+ * 127.0.0.1 binding address Harper sees internally — so the Endpoints
+ * table is copy-pasteable.
+ *
+ * Fall back to `http://127.0.0.1:${HTTP_PORT}` for local-only installs.
+ */
+function resolvePublicUrl(): string {
+  // Explicit override wins. Production deployments (Fabric, VPS-hosted)
+  // should set FLAIR_PUBLIC_URL in their launchd / systemd unit so the
+  // admin pane shows the URL operators actually type, not the binding
+  // address Harper sees internally. Auto-detecting from request headers
+  // is brittle across reverse-proxy configurations.
+  if (process.env.FLAIR_PUBLIC_URL) {
+    return process.env.FLAIR_PUBLIC_URL.replace(/\/$/, "");
+  }
+  return `http://127.0.0.1:${process.env.HTTP_PORT ?? "19926"}`;
+}
+
+/**
+ * Read the runtime package version from the bundled package.json so the
+ * Instance pane shows the real version (e.g. 0.8.3) rather than "dev" —
+ * `process.env.npm_package_version` is only populated inside `npm run`.
+ */
+function resolveVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      join(here, "..", "..", "package.json"),
+      join(here, "..", "package.json"),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        const pkg = JSON.parse(readFileSync(p, "utf-8"));
+        if (pkg.version) return pkg.version;
+      }
+    }
+  } catch { /* fall through */ }
+  return process.env.npm_package_version ?? "dev";
+}
 
 /**
  * GET /AdminInstance — instance info, public key, version.
  */
 export class AdminInstance extends Resource {
   async get() {
-    const version = process.env.npm_package_version ?? "dev";
-    const httpPort = process.env.HTTP_PORT ?? "19926";
-    const publicUrl = process.env.FLAIR_PUBLIC_URL ?? `http://127.0.0.1:${httpPort}`;
+    const version = resolveVersion();
+    const publicUrl = resolvePublicUrl();
 
     // Try to read instance public key
     let publicKey = "—";
