@@ -75,7 +75,7 @@ Per the pre-1.0 versioning policy, this minor bump is breaking on purpose.
 
 - **`test/unit/federation-pair-role.test.ts` restores `globalThis.fetch` in `afterEach`** — the previous mock leaked into integration tests, masquerading as Harper-unhealthy timeouts when running the full suite.
 
-## Unreleased
+## 0.7.0 (2026-05-03)
 
 ### 🛠 Chores
 
