@@ -234,6 +234,20 @@ server.http(async (request: any, nextLayer: any) => {
   const m = header.match(/^TPS-Ed25519\s+([^:]+):(\d+):([^:]+):(.+)$/);
 
   if (!m) {
+    // For browser-accessible admin pages, emit `WWW-Authenticate: Basic` so
+    // the browser shows a native auth dialog instead of a bare 401 page.
+    // JSON API endpoints don't get this — they should keep the structured
+    // 401 body so the client can parse the error.
+    const isAdminPage = url.pathname === "/Admin" || url.pathname.startsWith("/Admin");
+    if (isAdminPage) {
+      return new Response("Authentication required.", {
+        status: 401,
+        headers: {
+          "WWW-Authenticate": 'Basic realm="Flair Admin"',
+          "content-type": "text/plain; charset=utf-8",
+        },
+      });
+    }
     return new Response(JSON.stringify({ error: "missing_or_invalid_authorization" }), { status: 401 });
   }
 
