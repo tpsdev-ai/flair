@@ -2911,15 +2911,44 @@ federation
       if (peers.length === 0) {
         console.log("No peers configured. Use 'flair federation pair' to connect to a hub.");
       } else {
-        console.log(`${"Peer".padEnd(20)} ${"Role".padEnd(8)} ${"Status".padEnd(14)} ${"Last Sync".padEnd(22)} Relay`);
+        // Compute lastSync staleness so an operator can tell at a glance whether sync is current.
+        const now = Date.now();
+        const stale = (iso: string | undefined): string => {
+          if (!iso) return "never";
+          const t = Date.parse(iso);
+          if (!Number.isFinite(t)) return "never";
+          const ageMs = now - t;
+          if (ageMs < 60_000) return "<1m ago";
+          if (ageMs < 3_600_000) return `${Math.floor(ageMs / 60_000)}m ago`;
+          if (ageMs < 86_400_000) return `${Math.floor(ageMs / 3_600_000)}h ago`;
+          return `${Math.floor(ageMs / 86_400_000)}d ago`;
+        };
+        console.log(`${"Peer".padEnd(20)} ${"Role".padEnd(8)} ${"Status".padEnd(14)} ${"Last Sync".padEnd(14)} Relay`);
         console.log("─".repeat(80));
         for (const p of peers) {
-          const lastSync = p.lastSyncAt?.slice(0, 19) ?? "never";
-          console.log(`${p.id.padEnd(20)} ${(p.role ?? "—").padEnd(8)} ${(p.status ?? "—").padEnd(14)} ${lastSync.padEnd(22)} ${p.relayOnly ? "yes" : "no"}`);
+          console.log(`${p.id.padEnd(20)} ${(p.role ?? "—").padEnd(8)} ${(p.status ?? "—").padEnd(14)} ${stale(p.lastSyncAt).padEnd(14)} ${p.relayOnly ? "yes" : "no"}`);
+        }
+        const haveStale = peers.some((p: any) => {
+          if (!p.lastSyncAt) return true;
+          return now - Date.parse(p.lastSyncAt) > 86_400_000;
+        });
+        if (haveStale) {
+          console.log();
+          console.log("⚠  One or more peers haven't synced in >24h. Run 'flair federation sync' or check the launchd watchdog.");
         }
       }
     } catch (err: any) {
-      console.error(`Error: ${err.message}`);
+      // Better UX on the common auth failure: tell the user what to set.
+      const msg = String(err.message ?? err);
+      if (msg.includes("missing_or_invalid_authorization") || msg.includes("401")) {
+        console.error("Error: federation status requires auth.");
+        console.error("  Set one of:");
+        console.error("    FLAIR_AGENT_ID=<your-agent-id>     (Ed25519 — uses ~/.flair/keys/<id>.key)");
+        console.error("    FLAIR_ADMIN_PASS=<admin-password>  (admin Basic auth, remote targets)");
+        console.error("    FLAIR_TOKEN=<bearer>               (legacy)");
+        process.exit(1);
+      }
+      console.error(`Error: ${msg}`);
       process.exit(1);
     }
   });
