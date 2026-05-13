@@ -127,7 +127,9 @@ Records with `updatedAt` more than 5 minutes in the future are rejected. This pr
 |---------|-------------|
 | `flair federation status` | Show instance identity and peer connections |
 | `flair federation pair <hub-url> --token-from <file>` | Pair this spoke with a hub using a token triple file (or `-` for stdin) |
-| `flair federation sync` | Push local changes to the hub |
+| `flair federation sync` | Push local changes to the hub (one-shot) |
+| `flair federation watch [--interval <s>]` | Run sync in a foreground daemon loop (default 30s) |
+| `flair federation reachability` | Probe local instance + each paired peer (read-only) |
 | `flair federation token [--ttl <min>]` | Generate a one-time pairing token triple (hub only) |
 
 ## Conflict Resolution
@@ -172,6 +174,6 @@ flair federation unpin <instanceId>
 ## Limitations (1.0)
 
 - **HTTP push only** — no persistent WebSocket connections or real-time sync
-- **Manual sync** — `flair federation sync` must be run explicitly (cron recommended)
+- **Manual or watch-loop sync** — `flair federation sync` is one-shot; `flair federation watch --interval 30` runs it on a loop in a foreground daemon (wrap in launchd / systemd for production)
 - **Single hub** — spoke-to-spoke sync goes through the hub
 - **Record-level LWW** — not field-level; concurrent edits to different fields of the same record may lose data
