@@ -2,8 +2,31 @@
  * Shared HTML layout for the Flair web admin.
  * Server-rendered, no JS framework. Minimal CSS for Nathan-grade UX.
  */
+import { existsSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const VERSION = process.env.npm_package_version ?? "dev";
+// Resolve the runtime package version from package.json — process.env.npm_package_version
+// is only populated inside `npm run`, so it returned "dev" in production and rendered
+// "vdev" in the admin sidebar footer for anyone running the published binary.
+function resolveVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      join(here, "..", "..", "package.json"),
+      join(here, "..", "package.json"),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        const pkg = JSON.parse(readFileSync(p, "utf-8"));
+        if (pkg.version) return pkg.version;
+      }
+    }
+  } catch { /* fall through */ }
+  return process.env.npm_package_version ?? "dev";
+}
+
+const VERSION = resolveVersion();
 
 /** Escape HTML special characters to prevent stored XSS. */
 export function esc(str: string | undefined | null): string {
