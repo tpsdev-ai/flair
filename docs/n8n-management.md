@@ -45,6 +45,10 @@ curl -s "http://127.0.0.1:5678/api/v1/workflows/$WORKFLOW_ID" \
 
 See `scripts/n8n/activate-workflow.sh` for a reusable wrapper.
 
+## Why PATCH Doesn't Work
+
+n8n's v1 API docs mention `PATCH /api/v1/workflows/:id` with `{ "active": true }`. **This returns 405 Method Not Allowed on n8n 1.123.38.** The documented activation endpoints are `POST /api/v1/workflows/:id/activate` and `POST /api/v1/workflows/:id/deactivate`.
+
 ## Alternative Approaches
 
 ### Approach 2: CLI when n8n is stopped
