@@ -4261,6 +4261,64 @@ rem
     }
   });
 
+// ─── flair rem nightly run-once ──────────────────────────────────────────────
+// Slice 1 of FLAIR-NIGHTLY-REM § 3. Manually invokes the nightly cycle code
+// path — same module the scheduler will call in PR-2. Useful for:
+//   - First-time operators verifying the cycle works before turning on the
+//     scheduled timer.
+//   - The dry-run-first-run guard (spec § 10) when the scheduler isn't yet
+//     installed.
+//   - Debugging a stale snapshot or audit row.
+//
+// `nightly enable` / `disable` / `status` land in PR-2 (scheduler templates).
+
+const remNightly = rem.command("nightly").description("Scheduled REM nightly cycle (manual trigger + scheduler management)");
+
+remNightly
+  .command("run-once")
+  .description("Run one nightly cycle now (snapshot + log). Same code path the scheduler will use.")
+  .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
+  .option("--dry-run", "Log the row but skip the snapshot write")
+  .action(async (opts) => {
+    const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+    if (!agentId) {
+      console.error("Error: --agent or FLAIR_AGENT_ID env required");
+      process.exit(1);
+    }
+    const { runNightlyCycle } = await import("./rem/runner.js");
+    try {
+      const result = await runNightlyCycle({
+        agentId,
+        flairVersion: __pkgVersion,
+        apiCall: api,
+        dryRun: !!opts.dryRun,
+      });
+      const row = result.logRow;
+      console.log(`-- rem nightly run-once${opts.dryRun ? " (dry-run)" : ""} --`);
+      console.log(`Agent:      ${agentId}`);
+      console.log(`Status:     ${result.status}`);
+      if (result.snapshotPath) {
+        console.log(`Snapshot:   ${result.snapshotPath}`);
+      }
+      console.log(`Memories:   ${row.memoryCount ?? "—"}`);
+      console.log(`Souls:      ${row.soulCount ?? "—"}`);
+      console.log(`Pending:    ${row.pendingCandidates ?? "—"}`);
+      console.log(`Duration:   ${row.durationMs}ms`);
+      if (row.errors.length > 0) {
+        console.log(`Errors:`);
+        for (const e of row.errors) console.log(`  - ${e}`);
+        process.exit(1);
+      }
+      if (result.status === "paused") {
+        console.log(`\nNote: REM is paused (sentinel ~/.flair/rem.paused or FLAIR_REM_PAUSE env).`);
+        console.log(`Resume with: flair rem resume`);
+      }
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
 // ─── flair rem snapshot list ─────────────────────────────────────────────────
 // Slice 1 of FLAIR-NIGHTLY-REM (ops-2qq). Lists snapshot tarballs under
 // ~/.flair/snapshots/<agent>/. Snapshot creation lives inside the nightly
