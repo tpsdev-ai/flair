@@ -4403,6 +4403,10 @@ remNightly
       console.log(`Memories:   ${row.memoryCount ?? "—"}`);
       console.log(`Souls:      ${row.soulCount ?? "—"}`);
       console.log(`Pending:    ${row.pendingCandidates ?? "—"}`);
+      if (typeof row.archived === "number" || typeof row.expired === "number") {
+        console.log(`Archived:   ${row.archived ?? "—"}`);
+        console.log(`Expired:    ${row.expired ?? "—"}`);
+      }
       console.log(`Duration:   ${row.durationMs}ms`);
       if (row.errors.length > 0) {
         console.log(`Errors:`);

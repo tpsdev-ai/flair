@@ -14,6 +14,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runNightlyCycle, type ApiCall, type RunnerOpts } from "../src/rem/runner.ts";
 
+const sampleMemories = [
+  { id: "m1", agentId: "test-agent", content: "first memory", durability: "persistent" },
+  { id: "m2", agentId: "test-agent", content: "second memory" },
+];
+const sampleSoul = { id: "soul-test-agent", agentId: "test-agent", instructions: "be helpful" };
+
 let testRoot: string;
 let snapshotRoot: string;
 let logPath: string;
@@ -55,6 +61,7 @@ function baseOpts(overrides: Partial<RunnerOpts> = {}): RunnerOpts {
       "GET:/Memory": () => [{ id: "m1" }, { id: "m2" }],
       "GET:/Soul": () => [{ id: "soul-test-agent", agentId: "test-agent" }],
       "POST:/MemoryCandidate/search_by_conditions": () => [],
+      "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
     }),
     snapshotRoot,
     logPath,
@@ -97,7 +104,8 @@ describe("happy path", () => {
     expect(r.logRow.soulCount).toBe(1);
     expect(r.logRow.pendingCandidates).toBe(0);
     expect(r.logRow.errors).toEqual([]);
-    expect(r.logRow.slice).toBe("1");
+    // With maintenance wired in this PR, baseline cycles are now slice-2-maintenance.
+    expect(r.logRow.slice).toBe("2-maintenance");
 
     // Log file contains exactly one row.
     const rows = readLogRows();
@@ -114,6 +122,7 @@ describe("happy path", () => {
         "POST:/MemoryCandidate/search_by_conditions": () => [
           { id: "c1" }, { id: "c2" }, { id: "c3" },
         ],
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
       }),
     }));
     expect(r.logRow.pendingCandidates).toBe(3);
@@ -125,11 +134,48 @@ describe("happy path", () => {
         "GET:/Memory": () => ({ results: [{ id: "m1" }, { id: "m2" }, { id: "m3" }] }),
         "GET:/Soul": () => ({ items: [{ id: "s1" }] }),
         "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
       }),
     }));
     expect(r.status).toBe("completed");
     expect(r.logRow.memoryCount).toBe(3);
     expect(r.logRow.soulCount).toBe(1);
+  });
+
+  it("populates archived and expired from /MemoryMaintenance response", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+        "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => ({ expired: 5, archived: 12, total: 200, errors: 0 }),
+      }),
+    }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.archived).toBe(12);
+    expect(r.logRow.expired).toBe(5);
+    expect(r.logRow.slice).toBe("2-maintenance");
+  });
+
+  it("forwards dryRun to /MemoryMaintenance so counts are accurate without mutation", async () => {
+    let receivedDryRun: unknown;
+    const r = await runNightlyCycle(baseOpts({
+      dryRun: true,
+      apiCall: async (method, path, body) => {
+        if (method === "POST" && path === "/MemoryMaintenance") {
+          receivedDryRun = (body as any)?.dryRun;
+          return { expired: 2, archived: 7, total: 100, errors: 0 };
+        }
+        if (method === "GET" && path.startsWith("/Memory?")) return sampleMemories;
+        if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
+        if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return [];
+        throw new Error(`unexpected api: ${method}:${path}`);
+      },
+    }));
+    expect(r.status).toBe("dry-run");
+    expect(receivedDryRun).toBe(true);
+    expect(r.logRow.archived).toBe(7);
+    expect(r.logRow.expired).toBe(2);
   });
 });
 
@@ -184,11 +230,43 @@ describe("failure modes", () => {
         "GET:/Memory": () => [{ id: "m1" }],
         "GET:/Soul": () => [],
         "POST:/MemoryCandidate/search_by_conditions": () => { throw new Error("candidate table missing"); },
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
       }),
     }));
     // Candidate count is a non-fatal signal — the cycle still completes.
     expect(r.status).toBe("completed");
     expect(r.logRow.pendingCandidates).toBe(0);
+  });
+
+  it("captures maintenance errors and exits failed (snapshot preserved)", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => [{ id: "m1" }],
+        "GET:/Soul": () => [],
+        "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => { throw new Error("maintenance worker offline"); },
+      }),
+    }));
+    expect(r.status).toBe("failed");
+    // Snapshot already wrote before maintenance ran — it's preserved.
+    expect(r.snapshotPath).toBeDefined();
+    expect(existsSync(r.snapshotPath!)).toBe(true);
+    expect(r.logRow.errors[0]).toContain("maintenance:");
+    expect(r.logRow.errors[0]).toContain("maintenance worker offline");
+    expect(r.logRow.slice).toBe("2-maintenance");
+  });
+
+  it("treats { error: '...' } maintenance response as failure", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => [{ id: "m1" }],
+        "GET:/Soul": () => [],
+        "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => ({ error: "agentId required" }),
+      }),
+    }));
+    expect(r.status).toBe("failed");
+    expect(r.logRow.errors[0]).toContain("agentId required");
   });
 });
 

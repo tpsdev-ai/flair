@@ -1,18 +1,26 @@
 /**
- * REM nightly runner — orchestrates the slice-1 cycle.
+ * REM nightly runner — orchestrates the cycle.
  *
  * Per FLAIR-NIGHTLY-REM § 4, in order:
  *   1. Pre-flight: check pause sentinel / FLAIR_REM_PAUSE env. Exit clean if paused.
  *   2. Snapshot agent state (memory + soul) to ~/.flair/snapshots/<agent>/.
- *   3. (slice-2) maintenance — soft-delete expired + soft-archive stale.
- *   4. (slice-2) trust-tier filter on input memories.
- *   5. (slice-2) distillation — call /ReflectMemories, persist candidates.
+ *   3. Maintenance — delegate to /MemoryMaintenance (same code path `flair rem light` uses).
+ *   4. (slice-2 next) trust-tier filter on input memories.
+ *   5. (slice-2 next) distillation — call /ReflectMemories, persist candidates.
  *   6. Append a row to ~/.flair/logs/rem-nightly.jsonl.
  *
- * Slice-1 ships steps 1, 2, and 6. Maintenance + distillation are deferred to
- * slice-2 so the load-bearing claim — "every cycle is reversible" — ships
- * first. The audit row marks slice-1 cycles with `slice: "1"` so slice-2
- * upgrades are visible in the history.
+ * Status today:
+ *   - Steps 1, 2, 6 shipped in slice-1 PR-1 (#414).
+ *   - Step 3 (maintenance) ships in this PR — fills `archived`/`expired` in
+ *     the audit row.
+ *   - Steps 4, 5 are slice-2 follow-ups; require an in-process distillation
+ *     LLM path (today `/ReflectMemories` returns a prompt for human/agent
+ *     consumption, not server-side candidate generation).
+ *
+ * The audit row's `slice` field tells readers which steps populated which
+ * counts: `slice: "1"` rows have `archived`/`expired` undefined; `slice:
+ * "2-maintenance"` rows populate them; future slice-2 rows will populate
+ * `consolidated` and `candidates`.
  *
  * Pure dependency injection so the runner is unit-testable without Harper.
  * The CLI wires the real `apiCall` + `pkgVersion`; tests pass stubs.
@@ -47,10 +55,21 @@ export interface RunnerOpts {
 
 export type RunnerStatus = "paused" | "completed" | "dry-run" | "failed";
 
+/**
+ * Audit-row `slice` field. Tracks which phase of FLAIR-NIGHTLY-REM
+ * produced this row so log readers can distinguish snapshot-only cycles
+ * from cycles with maintenance / distillation populated:
+ *
+ *   "1"             — snapshot + log only (slice-1, before #416)
+ *   "2-maintenance" — snapshot + /MemoryMaintenance (this PR, slice-2 PR-3)
+ *   "2"             — full slice-2 (adds /ReflectMemories distillation + replay)
+ */
+export type RunnerSlice = "1" | "2-maintenance" | "2";
+
 export interface RunnerLogRow {
   agentId: string;
   runAt: string;
-  slice: "1";
+  slice: RunnerSlice;
   status: RunnerStatus;
   dryRun?: boolean;
   snapshotPath?: string;
@@ -207,19 +226,62 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     return { status: "failed", logRow: row };
   }
 
+  // Step 3: maintenance — soft-delete expired + soft-archive stale.
+  // Delegates to /MemoryMaintenance (same endpoint `flair rem light` uses).
+  // In dry-run mode the snapshot wasn't written, but we still want to know
+  // what maintenance WOULD do — POST with dryRun=true so the response counts
+  // are accurate without mutating state.
+  let archived = 0;
+  let expired = 0;
+  let sliceLabel: RunnerLogRow["slice"] = "2-maintenance";
+
+  try {
+    const maintRaw = await opts.apiCall("POST", "/MemoryMaintenance", {
+      agentId: opts.agentId,
+      dryRun: opts.dryRun ?? false,
+    });
+    if (maintRaw && typeof maintRaw === "object") {
+      const obj = maintRaw as Record<string, unknown>;
+      if (obj.error) {
+        // /MemoryMaintenance returned { error: "..." } — treat as failure.
+        throw new Error(String(obj.error));
+      }
+      expired = typeof obj.expired === "number" ? obj.expired : 0;
+      archived = typeof obj.archived === "number" ? obj.archived : 0;
+    }
+  } catch (err: any) {
+    errors.push(`maintenance: ${err?.message ?? String(err)}`);
+    const row: RunnerLogRow = {
+      ...baseRow,
+      slice: sliceLabel,
+      status: "failed",
+      snapshotPath,
+      memoryCount,
+      soulCount,
+      pendingCandidates,
+      durationMs: Date.now() - startedMs,
+      errors,
+    };
+    appendLogRow(logPath, row);
+    return { status: "failed", logRow: row, snapshotPath };
+  }
+
   // Step 6: log
   const row: RunnerLogRow = {
     ...baseRow,
+    slice: sliceLabel,
     status: opts.dryRun ? "dry-run" : "completed",
     dryRun: opts.dryRun || undefined,
     snapshotPath,
     memoryCount,
     soulCount,
     pendingCandidates,
+    archived,
+    expired,
     durationMs: Date.now() - startedMs,
     errors,
-    // Slice-2 placeholders — left undefined for now so readers don't see
-    // confusing "0" archived/consolidated counts on slice-1 rows.
+    // `consolidated` and `candidates` populate when slice-2 PR-4 (distillation)
+    // lands; today they remain undefined so the row is honest about what ran.
   };
   appendLogRow(logPath, row);
   return { status: row.status, logRow: row, snapshotPath };
