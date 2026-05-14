@@ -1,0 +1,19 @@
+{
+  "name": "flair-benchmarks",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Reproducible benchmarks measuring agent task performance with vs without Flair memory.",
+  "scripts": {
+    "build": "tsc",
+    "bench": "node --experimental-strip-types ./harness/runner.ts",
+    "report": "node --experimental-strip-types ./harness/report.ts"
+  },
+  "dependencies": {
+    "@tpsdev-ai/flair-client": "*",
+    "@anthropic-ai/sdk": "^0.30.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
