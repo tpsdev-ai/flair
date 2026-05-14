@@ -74,9 +74,9 @@ export interface RunnerResult {
 
 function readPauseSentinel(path: string): boolean {
   try {
-    const stat = readFileSync(path, "utf-8");
+    const contents = readFileSync(path, "utf-8");
     // Existence alone is enough; the body is just a touch-timestamp.
-    return stat.length >= 0;
+    return contents.length >= 0;
   } catch {
     return false;
   }
@@ -136,7 +136,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   const startedMs = startedAt.getTime();
   const logPath = opts.logPath ?? REM_NIGHTLY_LOG;
   const pauseFlagPath = opts.pauseFlagPath ?? REM_PAUSE_FLAG;
-  const envPaused = opts.envPaused ?? !!process.env.FLAIR_REM_PAUSE;
+  const envPaused = opts.envPaused ?? process.env.FLAIR_REM_PAUSE === "1";
 
   const baseRow: Omit<RunnerLogRow, "status" | "durationMs"> = {
     agentId: opts.agentId,

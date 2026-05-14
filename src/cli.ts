@@ -4455,8 +4455,8 @@ rem
     } else {
       console.log(`(REM was not paused — no sentinel at ${REM_PAUSE_FLAG})`);
     }
-    if (process.env.FLAIR_REM_PAUSE) {
-      console.log(`\n⚠ FLAIR_REM_PAUSE env var is also set; unset it to fully resume.`);
+    if (process.env.FLAIR_REM_PAUSE === "1") {
+      console.log(`\n⚠ FLAIR_REM_PAUSE=1 env var is also set; unset it to fully resume.`);
     }
   });
 
