@@ -173,8 +173,15 @@ function writeFileWithDir(path: string, contents: string, mode: number = 0o600):
   writeFileSync(path, contents, { mode });
 }
 
+// 30s ceiling on launchctl/systemctl invocations so a hung service manager
+// can't block the CLI indefinitely. Sherlock #415 follow-up.
+const SPAWN_TIMEOUT_MS = 30_000;
+
 function spawnReport(cmd: string[]): { code: number | null; stdout: string; stderr: string } {
-  const r: SpawnSyncReturns<Buffer> = spawnSync(cmd[0], cmd.slice(1), { encoding: "buffer" });
+  const r: SpawnSyncReturns<Buffer> = spawnSync(cmd[0], cmd.slice(1), {
+    encoding: "buffer",
+    timeout: SPAWN_TIMEOUT_MS,
+  });
   return {
     code: r.status,
     stdout: r.stdout?.toString("utf-8") ?? "",

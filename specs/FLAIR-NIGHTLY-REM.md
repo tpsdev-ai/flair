@@ -158,9 +158,14 @@ First time `flair rem nightly enable` is run for an agent, the next cycle runs w
 ## § 11 Out of Scope for 1.0
 
 - **Auto-promotion of any candidate.** 1.0 promotions are always human/high-trust-agent. Auto-promotion on high-confidence candidates is 1.1+.
+- **Automated nightly distillation.** Step 5 (distillation via `/ReflectMemories`) is operator-triggered in 1.0 via `flair rem rapid` — that command outputs an LLM prompt the operator or agent feeds to its own model and writes insights back manually. Server-side automated distillation requires a configured chat-completion provider per agent (anthropic / openai / ollama / etc.); pluggable distillation-provider interface lands in 1.1+. The nightly cycle in 1.0 ships the load-bearing reversibility (snapshot + maintenance + restore) without auto-distillation.
 - **Cross-agent reflection.** 1.0 REM only distills from a single agent's memories. Multi-agent reflection (e.g., "what did all reviewers learn this week?") is 1.1+.
+- **Cross-agent restore.** `flair rem restore --apply` refuses if the snapshot's `metadata.agentId` differs from `--agent`. Admin restoring another agent's state lands in 1.1+.
 - **LLM-authored rationale.** The rationale on promote/reject is operator-written. An LLM-drafted rationale the human edits is 1.1+.
 - **Cloud-hosted scheduler.** 1.0 uses platform-native schedulers (launchd/systemd). Fabric-hosted nightly is bundled with Flair-cloud post-1.0.
+- **Trust-tier filter on REM input.** Step 4 (filter input memories to `endorsed`+ tier before distillation) is operator-discipline in 1.0 — when the operator runs `rem rapid`, they choose what to promote based on visible source memories. Server-side trust-tier filter lands with the pluggable distillation provider in 1.1+.
+- **Pagination on memory fetch.** The nightly runner fetches all memories for an agent in a single `GET /Memory?agentId=...` call. Fine for the agents Flair targets in 1.0 (single operator, hundreds-to-low-thousands of memories). Pagination lands when the size envelope demands it.
+- **Fail-fast restore mode.** Per Kern's #418 review, current behavior is per-row-continue (with rollback path via pre-restore snapshot). A `--strict` mode that aborts on first error is a 1.1 follow-up.
 
 ## § 12 Open Questions — Resolved
 
