@@ -16,7 +16,7 @@ import {
   statSync,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join, resolve, sep, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
@@ -4258,6 +4258,205 @@ rem
     } catch (err: any) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
+    }
+  });
+
+// ─── flair rem nightly run-once ──────────────────────────────────────────────
+// Slice 1 of FLAIR-NIGHTLY-REM § 3. Manually invokes the nightly cycle code
+// path — same module the scheduler will call in PR-2. Useful for:
+//   - First-time operators verifying the cycle works before turning on the
+//     scheduled timer.
+//   - The dry-run-first-run guard (spec § 10) when the scheduler isn't yet
+//     installed.
+//   - Debugging a stale snapshot or audit row.
+//
+// `nightly enable` / `disable` / `status` land in PR-2 (scheduler templates).
+
+const remNightly = rem.command("nightly").description("Scheduled REM nightly cycle (manual trigger + scheduler management)");
+
+remNightly
+  .command("run-once")
+  .description("Run one nightly cycle now (snapshot + log). Same code path the scheduler will use.")
+  .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
+  .option("--dry-run", "Log the row but skip the snapshot write")
+  .action(async (opts) => {
+    const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+    if (!agentId) {
+      console.error("Error: --agent or FLAIR_AGENT_ID env required");
+      process.exit(1);
+    }
+    const { runNightlyCycle } = await import("./rem/runner.js");
+    try {
+      const result = await runNightlyCycle({
+        agentId,
+        flairVersion: __pkgVersion,
+        apiCall: api,
+        dryRun: !!opts.dryRun,
+      });
+      const row = result.logRow;
+      console.log(`-- rem nightly run-once${opts.dryRun ? " (dry-run)" : ""} --`);
+      console.log(`Agent:      ${agentId}`);
+      console.log(`Status:     ${result.status}`);
+      if (result.snapshotPath) {
+        console.log(`Snapshot:   ${result.snapshotPath}`);
+      }
+      console.log(`Memories:   ${row.memoryCount ?? "—"}`);
+      console.log(`Souls:      ${row.soulCount ?? "—"}`);
+      console.log(`Pending:    ${row.pendingCandidates ?? "—"}`);
+      console.log(`Duration:   ${row.durationMs}ms`);
+      if (row.errors.length > 0) {
+        console.log(`Errors:`);
+        for (const e of row.errors) console.log(`  - ${e}`);
+        process.exit(1);
+      }
+      if (result.status === "paused") {
+        console.log(`\nNote: REM is paused (sentinel ~/.flair/rem.paused or FLAIR_REM_PAUSE env).`);
+        console.log(`Resume with: flair rem resume`);
+      }
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+// ─── flair rem snapshot list ─────────────────────────────────────────────────
+// Slice 1 of FLAIR-NIGHTLY-REM (ops-2qq). Lists snapshot tarballs under
+// ~/.flair/snapshots/<agent>/. Snapshot creation lives inside the nightly
+// runner (and exposed via `flair rem nightly run-once`) — there is no
+// user-facing `rem snapshot create` because that would invite operators to
+// create snapshots out of sync with the audit log. The list is the surface.
+
+const remSnapshot = rem.command("snapshot").description("REM nightly snapshots (tar.gz archives of agent memory + soul)");
+
+remSnapshot
+  .command("list")
+  .description("List REM snapshots for an agent (or all agents)")
+  .option("--agent <id>", "Filter to a single agent")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { listSnapshots } = await import("./rem/snapshot.js");
+    const rows = listSnapshots(opts.agent);
+    if (opts.json) {
+      console.log(JSON.stringify(rows, null, 2));
+      return;
+    }
+    if (rows.length === 0) {
+      console.log("(no REM snapshots — ~/.flair/snapshots/ is empty or absent)");
+      console.log("\nSnapshots are produced by the nightly cycle. Run `flair rem nightly run-once`");
+      console.log("to generate one manually (slice 1).");
+      return;
+    }
+    const agentW = Math.max(5, ...rows.map((r) => r.agent.length));
+    const fileW = Math.max(20, ...rows.map((r) => r.file.length));
+    console.log(`  ${"agent".padEnd(agentW)}  ${"file".padEnd(fileW)}  size      age`);
+    for (const r of rows) {
+      console.log(`  ${r.agent.padEnd(agentW)}  ${r.file.padEnd(fileW)}  ${humanBytes(r.size).padEnd(8)}  ${relativeTime(r.mtime)}`);
+    }
+    console.log(`\n${rows.length} snapshot${rows.length > 1 ? "s" : ""}.`);
+  });
+
+// ─── flair rem restore <date> ────────────────────────────────────────────────
+// Slice 1 of FLAIR-NIGHTLY-REM § 9. Extracts a snapshot tarball to a target
+// directory for inspection. This is the "snapshot list + extract" pair — the
+// extracted memories.jsonl / soul.json / metadata.json can be inspected and
+// manually replayed if needed. A live replay into Harper (operator command
+// "actually rewind state to <date>") lands in slice-2 once we settle the
+// replay endpoint shape.
+//
+// The <date> argument can be a full ISO timestamp prefix (e.g.
+// "2026-05-14T03-00-00-000Z") or a date-only prefix ("2026-05-14"). The
+// command picks the latest snapshot matching that prefix.
+
+rem
+  .command("restore <date>")
+  .description("Extract a REM snapshot for inspection (replay-into-live-state is slice 2)")
+  .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
+  .option("--target <dir>", "Directory to extract into (default: <snapshot>.restored)")
+  .option("--dry-run", "List the snapshot's contents without extracting")
+  .action(async (date, opts) => {
+    const { listSnapshots, extractSnapshot } = await import("./rem/snapshot.js");
+    const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+    if (!agentId) {
+      console.error("Error: --agent or FLAIR_AGENT_ID env required");
+      process.exit(1);
+    }
+    let rows;
+    try {
+      rows = listSnapshots(agentId);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+    const matches = rows.filter((r) => r.file.startsWith(date));
+    if (matches.length === 0) {
+      console.error(`Error: no snapshot found for agent '${agentId}' matching date '${date}'`);
+      if (rows.length > 0) {
+        console.error(`  Available: ${rows.slice(0, 5).map((r) => r.file.replace(/\.tar\.gz$/, "")).join(", ")}`);
+      } else {
+        console.error(`  No snapshots exist for ${agentId}. Run \`flair rem nightly run-once\` to create one.`);
+      }
+      process.exit(1);
+    }
+    // listSnapshots returns descending by mtime, so matches[0] is the newest
+    // snapshot for the date prefix.
+    const match = matches[0];
+
+    try {
+      const result = await extractSnapshot({
+        snapshotPath: match.path,
+        targetDir: opts.target,
+        dryRun: !!opts.dryRun,
+      });
+      if (opts.dryRun) {
+        console.log(`(dry-run) snapshot: ${match.path}`);
+        for (const e of result.entries) {
+          console.log(`  ${e.path}  (${humanBytes(e.size)})`);
+        }
+        return;
+      }
+      console.log(`✅ Extracted: ${match.path}`);
+      console.log(`   To:        ${result.targetDir}`);
+      for (const e of result.entries) {
+        console.log(`     ${e.path}  (${humanBytes(e.size)})`);
+      }
+      console.log(`\nNote: this is a filesystem extract — Harper state is unchanged.`);
+      console.log(`Live replay (rewind into Harper) is a slice-2 capability.`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+// ─── flair rem pause / resume ────────────────────────────────────────────────
+// Slice 1 of FLAIR-NIGHTLY-REM § 9. The pause sentinel is checked by the
+// nightly runner before any side effects. Env-var FLAIR_REM_PAUSE=1 is also
+// honored — lets ops pause fleet-wide without writing a file.
+
+const REM_PAUSE_FLAG = resolve(homedir(), ".flair", "rem.paused");
+
+rem
+  .command("pause")
+  .description("Pause nightly REM runs — writes ~/.flair/rem.paused sentinel")
+  .action(() => {
+    const dir = dirname(REM_PAUSE_FLAG);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(REM_PAUSE_FLAG, new Date().toISOString() + "\n", { mode: 0o600 });
+    console.log(`✅ REM nightly runs paused (sentinel: ${REM_PAUSE_FLAG})`);
+    console.log(`   Resume with: flair rem resume`);
+  });
+
+rem
+  .command("resume")
+  .description("Resume nightly REM runs — removes the pause sentinel")
+  .action(() => {
+    if (existsSync(REM_PAUSE_FLAG)) {
+      rmSync(REM_PAUSE_FLAG);
+      console.log(`✅ REM nightly runs resumed (removed ${REM_PAUSE_FLAG})`);
+    } else {
+      console.log(`(REM was not paused — no sentinel at ${REM_PAUSE_FLAG})`);
+    }
+    if (process.env.FLAIR_REM_PAUSE === "1") {
+      console.log(`\n⚠ FLAIR_REM_PAUSE=1 env var is also set; unset it to fully resume.`);
     }
   });
 
