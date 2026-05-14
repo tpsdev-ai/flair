@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.flair.rem.nightly</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{SHIM_PATH}}</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>{{HOUR}}</integer>
+    <key>Minute</key>
+    <integer>{{MINUTE}}</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>{{HOME}}/.flair/logs/rem-nightly.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>{{HOME}}/.flair/logs/rem-nightly.stderr.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>{{HOME}}</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>{{HOME}}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>FLAIR_AGENT_ID</key>
+    <string>{{AGENT_ID}}</string>
+    <key>FLAIR_URL</key>
+    <string>{{FLAIR_URL}}</string>
+  </dict>
+</dict>
+</plist>

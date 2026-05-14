@@ -30,6 +30,7 @@
   "files": [
     "dist/",
     "schemas/",
+    "templates/",
     "ui/",
     "config.yaml",
     "LICENSE",
