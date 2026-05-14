@@ -228,7 +228,18 @@ git -C "$ROOT" add \
   "$ROOT/packages/openclaw-flair/package.json" \
   "$ROOT/packages/pi-flair/package.json" \
   "$ROOT/packages/n8n-nodes-flair/package.json" \
+  "$ROOT/packages/langgraph-flair/package.json" \
   "$ROOT/bun.lock"
+
+# Also stage CHANGELOG.md and scripts/release.sh if they have pre-staged changes —
+# operators routinely write the release notes before invoking this script, and
+# script bugfixes (like the missing langgraph-flair stage line, 2026-05-14) need
+# to ride along with the release that surfaces them.
+for extra in "$ROOT/CHANGELOG.md" "$ROOT/scripts/release.sh"; do
+  if ! git -C "$ROOT" diff --quiet -- "$extra"; then
+    git -C "$ROOT" add "$extra"
+  fi
+done
 git -C "$ROOT" commit -m "release: v${VERSION} — align all workspace packages"
 
 if [[ "$MODE" == "--dry" ]]; then
