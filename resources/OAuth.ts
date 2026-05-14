@@ -44,6 +44,13 @@ function futureISO(ms: number): string {
 // ─── Discovery metadata ──────────────────────────────────────────────────────
 
 export class OAuthMetadata extends Resource {
+  // OAuth discovery metadata is intentionally public — RFC 8414 § 3 requires
+  // it be accessible without authentication so clients can bootstrap their
+  // flow. `allowRead() { return true }` opens Harper's role gate so remote
+  // operators (e.g. Fabric-hosted Flair) get the metadata document instead
+  // of a 401 from Harper's intrinsic auth layer. Same pattern as Health (#386).
+  allowRead() { return true; }
+
   async get() {
     const baseUrl = process.env.FLAIR_PUBLIC_URL || `http://127.0.0.1:${process.env.HTTP_PORT || 19926}`;
     return {
@@ -75,6 +82,11 @@ export class OAuthMetadata extends Resource {
 // ─── Dynamic Client Registration (RFC 7591) ──────────────────────────────────
 
 export class OAuthRegister extends Resource {
+  // Dynamic Client Registration (RFC 7591) — clients must be able to register
+  // anonymously to bootstrap. Validation (redirect_uri allow-list, etc.)
+  // happens in post(). Pattern matches FederationPair.allowCreate (#299).
+  allowCreate() { return true; }
+
   async post(data: any) {
     const redirectUris: string[] = data?.redirect_uris ?? [];
     const clientName: string = data?.client_name ?? "Unknown Client";
@@ -120,6 +132,12 @@ export class OAuthRegister extends Resource {
 // ─── Authorization endpoint ──────────────────────────────────────────────────
 
 export class OAuthAuthorize extends Resource {
+  // OAuth authorize endpoint must accept anonymous GET/POST — the whole
+  // point of authorize is to start an unauthenticated user's flow. PKCE
+  // and state-parameter validation in the handler enforce real auth.
+  allowRead() { return true; }
+  allowCreate() { return true; }
+
   async get() {
     // In 1.0, this returns a simple HTML consent page.
     // The user (Nathan) approves or denies, which POSTs back.
@@ -233,6 +251,11 @@ ${scope.split(" ").map((s: string) => `<div class="scope">${s}</div>`).join("")}
 // ─── Token endpoint ──────────────────────────────────────────────────────────
 
 export class OAuthToken extends Resource {
+  // OAuth token exchange — client must hit this without prior Harper auth
+  // since they're trading code/refresh for a token. Authentication is in
+  // the post() handler via PKCE verifier + client_secret_basic.
+  allowCreate() { return true; }
+
   async post(data: any) {
     const grantType = data?.grant_type;
 
@@ -414,6 +437,10 @@ export class OAuthToken extends Resource {
 // ─── Revocation endpoint ─────────────────────────────────────────────────────
 
 export class OAuthRevoke extends Resource {
+  // RFC 7009 — token revocation accepts the token itself as proof; clients
+  // may not have a separate auth credential. Handler validates the token.
+  allowCreate() { return true; }
+
   async post(data: any) {
     const token = data?.token;
     if (!token) {

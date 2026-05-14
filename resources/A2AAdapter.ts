@@ -294,6 +294,12 @@ function statusFromOrgEvent(event: any): string | null {
 }
 
 export class A2AAdapter extends Resource {
+  // A2A discovery surface — agent cards and adapter metadata are intentionally
+  // public so other agents/clients can discover this Flair as a memory peer.
+  // Handler enforces auth on actual A2A actions (POST below).
+  allowRead() { return true; }
+  allowCreate() { return true; }
+
   async get() {
     const host = process.env.FLAIR_PUBLIC_URL || "http://localhost:9926";
     return new Response(JSON.stringify({
