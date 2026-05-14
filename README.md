@@ -61,6 +61,26 @@ The honest gaps:
 
 If you need any of those specifically, use them. If you need crypto-pinned identity + federation + cross-orchestrator breadth + soul-as-a-feature — that's the gap Flair fills.
 
+### Memory curation: vs Claude Dreams
+
+Anthropic shipped [Claude Dreams](https://platform.claude.com/docs/en/managed-agents/dreams) (research preview, April 2026) — async pipeline that reads a memory store + session transcripts and produces a curated output store: duplicates merged, stale entries replaced, insights surfaced. Validates the category: agent memory accumulates drift and needs cleanup.
+
+Flair ships two curation paths:
+
+- **`flair rem rapid`** — on-demand reflection, like Dreams' one-shot job. `--focus {lessons_learned, patterns, decisions, errors}` mirrors Dreams' `instructions` parameter.
+- **`flair rem nightly enable`** — scheduled (launchd / systemd), with pre-cycle snapshot, `flair rem restore <date>` rollback, and trust-tier filtering of input memories.
+
+The difference is the promotion contract:
+
+| | Claude Dreams | Flair REM |
+|---|---|---|
+| **Output** | New memory store — swap in or discard | Staged candidates — per-candidate decision |
+| **Promotion gate** | Accept whole store | `flair rem promote <id> --rationale "<why>"`, ACL-gated by trust tier |
+| **Reversibility** | Input never modified | Snapshot/restore on every cycle |
+| **Where it runs** | Anthropic Managed Agents (SaaS, Anthropic models only) | Self-hosted, any model |
+
+Dreams is easier to start with (one API call). REM is the production-discipline version — every promotion is deliberate, every night is reversible.
+
 ## Why this exists
 
 Every agent framework gives you chat history. None of them give you *identity*.
