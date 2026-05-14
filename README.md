@@ -61,6 +61,27 @@ The honest gaps:
 
 If you need any of those specifically, use them. If you need crypto-pinned identity + federation + cross-orchestrator breadth + soul-as-a-feature — that's the gap Flair fills.
 
+### Memory curation: vs Claude Dreams
+
+Anthropic shipped [Claude Dreams](https://platform.claude.com/docs/en/managed-agents/dreams) (research preview, April 2026) — async pipeline that reads a memory store + session transcripts and produces a curated output store: duplicates merged, stale entries replaced, insights surfaced. Validates the category: agent memory accumulates drift and needs cleanup.
+
+Flair ships an on-demand curation surface today: `flair rem rapid`. Scheduled nightly REM is in the [FLAIR-NIGHTLY-REM spec](specs/FLAIR-NIGHTLY-REM.md) and partially built.
+
+- **`flair rem rapid`** (ships now) — on-demand reflection. `--focus {lessons_learned, patterns, decisions, errors}` mirrors Dreams' `instructions` parameter. Outputs *candidates*, not a wholesale store swap.
+- **`flair rem candidates` / `flair rem promote <id> --rationale "<why>"` / `flair rem reject <id>`** (ship now) — review and promote distilled candidates with required rationale.
+- **`flair rem nightly`** (planned, P0 for 1.0) — scheduled automation with pre-cycle snapshot, `rem restore <date>` rollback, trust-tier filtering. Spec'd; not yet implemented.
+
+The substantive difference is the **promotion contract**:
+
+| | Claude Dreams | Flair REM (today) |
+|---|---|---|
+| **Output** | New memory store — accept or discard | Staged candidates — per-candidate decision |
+| **Promotion gate** | None — accept the whole store | `flair rem promote <id> --rationale "<why>"` |
+| **Reversibility** | Input store is never modified (real safety property) | In-place modifications; nightly snapshot/restore is on the roadmap |
+| **Where it runs** | Anthropic Managed Agents (SaaS, Anthropic models only) | Self-hosted, any model |
+
+Dreams is easier to start with — one API call, and the input-never-modified contract gives you a clean rollback by simply not accepting the output. REM is the more granular surface — per-candidate decisions with required rationale — for operators who want to merge what's right and reject what's wrong on the same nightly cycle. Both are legitimate choices; the right one depends on whether you want store-level or candidate-level review.
+
 ## Why this exists
 
 Every agent framework gives you chat history. None of them give you *identity*.
