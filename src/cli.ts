@@ -4460,23 +4460,29 @@ remSnapshot
   });
 
 // ─── flair rem restore <date> ────────────────────────────────────────────────
-// Slice 1 of FLAIR-NIGHTLY-REM § 9. Extracts a snapshot tarball to a target
-// directory for inspection. This is the "snapshot list + extract" pair — the
-// extracted memories.jsonl / soul.json / metadata.json can be inspected and
-// manually replayed if needed. A live replay into Harper (operator command
-// "actually rewind state to <date>") lands in slice-2 once we settle the
-// replay endpoint shape.
+// Slice 1 + 2 of FLAIR-NIGHTLY-REM § 9.
 //
-// The <date> argument can be a full ISO timestamp prefix (e.g.
-// "2026-05-14T03-00-00-000Z") or a date-only prefix ("2026-05-14"). The
+// Default (no --apply): filesystem-only extract for inspection. Writes
+//   memories.jsonl / soul.json / metadata.json to a target directory.
+//   Harper state is unchanged.
+//
+// --apply: live replay. Reads the snapshot contents, takes a pre-restore
+//   snapshot of the agent's CURRENT state (so this restore is itself
+//   reversible), then DELETEs current memories/souls for the agent and PUTs
+//   the snapshot's rows back. Per-row failures are captured per-row; the
+//   pre-restore snapshot's path is reported so operator can roll back if
+//   something goes wrong mid-flight.
+//
+// The <date> argument is an ISO-timestamp prefix or date-only prefix; the
 // command picks the latest snapshot matching that prefix.
 
 rem
   .command("restore <date>")
-  .description("Extract a REM snapshot for inspection (replay-into-live-state is slice 2)")
+  .description("Restore from a REM snapshot (inspect by default; --apply rewinds Harper state)")
   .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
-  .option("--target <dir>", "Directory to extract into (default: <snapshot>.restored)")
-  .option("--dry-run", "List the snapshot's contents without extracting")
+  .option("--target <dir>", "Directory to extract into (default: <snapshot>.restored, only used without --apply)")
+  .option("--dry-run", "Plan-only — list contents or planned counts without writing")
+  .option("--apply", "Live replay: rewind Harper state to the snapshot (irreversible without the pre-restore snapshot)")
   .action(async (date, opts) => {
     const { listSnapshots, extractSnapshot } = await import("./rem/snapshot.js");
     const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
@@ -4505,6 +4511,40 @@ rem
     // snapshot for the date prefix.
     const match = matches[0];
 
+    // --apply path: live replay via src/rem/restore.ts
+    if (opts.apply) {
+      const { applySnapshot } = await import("./rem/restore.js");
+      try {
+        const result = await applySnapshot({
+          agentId,
+          snapshotPath: match.path,
+          flairVersion: __pkgVersion,
+          apiCall: api,
+          dryRun: !!opts.dryRun,
+        });
+        const verb = opts.dryRun ? "(dry-run) would" : "";
+        console.log(`${opts.dryRun ? "(dry-run) " : ""}flair rem restore --apply${opts.dryRun ? "" : ""}`);
+        console.log(`  Status:       ${result.status}`);
+        console.log(`  Snapshot:     ${match.path}`);
+        if (result.preRestoreSnapshotPath) {
+          console.log(`  Pre-restore:  ${result.preRestoreSnapshotPath}`);
+          console.log(`                (rollback: flair rem restore <pre-restore-date> --agent ${agentId} --apply)`);
+        }
+        console.log(`  Deleted:      ${result.deleted.memories} memories, ${result.deleted.souls} souls`);
+        console.log(`  Restored:     ${result.restored.memories} memories, ${result.restored.souls} souls`);
+        if (result.errors.length > 0) {
+          console.log(`  Errors:`);
+          for (const e of result.errors) console.log(`    - ${e}`);
+        }
+        if (result.status === "failed") process.exit(1);
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+      return;
+    }
+
+    // Default: filesystem extract.
     try {
       const result = await extractSnapshot({
         snapshotPath: match.path,
@@ -4524,7 +4564,7 @@ rem
         console.log(`     ${e.path}  (${humanBytes(e.size)})`);
       }
       console.log(`\nNote: this is a filesystem extract — Harper state is unchanged.`);
-      console.log(`Live replay (rewind into Harper) is a slice-2 capability.`);
+      console.log(`To actually rewind state, re-run with --apply.`);
     } catch (err: any) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
