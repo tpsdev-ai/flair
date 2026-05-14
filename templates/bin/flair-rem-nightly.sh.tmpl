@@ -1,0 +1,9 @@
+#!/bin/sh
+# Flair REM nightly runner shim.
+# Deployed by `flair rem nightly enable` to {{SHIM_PATH}}.
+# Invoked by launchd (macOS) or systemd (Linux) on the configured schedule.
+#
+# Single line that invokes the CLI's run-once subcommand — the runner module
+# does all the work. Logs land in {{HOME}}/.flair/logs/.
+set -e
+exec {{FLAIR_BIN}} rem nightly run-once

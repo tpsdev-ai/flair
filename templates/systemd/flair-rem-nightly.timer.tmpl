@@ -1,0 +1,10 @@
+[Unit]
+Description=Flair REM nightly timer ({{AGENT_ID}})
+
+[Timer]
+OnCalendar=*-*-* {{HOUR_PAD}}:{{MINUTE_PAD}}:00
+Persistent=true
+Unit=flair-rem-nightly.service
+
+[Install]
+WantedBy=timers.target

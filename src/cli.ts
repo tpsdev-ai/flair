@@ -4274,6 +4274,106 @@ rem
 
 const remNightly = rem.command("nightly").description("Scheduled REM nightly cycle (manual trigger + scheduler management)");
 
+// `enable` / `disable` / `status` — scheduler install/uninstall (slice-1 PR-2).
+// macOS: writes ~/Library/LaunchAgents/dev.flair.rem.nightly.plist and bootstraps it.
+// Linux: writes ~/.config/systemd/user/flair-rem-nightly.{timer,service} and enables the timer.
+// Snapshot data and the audit log are preserved through enable/disable cycles.
+
+remNightly
+  .command("enable")
+  .description("Install the nightly scheduler (launchd on macOS, systemd timer on Linux)")
+  .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
+  .option("--at <HH:MM>", "Local time to run nightly (default 03:00)", "03:00")
+  .option("--flair-url <url>", "Flair HTTP URL the runner will hit (default http://127.0.0.1:<port>)")
+  .action(async (opts) => {
+    const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+    if (!agentId) {
+      console.error("Error: --agent or FLAIR_AGENT_ID env required");
+      process.exit(1);
+    }
+    const match = /^(\d{1,2}):(\d{2})$/.exec(opts.at);
+    if (!match) {
+      console.error(`Error: --at must be HH:MM (got: ${opts.at})`);
+      process.exit(1);
+    }
+    const hour = parseInt(match[1], 10);
+    const minute = parseInt(match[2], 10);
+
+    const port = readPortFromConfig() ?? DEFAULT_PORT;
+    const flairUrl = opts.flairUrl || process.env.FLAIR_URL || `http://127.0.0.1:${port}`;
+
+    const { enableScheduler } = await import("./rem/scheduler.js");
+    try {
+      const r = enableScheduler({ agentId, flairUrl, hour, minute });
+      console.log(`✅ REM nightly scheduler enabled (${r.platform})`);
+      console.log(`   Schedule:    ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} local time`);
+      console.log(`   Scheduler:   ${r.schedulerPath}`);
+      console.log(`   Shim:        ${r.shimPath}`);
+      console.log(`   Agent:       ${agentId}`);
+      console.log(`   Flair URL:   ${flairUrl}`);
+      if (r.loadResult) {
+        if (r.loadResult.code === 0) {
+          console.log(`   Load:        ${r.loadCommand.join(" ")} → ok`);
+        } else {
+          console.log(`   Load:        ${r.loadCommand.join(" ")} → code ${r.loadResult.code}`);
+          if (r.loadResult.stderr) console.log(`     stderr: ${r.loadResult.stderr.trim()}`);
+        }
+      }
+      console.log(`\nTip: run \`flair rem nightly run-once --dry-run\` to verify the cycle works`);
+      console.log(`     before the first scheduled fire. Disable with \`flair rem nightly disable\`.`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+remNightly
+  .command("disable")
+  .description("Remove the nightly scheduler (keeps snapshots + audit log)")
+  .option("--remove-shim", "Also delete the ~/.flair/bin/flair-rem-nightly shim")
+  .action(async (opts) => {
+    const { disableScheduler } = await import("./rem/scheduler.js");
+    try {
+      const r = disableScheduler({ removeShim: !!opts.removeShim });
+      if (r.removed.length === 0) {
+        console.log(`(REM nightly scheduler was not installed on ${r.platform})`);
+        return;
+      }
+      console.log(`✅ REM nightly scheduler disabled (${r.platform})`);
+      console.log(`   Removed:`);
+      for (const p of r.removed) console.log(`     ${p}`);
+      if (r.unloadResult && r.unloadResult.code !== 0) {
+        console.log(`   Unload:      ${r.unloadCommand.join(" ")} → code ${r.unloadResult.code}`);
+        if (r.unloadResult.stderr) console.log(`     stderr: ${r.unloadResult.stderr.trim()}`);
+      }
+      console.log(`\nSnapshots at ~/.flair/snapshots/ and the audit log at`);
+      console.log(`~/.flair/logs/rem-nightly.jsonl are preserved.`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+remNightly
+  .command("status")
+  .description("Show whether the nightly scheduler is installed")
+  .action(async () => {
+    const { schedulerStatus } = await import("./rem/scheduler.js");
+    try {
+      const s = schedulerStatus();
+      console.log(`REM nightly scheduler (${s.platform}):`);
+      console.log(`  Installed:   ${s.installed ? "yes" : "no"}`);
+      console.log(`  Scheduler:   ${s.schedulerPath}`);
+      console.log(`  Shim:        ${s.shimPath}${s.shimExists ? "" : " (missing)"}`);
+      if (!s.installed) {
+        console.log(`\nEnable with: flair rem nightly enable --agent <id> [--at HH:MM]`);
+      }
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
 remNightly
   .command("run-once")
   .description("Run one nightly cycle now (snapshot + log). Same code path the scheduler will use.")

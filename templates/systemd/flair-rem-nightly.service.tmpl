@@ -1,0 +1,14 @@
+[Unit]
+Description=Flair REM nightly cycle ({{AGENT_ID}})
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart={{SHIM_PATH}}
+Environment=FLAIR_AGENT_ID={{AGENT_ID}}
+Environment=FLAIR_URL={{FLAIR_URL}}
+StandardOutput=append:{{HOME}}/.flair/logs/rem-nightly.stdout.log
+StandardError=append:{{HOME}}/.flair/logs/rem-nightly.stderr.log
+
+[Install]
+WantedBy=default.target
