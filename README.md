@@ -38,6 +38,12 @@ Most agent memory systems store *facts*. Flair stores facts AND the agent's iden
 
 `flair memory add` writes a memory; `flair search` finds it by meaning, not keywords. The same memory is then visible to every harness in the catalog above.
 
+### Same identity, every orchestrator
+
+![Flair cross-orchestrator: one agent, one memory store, three MCP-capable CLIs](docs/assets/flair-cross-orchestrator.gif)
+
+Same Ed25519 identity, same memory store, three different MCP-capable CLIs (Claude Code, Codex CLI, Gemini CLI). A memory written from one is immediately retrievable from the next. This is the load-bearing differentiation vs vendor-locked memory systems — your agent's identity and history aren't bound to a single orchestrator's runtime.
+
 ## How Flair compares
 
 | | Flair | Mem0 | Honcho | Letta (MemGPT) | Built-ins (OAI/Anthropic/Google) |
