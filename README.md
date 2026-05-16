@@ -4,9 +4,9 @@
 [![Docker Test](https://github.com/tpsdev-ai/flair/actions/workflows/docker-test.yml/badge.svg)](https://github.com/tpsdev-ai/flair/actions/workflows/docker-test.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-> **The memory system that gives agents a durable identity, not just durable facts. Federated. Crypto-isolated. Yours.**
+> **The identity and memory substrate for AI agents. Crypto-pinned. Federated. Self-hosted.**
 
-Most agent memory systems store *facts*. Flair stores facts AND the agent's identity — its character, its values, its accumulated way of working. Same agent, different orchestrator: memory follows. Same network, different machine: memory federates. Same instance, different agents: memory is crypto-isolated end-to-end.
+Flair is the **identity + memory substrate for AI agents**. Cryptographic per-agent identity (Ed25519). Soul as a first-class primitive, separate from memory. Federation across hosts (hub/spoke). Same agent, every orchestrator — memory follows.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -42,22 +42,18 @@ Most agent memory systems store *facts*. Flair stores facts AND the agent's iden
 
 ![Flair cross-orchestrator: one agent, one memory store, three MCP-capable CLIs](docs/assets/flair-cross-orchestrator.gif)
 
-Same Ed25519 identity, same memory store, three different MCP-capable CLIs (Claude Code, Codex CLI, Gemini CLI). A memory written from one is immediately retrievable from the next. This is the load-bearing differentiation vs vendor-locked memory systems — your agent's identity and history aren't bound to a single orchestrator's runtime.
+Same Ed25519 identity, same memory store, three different MCP-capable CLIs (Claude Code, Codex CLI, Gemini CLI). A memory written from one is immediately retrievable from the next. Your agent's identity and history aren't bound to a single orchestrator's runtime.
 
 ## How Flair compares
 
 | | Flair | Mem0 | Honcho | Letta (MemGPT) | Built-ins (OAI/Anthropic/Google) |
 |---|---|---|---|---|---|
-| **License** | Apache 2.0 | Apache 2.0 | AGPL-3.0 | Apache 2.0 | proprietary |
-| **Self-host** | yes | yes (Docker) | yes (Docker) | yes | no |
-| **Managed cloud also offered** | no | yes (app.mem0.ai) | yes (app.honcho.dev) | no | only mode |
 | **Identity model** | **Ed25519 per agent (crypto-pinned)** | tenant-isolation | per-user soft tenant | runtime-bound | account-scoped |
 | **Federation (peer-to-peer)** | **yes — hub/spoke validated** | no | no | no | no |
 | **Cross-orchestrator** | **11+ harnesses, same memory** | several | several | runtime-bound | vendor-locked |
-| **Semantic search** | in-process (nomic-embed, no API calls) | yes | yes | yes | varies |
 | **Soul / persistent character** | **first-class** | optional | persona-shaped | optional | no |
 
-Mem0, Honcho, and Letta are all open-source and self-hostable — credit where it's due. That's why we don't lead with "open source" as the differentiator. The cells in **bold** are the ones that, in our reading, no other system can claim cleanly today: crypto-pinned per-agent identity, peer-to-peer federation, the breadth of cross-orchestrator integrations, and soul as a first-class primitive.
+Four rows where Flair holds a cell no other system holds cleanly today. Parity rows (license, self-host, semantic search) are table-stakes for this neighborhood — Mem0, Honcho, and Letta are all open-source and self-hostable — so they're omitted to keep the moat visible.
 
 The honest gaps:
 
