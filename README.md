@@ -67,11 +67,13 @@ If you need any of those specifically, use them. If you need crypto-pinned ident
 
 Anthropic shipped [Claude Dreams](https://platform.claude.com/docs/en/managed-agents/dreams) (research preview, April 2026) — async pipeline that reads a memory store + session transcripts and produces a curated output store: duplicates merged, stale entries replaced, insights surfaced. Validates the category: agent memory accumulates drift and needs cleanup.
 
-Flair ships an on-demand curation surface today: `flair rem rapid`. Scheduled nightly REM is in the [FLAIR-NIGHTLY-REM spec](specs/FLAIR-NIGHTLY-REM.md) and partially built.
+Flair ships both the on-demand curation surface (`flair rem rapid`) AND the scheduled nightly cycle in v0.9.0, per the [FLAIR-NIGHTLY-REM spec](specs/FLAIR-NIGHTLY-REM.md).
 
-- **`flair rem rapid`** (ships now) — on-demand reflection. `--focus {lessons_learned, patterns, decisions, errors}` mirrors Dreams' `instructions` parameter. Outputs *candidates*, not a wholesale store swap.
-- **`flair rem candidates` / `flair rem promote <id> --rationale "<why>"` / `flair rem reject <id>`** (ship now) — review and promote distilled candidates with required rationale.
-- **`flair rem nightly`** (planned, P0 for 1.0) — scheduled automation with pre-cycle snapshot, `rem restore <date>` rollback, trust-tier filtering. Spec'd; not yet implemented.
+- **`flair rem rapid`** — on-demand reflection. `--focus {lessons_learned, patterns, decisions, errors}` mirrors Dreams' `instructions` parameter. Outputs *candidates*, not a wholesale store swap.
+- **`flair rem candidates` / `flair rem promote <id> --rationale "<why>"` / `flair rem reject <id>`** — review and promote distilled candidates with required rationale.
+- **`flair rem nightly enable [--at HH:MM]`** — scheduled automation via platform-native scheduler (launchd / systemd). Pre-cycle snapshot to `~/.flair/snapshots/<agent>/<iso>.tar.gz`. Maintenance step (soft-delete expired + soft-archive stale). Audit log to `~/.flair/logs/rem-nightly.jsonl`. `flair rem pause` / `resume` for emergency stop.
+- **`flair rem restore <date> --apply`** — rewinds Harper state to a snapshot. Takes a pre-restore snapshot of current state first, so the rewind itself is reversible.
+- *Slice-3 (1.1)* — automated server-side distillation (requires pluggable LLM provider), trust-tier filter on REM input, cross-agent restore. Until then, distillation is operator-triggered via `flair rem rapid` followed by manual promote/reject.
 
 The substantive difference is the **promotion contract**:
 
@@ -79,7 +81,7 @@ The substantive difference is the **promotion contract**:
 |---|---|---|
 | **Output** | New memory store — accept or discard | Staged candidates — per-candidate decision |
 | **Promotion gate** | None — accept the whole store | `flair rem promote <id> --rationale "<why>"` |
-| **Reversibility** | Input store is never modified (real safety property) | In-place modifications; nightly snapshot/restore is on the roadmap |
+| **Reversibility** | Input store is never modified (real safety property) | Pre-cycle snapshot + `rem restore <date> --apply` (rewinds Harper state, takes a pre-restore snapshot too) |
 | **Where it runs** | Anthropic Managed Agents (SaaS, Anthropic models only) | Self-hosted, any model |
 
 Dreams is easier to start with — one API call, and the input-never-modified contract gives you a clean rollback by simply not accepting the output. REM is the more granular surface — per-candidate decisions with required rationale — for operators who want to merge what's right and reject what's wrong on the same nightly cycle. Both are legitimate choices; the right one depends on whether you want store-level or candidate-level review.
