@@ -7350,14 +7350,25 @@ program
   .option("--agents <ids>", "Comma-separated agent IDs to include (default: all)")
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
-  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)")
+  .option("--admin-pass-file <path>", "Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.")
   .action(async (opts) => {
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
-    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    let adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+    if (!adminPass && opts.adminPassFile) {
+      // Pull from file. Trim trailing newlines — common gotcha for files
+      // generated via `openssl rand -base64 24 > admin-pass`.
+      try {
+        adminPass = readFileSync(opts.adminPassFile, "utf-8").replace(/\s+$/, "");
+      } catch (err: any) {
+        console.error(`Error reading --admin-pass-file ${opts.adminPassFile}: ${err.message}`);
+        process.exit(1);
+      }
+    }
     const adminUser = DEFAULT_ADMIN_USER;
 
     if (!adminPass) {
-      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for backup");
+      console.error("Error: --admin-pass, --admin-pass-file, or FLAIR_ADMIN_PASS required for backup");
       process.exit(1);
     }
 
