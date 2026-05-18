@@ -6,10 +6,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
+import { readAdminPassFileSecure } from "../src/cli.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -374,5 +375,55 @@ describe("flair restore", () => {
       backup: BACKUP,
     });
     expect(result.agentCount).toBe(2);
+  });
+});
+
+// ─── readAdminPassFileSecure — ops-smft ───────────────────────────────────────
+
+describe("readAdminPassFileSecure", () => {
+  let tmpDir: string;
+  let passFile: string;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+    passFile = join(tmpDir, "admin-pass");
+  });
+
+  afterEach(() => {
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  });
+
+  it("returns trimmed contents when mode is 0600", () => {
+    writeFileSync(passFile, "topsecret\n", "utf-8");
+    chmodSync(passFile, 0o600);
+    expect(readAdminPassFileSecure(passFile)).toBe("topsecret");
+  });
+
+  it("refuses when group-readable (0640)", () => {
+    writeFileSync(passFile, "topsecret\n", "utf-8");
+    chmodSync(passFile, 0o640);
+    expect(() => readAdminPassFileSecure(passFile)).toThrow(/permissions 640 are too open/);
+  });
+
+  it("refuses when world-readable (0644)", () => {
+    writeFileSync(passFile, "topsecret\n", "utf-8");
+    chmodSync(passFile, 0o644);
+    expect(() => readAdminPassFileSecure(passFile)).toThrow(/permissions 644 are too open/);
+  });
+
+  it("error message includes chmod 600 remediation", () => {
+    writeFileSync(passFile, "topsecret\n", "utf-8");
+    chmodSync(passFile, 0o644);
+    expect(() => readAdminPassFileSecure(passFile)).toThrow(new RegExp(`chmod 600 ${passFile}`));
+  });
+
+  it("refuses when file does not exist", () => {
+    expect(() => readAdminPassFileSecure(join(tmpDir, "missing"))).toThrow(/path does not exist/);
+  });
+
+  it("refuses when file is whitespace-only", () => {
+    writeFileSync(passFile, "   \n\t\n", "utf-8");
+    chmodSync(passFile, 0o600);
+    expect(() => readAdminPassFileSecure(passFile)).toThrow(/empty or contains only whitespace/);
   });
 });
