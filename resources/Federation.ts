@@ -386,6 +386,25 @@ export class FederationSync extends Resource {
           continue;
         }
 
+        // No-op skip: if the local record exists, has the same contentHash, and
+        // the remote isn't strictly newer, the sync is a phantom — same bytes,
+        // same logical version. Writing it anyway re-blobs the HNSW embedding
+        // (BlobDB stores each version separately) and bloats the dataset
+        // quadratically with poll frequency. Caught 2026-05-19 after the
+        // Fabric cluster hit its 4.7G XFS quota with 5,899 blob entries
+        // across 109 unique IDs (~54 versions per live record).
+        const remoteContentHash = (record.data as any)?.contentHash;
+        if (
+          local &&
+          local.contentHash &&
+          remoteContentHash &&
+          local.contentHash === remoteContentHash &&
+          record.updatedAt <= (local.updatedAt ?? "")
+        ) {
+          skipped++;
+          continue;
+        }
+
         const mergedData = mergeRecord(local, record);
 
         // Preserve originator for provenance
