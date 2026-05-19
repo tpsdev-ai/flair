@@ -120,7 +120,14 @@ describe("federation watch", () => {
         );
       }
       if (init?.method === "POST" && !url.includes("/FederationSync")) {
-        syncCalls++;
+        // Distinguish search_by_conditions (one per table per sync) from
+        // the lastSyncAt cursor-advance update (one per sync, added in
+        // task #146 fix). Test only counts the per-table search ops.
+        let opType: string | undefined;
+        try { opType = JSON.parse(String(init?.body ?? "{}"))?.operation; } catch { /* ignore */ }
+        if (opType === "search_by_conditions") {
+          syncCalls++;
+        }
         return new Response(JSON.stringify([]), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -137,7 +144,9 @@ describe("federation watch", () => {
     const elapsed = Date.now() - start;
 
     // With interval clamped to 5s, we should only see 1 sync run in 500ms.
-    // Each sync run issues 4 ops POSTs (one per table: Memory, Soul, Agent, Relationship).
+    // Each sync run issues 4 search_by_conditions POSTs (one per table:
+    // Memory, Soul, Agent, Relationship). The Peer.update for cursor
+    // advancement is NOT counted (filtered above) — orthogonal concern.
     expect(syncCalls).toBe(4);
     expect(elapsed).toBeLessThan(1000);
   });

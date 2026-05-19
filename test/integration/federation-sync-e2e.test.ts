@@ -94,6 +94,21 @@ describe("FederationSync resource logic (transitional)", () => {
 
       if (local && local.updatedAt && local.updatedAt > ts) { skipped++; continue; }
 
+      // contentHash gate (matches Federation.ts production code) — skip the
+      // write if local and remote agree on contentHash and remote isn't
+      // strictly newer. Prevents the federation-watch re-upsert loop.
+      const remoteContentHash = (record.data as any)?.contentHash;
+      if (
+        local &&
+        local.contentHash &&
+        remoteContentHash &&
+        local.contentHash === remoteContentHash &&
+        ts <= (local.updatedAt ?? "")
+      ) {
+        skipped++;
+        continue;
+      }
+
       const mergedData = {
         ...(record.data ?? {}),
         id: record.id,
@@ -338,5 +353,123 @@ describe("FederationSync resource logic (transitional)", () => {
 
     const updated = memoryGet("mem-1");
     expect(updated.content).toBe("new");
+  });
+
+  test("re-sync of identical record (same contentHash, same updatedAt) is skipped — no re-blob loop", async () => {
+    // Regression for the federation-watch re-upsert loop diagnosed 2026-05-19:
+    // sender's `since` cursor never advanced, so every poll re-sent every
+    // memory. Receiver was put-ing each one, generating fresh HNSW vector
+    // blobs every cycle. Fabric cluster hit XFS quota with 5,899 blob
+    // entries across 109 unique IDs. The contentHash gate stops the
+    // re-blob even if the sender keeps re-sending.
+    const kp = nacl.sign.keyPair();
+    const instanceId = "spoke-resync";
+    peerStore.set(instanceId, {
+      id: instanceId,
+      publicKey: Buffer.from(kp.publicKey).toString("base64url"),
+      role: "spoke",
+      status: "paired",
+    });
+
+    const ts = new Date().toISOString();
+    const record = {
+      table: "Memory",
+      id: "mem-resync-1",
+      data: {
+        id: "mem-resync-1",
+        content: "stable content",
+        contentHash: "sha256-abc123",
+      },
+      updatedAt: ts,
+      originatorInstanceId: instanceId,
+    };
+
+    // First sync: record should land in memoryStore.
+    const first = await handleSyncRequest(
+      signBodyFresh(
+        { instanceId, records: [record], lamportClock: Date.now() },
+        kp.secretKey,
+      ),
+    );
+    expect(first.status).toBe(200);
+    expect(first.body.merged).toBe(1);
+    expect(first.body.skipped).toBe(0);
+
+    // The mock memoryPut doesn't propagate contentHash by default; mirror
+    // the production receiver-side merge by ensuring the stored record
+    // carries contentHash (Federation.ts's mergeRecord spreads record.data).
+    const stored = memoryGet("mem-resync-1");
+    expect(stored.contentHash).toBe("sha256-abc123");
+
+    // Second sync: same record sent again. Should be SKIPPED, not merged.
+    // Without the gate this writes a new blob version with the embedding.
+    const second = await handleSyncRequest(
+      signBodyFresh(
+        { instanceId, records: [record], lamportClock: Date.now() + 1 },
+        kp.secretKey,
+      ),
+    );
+    expect(second.status).toBe(200);
+    expect(second.body.merged).toBe(0);
+    expect(second.body.skipped).toBe(1);
+  });
+
+  test("re-sync with newer updatedAt but same contentHash still gets stored (real edit-then-revert case)", async () => {
+    // Edge case: contentHash matches but remote has strictly newer
+    // updatedAt. Could mean the record was edited and reverted, or just
+    // metadata-changed. We still write so the updatedAt advances; LWW
+    // merge wins the latest provenance. The gate only skips when
+    // remote.updatedAt <= local.updatedAt.
+    const kp = nacl.sign.keyPair();
+    const instanceId = "spoke-resync-newer";
+    peerStore.set(instanceId, {
+      id: instanceId,
+      publicKey: Buffer.from(kp.publicKey).toString("base64url"),
+      role: "spoke",
+      status: "paired",
+    });
+
+    const initial = new Date(Date.now() - 60_000).toISOString();
+    const later = new Date().toISOString();
+
+    // Initial
+    await handleSyncRequest(
+      signBodyFresh(
+        {
+          instanceId,
+          records: [{
+            table: "Memory",
+            id: "mem-edit-revert",
+            data: { id: "mem-edit-revert", content: "x", contentHash: "sha-x" },
+            updatedAt: initial,
+            originatorInstanceId: instanceId,
+          }],
+          lamportClock: Date.now(),
+        },
+        kp.secretKey,
+      ),
+    );
+
+    // Same contentHash but newer timestamp
+    const second = await handleSyncRequest(
+      signBodyFresh(
+        {
+          instanceId,
+          records: [{
+            table: "Memory",
+            id: "mem-edit-revert",
+            data: { id: "mem-edit-revert", content: "x", contentHash: "sha-x" },
+            updatedAt: later,
+            originatorInstanceId: instanceId,
+          }],
+          lamportClock: Date.now() + 1,
+        },
+        kp.secretKey,
+      ),
+    );
+
+    expect(second.status).toBe(200);
+    expect(second.body.merged).toBe(1);
+    expect(second.body.skipped).toBe(0);
   });
 });

@@ -3358,6 +3358,12 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
 
     console.log(`Syncing to hub: ${hub.id}...`);
     const since = hub.lastSyncAt ?? new Date(0).toISOString();
+    // Capture sync start time BEFORE we query records. We advance the local
+    // hub peer's lastSyncAt to this value after success so the next poll's
+    // `since` cursor moves forward — fixes task #146 (federation peer
+    // .lastSyncAt update bug). Records updated DURING this sync will have
+    // updatedAt > syncStartedAt and be picked up next cycle, not missed.
+    const syncStartedAt = new Date().toISOString();
     const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
@@ -3442,6 +3448,35 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         totalSkipped += result.skipped;
         totalBatches++;
       }
+    }
+
+    // Advance the local hub peer's lastSyncAt cursor. The hub-side
+    // FederationSync handler updates ITS view of the spoke peer, but the
+    // spoke never updated its own view of the hub — so `since` stayed at
+    // whatever value was on the peer record at pair time (often near-epoch),
+    // and every poll re-queried `updatedAt > since` and re-sent every
+    // memory ever written. The receiver-side contentHash gate in
+    // Federation.ts prevents the actual blob re-write, but advancing the
+    // cursor here stops the redundant network traffic + Lambda compute
+    // entirely. Task #146. Even no-change runs should advance.
+    try {
+      const advanceRes = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: auth },
+        body: JSON.stringify({
+          operation: "update",
+          database: "flair",
+          table: "Peer",
+          records: [{ id: hub.id, lastSyncAt: syncStartedAt }],
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!advanceRes.ok) {
+        const txt = await advanceRes.text().catch(() => "");
+        console.warn(`⚠️  Local hub.lastSyncAt advance failed (${advanceRes.status}): ${txt.slice(0, 200)}. Next poll will re-send memories.`);
+      }
+    } catch (advErr: any) {
+      console.warn(`⚠️  Local hub.lastSyncAt advance error: ${advErr?.message ?? advErr}. Next poll will re-send memories.`);
     }
 
     if (totalBatches === 0) {
