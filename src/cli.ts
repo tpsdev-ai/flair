@@ -2948,58 +2948,89 @@ federation
   .option("--port <port>", "Harper HTTP port")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
+  .option("--json", "Emit JSON {instance, peers} (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+    const mode = render.resolveOutputMode(opts);
     try {
       const instance = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
-      console.log(`Instance: ${instance.id} (${instance.role})`);
-      console.log(`Public key: ${instance.publicKey}`);
-      console.log(`Status: ${instance.status}`);
-      console.log();
-
       const { peers } = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+
+      if (mode === "json") {
+        console.log(render.asJSON({ instance, peers }));
+        return;
+      }
+
+      const statusColor = instance.status === "active" ? render.c.green : render.c.yellow;
+      console.log(render.wrap(render.c.bold, "Federation"));
+      console.log(render.kv("Instance", `${instance.id}  ${render.wrap(render.c.dim, `(${instance.role})`)}`));
+      console.log(render.kv("Public key", render.wrap(render.c.dim, instance.publicKey)));
+      console.log(render.kv("Status", render.wrap(statusColor, instance.status)));
+
       if (peers.length === 0) {
-        console.log("No peers configured. Use 'flair federation pair' to connect to a hub.");
-      } else {
-        // Compute lastSync staleness so an operator can tell at a glance whether sync is current.
-        const now = Date.now();
-        const stale = (iso: string | undefined): string => {
-          if (!iso) return "never";
-          const t = Date.parse(iso);
-          if (!Number.isFinite(t)) return "never";
-          const ageMs = now - t;
-          if (ageMs < 60_000) return "<1m ago";
-          if (ageMs < 3_600_000) return `${Math.floor(ageMs / 60_000)}m ago`;
-          if (ageMs < 86_400_000) return `${Math.floor(ageMs / 3_600_000)}h ago`;
-          return `${Math.floor(ageMs / 86_400_000)}d ago`;
-        };
-        console.log(`${"Peer".padEnd(20)} ${"Role".padEnd(8)} ${"Status".padEnd(14)} ${"Last Sync".padEnd(14)} Relay`);
-        console.log("─".repeat(80));
-        for (const p of peers) {
-          console.log(`${p.id.padEnd(20)} ${(p.role ?? "—").padEnd(8)} ${(p.status ?? "—").padEnd(14)} ${stale(p.lastSyncAt).padEnd(14)} ${p.relayOnly ? "yes" : "no"}`);
-        }
-        const haveStale = peers.some((p: any) => {
-          if (!p.lastSyncAt) return true;
-          return now - Date.parse(p.lastSyncAt) > 86_400_000;
-        });
-        if (haveStale) {
-          console.log();
-          console.log("⚠  One or more peers haven't synced in >24h. Run 'flair federation sync' or check the launchd watchdog.");
-        }
+        console.log(`\n${render.icons.info} ${render.wrap(render.c.dim, "No peers configured. Use 'flair federation pair' to connect to a hub.")}`);
+        return;
+      }
+
+      const now = Date.now();
+      console.log();
+      const cols: render.TableColumn[] = [
+        { label: "peer", key: "id" },
+        { label: "role", key: "role", format: (v) => String(v ?? "—") },
+        {
+          label: "status",
+          key: "status",
+          format: (v) => {
+            const s = String(v ?? "—");
+            const color = s === "paired" || s === "connected" || s === "active" ? render.c.green : s === "revoked" ? render.c.red : render.c.yellow;
+            return render.wrap(color, s);
+          },
+        },
+        {
+          label: "last_sync",
+          key: "lastSyncAt",
+          format: (v) => {
+            const iso = v as string | null;
+            if (!iso) return render.wrap(render.c.red, "never");
+            const t = Date.parse(iso);
+            if (!Number.isFinite(t)) return render.wrap(render.c.red, "never");
+            const ageMs = now - t;
+            const stale = ageMs > 86_400_000;
+            const ageStr = ageMs < 60_000 ? "<1m ago"
+              : ageMs < 3_600_000 ? `${Math.floor(ageMs / 60_000)}m ago`
+              : ageMs < 86_400_000 ? `${Math.floor(ageMs / 3_600_000)}h ago`
+              : `${Math.floor(ageMs / 86_400_000)}d ago`;
+            return render.wrap(stale ? render.c.yellow : render.c.dim, ageStr);
+          },
+        },
+        {
+          label: "relay",
+          key: "relayOnly",
+          format: (v) => (v ? render.wrap(render.c.cyan, "yes") : render.wrap(render.c.dim, "no")),
+        },
+      ];
+      console.log(render.table(cols, peers as Array<Record<string, unknown>>));
+
+      const haveStale = peers.some((p: any) => {
+        if (!p.lastSyncAt) return true;
+        return now - Date.parse(p.lastSyncAt) > 86_400_000;
+      });
+      if (haveStale) {
+        console.log();
+        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "One or more peers haven't synced in >24h.")} ${render.wrap(render.c.dim, "Run 'flair federation sync' or check the launchd watchdog.")}`);
       }
     } catch (err: any) {
-      // Better UX on the common auth failure: tell the user what to set.
       const msg = String(err.message ?? err);
       if (msg.includes("missing_or_invalid_authorization") || msg.includes("401")) {
-        console.error("Error: federation status requires auth.");
-        console.error("  Set one of:");
-        console.error("    FLAIR_AGENT_ID=<your-agent-id>     (Ed25519 — uses ~/.flair/keys/<id>.key)");
-        console.error("    FLAIR_ADMIN_PASS=<admin-password>  (admin Basic auth, remote targets)");
-        console.error("    FLAIR_TOKEN=<bearer>               (legacy)");
+        console.error(`${render.icons.error} federation status requires auth.`);
+        console.error(`  ${render.wrap(render.c.dim, "Set one of:")}`);
+        console.error(`    ${render.wrap(render.c.cyan, "FLAIR_AGENT_ID=<your-agent-id>")}     ${render.wrap(render.c.dim, "(Ed25519 — uses ~/.flair/keys/<id>.key)")}`);
+        console.error(`    ${render.wrap(render.c.cyan, "FLAIR_ADMIN_PASS=<admin-password>")}  ${render.wrap(render.c.dim, "(admin Basic auth, remote targets)")}`);
+        console.error(`    ${render.wrap(render.c.cyan, "FLAIR_TOKEN=<bearer>")}               ${render.wrap(render.c.dim, "(legacy)")}`);
         process.exit(1);
       }
-      console.error(`Error: ${msg}`);
+      console.error(`${render.icons.error} ${msg}`);
       process.exit(1);
     }
   });
