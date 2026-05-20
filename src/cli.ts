@@ -4947,134 +4947,176 @@ const statusCmd = program
       : warnings;
 
     const hasWarn = scopedWarnings.some((w) => w.level === "warn");
-    const headerIcon = hasWarn ? "🟡" : "🟢";
+    const headerIcon = hasWarn ? render.icons.warn : render.icons.ok;
 
-    console.log(`Flair v${__pkgVersion} — ${headerIcon} running${pid ? ` (PID ${pid}` : ""}${uptimeStr ? `, uptime ${uptimeStr})` : pid ? ")" : ""}`);
-    console.log(`  URL:        ${baseUrl}`);
+    const versionStr = render.wrap(render.c.bold, `Flair v${__pkgVersion}`);
+    const runStatus = `${headerIcon} ${render.wrap(render.c.green, "running")}`;
+    const pidPart = pid ? render.wrap(render.c.dim, `PID ${pid}`) : "";
+    const uptimePart = uptimeStr ? render.wrap(render.c.dim, `uptime ${uptimeStr}`) : "";
+    const metaParts = [pidPart, uptimePart].filter(Boolean).join(render.wrap(render.c.dim, " · "));
+    console.log(`${versionStr} ${render.wrap(render.c.dim, "—")} ${runStatus}${metaParts ? `  ${metaParts}` : ""}`);
+    console.log(render.kv("URL", baseUrl));
 
     if (scopedWarnings.length > 0) {
-      console.log(`\n⚠ Warnings:  ${scopedWarnings.length}`);
-      for (const w of scopedWarnings) console.log(`  • ${w.level} ${w.message}`);
+      console.log(`\n${render.wrap(render.c.bold, "Warnings")}  ${render.wrap(render.c.dim, `(${scopedWarnings.length})`)}`);
+      for (const w of scopedWarnings) {
+        const icon = w.level === "warn" ? render.icons.warn : render.icons.info;
+        console.log(`  ${icon} ${w.message}`);
+      }
     }
 
     if (memories) {
-      console.log("\nMemory:");
+      console.log(`\n${render.wrap(render.c.bold, "Memory")}`);
       const embStr = memories.withEmbeddings > 0 ? `${memories.withEmbeddings} embedded` : "";
       const hashStr = memories.hashFallback > 0 ? `${memories.hashFallback} hash` : "";
       const detail = [embStr, hashStr].filter(Boolean).join(", ");
-      console.log(`  Total:       ${memories.total}${detail ? ` (${detail})` : ""}`);
+      console.log(render.kv("Total", `${render.wrap(render.c.bold, String(memories.total))}${detail ? ` ${render.wrap(render.c.dim, `(${detail})`)}` : ""}`));
       if (memories.modelCounts && typeof memories.modelCounts === "object") {
         const entries = Object.entries(memories.modelCounts as Record<string, number>)
           .filter(([, n]) => n > 0)
           .sort((a, b) => b[1] - a[1]);
         if (entries.length > 0) {
-          const formatted = entries.map(([k, n]) => `${k}: ${n}`).join(", ");
-          console.log(`  Embeddings:  ${formatted}`);
+          const formatted = entries.map(([k, n]) => `${render.wrap(render.c.cyan, k)}:${n}`).join(render.wrap(render.c.dim, ", "));
+          console.log(render.kv("Embeddings", formatted));
         }
       }
       if (memories.byDurability) {
         const d = memories.byDurability;
-        console.log(`  Durability:  ${d.permanent ?? 0} permanent / ${d.persistent ?? 0} persistent / ${d.standard ?? 0} standard / ${d.ephemeral ?? 0} ephemeral`);
+        const parts = [
+          `${render.wrap(render.c.magenta, "permanent")}:${d.permanent ?? 0}`,
+          `${render.wrap(render.c.blue, "persistent")}:${d.persistent ?? 0}`,
+          `${render.wrap(render.c.cyan, "standard")}:${d.standard ?? 0}`,
+          `${render.wrap(render.c.gray, "ephemeral")}:${d.ephemeral ?? 0}`,
+        ];
+        console.log(render.kv("Durability", parts.join(render.wrap(render.c.dim, " · "))));
       }
-      if (typeof memories.archived === "number") console.log(`  Archived:    ${memories.archived}`);
-      if (typeof memories.expired === "number" && memories.expired > 0) console.log(`  Expired:     ${memories.expired}`);
-      if (healthData?.lastWrite) console.log(`  Last write:  ${relativeTime(healthData.lastWrite)}`);
+      if (typeof memories.archived === "number") console.log(render.kv("Archived", String(memories.archived)));
+      if (typeof memories.expired === "number" && memories.expired > 0) {
+        console.log(render.kv("Expired", `${render.wrap(render.c.yellow, String(memories.expired))}`));
+      }
+      if (healthData?.lastWrite) console.log(render.kv("Last write", render.relativeTime(healthData.lastWrite)));
     }
 
     if (agents && agents.count > 0) {
-      console.log("\nAgents:");
-      const nameStr = agents.names?.length > 0 ? ` — ${agents.names.join(", ")}` : "";
-      console.log(`  ${agents.count} total${nameStr}`);
+      console.log(`\n${render.wrap(render.c.bold, "Agents")}`);
+      const nameStr = agents.names?.length > 0 ? ` ${render.wrap(render.c.dim, "—")} ${agents.names.join(render.wrap(render.c.dim, ", "))}` : "";
+      console.log(render.kv("Total", `${render.wrap(render.c.bold, String(agents.count))}${nameStr}`));
       if (agents.count > 1 && Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
-        const idW = Math.max(2, ...agents.perAgent.map((r: any) => (r.id ?? "").length));
-        // Older HealthDetail responses only carry id / memoryCount / lastWriteAt.
-        // Only print the richer columns if at least one row supplies them.
         const hasDeep = agents.perAgent.some(
           (r: any) => typeof r.hashFallback === "number" || typeof r.writes24h === "number",
         );
-        if (hasDeep) {
-          console.log(`  ${"id".padEnd(idW)}  memories  hash_fb  24h  last_write`);
-          for (const r of agents.perAgent) {
-            const fb = typeof r.hashFallback === "number" ? String(r.hashFallback) : "—";
-            const w24 = typeof r.writes24h === "number" ? String(r.writes24h) : "—";
-            console.log(
-              `  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${fb.padStart(7)}  ${w24.padStart(3)}  ${relativeTime(r.lastWriteAt)}`,
-            );
-          }
-        } else {
-          console.log(`  ${"id".padEnd(idW)}  memories  last_write`);
-          for (const r of agents.perAgent) {
-            console.log(`  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${relativeTime(r.lastWriteAt)}`);
-          }
-        }
+        const cols: render.TableColumn[] = hasDeep
+          ? [
+              { label: "id", key: "id" },
+              { label: "memories", key: "memoryCount", align: "right" },
+              { label: "hash_fb", key: "hashFallback", align: "right", format: (v) => (typeof v === "number" ? String(v) : "—") },
+              { label: "24h", key: "writes24h", align: "right", format: (v) => (typeof v === "number" ? String(v) : "—") },
+              { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
+            ]
+          : [
+              { label: "id", key: "id" },
+              { label: "memories", key: "memoryCount", align: "right" },
+              { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
+            ];
+        console.log(render.table(cols, agents.perAgent as Array<Record<string, unknown>>));
       }
     }
 
     if (healthData?.relationships) {
       const r = healthData.relationships;
-      console.log("\nRelationships:");
-      console.log(`  ${r.total} total (${r.active} active)`);
+      console.log(`\n${render.wrap(render.c.bold, "Relationships")}`);
+      console.log(render.kv("Total", `${r.total}  ${render.wrap(render.c.dim, `(${r.active} active)`)}`));
     }
 
     if (healthData?.soul && healthData.soul.total > 0) {
       const s = healthData.soul;
       const bp = s.byPriority ?? {};
-      console.log("\nSoul:");
-      console.log(`  ${s.total} entries — ${bp.critical ?? 0} critical / ${bp.high ?? 0} high / ${bp.standard ?? 0} standard / ${bp.low ?? 0} low`);
+      console.log(`\n${render.wrap(render.c.bold, "Soul")}`);
+      const parts = [
+        `${render.wrap(render.c.red, "critical")}:${bp.critical ?? 0}`,
+        `${render.wrap(render.c.yellow, "high")}:${bp.high ?? 0}`,
+        `${render.wrap(render.c.cyan, "standard")}:${bp.standard ?? 0}`,
+        `${render.wrap(render.c.gray, "low")}:${bp.low ?? 0}`,
+      ];
+      console.log(render.kv("Entries", `${render.wrap(render.c.bold, String(s.total))} ${render.wrap(render.c.dim, "—")} ${parts.join(render.wrap(render.c.dim, " · "))}`));
     } else if (typeof healthData?.soulEntries === "number" && healthData.soulEntries > 0) {
-      console.log("\nSoul:");
-      console.log(`  ${healthData.soulEntries} entries`);
+      console.log(`\n${render.wrap(render.c.bold, "Soul")}`);
+      console.log(render.kv("Entries", String(healthData.soulEntries)));
     }
 
     if (healthData?.rem) {
       const r = healthData.rem;
-      console.log("\nREM:");
-      if (r.lastLightAt) console.log(`  Last light:        ${relativeTime(r.lastLightAt)}`);
-      if (r.lastRapidAt) console.log(`  Last rapid:        ${relativeTime(r.lastRapidAt)}`);
-      if (r.lastRestorativeAt) console.log(`  Last restorative:  ${relativeTime(r.lastRestorativeAt)}`);
-      const nightly = r.nightlyEnabled === true ? "enabled" : r.nightlyEnabled === false ? "disabled" : "unknown";
-      console.log(`  Nightly:           ${nightly}`);
-      if (r.nightlyEnabled && r.lastNightlyAt) console.log(`  Last nightly:      ${relativeTime(r.lastNightlyAt)}`);
+      console.log(`\n${render.wrap(render.c.bold, "REM")}`);
+      if (r.lastLightAt) console.log(render.kv("Last light", render.relativeTime(r.lastLightAt)));
+      if (r.lastRapidAt) console.log(render.kv("Last rapid", render.relativeTime(r.lastRapidAt)));
+      if (r.lastRestorativeAt) console.log(render.kv("Last restorative", render.relativeTime(r.lastRestorativeAt)));
+      const nightlyTxt = r.nightlyEnabled === true
+        ? render.wrap(render.c.green, "enabled")
+        : r.nightlyEnabled === false
+          ? render.wrap(render.c.dim, "disabled")
+          : render.wrap(render.c.dim, "unknown");
+      console.log(render.kv("Nightly", nightlyTxt));
+      if (r.nightlyEnabled && r.lastNightlyAt) console.log(render.kv("Last nightly", render.relativeTime(r.lastNightlyAt)));
       if (typeof r.pendingCandidates === "number" && r.pendingCandidates > 0) {
-        console.log(`  Pending candidates: ${r.pendingCandidates}`);
+        console.log(render.kv("Pending candidates", render.wrap(render.c.yellow, String(r.pendingCandidates))));
       }
     }
 
     if (healthData?.federation) {
       const f = healthData.federation;
-      console.log("\nFederation:");
-      if (f.instance) console.log(`  Instance:    ${f.instance.id} (${f.instance.role ?? "—"}, ${f.instance.status ?? "—"})`);
-      if (f.peers) console.log(`  Peers:       ${f.peers.total} (${f.peers.connected} connected / ${f.peers.disconnected} down / ${f.peers.revoked} revoked)`);
-      if (f.pendingTokens > 0) console.log(`  Pairing:     ${f.pendingTokens} unconsumed token(s)`);
+      console.log(`\n${render.wrap(render.c.bold, "Federation")}`);
+      if (f.instance) {
+        const statusColor = f.instance.status === "active" ? render.c.green : render.c.yellow;
+        console.log(render.kv("Instance", `${f.instance.id}  ${render.wrap(render.c.dim, "(")}${f.instance.role ?? "—"}${render.wrap(render.c.dim, ", ")}${render.wrap(statusColor, f.instance.status ?? "—")}${render.wrap(render.c.dim, ")")}`));
+      }
+      if (f.peers) {
+        const connColor = f.peers.connected > 0 ? render.c.green : render.c.dim;
+        const downColor = f.peers.disconnected > 0 ? render.c.yellow : render.c.dim;
+        const revColor = f.peers.revoked > 0 ? render.c.red : render.c.dim;
+        const parts = [
+          `${render.wrap(connColor, `${f.peers.connected} connected`)}`,
+          `${render.wrap(downColor, `${f.peers.disconnected} down`)}`,
+          `${render.wrap(revColor, `${f.peers.revoked} revoked`)}`,
+        ];
+        console.log(render.kv("Peers", `${render.wrap(render.c.bold, String(f.peers.total))} ${render.wrap(render.c.dim, "—")} ${parts.join(render.wrap(render.c.dim, " · "))}`));
+      }
+      if (f.pendingTokens > 0) console.log(render.kv("Pairing", `${render.wrap(render.c.yellow, String(f.pendingTokens))} unconsumed token(s)`));
     } else {
-      console.log("\nFederation: not configured");
+      console.log(`\n${render.wrap(render.c.bold, "Federation")}  ${render.wrap(render.c.dim, "not configured")}`);
     }
 
     if (healthData?.oauth) {
       const lines = oauthSummaryLines(healthData.oauth);
-      for (const line of lines) console.log(line);
+      // Tweak the "OAuth:" header to bold; downstream lines are aligned k/v which already look fine
+      for (const line of lines) {
+        if (line.trim() === "OAuth:") console.log(`\n${render.wrap(render.c.bold, "OAuth")}`);
+        else console.log(line);
+      }
     }
 
     if (healthData?.bridges) {
       const b = healthData.bridges;
-      console.log("\nBridges:");
-      if (Array.isArray(b.installed) && b.installed.length > 0) console.log(`  Installed:   ${b.installed.join(", ")}`);
-      if (b.lastImport) console.log(`  Last import: ${relativeTime(b.lastImport)}`);
-      if (b.lastExport) console.log(`  Last export: ${relativeTime(b.lastExport)}`);
+      console.log(`\n${render.wrap(render.c.bold, "Bridges")}`);
+      if (Array.isArray(b.installed) && b.installed.length > 0) console.log(render.kv("Installed", b.installed.join(render.wrap(render.c.dim, ", "))));
+      if (b.lastImport) console.log(render.kv("Last import", render.relativeTime(b.lastImport)));
+      if (b.lastExport) console.log(render.kv("Last export", render.relativeTime(b.lastExport)));
     } else {
-      console.log("\nBridges: none installed");
+      console.log(`\n${render.wrap(render.c.bold, "Bridges")}  ${render.wrap(render.c.dim, "none installed")}`);
     }
 
     if (healthData?.disk) {
       const d = healthData.disk;
-      console.log("\nDisk:");
-      console.log(`  Data:        ${d.dataDir} — ${humanBytes(d.dataBytes ?? 0)}`);
-      console.log(`  Snapshots:   ${d.snapshotDir} — ${humanBytes(d.snapshotBytes ?? 0)}`);
+      console.log(`\n${render.wrap(render.c.bold, "Disk")}`);
+      console.log(render.kv("Data", `${render.wrap(render.c.dim, d.dataDir)} ${render.wrap(render.c.dim, "—")} ${render.wrap(render.c.bold, render.humanBytes(d.dataBytes ?? 0))}`));
+      console.log(render.kv("Snapshots", `${render.wrap(render.c.dim, d.snapshotDir)} ${render.wrap(render.c.dim, "—")} ${render.wrap(render.c.bold, render.humanBytes(d.snapshotBytes ?? 0))}`));
     }
 
     console.log("");
-    if (scopedWarnings.length > 0) console.log(`  Health:     ⚠ ${scopedWarnings.length} warning(s)`);
-    else console.log(`  Health:     ✅ all checks passing`);
+    if (scopedWarnings.length > 0) {
+      console.log(`  ${render.icons.warn} ${render.wrap(render.c.yellow, `${scopedWarnings.length} warning${scopedWarnings.length === 1 ? "" : "s"}`)}`);
+    } else {
+      console.log(`  ${render.icons.ok} ${render.wrap(render.c.green, "all checks passing")}`);
+    }
   });
 
 statusCmd
