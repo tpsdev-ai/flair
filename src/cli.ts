@@ -6959,41 +6959,141 @@ memory.command("hygiene")
 
 // ─── flair search (top-level shortcut) ───────────────────────────────────────
 
+// Parse --since / --as-of: accept ISO 8601 OR relative expressions
+// ("1h", "7d", "30m"). Returns ISO 8601 string or null if input is empty.
+// Returns the original string unchanged if it looks like a date (caller
+// passes through to server, which validates).
+function parseRelativeOrIso(input: string | undefined): string | null {
+  if (!input) return null;
+  const m = input.match(/^(\d+)([smhdw])$/);
+  if (!m) return input;
+  const n = Number.parseInt(m[1], 10);
+  const unit = m[2];
+  const multMs: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+  return new Date(Date.now() - n * (multMs[unit] ?? 0)).toISOString();
+}
+
 program
   .command("search <query>")
-  .description("Search memories by meaning (shortcut for memory search)")
-  .requiredOption("--agent <id>", "Agent ID")
+  .description("Search memories by meaning (shortcut for memory search) — filterable, with --explain ranking")
+  .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--limit <n>", "Max results", "5")
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
   .option("--key <path>", "Ed25519 private key path")
+  // Server-side filters (forwarded to /SemanticSearch payload)
+  .option("--tag <tag>", "Filter to memories carrying this tag")
+  .option("--subject <subject>", "Filter to memories carrying this subject (case-insensitive)")
+  .option("--subjects <list>", "Comma-separated list of subjects to OR-filter (case-insensitive)")
+  .option("--since <iso-or-relative>", "Only memories created after this point (ISO 8601 or '7d'/'24h'/'30m')")
+  .option("--as-of <iso>", "Temporal validity: only memories valid at this point (ISO 8601)")
+  .option("--include-superseded", "Include memories that have been superseded")
+  .option("--scoring <mode>", "Scoring mode: composite (default) re-ranks by durability/recency/retrieval; raw uses cosine similarity only", "composite")
+  .option("--min-score <n>", "Drop results below this score (0..1)", "0")
+  // Client-side filters (applied after server response)
+  .option("--durability <level>", "Filter to permanent|persistent|standard|ephemeral (client-side)")
+  .option("--source <name>", "Filter by source/agentId (client-side)")
+  // Output modes
+  .option("--explain", "Show score breakdown (composite, raw, durability, age, retrieval) per hit")
+  .option("--json", "Output raw JSON array")
   .action(async (query, opts) => {
     try {
-      const baseUrl = opts.url || `http://127.0.0.1:${resolveHttpPort(opts)}`;
-      const headers: Record<string, string> = { "content-type": "application/json" };
-      const keyPath = opts.key || resolveKeyPath(opts.agent);
-      if (keyPath) {
-        headers["authorization"] = buildEd25519Auth(opts.agent, "POST", "/SemanticSearch", keyPath);
+      const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+      if (!agentId) {
+        console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
+        process.exit(2);
       }
+      const baseUrl = opts.target || opts.url || process.env.FLAIR_TARGET || (process.env.FLAIR_URL ?? `http://127.0.0.1:${resolveHttpPort(opts)}`);
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      const keyPath = opts.key || resolveKeyPath(agentId);
+      if (keyPath) {
+        headers["authorization"] = buildEd25519Auth(agentId, "POST", "/SemanticSearch", keyPath);
+      }
+
+      // Build payload from CLI options. Server validates types.
+      const payload: Record<string, any> = {
+        agentId,
+        q: query,
+        limit: Number.parseInt(opts.limit, 10) || 5,
+        scoring: opts.scoring === "raw" ? "raw" : "composite",
+      };
+      if (opts.tag) payload.tag = opts.tag;
+      if (opts.subject) payload.subject = opts.subject;
+      if (opts.subjects) payload.subjects = String(opts.subjects).split(",").map((s) => s.trim()).filter(Boolean);
+      const since = parseRelativeOrIso(opts.since);
+      if (since) payload.since = since;
+      if (opts.asOf) payload.asOf = opts.asOf;
+      if (opts.includeSuperseded) payload.includeSuperseded = true;
+      const minScore = Number.parseFloat(opts.minScore ?? "0");
+      if (Number.isFinite(minScore) && minScore > 0) payload.minScore = minScore;
+
       const res = await fetch(`${baseUrl}/SemanticSearch`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ agentId: opts.agent, q: query, limit: parseInt(opts.limit, 10) }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await res.text());
-      const result = await res.json() as any;
-      const results = result.results || result || [];
-      if (!Array.isArray(results) || results.length === 0) {
-        console.log("No results found.");
+      const result = (await res.json()) as any;
+      let results: any[] = result.results || result || [];
+      if (!Array.isArray(results)) results = [];
+
+      // Client-side filters: durability + source. Server doesn't expose these
+      // as conditions, so we filter after fetch.
+      if (opts.durability) {
+        const allowed = new Set(String(opts.durability).split(",").map((d) => d.trim()));
+        results = results.filter((r) => allowed.has(r.durability ?? "standard"));
+      }
+      if (opts.source) {
+        const allowed = new Set(String(opts.source).split(",").map((s) => s.trim()));
+        results = results.filter((r) => allowed.has(r._source ?? r.agentId ?? ""));
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify(results, null, 2));
         return;
       }
+
+      if (results.length === 0) {
+        console.log("No results found.");
+        const filters: string[] = [];
+        if (opts.tag) filters.push(`tag=${opts.tag}`);
+        if (opts.subject) filters.push(`subject=${opts.subject}`);
+        if (opts.subjects) filters.push(`subjects=${opts.subjects}`);
+        if (opts.since) filters.push(`since=${opts.since}`);
+        if (opts.durability) filters.push(`durability=${opts.durability}`);
+        if (opts.source) filters.push(`source=${opts.source}`);
+        if (filters.length > 0) {
+          console.log(`  Filters: ${filters.join(", ")}`);
+          console.log(`  Try removing a filter or running: flair search "${query}" --agent ${agentId}`);
+        }
+        return;
+      }
+
       for (const r of results) {
-        const date = r.createdAt ? r.createdAt.slice(0, 10) : "";
-        const score = r._score ? `${(r._score * 100).toFixed(0)}%` : "";
-        const meta = [date, r.type, score].filter(Boolean).join(" · ");
+        const date = r.createdAt ? String(r.createdAt).slice(0, 10) : "";
+        const scorePct = typeof r._score === "number" ? `${(r._score * 100).toFixed(0)}%` : "";
+        const durability = r.durability ?? "standard";
+        const metaParts = [date, durability, scorePct].filter(Boolean);
+        if (r._source) metaParts.push(`from:${r._source}`);
+        const meta = metaParts.join(" · ");
         console.log(`  ${r.content}`);
         if (meta) console.log(`  (${meta})`);
+        if (opts.explain) {
+          const lines: string[] = [];
+          if (typeof r._rawScore === "number") lines.push(`raw=${r._rawScore.toFixed(3)}`);
+          if (typeof r._score === "number") lines.push(`composite=${r._score.toFixed(3)}`);
+          if (typeof r.retrievalCount === "number" && r.retrievalCount > 0) lines.push(`retrievals=${r.retrievalCount}`);
+          if (r.tags && Array.isArray(r.tags) && r.tags.length > 0) lines.push(`tags=[${r.tags.join(",")}]`);
+          if (r.subject) lines.push(`subject=${r.subject}`);
+          if (r.supersedes) lines.push(`supersedes=${r.supersedes}`);
+          if (lines.length > 0) console.log(`    └─ ${lines.join(" · ")}`);
+        }
         console.log();
+      }
+
+      if (opts.explain) {
+        console.log(`Scoring: ${payload.scoring}  ${payload.scoring === "composite" ? "(semantic × durability-weight × recency-decay × retrieval-boost)" : "(cosine similarity only)"}`);
       }
     } catch (err: any) {
       console.error(`Search failed: ${err.message}`);
