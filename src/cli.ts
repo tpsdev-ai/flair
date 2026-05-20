@@ -5144,6 +5144,259 @@ statusCmd
     if (b.lastExport) console.log(`  Last export: ${relativeTime(b.lastExport)}`);
   });
 
+// ─── flair status --deep ──────────────────────────────────────────────────────
+//
+// Deeper observability than the default `flair status` summary — full
+// per-section detail with no condensing. Optional --bootstrap measures
+// cold-start context bytes per agent (slow; calls /MemoryBootstrap once per
+// agent, admin-auth required).
+//
+// Addresses ops-yph: Nathan's 2026-04-22 ask for "how much storage does my
+// memory take, how much context are bootstraps pulling, what's the real usage
+// pattern" — questions the default `flair status` summarizes but doesn't
+// surface in full. Agents should be able to self-audit via this too.
+
+statusCmd
+  .command("deep")
+  .description("Verbose status + optional bootstrap context size per agent (ops-yph)")
+  .option("--bootstrap", "Also measure bootstrap context bytes per agent (slow; admin auth required)")
+  .option("--max-tokens <n>", "Bootstrap maxTokens cap when --bootstrap is set", "4000")
+  .action(async function (this: Command) {
+    const opts = this.optsWithGlobals();
+    const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
+
+    if (!healthy) {
+      if (opts.json) {
+        console.log(JSON.stringify({ healthy: false, url: baseUrl, error: "unreachable" }, null, 2));
+      } else {
+        console.log(`Flair v${__pkgVersion} — 🔴 unreachable`);
+        console.log(`  URL:  ${baseUrl}`);
+        console.log(`\n  Run: flair start  or  flair doctor`);
+      }
+      process.exit(1);
+    }
+
+    // Optional: per-agent bootstrap context bytes. Calls /MemoryBootstrap with
+    // admin auth (so we can measure on behalf of any agent without holding
+    // their keys). 15s timeout per call — bootstrap can be expensive on cold
+    // caches or large memory sets.
+    const agentList: string[] =
+      (Array.isArray(healthData?.agents?.names) && healthData.agents.names.length > 0
+        ? healthData.agents.names
+        : Array.isArray(healthData?.agents?.perAgent)
+          ? healthData.agents.perAgent.map((r: any) => r.id).filter(Boolean)
+          : []) as string[];
+    const bootstrapBytes: Record<string, { bytes: number; tokenEstimate?: number; memoriesIncluded?: number; error?: string }> = {};
+    if (opts.bootstrap && agentList.length > 0) {
+      const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS;
+      if (!adminPass) {
+        if (!opts.json) {
+          console.log("⚠ --bootstrap requires HDB_ADMIN_PASSWORD or FLAIR_ADMIN_PASS env var");
+        }
+      } else {
+        const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+        const maxTokens = Number.parseInt(String(opts.maxTokens ?? "4000"), 10);
+        for (const agentId of agentList) {
+          try {
+            const res = await fetch(`${baseUrl}/BootstrapMemories`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: auth },
+              body: JSON.stringify({ agentId, maxTokens }),
+              signal: AbortSignal.timeout(15000),
+            });
+            const text = await res.text();
+            const bytes = Buffer.byteLength(text, "utf8");
+            let tokenEstimate: number | undefined;
+            let memoriesIncluded: number | undefined;
+            try {
+              const json = JSON.parse(text);
+              tokenEstimate = typeof json.tokenEstimate === "number" ? json.tokenEstimate : undefined;
+              memoriesIncluded = typeof json.memoriesIncluded === "number" ? json.memoriesIncluded : undefined;
+            } catch { /* response wasn't JSON; bytes still valid */ }
+            if (!res.ok) {
+              bootstrapBytes[agentId] = { bytes, error: `HTTP ${res.status}` };
+            } else {
+              bootstrapBytes[agentId] = { bytes, tokenEstimate, memoriesIncluded };
+            }
+          } catch (e: any) {
+            bootstrapBytes[agentId] = { bytes: 0, error: e?.message ?? String(e) };
+          }
+        }
+      }
+    }
+
+    if (opts.json) {
+      const out: Record<string, any> = { healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData };
+      if (opts.bootstrap) out.bootstrapBytes = bootstrapBytes;
+      console.log(JSON.stringify(out, null, 2));
+      return;
+    }
+
+    // Human-readable verbose render.
+    const uptimeSec = healthData?.uptimeSeconds;
+    let uptimeStr = "";
+    if (uptimeSec != null) {
+      const d = Math.floor(uptimeSec / 86400);
+      const h = Math.floor((uptimeSec % 86400) / 3600);
+      const m = Math.floor((uptimeSec % 3600) / 60);
+      uptimeStr = d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+    }
+    const pid = healthData?.pid ?? "?";
+
+    console.log(`Flair v${__pkgVersion} — running (PID ${pid}${uptimeStr ? `, uptime ${uptimeStr}` : ""})`);
+    console.log(`URL: ${baseUrl}`);
+
+    const memories = healthData?.memories;
+    if (memories) {
+      console.log("\n═══ Memory ═══════════════════════════════════════");
+      console.log(`Total:        ${memories.total}`);
+      console.log(`Breakdown:    ${memories.withEmbeddings ?? 0} embedded, ${memories.hashFallback ?? 0} hash-fallback`);
+      if (memories.modelCounts && memories.total > 0) {
+        const entries = Object.entries(memories.modelCounts as Record<string, number>)
+          .filter(([, n]) => n > 0)
+          .sort((a, b) => b[1] - a[1]);
+        for (const [k, n] of entries) {
+          const pct = ((n / memories.total) * 100).toFixed(1);
+          console.log(`  ${k.padEnd(28)} ${String(n).padStart(6)}  (${pct}%)`);
+        }
+      }
+      if (memories.byDurability) {
+        const d = memories.byDurability;
+        console.log(`Durability:   ${d.permanent ?? 0} permanent / ${d.persistent ?? 0} persistent / ${d.standard ?? 0} standard / ${d.ephemeral ?? 0} ephemeral`);
+      }
+      console.log(`Archived:     ${memories.archived ?? 0}`);
+      console.log(`Expired:      ${memories.expired ?? 0}`);
+      if (healthData?.lastWrite) console.log(`Last write:   ${relativeTime(healthData.lastWrite)} (${healthData.lastWrite})`);
+    }
+
+    const agents = healthData?.agents;
+    if (agents && agents.count > 0) {
+      console.log("\n═══ Agents ═══════════════════════════════════════");
+      console.log(`Total:        ${agents.count}`);
+      if (Array.isArray(agents.names) && agents.names.length > 0) {
+        console.log(`Names:        ${agents.names.join(", ")}`);
+      }
+      if (Array.isArray(agents.perAgent) && agents.perAgent.length > 0) {
+        const idW = Math.max(2, ...agents.perAgent.map((r: any) => (r.id ?? "").length));
+        console.log(`\n  ${"id".padEnd(idW)}  memories  hash_fb  24h  last_write`);
+        for (const r of agents.perAgent) {
+          const fb = typeof r.hashFallback === "number" ? String(r.hashFallback) : "—";
+          const w24 = typeof r.writes24h === "number" ? String(r.writes24h) : "—";
+          console.log(
+            `  ${(r.id ?? "").padEnd(idW)}  ${String(r.memoryCount).padStart(8)}  ${fb.padStart(7)}  ${w24.padStart(3)}  ${relativeTime(r.lastWriteAt)}`,
+          );
+        }
+      }
+    }
+
+    // Bootstrap context section — always printed so users see how to opt in.
+    console.log("\n═══ Bootstrap context ═══════════════════════════");
+    if (!opts.bootstrap) {
+      console.log("  (not measured — pass --bootstrap to fetch per-agent context bytes)");
+    } else if (Object.keys(bootstrapBytes).length === 0) {
+      console.log("  (no agents found, or admin pass missing — see HDB_ADMIN_PASSWORD)");
+    } else {
+      const idW = Math.max(5, ...Object.keys(bootstrapBytes).map((id) => id.length));
+      console.log(`  ${"agent".padEnd(idW)}  ${"bytes".padStart(9)}  ${"~tokens".padStart(7)}  ${"mems".padStart(4)}  status`);
+      // Sort by bytes desc so heaviest bootstraps surface first.
+      const sortedEntries = Object.entries(bootstrapBytes).sort(
+        (a, b) => (b[1].bytes ?? 0) - (a[1].bytes ?? 0),
+      );
+      for (const [agentId, info] of sortedEntries) {
+        const bytesStr = info.error ? "error" : humanBytes(info.bytes);
+        const tok = info.tokenEstimate != null ? String(info.tokenEstimate) : "—";
+        const mems = info.memoriesIncluded != null ? String(info.memoriesIncluded) : "—";
+        const status = info.error ? info.error.slice(0, 40) : "ok";
+        console.log(`  ${agentId.padEnd(idW)}  ${bytesStr.padStart(9)}  ${tok.padStart(7)}  ${mems.padStart(4)}  ${status}`);
+      }
+    }
+
+    if (healthData?.relationships) {
+      const r = healthData.relationships;
+      console.log("\n═══ Relationships ═══════════════════════════════");
+      console.log(`Total:        ${r.total} (${r.active} active)`);
+    }
+
+    if (healthData?.soul && healthData.soul.total > 0) {
+      const s = healthData.soul;
+      const bp = s.byPriority ?? {};
+      console.log("\n═══ Soul ═════════════════════════════════════════");
+      console.log(`Total:        ${s.total} entries`);
+      console.log(`Priority:     ${bp.critical ?? 0} critical / ${bp.high ?? 0} high / ${bp.standard ?? 0} standard / ${bp.low ?? 0} low`);
+    } else if (typeof healthData?.soulEntries === "number" && healthData.soulEntries > 0) {
+      console.log("\n═══ Soul ═════════════════════════════════════════");
+      console.log(`Total:        ${healthData.soulEntries} entries`);
+    }
+
+    if (healthData?.rem) {
+      const r = healthData.rem;
+      console.log("\n═══ REM ══════════════════════════════════════════");
+      console.log(`Last light:        ${relativeTime(r.lastLightAt)}`);
+      console.log(`Last rapid:        ${relativeTime(r.lastRapidAt)}`);
+      console.log(`Last restorative:  ${relativeTime(r.lastRestorativeAt)}`);
+      const nightly = r.nightlyEnabled === true ? "enabled" : r.nightlyEnabled === false ? "disabled" : "unknown";
+      console.log(`Nightly:           ${nightly}`);
+      if (r.lastNightlyAt) console.log(`Last nightly:      ${relativeTime(r.lastNightlyAt)} (${r.lastNightlyAt})`);
+      if (typeof r.pendingCandidates === "number") console.log(`Pending candidates: ${r.pendingCandidates}`);
+    }
+
+    if (healthData?.federation) {
+      const f = healthData.federation;
+      console.log("\n═══ Federation ═══════════════════════════════════");
+      if (f.instance) console.log(`Instance:     ${f.instance.id} (${f.instance.role ?? "—"}, ${f.instance.status ?? "—"})`);
+      if (f.peers) console.log(`Peers:        ${f.peers.total} total (${f.peers.connected} connected, ${f.peers.disconnected} down, ${f.peers.revoked} revoked)`);
+      if (typeof f.pendingTokens === "number" && f.pendingTokens > 0) console.log(`Pairing:      ${f.pendingTokens} unconsumed token(s)`);
+      if (Array.isArray(f.peerList) && f.peerList.length > 0) {
+        const idW = Math.max(4, ...f.peerList.map((p: any) => (p.id ?? "").length));
+        console.log(`\n  ${"peer".padEnd(idW)}  ${"role".padEnd(5)}  ${"status".padEnd(13)}  last_sync`);
+        for (const p of f.peerList) {
+          console.log(`  ${(p.id ?? "").padEnd(idW)}  ${(p.role ?? "—").padEnd(5)}  ${(p.status ?? "—").padEnd(13)}  ${p.lastSyncAt ? `${relativeTime(p.lastSyncAt)} (${p.lastSyncAt})` : "never"}`);
+        }
+      }
+    } else {
+      console.log("\n═══ Federation ═══════════════════════════════════");
+      console.log("  not configured");
+    }
+
+    if (healthData?.oauth) {
+      const o = healthData.oauth;
+      console.log("\n═══ OAuth / IdP ══════════════════════════════════");
+      console.log(`Clients:       ${o.clients}`);
+      console.log(`IdP configs:   ${o.idpConfigs}`);
+      console.log(`Active tokens: ${o.activeTokens}`);
+      if (Array.isArray(o.clientList) && o.clientList.length > 0) {
+        console.log(`\n  Clients:`);
+        for (const c of o.clientList) {
+          console.log(`    ${c.id}  ${c.name ?? "—"}  ${c.registeredBy ?? "—"}  ${c.createdAt ?? "—"}`);
+        }
+      }
+    }
+
+    if (healthData?.bridges) {
+      const b = healthData.bridges;
+      console.log("\n═══ Bridges ══════════════════════════════════════");
+      if (Array.isArray(b.installed) && b.installed.length > 0) console.log(`Installed:    ${b.installed.join(", ")}`);
+      if (b.lastImport) console.log(`Last import:  ${relativeTime(b.lastImport)}`);
+      if (b.lastExport) console.log(`Last export:  ${relativeTime(b.lastExport)}`);
+    }
+
+    if (healthData?.disk) {
+      const d = healthData.disk;
+      console.log("\n═══ Disk ═════════════════════════════════════════");
+      console.log(`Data:         ${d.dataDir} — ${humanBytes(d.dataBytes ?? 0)}`);
+      console.log(`Snapshots:    ${d.snapshotDir} — ${humanBytes(d.snapshotBytes ?? 0)}`);
+      console.log(`Total:        ${humanBytes((d.dataBytes ?? 0) + (d.snapshotBytes ?? 0))}`);
+    }
+
+    const warnings: Array<{ level: string; message: string }> = Array.isArray(healthData?.warnings) ? healthData.warnings : [];
+    if (warnings.length > 0) {
+      console.log("\n═══ Warnings ═════════════════════════════════════");
+      for (const w of warnings) console.log(`  ${w.level === "warn" ? "⚠" : "ℹ"} ${w.message}`);
+    } else {
+      console.log("\n✅ no warnings");
+    }
+  });
+
 // ─── flair upgrade ────────────────────────────────────────────────────────────
 
 program
