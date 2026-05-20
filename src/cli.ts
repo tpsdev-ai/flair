@@ -8393,11 +8393,11 @@ program
     writeFileSync(tmp, JSON.stringify(backup, null, 2) + "\n", "utf-8");
     renameSync(tmp, outputPath);
 
-    console.log(`\n✅ Backup complete`);
-    console.log(`   Agents:   ${agents.length}`);
-    console.log(`   Memories: ${memories.length}`);
-    console.log(`   Souls:    ${souls.length}`);
-    console.log(`   Output:   ${outputPath}`);
+    console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, "Backup complete")}`);
+    console.log(render.kv("Agents", render.wrap(render.c.bold, String(agents.length))));
+    console.log(render.kv("Memories", render.wrap(render.c.bold, String(memories.length))));
+    console.log(render.kv("Souls", render.wrap(render.c.bold, String(souls.length))));
+    console.log(render.kv("Output", render.wrap(render.c.dim, outputPath)));
   });
 
 // ─── flair restore ────────────────────────────────────────────────────────────
@@ -8521,10 +8521,10 @@ program
       }
     }
 
-    console.log(`\n✅ Restore complete`);
-    console.log(`   Agents restored:   ${agentCount}/${agents.length}`);
-    console.log(`   Memories restored: ${memoryCount}/${memories.length}`);
-    console.log(`   Souls restored:    ${soulCount}/${souls.length}`);
+    console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, "Restore complete")}`);
+    console.log(render.kv("Agents restored", `${render.wrap(render.c.bold, String(agentCount))}${render.wrap(render.c.dim, `/${agents.length}`)}`));
+    console.log(render.kv("Memories restored", `${render.wrap(render.c.bold, String(memoryCount))}${render.wrap(render.c.dim, `/${memories.length}`)}`));
+    console.log(render.kv("Souls restored", `${render.wrap(render.c.bold, String(soulCount))}${render.wrap(render.c.dim, `/${souls.length}`)}`));
   });
 
 // ─── flair export ────────────────────────────────────────────────────────────
@@ -8607,13 +8607,16 @@ program
     writeFileSync(outputPath, JSON.stringify(exportData, null, 2), { mode: fileMode });
     if (privateKey) chmodSync(outputPath, 0o600); // enforce even if umask is permissive
 
-    console.log(`\n✅ Agent '${agentId}' exported`);
-    console.log(`   Memories: ${memories.length}`);
-    console.log(`   Souls:    ${souls.length}`);
-    console.log(`   Grants:   ${grants.length}`);
-    console.log(`   Key:      ${privateKey ? "included (UNENCRYPTED — protect this file)" : "not included"}`);
-    console.log(`   Mode:     ${fileMode.toString(8)} (${privateKey ? "owner-only" : "standard"})`);
-    console.log(`   Output:   ${outputPath}`);
+    console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, `Agent '${agentId}' exported`)}`);
+    console.log(render.kv("Memories", render.wrap(render.c.bold, String(memories.length))));
+    console.log(render.kv("Souls", render.wrap(render.c.bold, String(souls.length))));
+    console.log(render.kv("Grants", render.wrap(render.c.bold, String(grants.length))));
+    const keyText = privateKey
+      ? `${render.wrap(render.c.magenta, "included")} ${render.wrap(render.c.red, "(UNENCRYPTED — protect this file)")}`
+      : render.wrap(render.c.dim, "not included");
+    console.log(render.kv("Key", keyText));
+    console.log(render.kv("Mode", `${fileMode.toString(8)} ${render.wrap(render.c.dim, `(${privateKey ? "owner-only" : "standard"})`)}`));
+    console.log(render.kv("Output", render.wrap(render.c.dim, outputPath)));
   });
 
 // ─── flair import ────────────────────────────────────────────────────────────
@@ -8704,10 +8707,10 @@ program
       } catch { /* skip failures */ }
     }
 
-    console.log(`\n✅ Agent '${agentId}' imported`);
-    console.log(`   Memories: ${memCount}/${(data.memories ?? []).length}`);
-    console.log(`   Souls:    ${soulCount}/${(data.souls ?? []).length}`);
-    console.log(`   Key:      ${privPath}`);
+    console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, `Agent '${agentId}' imported`)}`);
+    console.log(render.kv("Memories", `${render.wrap(render.c.bold, String(memCount))}${render.wrap(render.c.dim, `/${(data.memories ?? []).length}`)}`));
+    console.log(render.kv("Souls", `${render.wrap(render.c.bold, String(soulCount))}${render.wrap(render.c.dim, `/${(data.souls ?? []).length}`)}`));
+    console.log(render.kv("Key", render.wrap(render.c.dim, privPath)));
   });
 
 // ─── flair backup inspect ────────────────────────────────────────────────────
@@ -8715,28 +8718,42 @@ program
 program
   .command("inspect <path>")
   .description("Show contents of a backup or export file")
-  .action(async (filePath) => {
-    if (!existsSync(filePath)) { console.error(`File not found: ${filePath}`); process.exit(1); }
+  .option("--json", "Emit raw JSON of the file (also: pipe + FLAIR_OUTPUT=json)")
+  .action(async (filePath, opts) => {
+    if (!existsSync(filePath)) {
+      console.error(`${render.icons.error} File not found: ${render.wrap(render.c.dim, filePath)}`);
+      process.exit(1);
+    }
     const data = JSON.parse(readFileSync(filePath, "utf-8"));
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(data));
+      return;
+    }
 
-    console.log(`File: ${filePath}`);
-    console.log(`Type: ${data.type ?? "full-backup"}`);
-    console.log(`Created: ${data.createdAt ?? data.exportedAt ?? "unknown"}`);
-    console.log(`Source: ${data.source ?? "unknown"}`);
+    console.log(`${render.wrap(render.c.bold, "File:")}    ${render.wrap(render.c.dim, filePath)}`);
+    const type = data.type ?? "full-backup";
+    const typeColor = type === "agent-export" ? render.c.cyan : render.c.magenta;
+    console.log(render.kv("Type", render.wrap(typeColor, type)));
+    console.log(render.kv("Created", String(data.createdAt ?? data.exportedAt ?? render.wrap(render.c.dim, "unknown"))));
+    console.log(render.kv("Source", String(data.source ?? render.wrap(render.c.dim, "unknown"))));
 
     if (data.type === "agent-export") {
-      console.log(`\nAgent: ${data.agent?.id ?? "unknown"}`);
-      console.log(`  Name: ${data.agent?.name ?? data.agent?.id}`);
-      console.log(`  Memories: ${(data.memories ?? []).length}`);
-      console.log(`  Souls: ${(data.souls ?? []).length}`);
-      console.log(`  Grants: ${(data.grants ?? []).length}`);
-      console.log(`  Key included: ${data.privateKey ? "yes" : "no"}`);
+      console.log(`\n${render.wrap(render.c.bold, "Agent")}: ${render.wrap(render.c.bold, data.agent?.id ?? "unknown")}`);
+      console.log(render.kv("Name", String(data.agent?.name ?? data.agent?.id ?? "—")));
+      console.log(render.kv("Memories", render.wrap(render.c.bold, String((data.memories ?? []).length))));
+      console.log(render.kv("Souls", render.wrap(render.c.bold, String((data.souls ?? []).length))));
+      console.log(render.kv("Grants", render.wrap(render.c.bold, String((data.grants ?? []).length))));
+      const keyText = data.privateKey ? render.wrap(render.c.magenta, "yes") : render.wrap(render.c.dim, "no");
+      console.log(render.kv("Key included", keyText));
     } else {
       const agents = data.agents ?? [];
-      console.log(`\nAgents: ${agents.length}`);
-      for (const a of agents) console.log(`  - ${a.id} (${a.name ?? a.id})`);
-      console.log(`Memories: ${(data.memories ?? []).length}`);
-      console.log(`Souls: ${(data.souls ?? []).length}`);
+      console.log(`\n${render.wrap(render.c.bold, "Agents")}: ${render.wrap(render.c.bold, String(agents.length))}`);
+      for (const a of agents) {
+        console.log(`  ${render.wrap(render.c.dim, "·")} ${render.wrap(render.c.bold, a.id)} ${render.wrap(render.c.dim, `(${a.name ?? a.id})`)}`);
+      }
+      console.log(render.kv("Memories", render.wrap(render.c.bold, String((data.memories ?? []).length))));
+      console.log(render.kv("Souls", render.wrap(render.c.bold, String((data.souls ?? []).length))));
     }
   });
 
