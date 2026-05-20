@@ -4116,7 +4116,7 @@ rem
     }
 
     if (!agentId) {
-      console.error("Error: --agent is required (or set FLAIR_AGENT_ID)");
+      console.error(`${render.icons.error} --agent is required (or set FLAIR_AGENT_ID)`);
       process.exit(1);
     }
 
@@ -4130,46 +4130,58 @@ rem
         get_attributes: ["id", "claim", "generatedBy", "generatedAt", "status", "target", "reviewerId", "decidedAt", "supersedes"],
       });
 
-      // search_by_conditions returns either an array or { error }; tolerate both shapes
       const candidates: any[] = Array.isArray(result) ? result : (result?.results ?? []);
+      const mode = render.resolveOutputMode(opts);
 
-      if (opts.json) {
-        console.log(JSON.stringify({ agentId, status, count: candidates.length, candidates }, null, 2));
+      if (mode === "json") {
+        console.log(render.asJSON({ agentId, status, count: candidates.length, candidates }));
         return;
       }
 
-      console.log(`\n-- rem candidates (agent=${agentId}, status=${status}) --\n`);
+      const statusColor = status === "promoted" ? render.c.green : status === "rejected" ? render.c.red : render.c.yellow;
+      console.log(
+        `${render.wrap(render.c.bold, "REM candidates")}  ${render.wrap(render.c.dim, "—")} agent ${render.wrap(render.c.bold, agentId)} ${render.wrap(render.c.dim, "·")} ${render.wrap(statusColor, status)}`,
+      );
 
       if (candidates.length === 0) {
-        console.log(`No ${status} candidates.`);
+        console.log(`\n${render.icons.info} ${render.wrap(render.c.dim, `No ${status} candidates.`)}`);
         if (status === "pending") {
-          console.log("\n(Run `flair rem nightly enable` to start the nightly distillation cycle that populates this table.)");
+          console.log(
+            `${render.wrap(render.c.dim, "  Run")} flair rem nightly enable ${render.wrap(render.c.dim, "to start the nightly distillation cycle that populates this table.")}`,
+          );
         }
         return;
       }
 
-      // Sort newest-first by generatedAt
       candidates.sort((a, b) => String(b.generatedAt ?? "").localeCompare(String(a.generatedAt ?? "")));
 
+      console.log();
       for (const c of candidates) {
-        const tag = c.status === "promoted"
-          ? `[promoted → ${c.target ?? "?"} by ${c.reviewerId ?? "?"} @ ${relativeTime(c.decidedAt)}]`
-          : c.status === "rejected"
-            ? `[rejected by ${c.reviewerId ?? "?"} @ ${relativeTime(c.decidedAt)}]`
-            : `[pending — ${c.generatedBy ?? "?"} @ ${relativeTime(c.generatedAt)}]`;
-        console.log(`  ${c.id}  ${tag}`);
+        let tag: string;
+        if (c.status === "promoted") {
+          tag = `${render.wrap(render.c.green, "✓ promoted")} ${render.wrap(render.c.dim, "→")} ${render.wrap(render.c.bold, c.target ?? "?")} ${render.wrap(render.c.dim, `by ${c.reviewerId ?? "?"} ${render.relativeTime(c.decidedAt)}`)}`;
+        } else if (c.status === "rejected") {
+          tag = `${render.wrap(render.c.red, "✗ rejected")} ${render.wrap(render.c.dim, `by ${c.reviewerId ?? "?"} ${render.relativeTime(c.decidedAt)}`)}`;
+        } else {
+          tag = `${render.wrap(render.c.yellow, "○ pending")} ${render.wrap(render.c.dim, `— ${c.generatedBy ?? "?"} ${render.relativeTime(c.generatedAt)}`)}`;
+        }
+        console.log(`  ${render.wrap(render.c.dim, c.id)}  ${tag}`);
         console.log(`    ${c.claim}`);
-        if (c.supersedes) console.log(`    (supersedes ${c.supersedes} — recurring proposal)`);
+        if (c.supersedes) {
+          console.log(`    ${render.wrap(render.c.dim, `(supersedes ${c.supersedes} — recurring proposal)`)}`);
+        }
         console.log("");
       }
 
-      console.log(`${candidates.length} candidate${candidates.length > 1 ? "s" : ""}.`);
+      console.log(
+        `${render.wrap(render.c.bold, String(candidates.length))} candidate${candidates.length > 1 ? "s" : ""}.`,
+      );
       if (status === "pending") {
-        console.log(`Promote: flair rem promote <id> --rationale "<why>" --to (soul|memory)`);
-        console.log(`Reject:  flair rem reject <id> --reason "<why>"`);
+        console.log(`${render.wrap(render.c.dim, "Promote:")} flair rem promote <id> --rationale "<why>" --to (soul|memory)`);
+        console.log(`${render.wrap(render.c.dim, "Reject: ")} flair rem reject <id> --reason "<why>"`);
       }
     } catch (err: any) {
-      console.error(`Error: ${err.message}`);
+      console.error(`${render.icons.error} ${err.message}`);
       process.exit(1);
     }
   });
