@@ -6582,7 +6582,7 @@ program
     let issues = 0;
     let harperResponding = false;
 
-    console.log("\n🩺 Flair Doctor\n");
+    console.log(`\n${render.wrap(render.c.bold, "🩺 Flair Doctor")}\n`);
 
     // Helper: try to reach Harper on a given port
     async function probePort(p: number): Promise<boolean> {
@@ -6618,12 +6618,12 @@ program
         pidValue = rawPid;
         try { process.kill(Number(pidValue), 0); pidAlive = true; } catch { /* dead */ }
       } else {
-        console.log(`  ⚠️  PID file contains non-numeric value: ${pidFile0} — skipping`);
+        console.log(`  ${render.icons.warn} PID file contains non-numeric value: ${render.wrap(render.c.dim, pidFile0)} — skipping`);
       }
     }
 
     if (await probePort(port)) {
-      console.log(`  ✅ Harper responding on port ${port}`);
+      console.log(`  ${render.icons.ok} Harper responding on port ${render.wrap(render.c.bold, String(port))}`);
       harperResponding = true;
     } else {
       // Port didn't respond — but if PID is alive, try to find the real port
@@ -6631,25 +6631,25 @@ program
       if (pidAlive) {
         discoveredPort = await discoverPortFromPid(pidValue);
         if (discoveredPort && discoveredPort !== port && await probePort(discoveredPort)) {
-          console.log(`  ⚠️  Harper not on expected port ${port}, but responding on port ${discoveredPort} (PID ${pidValue})`);
-          console.log(`     Your config says port ${port} but Harper is actually running on ${discoveredPort}`);
+          console.log(`  ${render.icons.warn} Harper not on expected port ${port}, but responding on port ${render.wrap(render.c.bold, String(discoveredPort))} ${render.wrap(render.c.dim, `(PID ${pidValue})`)}`);
+          console.log(`     ${render.wrap(render.c.dim, `Your config says port ${port} but Harper is actually running on ${discoveredPort}`)}`);
           if (autoFix) {
             if (dryRun) {
-              console.log(`     Would update config to port ${discoveredPort}`);
+              console.log(`     ${render.wrap(render.c.dim, "Would update config to port")} ${discoveredPort}`);
             } else {
               writeConfig(discoveredPort);
-              console.log(`     ✅ Updated config to port ${discoveredPort}`);
+              console.log(`     ${render.icons.ok} Updated config to port ${discoveredPort}`);
             }
           } else {
-            console.log(`     Fix: flair doctor --fix (updates config to match running port)`);
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(updates config to match running port)")}`);
           }
           effectivePort = discoveredPort;
           baseUrl = `http://127.0.0.1:${discoveredPort}`;
           harperResponding = true;
           issues++;
         } else {
-          console.log(`  ❌ Harper process alive (PID ${pidValue}) but not responding on any detected port`);
-          console.log(`     Fix: flair restart`);
+          console.log(`  ${render.icons.error} Harper process alive (PID ${pidValue}) but not responding on any detected port`);
+          console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair restart`);
           issues++;
         }
       } else {
@@ -6659,29 +6659,29 @@ program
           const { execSync } = await import("node:child_process");
           const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
           if (lsof) {
-            console.log(`  ❌ Nothing responding on port ${port} (port occupied by PID ${lsof})`);
-            console.log(`     Fix: kill ${lsof} && flair restart`);
+            console.log(`  ${render.icons.error} Nothing responding on port ${port} ${render.wrap(render.c.dim, `(port occupied by PID ${lsof})`)}`);
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} kill ${lsof} && flair restart`);
           } else {
-            console.log(`  ❌ Harper is not running`);
-            console.log(`     Fix: flair restart`);
+            console.log(`  ${render.icons.error} Harper is not running`);
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair restart`);
           }
         } catch {
-          console.log(`  ❌ Harper is not running`);
+          console.log(`  ${render.icons.error} Harper is not running`);
           if (autoFix) {
             if (dryRun) {
-              console.log(`     Would run: flair restart`);
+              console.log(`     ${render.wrap(render.c.dim, "Would run:")} flair restart`);
             } else {
-              console.log(`     Attempting restart...`);
+              console.log(`     ${render.wrap(render.c.dim, "Attempting restart...")}`);
               try {
                 const { execSync } = await import("node:child_process");
                 execSync(`${process.argv[0]} ${process.argv[1]} restart --port ${port}`, { stdio: "inherit" });
-                console.log(`     ✅ Restart attempted`);
+                console.log(`     ${render.icons.ok} Restart attempted`);
               } catch {
-                console.log(`     ❌ Restart failed — try: flair init --agent-id <your-agent>`);
+                console.log(`     ${render.icons.error} Restart failed — try: flair init --agent-id <your-agent>`);
               }
             }
           } else {
-            console.log(`     Fix: flair restart`);
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair restart`);
           }
         }
         issues++;
@@ -6693,15 +6693,15 @@ program
     if (existsSync(keysDir)) {
       const keyFiles = (await import("node:fs")).readdirSync(keysDir).filter((f: string) => f.endsWith(".key"));
       if (keyFiles.length > 0) {
-        console.log(`  ✅ Keys found: ${keyFiles.length} agent(s) in ${keysDir}`);
+        console.log(`  ${render.icons.ok} Keys found: ${render.wrap(render.c.bold, String(keyFiles.length))} agent(s) in ${render.wrap(render.c.dim, keysDir)}`);
       } else {
-        console.log(`  ❌ Keys directory exists but no .key files found`);
-        console.log(`     Fix: flair init --agent-id <your-agent>`);
+        console.log(`  ${render.icons.error} Keys directory exists but no .key files found`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
         issues++;
       }
     } else {
-      console.log(`  ❌ Keys directory missing: ${keysDir}`);
-      console.log(`     Fix: flair init --agent-id <your-agent>`);
+      console.log(`  ${render.icons.error} Keys directory missing: ${render.wrap(render.c.dim, keysDir)}`);
+      console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
       issues++;
     }
 
@@ -6709,9 +6709,9 @@ program
     const cfgPath = configPath();
     if (existsSync(cfgPath)) {
       const savedPort = readPortFromConfig();
-      console.log(`  ✅ Config: ${cfgPath} (port: ${savedPort ?? "default"})`);
+      console.log(`  ${render.icons.ok} Config: ${render.wrap(render.c.dim, cfgPath)} ${render.wrap(render.c.dim, `(port: ${savedPort ?? "default"})`)}`);
     } else {
-      console.log(`  ⚠️  No config file at ${cfgPath} — using defaults`);
+      console.log(`  ${render.icons.warn} No config file at ${render.wrap(render.c.dim, cfgPath)} — using defaults`);
     }
 
     // 4. Embeddings check (only if Harper is responding)
@@ -6726,15 +6726,15 @@ program
         if (testRes.ok) {
           const data = await testRes.json() as { _warning?: string };
           if (data._warning) {
-            console.log(`  ⚠️  Embeddings: keyword-only (${data._warning})`);
-            console.log(`     Semantic search quality is degraded`);
-            console.log(`     Check: ls ~/.npm-global/lib/node_modules/@tpsdev-ai/flair/models/`);
+            console.log(`  ${render.icons.warn} Embeddings: keyword-only ${render.wrap(render.c.dim, `(${data._warning})`)}`);
+            console.log(`     ${render.wrap(render.c.dim, "Semantic search quality is degraded")}`);
+            console.log(`     ${render.wrap(render.c.dim, "Check:")} ls ~/.npm-global/lib/node_modules/@tpsdev-ai/flair/models/`);
             issues++;
           } else {
-            console.log(`  ✅ Embeddings: semantic search operational`);
+            console.log(`  ${render.icons.ok} Embeddings: semantic search operational`);
           }
         } else if (testRes.status === 401) {
-          console.log(`  ⚠️  Embeddings: cannot verify (auth required for SemanticSearch)`);
+          console.log(`  ${render.icons.warn} Embeddings: cannot verify ${render.wrap(render.c.dim, "(auth required for SemanticSearch)")}`);
         }
       } catch { /* fetch error, already flagged */ }
     }
@@ -6747,20 +6747,20 @@ program
       try {
         process.kill(Number(pidContent), 0);
         if (harperResponding) {
-          console.log(`  ✅ PID file: ${pidFile} (process ${pidContent} is alive)`);
+          console.log(`  ${render.icons.ok} PID file: ${render.wrap(render.c.dim, pidFile)} ${render.wrap(render.c.dim, `(process ${pidContent} is alive)`)}`);
         }
         // If not responding, we already reported the issue in step 1
       } catch {
-        console.log(`  ❌ Stale PID file: ${pidFile} (process ${pidContent} is dead)`);
+        console.log(`  ${render.icons.error} Stale PID file: ${render.wrap(render.c.dim, pidFile)} ${render.wrap(render.c.dim, `(process ${pidContent} is dead)`)}`);
         if (autoFix) {
           if (dryRun) {
-            console.log(`     Would remove: ${pidFile}`);
+            console.log(`     ${render.wrap(render.c.dim, "Would remove:")} ${pidFile}`);
           } else {
             (await import("node:fs")).unlinkSync(pidFile);
-            console.log(`     ✅ Removed stale PID file`);
+            console.log(`     ${render.icons.ok} Removed stale PID file`);
           }
         } else {
-          console.log(`     Fix: rm ${pidFile} && flair restart`);
+          console.log(`     ${render.wrap(render.c.dim, "Fix:")} rm ${pidFile} && flair restart`);
         }
         issues++;
       }
@@ -6768,15 +6768,15 @@ program
 
     // 6. Data directory
     if (existsSync(dataDir)) {
-      console.log(`  ✅ Data directory: ${dataDir}`);
+      console.log(`  ${render.icons.ok} Data directory: ${render.wrap(render.c.dim, dataDir)}`);
     } else {
       // Check ~/harper/ (common alternative)
       const altDir = join(homedir(), "harper");
       if (existsSync(altDir)) {
-        console.log(`  ⚠️  Data at ~/harper/ (not ~/.flair/data) — old install location`);
+        console.log(`  ${render.icons.warn} Data at ${render.wrap(render.c.dim, "~/harper/")} (not ${render.wrap(render.c.dim, "~/.flair/data")}) — old install location`);
       } else {
-        console.log(`  ❌ No data directory found`);
-        console.log(`     Fix: flair init --agent-id <your-agent>`);
+        console.log(`  ${render.icons.error} No data directory found`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
         issues++;
       }
     }
@@ -6784,9 +6784,9 @@ program
     // Summary
     console.log("");
     if (issues === 0) {
-      console.log("  🟢 No issues found");
+      console.log(`  ${render.icons.ok} ${render.wrap(render.c.green, "No issues found")}`);
     } else {
-      console.log(`  🔴 ${issues} issue${issues > 1 ? "s" : ""} found — see fixes above`);
+      console.log(`  ${render.icons.error} ${render.wrap(render.c.red, `${issues} issue${issues > 1 ? "s" : ""} found`)} ${render.wrap(render.c.dim, "— see fixes above")}`);
     }
     console.log("");
 
