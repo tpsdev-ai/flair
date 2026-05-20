@@ -5125,23 +5125,40 @@ statusCmd
   .action(async function (this: Command) {
     const opts = this.optsWithGlobals();
     const { healthy, healthData } = await fetchHealthDetail(opts);
-    if (opts.json) {
-      console.log(JSON.stringify({ healthy, rem: healthData?.rem ?? null }, null, 2));
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON({ healthy, rem: healthData?.rem ?? null }));
       if (!healthy) process.exit(1);
       return;
     }
-    if (!healthy) { console.log("🔴 unreachable"); process.exit(1); }
+    if (!healthy) {
+      console.log(`${render.icons.error} ${render.wrap(render.c.red, "unreachable")}`);
+      process.exit(1);
+    }
     const r = healthData?.rem;
-    if (!r) { console.log("REM: not configured (no log entries or platform timers found)"); return; }
-    console.log("REM:");
-    console.log(`  Last light:        ${relativeTime(r.lastLightAt)}`);
-    console.log(`  Last rapid:        ${relativeTime(r.lastRapidAt)}`);
-    console.log(`  Last restorative:  ${relativeTime(r.lastRestorativeAt)}`);
-    const nightly = r.nightlyEnabled === true ? "enabled" : r.nightlyEnabled === false ? "disabled" : "unknown";
-    console.log(`  Nightly:           ${nightly}`);
-    if (r.lastNightlyAt) console.log(`  Last nightly:      ${relativeTime(r.lastNightlyAt)} (${r.lastNightlyAt})`);
-    if (typeof r.pendingCandidates === "number") console.log(`  Pending candidates: ${r.pendingCandidates}`);
-    else console.log(`  Pending candidates: — (schema not available)`);
+    if (!r) {
+      console.log(`${render.wrap(render.c.bold, "REM")}  ${render.wrap(render.c.dim, "not configured (no log entries or platform timers found)")}`);
+      return;
+    }
+    console.log(render.wrap(render.c.bold, "REM"));
+    console.log(render.kv("Last light", render.relativeTime(r.lastLightAt), 18));
+    console.log(render.kv("Last rapid", render.relativeTime(r.lastRapidAt), 18));
+    console.log(render.kv("Last restorative", render.relativeTime(r.lastRestorativeAt), 18));
+    const nightlyTxt = r.nightlyEnabled === true
+      ? render.wrap(render.c.green, "enabled")
+      : r.nightlyEnabled === false
+        ? render.wrap(render.c.dim, "disabled")
+        : render.wrap(render.c.dim, "unknown");
+    console.log(render.kv("Nightly", nightlyTxt, 18));
+    if (r.lastNightlyAt) {
+      console.log(render.kv("Last nightly", `${render.relativeTime(r.lastNightlyAt)} ${render.wrap(render.c.dim, `(${r.lastNightlyAt})`)}`, 18));
+    }
+    if (typeof r.pendingCandidates === "number") {
+      const pendingColor = r.pendingCandidates > 0 ? render.c.yellow : render.c.dim;
+      console.log(render.kv("Pending candidates", render.wrap(pendingColor, String(r.pendingCandidates)), 18));
+    } else {
+      console.log(render.kv("Pending candidates", render.wrap(render.c.dim, "— (schema not available)"), 18));
+    }
   });
 
 statusCmd
@@ -5150,25 +5167,67 @@ statusCmd
   .action(async function (this: Command) {
     const opts = this.optsWithGlobals();
     const { healthy, healthData } = await fetchHealthDetail(opts);
-    if (opts.json) {
-      console.log(JSON.stringify({ healthy, federation: healthData?.federation ?? null }, null, 2));
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON({ healthy, federation: healthData?.federation ?? null }));
       if (!healthy) process.exit(1);
       return;
     }
-    if (!healthy) { console.log("🔴 unreachable"); process.exit(1); }
+    if (!healthy) {
+      console.log(`${render.icons.error} ${render.wrap(render.c.red, "unreachable")}`);
+      process.exit(1);
+    }
     const f = healthData?.federation;
-    if (!f) { console.log("Federation: not configured"); return; }
-    console.log("Federation:");
-    if (f.instance) console.log(`  Instance:    ${f.instance.id} (${f.instance.role ?? "—"}, ${f.instance.status ?? "—"})`);
-    else console.log("  Instance:    —");
-    if (f.peers) console.log(`  Peers:       ${f.peers.total} (${f.peers.connected} connected / ${f.peers.disconnected} down / ${f.peers.revoked} revoked)`);
-    if (typeof f.pendingTokens === "number" && f.pendingTokens > 0) console.log(`  Pairing:     ${f.pendingTokens} unconsumed token(s)`);
+    if (!f) {
+      console.log(`${render.wrap(render.c.bold, "Federation")}  ${render.wrap(render.c.dim, "not configured")}`);
+      return;
+    }
+    console.log(render.wrap(render.c.bold, "Federation"));
+    if (f.instance) {
+      const statusColor = f.instance.status === "active" ? render.c.green : render.c.yellow;
+      console.log(render.kv("Instance", `${f.instance.id}  ${render.wrap(render.c.dim, "(")}${f.instance.role ?? "—"}${render.wrap(render.c.dim, ", ")}${render.wrap(statusColor, f.instance.status ?? "—")}${render.wrap(render.c.dim, ")")}`));
+    } else {
+      console.log(render.kv("Instance", render.wrap(render.c.dim, "—")));
+    }
+    if (f.peers) {
+      const connColor = f.peers.connected > 0 ? render.c.green : render.c.dim;
+      const downColor = f.peers.disconnected > 0 ? render.c.yellow : render.c.dim;
+      const revColor = f.peers.revoked > 0 ? render.c.red : render.c.dim;
+      const parts = [
+        render.wrap(connColor, `${f.peers.connected} connected`),
+        render.wrap(downColor, `${f.peers.disconnected} down`),
+        render.wrap(revColor, `${f.peers.revoked} revoked`),
+      ];
+      console.log(render.kv("Peers", `${render.wrap(render.c.bold, String(f.peers.total))} ${render.wrap(render.c.dim, "—")} ${parts.join(render.wrap(render.c.dim, " · "))}`));
+    }
+    if (typeof f.pendingTokens === "number" && f.pendingTokens > 0) {
+      console.log(render.kv("Pairing", `${render.wrap(render.c.yellow, String(f.pendingTokens))} unconsumed token(s)`));
+    }
     if (Array.isArray(f.peerList) && f.peerList.length > 0) {
-      const idW = Math.max(4, ...f.peerList.map((p: any) => (p.id ?? "").length));
-      console.log(`\n  ${"peer".padEnd(idW)}  ${"role".padEnd(5)}  ${"status".padEnd(13)}  last_sync`);
-      for (const p of f.peerList) {
-        console.log(`  ${(p.id ?? "").padEnd(idW)}  ${(p.role ?? "—").padEnd(5)}  ${(p.status ?? "—").padEnd(13)}  ${p.lastSyncAt ? `${relativeTime(p.lastSyncAt)} (${p.lastSyncAt})` : "never"}`);
-      }
+      console.log();
+      const cols: render.TableColumn[] = [
+        { label: "peer", key: "id" },
+        { label: "role", key: "role", format: (v) => String(v ?? "—") },
+        {
+          label: "status",
+          key: "status",
+          format: (v) => {
+            const s = String(v ?? "—");
+            const color = s === "paired" || s === "connected" ? render.c.green : s === "revoked" ? render.c.red : render.c.yellow;
+            return render.wrap(color, s);
+          },
+        },
+        {
+          label: "last_sync",
+          key: "lastSyncAt",
+          format: (v) => {
+            const iso = v as string | null;
+            if (!iso) return render.wrap(render.c.dim, "never");
+            return `${render.relativeTime(iso)} ${render.wrap(render.c.dim, `(${iso})`)}`;
+          },
+        },
+      ];
+      console.log(render.table(cols, f.peerList as Array<Record<string, unknown>>));
     }
   });
 
@@ -5178,16 +5237,45 @@ statusCmd
   .action(async function (this: Command) {
     const opts = this.optsWithGlobals();
     const { healthy, healthData } = await fetchHealthDetail(opts);
-    if (opts.json) {
-      console.log(JSON.stringify({ healthy, oauth: healthData?.oauth ?? null }, null, 2));
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON({ healthy, oauth: healthData?.oauth ?? null }));
       if (!healthy) process.exit(1);
       return;
     }
-    if (!healthy) { console.log("🔴 unreachable"); process.exit(1); }
+    if (!healthy) {
+      console.log(`${render.icons.error} ${render.wrap(render.c.red, "unreachable")}`);
+      process.exit(1);
+    }
     const o = healthData?.oauth;
-    if (!o) { console.log("OAuth: not configured"); return; }
-    const lines = oauthDetailLines(o);
-    for (const line of lines) console.log(line);
+    if (!o) {
+      console.log(`${render.wrap(render.c.bold, "OAuth")}  ${render.wrap(render.c.dim, "not configured")}`);
+      return;
+    }
+    console.log(render.wrap(render.c.bold, "OAuth"));
+    console.log(render.kv("Clients", render.wrap(render.c.bold, String(Number(o?.clients ?? 0)))));
+    console.log(render.kv("IdP configs", String(Number(o?.idpConfigs ?? 0))));
+    const tokenColor = Number(o?.activeTokens ?? 0) > 0 ? render.c.green : render.c.dim;
+    console.log(render.kv("Active tokens", render.wrap(tokenColor, String(Number(o?.activeTokens ?? 0)))));
+    if (Array.isArray(o?.clientList) && o.clientList.length > 0) {
+      console.log(`\n  ${render.wrap(render.c.dim, "Clients")}`);
+      const cols: render.TableColumn[] = [
+        { label: "id", key: "id" },
+        { label: "name", key: "name", format: (v) => String(v ?? "—") },
+        { label: "registered_by", key: "registeredBy", format: (v) => String(v ?? "—") },
+        { label: "created_at", key: "createdAt", format: (v) => String(v ?? "—") },
+      ];
+      console.log(render.table(cols, o.clientList as Array<Record<string, unknown>>));
+    }
+    if (Array.isArray(o?.idpList) && o.idpList.length > 0) {
+      console.log(`\n  ${render.wrap(render.c.dim, "IdPs")}`);
+      const cols: render.TableColumn[] = [
+        { label: "id", key: "id" },
+        { label: "name", key: "name", format: (v) => String(v ?? "—") },
+        { label: "issuer", key: "issuer", format: (v) => String(v ?? "—") },
+      ];
+      console.log(render.table(cols, o.idpList as Array<Record<string, unknown>>));
+    }
   });
 
 statusCmd
@@ -5196,18 +5284,27 @@ statusCmd
   .action(async function (this: Command) {
     const opts = this.optsWithGlobals();
     const { healthy, healthData } = await fetchHealthDetail(opts);
-    if (opts.json) {
-      console.log(JSON.stringify({ healthy, bridges: healthData?.bridges ?? null }, null, 2));
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON({ healthy, bridges: healthData?.bridges ?? null }));
       if (!healthy) process.exit(1);
       return;
     }
-    if (!healthy) { console.log("🔴 unreachable"); process.exit(1); }
+    if (!healthy) {
+      console.log(`${render.icons.error} ${render.wrap(render.c.red, "unreachable")}`);
+      process.exit(1);
+    }
     const b = healthData?.bridges;
-    if (!b) { console.log("Bridges: none installed (no flair-bridge-* packages found)"); return; }
-    console.log("Bridges:");
-    if (Array.isArray(b.installed) && b.installed.length > 0) console.log(`  Installed:   ${b.installed.join(", ")}`);
-    if (b.lastImport) console.log(`  Last import: ${relativeTime(b.lastImport)}`);
-    if (b.lastExport) console.log(`  Last export: ${relativeTime(b.lastExport)}`);
+    if (!b) {
+      console.log(`${render.wrap(render.c.bold, "Bridges")}  ${render.wrap(render.c.dim, "none installed (no flair-bridge-* packages found)")}`);
+      return;
+    }
+    console.log(render.wrap(render.c.bold, "Bridges"));
+    if (Array.isArray(b.installed) && b.installed.length > 0) {
+      console.log(render.kv("Installed", b.installed.join(render.wrap(render.c.dim, ", "))));
+    }
+    if (b.lastImport) console.log(render.kv("Last import", render.relativeTime(b.lastImport)));
+    if (b.lastExport) console.log(render.kv("Last export", render.relativeTime(b.lastExport)));
   });
 
 // ─── flair status --deep ──────────────────────────────────────────────────────
