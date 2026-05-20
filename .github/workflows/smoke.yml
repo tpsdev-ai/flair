@@ -1,0 +1,81 @@
+name: Smoke Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  smoke:
+    name: Smoke Tests (Golden Path)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Install linux-x64 native binary for embeddings
+        run: bun add --no-save @node-llama-cpp/linux-x64@3
+
+      - name: Build Flair resources and CLI
+        run: bun run build && bun run build:cli
+
+      - name: Pre-download embedding model
+        run: |
+          mkdir -p models
+          curl -fSL \
+            "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
+            -o models/nomic-embed-text-v1.5.Q4_K_M.gguf
+          echo "Model downloaded ($(du -sh models/*.gguf | cut -f1))"
+
+      - name: Start Flair (ephemeral Harper + Flair components)
+        run: |
+          docker run -d \
+            --name harper-flair-smoke \
+            -p 9925:9925 -p 9926:9926 \
+            -v ${{ github.workspace }}:/flair \
+            -e ROOTPATH=/tmp/harper-flair-smoke \
+            -e HDB_ADMIN_USERNAME=admin \
+            -e HDB_ADMIN_PASSWORD=admin123 \
+            -e NODE_HOSTNAME=0.0.0.0 \
+            -e OPERATIONSAPI_NETWORK_PORT=9925 \
+            -e HTTP_PORT=9926 \
+            --entrypoint /bin/sh \
+            harperfast/harper:5.0.1 \
+            -c "harper install && harper dev /flair"
+
+          # Wait for Harper to be healthy
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:9926/Health 2>/dev/null; then
+              echo "Flair ready (${i}s)"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "Flair failed to start. Docker logs:"
+              docker logs harper-flair-smoke 2>&1 || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Run smoke tests
+        env:
+          FLAIR_TEST_URL: "http://localhost:9926"
+          FLAIR_ADMIN_PASS: "admin123"
+        run: bun test test/smoke/
+
+      - name: Cleanup Docker
+        if: always()
+        run: |
+          docker stop harper-flair-smoke 2>/dev/null || true
+          docker rm harper-flair-smoke 2>/dev/null || true
