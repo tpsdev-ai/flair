@@ -6403,17 +6403,14 @@ program
   .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
-    const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
-    const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
-
     const agentId = opts.agent ?? process.env.FLAIR_AGENT_ID;
     if (!agentId && !process.env.FLAIR_ADMIN_PASS) {
-      console.error(red("Error: set --agent / FLAIR_AGENT_ID or FLAIR_ADMIN_PASS"));
+      console.error(`${render.icons.error} ${render.wrap(render.c.red, "set --agent / FLAIR_AGENT_ID or FLAIR_ADMIN_PASS")}`);
       process.exit(1);
     }
 
     const baseUrl = `http://127.0.0.1:${resolveHttpPort(opts)}`;
-    console.log(`\nFlair test (url: ${baseUrl})\n`);
+    console.log(`\n${render.wrap(render.c.bold, "Flair test")} ${render.wrap(render.c.dim, `(url: ${baseUrl})`)}\n`);
 
     let passed = 0;
     let failed = 0;
@@ -6422,11 +6419,16 @@ program
     const check = async (name: string, fn: () => Promise<boolean>) => {
       try {
         const ok = await fn();
-        if (ok) { console.log(`  ${green("PASS")} ${name}`); passed++; }
-        else { console.log(`  ${red("FAIL")} ${name}`); failed++; }
+        if (ok) {
+          console.log(`  ${render.icons.ok} ${render.wrap(render.c.green, "PASS")} ${name}`);
+          passed++;
+        } else {
+          console.log(`  ${render.icons.error} ${render.wrap(render.c.red, "FAIL")} ${name}`);
+          failed++;
+        }
       } catch (e: unknown) {
         const message = e instanceof Error ? e.message : String(e);
-        console.log(`  ${red("FAIL")} ${name}: ${message?.slice(0, 120)}`);
+        console.log(`  ${render.icons.error} ${render.wrap(render.c.red, "FAIL")} ${name}: ${render.wrap(render.c.dim, message?.slice(0, 120))}`);
         failed++;
       }
     };
@@ -6467,7 +6469,9 @@ program
       return true;
     });
 
-    console.log(`\n${passed} passed, ${failed} failed`);
+    const passColor = passed > 0 ? render.c.green : render.c.dim;
+    const failColor = failed > 0 ? render.c.red : render.c.dim;
+    console.log(`\n  ${render.wrap(passColor, `${passed} passed`)} ${render.wrap(render.c.dim, "·")} ${render.wrap(failColor, `${failed} failed`)}`);
     if (failed > 0) process.exit(1);
   });
 
