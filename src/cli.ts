@@ -177,6 +177,29 @@ function resolveHttpPort(opts: { port?: string | number }): number {
   return readPortFromConfig() ?? DEFAULT_PORT;
 }
 
+// Unified base URL resolution. Precedence:
+//   --target > --url > FLAIR_TARGET env > FLAIR_URL env > http://127.0.0.1:<resolveHttpPort>
+//
+// Every user-facing command that talks to a Flair instance should call this
+// instead of hand-rolling the precedence. Keeps remote-target switching
+// (e.g. CI hitting Fabric) consistent across `flair status`, `flair search`,
+// `flair bootstrap`, etc.
+function resolveBaseUrl(opts: { target?: string; url?: string; port?: string | number }): string {
+  return (
+    opts.target
+    || opts.url
+    || process.env.FLAIR_TARGET
+    || process.env.FLAIR_URL
+    || `http://127.0.0.1:${resolveHttpPort(opts)}`
+  );
+}
+
+// Resolve agent id from --agent flag or FLAIR_AGENT_ID env.
+// Returns null if neither is set; caller decides whether that's fatal.
+function resolveAgentIdOrEnv(opts: { agent?: string }): string | null {
+  return opts.agent || process.env.FLAIR_AGENT_ID || null;
+}
+
 // Ops port resolution: --ops-port flag > FLAIR_OPS_PORT env > config opsPort > httpPort - 1
 function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }): number {
   if (opts.opsPort !== undefined && opts.opsPort !== null) {
@@ -6743,16 +6766,27 @@ memory.command("write-task-summary")
     console.log(memId);
   });
 
-memory.command("search [query]").requiredOption("--agent <id>")
+memory.command("search [query]")
+  .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--q <query>", "search query (alias for positional arg)")
   .option("--limit <n>", "Max results", "5")
   .option("--tag <tag>")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--port <port>", "Harper HTTP port")
   .action(async (queryArg, opts) => {
+    const agentId = resolveAgentIdOrEnv(opts);
+    if (!agentId) {
+      console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
+      process.exit(2);
+    }
     const q = queryArg ?? opts.q;
     if (!q) { console.error("error: query required (positional arg or --q)"); process.exit(1); }
-    const body: Record<string, any> = { agentId: opts.agent, q, limit: parseInt(opts.limit, 10) || 5 };
+    const body: Record<string, any> = { agentId, q, limit: parseInt(opts.limit, 10) || 5 };
     if (opts.tag) body.tag = opts.tag;
-    console.log(JSON.stringify(await api("POST", "/SemanticSearch", body), null, 2));
+    const baseUrl = resolveBaseUrl(opts);
+    const res = await api("POST", "/SemanticSearch", body, { baseUrl });
+    console.log(JSON.stringify(res, null, 2));
   });
 memory.command("list")
   .requiredOption("--agent <id>")
@@ -6999,12 +7033,12 @@ program
   .option("--json", "Output raw JSON array")
   .action(async (query, opts) => {
     try {
-      const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
+      const agentId = resolveAgentIdOrEnv(opts);
       if (!agentId) {
         console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
         process.exit(2);
       }
-      const baseUrl = opts.target || opts.url || process.env.FLAIR_TARGET || (process.env.FLAIR_URL ?? `http://127.0.0.1:${resolveHttpPort(opts)}`);
+      const baseUrl = resolveBaseUrl(opts);
       const headers: Record<string, string> = { "content-type": "application/json" };
       const keyPath = opts.key || resolveKeyPath(agentId);
       if (keyPath) {
@@ -7120,23 +7154,29 @@ program
 program
   .command("bootstrap")
   .description("Cold-start context: get soul + recent memories as formatted text")
-  .requiredOption("--agent <id>", "Agent ID")
+  .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--max-tokens <n>", "Maximum tokens in output", "4000")
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
   .option("--key <path>", "Ed25519 private key path")
   .action(async (opts) => {
-    const baseUrl = opts.url || `http://127.0.0.1:${resolveHttpPort(opts)}`;
+    const agentId = resolveAgentIdOrEnv(opts);
+    if (!agentId) {
+      console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
+      process.exit(2);
+    }
+    const baseUrl = resolveBaseUrl(opts);
     try {
       const headers: Record<string, string> = { "content-type": "application/json" };
-      const keyPath = opts.key || resolveKeyPath(opts.agent);
+      const keyPath = opts.key || resolveKeyPath(agentId);
       if (keyPath) {
-        headers["authorization"] = buildEd25519Auth(opts.agent, "POST", "/BootstrapMemories", keyPath);
+        headers["authorization"] = buildEd25519Auth(agentId, "POST", "/BootstrapMemories", keyPath);
       }
       const res = await fetch(`${baseUrl}/BootstrapMemories`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ agentId: opts.agent, maxTokens: parseInt(opts.maxTokens, 10) }),
+        body: JSON.stringify({ agentId, maxTokens: parseInt(opts.maxTokens, 10) }),
       });
       if (!res.ok) {
         const body = await res.text();
