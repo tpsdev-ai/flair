@@ -7714,24 +7714,39 @@ bridge
     const { discover } = await import("./bridges/discover.js");
     const { builtinDiscoveryRecords } = await import("./bridges/builtins/index.js");
     const found = await discover({ builtins: builtinDiscoveryRecords() });
-    if (opts.json) {
-      console.log(JSON.stringify(found, null, 2));
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(found));
       return;
     }
     if (found.length === 0) {
-      console.log("No bridges installed.");
-      console.log("Add one with:  flair bridge scaffold <name> --file");
-      console.log("Or install from npm:  npm install flair-bridge-<name>");
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, "No bridges installed.")}`);
+      console.log(`${render.wrap(render.c.dim, "  Add one with:")}     flair bridge scaffold <name> --file`);
+      console.log(`${render.wrap(render.c.dim, "  Or install from npm:")} npm install flair-bridge-<name>`);
       return;
     }
-    const nameW = Math.max(4, ...found.map((b) => b.name.length));
-    const kindW = Math.max(4, ...found.map((b) => b.kind.length));
-    const srcW = Math.max(6, ...found.map((b) => b.source.length));
-    console.log(`  ${"name".padEnd(nameW)}  ${"kind".padEnd(kindW)}  ${"source".padEnd(srcW)}  description`);
-    for (const b of found) {
-      const desc = b.description ?? "";
-      console.log(`  ${b.name.padEnd(nameW)}  ${b.kind.padEnd(kindW)}  ${b.source.padEnd(srcW)}  ${desc}`);
-    }
+    console.log(`${render.wrap(render.c.bold, String(found.length))} bridge${found.length === 1 ? "" : "s"}\n`);
+    const cols: render.TableColumn[] = [
+      { label: "name", key: "name", format: (v) => render.wrap(render.c.bold, String(v ?? "—")) },
+      {
+        label: "kind",
+        key: "kind",
+        format: (v) => {
+          const k = String(v ?? "—");
+          return render.wrap(k === "yaml" ? render.c.cyan : k === "api" ? render.c.magenta : render.c.dim, k);
+        },
+      },
+      {
+        label: "source",
+        key: "source",
+        format: (v) => {
+          const s = String(v ?? "—");
+          return render.wrap(s === "builtin" ? render.c.green : render.c.dim, s);
+        },
+      },
+      { label: "description", key: "description", format: (v) => String(v ?? "") },
+    ];
+    console.log(render.table(cols, found as unknown as Array<Record<string, unknown>>));
   });
 
 bridge
@@ -8171,18 +8186,22 @@ bridge
   .action(async (opts) => {
     const { list: listAllowed } = await import("./bridges/runtime/allow-list.js");
     const entries = await listAllowed();
-    if (opts.json) { console.log(JSON.stringify(entries, null, 2)); return; }
-    if (entries.length === 0) {
-      console.log("No code-plugin bridges are allow-listed yet.");
-      console.log("Allow one with: flair bridge allow <name>");
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(entries));
       return;
     }
-    const nameW = Math.max(4, ...entries.map((e) => e.name.length));
-    const verW = Math.max(7, ...entries.map((e) => (e.version ?? "—").length));
-    console.log(`  ${"name".padEnd(nameW)}  ${"version".padEnd(verW)}  allowed-at               location / digest`);
+    if (entries.length === 0) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, "No code-plugin bridges are allow-listed yet.")}`);
+      console.log(`${render.wrap(render.c.dim, "  Allow one with:")} flair bridge allow <name>`);
+      return;
+    }
+    console.log(`${render.wrap(render.c.bold, String(entries.length))} allow-listed code-plugin bridge${entries.length === 1 ? "" : "s"}\n`);
     for (const e of entries) {
-      console.log(`  ${e.name.padEnd(nameW)}  ${(e.version ?? "—").padEnd(verW)}  ${e.allowedAt}  ${e.packageDir}`);
-      console.log(`  ${" ".repeat(nameW)}  ${" ".repeat(verW)}  ${" ".repeat(24)}  sha256:${e.packageJsonSha256.slice(0, 16)}…`);
+      console.log(`${render.wrap(render.c.bold, e.name)}  ${render.wrap(render.c.dim, `(${e.version ?? "—"})`)}  ${render.wrap(render.c.green, "✓ allowed")} ${render.wrap(render.c.dim, e.allowedAt)}`);
+      console.log(render.kv("location", render.wrap(render.c.dim, e.packageDir)));
+      console.log(render.kv("digest", render.wrap(render.c.dim, `sha256:${e.packageJsonSha256.slice(0, 16)}…`)));
+      console.log();
     }
   });
 
