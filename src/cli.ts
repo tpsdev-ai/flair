@@ -6929,47 +6929,117 @@ memory.command("search [query]")
     console.log(JSON.stringify(res, null, 2));
   });
 memory.command("list")
-  .requiredOption("--agent <id>")
+  .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--tag <tag>")
   .option("--hash-fallback", "Only memories with missing or hash-fallback embeddings (for backfill triage)")
   .option("--limit <n>", "Max rows when using --hash-fallback", "50")
+  .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
-    const q = new URLSearchParams({ agentId: opts.agent, ...(opts.tag ? { tag: opts.tag } : {}) }).toString();
+    const agentId = resolveAgentIdOrEnv(opts);
+    if (!agentId) {
+      console.error(`${render.icons.error} --agent <id> required (or set FLAIR_AGENT_ID)`);
+      process.exit(2);
+    }
+    const q = new URLSearchParams({ agentId, ...(opts.tag ? { tag: opts.tag } : {}) }).toString();
     const raw = await api("GET", `/Memory?${q}`);
-    if (!opts.hashFallback) {
-      console.log(JSON.stringify(raw, null, 2));
+    const mode = render.resolveOutputMode(opts);
+
+    // hashFallback flag changes the lens: instead of all memories, show
+    // only those that need re-embedding. Keep that surface separate.
+    if (opts.hashFallback) {
+      const all: any[] = Array.isArray(raw) ? raw : (raw?.results ?? raw?.items ?? []);
+      const fallback = all.filter((m: any) => !m.embeddingModel || m.embeddingModel === "hash-512d");
+      if (mode === "json") {
+        console.log(render.asJSON(fallback));
+        return;
+      }
+      if (fallback.length === 0) {
+        console.log(`${render.icons.ok} ${render.wrap(render.c.green, "All memories embedded")} ${render.wrap(render.c.dim, `(agent ${agentId})`)}`);
+        return;
+      }
+      const limit = Math.max(1, parseInt(opts.limit, 10) || 50);
+      const rows = fallback
+        .slice()
+        .sort((a: any, b: any) => {
+          const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+          const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+          return tb - ta;
+        })
+        .slice(0, limit);
+      console.log(
+        `${render.icons.warn} ${render.wrap(render.c.yellow, String(fallback.length))} hash-fallback memories for agent ${render.wrap(render.c.bold, agentId)} ${render.wrap(render.c.dim, `(showing ${rows.length})`)}\n`,
+      );
+      const cols: render.TableColumn[] = [
+        { label: "id", key: "id" },
+        {
+          label: "created_at",
+          key: "createdAt",
+          format: (v) => (v ? String(v).slice(0, 19).replace("T", " ") : "—"),
+        },
+        {
+          label: "preview",
+          key: "content",
+          format: (v) => String(v ?? "").replace(/\s+/g, " ").slice(0, 80),
+        },
+      ];
+      console.log(render.table(cols, rows as Array<Record<string, unknown>>));
+      if (fallback.length > rows.length) {
+        console.log(
+          `\n${render.wrap(render.c.dim, `... ${fallback.length - rows.length} more (raise with --limit). To backfill:`)} flair reembed --agent ${agentId} --stale-only`,
+        );
+      } else {
+        console.log(`\n${render.wrap(render.c.dim, "To backfill:")} flair reembed --agent ${agentId} --stale-only`);
+      }
       return;
     }
-    // --hash-fallback: filter to entries without a real embedding and print as a table.
-    // Same predicate HealthDetail uses: missing model or the "hash-512d" marker.
+
+    // Default lens: all memories for the agent.
     const all: any[] = Array.isArray(raw) ? raw : (raw?.results ?? raw?.items ?? []);
-    const fallback = all.filter((m: any) => !m.embeddingModel || m.embeddingModel === "hash-512d");
-    if (fallback.length === 0) {
-      console.log(`No hash-fallback memories for agent ${opts.agent}. All embedded.`);
+    if (mode === "json") {
+      console.log(render.asJSON(all));
       return;
     }
-    const limit = Math.max(1, parseInt(opts.limit, 10) || 50);
-    const rows = fallback
+    if (all.length === 0) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, `No memories for agent ${agentId}`)}`);
+      return;
+    }
+    console.log(
+      `${render.wrap(render.c.bold, String(all.length))} memories for agent ${render.wrap(render.c.bold, agentId)}${opts.tag ? ` ${render.wrap(render.c.dim, `(tag=${opts.tag})`)}` : ""}\n`,
+    );
+    const sorted = all
       .slice()
       .sort((a: any, b: any) => {
         const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
         const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
         return tb - ta;
-      })
-      .slice(0, limit);
-    const idW = Math.max(2, ...rows.map((r: any) => String(r.id ?? "").length));
-    console.log(`${fallback.length} hash-fallback memories for agent ${opts.agent} (showing ${rows.length}):\n`);
-    console.log(`  ${"id".padEnd(idW)}  created_at            preview`);
-    for (const r of rows) {
-      const created = r.createdAt ? String(r.createdAt).slice(0, 19).replace("T", " ") : "—".padEnd(19);
-      const preview = String(r.content ?? "").replace(/\s+/g, " ").slice(0, 80);
-      console.log(`  ${String(r.id ?? "").padEnd(idW)}  ${created}  ${preview}`);
-    }
-    if (fallback.length > rows.length) {
-      console.log(`\n... ${fallback.length - rows.length} more (raise with --limit). To backfill: flair reembed --agent ${opts.agent} --stale-only`);
-    } else {
-      console.log(`\nTo backfill: flair reembed --agent ${opts.agent} --stale-only`);
-    }
+      });
+    const durabilityColor = (d: string): string => {
+      if (d === "permanent") return render.c.magenta;
+      if (d === "persistent") return render.c.blue;
+      if (d === "ephemeral") return render.c.gray;
+      return render.c.cyan;
+    };
+    const cols: render.TableColumn[] = [
+      {
+        label: "created_at",
+        key: "createdAt",
+        format: (v) => (v ? render.wrap(render.c.dim, String(v).slice(0, 10)) : render.wrap(render.c.dim, "—")),
+      },
+      {
+        label: "durability",
+        key: "durability",
+        format: (v) => {
+          const d = String(v ?? "standard");
+          return render.wrap(durabilityColor(d), d);
+        },
+      },
+      {
+        label: "preview",
+        key: "content",
+        format: (v) => String(v ?? "").replace(/\s+/g, " ").slice(0, 80),
+      },
+    ];
+    console.log(render.table(cols, sorted as Array<Record<string, unknown>>));
   });
 
 // ─── flair memory hygiene ────────────────────────────────────────────────────
@@ -7382,15 +7452,113 @@ program
   });
 
 const soul = program.command("soul").description("Manage agent soul entries");
-soul.command("set").requiredOption("--agent <id>").requiredOption("--key <key>").requiredOption("--value <value>")
+soul.command("set")
+  .requiredOption("--agent <id>")
+  .requiredOption("--key <key>")
+  .requiredOption("--value <value>")
   .option("--durability <d>", "permanent")
+  .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
-    const out = await api("POST", "/Soul", { id: `${opts.agent}:${opts.key}`, agentId: opts.agent, key: opts.key, value: opts.value, durability: opts.durability });
-    console.log(JSON.stringify(out, null, 2));
+    const out = await api("POST", "/Soul", {
+      id: `${opts.agent}:${opts.key}`,
+      agentId: opts.agent,
+      key: opts.key,
+      value: opts.value,
+      durability: opts.durability,
+    });
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(out));
+      return;
+    }
+    console.log(`${render.icons.ok} ${render.wrap(render.c.green, "soul entry set")}`);
+    console.log(render.kv("agent", opts.agent));
+    console.log(render.kv("key", render.wrap(render.c.bold, opts.key)));
+    console.log(render.kv("value", String(opts.value)));
+    if (opts.durability) console.log(render.kv("durability", render.wrap(render.c.magenta, opts.durability)));
   });
-soul.command("get").argument("<id>").action(async (id) => console.log(JSON.stringify(await api("GET", `/Soul/${id}`), null, 2)));
-soul.command("list").requiredOption("--agent <id>")
-  .action(async (opts) => console.log(JSON.stringify(await api("GET", `/Soul?agentId=${encodeURIComponent(opts.agent)}`), null, 2)));
+
+soul.command("get")
+  .argument("<id>")
+  .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
+  .action(async (id, opts) => {
+    const out = await api("GET", `/Soul/${id}`);
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(out));
+      return;
+    }
+    if (!out || (typeof out === "object" && !out.id)) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, "no entry")}`);
+      return;
+    }
+    console.log(render.wrap(render.c.bold, out.id ?? id));
+    if (out.agentId) console.log(render.kv("agent", out.agentId));
+    if (out.key) console.log(render.kv("key", out.key));
+    if (out.value !== undefined) console.log(render.kv("value", String(out.value)));
+    if (out.durability) console.log(render.kv("durability", render.wrap(render.c.magenta, String(out.durability))));
+    if (out.priority) console.log(render.kv("priority", String(out.priority)));
+    if (out.createdAt) console.log(render.kv("created", `${render.relativeTime(out.createdAt)} ${render.wrap(render.c.dim, `(${out.createdAt})`)}`));
+    if (out.updatedAt && out.updatedAt !== out.createdAt) {
+      console.log(render.kv("updated", `${render.relativeTime(out.updatedAt)} ${render.wrap(render.c.dim, `(${out.updatedAt})`)}`));
+    }
+  });
+
+soul.command("list")
+  .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
+  .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
+  .action(async (opts) => {
+    const agentId = resolveAgentIdOrEnv(opts);
+    if (!agentId) {
+      console.error(`${render.icons.error} --agent <id> required (or set FLAIR_AGENT_ID)`);
+      process.exit(2);
+    }
+    const out = await api("GET", `/Soul?agentId=${encodeURIComponent(agentId)}`);
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(out));
+      return;
+    }
+    const all: any[] = Array.isArray(out) ? out : (out?.results ?? out?.items ?? []);
+    if (all.length === 0) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, `no soul entries for agent ${agentId}`)}`);
+      return;
+    }
+    console.log(
+      `${render.wrap(render.c.bold, String(all.length))} soul entries for agent ${render.wrap(render.c.bold, agentId)}\n`,
+    );
+    const priorityColor = (p: string): string => {
+      if (p === "critical") return render.c.red;
+      if (p === "high") return render.c.yellow;
+      if (p === "low") return render.c.gray;
+      return render.c.cyan;
+    };
+    const cols: render.TableColumn[] = [
+      { label: "key", key: "key", format: (v) => render.wrap(render.c.bold, String(v ?? "—")) },
+      {
+        label: "priority",
+        key: "priority",
+        format: (v) => {
+          const p = String(v ?? "standard");
+          return render.wrap(priorityColor(p), p);
+        },
+      },
+      {
+        label: "durability",
+        key: "durability",
+        format: (v) => {
+          const d = String(v ?? "—");
+          return d === "permanent" ? render.wrap(render.c.magenta, d) : render.wrap(render.c.dim, d);
+        },
+      },
+      {
+        label: "value",
+        key: "value",
+        format: (v) => String(v ?? "").replace(/\s+/g, " ").slice(0, 80),
+      },
+    ];
+    console.log(render.table(cols, all as Array<Record<string, unknown>>));
+  });
 
 // ─── flair bridge ────────────────────────────────────────────────────────────
 // Slice 1: discovery + scaffold. Slice 2: YAML runtime + `import` for Shape A
