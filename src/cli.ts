@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import nacl from "tweetnacl";
 import { load as parseYaml } from "js-yaml";
+import * as render from "./render.js";
 import {
   existsSync,
   mkdirSync,
@@ -7083,13 +7084,14 @@ program
         results = results.filter((r) => allowed.has(r._source ?? r.agentId ?? ""));
       }
 
-      if (opts.json) {
-        console.log(JSON.stringify(results, null, 2));
+      const mode = render.resolveOutputMode(opts);
+      if (mode === "json") {
+        console.log(render.asJSON(results));
         return;
       }
 
       if (results.length === 0) {
-        console.log("No results found.");
+        console.log(`${render.icons.info} ${render.wrap(render.c.dim, "No results found.")}`);
         const filters: string[] = [];
         if (opts.tag) filters.push(`tag=${opts.tag}`);
         if (opts.subject) filters.push(`subject=${opts.subject}`);
@@ -7098,39 +7100,63 @@ program
         if (opts.durability) filters.push(`durability=${opts.durability}`);
         if (opts.source) filters.push(`source=${opts.source}`);
         if (filters.length > 0) {
-          console.log(`  Filters: ${filters.join(", ")}`);
-          console.log(`  Try removing a filter or running: flair search "${query}" --agent ${agentId}`);
+          console.log(`  ${render.wrap(render.c.dim, "Filters:")} ${filters.join(render.wrap(render.c.dim, " · "))}`);
+          console.log(
+            `  ${render.icons.arrow} ${render.wrap(render.c.dim, "Try removing a filter or:")} flair search "${query}" --agent ${agentId}`,
+          );
         }
         return;
       }
 
+      const durabilityColor = (d: string): string => {
+        if (d === "permanent") return render.c.magenta;
+        if (d === "persistent") return render.c.blue;
+        if (d === "ephemeral") return render.c.gray;
+        return render.c.cyan;
+      };
+
       for (const r of results) {
         const date = r.createdAt ? String(r.createdAt).slice(0, 10) : "";
-        const scorePct = typeof r._score === "number" ? `${(r._score * 100).toFixed(0)}%` : "";
+        const scoreVal = typeof r._score === "number" ? r._score : 0;
+        const scorePct = typeof r._score === "number" ? `${(scoreVal * 100).toFixed(0)}%` : "";
+        const scoreColor = scoreVal >= 0.7 ? render.c.green : scoreVal >= 0.4 ? render.c.yellow : render.c.dim;
         const durability = r.durability ?? "standard";
-        const metaParts = [date, durability, scorePct].filter(Boolean);
-        if (r._source) metaParts.push(`from:${r._source}`);
-        const meta = metaParts.join(" · ");
+        const metaParts: string[] = [];
+        if (date) metaParts.push(render.wrap(render.c.dim, date));
+        metaParts.push(render.wrap(durabilityColor(durability), durability));
+        if (scorePct) metaParts.push(render.wrap(scoreColor, scorePct));
+        if (r._source) metaParts.push(render.wrap(render.c.cyan, `from:${r._source}`));
+        const meta = metaParts.join(render.wrap(render.c.dim, " · "));
         console.log(`  ${r.content}`);
-        if (meta) console.log(`  (${meta})`);
+        if (meta) console.log(`  ${render.wrap(render.c.dim, "(")} ${meta} ${render.wrap(render.c.dim, ")")}`);
         if (opts.explain) {
-          const lines: string[] = [];
-          if (typeof r._rawScore === "number") lines.push(`raw=${r._rawScore.toFixed(3)}`);
-          if (typeof r._score === "number") lines.push(`composite=${r._score.toFixed(3)}`);
-          if (typeof r.retrievalCount === "number" && r.retrievalCount > 0) lines.push(`retrievals=${r.retrievalCount}`);
-          if (r.tags && Array.isArray(r.tags) && r.tags.length > 0) lines.push(`tags=[${r.tags.join(",")}]`);
-          if (r.subject) lines.push(`subject=${r.subject}`);
-          if (r.supersedes) lines.push(`supersedes=${r.supersedes}`);
-          if (lines.length > 0) console.log(`    └─ ${lines.join(" · ")}`);
+          const parts: string[] = [];
+          if (typeof r._rawScore === "number") parts.push(`raw=${r._rawScore.toFixed(3)}`);
+          if (typeof r._score === "number") parts.push(`composite=${r._score.toFixed(3)}`);
+          if (typeof r.retrievalCount === "number" && r.retrievalCount > 0) parts.push(`retrievals=${r.retrievalCount}`);
+          if (r.tags && Array.isArray(r.tags) && r.tags.length > 0) parts.push(`tags=[${r.tags.join(",")}]`);
+          if (r.subject) parts.push(`subject=${r.subject}`);
+          if (r.supersedes) parts.push(`supersedes=${r.supersedes}`);
+          if (parts.length > 0) {
+            console.log(
+              `    ${render.wrap(render.c.gray, "└─")} ${render.wrap(render.c.dim, parts.join(" · "))}`,
+            );
+          }
         }
         console.log();
       }
 
       if (opts.explain) {
-        console.log(`Scoring: ${payload.scoring}  ${payload.scoring === "composite" ? "(semantic × durability-weight × recency-decay × retrieval-boost)" : "(cosine similarity only)"}`);
+        const formula =
+          payload.scoring === "composite"
+            ? "semantic × durability-weight × recency-decay × retrieval-boost"
+            : "cosine similarity only";
+        console.log(
+          `${render.wrap(render.c.dim, "Scoring:")} ${render.wrap(render.c.bold, payload.scoring)}  ${render.wrap(render.c.dim, `(${formula})`)}`,
+        );
       }
     } catch (err: any) {
-      console.error(`Search failed: ${err.message}`);
+      console.error(`${render.icons.error} Search failed: ${err.message}`);
       process.exit(1);
     }
   });
@@ -7160,13 +7186,15 @@ program
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
   .option("--key <path>", "Ed25519 private key path")
+  .option("--json", "Emit JSON {context, tokenEstimate, memoriesIncluded, ...} (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
     const agentId = resolveAgentIdOrEnv(opts);
     if (!agentId) {
-      console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
+      console.error(`${render.icons.error} --agent <id> required (or set FLAIR_AGENT_ID)`);
       process.exit(2);
     }
     const baseUrl = resolveBaseUrl(opts);
+    const mode = render.resolveOutputMode(opts);
     try {
       const headers: Record<string, string> = { "content-type": "application/json" };
       const keyPath = opts.key || resolveKeyPath(agentId);
@@ -7182,21 +7210,34 @@ program
         const body = await res.text();
         throw new Error(`${res.status}: ${body}`);
       }
-      const result = await res.json() as any;
+      const result = (await res.json()) as any;
+
+      if (mode === "json") {
+        // Agent-first: emit the full server response, augmented with the cap
+        // that was requested. Includes context, sections, tokenEstimate, etc.
+        console.log(render.asJSON({ ...result, maxTokens: parseInt(opts.maxTokens, 10) }));
+        return;
+      }
+
+      // Human mode: print context to stdout, budget footer to stderr (parseable).
       if (result.context) {
         console.log(result.context);
       } else {
-        console.error("No context available.");
+        console.error(`${render.icons.error} No context available.`);
         process.exit(1);
       }
-      // Print budget footer to stderr (parseable, won't interfere with context output)
       const tokensUsed = result.tokenEstimate ?? 0;
       const maxTokens = parseInt(opts.maxTokens, 10);
       const included = result.memoriesIncluded ?? 0;
       const truncated = result.memoriesTruncated ?? 0;
-      console.error(`[budget: ${tokensUsed}/${maxTokens} tokens, ${included} included, ${truncated} truncated]`);
+      const tokenPct = maxTokens > 0 ? (tokensUsed / maxTokens) * 100 : 0;
+      const tokenIcon = tokenPct >= 90 ? render.icons.warn : tokenPct >= 70 ? render.icons.info : render.icons.ok;
+      const truncIcon = truncated > 0 ? render.icons.warn : render.icons.ok;
+      console.error(
+        `${tokenIcon} budget ${tokensUsed}/${maxTokens} tokens (${tokenPct.toFixed(0)}%) ${render.icons.bullet} ${render.icons.ok} ${included} included ${render.icons.bullet} ${truncIcon} ${truncated} truncated`,
+      );
     } catch (err: any) {
-      console.error(`Bootstrap failed: ${err.message}`);
+      console.error(`${render.icons.error} Bootstrap failed: ${err.message}`);
       process.exit(1);
     }
   });
