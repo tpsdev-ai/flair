@@ -2109,6 +2109,7 @@ agent
   .description("List all agents")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--port <port>", "Harper HTTP port")
+  .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
     const port = resolveHttpPort(opts);
     // fromEnv is true ONLY when the resolved value came from env (no inline override).
@@ -2120,8 +2121,9 @@ agent
       );
     }
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+    const mode = render.resolveOutputMode(opts);
+    let agents: any[];
     if (adminPass) {
-      // Use admin basic auth against ops API to list agents directly
       const opsPort = resolveOpsPort(opts);
       const auth = Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64");
       const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
@@ -2131,38 +2133,73 @@ agent
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        console.error(`Error: ${res.status} ${text}`);
+        console.error(`${render.icons.error} ${res.status} ${text}`);
         process.exit(1);
       }
-      const agents = await res.json() as any[];
-      agents.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
-      console.log(JSON.stringify(agents, null, 2));
+      agents = await res.json() as any[];
     } else {
-      // Localhost operator path: allow IDs-only enumeration without per-agent auth
-      // This treats localhost as a trusted boundary for read-only public metadata
       const baseUrl = `http://127.0.0.1:${port}`;
       const res = await fetch(`${baseUrl}/Agent`, {
         headers: { "Content-Type": "application/json" },
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        console.error(`Error: ${res.status} ${text}`);
+        console.error(`${render.icons.error} ${res.status} ${text}`);
         process.exit(1);
       }
       const data = await res.json();
-      // Filter to IDs-only to respect the localhost trust boundary
-      if (Array.isArray(data)) {
-        console.log(JSON.stringify(data.map((a: any) => ({ id: a.id, name: a.name, createdAt: a.createdAt })), null, 2));
-      } else {
-        console.log(JSON.stringify(data, null, 2));
-      }
+      agents = Array.isArray(data) ? data.map((a: any) => ({ id: a.id, name: a.name, createdAt: a.createdAt })) : [];
     }
+    agents.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
+
+    if (mode === "json") {
+      console.log(render.asJSON(agents));
+      return;
+    }
+    if (agents.length === 0) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, "no agents")}`);
+      return;
+    }
+    console.log(`${render.wrap(render.c.bold, String(agents.length))} agents\n`);
+    const cols: render.TableColumn[] = [
+      { label: "id", key: "id", format: (v) => render.wrap(render.c.bold, String(v ?? "—")) },
+      { label: "name", key: "name", format: (v) => String(v ?? "—") },
+      { label: "created", key: "createdAt", format: (v) => render.wrap(render.c.dim, v ? String(v).slice(0, 10) : "—") },
+    ];
+    console.log(render.table(cols, agents as Array<Record<string, unknown>>));
   });
 
 agent
   .command("show <id>")
   .description("Show agent details")
-  .action(async (id: string) => console.log(JSON.stringify(await api("GET", `/Agent/${id}`), null, 2)));
+  .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
+  .action(async (id: string, opts) => {
+    const out = await api("GET", `/Agent/${id}`);
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(out));
+      return;
+    }
+    if (!out || (typeof out === "object" && !out.id)) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, `no agent ${id}`)}`);
+      return;
+    }
+    console.log(render.wrap(render.c.bold, String(out.id)));
+    if (out.name) console.log(render.kv("name", String(out.name)));
+    if (out.kind) console.log(render.kv("kind", render.wrap(render.c.cyan, String(out.kind))));
+    if (out.status) {
+      const statusColor = out.status === "active" ? render.c.green : out.status === "disabled" ? render.c.red : render.c.yellow;
+      console.log(render.kv("status", render.wrap(statusColor, String(out.status))));
+    }
+    if (out.defaultTrustTier) console.log(render.kv("trust tier", String(out.defaultTrustTier)));
+    if (out.admin) console.log(render.kv("admin", render.wrap(render.c.magenta, "yes")));
+    if (out.runtime) console.log(render.kv("runtime", String(out.runtime)));
+    if (out.publicKey) console.log(render.kv("publicKey", render.wrap(render.c.dim, String(out.publicKey))));
+    if (out.createdAt) console.log(render.kv("created", `${render.relativeTime(out.createdAt)} ${render.wrap(render.c.dim, `(${out.createdAt})`)}`));
+    if (out.updatedAt && out.updatedAt !== out.createdAt) {
+      console.log(render.kv("updated", `${render.relativeTime(out.updatedAt)} ${render.wrap(render.c.dim, `(${out.updatedAt})`)}`));
+    }
+  });
 
 agent
   .command("rotate-key <id>")
@@ -2470,11 +2507,12 @@ principal
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
+  .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
     const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     if (!adminPass) {
-      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      console.error(`${render.icons.error} --admin-pass or FLAIR_ADMIN_PASS required`);
       process.exit(1);
     }
 
@@ -2496,37 +2534,84 @@ principal
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.error(`Error: ${res.status} ${text}`);
+      console.error(`${render.icons.error} ${res.status} ${text}`);
       process.exit(1);
     }
 
     const records = await res.json() as any[];
     records.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
-    if (records.length === 0) {
-      console.log("No principals found.");
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(records));
       return;
     }
-
-    // Table format
-    console.log(`${"ID".padEnd(20)} ${"Kind".padEnd(7)} ${"Trust".padEnd(14)} ${"Admin".padEnd(6)} ${"Status".padEnd(12)} ${"Runtime".padEnd(12)} Created`);
-    console.log("─".repeat(95));
-    for (const r of records) {
-      const kind = r.kind ?? "agent";
-      const trust = r.defaultTrustTier ?? "—";
-      const admin = r.admin ? "yes" : "no";
-      const status = r.status ?? "active";
-      const runtime = r.runtime ?? "—";
-      const created = r.createdAt?.slice(0, 10) ?? "—";
-      console.log(`${String(r.id).padEnd(20)} ${kind.padEnd(7)} ${trust.padEnd(14)} ${admin.padEnd(6)} ${status.padEnd(12)} ${runtime.padEnd(12)} ${created}`);
+    if (records.length === 0) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, "no principals")}`);
+      return;
     }
+    console.log(`${render.wrap(render.c.bold, String(records.length))} principals${opts.kind ? ` ${render.wrap(render.c.dim, `(kind=${opts.kind})`)}` : ""}\n`);
+    const cols: render.TableColumn[] = [
+      { label: "id", key: "id", format: (v) => render.wrap(render.c.bold, String(v ?? "—")) },
+      {
+        label: "kind",
+        key: "kind",
+        format: (v) => {
+          const k = String(v ?? "agent");
+          return render.wrap(k === "human" ? render.c.cyan : render.c.magenta, k);
+        },
+      },
+      { label: "trust", key: "defaultTrustTier", format: (v) => String(v ?? "—") },
+      {
+        label: "admin",
+        key: "admin",
+        format: (v) => (v ? render.wrap(render.c.red, "yes") : render.wrap(render.c.dim, "no")),
+      },
+      {
+        label: "status",
+        key: "status",
+        format: (v) => {
+          const s = String(v ?? "active");
+          const color = s === "active" ? render.c.green : s === "disabled" ? render.c.red : render.c.yellow;
+          return render.wrap(color, s);
+        },
+      },
+      { label: "runtime", key: "runtime", format: (v) => String(v ?? "—") },
+      { label: "created", key: "createdAt", format: (v) => render.wrap(render.c.dim, v ? String(v).slice(0, 10) : "—") },
+    ];
+    console.log(render.table(cols, records as Array<Record<string, unknown>>));
   });
 
 principal
   .command("show <id>")
   .description("Show principal details")
-  .action(async (id: string) => {
+  .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
+  .action(async (id: string, opts) => {
     const result = await api("GET", `/Agent/${id}`);
-    console.log(JSON.stringify(result, null, 2));
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(result));
+      return;
+    }
+    if (!result || (typeof result === "object" && !result.id)) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, `no principal ${id}`)}`);
+      return;
+    }
+    console.log(render.wrap(render.c.bold, String(result.id)));
+    if (result.name) console.log(render.kv("name", String(result.name)));
+    if (result.kind) console.log(render.kv("kind", render.wrap(result.kind === "human" ? render.c.cyan : render.c.magenta, String(result.kind))));
+    if (result.status) {
+      const statusColor = result.status === "active" ? render.c.green : result.status === "disabled" ? render.c.red : render.c.yellow;
+      console.log(render.kv("status", render.wrap(statusColor, String(result.status))));
+    }
+    if (result.defaultTrustTier) console.log(render.kv("trust tier", String(result.defaultTrustTier)));
+    if (result.admin) console.log(render.kv("admin", render.wrap(render.c.red, "yes")));
+    if (result.runtime) console.log(render.kv("runtime", String(result.runtime)));
+    if (result.email) console.log(render.kv("email", String(result.email)));
+    if (result.publicKey) console.log(render.kv("publicKey", render.wrap(render.c.dim, String(result.publicKey))));
+    if (result.createdAt) console.log(render.kv("created", `${render.relativeTime(result.createdAt)} ${render.wrap(render.c.dim, `(${result.createdAt})`)}`));
+    if (result.updatedAt && result.updatedAt !== result.createdAt) {
+      console.log(render.kv("updated", `${render.relativeTime(result.updatedAt)} ${render.wrap(render.c.dim, `(${result.updatedAt})`)}`));
+    }
   });
 
 principal
@@ -2668,11 +2753,12 @@ idp
   .description("List configured IdPs")
   .option("--admin-pass <pass>", "Admin password")
   .option("--ops-port <port>", "Harper operations API port")
+  .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
     const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     if (!adminPass) {
-      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      console.error(`${render.icons.error} --admin-pass or FLAIR_ADMIN_PASS required`);
       process.exit(1);
     }
 
@@ -2692,23 +2778,28 @@ idp
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.error(`Error: ${res.status} ${text}`);
+      console.error(`${render.icons.error} ${res.status} ${text}`);
       process.exit(1);
     }
 
     const records = await res.json() as any[];
     records.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
-    if (records.length === 0) {
-      console.log("No IdPs configured.");
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(records));
       return;
     }
-
+    if (records.length === 0) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, "no IdPs configured")}`);
+      return;
+    }
+    console.log(`${render.wrap(render.c.bold, String(records.length))} IdP${records.length === 1 ? "" : "s"}\n`);
     for (const r of records) {
-      const status = r.enabled ? "enabled" : "disabled";
-      console.log(`${r.name} (${r.id}) — ${status}`);
-      console.log(`  Issuer: ${r.issuer}`);
-      if (r.requiredDomain) console.log(`  Domain: ${r.requiredDomain}`);
-      console.log(`  JIT: ${r.jitProvision ?? true}`);
+      const enabled = r.enabled ? render.wrap(render.c.green, "enabled") : render.wrap(render.c.dim, "disabled");
+      console.log(`${render.wrap(render.c.bold, r.name ?? "?")}  ${render.wrap(render.c.dim, `(${r.id})`)}  ${render.wrap(render.c.dim, "—")}  ${enabled}`);
+      console.log(render.kv("issuer", String(r.issuer ?? "—")));
+      if (r.requiredDomain) console.log(render.kv("domain", String(r.requiredDomain)));
+      console.log(render.kv("JIT", String(r.jitProvision ?? true)));
       console.log();
     }
   });
