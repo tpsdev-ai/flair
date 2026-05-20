@@ -358,7 +358,7 @@ flair/
 - **Harper-native** — No Express, no middleware frameworks. Harper IS the runtime.
 - **In-process embeddings** — Native [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) (768 dimensions) via [llama.cpp](https://github.com/ggerganov/llama.cpp). Runs on CPU or GPU (Metal, CUDA). No API calls, no OpenAI key needed.
 - **Schema-driven** — GraphQL schemas with `@table @export` auto-generate REST CRUD. Custom resources extend behavior (durability guards, auto-embedding, search).
-- **Zero admin tokens on disk** — Admin credentials come from the `HDB_ADMIN_PASSWORD` environment variable only. Never stored on the filesystem.
+- **Admin credentials** — `flair init` auto-generates an admin password stored at `~/.flair/admin-pass` (mode 0600). Can also be set via `HDB_ADMIN_PASSWORD`. See [SECURITY.md](SECURITY.md) for the full model.
 
 ## Deployment
 
@@ -390,9 +390,9 @@ FLAIR_URL=https://your-server:19926 flair agent add mybot
 
 Good for teams with multiple machines or always-on agents.
 
-### Harper Fabric (coming soon)
+### Harper Fabric
 
-Managed multi-region deployment via [Harper Fabric](https://www.harperdb.io/). Data replication, automatic failover, web dashboard. Enterprise scale without ops overhead.
+Deploy Flair on [Harper Fabric](https://www.harperdb.io/) for managed hosting with multi-region replication and failover. Federation is live against Harper Fabric hubs (e.g. `flair.heskew.harperfabric.com`) — pair your local instance to sync memories across nodes.
 
 ## Security
 
@@ -401,7 +401,7 @@ See [SECURITY.md](SECURITY.md) for the full security model, threat analysis, and
 **Key points:**
 - Ed25519 cryptographic identity — agents sign every request
 - Collection-level data isolation — agents can't read each other's memories
-- Admin credentials never stored on disk — environment variables only
+- Admin password auto-generated on init, stored at `~/.flair/admin-pass` (mode 0600)
 - Key rotation via `flair agent rotate-key`
 - Cross-agent access requires explicit grants
 
