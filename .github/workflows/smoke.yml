@@ -22,7 +22,13 @@ jobs:
         with:
           node-version: "22"
 
-      - run: bun install --frozen-lockfile
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+
+        with:
+
+          mode: firewall-free
+
+      - run: sfw bun install --frozen-lockfile
 
       - name: Install linux-x64 native binary for embeddings
         run: bun add --no-save @node-llama-cpp/linux-x64@3
