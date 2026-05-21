@@ -45,7 +45,10 @@ jobs:
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
-      - run: bun install --frozen-lockfile
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - run: sfw bun install --frozen-lockfile
       - run: bun test test/unit/
 
   test-integration:
@@ -68,7 +71,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
-      - run: bun install --frozen-lockfile
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - run: sfw bun install --frozen-lockfile
       - name: Install linux-x64 native binary for embeddings
         run: bun add --no-save @node-llama-cpp/linux-x64@3
       - name: Build Flair resources and CLI
@@ -150,7 +156,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
-      - run: bun install --frozen-lockfile
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - run: sfw bun install --frozen-lockfile
       - run: bun run build && bun run build:cli
       - name: Verify dist/ modules import cleanly (dev surface)
         run: node scripts/check-imports.mjs dist
@@ -247,7 +256,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
-      - run: bun install --frozen-lockfile
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - run: sfw bun install --frozen-lockfile
       - run: bun run build && bun run build:cli
       - name: Pack HEAD
         id: pack
@@ -340,7 +352,10 @@ jobs:
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
-      - run: bun install --frozen-lockfile
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - run: sfw bun install --frozen-lockfile
       - run: bunx tsc --noEmit -p tsconfig.check.json
 
   typecheck-strict:
@@ -351,7 +366,10 @@ jobs:
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
-      - run: bun install --frozen-lockfile
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - run: sfw bun install --frozen-lockfile
       # Root resources (tsconfig.check.json has @harperfast/harper paths override
       # so harper's raw .ts internals don't pollute the output)
       - name: Type check root (resources)
@@ -393,7 +411,10 @@ jobs:
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
-      - run: bun install --frozen-lockfile
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - run: sfw bun install --frozen-lockfile
       - name: Run audit (advisory-only for transitive deps)
         run: bun audit || echo "::warning::Audit found vulnerabilities — all in harper transitive deps (unreleased v5 build)"
         continue-on-error: true
