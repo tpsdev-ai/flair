@@ -118,13 +118,19 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
 server.http(async (request: any, nextLayer: any) => {
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
 
+  // A2A discovery endpoints: GET returns public agent-card metadata (per
+  // A2A spec, cards are intentionally public). POST invokes JSON-RPC
+  // actions (message/send writes OrgEvents on behalf of agents,
+  // tasks/list reads Beads issues, message/stream subscribes to
+  // OrgEvents) — those must be authenticated. Narrowing to GET-only
+  // closes the P0 where any caller could forge OrgEvents as any agent
+  // and read all internal Beads issues unauthenticated.
+  const isA2APath = url.pathname === "/a2a" || url.pathname === "/A2AAdapter" || url.pathname.startsWith("/A2AAdapter/");
   if (
     url.pathname === "/health" ||
     url.pathname === "/Health" ||
-    url.pathname === "/a2a" ||
-    url.pathname === "/A2AAdapter" ||
+    (request.method === "GET" && isA2APath) ||
     url.pathname === "/AgentCard" ||
-    url.pathname.startsWith("/A2AAdapter/") ||
     url.pathname.startsWith("/AgentCard/") ||
     // FederationSync uses Ed25519 body-signature auth with anti-replay, validated
     // by the resource handler (allowCreate=true, same pattern as FederationPair).
