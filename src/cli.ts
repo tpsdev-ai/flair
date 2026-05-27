@@ -3065,6 +3065,18 @@ federation
       }
 
       const now = Date.now();
+      const formatPeerAge = (iso: string | null, refNow: number, staleAfterMs: number): string => {
+        if (!iso) return render.wrap(render.c.red, "never");
+        const t = Date.parse(iso);
+        if (!Number.isFinite(t)) return render.wrap(render.c.red, "never");
+        const ageMs = refNow - t;
+        const ageStr = ageMs < 60_000 ? "<1m ago"
+          : ageMs < 3_600_000 ? `${Math.floor(ageMs / 60_000)}m ago`
+          : ageMs < 86_400_000 ? `${Math.floor(ageMs / 3_600_000)}h ago`
+          : `${Math.floor(ageMs / 86_400_000)}d ago`;
+        const stale = ageMs > staleAfterMs;
+        return render.wrap(stale ? render.c.yellow : render.c.dim, ageStr);
+      };
       console.log();
       const cols: render.TableColumn[] = [
         { label: "peer", key: "id" },
@@ -3079,21 +3091,18 @@ federation
           },
         },
         {
+          // Liveness: "did we hear from this peer recently?" Updates on every
+          // contact, even when 100% of records were skipped. See flair#444.
           label: "last_sync",
           key: "lastSyncAt",
-          format: (v) => {
-            const iso = v as string | null;
-            if (!iso) return render.wrap(render.c.red, "never");
-            const t = Date.parse(iso);
-            if (!Number.isFinite(t)) return render.wrap(render.c.red, "never");
-            const ageMs = now - t;
-            const stale = ageMs > 86_400_000;
-            const ageStr = ageMs < 60_000 ? "<1m ago"
-              : ageMs < 3_600_000 ? `${Math.floor(ageMs / 60_000)}m ago`
-              : ageMs < 86_400_000 ? `${Math.floor(ageMs / 3_600_000)}h ago`
-              : `${Math.floor(ageMs / 86_400_000)}d ago`;
-            return render.wrap(stale ? render.c.yellow : render.c.dim, ageStr);
-          },
+          format: (v) => formatPeerAge(v as string | null, now, 86_400_000),
+        },
+        {
+          // Progress: "did data actually flow in?" Updates only when merged>0.
+          // Diverging from last_sync means contact-yes but data-no — investigate.
+          label: "last_merge",
+          key: "lastMergeAt",
+          format: (v) => formatPeerAge(v as string | null, now, 86_400_000),
         },
         {
           label: "relay",
@@ -3103,13 +3112,31 @@ federation
       ];
       console.log(render.table(cols, peers as Array<Record<string, unknown>>));
 
+      // Stale warning is gated on lastMergeAt (real progress), not lastSyncAt.
+      // A peer that "syncs" every 5min but hasn't merged a record in 24h is
+      // exactly the failure mode we want surfaced.
       const haveStale = peers.some((p: any) => {
-        if (!p.lastSyncAt) return true;
-        return now - Date.parse(p.lastSyncAt) > 86_400_000;
+        const cursor = p.lastMergeAt ?? p.lastSyncAt;
+        if (!cursor) return true;
+        const t = Date.parse(cursor);
+        return !Number.isFinite(t) || (now - t) > 86_400_000;
       });
       if (haveStale) {
         console.log();
-        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "One or more peers haven't synced in >24h.")} ${render.wrap(render.c.dim, "Run 'flair federation sync' or check the launchd watchdog.")}`);
+        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "One or more peers haven't merged a record in >24h.")} ${render.wrap(render.c.dim, "Check skippedReasons in SyncLog or run 'flair federation sync'.")}`);
+      }
+
+      const haveContactButNoMerge = peers.some((p: any) => {
+        if (!p.lastSyncAt || !Number.isFinite(Date.parse(p.lastSyncAt))) return false;
+        if ((now - Date.parse(p.lastSyncAt)) > 3_600_000) return false; // only recent contact
+        // Contact within the last hour, but no merge ever (or stale by >1h)
+        if (!p.lastMergeAt) return true;
+        const tm = Date.parse(p.lastMergeAt);
+        return !Number.isFinite(tm) || (now - tm) > 3_600_000;
+      });
+      if (haveContactButNoMerge && !haveStale) {
+        console.log();
+        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Peer contact is fresh but no records merged in the last hour.")} ${render.wrap(render.c.dim, "Possible silent-skip scenario — check SyncLog.skippedReasons.")}`);
       }
     } catch (err: any) {
       const msg = String(err.message ?? err);
