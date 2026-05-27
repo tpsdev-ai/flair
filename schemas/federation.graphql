@@ -30,7 +30,8 @@ type Peer @table(database: "flair") @export {
   role: String @indexed            # "hub" | "spoke"
   endpoint: String                 # wss:// URL for the peer
   status: String @indexed          # "paired" | "connected" | "disconnected" | "revoked"
-  lastSyncAt: String               # last successful sync timestamp
+  lastSyncAt: String               # last contact with this peer (liveness signal)
+  lastMergeAt: String              # last sync where merged > 0 (data-progress signal)
   lastSyncCursor: String           # Lamport clock or ISO timestamp for incremental sync
   relayOnly: Boolean               # true for spoke-to-spoke peers announced by hub
   pairedAt: String
@@ -43,9 +44,11 @@ type SyncLog @table(database: "flair") {
   id: ID @primaryKey
   peerId: String! @indexed         # which peer this sync was with
   direction: String! @indexed      # "push" | "pull"
-  recordCount: Int                 # how many records in this sync batch
+  recordCount: Int                 # how many records merged in this batch
+  skippedCount: Int                # how many records skipped (sum of skippedReasons)
+  skippedReasons: String           # JSON: { unknown_table: N, non_originator: N, future_timestamp: N, no_op_same_hash: N, merge_error: N }
   status: String @indexed          # "success" | "partial" | "failed"
-  error: String                    # error message if failed
+  error: String                    # human-readable summary if partial/failed (includes per-record error messages, capped)
   durationMs: Int                  # how long the sync took
   createdAt: String! @indexed
 }

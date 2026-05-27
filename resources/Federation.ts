@@ -12,6 +12,9 @@ import {
 } from "./federation-crypto.js";
 import type { NonceStore } from "./federation-crypto.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
+import { classifyRecord } from "./federation-classify.js";
+export { classifyRecord } from "./federation-classify.js";
+export type { SkipReason, ClassifyResult } from "./federation-classify.js";
 
 // Module-level nonce store for federation anti-replay.
 // Shared across FederationPair + FederationSync — nonces are globally unique
@@ -350,6 +353,13 @@ export class FederationSync extends Resource {
     const startTime = Date.now();
     let merged = 0;
     let skipped = 0;
+    const skippedReasons: Record<string, number> = {};
+    const mergeErrors: string[] = [];
+
+    function recordSkip(reason: string) {
+      skipped++;
+      skippedReasons[reason] = (skippedReasons[reason] ?? 0) + 1;
+    }
 
     // Table name → Harper database table mapping
     const tableMap: Record<string, any> = {
@@ -358,93 +368,105 @@ export class FederationSync extends Resource {
       Agent: (databases as any).flair.Agent,
       Relationship: (databases as any).flair.Relationship,
     };
+    const knownTables = new Set(Object.keys(tableMap));
 
     for (const record of records as SyncRecord[]) {
-      const table = tableMap[record.table];
-      if (!table) {
-        skipped++;
-        continue;
-      }
-
-      // Originator enforcement: peers can only push records they originated.
-      // The hub can relay records from other peers (role === "hub"),
-      // but spokes can only push their own records.
-      const originator = record.originatorInstanceId ?? instanceId;
-      if (originator !== instanceId && peer.role !== "hub") {
-        skipped++;
-        continue;
-      }
-
       try {
-        const local = await table.get(record.id);
+        const table = tableMap[record.table];
+        const local = table ? await table.get(record.id) : null;
 
-        // Timestamp ceiling: reject records with updatedAt more than 5 minutes in the future.
-        // Prevents attackers from using far-future timestamps to permanently win LWW.
-        const fiveMinFromNow = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-        if (record.updatedAt > fiveMinFromNow) {
-          skipped++;
-          continue;
-        }
+        const decision = classifyRecord(
+          record,
+          peer.role,
+          instanceId,
+          local,
+          knownTables,
+        );
 
-        // No-op skip: if the local record exists, has the same contentHash, and
-        // the remote isn't strictly newer, the sync is a phantom — same bytes,
-        // same logical version. Writing it anyway re-blobs the HNSW embedding
-        // (BlobDB stores each version separately) and bloats the dataset
-        // quadratically with poll frequency. Caught 2026-05-19 after the
-        // Fabric cluster hit its 4.7G XFS quota with 5,899 blob entries
-        // across 109 unique IDs (~54 versions per live record).
-        const remoteContentHash = (record.data as any)?.contentHash;
-        if (
-          local &&
-          local.contentHash &&
-          remoteContentHash &&
-          local.contentHash === remoteContentHash &&
-          record.updatedAt <= (local.updatedAt ?? "")
-        ) {
-          skipped++;
+        if (decision.action === "skip") {
+          recordSkip(decision.reason);
           continue;
         }
 
         const mergedData = mergeRecord(local, record);
-
-        // Preserve originator for provenance
-        mergedData._originatorInstanceId = originator;
+        mergedData._originatorInstanceId = decision.originator;
         mergedData._syncedFrom = instanceId;
         mergedData._syncedAt = new Date().toISOString();
 
         await table.put(mergedData);
         merged++;
-      } catch {
-        skipped++;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        recordSkip("merge_error");
+        // Cap the captured-error list so a hostile/buggy peer can't blow up
+        // the SyncLog row, but ALWAYS log to console so operators don't lose
+        // the per-record signal — the silent-swallow is the bug we're fixing.
+        if (mergeErrors.length < 10) {
+          mergeErrors.push(`${record.table}/${record.id}: ${msg}`);
+        }
+        console.warn(
+          `[Federation] merge error for ${record.table}/${record.id} from ${instanceId}: ${msg}`,
+        );
       }
     }
 
-    // Update peer sync cursor
-    await (databases as any).flair.Peer.put({
+    // Peer cursor update — distinguish liveness from progress:
+    //   lastSyncAt → "we heard from this peer just now" (always update)
+    //   lastMergeAt → "data actually flowed in" (only when merged > 0)
+    // Conflating them produced the "green dashboard while burning" failure
+    // mode — dogfood pass 2026-05-26 surfaced unconditional update masking
+    // 100%-skip syncs.
+    const nowIso = new Date().toISOString();
+    const peerUpdate: Record<string, any> = {
       ...peer,
-      lastSyncAt: new Date().toISOString(),
-      lastSyncCursor: lamportClock?.toString() ?? new Date().toISOString(),
+      lastSyncAt: nowIso,
+      lastSyncCursor: lamportClock?.toString() ?? nowIso,
       status: "connected",
-      updatedAt: new Date().toISOString(),
-    });
+      updatedAt: nowIso,
+    };
+    if (merged > 0) {
+      peerUpdate.lastMergeAt = nowIso;
+    }
+    await (databases as any).flair.Peer.put(peerUpdate);
 
-    // Log sync operation
+    // Log sync operation with skip-reason breakdown so the partial state
+    // is debuggable instead of a black box.
     try {
+      const errorParts: string[] = [];
+      if (Object.keys(skippedReasons).length > 0) {
+        errorParts.push(
+          "skipped: " +
+            Object.entries(skippedReasons)
+              .map(([reason, n]) => `${n} ${reason}`)
+              .join(", "),
+        );
+      }
+      if (mergeErrors.length > 0) {
+        errorParts.push("merge_errors: " + mergeErrors.join("; "));
+      }
+      const errorSummary = errorParts.length > 0 ? errorParts.join(" | ") : undefined;
+      const status = mergeErrors.length > 0
+        ? "partial"
+        : skipped > 0 ? "partial" : "success";
+
       await (databases as any).flair.SyncLog.put({
         id: `sync_${Date.now()}_${randomBytes(4).toString("hex")}`,
         peerId: instanceId,
         direction: "pull",
         recordCount: merged,
-        status: skipped > 0 ? "partial" : "success",
-        error: skipped > 0 ? `${skipped} records skipped` : undefined,
+        skippedCount: skipped,
+        skippedReasons: JSON.stringify(skippedReasons),
+        status,
+        error: errorSummary,
         durationMs: Date.now() - startTime,
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
       });
     } catch { /* non-fatal */ }
 
     return {
       merged,
       skipped,
+      skippedReasons,
       total: records.length,
       durationMs: Date.now() - startTime,
     };
