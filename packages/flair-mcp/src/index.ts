@@ -183,9 +183,28 @@ server.tool(
         dedup: true,
         dedupThreshold: 0.95,
       });
-      // Signal when dedup returned an existing memory instead of writing.
+      // Dedup path: existing memory matched, NEW content was NOT written.
+      // Emit both prose AND structuredContent so callers can react
+      // programmatically even when LLMs compress prose imprecisely
+      // (see flair#449 — work agent missed dedup signal and lost data).
       if ((result as any).deduped) {
-        return { content: [{ type: "text", text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}\n(no new entry written)` }] };
+        const sc = {
+          deduplicated: true,
+          mergedWith: result.id,
+          existingContent: result.content,
+          written: false,
+        };
+        return {
+          content: [{
+            type: "text",
+            text:
+              `⚠️ DEDUPLICATED — new content was NOT written. ` +
+              `Matched existing memory id=${result.id}: ${result.content?.slice(0, 200)}\n\n` +
+              `If the new content is genuinely distinct, retry with different phrasing ` +
+              `or call memory_store with the same id to update.`,
+          }],
+          structuredContent: sc,
+        };
       }
       const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
       const tagStr = tags && tags.length > 0 ? tags.join(", ") : "none";
@@ -196,7 +215,10 @@ server.tool(
         `Tags: ${tagStr}`,
         `Type: ${type}, Durability: ${durability}`,
       ].join("\n");
-      return { content: [{ type: "text", text }] };
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: { deduplicated: false, id: result.id, written: true },
+      };
     } catch (err) {
       return errorResult(err, flair.url);
     }

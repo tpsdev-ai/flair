@@ -582,12 +582,24 @@ export default {
               dedup: !supersedes, // skip dedup when explicitly superseding
               dedupThreshold: 0.7,
             });
-            const wasDeduped = result.id !== memId;
+            // Two signals available: (1) id-mismatch (explicit memId vs
+            // returned id), (2) flair-client's `deduped` flag. Use both —
+            // the deduped flag is the authoritative one from flair-client,
+            // id-mismatch is the legacy check. Match either to be safe.
+            const wasDeduped = result.id !== memId || (result as any).deduped === true;
             return {
-              content: [{ type: "text", text: wasDeduped
-                ? `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}`
-                : `Memory stored (id: ${memId})` }],
-              details: { id: result.id, deduplicated: wasDeduped },
+              content: [{
+                type: "text",
+                text: wasDeduped
+                  ? `⚠️ DEDUPLICATED — new content was NOT written. Matched existing memory id=${result.id}: ${result.content?.slice(0, 200)}`
+                  : `Memory stored (id: ${memId})`,
+              }],
+              details: {
+                id: result.id,
+                deduplicated: wasDeduped,
+                written: !wasDeduped,
+                ...(wasDeduped ? { mergedWith: result.id } : {}),
+              },
             };
           } catch (err: any) {
             api.logger.warn(`openclaw-flair: store failed: ${err.message}`);
