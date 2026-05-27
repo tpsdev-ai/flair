@@ -487,6 +487,7 @@ export class FederationPeers extends Resource {
           status: p.status,
           endpoint: p.endpoint,
           lastSyncAt: p.lastSyncAt,
+          lastMergeAt: p.lastMergeAt,
           relayOnly: p.relayOnly,
           pairedAt: p.pairedAt,
         });
