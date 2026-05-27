@@ -137,8 +137,22 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
     return result;
   }
 
-  // 3. Verify agent id matches.
-  if (metadata.agentId && metadata.agentId !== opts.agentId) {
+  // 3. Verify agent id matches. Hard-fail on missing OR mismatched —
+  //    the previous `metadata.agentId && ...` short-circuited on missing,
+  //    which means a snapshot crafted without metadata.agentId would bypass
+  //    the cross-agent guard entirely. v0.9.0+ snapshots always write
+  //    metadata.agentId (see src/rem/snapshot.ts), so the missing case can
+  //    only originate from pre-v0.9.0 snapshots or external/hand-edited
+  //    input — both of which we must reject.
+  if (!metadata.agentId) {
+    errors.push(
+      `snapshot is missing metadata.agentId — refusing to restore (pre-v0.9.0 or untrusted snapshot)`,
+    );
+    result.status = "failed";
+    rmSync(tmp, { recursive: true, force: true });
+    return result;
+  }
+  if (metadata.agentId !== opts.agentId) {
     errors.push(
       `snapshot agentId (${metadata.agentId}) does not match target (${opts.agentId}) — refusing to restore cross-agent`,
     );

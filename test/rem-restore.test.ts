@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { applySnapshot, type ApiCall } from "../src/rem/restore.ts";
 import { createSnapshot } from "../src/rem/snapshot.ts";
+import { create as tarCreate, extract as tarExtract } from "tar";
 
 let testRoot: string;
 let snapshotRoot: string;
@@ -110,6 +111,39 @@ describe("applySnapshot — agent-id mismatch", () => {
     });
     expect(r.status).toBe("failed");
     expect(r.errors[0]).toContain("does not match target");
+    expect(r.preRestoreSnapshotPath).toBeUndefined();
+  });
+
+  it("refuses to restore when snapshot.metadata.agentId is missing (pre-0.9.0 / crafted snapshot)", async () => {
+    // Build a tarball whose metadata.json omits agentId entirely — simulates
+    // pre-v0.9.0 snapshots, hand-edited input, or attacker-crafted tarballs.
+    // The original short-circuit predicate (`metadata.agentId && ...`) would
+    // silently bypass the cross-agent guard for this case.
+    const srcDir = await makeTestSnapshot("alice");
+    const extractDir = join(testRoot, "extract-no-agentid");
+    mkdirSync(extractDir, { recursive: true });
+    await tarExtract({ file: srcDir, cwd: extractDir });
+    const metaPath = join(extractDir, "metadata.json");
+    const meta = JSON.parse(readFileSync(metaPath, "utf-8"));
+    delete meta.agentId;
+    writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    const tamperedTarPath = join(testRoot, "tampered.tar.gz");
+    await tarCreate(
+      { gzip: true, cwd: extractDir, file: tamperedTarPath, portable: true },
+      ["memories.jsonl", "soul.json", "metadata.json"],
+    );
+
+    const { api } = recordingApi();
+    const r = await applySnapshot({
+      agentId: "bob",
+      snapshotPath: tamperedTarPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+    expect(r.status).toBe("failed");
+    expect(r.errors[0]).toContain("missing metadata.agentId");
     expect(r.preRestoreSnapshotPath).toBeUndefined();
   });
 });
