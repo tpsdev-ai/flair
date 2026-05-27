@@ -294,9 +294,15 @@ function statusFromOrgEvent(event: any): string | null {
 }
 
 export class A2AAdapter extends Resource {
-  // A2A discovery surface — agent cards and adapter metadata are intentionally
-  // public so other agents/clients can discover this Flair as a memory peer.
-  // Handler enforces auth on actual A2A actions (POST below).
+  // A2A discovery surface — agent-card metadata (GET) is intentionally
+  // public so other agents/clients can discover this Flair as a memory
+  // peer. POST is JSON-RPC for actions (message/send writes OrgEvents,
+  // tasks/list reads Beads issues, message/stream subscribes to events)
+  // and is auth-gated upstream by auth-middleware's narrowed allow-list
+  // (GET /a2a passes through; POST /a2a must carry TPS-Ed25519 or admin
+  // Basic). The post() handler below additionally enforces sender ==
+  // params.agentId for message/send so an authenticated caller can only
+  // act AS themselves, not impersonate another agent.
   allowRead() { return true; }
   allowCreate() { return true; }
 
@@ -343,6 +349,21 @@ export class A2AAdapter extends Resource {
 
     const id = body.id ?? null;
     const params = body.params ?? {};
+
+    // Defense-in-depth: auth-middleware narrows the /a2a allow-list so
+    // POSTs only reach here after TPS-Ed25519 or admin Basic succeeds,
+    // which sets request.tpsAgent / tpsAgentIsAdmin. If middleware was
+    // misconfigured or someone added a back-door allow-list entry, fail
+    // closed here. Pattern matches WorkspaceState/Memory/etc.
+    const ctx = (this as any).getContext?.() ?? _context ?? {};
+    const ctxRequest = ctx.request ?? ctx;
+    const callerAgent: string | undefined = ctxRequest?.tpsAgent;
+    const callerIsAdmin: boolean = ctxRequest?.tpsAgentIsAdmin === true;
+    if (!callerAgent && !callerIsAdmin) {
+      return rpcError(id, -32001, "Unauthorized", {
+        detail: "POST /a2a requires TPS-Ed25519 or admin Basic auth",
+      });
+    }
 
     try {
       if (body.method === "message/stream") {
@@ -437,6 +458,17 @@ export class A2AAdapter extends Resource {
         const message = params.message;
         if (!agentId || !message || typeof message !== "object") {
           return rpcError(id, -32602, "Invalid params: agentId and message are required");
+        }
+
+        // Sender must match params.agentId — you can only send AS yourself.
+        // Admin agents may send as anyone (operational convenience).
+        // Without this check, an authenticated agent could forge OrgEvents
+        // attributed to any other agent — defeats the whole signed-envelopes
+        // model that delegationChain enforces for TPS mail.
+        if (!callerIsAdmin && callerAgent !== agentId) {
+          return rpcError(id, -32001, "Forbidden", {
+            detail: `caller ${callerAgent ?? "(anon)"} cannot send as ${agentId}`,
+          });
         }
 
         const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
