@@ -35,6 +35,13 @@ export interface RestoreOpts {
   preRestoreSnapshotRoot?: string;
   /** When true, plan and report what would happen — no API mutations. */
   dryRun?: boolean;
+  /**
+   * After the PUT loop, GET back the agent's memories + souls and diff
+   * against the snapshot to detect silent failures (schema coercion, 4xx
+   * responses the apiCall layer masked, partial accepts). Default true.
+   * Disable only for tests that intentionally simulate inconsistent state.
+   */
+  verifyPostRestore?: boolean;
   /** Override tmpdir for testing. */
   tmpRootOverride?: string;
   /** Override "now" for testing. */
@@ -54,6 +61,23 @@ export interface RestoreResult {
   restored: {
     memories: number;
     souls: number;
+  };
+  /**
+   * Post-restore state verification. Populated when verifyPostRestore is on
+   * (default). `missing*` IDs were in the snapshot but absent from Harper
+   * afterwards (silent PUT failure). `extra*` IDs were present afterwards
+   * but not in the snapshot (silent DELETE failure / lingering rows).
+   * Both fields being empty means the restore is byte-clean.
+   */
+  verified?: {
+    expectedMemoryIds: string[];
+    expectedSoulIds: string[];
+    actualMemoryIds: string[];
+    actualSoulIds: string[];
+    missingMemoryIds: string[];
+    missingSoulIds: string[];
+    extraMemoryIds: string[];
+    extraSoulIds: string[];
   };
   errors: string[];
 }
@@ -228,6 +252,59 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
       result.restored.souls++;
     } catch (err: any) {
       errors.push(`put-soul ${s.id}: ${err?.message ?? String(err)}`);
+    }
+  }
+
+  // 7. Verify post-restore state (default on; opt-out via verifyPostRestore=false).
+  //    Catches silent failures: Harper schema coercion, 4xx responses the
+  //    apiCall layer masked as ok, partial-DELETE leftovers. Per-ID diff,
+  //    not just counts — count parity can hide simultaneous PUT+DELETE
+  //    failures that wash out numerically. See ops-90dq.
+  if (opts.verifyPostRestore !== false) {
+    try {
+      const verifyMem = asArray(await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`));
+      const verifySouls = asArray(await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`));
+
+      const expectedMemoryIds = memories.filter((m) => m?.id).map((m) => String(m.id));
+      const expectedSoulIds = souls.filter((s) => s?.id).map((s) => String(s.id));
+      const actualMemoryIds = verifyMem.filter((m) => m?.id).map((m) => String(m.id));
+      const actualSoulIds = verifySouls.filter((s) => s?.id).map((s) => String(s.id));
+
+      const expMem = new Set(expectedMemoryIds);
+      const expSoul = new Set(expectedSoulIds);
+      const actMem = new Set(actualMemoryIds);
+      const actSoul = new Set(actualSoulIds);
+
+      const missingMemoryIds = [...expMem].filter((id) => !actMem.has(id));
+      const missingSoulIds = [...expSoul].filter((id) => !actSoul.has(id));
+      const extraMemoryIds = [...actMem].filter((id) => !expMem.has(id));
+      const extraSoulIds = [...actSoul].filter((id) => !expSoul.has(id));
+
+      result.verified = {
+        expectedMemoryIds,
+        expectedSoulIds,
+        actualMemoryIds,
+        actualSoulIds,
+        missingMemoryIds,
+        missingSoulIds,
+        extraMemoryIds,
+        extraSoulIds,
+      };
+
+      if (missingMemoryIds.length > 0) {
+        errors.push(`post-restore-verify: ${missingMemoryIds.length} memory rows missing (e.g. ${missingMemoryIds.slice(0, 3).join(", ")})`);
+      }
+      if (missingSoulIds.length > 0) {
+        errors.push(`post-restore-verify: ${missingSoulIds.length} soul rows missing (e.g. ${missingSoulIds.slice(0, 3).join(", ")})`);
+      }
+      if (extraMemoryIds.length > 0) {
+        errors.push(`post-restore-verify: ${extraMemoryIds.length} unexpected memory rows present (e.g. ${extraMemoryIds.slice(0, 3).join(", ")})`);
+      }
+      if (extraSoulIds.length > 0) {
+        errors.push(`post-restore-verify: ${extraSoulIds.length} unexpected soul rows present (e.g. ${extraSoulIds.slice(0, 3).join(", ")})`);
+      }
+    } catch (err: any) {
+      errors.push(`post-restore-verify: ${err?.message ?? String(err)}`);
     }
   }
 
