@@ -235,16 +235,28 @@ export default function (pi: ExtensionAPI) {
           dedup: true,
           dedupThreshold: 0.95,
         });
-        
-        // Check if dedup returned an existing memory
-        const agentId = getAgentId(config, ctx);
-        const generatedPrefix = `${agentId}-`;
-        const wasDeduped = result.id && !result.id.startsWith(generatedPrefix);
-        
+
+        // Dedup signal: use the explicit `deduped` flag that flair-client
+        // sets on the returned record. The previous prefix-match check
+        // (`!result.id.startsWith(`${agentId}-`)`) was unreliable — when
+        // a dedup hit returned an existing memory from the SAME agent,
+        // both IDs start with the same prefix and the check silently
+        // returned the success path, dropping the new content. Same fix
+        // class as #358 (P0 silent data loss) applied to flair-mcp;
+        // pi-flair was missed. See flair#449 (filed by a Claude Code
+        // session that hit this exact failure).
+        const wasDeduped = (result as any).deduped === true;
+
         if (wasDeduped) {
-          return { content: [{ type: "text", text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}` }], details: {} };
+          return {
+            content: [{
+              type: "text",
+              text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}\n(no new entry written)`,
+            }],
+            details: { deduplicated: true, mergedWith: result.id },
+          };
         }
-        
+
         const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
         const tagStr = (params.tags as string[] | undefined)?.length ? (params.tags as string[]).join(", ") : "none";
         const text = [
@@ -254,8 +266,8 @@ export default function (pi: ExtensionAPI) {
           `Tags: ${tagStr}`,
           `Durability: ${durability}`,
         ].join("\n");
-        
-        return { content: [{ type: "text", text }], details: {} };
+
+        return { content: [{ type: "text", text }], details: { deduplicated: false, id: result.id } };
       } catch (err) {
         return errorResult(err, flair.url);
       }

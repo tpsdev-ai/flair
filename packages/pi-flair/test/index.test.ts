@@ -116,28 +116,84 @@ describe("Error Classification", () => {
   });
 });
 
-// ─── Dedup Logic Tests ──────────────────────────────────────────────────────
+// ─── Dedup Detection Tests ──────────────────────────────────────────────────
+//
+// Per flair#449: the previous predicate (`!resultId.startsWith(agentPrefix)`)
+// was unreliable — when dedup matched an EXISTING memory from the SAME
+// agent, both IDs share the prefix and the check silently returned the
+// success path, dropping the new content with no signal. The fix uses
+// the explicit `result.deduped` flag that flair-client sets when its
+// pre-flight similarity search finds a hit.
 
-describe("Dedup Detection", () => {
-  test("new memory ID starts with agentId prefix", () => {
+describe("Dedup Detection — explicit `deduped` flag (flair#449 fix)", () => {
+  test("dedup hit: result.deduped=true → wasDeduped=true regardless of ID prefix", () => {
+    // Same-agent dedup — the old prefix-match check would silently fail
+    // because resultId starts with the same prefix as the new write would.
     const agentId = "pi-test";
-    const resultId = `${agentId}-${crypto.randomUUID()}`;
-    const wasDeduped = resultId && !resultId.startsWith(`${agentId}-`);
-    expect(wasDeduped).toBeFalsy();
-  });
-
-  test("deduped memory has different prefix", () => {
-    const agentId = "pi-test";
-    const resultId = "other-agent-12345";
-    const wasDeduped = resultId && !resultId.startsWith(`${agentId}-`);
+    const result = {
+      id: `${agentId}-existing-memory-1`,
+      deduped: true,
+      content: "Previously stored content",
+    };
+    const wasDeduped = (result as any).deduped === true;
     expect(wasDeduped).toBe(true);
   });
 
-  test("undefined ID is not deduped", () => {
-    const agentId = "pi-test";
-    const resultId = undefined;
-    const wasDeduped = resultId && !resultId.startsWith(`${agentId}-`);
-    expect(wasDeduped).toBeFalsy();
+  test("no dedup: result.deduped is undefined/falsey → wasDeduped=false", () => {
+    const result = { id: "pi-test-fresh-uuid", content: "new content" };
+    const wasDeduped = (result as any).deduped === true;
+    expect(wasDeduped).toBe(false);
+  });
+
+  test("explicit deduped=false → wasDeduped=false", () => {
+    const result = { id: "pi-test-fresh-uuid", deduped: false, content: "new content" };
+    const wasDeduped = (result as any).deduped === true;
+    expect(wasDeduped).toBe(false);
+  });
+
+  test("cross-agent dedup hit (unusual but valid): result.deduped=true wins", () => {
+    // If flair-client somehow returns a record from another agent (hub
+    // relay, shared memory), `deduped` is still the authoritative signal.
+    const result = {
+      id: "other-agent-existing-1",
+      deduped: true,
+      content: "shared memory",
+    };
+    const wasDeduped = (result as any).deduped === true;
+    expect(wasDeduped).toBe(true);
+  });
+});
+
+// ─── Response Shape Tests ────────────────────────────────────────────────────
+
+describe("memory_store response shape — programmatic dedup signal", () => {
+  // The PR adds a structured `details` field so callers can react to
+  // dedup programmatically (not just parse prose). LLMs sometimes
+  // compress the prose ("Similar memory exists") into "got the ID" and
+  // miss the dedup signal — see flair#449.
+
+  test("dedup response includes details.deduplicated=true + mergedWith", () => {
+    const result = { id: "pi-test-existing-1", deduped: true, content: "existing" };
+    const wasDeduped = (result as any).deduped === true;
+    const response = {
+      content: [{ type: "text", text: "Similar memory ..." }],
+      details: wasDeduped
+        ? { deduplicated: true, mergedWith: result.id }
+        : { deduplicated: false, id: result.id },
+    };
+    expect(response.details).toEqual({ deduplicated: true, mergedWith: "pi-test-existing-1" });
+  });
+
+  test("success response includes details.deduplicated=false + id", () => {
+    const result = { id: "pi-test-new-uuid", content: "new" };
+    const wasDeduped = (result as any).deduped === true;
+    const response = {
+      content: [{ type: "text", text: "Memory stored ..." }],
+      details: wasDeduped
+        ? { deduplicated: true, mergedWith: result.id }
+        : { deduplicated: false, id: result.id },
+    };
+    expect(response.details).toEqual({ deduplicated: false, id: "pi-test-new-uuid" });
   });
 });
 
