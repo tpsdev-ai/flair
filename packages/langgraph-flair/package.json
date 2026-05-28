@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/langgraph-flair",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "LangGraph BaseStore adapter backed by Flair — durable agent memory with crypto-pinned identity, federation, and cross-orchestrator portability.",
   "type": "module",
   "main": "dist/index.js",
@@ -36,7 +36,7 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@tpsdev-ai/flair-client": "0.9.0"
+    "@tpsdev-ai/flair-client": "0.10.0"
   },
   "peerDependencies": {
     "@langchain/langgraph-checkpoint": ">=0.0.10"
