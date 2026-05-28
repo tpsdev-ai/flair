@@ -975,6 +975,17 @@ export function probeOpenclawPluginVersion(extensionName: string): string | null
   }
 }
 
+/**
+ * Order a soul key→count map for display: highest count first, ties broken
+ * alphabetically for stable output. Soul entries are keyed identity facts
+ * (role / project / standards / …) — this is the honest breakdown dimension.
+ * (Replaced a priority breakdown that was dead telemetry — see flair#453:
+ * nothing ever writes Soul.priority to anything but "standard".)
+ */
+export function sortSoulKeyEntries(byKey: Record<string, number>): Array<[string, number]> {
+  return Object.entries(byKey ?? {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
 // ─── First-run soul wizard ────────────────────────────────────────────────────
 
 type SoulEntries = [string, string][];
@@ -5191,15 +5202,13 @@ const statusCmd = program
 
     if (healthData?.soul && healthData.soul.total > 0) {
       const s = healthData.soul;
-      const bp = s.byPriority ?? {};
       console.log(`\n${render.wrap(render.c.bold, "Soul")}`);
-      const parts = [
-        `${render.wrap(render.c.red, "critical")}:${bp.critical ?? 0}`,
-        `${render.wrap(render.c.yellow, "high")}:${bp.high ?? 0}`,
-        `${render.wrap(render.c.cyan, "standard")}:${bp.standard ?? 0}`,
-        `${render.wrap(render.c.gray, "low")}:${bp.low ?? 0}`,
-      ];
-      console.log(render.kv("Entries", `${render.wrap(render.c.bold, String(s.total))} ${render.wrap(render.c.dim, "—")} ${parts.join(render.wrap(render.c.dim, " · "))}`));
+      const entries = sortSoulKeyEntries(s.byKey ?? {});
+      const parts = entries.map(([k, n]) => `${render.wrap(render.c.cyan, k)}:${n}`);
+      const suffix = parts.length > 0
+        ? ` ${render.wrap(render.c.dim, "—")} ${parts.join(render.wrap(render.c.dim, " · "))}`
+        : "";
+      console.log(render.kv("Entries", `${render.wrap(render.c.bold, String(s.total))}${suffix}`));
     } else if (typeof healthData?.soulEntries === "number" && healthData.soulEntries > 0) {
       console.log(`\n${render.wrap(render.c.bold, "Soul")}`);
       console.log(render.kv("Entries", String(healthData.soulEntries)));
@@ -5643,10 +5652,12 @@ statusCmd
 
     if (healthData?.soul && healthData.soul.total > 0) {
       const s = healthData.soul;
-      const bp = s.byPriority ?? {};
       console.log("\n═══ Soul ═════════════════════════════════════════");
       console.log(`Total:        ${s.total} entries`);
-      console.log(`Priority:     ${bp.critical ?? 0} critical / ${bp.high ?? 0} high / ${bp.standard ?? 0} standard / ${bp.low ?? 0} low`);
+      const entries = sortSoulKeyEntries(s.byKey ?? {});
+      if (entries.length > 0) {
+        console.log(`Keys:         ${entries.map(([k, n]) => `${n} ${k}`).join(" / ")}`);
+      }
     } else if (typeof healthData?.soulEntries === "number" && healthData.soulEntries > 0) {
       console.log("\n═══ Soul ═════════════════════════════════════════");
       console.log(`Total:        ${healthData.soulEntries} entries`);

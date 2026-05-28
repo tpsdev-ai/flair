@@ -191,12 +191,18 @@ export class HealthDetail extends Resource {
       const souls: any[] = [];
       for await (const s of db.flair.Soul.search({})) souls.push(s);
       stats.soulEntries = souls.length;
-      const byPriority = { critical: 0, high: 0, standard: 0, low: 0 } as Record<string, number>;
+      // Soul entries have no severity dimension — they are keyed identity facts
+      // (role / project / standards / …). A per-priority breakdown was dead
+      // telemetry: nothing writes Soul.priority to anything but "standard", and
+      // the `?? "standard"` fallback also mislabelled *unset* as *standard*, so
+      // it always read 100% standard regardless of the data. Report the honest
+      // dimension instead — a count per key.
+      const byKey: Record<string, number> = {};
       for (const s of souls) {
-        const p = (s.priority ?? "standard") as string;
-        if (p in byPriority) byPriority[p]++;
+        const k = (s.key ?? "(unkeyed)") as string;
+        byKey[k] = (byKey[k] ?? 0) + 1;
       }
-      stats.soul = { total: souls.length, byPriority };
+      stats.soul = { total: souls.length, byKey };
     } catch { stats.soulEntries = null; stats.soul = null; }
 
     // ── Federation ──

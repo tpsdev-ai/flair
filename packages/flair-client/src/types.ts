@@ -30,7 +30,18 @@ export interface SoulEntry {
   agentId: string;
   key: string;
   value: string;
+  /**
+   * Optional governance fields. These exist on the Harper `Soul` schema
+   * (see schemas/memory.graphql) but are not set by `flair soul set`, so they
+   * are absent on hand-authored entries. `priority` is reserved for skill
+   * governance and is currently only ever written as "standard".
+   */
+  priority?: "critical" | "high" | "standard" | "low";
+  durability?: Durability;
+  /** JSON blob (skill governance: source, version, hash, etc.). */
+  metadata?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 /** Semantic search result. */
