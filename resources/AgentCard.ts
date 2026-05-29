@@ -1,19 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
-
-type SoulLike = {
-  key?: string;
-  value?: string;
-  kind?: string;
-  content?: string;
-};
-
-function readSoulKind(entry: SoulLike): string {
-  return String(entry.kind ?? entry.key ?? "").trim().toLowerCase();
-}
-
-function readSoulContent(entry: SoulLike): string {
-  return String(entry.content ?? entry.value ?? "").trim();
-}
+import { type SoulLike, selectPublicDescription, selectPublicSkills } from "./agentcard-fields.js";
 
 export class AgentCard extends Resource {
   async get(pathInfo?: any) {
@@ -42,22 +28,15 @@ export class AgentCard extends Resource {
       if (row?.agentId === agentId) souls.push(row);
     }
 
-    const descriptionEntry =
-      souls.find((s) => readSoulKind(s) === "description" && readSoulContent(s)) ??
-      souls.find((s) => readSoulContent(s));
-
-    const skills = souls
-      .filter((s) => readSoulKind(s) === "capability")
-      .map((s) => readSoulContent(s))
-      .filter(Boolean);
-
     return {
       name: String(agent.name ?? agent.id ?? agentId),
-      description: descriptionEntry ? readSoulContent(descriptionEntry) : "",
+      // Only an explicit kind="description" soul publishes — no private-soul
+      // fallback (ops-vz6j). See agentcard-fields.ts for the security rationale.
+      description: selectPublicDescription(souls),
       url: String(agent.url ?? ""),
       version: String(agent.version ?? "1.0.0"),
       capabilities: agent.capabilities && typeof agent.capabilities === "object" ? agent.capabilities : {},
-      skills,
+      skills: selectPublicSkills(souls),
       defaultInputModes: ["text"],
       defaultOutputModes: ["text"],
     };
