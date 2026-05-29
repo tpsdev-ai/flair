@@ -294,27 +294,33 @@ server.http(async (request: any, nextLayer: any) => {
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
-  // Swap the Authorization header to Basic admin auth so Harper's internal auth
-  // pipeline (passport) authenticates the request with full permissions including
-  // HNSW vector search. This requires HDB_ADMIN_PASSWORD to be set.
-  // NOTE: server.getUser() alone doesn't grant HNSW permissions in Harper v5.
-  const adminPass = getAdminPass();
-  if (adminPass !== null) {
-    try {
-      const superAuth = "Basic " + btoa("admin:" + adminPass);
-      request.headers.set("authorization", superAuth);
-      if (request.headers.asObject) request.headers.asObject.authorization = superAuth;
-    } catch {
-      // Header manipulation failed — fall back to getUser
-      try {
-        request.user = await (server as any).getUser("admin", null, request);
-      } catch {}
-    }
-  } else {
-    // No admin password configured — try server.getUser as fallback (limited permissions)
-    try {
-      request.user = await (server as any).getUser("admin", null, request);
-    } catch {}
+  // Grant Harper-level permissions for the cryptographically-verified agent by
+  // setting request.user directly to the admin super_user.
+  //
+  // Prior approach swapped the Authorization header to "Basic admin:<pass>" so
+  // Harper's auth pipeline would re-authenticate with full (HNSW-capable)
+  // permissions. That silently broke under Harper 5.0.9: its authentication
+  // layer (security/auth.ts `authentication()`) reads the Authorization header
+  // and resolves request.user BEFORE invoking this middleware via nextHandler.
+  // A TPS-Ed25519 header matches no Basic/Bearer strategy, so Harper sets
+  // request.user = null and never re-reads the header — our post-hoc swap was
+  // ignored, the request ran unauthenticated, and Harper surfaced it downstream
+  // as a generic "Login failed" 401. (Broke at the 2026-05-27 daemon restart,
+  // which loaded 5.0.9 fresh; the prior long-running process held an older
+  // in-memory Harper where the late header read still worked.)
+  //
+  // Setting request.user directly is the supported extension path and is honored
+  // by all downstream resources, including HNSW vector search. getUser(admin,
+  // null) looks up the admin record WITHOUT password validation — safe here
+  // because the Ed25519 signature verified above already proves agent identity
+  // cryptographically; no Basic credential is presented. This preserves the
+  // prior privilege model (verified agents act with admin perms; per-agent data
+  // isolation is still enforced downstream via the x-tps-agent header below).
+  try {
+    request.user = await (server as any).getUser("admin", null, request);
+  } catch {
+    // Admin record unavailable — request proceeds as the verified tpsAgent
+    // without elevated perms; resource-level scoping still applies.
   }
 
   // Propagate authenticated agent to downstream resources via header.
