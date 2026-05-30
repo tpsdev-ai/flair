@@ -64,6 +64,15 @@
     "tar": "^7.5.13",
     "tweetnacl": "1.0.3"
   },
+  "optionalDependencies": {
+    "@node-llama-cpp/linux-arm64": "3.18.1",
+    "@node-llama-cpp/linux-armv7l": "3.18.1",
+    "@node-llama-cpp/linux-x64": "3.18.1",
+    "@node-llama-cpp/mac-arm64-metal": "3.18.1",
+    "@node-llama-cpp/mac-x64": "3.18.1",
+    "@node-llama-cpp/win-arm64": "3.18.1",
+    "@node-llama-cpp/win-x64": "3.18.1"
+  },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@types/node": "24.11.0",
