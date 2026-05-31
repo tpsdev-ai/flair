@@ -44,5 +44,12 @@
       "maxBootstrapTokens": { "type": "number", "minimum": 500, "maximum": 8000 }
     },
     "required": []
+  },
+  "contracts": {
+    "tools": [
+      { "name": "memory_search" },
+      { "name": "memory_store" },
+      { "name": "memory_get" }
+    ]
   }
 }
