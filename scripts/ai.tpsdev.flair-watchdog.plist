@@ -9,7 +9,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/squeued/ops/flair/scripts/harper-watchdog.sh</string>
+    <string>/Users/youruser/ops/flair/scripts/harper-watchdog.sh</string>
   </array>
 
   <key>StartInterval</key>
@@ -19,15 +19,15 @@
   <false/>
 
   <key>StandardOutPath</key>
-  <string>/Users/squeued/.tps/logs/harper-watchdog.log</string>
+  <string>/Users/youruser/.tps/logs/harper-watchdog.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/squeued/.tps/logs/harper-watchdog.log</string>
+  <string>/Users/youruser/.tps/logs/harper-watchdog.log</string>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
-    <string>/Users/squeued</string>
+    <string>/Users/youruser</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>HARPER_PORT</key>

@@ -132,9 +132,9 @@ describe("resolveEffectiveOpsUrl", () => {
 
   test("uses --ops-target directly when both flags are set (Fabric path)", () => {
     expect(resolveEffectiveOpsUrl({
-      target: "https://flair.heskew.harperfabric.com",
-      opsTarget: "https://flair.heskew.harperfabric.com:9925",
-    })).toBe("https://flair.heskew.harperfabric.com:9925");
+      target: "https://flair.example.harperfabric.com",
+      opsTarget: "https://flair.example.harperfabric.com:9925",
+    })).toBe("https://flair.example.harperfabric.com:9925");
   });
 
   test("uses --ops-target directly even with no --target (edge case)", () => {
@@ -355,40 +355,40 @@ describe("api() baseUrl override routes HTTP calls to target", () => {
 describe("--ops-target overrides ops URL derivation", () => {
   test("ops-target is used directly for ops calls, separate from --target REST", () => {
     const opsTarget = resolveOpsTarget({
-      opsTarget: "https://flair.heskew.harperfabric.com:9925",
+      opsTarget: "https://flair.example.harperfabric.com:9925",
     });
-    expect(opsTarget).toBe("https://flair.heskew.harperfabric.com:9925");
+    expect(opsTarget).toBe("https://flair.example.harperfabric.com:9925");
 
     const target = resolveTarget({
-      target: "https://flair.heskew.harperfabric.com",
+      target: "https://flair.example.harperfabric.com",
     });
-    expect(target).toBe("https://flair.heskew.harperfabric.com");
+    expect(target).toBe("https://flair.example.harperfabric.com");
 
     // opsTarget is a completely different URL from target — no port-1 derivation
-    expect(opsTarget).not.toBe("https://flair.heskew.harperfabric.com:442");
+    expect(opsTarget).not.toBe("https://flair.example.harperfabric.com:442");
   });
 
   test("Fabric acceptance criteria: target rest + ops on separate port", () => {
     // Simulate the Fabric use case from spec:
-    // --target https://flair.heskew.harperfabric.com
-    // --ops-target https://flair.heskew.harperfabric.com:9925
+    // --target https://flair.example.harperfabric.com
+    // --ops-target https://flair.example.harperfabric.com:9925
     const baseUrl = resolveTarget({
-      target: "https://flair.heskew.harperfabric.com",
+      target: "https://flair.example.harperfabric.com",
     })!.replace(/\/$/, "");
     const opsUrl = resolveOpsTarget({
-      opsTarget: "https://flair.heskew.harperfabric.com:9925",
+      opsTarget: "https://flair.example.harperfabric.com:9925",
     })!.replace(/\/$/, "");
 
-    expect(baseUrl).toBe("https://flair.heskew.harperfabric.com");
-    expect(opsUrl).toBe("https://flair.heskew.harperfabric.com:9925");
+    expect(baseUrl).toBe("https://flair.example.harperfabric.com");
+    expect(opsUrl).toBe("https://flair.example.harperfabric.com:9925");
 
     // Verify no derivation contamination: opsUrl is explicit, not port-1
     const derivedFromBase = resolveOpsUrlFromTarget(baseUrl);
-    expect(derivedFromBase).toBe("https://flair.heskew.harperfabric.com:442");
+    expect(derivedFromBase).toBe("https://flair.example.harperfabric.com:442");
     expect(opsUrl).not.toBe(derivedFromBase);
   });
 
-  test("only --target (rockit-style) still derives ops URL correctly", () => {
+  test("only --target (local-style) still derives ops URL correctly", () => {
     // Back-compat: no --ops-target, only --target
     const baseUrl = resolveTarget({
       target: "https://localhost:19926",
@@ -419,7 +419,7 @@ describe("seedFederationInstanceViaOpsApi", () => {
 
     try {
       await seedFederationInstanceViaOpsApi(
-        "https://flair.heskew.harperfabric.com:9925",
+        "https://flair.example.harperfabric.com:9925",
         "test-instance-uuid",
         "base64pubkey==",
         "hub",
@@ -431,7 +431,7 @@ describe("seedFederationInstanceViaOpsApi", () => {
     }
 
     // Verify URL has trailing slash (as seedAgentViaOpsApi does)
-    expect(capturedUrl).toBe("https://flair.heskew.harperfabric.com:9925/");
+    expect(capturedUrl).toBe("https://flair.example.harperfabric.com:9925/");
 
     // Verify auth header
     expect(capturedHeaders!["Authorization"]).toBe(
@@ -461,7 +461,7 @@ describe("seedFederationInstanceViaOpsApi", () => {
 
     try {
       await seedFederationInstanceViaOpsApi(
-        "https://flair.heskew.harperfabric.com:9925/",
+        "https://flair.example.harperfabric.com:9925/",
         "id",
         "pk",
         "hub",
@@ -472,7 +472,7 @@ describe("seedFederationInstanceViaOpsApi", () => {
       globalThis.fetch = origFetch;
     }
 
-    expect(capturedUrl).toBe("https://flair.heskew.harperfabric.com:9925/");
+    expect(capturedUrl).toBe("https://flair.example.harperfabric.com:9925/");
   });
 
   test("uses localhost URL when opsPortOrUrl is a number", async () => {

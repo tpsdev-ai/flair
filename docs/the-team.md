@@ -8,11 +8,11 @@ If you're trying to run your own multi-agent team using Flair as the memory laye
 
 | Agent | Role | Runtime | Model | Where it runs |
 |---|---|---|---|---|
-| **Flint** | Strategy, product, PR review | Claude Code | Claude Opus | rockit (Mac Mini) |
-| **Anvil** | Implementation, PR opener | OpenClaw | Claude Sonnet (API) | exe.dev VM (`tps-anvil.exe.xyz`) |
-| **Kern** | Architecture / perf review | OpenClaw | Open-source via Ollama | newton (Mac Studio) |
-| **Sherlock** | Security review | OpenClaw | Open-source via Ollama (local-only) | newton (Mac Studio) |
-| **Pulse** | EA / intel scanning / coordination | OpenClaw | Claude API | exe.dev VM (`pulse.exe.xyz`) |
+| **Flint** | Strategy, product, PR review | Claude Code | Claude Opus | always-on local host |
+| **Anvil** | Implementation, PR opener | OpenClaw | Claude Sonnet (API) | cloud VM |
+| **Kern** | Architecture / perf review | OpenClaw | Open-source via Ollama | local inference box |
+| **Sherlock** | Security review | OpenClaw | Open-source via Ollama (local-only) | local inference box |
+| **Pulse** | EA / intel scanning / coordination | OpenClaw | Claude API | cloud VM |
 | **Nathan** | Founder / product owner / human-in-the-loop | (human) | (human) | wherever |
 
 Every agent has its own Ed25519 identity in Flair. They sign every memory write and every read. **Cross-agent reads are refused at the Flair API layer**, not by client convention — Sherlock can't accidentally read Pulse's memories even on a shared Flair instance, because the signature won't verify.
@@ -20,19 +20,18 @@ Every agent has its own Ed25519 identity in Flair. They sign every memory write 
 ## How memory flows
 
 ```
-                                ┌────────────────────────┐
-                                │  Flair (rockit)        │
-                                │  http://rockit:9926    │
-                                │                        │
-                                │  Per-agent isolation   │
-                                │  enforced server-side  │
-                                │  via Ed25519 signing   │
-                                └─────────▲──────────────┘
-                                          │
+                                ┌────────────────────────┐                  
+                                │  Flair (self-hosted)   │                  
+                                │                        │                  
+                                │  Per-agent isolation   │                  
+                                │  enforced server-side  │                  
+                                │  via Ed25519 signing   │                  
+                                └─────────▲──────────────┘                  
+                                          │                                 
         ┌─────────────────┬───────────────┼──────────────┬─────────────────┐
         │                 │               │              │                 │
    Flint               Anvil           Kern          Sherlock           Pulse
-  (rockit)        (tps-anvil)       (newton)         (newton)         (pulse.exe.xyz)
+   (local)           (cloud VM)    (inference box) (inference box)    (cloud VM)
         │                 │               │              │                 │
    reads/writes      reads/writes    reads/writes   reads/writes      reads/writes
    own memories      own memories    own memories   own memories      own memories
@@ -59,17 +58,16 @@ This isn't a value judgment of one runtime over another — it's about matching 
 ### Local vs API for inference
 
 - **Anvil + Pulse on the Anthropic API** — high-throughput implementation work and EA-shaped intel scanning need frontier model quality and consistent latency. Worth the API spend.
-- **Kern + Sherlock on local Ollama (`newton`)** — review work can be slower and is bursty (a few PRs/day). Self-hosted on a Mac Studio Ollama install means no rate limits, no session-locks, no third-party data exposure. Both currently run **gpt-oss:120b** as primary (OpenAI's open weights, Apache 2.0), with `nemotron-3-super:120b` and `deepseek-r1:70b` in the local fallback chain. **Sherlock is local-only as a deliberate privacy decision** — security findings are pre-disclosure-sensitive, not appropriate to send to any external inference provider.
+- **Kern + Sherlock on local Ollama** — review work can be slower and is bursty (a few PRs/day). Self-hosting on a local Ollama box means no rate limits, no session-locks, no third-party data exposure. Both run a large open-weight model (~120B class, permissively licensed) as primary, with smaller open models in the local fallback chain. **Sherlock is local-only as a deliberate privacy decision** — security findings are pre-disclosure-sensitive, not appropriate to send to any external inference provider.
 - **Flint on Opus** — strategy + spec writing is rate-of-thought, not rate-of-tokens. Opus's reasoning depth matters more than throughput.
 
-> **Note on the migration trial period (2026-04-25 → ~2026-05-02):** during the first week after K&S moved off Gemini, we kept Gemini as the *last* fallback in the chain to catch any quality regressions. After the trial period that fallback gets removed and K&S are strictly local. If you're copying this setup, decide upfront whether you want a cloud safety net during your own migration — and remove it on a known date.
+> **Note on migration safety nets:** when we moved the review agents off a previous cloud model onto local inference, we kept the old model as the *last* fallback for a short trial window to catch quality regressions, then removed it on a fixed date. If you're copying this setup, decide upfront whether you want a cloud safety net during your own migration — and remove it on a known date.
 
 ### Different hardware for different load
 
-- **rockit (Mac Mini)** — always-on, lightweight, runs Flint + the rhythm-agent watchdog + the local Flair Harper instance.
-- **newton (Mac Studio M3 Ultra, 96GB)** — heavy local inference. Hosts Ollama + cloud-pass-through. Kern + Sherlock both target this box.
-- **exe.dev VMs** — cloud agents that need internet-side work (pulse fetches news/intel; anvil opens GitHub PRs from a clean network space). Independent failure domain from the local stack.
-- **(planned)** Jetson Orin Nano for the rhythm-agent dispatcher in v1, freeing rockit's CPU for Flint.
+- **Always-on local host** — lightweight, runs the founder-facing agent + a watchdog + the local Flair Harper instance.
+- **Local inference box** — heavier local inference on a workstation with strong unified memory / GPU. Hosts Ollama; the review agents target this box.
+- **Cloud VMs** — agents that need internet-side work (intel fetching, opening GitHub PRs from a clean network space). Independent failure domain from the local stack.
 
 ## The handoff loop
 
@@ -77,7 +75,7 @@ Standard PR-shaped work flows like this:
 
 ```
   1. Nathan brings a need to Flint (Discord)
-  2. Flint writes a spec, files it in ~/ops/specs/, updates Beads
+  2. Flint writes a spec, files it in the planning repo, updates Beads
   3. Flint mails Kern + Sherlock for arch + security review of the SPEC
      (catch issues at design time, not after implementation)
   4. K&S respond with concerns or sign-off
@@ -100,7 +98,7 @@ Flair is the connective tissue:
 - **Identity:** every agent has an Ed25519 keypair in Flair (`flair agent add <id>`). All signed requests, no shared passwords, no env-var secrets to leak.
 - **Memory:** each agent writes its own lessons, decisions, observations. Flint's strategic memory survives a session crash. Anvil's "this codebase pattern works for X but fails for Y" persists across PR iterations.
 - **Soul:** each agent has a permanent personality block — role, voice, constraints. Loaded on every bootstrap so the agent stays *themselves* across sessions.
-- **Bridges:** when an agent needs context from a foreign system (e.g., Anvil needs to import lessons from `agentic-stack/`), bridges import them into Flair without a custom integration per source.
+- **Bridges:** when an agent needs context from a foreign system (e.g., Anvil needs to import lessons from another repo), bridges import them into Flair without a custom integration per source.
 
 The MCP server (`@tpsdev-ai/flair-mcp`) is what makes this orchestrator-agnostic — Flint's Claude Code, Anvil/Kern/Sherlock/Pulse's OpenClaw all hit the same Flair server with the same per-agent isolation guarantees.
 
@@ -115,8 +113,7 @@ The MCP server (`@tpsdev-ai/flair-mcp`) is what makes this orchestrator-agnostic
 ## What we're still figuring out
 
 - **Cross-agent visibility for collaborative work.** Sometimes Flint needs Sherlock's recent security findings to write a spec. Today Flint asks via TPS mail; Sherlock answers. We're considering an explicit `flair memory share` mechanism with audit trails. Not in 1.0.
-- **Rhythm agent v1.** Today's v0 is a shell-cron polling for state changes and posting to Discord. v1 lives on a Jetson, uses a small local model to summarize, and escalates only when truly stuck. Post-1.0 polish.
-- **A `nathan-local` ops-EA on his laptop** that handles laptop-local tasks (files, browser, SSH-keyed ops) Pulse can't reach from the cloud. Identity model: acts AS Nathan, not as a peer agent. In design.
+- **Rhythm agent v1.** Today's v0 is a shell-cron polling for state changes and posting to Discord. v1 moves to a dedicated low-power device, uses a small local model to summarize, and escalates only when truly stuck. Post-1.0 polish.
 
 ## Try this with your own team
 

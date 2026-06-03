@@ -20,7 +20,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Walk Flint's TPS-mail inbox and emit one item per .json mail file.\n// Single Code node replaces the older ls + Split + Read + Parse chain\n// because (a) it's atomic — no node-version drift to chase, (b) it's\n// portable to any maildir-shaped source by changing the path, (c) n8n's\n// ExecuteCommand stdout-as-string didn't play nicely with Item Lists\n// when filenames had spaces or odd chars.\n//\n// Each emitted item: { mail: <parsed JSON>, _file: <basename> }.\nconst fs = require('fs');\nconst path = require('path');\nconst INBOX = '/Users/squeued/.tps/mail/flint/new';\n\nlet entries;\ntry {\n  entries = fs.readdirSync(INBOX);\n} catch (err) {\n  // Inbox missing is not an error condition — first ever run on a fresh\n  // box can legitimately have no inbox yet.\n  if (err.code === 'ENOENT') return [];\n  throw err;\n}\n\nconst items = [];\nfor (const f of entries) {\n  if (!f.endsWith('.json')) continue;\n  const full = path.join(INBOX, f);\n  try {\n    const content = fs.readFileSync(full, 'utf8');\n    const mail = JSON.parse(content);\n    items.push({ json: { mail, _file: f } });\n  } catch (err) {\n    // Skip malformed mail files — they'll surface in a later sweep when\n    // the file is rewritten cleanly, or get cleaned up via the gc loop.\n    continue;\n  }\n}\nreturn items;\n"
+        "jsCode": "// Walk the agent's TPS-mail inbox and emit one item per .json mail file.\n// Single Code node replaces the older ls + Split + Read + Parse chain\n// because (a) it's atomic — no node-version drift to chase, (b) it's\n// portable to any maildir-shaped source by changing the path, (c) n8n's\n// ExecuteCommand stdout-as-string didn't play nicely with Item Lists\n// when filenames had spaces or odd chars.\n//\n// Each emitted item: { mail: <parsed JSON>, _file: <basename> }.\nconst fs = require('fs');\nconst path = require('path');\nconst INBOX = '/Users/youruser/.tps/mail/<agent>/new';\n\nlet entries;\ntry {\n  entries = fs.readdirSync(INBOX);\n} catch (err) {\n  // Inbox missing is not an error condition — first ever run on a fresh\n  // box can legitimately have no inbox yet.\n  if (err.code === 'ENOENT') return [];\n  throw err;\n}\n\nconst items = [];\nfor (const f of entries) {\n  if (!f.endsWith('.json')) continue;\n  const full = path.join(INBOX, f);\n  try {\n    const content = fs.readFileSync(full, 'utf8');\n    const mail = JSON.parse(content);\n    items.push({ json: { mail, _file: f } });\n  } catch (err) {\n    // Skip malformed mail files — they'll surface in a later sweep when\n    // the file is rewritten cleanly, or get cleaned up via the gc loop.\n    continue;\n  }\n}\nreturn items;\n"
       },
       "id": "read-inbox",
       "name": "Read TPS-mail inbox",
@@ -75,7 +75,7 @@
       "credentials": {
         "flairApi": {
           "id": "REPLACE-ME",
-          "name": "Flair (rockit)"
+          "name": "Flair (self-hosted)"
         }
       }
     }

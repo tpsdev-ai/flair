@@ -85,7 +85,7 @@ Agents arrive with: who they are, what they recently did, and what they're being
 - **Reset trigger fires but Flair is unreachable.** The summary write fails. Block the reset; surface to the operator via mail-bounce or stderr. Don't drop the lesson.
 - **Multiple triggers fire concurrently** (e.g. DONE-with-CI-green AND operator-acked at the same time). Idempotent: first trigger wins, subsequent triggers no-op.
 - **Reset fires mid-task** (e.g. the agent emits DONE but the operator hasn't acked, AND the operator explicitly resets). Operator override wins; summary captures whatever the agent said it accomplished, even if not yet ack'd.
-- **Cross-host reset** (agent on tps-anvil, summary write to rockit-Flair via federation). Works as long as federation is healthy; no special handling.
+- **Cross-host reset** (agent on a remote host, summary write to the hub Flair via federation). Works as long as federation is healthy; no special handling.
 
 ## § 7 What this does NOT replace
 
@@ -118,7 +118,7 @@ Slices 5+6 are the operator surfaces.
 
 3. **Reset notification placement.** As a system message in the next dispatch (§ 4 step 5)? Or as a separate "reset-event" memory the agent reads from Flair on bootstrap? System message is cheaper but makes the bootstrap path more harness-specific.
 
-4. **Cross-host federation latency.** If Anvil resets on tps-anvil and writes a task summary to anvil's local Flair, the summary doesn't show up on rockit-Flair until federation sync. For 1.0 we accept the delay (max ~minutes); flag if you'd want explicit sync-on-write.
+4. **Cross-host federation latency.** If Anvil resets on a remote host and writes a task summary to that host's local Flair, the summary doesn't show up on the hub Flair until federation sync. For 1.0 we accept the delay (max ~minutes); flag if you'd want explicit sync-on-write.
 
 ## § 10 Out of scope for 1.0
 

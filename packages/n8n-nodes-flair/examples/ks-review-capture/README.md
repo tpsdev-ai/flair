@@ -78,7 +78,7 @@ Notes on each step:
 
 - **Filter expansion**: add `host`, `ember`, or any agent to the `containedInList` value to capture more sources. Pair with a `kind:` tag-update in the Format step so the search story stays clean.
 - **Deeper formatting**: the Format step is a Code node — you can pull more structure out of the body (e.g., bullet-point analysis vs paragraph prose), set `validFrom`/`validTo` for time-bounded reasoning, or branch durability by content (security flags → `permanent`, info → `standard`).
-- **Cross-instance**: this workflow writes to *one* Flair instance. The hub-spoke federation pair (rockit ↔ Fabric) propagates the writes without further n8n changes — every memory captured here becomes searchable from every federated peer.
+- **Cross-instance**: this workflow writes to *one* Flair instance. The hub-spoke federation pair (local ↔ Fabric) propagates the writes without further n8n changes — every memory captured here becomes searchable from every federated peer.
 
 ## Operational notes
 
@@ -90,4 +90,4 @@ Notes on each step:
 
 Six months from now, when we want to know *what reasoning Sherlock typically applies to bridge-loading code*, we'll have a real archive. Today's review mail is reasoning that decays the moment the Discord/inbox scrolls past. This workflow is the bet that capturing the reasoning durably will compound into measurable signal.
 
-If after a month of dogfooding the search results turn up genuine value (we use them to inform new specs, new dispatches, new architecture decisions), we lift the workflow to a more durable host (own VM, or Pulse VM if we consolidate) and add it to the standard rockit deploy. If signal is noisy, no infra to dismantle — just deactivate.
+If after a month of dogfooding the search results turn up genuine value (we use them to inform new specs, new dispatches, new architecture decisions), we lift the workflow to a more durable host (its own VM) and add it to the standard deploy. If signal is noisy, no infra to dismantle — just deactivate.

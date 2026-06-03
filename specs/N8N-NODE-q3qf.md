@@ -3,7 +3,7 @@
 
 **Goal:** ship a community-published n8n node package that lets n8n workflows use Flair as their AI-Agent memory backend, plus a worked-example workflow. The 1.0 narrative move: orchestrator-agnostic memory across Claude Code / OpenClaw / n8n.
 
-**Status:** spec ready. Federation flow proven (rockit↔Fabric, post-PR-#299), PR #314 merged (federation reachability/prune/verify CLI), PR #315 merged (flair-mcp parent-exit watcher). Gates open.
+**Status:** spec ready. Federation flow proven (local↔Fabric, post-PR-#299), PR #314 merged (federation reachability/prune/verify CLI), PR #315 merged (flair-mcp parent-exit watcher). Gates open.
 
 **Bead:** `ops-q3qf` (priority P1).
 

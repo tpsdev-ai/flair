@@ -42,7 +42,7 @@ describe("chatgpt bridge: plain-text input (primary user workflow)", () => {
       const path = join(dir, "memories.txt");
       writeFileSync(path,
         "- User prefers TypeScript\n" +
-        "- User runs newton on M3 Ultra\n" +
+        "- User runs a home GPU box\n" +
         "- User's coffee order is a flat white\n",
       );
       const out = await collectMemories({ source: path }, fakeCtx());
@@ -162,7 +162,7 @@ describe("chatgpt bridge: JSON fallback (third-party tool exports)", () => {
       writeFileSync(path, JSON.stringify({
         memories: [
           { id: "abc", content: "User uses TypeScript", created_at: "2026-04-15T00:00:00Z" },
-          { id: "def", content: "User runs newton on M3 Ultra" },
+          { id: "def", content: "User runs a home GPU box" },
         ],
       }));
       const out = await collectMemories({ source: path }, fakeCtx());

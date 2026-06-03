@@ -21,10 +21,10 @@ const exists = async (path: string): Promise<boolean> => {
  * which is what makes /Health work for callers outside `authorizeLocal`'s
  * localhost-bypass. Without this, Harper's intrinsic Basic-auth gate fires
  * BEFORE our HTTP middleware can apply the /Health bypass list in
- * auth-middleware.ts, so remote callers (e.g., from rockit hitting a Fabric-
+ * auth-middleware.ts, so remote callers (e.g., from a remote host hitting a Fabric-
  * hosted Flair) get a 401 even though the Resource handler is intentionally
  * unauthenticated. Symptom matched: Fabric returned 401 + WWW-Authenticate:
- * Basic on /Health while rockit-localhost returned 200 — the difference was
+ * Basic on /Health while a localhost caller returned 200 — the difference was
  * Harper's localhost-auto-auth, not anything in our code.
  *
  * Same pattern as `FederationPair.allowCreate(){ return true }` (PR #299):

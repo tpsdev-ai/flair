@@ -4933,7 +4933,7 @@ function oauthDetailLines(o: any): string[] {
 // discoverLocalFlairPort when the configured URL is unreachable, to detect
 // config-vs-daemon port drift (ops-mbdi). Order is ad-hoc — first hit wins.
 //
-// 9926: original default (long-running rockit installs predate the bump)
+// 9926: original default (long-running early installs predate the bump)
 // 19926: current default (DEFAULT_PORT)
 // 19925: ops-anvil VM secondary
 const LOCAL_FLAIR_PROBE_PORTS = [9926, 19926, 19925];
@@ -7220,7 +7220,7 @@ memory.command("list")
 
 // ─── flair memory hygiene ────────────────────────────────────────────────────
 // Detect + remove junk memory rows that accumulate over time. Surfaced from
-// the 2026-05-07 manual cleanup (ops-ucyy): rockit had 627 records, ~250 of
+// the 2026-05-07 manual cleanup (ops-ucyy): an instance had 627 records, ~250 of
 // them were noise — `*-compact-*` ID fragments from an old pipeline, pangram
 // test content ("the quick brown fox..." / "Flair 251 test ..."), and
 // near-empty rows (<25 chars). We did the cleanup ad-hoc with raw curl + jq;

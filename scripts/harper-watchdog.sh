@@ -3,7 +3,7 @@
 # and force-restarts via launchd.
 #
 # Usage: run via cron or launchd every 60s
-#   * * * * * /Users/squeued/ops/flair/scripts/harper-watchdog.sh
+#   * * * * * /Users/youruser/ops/flair/scripts/harper-watchdog.sh
 #
 # Or as a launchd StartInterval job (see ai.tpsdev.flair-watchdog.plist)
 

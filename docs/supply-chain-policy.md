@@ -65,7 +65,7 @@ Every PR runs the Socket.dev Supply Chain check. Failure blocks merge. The Socke
 
 Only Nathan publishes to npm (per the existing MFA boundary). Flint preps the release commit + version bump + CHANGELOG; Nathan runs `./scripts/release.sh <ver> --publish` from his laptop.
 
-- Rockit is not logged into npm by design.
+- The build host is not logged into npm by design.
 - A planned post-publish smoke job will add an automated round-trip check after each publish to ensure cross-package resolution works on the actually-published artifacts.
 
 ---

@@ -1,6 +1,6 @@
 # n8n Workflow Management
 
-Programmatic activation/deactivation of n8n workflows — the approach we use for ops automation on rockit.
+Programmatic activation/deactivation of n8n workflows — the approach we use for ops automation.
 
 ## The Problem
 

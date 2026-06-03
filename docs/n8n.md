@@ -12,7 +12,7 @@ Flair is the right pick when you want:
 |---|---|---|
 | **Shape** | Tagged + typed memories with semantic search, plus chat-buffer compatibility | Conversation-buffer only (LangChain `BaseMessage` records) |
 | **Cross-orchestrator** | Same memory readable from Claude Code, OpenClaw, n8n | n8n-internal schema; nothing else reads it |
-| **Cross-instance** | Hub-spoke federation built-in (rockit ↔ Fabric, etc.) | Single-instance unless you self-build replication |
+| **Cross-instance** | Hub-spoke federation built-in (local ↔ Fabric, etc.) | Single-instance unless you self-build replication |
 | **Identity** | Ed25519 per-agent (planned) or admin-token (v1) | n8n credential per workflow |
 
 If your AI Agent only needs to remember the last N turns of a single chat in a single n8n instance, Postgres-as-memory is fine. If you want the same memory to inform a Claude Code conversation tomorrow, or to persist across n8n redeploys via federated Flair, this package is the path.
