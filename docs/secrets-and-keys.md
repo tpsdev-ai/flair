@@ -138,7 +138,7 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 
 `~/.flair/keys/<agent>.key` is the only secret Flair generates. Treat it like an SSH private key:
 
-- **Stays on the host that owns the agent.** If your agent runs on rockit, the key lives on rockit. If you spin up the same agent on another machine, **don't copy the key** — register a new agent identity (`flair agent add <id>-on-<other-host>`) on that machine. Different identities, same Flair instance can store memories for both, you decide cross-agent visibility.
+- **Stays on the host that owns the agent.** If your agent runs on a given host, the key lives on that host. If you spin up the same agent on another machine, **don't copy the key** — register a new agent identity (`flair agent add <id>-on-<other-host>`) on that machine. Different identities, same Flair instance can store memories for both, you decide cross-agent visibility.
 - **`chmod 600` enforced** by `flair agent add`. Don't relax it.
 - **Don't check it into git.** `.gitignore` should already exclude `~/.flair/keys/`; if you're ever tempted to share keys for "convenience," rotate first (`flair agent rotate <id>`).
 - **Backup separately**, encrypted. The `flair backup` command excludes private keys by default. Roll your own backup of `~/.flair/keys/` via age-encrypted archive if you want offsite recovery.

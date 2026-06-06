@@ -315,7 +315,7 @@ On Harper (Fabric), the IdP configuration is stored alongside other Flair instan
 
 ### Local Development
 
-For local Flair instances (rockit), XAA is optional. If no IdP is configured, the `/oauth/token` endpoint only accepts `authorization_code` and `refresh_token` grants — the `jwt-bearer` grant type is disabled. This means local instances work exactly as FLAIR-PRINCIPALS § 2 describes, with no XAA overhead.
+For local Flair instances, XAA is optional. If no IdP is configured, the `/oauth/token` endpoint only accepts `authorization_code` and `refresh_token` grants — the `jwt-bearer` grant type is disabled. This means local instances work exactly as FLAIR-PRINCIPALS § 2 describes, with no XAA overhead.
 
 ### Testing
 

@@ -2,7 +2,7 @@
 # setup-vm.sh — Set up Flair + Claude Code MCP on a fresh exe.dev VM
 #
 # Usage: ./scripts/setup-vm.sh <vm-hostname>
-# Example: ./scripts/setup-vm.sh tps-claude.exe.xyz
+# Example: ./scripts/setup-vm.sh your-vm.example.com
 #
 # Prerequisites:
 #   - SSH access to the VM (configured in ~/.ssh/config)

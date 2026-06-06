@@ -6,7 +6,7 @@
  *
  * Config (env vars or constructor options):
  *   OBSERVATORY_URL        — e.g. https://tps-observatory.harperdbcloud.com
- *   OBSERVATORY_OFFICE_ID  — e.g. "rockit"
+ *   OBSERVATORY_OFFICE_ID  — e.g. "office1"
  *   OBSERVATORY_KEY_PATH   — path to Ed25519 private key (raw 32-byte seed)
  *   FLAIR_URL              — local Flair base URL (default http://127.0.0.1:9926)
  *   OBSERVATORY_INTERVAL_MS — sync interval (default 60000)
@@ -17,7 +17,7 @@
  *
  *   // Or import and start:
  *   import { ObservatorySync } from "./observatory-sync.js";
- *   const sync = new ObservatorySync({ officeId: "rockit", ... });
+ *   const sync = new ObservatorySync({ officeId: "office1", ... });
  *   await sync.start();
  */
 

@@ -24,7 +24,7 @@
 [0.5, "o", "\u001b[36mflint>\u001b[0m \u001b[2msummarize our recent infra decisions\u001b[0m\r\n"]
 [1.7, "o", "  \u001b[32m\u2713\u001b[0m bootstrap: same 287 memories, same soul, same Ed25519 identity\r\n"]
 [0.5, "o", "  \u2022 Postgres for replication-lag (2026-05-14)\r\n"]
-[0.0, "o", "  \u2022 Federation pair: rockit\u2192Fabric via Ed25519 (2026-05-05)\r\n"]
+[0.0, "o", "  \u2022 Federation pair: local\u2192Fabric via Ed25519 (2026-05-05)\r\n"]
 [0.0, "o", "  \u2022 REM nightly cycle ships in v0.9.0 (2026-05-14)\r\n\r\n"]
 [2.5, "o", "  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\r\n"]
 [0.0, "o", "  No SaaS in the middle.  No vendor lock.\r\n"]

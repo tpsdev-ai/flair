@@ -15,9 +15,9 @@ Flair runs Harper v5 (a Node.js HTTP+storage runtime) plus a small CLI/MCP layer
 
 | Host | RAM (RSS) | Data dir | Node | Uptime | Notes |
 |---|---|---|---|---|---|
-| rockit (Mac mini, 16 GB) | 740 MB daemon + ~175 MB across 4 flair-mcp clients = ~915 MB total | 163 MB | 25.9.0 | 35 min | Hub for rockit↔Fabric pair; local agent count: 4 (flint, kern, sherlock, ember). |
-| pulse (Linux VM, 19 GB pool) | 500 MB | 88 MB | 22.22.0 | 3d 20h | Spoke; 1 agent (pulse). |
-| tps-anvil (Linux VM, 19 GB pool) | (not running) | 71 MB | 22.22.1 | — | Linux deps issue, P1 backlog. |
+| Mac mini (16 GB) | 740 MB daemon + ~175 MB across 4 flair-mcp clients = ~915 MB total | 163 MB | 25.9.0 | 35 min | Federation hub; 4 local agents. |
+| Linux VM (19 GB pool) | 500 MB | 88 MB | 22.22.0 | 3d 20h | Federation spoke; 1 agent. |
+| Linux VM (19 GB pool) | (not running) | 71 MB | 22.22.1 | — | Linux deps issue (backlog). |
 
 ## What drives the numbers
 
@@ -33,7 +33,7 @@ The numbers above are 1-agent steady state. Per additional agent on the same dae
 - ~50 MB additional RSS (per-agent HNSW index + small per-agent caches).
 - ~10–30 MB additional data-dir growth per week of active use.
 
-A 4-agent rockit at full embeddings + federation runs comfortably in 1 GB. An 8-agent host is fine in 2 GB. Multi-org hubs with hundreds of agents would want measured sizing — file an issue or join the Discord.
+A 4-agent Mac mini at full embeddings + federation runs comfortably in 1 GB. An 8-agent host is fine in 2 GB. Multi-org hubs with hundreds of agents would want measured sizing — file an issue or join the Discord.
 
 ## Known constraints
 

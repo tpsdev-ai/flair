@@ -17,9 +17,9 @@ function makeTestKeyPair(): { privateKeyRaw: Buffer; publicKeyHex: string; sign:
       const nonce = Math.random().toString(36).slice(2, 10);
       const pkcs8h = Buffer.from("302e020100300506032b657004220420", "hex");
       const privKey = require("node:crypto").createPrivateKey({ key: Buffer.concat([pkcs8h, privRaw]), format: "der", type: "pkcs8" });
-      const payload = `rockit:${ts}:${nonce}:POST:${urlPath}`;
+      const payload = `office1:${ts}:${nonce}:POST:${urlPath}`;
       const sig = sign(null, Buffer.from(payload), privKey).toString("base64");
-      return `TPS-Ed25519 rockit:${ts}:${nonce}:${sig}`;
+      return `TPS-Ed25519 office1:${ts}:${nonce}:${sig}`;
     },
   };
 }
@@ -31,7 +31,7 @@ describe("IngestEvents auth logic", () => {
     const kp = makeTestKeyPair();
     const authHeader = kp.sign("/IngestEvents");
     // Quick parse test: header has TPS-Ed25519 prefix
-    expect(authHeader.startsWith("TPS-Ed25519 rockit:")).toBe(true);
+    expect(authHeader.startsWith("TPS-Ed25519 office1:")).toBe(true);
     const parts = authHeader.split(":"); 
     expect(parts.length).toBeGreaterThanOrEqual(4);
   });

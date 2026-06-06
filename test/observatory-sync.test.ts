@@ -64,7 +64,7 @@ describe("ObservatorySync", () => {
 
     const sync = new ObservatorySync({
       observatoryUrl: "http://observatory.test",
-      officeId: "rockit",
+      officeId: "office1",
       keyPath,
       flairUrl: "http://flair.test",
       cursorPath: join(tmpDir, "cursor.json"),
@@ -79,7 +79,7 @@ describe("ObservatorySync", () => {
     const ingestCall = fetchCalls.find((c) => c.url.includes("IngestEvents"));
     expect(ingestCall).toBeDefined();
     const payload = JSON.parse(String(ingestCall!.body));
-    expect(payload.officeId).toBe("rockit");
+    expect(payload.officeId).toBe("office1");
     expect(payload.events).toHaveLength(1);
     expect(payload.events[0].kind).toBe("task.completed");
   });
@@ -98,7 +98,7 @@ describe("ObservatorySync", () => {
     const cursorPath = join(tmpDir, "cursor.json");
     const sync = new ObservatorySync({
       observatoryUrl: "http://obs.test",
-      officeId: "rockit",
+      officeId: "office1",
       keyPath,
       cursorPath,
     });
@@ -118,7 +118,7 @@ describe("ObservatorySync", () => {
 
     const sync = new ObservatorySync({
       observatoryUrl: "http://obs.test",
-      officeId: "rockit",
+      officeId: "office1",
       keyPath,
       cursorPath: join(tmpDir, "cursor.json"),
     });
@@ -137,7 +137,7 @@ describe("ObservatorySync", () => {
 
     const sync = new ObservatorySync({
       observatoryUrl: "http://obs.test",
-      officeId: "rockit",
+      officeId: "office1",
       keyPath,
       cursorPath: join(tmpDir, "cursor.json"),
     });
@@ -157,7 +157,7 @@ describe("ObservatorySync", () => {
 
     const sync = new ObservatorySync({
       observatoryUrl: "http://obs.test",
-      officeId: "rockit",
+      officeId: "office1",
       keyPath,
       cursorPath: join(tmpDir, "cursor.json"),
     });

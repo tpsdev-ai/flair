@@ -17,7 +17,7 @@ Flair is the **identity + memory substrate for AI agents**. Cryptographic per-ag
 │  Codex CLI    ─┼─[ flair-mcp ]─┐                                 │
 │  Gemini CLI   ─┤               │                                 │
 │  Continue.dev ─┤               │   ┌──────────────────────┐      │
-│  Goose        ─┘               ├─▶ │  Flair (rockit)      │      │
+│  Goose        ─┘               ├─▶ │  Flair (self-hosted) │      │
 │  LangGraph   ─[ langgraph-flair ]──│  Ed25519 / HNSW /    │      │
 │  OpenClaw    ─[ openclaw-flair  ]──│  Soul + Memory       │      │
 │  n8n         ─[ n8n-nodes-flair ]──└──────────┬───────────┘      │
@@ -146,7 +146,7 @@ Not all memories are equal:
 Memories can be time-bounded with `validFrom` and `validTo` fields. Expired memories are excluded from search and bootstrap automatically — no manual cleanup.
 
 ### Relationship Graph
-Entity-to-entity triples with temporal bounds. Model structured knowledge — "Flint works-with Anvil since 2024-01-01" — queryable alongside semantic memory.
+Entity-to-entity triples with temporal bounds. Model structured knowledge — "Alice works-with Bob since 2024-01-01" — queryable alongside semantic memory.
 
 ### Real-Time Feeds
 Subscribe to memory or soul changes via WebSocket/SSE. Useful for dashboards, cross-agent sync, or audit trails.
@@ -392,7 +392,7 @@ Good for teams with multiple machines or always-on agents.
 
 ### Harper Fabric
 
-Deploy Flair on [Harper Fabric](https://www.harperdb.io/) for managed hosting with multi-region replication and failover. Federation is live against Harper Fabric hubs (e.g. `flair.heskew.harperfabric.com`) — pair your local instance to sync memories across nodes.
+Deploy Flair on [Harper Fabric](https://www.harperdb.io/) for managed hosting with multi-region replication and failover. Federation runs against Harper Fabric hubs (e.g. `flair.your-org.harperfabric.com`) — pair your local instance to sync memories across nodes.
 
 ## Security
 

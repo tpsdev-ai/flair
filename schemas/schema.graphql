@@ -2,7 +2,7 @@
 # ─── Observatory tables ───────────────────────────────────────────────────────
 
 type ObsOffice @table(database: "flair") @export {
-  id: ID @primaryKey        # e.g. "rockit"
+  id: ID @primaryKey        # e.g. "office1"
   name: String!
   publicKey: String!        # Ed25519 hex public key for auth verification
   status: String @indexed   # "online" | "offline" | "degraded"

@@ -151,7 +151,7 @@ server.http(async (request: any, nextLayer: any) => {
     // and inline JS, with no embedded data. The JS prompts for admin-pass and
     // auths every API call (/Agent, /SemanticSearch, /FederationPeers, etc).
     // Without this allow-list entry, the HTML is 401-blocked on hosted Flair
-    // instances (rockit-local works only because authorizeLocal=true).
+    // instances (a localhost caller works only because authorizeLocal=true).
     url.pathname === "/ObservationCenter"
   ) return nextLayer(request);
 

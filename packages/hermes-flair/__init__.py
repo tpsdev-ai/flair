@@ -8,7 +8,7 @@ and memories are isolated by that agentId end-to-end.
 Why Flair specifically:
   - Agent-authored memory (no LLM-driven extraction by default — the agent
     decides what's worth remembering).
-  - Self-hosted, no SaaS dependency. Runs on rockit, Mac Studio, a Pi.
+  - Self-hosted, no SaaS dependency. Runs on a Mac mini, Mac Studio, a Pi.
   - Ed25519 per-agent signing keys: cross-agent reads are refused by the
     server, not by client convention.
   - Same backend for memory + identity (soul + agent registry), so the
