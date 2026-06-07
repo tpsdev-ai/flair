@@ -3393,28 +3393,49 @@ federation
       const result = await res.json() as any;
       console.log(`✅ Paired with hub: ${result.instance?.id ?? hubUrl}`);
 
-      // Record the hub as our peer — locally or remotely depending on --target
-      const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-      if (adminPass) {
-        const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
-        const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
-        await fetch(`${opsEndpoint}/`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify({
-            operation: "upsert", database: "flair", table: "Peer",
-            records: [{
-              id: result.instance?.id ?? "hub",
-              publicKey: result.instance?.publicKey ?? "",
-              role: "hub", endpoint: hubUrl, status: "paired",
-              pairedAt: new Date().toISOString(),
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            }],
-          }),
-          signal: AbortSignal.timeout(10_000),
-        });
+      // Record the hub as our local peer. This is REQUIRED, not optional:
+      // `flair federation sync` reads the Peer table to find the hub, so
+      // without this record sync reports "No hub peer configured" and silently
+      // never runs. Previously this was gated on `if (adminPass)` and the write
+      // result was never checked — pairing with only an agent key (or a failed
+      // upsert) left no peer behind a misleadingly green "✅ Paired".
+      const adminPass = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+      if (!adminPass) {
+        console.error(
+          "Error: paired on the hub, but the local hub-peer record needs admin auth to write — " +
+          "pass --admin-pass, or set FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD, then re-run pair. " +
+          "Without it, 'flair federation sync' will report 'No hub peer configured'."
+        );
+        process.exit(1);
       }
+      const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+      const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
+      const peerRes = await fetch(`${opsEndpoint}/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: auth },
+        body: JSON.stringify({
+          operation: "upsert", database: "flair", table: "Peer",
+          records: [{
+            id: result.instance?.id ?? "hub",
+            publicKey: result.instance?.publicKey ?? "",
+            role: "hub", endpoint: hubUrl, status: "paired",
+            pairedAt: new Date().toISOString(),
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }],
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!peerRes.ok) {
+        const text = await peerRes.text().catch(() => "");
+        console.error(
+          `Error: paired with the hub but failed to write the local hub-peer record ` +
+          `(${peerRes.status} ${text.slice(0, 200)}). Ops endpoint: ${opsEndpoint}. ` +
+          `'flair federation sync' will not find the hub until this succeeds — check --admin-pass and the ops port.`
+        );
+        process.exit(1);
+      }
+      console.log(`✅ Recorded hub as local peer: ${result.instance?.id ?? "hub"} → ${hubUrl}`);
     } catch (err: any) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
@@ -3557,25 +3578,63 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
 
     // ── Batching constants ──────────────────────────────────────────────
     // 2MB JSON budget (server cap is 10MB; 2MB leaves headroom for headers
-    // and signature metadata) + 200 records max per batch.
+    // and signature metadata) + 50 records max per batch. The hub merge itself
+    // is fast (~1.7s/50 records, per its SyncLog), but the Fabric ingress was
+    // observed to intermittently stall on larger POSTs — a 50-record batch hung
+    // ~2 min while the same records split into 2×25 went through immediately.
+    // 50 keeps batches in the reliable range, and sendBatch's adaptive split
+    // recovers if a stretch still stalls.
     const BUDGET_BYTES = 2_000_000;
-    const BUDGET_RECORDS = 200;
+    const BUDGET_RECORDS = 50;
 
     // ── sendBatch helper ────────────────────────────────────────────────
     // Secret key is lazy-loaded: only needed when there are records to send.
     // Loading earlier would cause a spurious error when SQL queries fail
     // (e.g. 401) before we know we have records.
     let secretKey: Uint8Array | undefined;
+    // Statuses the Fabric ingress returns when a batch POST didn't complete in
+    // time (408) or was too large (413), plus the transient gateway 5xx family.
+    // Splitting the batch and retrying smaller chunks lets the sync converge
+    // instead of aborting the whole run.
+    const TIMEOUT_STATUSES = new Set([408, 413, 502, 503, 504]);
+    // Per-batch wall-clock cap. Without it a stalled connection to the Fabric
+    // ingress hangs the whole sync until the *gateway's* timeout fires (~2 min
+    // observed), which is what stranded the re-pair. A 45s cap is generous —
+    // a healthy 50-record batch merges in <2s — so a trip means a real stall,
+    // and we split-and-retry rather than wait it out.
+    const BATCH_TIMEOUT_MS = 45_000;
     async function sendBatch(batch: any[]): Promise<{ merged: number; skipped: number }> {
       if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
       const syncBody: Record<string, any> = { instanceId: instance.id, records: batch, lamportClock: Date.now() };
       const signedSyncBody = signBodyFresh(syncBody, secretKey);
-      const syncRes = await fetch(`${hubUrl}/FederationSync`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(signedSyncBody),
-      });
+
+      // Halve and retry down to a single record. Covers both an explicit
+      // timeout status AND a client-side abort (stalled socket). The hub
+      // merges idempotently (put-by-id), so retried records are safe.
+      const splittable = (status: number | null) =>
+        batch.length > 1 && (status === null || TIMEOUT_STATUSES.has(status));
+      const split = async () => {
+        const mid = Math.floor(batch.length / 2);
+        const left = await sendBatch(batch.slice(0, mid));
+        const right = await sendBatch(batch.slice(mid));
+        return { merged: left.merged + right.merged, skipped: left.skipped + right.skipped };
+      };
+
+      let syncRes: Response;
+      try {
+        syncRes = await fetch(`${hubUrl}/FederationSync`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(signedSyncBody),
+          signal: AbortSignal.timeout(BATCH_TIMEOUT_MS),
+        });
+      } catch (err: any) {
+        // Timeout/abort or network drop — no status. Split if we can.
+        if (splittable(null)) return await split();
+        throw new Error(`Sync batch (${batch.length} record${batch.length === 1 ? "" : "s"}) failed: ${err?.message ?? err}`);
+      }
       if (!syncRes.ok) {
+        if (splittable(syncRes.status)) return await split();
         const text = await syncRes.text().catch(() => "");
         throw new Error(`Sync batch failed: ${syncRes.status} ${text}`);
       }
