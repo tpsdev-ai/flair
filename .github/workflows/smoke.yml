@@ -39,7 +39,10 @@ jobs:
       - name: Pre-download embedding model
         run: |
           mkdir -p models
-          curl -fSL \
+          # HuggingFace intermittently 429s the model download; retry with
+          # backoff (--retry-all-errors so 429/4xx are retried, not just 5xx).
+          # A bare curl here flaked the whole job and blocked merges (#463, #465).
+          curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
             "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
             -o models/nomic-embed-text-v1.5.Q4_K_M.gguf
           echo "Model downloaded ($(du -sh models/*.gguf | cut -f1))"
