@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.1 (2026-06-07)
+
+> **Federation pairing + sync hardening.** A multi-host fleet bring-up — rockit, dtrt-pulse, and tps-anvil spokes onto a freshly recreated Fabric hub — surfaced two federation failure paths that stranded the re-pair. Both closed in #464, validated end-to-end (598 + 105 + 11 records replicated, incremental cursor sync confirmed).
+
+### 🐛 `federation pair` always writes the local hub-peer now — #464
+
+`flair federation pair` recorded the hub as a local `Peer` only inside an `if (adminPass)` branch and never checked the upsert result. Pairing with just an agent key — or a silently failed write — left no peer behind a misleadingly green `✅ Paired`, after which `flair federation sync` reported `No hub peer configured` and never ran. The local peer-write is now **mandatory and result-checked**: it errors clearly when admin auth is missing or the write fails, instead of skipping. Also accepts `HDB_ADMIN_PASSWORD` as an admin-pass source.
+
+### 🐛 Sync survives Fabric ingress stalls — #464
+
+Large sync batches could stall at the Fabric ingress with no client-side timeout, hanging the entire sync until the gateway's own ~2-minute timeout fired — the actual mechanism that stranded the re-pair. `runFederationSyncOnce` now applies a **45s per-batch fetch timeout** and **adaptively halves-and-retries** a batch on timeout / abort / 413 / 5xx down to a single record, so one slow stretch no longer aborts the run. Default batch lowered 200 → 50 (the hub merge runs ~1.7s/50 records; the ingress was observed to stall on larger POSTs). Idempotent on the hub (put-by-id), so retries are safe.
+
 ## 0.10.0 (2026-05-28)
 
 > **Dogfood-mature hardening.** This release is the result of a multi-day pass through Flair's load-bearing surfaces — federation sync, REM restore, A2A interop, memory_store — looking for silent-failure paths that pass tests but fail in production. Seven were found and closed: a P0 security gap on `/a2a`, a 6-month-old silent data-loss bug in `memory_store`, and five telemetry/observability holes that would have shown "healthy" while data was being dropped. Plus the v0.9.x patch stream (renderer + CLI polish, federation re-upsert fix, smoke tests, README correctness).
