@@ -2,7 +2,7 @@
 
 ## 0.10.1 (2026-06-07)
 
-> **Federation pairing + sync hardening.** A multi-host fleet bring-up — rockit, dtrt-pulse, and tps-anvil spokes onto a freshly recreated Fabric hub — surfaced two federation failure paths that stranded the re-pair. Both closed in #464, validated end-to-end (598 + 105 + 11 records replicated, incremental cursor sync confirmed).
+> **Federation pairing + sync hardening.** A multi-host fleet bring-up — three office spokes (one local, two cloud VMs) onto a freshly recreated Fabric hub — surfaced two federation failure paths that stranded the re-pair. Both closed in #464, validated end-to-end (598 + 105 + 11 records replicated, incremental cursor sync confirmed).
 
 ### 🐛 `federation pair` always writes the local hub-peer now — #464
 
