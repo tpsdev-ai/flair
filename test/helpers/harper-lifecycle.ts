@@ -27,12 +27,30 @@ export interface HarperInstance {
   external: boolean;
 }
 
-async function waitForHealth(httpURL: string, timeoutMs = 60_000): Promise<void> {
+interface HarperExit { code: number | null; signal: NodeJS.Signals | null }
+
+async function waitForHealth(
+  httpURL: string,
+  timeoutMs = 60_000,
+  // Optional probes into the spawned process. When Harper dies mid-startup we
+  // want to fail fast and loud with its log, instead of blindly polling a dead
+  // port for the full timeout (the failure mode that produced cryptic
+  // "did not respond within 60000ms" errors with zero Harper output).
+  getExited?: () => HarperExit | null,
+  getLog?: () => string,
+): Promise<void> {
   const url = `${httpURL}/health`;
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
   console.log(`[harper-lifecycle] waitForHealth: polling ${url} (timeout ${timeoutMs}ms)`);
   while (Date.now() < deadline) {
+    const exit = getExited?.();
+    if (exit) {
+      throw new Error(
+        `Harper exited (code=${exit.code} signal=${exit.signal}) while waiting for ${url} ` +
+        `to become healthy. Harper log:\n${getLog?.() ?? "(not captured)"}`,
+      );
+    }
     attempt++;
     const elapsed = Date.now() - (deadline - timeoutMs);
     try {
@@ -48,7 +66,12 @@ async function waitForHealth(httpURL: string, timeoutMs = 60_000): Promise<void>
     }
     await new Promise(r => setTimeout(r, 500));
   }
-  throw new Error(`Harper at ${httpURL} did not respond within ${timeoutMs}ms (${attempt} attempts)`);
+  const exit = getExited?.();
+  throw new Error(
+    `Harper at ${httpURL} did not respond within ${timeoutMs}ms (${attempt} attempts). ` +
+    `Process ${exit ? `exited (code=${exit.code} signal=${exit.signal})` : "still alive"}. ` +
+    `Harper log:\n${getLog?.() ?? "(not captured)"}`,
+  );
 }
 
 export async function startHarper(): Promise<HarperInstance> {
@@ -98,27 +121,46 @@ export async function startHarper(): Promise<HarperInstance> {
 
   const proc = spawn(NODE_BIN, [HARPER_BIN, "dev", "."], { cwd: process.cwd(), env });
 
+  // Capture Harper's output for the WHOLE lifetime of the process — not just
+  // until the startup banner — so a crash that happens after "listening on"
+  // (e.g. an intermittent llama.cpp model-load assert/OOM) stays visible.
+  // Likewise record the exit, so health-polling below can fail fast with the
+  // log instead of hammering a dead port for the full 60s with no explanation.
   let log = "";
+  let exited: HarperExit | null = null;
+  proc.stdout?.on("data", (d: Buffer) => { log += d.toString(); });
+  proc.stderr?.on("data", (d: Buffer) => { log += d.toString(); });
+  proc.on("exit", (code, signal) => { exited = { code, signal }; });
+
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       proc.kill();
-      reject(new Error(`Harper startup timed out. Log:\n${log}`));
+      reject(new Error(`Harper startup timed out after ${STARTUP_TIMEOUT_MS}ms. Log:\n${log}`));
     }, STARTUP_TIMEOUT_MS);
 
-    const onData = (data: Buffer) => {
-      log += data.toString();
+    const onBanner = () => {
       if (log.includes("successfully started") || log.includes("listening on")) {
         clearTimeout(timer);
+        cleanup();
         resolve();
       }
     };
-    proc.stdout?.on("data", onData);
-    proc.stderr?.on("data", onData);
-    proc.on("error", (err) => { clearTimeout(timer); reject(err); });
-    proc.on("exit", (code) => {
+    const onError = (err: Error) => { clearTimeout(timer); cleanup(); reject(err); };
+    const onExit = () => {
       clearTimeout(timer);
-      if (code !== 0) reject(new Error(`Harper exited ${code}. Log:\n${log}`));
-    });
+      cleanup();
+      reject(new Error(`Harper exited during startup (code=${exited?.code} signal=${exited?.signal}). Log:\n${log}`));
+    };
+    const cleanup = () => {
+      proc.stdout?.off("data", onBanner);
+      proc.stderr?.off("data", onBanner);
+      proc.off("error", onError);
+      proc.off("exit", onExit);
+    };
+    proc.stdout?.on("data", onBanner);
+    proc.stderr?.on("data", onBanner);
+    proc.on("error", onError);
+    proc.on("exit", onExit);
   });
 
   const httpURL = `http://127.0.0.1:${httpPort}`;
@@ -127,7 +169,10 @@ export async function startHarper(): Promise<HarperInstance> {
   // startup; callers hit opsURL immediately (admin seed), so returning as soon
   // as httpURL answers was racy — agent-journey intermittently ECONNREFUSED on
   // opsURL even though httpURL was already serving 404s.
-  await Promise.all([waitForHealth(httpURL), waitForHealth(opsURL)]);
+  await Promise.all([
+    waitForHealth(httpURL, 60_000, () => exited, () => log),
+    waitForHealth(opsURL, 60_000, () => exited, () => log),
+  ]);
 
   return { httpURL, opsURL, installDir, process: proc, admin: { username: "admin", password: "test123" }, external: false };
 }
