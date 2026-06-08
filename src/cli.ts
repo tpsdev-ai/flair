@@ -3644,24 +3644,34 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     let totalBatches = 0;
 
     for (const table of tables) {
-      let res: Response;
-      try {
-        res = await fetch(`${opsEndpoint}/`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [{ search_attribute: "updatedAt", search_type: "greater_than", search_value: since }], get_attributes: ["*"] }),
-          signal: AbortSignal.timeout(15_000),
-        });
-      } catch (err: any) {
-        return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
+      let rows: any[] = [];
+      for (const query of [
+        { search_attribute: "updatedAt", search_type: "greater_than", search_value: since },
+        // Rows with null updatedAt (legacy direct-insert rows) use createdAt.
+        // COALESCE(updatedAt, createdAt) > since → pick up null-updatedAt rows
+        // whose createdAt > since. Filtered in JS below.
+        { search_attribute: "updatedAt", search_type: "equals", search_value: null },
+      ]) {
+        let res: Response;
+        try {
+          res = await fetch(`${opsEndpoint}/`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: auth },
+            body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions: [query], get_attributes: ["*"] }),
+            signal: AbortSignal.timeout(15_000),
+          });
+        } catch (err: any) {
+          return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
+        }
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          return { pushed: totalMerged, skipped: totalSkipped, error: new Error(`SQL query failed (${res.status}): ${text}`) };
+        }
+        const batch = await res.json() as any[];
+        // For null-updatedAt rows, use createdAt as the effective timestamp.
+        // Skip rows created before the last sync cursor.
+        rows = rows.concat(batch.filter((r: any) => r.updatedAt !== null || r.createdAt > since));
       }
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        return { pushed: totalMerged, skipped: totalSkipped, error: new Error(`SQL query failed (${res.status}): ${text}`) };
-      }
-
-      // Stream-collect records into batches
-      const rows = await res.json() as any[];
       if (rows.length === 0) continue;
 
       let batch: any[] = [];
