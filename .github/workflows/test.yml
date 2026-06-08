@@ -109,9 +109,14 @@ jobs:
         # integration_repeats (workflow_dispatch input, default 1) runs the
         # suite N times in one job to reproduce the intermittent native-spawn
         # flake (ops-wumd) under #467's diagnostics. Normal push/PR runs use 1,
-        # so this is a no-op for them.
+        # so this is a no-op for them. The input is passed via env (not
+        # interpolated into the script body) and validated numeric, to avoid
+        # ${{ ... }} shell-injection.
+        env:
+          INTEGRATION_REPEATS: ${{ github.event.inputs.integration_repeats || '1' }}
         run: |
-          repeats="${{ github.event.inputs.integration_repeats || '1' }}"
+          repeats="${INTEGRATION_REPEATS}"
+          case "$repeats" in ''|*[!0-9]*) repeats=1 ;; esac
           echo "Running integration suite ${repeats}x"
           for i in $(seq 1 "${repeats}"); do
             echo "::group::integration attempt ${i}/${repeats}"
