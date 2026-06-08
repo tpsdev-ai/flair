@@ -60,7 +60,7 @@ jobs:
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45 # THROWAWAY repro: 8x integration runs (do not merge)
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -115,14 +115,21 @@ jobs:
         env:
           INTEGRATION_REPEATS: ${{ github.event.inputs.integration_repeats || '1' }}
         run: |
-          repeats="${INTEGRATION_REPEATS}"
-          case "$repeats" in ''|*[!0-9]*) repeats=1 ;; esac
-          echo "Running integration suite ${repeats}x"
-          for i in $(seq 1 "${repeats}"); do
-            echo "::group::integration attempt ${i}/${repeats}"
-            bun test test/integration/
+          # THROWAWAY repro branch (ops-wumd): run the suite 8x to surface the
+          # intermittent native-spawn flake under #467 diagnostics. DO NOT MERGE.
+          fails=0
+          for i in $(seq 1 8); do
+            echo "::group::integration attempt ${i}/8"
+            if bun test test/integration/; then
+              echo "attempt ${i}: PASS"
+            else
+              echo "attempt ${i}: FAIL"
+              fails=$((fails + 1))
+            fi
             echo "::endgroup::"
           done
+          echo "REPRO SUMMARY: ${fails}/8 attempts failed"
+          [ "${fails}" -gt 0 ] && exit 1 || exit 0
       - name: Start Harper with Flair component (for E2E / Playwright)
         run: |
           docker run -d \
