@@ -151,8 +151,12 @@ server.http(async (request: any, nextLayer: any) => {
     // and inline JS, with no embedded data. The JS prompts for admin-pass and
     // auths every API call (/Agent, /SemanticSearch, /FederationPeers, etc).
     // Without this allow-list entry, the HTML is 401-blocked on hosted Flair
-    // instances (a localhost caller works only because authorizeLocal=true).
-    url.pathname === "/ObservationCenter"
+    // instances (rockit-local works only because authorizeLocal=true).
+    url.pathname === "/ObservationCenter" ||
+    // Presence roster is public-safe (field-allowlisted); GET serves the
+    // Office Space renderer without auth. POST handles Ed25519 auth internally
+    // (allowCreate=true on the Resource).
+    url.pathname === "/Presence"
   ) return nextLayer(request);
 
   // If Harper has already authorized this request (e.g. authorizeLocal=true on localhost),

@@ -1,4 +1,13 @@
 
+# ─── Presence table ───────────────────────────────────────────────────────────
+
+type Presence @table(database: "flair") @export {
+  agentId: ID @primaryKey
+  lastHeartbeatAt: BigInt        # unix ms timestamp
+  currentTask: String            # short human string, e.g. "Reviewing flair#467"
+  activity: String @indexed      # "coding" | "reviewing" | "planning" | "idle"
+}
+
 # ─── Observatory tables ───────────────────────────────────────────────────────
 
 type ObsOffice @table(database: "flair") @export {
