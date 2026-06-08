@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      integration_repeats:
+        description: "Run the integration suite N times in one job (native-spawn flake repro, ops-wumd). Default 1."
+        required: false
+        default: "1"
 
 jobs:
   test-unit:
@@ -99,7 +105,24 @@ jobs:
         # No HARPER_HTTP_URL — harper-lifecycle spawns Harper from node_modules
         # per the npm-installed @harperfast/harper@5.0.1. Avoids the Docker
         # runtime environment that triggers HarperFast/harper#386.
-        run: bun test test/integration/
+        #
+        # integration_repeats (workflow_dispatch input, default 1) runs the
+        # suite N times in one job to reproduce the intermittent native-spawn
+        # flake (ops-wumd) under #467's diagnostics. Normal push/PR runs use 1,
+        # so this is a no-op for them. The input is passed via env (not
+        # interpolated into the script body) and validated numeric, to avoid
+        # ${{ ... }} shell-injection.
+        env:
+          INTEGRATION_REPEATS: ${{ github.event.inputs.integration_repeats || '1' }}
+        run: |
+          repeats="${INTEGRATION_REPEATS}"
+          case "$repeats" in ''|*[!0-9]*) repeats=1 ;; esac
+          echo "Running integration suite ${repeats}x"
+          for i in $(seq 1 "${repeats}"); do
+            echo "::group::integration attempt ${i}/${repeats}"
+            bun test test/integration/
+            echo "::endgroup::"
+          done
       - name: Start Harper with Flair component (for E2E / Playwright)
         run: |
           docker run -d \
