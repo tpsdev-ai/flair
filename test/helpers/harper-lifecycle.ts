@@ -96,8 +96,15 @@ export async function startHarper(): Promise<HarperInstance> {
   const httpPort = getRandomPort();
   const opsPort = httpPort + 1;
 
+  // Deny-list: strip CI secrets from the inherited env so Harper's child
+  // process (and any log dump on failure) doesn't leak them onto a public
+  // CI runner (Sherlock review on #467).
+  const parentEnv = { ...process.env as Record<string, string> };
+  delete parentEnv.GITHUB_TOKEN;
+  delete parentEnv.NPM_TOKEN;
+
   const env: Record<string, string> = {
-    ...process.env as Record<string, string>,
+    ...parentEnv,
     ROOTPATH: installDir,
     HOME: installDir,               // isolate from system Harper install (~/.harperdb)
     DEFAULTS_MODE: "dev",
@@ -185,6 +192,9 @@ export async function stopHarper(inst: HarperInstance): Promise<void> {
     inst.process?.on("exit", r);
     setTimeout(() => { try { inst.process?.kill("SIGKILL"); } catch {} r(); }, 3000);
   });
+  // Drain persistent listeners added in #467 (stdout/stderr/exit capture) so
+  // the emitter doesn't linger and keep the ChildProcess ref alive.
+  inst.process?.removeAllListeners();
   if (inst.installDir) {
     await rm(inst.installDir, { recursive: true, force: true, maxRetries: 4 });
   }
