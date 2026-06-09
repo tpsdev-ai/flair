@@ -3733,6 +3733,30 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     }
 
     if (totalBatches === 0) {
+      // ops-c7t9: no-change syncs must still ping the hub so it updates the
+      // spoke's lastSyncAt (liveness). Without this, idle-but-alive spokes
+      // look indistinguishable from dead ones on the hub dashboard.
+      try {
+        if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
+        const pingBody = signBodyFresh({
+          instanceId: instance.id,
+          records: [],
+          lamportClock: Date.now(),
+        }, secretKey);
+        const pingRes = await fetch(`${hubUrl}/FederationSync`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(pingBody),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!pingRes.ok) {
+          const txt = await pingRes.text().catch(() => "");
+          console.warn(`⚠️  Liveness ping to hub failed (${pingRes.status}): ${txt.slice(0, 200)}. Hub won't update spoke liveness.`);
+        }
+      } catch (pingErr: any) {
+        console.warn(`⚠️  Liveness ping error: ${pingErr?.message ?? pingErr}. Hub won't update spoke liveness.`);
+      }
+
       console.log("No changes since last sync.");
       return { pushed: 0, skipped: 0 };
     }
