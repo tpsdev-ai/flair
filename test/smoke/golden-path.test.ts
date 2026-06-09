@@ -71,6 +71,12 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
     console.log(`  ✓ Created agent ${agentId} (${elapsed}ms)`);
   });
 
+  // Embedding-backed steps (write / search / bootstrap) run the embedding model,
+  // which takes ~3s locally and more on a cold CI runner. The default 5s test
+  // timeout is too tight and flakes intermittently; give these steps headroom.
+  // A genuine hang still fails at 30s.
+  const EMBED_TIMEOUT_MS = 30_000;
+
   test("Step 2: Write memory", async () => {
     expect(agentId).toBeTruthy();
     const t0 = performance.now();
@@ -84,7 +90,7 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
 
     const elapsed = (performance.now() - t0).toFixed(1);
     console.log(`  ✓ Wrote memory ${markerId} (${elapsed}ms)`);
-  });
+  }, EMBED_TIMEOUT_MS);
 
   test("Step 3: Search memory (semantic)", async () => {
     expect(agentId).toBeTruthy();
@@ -113,7 +119,7 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
 
     const elapsed = (performance.now() - t0).toFixed(1);
     console.log(`  ✓ Search returned ${results.length} result(s) (${elapsed}ms)`);
-  });
+  }, EMBED_TIMEOUT_MS);
 
   test("Step 4: Bootstrap context", async () => {
     expect(agentId).toBeTruthy();
@@ -141,7 +147,7 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
 
     const elapsed = (performance.now() - t0).toFixed(1);
     console.log(`  ✓ Bootstrap returned context (${elapsed}ms)`);
-  });
+  }, EMBED_TIMEOUT_MS);
 
   test("Step 5: Cleanup (agent + memories deleted)", async () => {
     expect(agentId).toBeTruthy();
