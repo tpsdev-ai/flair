@@ -10,6 +10,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import nacl from "tweetnacl";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -117,6 +118,9 @@ export async function createAgent(
   authHeader: string,
 ): Promise<string> {
   const id = `smoke-${Date.now()}-${randomBytes(4).toString("hex")}`;
+  // Generate a test Ed25519 keypair (matches real agent registration)
+  const kp = nacl.sign.keyPair();
+  const publicKey = Buffer.from(kp.publicKey).toString("base64url");
 
   const res = await fetch(`${baseUrl}/Agent/${encodeURIComponent(id)}`, {
     method: "PUT",
@@ -128,6 +132,8 @@ export async function createAgent(
       id,
       name: `Smoke Test ${id.slice(-8)}`,
       kind: "agent",
+      publicKey,
+      createdAt: new Date().toISOString(),
     }),
     signal: AbortSignal.timeout(10_000),
   });
