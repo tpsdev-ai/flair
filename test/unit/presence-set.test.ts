@@ -4,8 +4,8 @@
  * Uses mock HTTP servers. No real Harper instance required.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { spawn } from "node:child_process";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "bun:test";
+import { spawn, execSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -80,6 +80,11 @@ function runCli(args: string[], env: Record<string, string> = {}): Promise<{ std
 describe("flair presence set", () => {
   let tmpDir: string;
   let keysDir: string;
+
+  beforeAll(() => {
+    // Ensure dist/cli.js is built. Owns its dependency so this works in any CI job.
+    execSync("bun run build:cli", { stdio: "ignore" });
+  });
 
   beforeEach(() => {
     tmpDir = makeTmpDir();
