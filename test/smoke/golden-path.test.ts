@@ -63,7 +63,7 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
   test("Step 1: Create agent", async () => {
     const t0 = performance.now();
 
-    agentId = await createAgent(flair.baseUrl, flair.authHeader);
+    agentId = await createAgent(flair.opsUrl, flair.authHeader);
     expect(agentId).toBeTruthy();
     expect(agentId.startsWith("smoke-")).toBe(true);
 
@@ -77,7 +77,7 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
 
     markerId = await writeMemory(flair.baseUrl, agentId, MARKER_CONTENT, {
       tags: ["smoke-test"],
-    });
+    }, flair.authHeader);
 
     expect(markerId).toBeTruthy();
     expect(markerId.startsWith(agentId)).toBe(true);
@@ -90,7 +90,7 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
     expect(agentId).toBeTruthy();
     const t0 = performance.now();
 
-    const result = await searchMemories(flair.baseUrl, agentId, "smoke test marker", 5);
+    const result = await searchMemories(flair.baseUrl, agentId, "smoke test marker", 5, flair.authHeader);
 
     // The search response should have results
     assertShape(result, { results: null }, "searchResult");
@@ -119,7 +119,7 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
     expect(agentId).toBeTruthy();
     const t0 = performance.now();
 
-    const result = await bootstrapAgent(flair.baseUrl, agentId, 4000);
+    const result = await bootstrapAgent(flair.baseUrl, agentId, 4000, flair.authHeader);
 
     // Bootstrap returns context, tokenEstimate, memoriesIncluded
     assertShape(result, {
