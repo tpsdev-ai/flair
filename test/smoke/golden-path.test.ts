@@ -63,7 +63,7 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
   test("Step 1: Create agent", async () => {
     const t0 = performance.now();
 
-    agentId = await createAgent(flair.baseUrl, flair.authHeader);
+    agentId = await createAgent(flair.opsUrl, flair.authHeader);
     expect(agentId).toBeTruthy();
     expect(agentId.startsWith("smoke-")).toBe(true);
 
@@ -71,26 +71,32 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
     console.log(`  ✓ Created agent ${agentId} (${elapsed}ms)`);
   });
 
+  // Embedding-backed steps (write / search / bootstrap) run the embedding model,
+  // which takes ~3s locally and more on a cold CI runner. The default 5s test
+  // timeout is too tight and flakes intermittently; give these steps headroom.
+  // A genuine hang still fails at 30s.
+  const EMBED_TIMEOUT_MS = 30_000;
+
   test("Step 2: Write memory", async () => {
     expect(agentId).toBeTruthy();
     const t0 = performance.now();
 
     markerId = await writeMemory(flair.baseUrl, agentId, MARKER_CONTENT, {
       tags: ["smoke-test"],
-    });
+    }, flair.authHeader);
 
     expect(markerId).toBeTruthy();
     expect(markerId.startsWith(agentId)).toBe(true);
 
     const elapsed = (performance.now() - t0).toFixed(1);
     console.log(`  ✓ Wrote memory ${markerId} (${elapsed}ms)`);
-  });
+  }, EMBED_TIMEOUT_MS);
 
   test("Step 3: Search memory (semantic)", async () => {
     expect(agentId).toBeTruthy();
     const t0 = performance.now();
 
-    const result = await searchMemories(flair.baseUrl, agentId, "smoke test marker", 5);
+    const result = await searchMemories(flair.baseUrl, agentId, "smoke test marker", 5, flair.authHeader);
 
     // The search response should have results
     assertShape(result, { results: null }, "searchResult");
@@ -113,13 +119,13 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
 
     const elapsed = (performance.now() - t0).toFixed(1);
     console.log(`  ✓ Search returned ${results.length} result(s) (${elapsed}ms)`);
-  });
+  }, EMBED_TIMEOUT_MS);
 
   test("Step 4: Bootstrap context", async () => {
     expect(agentId).toBeTruthy();
     const t0 = performance.now();
 
-    const result = await bootstrapAgent(flair.baseUrl, agentId, 4000);
+    const result = await bootstrapAgent(flair.baseUrl, agentId, 4000, flair.authHeader);
 
     // Bootstrap returns context, tokenEstimate, memoriesIncluded
     assertShape(result, {
@@ -141,7 +147,7 @@ describe("Golden path: agent + memory + search + bootstrap", () => {
 
     const elapsed = (performance.now() - t0).toFixed(1);
     console.log(`  ✓ Bootstrap returned context (${elapsed}ms)`);
-  });
+  }, EMBED_TIMEOUT_MS);
 
   test("Step 5: Cleanup (agent + memories deleted)", async () => {
     expect(agentId).toBeTruthy();

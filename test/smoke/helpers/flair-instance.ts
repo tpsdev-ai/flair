@@ -10,6 +10,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import nacl from "tweetnacl";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -109,32 +110,58 @@ function httpPortFrom(baseUrl: string): number {
 }
 
 /**
- * Create an agent via the Flair REST API (which triggers key generation etc).
+ * Create an agent via the Harper operations API insert.
  * Returns the agent ID.
  */
 export async function createAgent(
-  baseUrl: string,
+  opsUrl: string,
   authHeader: string,
 ): Promise<string> {
   const id = `smoke-${Date.now()}-${randomBytes(4).toString("hex")}`;
+  // Generate a test Ed25519 keypair (matches real agent registration)
+  const kp = nacl.sign.keyPair();
+  const publicKey = Buffer.from(kp.publicKey).toString("base64url");
 
-  const res = await fetch(`${baseUrl}/Agent/${encodeURIComponent(id)}`, {
-    method: "PUT",
+  const body = JSON.stringify({
+    operation: "insert",
+    database: "flair",
+    table: "Agent",
+    records: [{
+      id,
+      name: `Smoke Test ${id.slice(-8)}`,
+      kind: "agent",
+      publicKey,
+      createdAt: new Date().toISOString(),
+    }],
+  });
+
+  // Try with auth first; if 401 (e.g. authorizeLocal=true with wrong password), retry without auth
+  let res = await fetch(opsUrl, {
+    method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: authHeader,
     },
-    body: JSON.stringify({
-      id,
-      name: `Smoke Test ${id.slice(-8)}`,
-      kind: "agent",
-    }),
+    body,
     signal: AbortSignal.timeout(10_000),
   });
+
+  if (res.status === 401) {
+    res = await fetch(opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal: AbortSignal.timeout(10_000),
+    });
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`createAgent ${id}: HTTP ${res.status} ${text}`);
+  }
+  const text = await res.text();
+  if (!text.includes("inserted")) {
+    throw new Error(`createAgent ${id}: unexpected response: ${text}`);
   }
 
   return id;
@@ -148,6 +175,7 @@ export async function writeMemory(
   agentId: string,
   content: string,
   opts?: { tags?: string[]; durability?: string },
+  authHeader?: string,
 ): Promise<string> {
   const memId = `${agentId}-${Date.now()}-${randomBytes(4).toString("hex")}`;
 
@@ -164,7 +192,7 @@ export async function writeMemory(
 
   const res = await fetch(`${baseUrl}/Memory/${encodeURIComponent(memId)}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(authHeader ? { Authorization: authHeader } : {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
@@ -188,10 +216,11 @@ export async function searchMemories(
   agentId: string,
   query: string,
   limit = 5,
+  authHeader?: string,
 ): Promise<any> {
   const res = await fetch(`${baseUrl}/SemanticSearch`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(authHeader ? { Authorization: authHeader } : {}) },
     body: JSON.stringify({ agentId, q: query, limit }),
     signal: AbortSignal.timeout(15_000),
   });
@@ -211,10 +240,11 @@ export async function bootstrapAgent(
   baseUrl: string,
   agentId: string,
   maxTokens = 4000,
+  authHeader?: string,
 ): Promise<any> {
   const res = await fetch(`${baseUrl}/BootstrapMemories`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(authHeader ? { Authorization: authHeader } : {}) },
     body: JSON.stringify({ agentId, maxTokens }),
     signal: AbortSignal.timeout(15_000),
   });
@@ -232,12 +262,22 @@ export async function bootstrapAgent(
 // ---------------------------------------------------------------------------
 
 async function opsPost(opsUrl: string, authHeader: string, body: unknown): Promise<any> {
-  const res = await fetch(opsUrl, {
+  const jsonBody = JSON.stringify(body);
+  // Try with auth first; if 401 (authorizeLocal=true), retry without auth
+  let res = await fetch(opsUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify(body),
+    body: jsonBody,
     signal: AbortSignal.timeout(10_000),
   });
+  if (res.status === 401) {
+    res = await fetch(opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: jsonBody,
+      signal: AbortSignal.timeout(10_000),
+    });
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`opsPost: HTTP ${res.status} ${text}`);
