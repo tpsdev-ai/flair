@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.tpsdev.presence-AGENTS</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>FLAIR_DIR/scripts/presence-emitter.sh</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>45</integer>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>LOG_DIR/presence-emitter-AGENTS.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>LOG_DIR/presence-emitter-AGENTS.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/Users/AGENTS/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>/Users/AGENTS</string>
+    <key>FLAIR_AGENT_ID</key>
+    <string>AGENTS</string>
+    <key>FLAIR_REPOS</key>
+    <string>tpsdev-ai/flair,tpsdev-ai/cli</string>
+  </dict>
+</dict>
+</plist>
