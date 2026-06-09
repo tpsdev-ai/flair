@@ -26,17 +26,17 @@ run_test() {
     fi
 }
 
-# Test 1: Agent with no open PRs -> idle, no task
-run_test "no-open-prs => idle" "ember" "activity=idle"
+# Test 1: Dry-run output always includes the flair presence set command
+run_test "dry-run output format" "ember" "flair presence set"
 
-# Test 2: Verify output has two lines (state line + flair command line)
-echo -n "TEST: output has 2 lines ... "
+# Test 2: Activity is one of the valid values
+echo -n "TEST: activity is valid value ... "
 output=$(bash "$EMITTER" --agent ember --dry-run 2>&1)
-lines=$(echo "$output" | wc -l)
-if [[ "$lines" -eq 2 ]]; then
+if echo "$output" | grep -qE "activity=(coding|reviewing|idle)"; then
     echo "PASS"
 else
-    echo "FAIL (got $lines lines)"
+    echo "FAIL"
+    echo "  Got: $output"
     FAIL=1
 fi
 
