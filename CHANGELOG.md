@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.11.0 (2026-06-09)
+
+> **Presence & Heartbeat API — the live agent-activity layer.** Agents report liveness and current task via Ed25519-signed heartbeats; a field-allowlisted public read surface exposes derived status (active / idle / offline) without leaking private data. Built as the backend for The Office Space — a live visualization of the agent fleet — and a concrete instance of zero-trust agent identity: an agent can only write its own presence. Ships alongside federation and Harper-lifecycle hardening.
+
+### ✨ Presence / Heartbeat API — #471, #473, #475
+
+Per-agent presence with **Ed25519-authenticated writes** (an agent can only update its own record; forged writes are rejected), a **public read surface restricted to a field allowlist** (no secrets, no admin fields), and configurable active/idle/offline derivation from heartbeat recency. Adds the `flair presence set` CLI subcommand (#473) and a per-agent presence emitter that infers current task from observable signals (#475).
+
+### 🐛 Federation syncs legacy null-`updatedAt` rows — #470
+
+Rows written before `updatedAt` tracking existed were silently skipped by incremental federation sync. Sync now orders by `COALESCE(updatedAt, createdAt)`, so legacy records replicate instead of being stranded.
+
+### 🐛 Liveness ping on no-change federation syncs — #472
+
+A sync that found no changes left host/office liveness stale. It now emits a liveness ping even on no-op syncs, so the fleet view can tell alive-but-idle hosts from dead ones.
+
+### 🔒 Harper-lifecycle env allowlist + listener cleanup — #474
+
+The Harper child process now inherits an explicit environment allowlist instead of the full parent environment, and lifecycle event listeners are detached on teardown to prevent leaks across restarts.
+
+### 🧹 Internal
+
+Test-helper and CI hardening: Golden Path smoke now creates agents via the ops-API insert path that real registration uses (#476, #479), and the implementation-term doc lint no longer false-matches CLI flags (#478).
+
 ## 0.10.1 (2026-06-07)
 
 > **Federation pairing + sync hardening.** A multi-host fleet bring-up — three office spokes (one local, two cloud VMs) onto a freshly recreated Fabric hub — surfaced two federation failure paths that stranded the re-pair. Both closed in #464, validated end-to-end (598 + 105 + 11 records replicated, incremental cursor sync confirmed).
