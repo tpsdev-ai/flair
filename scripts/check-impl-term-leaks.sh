@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Define the patterns to search for
-# Bead IDs: ops-[a-z0-9]{4,}
+# Define the patterns to search for. Each uses a leading (^|[^-a-z0-9]) token guard so
+# the term only matches as a standalone token, never glued to a preceding word/hyphen.
+# This prevents false positives on legitimate CLI flags (e.g. --ops-target) and
+# compounds (e.g. devops-pipeline, blogpost-2.0).
+# Bead IDs:            ops-[a-z0-9]{4,}
 # Implementation labels: post-#.# or pre-#.# (where # is digit)
-PATTERNS='ops-[a-z0-9]{4,}|\\bpost-[0-9]+\\.[0-9]+\\b|\\bpre-[0-9]+\\.[0-9]+\\b'
+# NB: portable ERE only — earlier \b word-boundary anchors were double-escaped inside
+#     the single-quoted string (\\b -> literal "\b"), so post-/pre- detection was dead.
+PATTERNS='(^|[^-a-z0-9])ops-[a-z0-9]{4,}|(^|[^-a-z0-9])(post|pre)-[0-9]+\.[0-9]+'
 
 # Temporary file for list of files
 TMPFILE=$(mktemp)
