@@ -85,15 +85,27 @@ Full contract in [docs/bridges.md](docs/bridges.md) and the spec at [specs/FLAIR
 
 ## Releases
 
-Releases are two-phase and driven by `scripts/release.sh`:
+Releases are two-phase. **Phase 1** opens the version-bump PR; **phase 2** stages every
+package to npm from CI — no local npm login. Full runbook: [docs/releasing.md](docs/releasing.md).
 
 ```bash
-./scripts/release.sh 0.7.0           # Phase 1: bumps, builds, opens release PR
+# Phase 1 — open the release PR (bumps every workspace package, builds, tests)
+./scripts/release.sh 0.7.0
 # ... review and merge the PR on GitHub ...
-./scripts/release.sh 0.7.0 --publish  # Phase 2: publishes to npm, tags, pushes tag
+
+# Phase 2 — stage-publish via CI (OIDC trusted publishing, no token)
+gh workflow run release-publish.yml -f version=0.7.0
 ```
 
-Update `CHANGELOG.md` to promote `## Unreleased` to the new version before running phase 2.
+Phase 2 runs the [`release-publish`](.github/workflows/release-publish.yml) workflow: it
+authenticates to npm with a short-lived **OIDC** token (no stored `NPM_TOKEN`), builds, and
+submits all packages to npm **staging** with provenance. They are **not live** until a
+maintainer reviews the staged tarballs and **approves them on npmjs.com with 2FA** — that
+approval is the release gate.
+
+Update `CHANGELOG.md` to promote `## Unreleased` to the new version before phase 1. The
+legacy `./scripts/release.sh 0.7.0 --publish` direct-publish path remains as a break-glass
+fallback for when CI is unavailable.
 
 ## Questions
 
