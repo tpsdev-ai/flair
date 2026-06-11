@@ -86,7 +86,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
+          # NO registry-url: it makes setup-node write an .npmrc with
+          # _authToken=${NODE_AUTH_TOKEN} + always-auth, and with NODE_AUTH_TOKEN
+          # unset npm tries the EMPTY token and fails E401 instead of falling
+          # through to OIDC trusted publishing. OIDC needs no token config; npm
+          # defaults to registry.npmjs.org.
 
       - name: Upgrade npm to a staging-capable version
         # OIDC trusted publishing needs npm >= 11.5.1; `npm stage` needs >= 11.15.0.
