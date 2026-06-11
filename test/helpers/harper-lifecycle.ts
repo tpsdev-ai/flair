@@ -1,10 +1,24 @@
 import { spawn, ChildProcess } from "node:child_process";
+import { createServer } from "node:net";
+import type { AddressInfo, Server } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const getRandomPort = () => 10000 + Math.floor(Math.random() * 50000);
 const STARTUP_TIMEOUT_MS = 45_000;
+const MAX_SPAWN_ATTEMPTS = 3;
+
+// Harper logs exactly this ("Unable to bind to port NNNNN: Address already in
+// use") when its HTTP/ops listener can't bind, but it STILL prints "successfully
+// started" — so without detecting it, the health poll hammers a dead port for the
+// full 60s timeout and the test fails at ~64s (the ops-wumd flake: a random port
+// occasionally collided with an in-use one).
+//
+// Match ONLY Harper's specific bind-failure message — NOT a bare "address already
+// in use", which also appears in benign noise like Node's inspector failing to
+// attach ("Starting inspector on 127.0.0.1:9229 failed: address already in use"),
+// which must not be mistaken for a Harper port-bind failure.
+const BIND_ERROR_RE = /Unable to bind to port/i;
 
 // Use @harperfast/harper from node_modules — spawned under node (not bun)
 // because bun 1.3.x doesn't support uv_ip6_addr which Harper's NAPI modules need.
@@ -29,13 +43,46 @@ export interface HarperInstance {
 
 interface HarperExit { code: number | null; signal: NodeJS.Signals | null }
 
+// Raised when Harper fails to bind a port. startHarper retries on this with a
+// fresh pair of OS-assigned ports rather than failing the whole test.
+class PortInUseError extends Error {}
+
+// Ask the OS for `count` distinct free TCP ports by listening on :0. All servers
+// are held open together so the ports are guaranteed distinct, then closed. A
+// tiny TOCTOU window remains before Harper rebinds them — the spawn-retry loop in
+// startHarper covers any residual collision.
+async function getFreePorts(count: number): Promise<number[]> {
+  const servers = await Promise.all(
+    Array.from({ length: count }, () =>
+      new Promise<Server>((resolve, reject) => {
+        const srv = createServer();
+        srv.once("error", reject);
+        srv.listen(0, "127.0.0.1", () => resolve(srv));
+      }),
+    ),
+  );
+  const ports = servers.map(s => (s.address() as AddressInfo).port);
+  await Promise.all(servers.map(s => new Promise<void>(r => s.close(() => r()))));
+  return ports;
+}
+
+async function killProcess(proc: ChildProcess): Promise<void> {
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  proc.kill();
+  await new Promise<void>(r => {
+    proc.on("exit", () => r());
+    setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} r(); }, 3000);
+  });
+  proc.removeAllListeners();
+}
+
 async function waitForHealth(
   httpURL: string,
   timeoutMs = 60_000,
-  // Optional probes into the spawned process. When Harper dies mid-startup we
-  // want to fail fast and loud with its log, instead of blindly polling a dead
-  // port for the full timeout (the failure mode that produced cryptic
-  // "did not respond within 60000ms" errors with zero Harper output).
+  // Optional probes into the spawned process. When Harper dies mid-startup, or
+  // fails to bind its port, we want to fail fast and loud with its log instead
+  // of blindly polling a dead port for the full timeout (the failure mode that
+  // produced cryptic "did not respond within 60000ms" errors with zero output).
   getExited?: () => HarperExit | null,
   getLog?: () => string,
 ): Promise<void> {
@@ -49,6 +96,15 @@ async function waitForHealth(
       throw new Error(
         `Harper exited (code=${exit.code} signal=${exit.signal}) while waiting for ${url} ` +
         `to become healthy. Harper log:\n${getLog?.() ?? "(not captured)"}`,
+      );
+    }
+    // Harper prints "successfully started" even when a port bind failed, so the
+    // banner alone is not proof the HTTP port is listening — detect the bind
+    // error explicitly and fail fast (retryable) instead of polling a dead port.
+    const log = getLog?.() ?? "";
+    if (BIND_ERROR_RE.test(log)) {
+      throw new PortInUseError(
+        `Harper failed to bind a port while waiting for ${url}. Harper log:\n${log}`,
       );
     }
     attempt++;
@@ -74,6 +130,49 @@ async function waitForHealth(
   );
 }
 
+// Wait for Harper's startup banner. Resolves on the banner, rejects fast on
+// process exit or a port-bind error (the latter as a retryable PortInUseError).
+function awaitStartup(proc: ChildProcess, getLog: () => string, getExited: () => HarperExit | null): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Harper startup timed out after ${STARTUP_TIMEOUT_MS}ms. Log:\n${getLog()}`));
+    }, STARTUP_TIMEOUT_MS);
+
+    const check = () => {
+      const log = getLog();
+      if (BIND_ERROR_RE.test(log)) {
+        clearTimeout(timer);
+        cleanup();
+        reject(new PortInUseError(`Harper failed to bind a port during startup. Log:\n${log}`));
+        return;
+      }
+      if (log.includes("successfully started") || log.includes("listening on")) {
+        clearTimeout(timer);
+        cleanup();
+        resolve();
+      }
+    };
+    const onError = (err: Error) => { clearTimeout(timer); cleanup(); reject(err); };
+    const onExit = () => {
+      clearTimeout(timer);
+      cleanup();
+      const exit = getExited();
+      reject(new Error(`Harper exited during startup (code=${exit?.code} signal=${exit?.signal}). Log:\n${getLog()}`));
+    };
+    const cleanup = () => {
+      proc.stdout?.off("data", check);
+      proc.stderr?.off("data", check);
+      proc.off("error", onError);
+      proc.off("exit", onExit);
+    };
+    proc.stdout?.on("data", check);
+    proc.stderr?.on("data", check);
+    proc.on("error", onError);
+    proc.on("exit", onExit);
+  });
+}
+
 export async function startHarper(): Promise<HarperInstance> {
   // ── External mode: connect to Docker service ─────────────────────────────
   if (HARPER_HTTP_URL) {
@@ -93,8 +192,6 @@ export async function startHarper(): Promise<HarperInstance> {
 
   // ── Local mode: spawn Harper from node_modules ────────────────────────────
   const installDir = await mkdtemp(join(tmpdir(), "flair-test-"));
-  const httpPort = getRandomPort();
-  const opsPort = httpPort + 1;
 
   // Deny-list: strip CI secrets from the inherited env so Harper's child
   // process (and any log dump on failure) doesn't leak them onto a public
@@ -103,7 +200,7 @@ export async function startHarper(): Promise<HarperInstance> {
   delete parentEnv.GITHUB_TOKEN;
   delete parentEnv.NPM_TOKEN;
 
-  const env: Record<string, string> = {
+  const baseEnv: Record<string, string> = {
     ...parentEnv,
     ROOTPATH: installDir,
     HOME: installDir,               // isolate from system Harper install (~/.harperdb)
@@ -112,11 +209,9 @@ export async function startHarper(): Promise<HarperInstance> {
     HDB_ADMIN_PASSWORD: "test123",
     THREADS_COUNT: "1",
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
-    OPERATIONSAPI_NETWORK_PORT: String(opsPort),
-    HTTP_PORT: String(httpPort),
   };
 
-  const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd: process.cwd(), env });
+  const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd: process.cwd(), env: baseEnv });
   await new Promise<void>((resolve, reject) => {
     let output = "";
     install.stdout?.on("data", (d: Buffer) => output += d.toString());
@@ -126,75 +221,59 @@ export async function startHarper(): Promise<HarperInstance> {
     setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
   });
 
-  const proc = spawn(NODE_BIN, [HARPER_BIN, "dev", "."], { cwd: process.cwd(), env });
+  // Spawn `harper dev` with a fresh pair of OS-assigned free ports. A port can
+  // still collide between allocation and bind (TOCTOU, or a lingering instance),
+  // and Harper reports "successfully started" even when a bind failed — so we
+  // detect the bind error and retry the spawn with new ports.
+  let lastErr: Error | undefined;
+  for (let attempt = 1; attempt <= MAX_SPAWN_ATTEMPTS; attempt++) {
+    const [httpPort, opsPort] = await getFreePorts(2);
+    const env: Record<string, string> = {
+      ...baseEnv,
+      OPERATIONSAPI_NETWORK_PORT: String(opsPort),
+      HTTP_PORT: String(httpPort),
+    };
+    const httpURL = `http://127.0.0.1:${httpPort}`;
+    const opsURL = `http://127.0.0.1:${opsPort}`;
 
-  // Capture Harper's output for the WHOLE lifetime of the process — not just
-  // until the startup banner — so a crash that happens after "listening on"
-  // (e.g. an intermittent llama.cpp model-load assert/OOM) stays visible.
-  // Likewise record the exit, so health-polling below can fail fast with the
-  // log instead of hammering a dead port for the full 60s with no explanation.
-  let log = "";
-  let exited: HarperExit | null = null;
-  proc.stdout?.on("data", (d: Buffer) => { log += d.toString(); });
-  proc.stderr?.on("data", (d: Buffer) => { log += d.toString(); });
-  proc.on("exit", (code, signal) => { exited = { code, signal }; });
+    const proc = spawn(NODE_BIN, [HARPER_BIN, "dev", "."], { cwd: process.cwd(), env });
 
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      proc.kill();
-      reject(new Error(`Harper startup timed out after ${STARTUP_TIMEOUT_MS}ms. Log:\n${log}`));
-    }, STARTUP_TIMEOUT_MS);
+    // Capture Harper's output for the WHOLE lifetime of the process — not just
+    // until the startup banner — so a crash that happens after "listening on"
+    // (e.g. an intermittent llama.cpp model-load assert/OOM) stays visible.
+    let log = "";
+    let exited: HarperExit | null = null;
+    proc.stdout?.on("data", (d: Buffer) => { log += d.toString(); });
+    proc.stderr?.on("data", (d: Buffer) => { log += d.toString(); });
+    proc.on("exit", (code, signal) => { exited = { code, signal }; });
 
-    const onBanner = () => {
-      if (log.includes("successfully started") || log.includes("listening on")) {
-        clearTimeout(timer);
-        cleanup();
-        resolve();
+    try {
+      await awaitStartup(proc, () => log, () => exited);
+      // Poll both ports. Harper binds httpURL and opsURL at different moments
+      // during startup; callers hit opsURL immediately (admin seed), so
+      // returning as soon as httpURL answered was racy.
+      await Promise.all([
+        waitForHealth(httpURL, 60_000, () => exited, () => log),
+        waitForHealth(opsURL, 60_000, () => exited, () => log),
+      ]);
+      return { httpURL, opsURL, installDir, process: proc, admin: { username: "admin", password: "test123" }, external: false };
+    } catch (err) {
+      await killProcess(proc);
+      lastErr = err as Error;
+      if (err instanceof PortInUseError && attempt < MAX_SPAWN_ATTEMPTS) {
+        console.log(`[harper-lifecycle] port collision (attempt ${attempt}/${MAX_SPAWN_ATTEMPTS}), retrying with fresh ports`);
+        continue;
       }
-    };
-    const onError = (err: Error) => { clearTimeout(timer); cleanup(); reject(err); };
-    const onExit = () => {
-      clearTimeout(timer);
-      cleanup();
-      reject(new Error(`Harper exited during startup (code=${exited?.code} signal=${exited?.signal}). Log:\n${log}`));
-    };
-    const cleanup = () => {
-      proc.stdout?.off("data", onBanner);
-      proc.stderr?.off("data", onBanner);
-      proc.off("error", onError);
-      proc.off("exit", onExit);
-    };
-    proc.stdout?.on("data", onBanner);
-    proc.stderr?.on("data", onBanner);
-    proc.on("error", onError);
-    proc.on("exit", onExit);
-  });
-
-  const httpURL = `http://127.0.0.1:${httpPort}`;
-  const opsURL = `http://127.0.0.1:${opsPort}`;
-  // Poll both ports. Harper binds httpURL and opsURL at different moments during
-  // startup; callers hit opsURL immediately (admin seed), so returning as soon
-  // as httpURL answers was racy — agent-journey intermittently ECONNREFUSED on
-  // opsURL even though httpURL was already serving 404s.
-  await Promise.all([
-    waitForHealth(httpURL, 60_000, () => exited, () => log),
-    waitForHealth(opsURL, 60_000, () => exited, () => log),
-  ]);
-
-  return { httpURL, opsURL, installDir, process: proc, admin: { username: "admin", password: "test123" }, external: false };
+      throw err;
+    }
+  }
+  throw lastErr ?? new Error("Harper failed to start");
 }
 
 export async function stopHarper(inst: HarperInstance): Promise<void> {
   if (inst.external) return;
 
-  inst.process?.kill();
-  await new Promise<void>(r => {
-    inst.process?.on("exit", r);
-    setTimeout(() => { try { inst.process?.kill("SIGKILL"); } catch {} r(); }, 3000);
-  });
-  // Drain persistent listeners added in #467 (stdout/stderr/exit capture) so
-  // the emitter doesn't linger and keep the ChildProcess ref alive.
-  inst.process?.removeAllListeners();
+  if (inst.process) await killProcess(inst.process);
   if (inst.installDir) {
     await rm(inst.installDir, { recursive: true, force: true, maxRetries: 4 });
   }
