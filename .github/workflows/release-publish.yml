@@ -1,22 +1,28 @@
 name: Release — stage-publish (OIDC)
 
-# Tokenless release pipeline. Authenticates to npm via OIDC trusted publishing
-# (no NPM_TOKEN stored anywhere) and submits every workspace package to npm's
-# STAGING area via `npm stage publish` rather than publishing live. A maintainer
-# then reviews the staged tarballs and approves them on npmjs.com with 2FA to go
-# live — that approval is the release gate (see docs/releasing.md).
+# Tokenless release pipeline, triggered by pushing a vX.Y.Z tag. Authenticates to
+# npm via OIDC trusted publishing (no NPM_TOKEN lives anywhere) and submits every
+# workspace package to npm's STAGING area via `npm stage publish` rather than
+# publishing live. A maintainer approves the staged tarballs on npmjs.com with 2FA
+# to go live — that approval is the release gate (see docs/releasing.md).
 #
-# Trigger: manual, after the `release: vX.Y.Z` PR is merged to main.
-#   gh-as flint workflow run release-publish.yml -f version=0.11.0
+# Cut a release: after the `release: vX.Y.Z` PR merges to main, push the tag:
+#   git tag v0.11.0 && git push origin v0.11.0
+# The tag push triggers this workflow. (workflow_dispatch is a manual fallback.)
 #
 # One-time setup (npmjs.com, per package): add a Trusted Publisher pointing at
 #   org=tpsdev-ai, repo=flair, workflow=release-publish.yml, environment=release
+# and allow ONLY "npm stage publish". The `release` GitHub environment must permit
+# `v*` tag deploys.
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to stage (must already be merged to main, e.g. 0.11.0)"
+        description: "Fallback only: version to stage (a vX.Y.Z tag must already exist on a merged commit)"
         required: true
         type: string
 
@@ -33,17 +39,49 @@ jobs:
     name: Stage-publish all packages
     runs-on: ubuntu-latest
     # `release` is an OIDC-scoping environment, NOT an approval gate: it pins the
-    # trusted-publisher trust to this environment and restricts deploys to main.
-    # The human gate is the npm staging approval (2FA), not a GitHub reviewer.
+    # trusted-publisher trust to this environment. The human gate is the npm
+    # staging approval (2FA), not a GitHub reviewer.
     environment: release
     permissions:
       id-token: write   # mint the short-lived OIDC token for npm trusted publishing
-      contents: write   # push the release tag
+      contents: read    # checkout + fetch main for the ancestry guard
     steps:
+      - name: Resolve version
+        id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            # tag push: github.ref_name is the tag (vX.Y.Z)
+            VERSION="${REF_NAME#v}"
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.11.0 or 1.0.0-rc.1)."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
-          ref: main
           fetch-depth: 0
+
+      - name: Verify tagged commit is on main
+        # A tag can point at any commit; require it to be merged to main so a tag
+        # can never ship un-reviewed code past the npm staging gate.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Commit ${GITHUB_SHA} is not an ancestor of origin/main. Tag a merged release commit."
+            exit 1
+          fi
+          echo "  ok ${GITHUB_SHA} is on main"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -68,17 +106,13 @@ jobs:
       - name: Install
         run: sfw bun install --frozen-lockfile
 
-      - name: Verify versions and tag
+      - name: Verify all workspace versions match the tag
         # All values flow through env, never ${{ }} interpolation inside the
-        # script body — keeps a crafted `version` input out of the shell.
+        # script body — keeps the resolved version out of the shell parser.
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
-            echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.11.0 or 1.0.0-rc.1)."
-            exit 1
-          fi
           PKG_JSONS=(
             package.json
             packages/flair-client/package.json
@@ -92,15 +126,11 @@ jobs:
             name="$(node -p "require('./$pj').name")"
             pv="$(node -p "require('./$pj').version")"
             if [ "$pv" != "$VERSION" ]; then
-              echo "::error::$name is at $pv, expected $VERSION. Has the release PR been merged?"
+              echo "::error::$name is at $pv, expected $VERSION (tag v$VERSION). Tag a merged release commit."
               exit 1
             fi
             echo "  ok $name @ $pv"
           done
-          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
-            echo "::error::Tag v$VERSION already exists. Did this version already ship?"
-            exit 1
-          fi
 
       - name: Build
         run: |
@@ -132,19 +162,9 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Tag release
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          git config user.name "tps-flint"
-          git config user.email "263629284+tps-flint@users.noreply.github.com"
-          git tag -a "v$VERSION" -m "Release v$VERSION"
-          git push origin "v$VERSION"
-
       - name: Summary
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           {
             echo "### 🚀 v$VERSION staged for release"
