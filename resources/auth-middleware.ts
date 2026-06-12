@@ -115,6 +115,17 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
 
 // ─── HTTP middleware ──────────────────────────────────────────────────────────
 
+// Extra public (no-auth) route paths, declared by the deployment via the
+// FLAIR_PUBLIC_PATHS env var (comma-separated). Lets flair compose on a
+// multi-component hub: the hub declares which sibling routes are public
+// (e.g. "/RosterView,/Observatory") instead of flair hardcoding them.
+const EXTRA_PUBLIC_PATHS = new Set(
+  (process.env.FLAIR_PUBLIC_PATHS ?? "")
+    .split(",")
+    .map((p: string) => p.trim())
+    .filter(Boolean),
+);
+
 server.http(async (request: any, nextLayer: any) => {
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
 
@@ -156,7 +167,11 @@ server.http(async (request: any, nextLayer: any) => {
     // Presence roster is public-safe (field-allowlisted); GET serves the
     // Office Space renderer without auth. POST handles Ed25519 auth internally
     // (allowCreate=true on the Resource).
-    url.pathname === "/Presence"
+    url.pathname === "/Presence" ||
+    // Extra public routes declared by the hub deployment (FLAIR_PUBLIC_PATHS),
+    // so sibling components' public surfaces (e.g. the composite hub's roster
+    // /RosterView + observatory /Observatory) aren't gated by flair's middleware.
+    EXTRA_PUBLIC_PATHS.has(url.pathname)
   ) return nextLayer(request);
 
   // If Harper has already authorized this request (e.g. authorizeLocal=true on localhost),
