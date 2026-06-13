@@ -79,13 +79,11 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
 
   afterAll(async () => { if (harper) await stopHarper(harper); });
 
-  // PENDING per-resource migration: SemanticSearch is a CUSTOM Resource with no
-  // allow*, so under flair_agent (non-super_user) it 403s AccessViolation — it was
-  // relying on the admin super_user bypass. Un-skip once SemanticSearch (and the
-  // other agent-facing custom resources) gain an allow* that calls
-  // verifyAgentRequest. This is the coupling the de-elevation surfaced: agents
-  // can't be de-elevated until every custom resource self-authorizes.
-  test.skip("SUFFICIENCY: agent HNSW q-search works under flair_agent (needs SemanticSearch.allow*)", async () => {
+  // SemanticSearch now self-authorizes via allowCreate→verifyAgentRequest, so a
+  // de-elevated flair_agent can run HNSW search (the role's Memory.read grant
+  // covers the internal vector reads). Regression guard for the custom-resource
+  // coupling the de-elevation surfaced.
+  test("SUFFICIENCY: agent HNSW q-search works under flair_agent (SemanticSearch.allowCreate)", async () => {
     const path = "/SemanticSearch";
     const res = await fetch(`${harper.httpURL}${path}`, {
       method: "POST",

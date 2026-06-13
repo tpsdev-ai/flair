@@ -1,4 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
+import { verifyAgentRequest } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -55,6 +56,18 @@ function distanceToSimilarity(distance: number): number {
 const CANDIDATE_MULTIPLIER = 5;
 
 export class SemanticSearch extends Resource {
+  // Self-authorize via the Ed25519 agent verify instead of relying on the auth
+  // gate's admin super_user elevation (removed in the auth reshape). Any
+  // cryptographically-verified agent may search; per-agent RESULT scoping is
+  // enforced in post() below (an agent only sees its own + office-visible +
+  // granted memories). Without this, Harper's default denies the POST for the
+  // least-privilege flair_agent role (AccessViolation 403).
+  async allowCreate(): Promise<boolean> {
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
+    return !!(await verifyAgentRequest(request));
+  }
+
   async post(data: any) {
     const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since, asOf } = data || {};
 
