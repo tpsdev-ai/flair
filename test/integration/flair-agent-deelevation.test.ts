@@ -156,6 +156,11 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     expect([401, 403], `OrgEventCatchup returned ${res.status}`).not.toContain(res.status);
   }, 30_000);
 
+  test("PUBLIC: GET /AgentCard needs no auth (allowRead=true; survives gate removal)", async () => {
+    const res = await fetch(`${harper.httpURL}/AgentCard/${agent.id}`);
+    expect([401, 403], `AgentCard (no auth) returned ${res.status}`).not.toContain(res.status);
+  }, 30_000);
+
   test("DE-ELEVATION: agent POST /sql is forbidden (flair_agent has no operations grant)", async () => {
     const path = "/sql";
     const res = await fetch(`${harper.httpURL}${path}`, {
