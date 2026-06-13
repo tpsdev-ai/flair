@@ -138,6 +138,24 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     expect([200, 204], `PUT own Memory returned ${res.status}: ${(await res.text()).slice(0, 200)}`).toContain(res.status);
   }, 30_000);
 
+  test("SUFFICIENCY: agent GET /WorkspaceLatest authorized under flair_agent (allowRead, not 403)", async () => {
+    const path = `/WorkspaceLatest/${agent.id}`;
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      headers: { Authorization: ed25519Header(agent, "GET", path) },
+    });
+    // allowRead fixes the AccessViolation 403 the custom resource would otherwise
+    // throw under flair_agent. 200/404 (data or none) both mean auth passed.
+    expect([401, 403], `WorkspaceLatest returned ${res.status}`).not.toContain(res.status);
+  }, 30_000);
+
+  test("SUFFICIENCY: agent GET /OrgEventCatchup authorized under flair_agent (allowRead, not 403)", async () => {
+    const path = `/OrgEventCatchup/${agent.id}`;
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      headers: { Authorization: ed25519Header(agent, "GET", path) },
+    });
+    expect([401, 403], `OrgEventCatchup returned ${res.status}`).not.toContain(res.status);
+  }, 30_000);
+
   test("DE-ELEVATION: agent POST /sql is forbidden (flair_agent has no operations grant)", async () => {
     const path = "/sql";
     const res = await fetch(`${harper.httpURL}${path}`, {
