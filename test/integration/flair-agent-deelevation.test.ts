@@ -96,6 +96,17 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     expect(Array.isArray(body.results)).toBe(true);
   }, 60_000);
 
+  test("SUFFICIENCY: agent POST /BootstrapMemories works under flair_agent (custom-resource allowCreate)", async () => {
+    const path = "/BootstrapMemories";
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "POST",
+      headers: { Authorization: ed25519Header(agent, "POST", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: agent.id, maxTokens: 2000 }),
+    });
+    const text = await res.text();
+    expect(res.status, `bootstrap returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+  }, 60_000);
+
   test("SUFFICIENCY: agent GET /Memory works under flair_agent (200)", async () => {
     const path = `/Memory/?agentId=${agent.id}`;
     const res = await fetch(`${harper.httpURL}${path}`, {
