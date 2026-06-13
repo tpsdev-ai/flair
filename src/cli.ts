@@ -899,6 +899,131 @@ export async function ensureFlairPairInitiatorRole(
   console.log(`Role '${ROLE_NAME}' updated ✓`);
 }
 
+// ─── flair_agent role ────────────────────────────────────────────────────────
+//
+// The auth reshape replaces the global gate's "verified agent borrows admin
+// super_user" elevation with a real, least-privilege Harper role. After an
+// agent's Ed25519 signature verifies, resources resolve the request to the
+// shared `flair_agent`-roled user instead of admin — so agents get exactly the
+// table CRUD below and nothing more. Critically: with no `super_user` and no
+// operations grants, /sql and /graphql become NATIVELY 403 for agents (the
+// raw-query block the gate hand-rolled is now enforced by Harper itself).
+//
+// Row-level ownership (an agent touches only its OWN memories/soul/events) is
+// NOT expressible in Harper's role model — it stays in each resource's allow*,
+// keyed on the Ed25519-verified agentId. So these per-table grants are the
+// coarse CRUD envelope; allow* is the ownership boundary inside it.
+//
+// VALIDATION GATES (must confirm against a live Harper before this role goes
+// live — flagged for Sherlock + the PR, not assumed):
+//   1. HNSW/vector search (SemanticSearch over Memory) works with table `read`
+//      alone — the old elevation comment claimed admin perms were needed for
+//      "HNSW-capable" access; confirm `read` suffices or widen precisely.
+//   2. Role table keys must EXACTLY match the @table names (Memory, OrgEvent,
+//      WorkspaceState, OAuthClient — NOT the logical Memory/Event/Workspace/OAuth
+//      shorthand the flair_pair_initiator spec used, which was harmless only
+//      because every grant there is false).
+//   3. Obs* writes: if the presence-emitter writes ObsAgentSnapshot AS the agent
+//      it needs insert/update — currently read-only here; confirm the writer's
+//      identity (system vs agent) and widen only if it's the agent.
+
+/** Canonical permission spec for flair_agent (least-privilege; real @table names). */
+const FLAIR_AGENT_PERMISSION = {
+  super_user: false,
+  cluster_user: false,
+  structure_user: false,
+  flair: {
+    tables: {
+      // Core agent-owned data — CRUD envelope; ownership enforced in allow*.
+      Memory:          { read: true,  insert: true,  update: true,  delete: true },
+      MemoryCandidate: { read: true,  insert: true,  update: true,  delete: true },
+      MemoryGrant:     { read: true,  insert: true,  update: true,  delete: true },
+      Soul:            { read: true,  insert: true,  update: true,  delete: false },
+      OrgEvent:        { read: true,  insert: true,  update: true,  delete: true },
+      WorkspaceState:  { read: true,  insert: true,  update: true,  delete: true },
+      Relationship:    { read: true,  insert: true,  update: true,  delete: true },
+      Integration:     { read: true,  insert: true,  update: true,  delete: true },
+      Credential:      { read: true,  insert: true,  update: true,  delete: true },
+      Presence:        { read: true,  insert: true,  update: true,  delete: false },
+      // Agent: read for discovery, update own card; creation/removal is admin.
+      Agent:           { read: true,  insert: false, update: true,  delete: false },
+      // Read-only reference data.
+      Instance:        { read: true,  insert: false, update: false, delete: false },
+      // Observatory read-models — public reads; writes are system-driven (gate 3).
+      ObsOffice:        { read: true, insert: false, update: false, delete: false },
+      ObsAgentSnapshot: { read: true, insert: false, update: false, delete: false },
+      ObsEventFeed:     { read: true, insert: false, update: false, delete: false },
+      // Federation / OAuth / IdP / internal — system + admin only; agents get none.
+      Peer:          { read: false, insert: false, update: false, delete: false },
+      PairingToken:  { read: false, insert: false, update: false, delete: false },
+      SyncLog:       { read: false, insert: false, update: false, delete: false },
+      OAuthClient:   { read: false, insert: false, update: false, delete: false },
+      OAuthToken:    { read: false, insert: false, update: false, delete: false },
+      OAuthAuthCode: { read: false, insert: false, update: false, delete: false },
+      IdpConfig:     { read: false, insert: false, update: false, delete: false },
+      IdJagReplay:   { read: false, insert: false, update: false, delete: false },
+    },
+  },
+} as const;
+
+/**
+ * Idempotently ensures the `flair_agent` role exists on the Harper instance at
+ * `opsUrl` with the canonical least-privilege spec. Same list/add/alter shape as
+ * ensureFlairPairInitiatorRole.
+ *
+ * - absent → `add_role`
+ * - exists with different permissions → `alter_role`
+ * - already matches → no-op
+ */
+export async function ensureFlairAgentRole(
+  opsUrl: string,
+  adminUser: string,
+  adminPass: string,
+): Promise<void> {
+  const ROLE_NAME = "flair_agent";
+
+  let roles: any[] = [];
+  try {
+    const result = await callOpsApi(opsUrl, { operation: "list_roles" }, adminUser, adminPass);
+    roles = Array.isArray(result) ? result : [];
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`ensureFlairAgentRole: list_roles failed: ${msg}`);
+  }
+
+  const existing = roles.find(
+    (r: any) => r.role === ROLE_NAME || r.name === ROLE_NAME,
+  );
+
+  if (!existing) {
+    console.log(`Creating role '${ROLE_NAME}'...`);
+    await callOpsApi(opsUrl, {
+      operation: "add_role",
+      role: ROLE_NAME,
+      permission: FLAIR_AGENT_PERMISSION,
+    }, adminUser, adminPass);
+    console.log(`Role '${ROLE_NAME}' created ✓`);
+    return;
+  }
+
+  const existingPerm = existing.permission ?? existing.role?.permission;
+  const canonicalStr = JSON.stringify(FLAIR_AGENT_PERMISSION);
+  const existingStr  = JSON.stringify(existingPerm);
+
+  if (existingStr === canonicalStr) {
+    console.log(`Role '${ROLE_NAME}' already exists with correct permissions — skipping`);
+    return;
+  }
+
+  console.log(`Role '${ROLE_NAME}' exists but permissions differ — updating...`);
+  await callOpsApi(opsUrl, {
+    operation: "alter_role",
+    role: ROLE_NAME,
+    permission: FLAIR_AGENT_PERMISSION,
+  }, adminUser, adminPass);
+  console.log(`Role '${ROLE_NAME}' updated ✓`);
+}
+
 // ─── Upgrade presence probes ──────────────────────────────────────────────────
 //
 // `flair upgrade` previously called `npm list -g <pkg>` to detect the installed
@@ -1234,6 +1359,12 @@ program
         if (opts.remote) {
           await ensureFlairPairInitiatorRole(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
         }
+
+        // Every flair instance has agents, so always provision the least-privilege
+        // flair_agent role. It replaces the auth gate's "verified agent borrows
+        // admin super_user" elevation: once resources resolve verified agents to
+        // this role, /sql and /graphql become natively 403 (no operations grant).
+        await ensureFlairAgentRole(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
       } else {
         // ── Existing behavior: --admin-pass required for already-running Flair ──
         if (!opts.adminPass) {
