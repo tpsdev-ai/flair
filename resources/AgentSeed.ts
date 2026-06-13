@@ -18,7 +18,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { isAdmin } from "./auth-middleware.js";
+import { isAdmin } from "./agent-auth.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,

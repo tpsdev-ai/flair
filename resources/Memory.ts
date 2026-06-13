@@ -1,6 +1,6 @@
 import { databases } from "@harperfast/harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
-import { isAdmin } from "./auth-middleware.js";
+import { isAdmin } from "./agent-auth.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";

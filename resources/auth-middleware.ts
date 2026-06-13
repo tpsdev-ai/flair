@@ -1,6 +1,7 @@
 import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
+import { isAdmin } from "./agent-auth.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -36,37 +37,10 @@ const WINDOW_MS = 30_000;
 const nonceSeen = new Map<string, number>();
 
 // ─── Admin resolution ─────────────────────────────────────────────────────────
-// Admin agents: from FLAIR_ADMIN_AGENTS env var (comma-separated) OR
-// Agent records with role === "admin". Both sources are OR-combined.
-// Result is cached for 60s to avoid per-request DB hits.
-
-let adminCacheExpiry = 0;
-let adminCache: Set<string> = new Set();
-
-async function getAdminAgents(): Promise<Set<string>> {
-  const now = Date.now();
-  if (now < adminCacheExpiry) return adminCache;
-
-  const from_env = (process.env.FLAIR_ADMIN_AGENTS ?? "")
-    .split(",").map((s) => s.trim()).filter(Boolean);
-
-  let from_db: string[] = [];
-  try {
-    const results = await (databases as any).flair.Agent.search([{ attribute: "role", value: "admin", condition: "equals" }]);
-    for await (const row of results) {
-      if (row?.id) from_db.push(row.id);
-    }
-  } catch { /* Agent table might not be populated yet */ }
-
-  adminCache = new Set([...from_env, ...from_db]);
-  adminCacheExpiry = now + 60_000;
-  return adminCache;
-}
-
-export async function isAdmin(agentId: string): Promise<boolean> {
-  const admins = await getAdminAgents();
-  return admins.has(agentId);
-}
+// `isAdmin` (FLAIR_ADMIN_AGENTS env + Agent role==="admin", 60s-cached) now lives
+// in agent-auth.ts as the single source of truth, imported above. During the
+// auth reshape this gate and the per-resource allow* helpers must agree on who's
+// an admin — one implementation guarantees they can't diverge.
 
 // ─── Crypto helpers ───────────────────────────────────────────────────────────
 

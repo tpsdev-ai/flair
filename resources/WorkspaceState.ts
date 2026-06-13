@@ -9,7 +9,7 @@
  */
 
 import { databases } from "@harperfast/harper";
-import { isAdmin } from "./auth-middleware.js";
+import { isAdmin } from "./agent-auth.js";
 
 export class WorkspaceState extends (databases as any).flair.WorkspaceState {
   /**

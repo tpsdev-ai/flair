@@ -17,7 +17,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { isAdmin } from "./auth-middleware.js";
+import { isAdmin } from "./agent-auth.js";
 
 function parseDuration(s: string): number {
   const m = s.match(/^(\d+)([dhm])$/);

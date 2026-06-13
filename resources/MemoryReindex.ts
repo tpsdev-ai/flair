@@ -25,7 +25,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { isAdmin } from "./auth-middleware.js";
+import { isAdmin } from "./agent-auth.js";
 
 type AgentDrift = { agentId: string; primary: number; indexed: number; missing: number };
 

@@ -21,7 +21,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { isAdmin } from "./auth-middleware.js";
+import { isAdmin } from "./agent-auth.js";
 import { patchRecordSilent } from "./table-helpers.js";
 
 const FOCUS_PROMPTS: Record<string, string> = {
