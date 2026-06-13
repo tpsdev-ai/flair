@@ -107,6 +107,17 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     expect(res.status, `bootstrap returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
   }, 60_000);
 
+  test("SUFFICIENCY: agent POST /FeedMemories works under flair_agent (custom-resource write path)", async () => {
+    const path = "/FeedMemories";
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "POST",
+      headers: { Authorization: ed25519Header(agent, "POST", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: agent.id, content: "fed via MemoryFeed under flair_agent" }),
+    });
+    const text = await res.text();
+    expect([200, 201, 204], `MemoryFeed returned ${res.status}: ${text.slice(0, 300)}`).toContain(res.status);
+  }, 30_000);
+
   test("SUFFICIENCY: agent GET /Memory works under flair_agent (200)", async () => {
     const path = `/Memory/?agentId=${agent.id}`;
     const res = await fetch(`${harper.httpURL}${path}`, {
