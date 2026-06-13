@@ -19,6 +19,14 @@ import { databases } from "@harperfast/harper";
 
 const WINDOW_MS = Number(process.env.FLAIR_AGENT_AUTH_WINDOW_MS) || 30_000;
 
+/**
+ * Shared Harper user that verified Ed25519 agents resolve to (least-privilege
+ * `flair_agent` role), replacing the old admin super_user elevation. Single
+ * source of truth — the auth gate resolves agents to this user and the CLI
+ * provisions it (ensureFlairAgentUser); they MUST agree on the name.
+ */
+export const FLAIR_AGENT_USERNAME = "flair-agent";
+
 // Replay protection: remember recently-seen (agent:nonce), pruned by the window.
 const nonceSeen = new Map<string, number>();
 

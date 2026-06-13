@@ -76,11 +76,20 @@ describe("ensureFlairAgentRole — security invariants of the grant spec", () =>
     return capturedBodies[1].permission;
   }
 
-  it("never grants super_user / cluster_user / structure_user", async () => {
+  it("never grants super_user/structure_user, and omits cluster_user (Harper misreads it as a db)", async () => {
     const perm = await captureSpec();
     expect(perm.super_user).toBe(false);
-    expect(perm.cluster_user).toBe(false);
     expect(perm.structure_user).toBe(false);
+    // cluster_user must NOT be present — Harper reads unknown top-level keys as
+    // database names and rejects add_role ("database 'cluster_user' does not exist").
+    expect(perm.cluster_user).toBeUndefined();
+  });
+
+  it("every table grant carries an attribute_permissions array (add_role requires it)", async () => {
+    const tables = (await captureSpec()).flair.tables;
+    for (const [name, t] of Object.entries<any>(tables)) {
+      expect(Array.isArray(t.attribute_permissions), `${name} missing attribute_permissions array`).toBe(true);
+    }
   });
 
   it("carries no operations grant → /sql and /graphql stay natively 403 for agents", async () => {
@@ -106,12 +115,12 @@ describe("ensureFlairAgentRole — security invariants of the grant spec", () =>
   it("lets agents CRUD their own core data but locks federation/oauth/idp internals", async () => {
     const tables = (await captureSpec()).flair.tables;
     // Agent-owned data: writable (row-ownership is enforced in allow*, not here).
-    expect(tables.Memory).toEqual({ read: true, insert: true, update: true, delete: true });
+    expect(tables.Memory).toEqual({ read: true, insert: true, update: true, delete: true, attribute_permissions: [] });
     expect(tables.OrgEvent.insert).toBe(true);
     expect(tables.WorkspaceState.update).toBe(true);
     // System/admin-only tables: no access at all.
     for (const t of ["Peer", "PairingToken", "SyncLog", "OAuthClient", "OAuthToken", "IdpConfig", "IdJagReplay"]) {
-      expect(tables[t]).toEqual({ read: false, insert: false, update: false, delete: false });
+      expect(tables[t]).toEqual({ read: false, insert: false, update: false, delete: false, attribute_permissions: [] });
     }
   });
 });

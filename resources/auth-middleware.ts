@@ -1,7 +1,7 @@
 import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
-import { isAdmin } from "./agent-auth.js";
+import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -273,31 +273,31 @@ server.http(async (request: any, nextLayer: any) => {
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
   // Grant Harper-level permissions for the cryptographically-verified agent by
-  // setting request.user directly to the admin super_user.
+  // setting request.user directly. Setting request.user is the supported
+  // extension path (and the only one that works post-5.0.9: Harper resolves
+  // request.user from the Authorization header BEFORE this middleware runs, and
+  // a TPS-Ed25519 header matches no Basic/Bearer strategy, so request.user
+  // arrives null — see #456). getUser(name, null) looks up the record WITHOUT
+  // password validation, safe here because the Ed25519 signature already proved
+  // identity cryptographically.
   //
-  // Prior approach swapped the Authorization header to "Basic admin:<pass>" so
-  // Harper's auth pipeline would re-authenticate with full (HNSW-capable)
-  // permissions. That silently broke under Harper 5.0.9: its authentication
-  // layer (security/auth.ts `authentication()`) reads the Authorization header
-  // and resolves request.user BEFORE invoking this middleware via nextHandler.
-  // A TPS-Ed25519 header matches no Basic/Bearer strategy, so Harper sets
-  // request.user = null and never re-reads the header — our post-hoc swap was
-  // ignored, the request ran unauthenticated, and Harper surfaced it downstream
-  // as a generic "Login failed" 401. (Broke at the 2026-05-27 daemon restart,
-  // which loaded 5.0.9 fresh; the prior long-running process held an older
-  // in-memory Harper where the late header read still worked.)
-  //
-  // Setting request.user directly is the supported extension path and is honored
-  // by all downstream resources, including HNSW vector search. getUser(admin,
-  // null) looks up the admin record WITHOUT password validation — safe here
-  // because the Ed25519 signature verified above already proves agent identity
-  // cryptographically; no Basic credential is presented. This preserves the
-  // prior privilege model (verified agents act with admin perms; per-agent data
-  // isolation is still enforced downstream via the x-tps-agent header below).
+  // RESHAPE (auth-rbac): verified agents resolve to the least-privilege
+  // `flair-agent` user, NOT admin super_user. The flair_agent role grants exactly
+  // the table CRUD agents need; with no operations grant, /sql + /graphql become
+  // natively 403. Row-level data isolation stays enforced via x-tps-agent below.
+  // Transitional fallback: if the flair-agent user isn't provisioned yet (older
+  // instances pre-ensureFlairAgentUser), fall back to admin so agents keep
+  // working until the deploy provisions it — logged so the gap is visible.
   try {
-    request.user = await (server as any).getUser("admin", null, request);
+    const flairAgentUser = await (server as any).getUser(FLAIR_AGENT_USERNAME, null, request);
+    if (flairAgentUser) {
+      request.user = flairAgentUser;
+    } else {
+      console.warn(`[auth] '${FLAIR_AGENT_USERNAME}' user not provisioned — falling back to admin elevation for ${agentId}. Run flair init to provision the least-privilege user.`);
+      request.user = await (server as any).getUser("admin", null, request);
+    }
   } catch {
-    // Admin record unavailable — request proceeds as the verified tpsAgent
+    // User lookup unavailable — request proceeds as the verified tpsAgent
     // without elevated perms; resource-level scoping still applies.
   }
 
