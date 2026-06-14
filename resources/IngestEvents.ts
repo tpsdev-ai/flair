@@ -88,6 +88,14 @@ function verifyEd25519Signature(
 }
 
 export class IngestEvents extends Resource {
+  // Public POST by design: the handler self-verifies the OFFICE's Ed25519
+  // signature against ObsOffice.publicKey (not an agent identity), so it can't use
+  // agent auth. allowCreate=true lets the request reach post() where that
+  // verification happens — same self-gating pattern as FederationPair/FederationSync.
+  allowCreate(): boolean {
+    return true;
+  }
+
   async post(body: unknown, context?: unknown) {
     const request = (this as any).request;
     const authHeader: string | undefined = request?.headers?.get?.("authorization") ?? request?.headers?.authorization;
