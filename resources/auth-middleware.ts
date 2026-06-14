@@ -291,7 +291,12 @@ server.http(async (request: any, nextLayer: any) => {
   try {
     const flairAgentUser = await (server as any).getUser(FLAIR_AGENT_USERNAME, null, request);
     if (flairAgentUser) {
-      request.user = flairAgentUser;
+      // Per-agent identity: keep the flair_agent role (table grants) but stamp the
+      // verified agentId as the username, so resources' allow* see the SPECIFIC
+      // agent via context.user.username and can enforce row-ownership natively
+      // (Harper passes context.user into allow*). Spread to avoid mutating the
+      // shared, cached flair-agent user object.
+      request.user = { ...flairAgentUser, username: agentId };
     } else {
       console.warn(`[auth] '${FLAIR_AGENT_USERNAME}' user not provisioned — falling back to admin elevation for ${agentId}. Run flair init to provision the least-privilege user.`);
       request.user = await (server as any).getUser("admin", null, request);

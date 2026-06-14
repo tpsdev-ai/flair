@@ -74,6 +74,19 @@ export class Memory extends (databases as any).flair.Memory {
       if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "write");
     }
 
+    // Create ownership: a non-admin may only write memories it owns. The verified
+    // agentId is context.user.username (the auth gate stamps the per-agent identity
+    // onto request.user, which surfaces here); content.agentId is the body. Closes
+    // the create-spoofing gap. Internal calls (no user) and admins are exempt.
+    {
+      const writer: string | undefined = ctx?.user?.username;
+      if (writer && content?.agentId && content.agentId !== writer && !(await isAdmin(writer))) {
+        return new Response(JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }), {
+          status: 403, headers: { "Content-Type": "application/json" },
+        });
+      }
+    }
+
     content.durability ||= "standard";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
@@ -160,6 +173,19 @@ export class Memory extends (databases as any).flair.Memory {
       }
       delete content._reindex;
       return super.put(content);
+    }
+
+    // Create/update ownership (same rule as post): a non-admin may only write
+    // memories it owns. Identity via context.user.username (per-agent), not the
+    // gate's request.tpsAgent annotation. The _reindex admin path above bypasses.
+    {
+      const octx = (this as any).getContext?.();
+      const writer: string | undefined = octx?.user?.username;
+      if (writer && content?.agentId && content.agentId !== writer && !(await isAdmin(writer))) {
+        return new Response(JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }), {
+          status: 403, headers: { "Content-Type": "application/json" },
+        });
+      }
     }
 
     const now = new Date().toISOString();

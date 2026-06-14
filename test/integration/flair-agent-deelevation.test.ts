@@ -231,12 +231,17 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     expect(res.status, `WS spoof returned ${res.status} (expected 403)`).toBe(403);
   }, 30_000);
 
-  // PRE-EXISTING gap (not a reshape regression): an agent can CREATE a Memory
-  // tagged with another agent's id. Resists the obvious fixes — a Table's allow*
-  // can't see the request in Harper's auth phase, and the gate's body-scoping
-  // (which works for WorkspaceState, proven by the guard above) silently fails to
-  // read the body for /Memory specifically (Memory's custom class changes how the
-  // request body stream is consumed). Needs deeper Harper-internals investigation;
-  // best solved alongside the gate-removal identity-attachment design. Surfaced.
-  test.todo("ISOLATION: agent cannot CREATE a Memory tagged as another agent (Memory body-read quirk — surfaced)");
+  // Now enforced natively in Memory.allowCreate via context.user.username (the
+  // per-agent identity the gate stamps). Proves the no-core-change approach: a
+  // per-agent request.user surfaces as context.user.username inside a Table allow*.
+  test("ISOLATION: agent cannot CREATE a Memory tagged as another agent (native allow* ownership)", async () => {
+    const id = `${other.id}-spoof-${Date.now()}`;
+    const path = `/Memory/${id}`;
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PUT",
+      headers: { Authorization: ed25519Header(agent, "PUT", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ id, agentId: other.id, content: "spoofed ownership attempt", durability: "standard" }),
+    });
+    expect(res.status, `spoofed create returned ${res.status} (expected 403)`).toBe(403);
+  }, 30_000);
 });
