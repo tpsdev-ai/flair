@@ -46,6 +46,7 @@ async function adminOp(harper: HarperInstance, op: Record<string, any>): Promise
 let harper: HarperInstance;
 const agent = mkAgent("deelev-agent");
 const other = mkAgent("deelev-other");
+const adminAgent = mkAgent("deelev-admin");
 
 describe("flair_agent de-elevation (verified agents act as flair-agent, not admin)", () => {
   beforeAll(async () => {
@@ -63,6 +64,13 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
       });
       expect(res.status).toBe(200);
     }
+    // Admin agent (role:"admin" → isAdmin via the Agent-table source) for the
+    // admin-only resource assertions.
+    const adminRes = await adminOp(harper, {
+      operation: "insert", database: "flair", table: "Agent",
+      records: [{ id: adminAgent.id, name: adminAgent.id, role: "admin", publicKey: adminAgent.publicKey, createdAt: new Date().toISOString() }],
+    });
+    expect(adminRes.status).toBe(200);
 
     // Seed memories for `agent` so HNSW has candidates.
     for (let i = 0; i < 5; i++) {
@@ -159,6 +167,26 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
   test("PUBLIC: GET /AgentCard needs no auth (allowRead=true; survives gate removal)", async () => {
     const res = await fetch(`${harper.httpURL}/AgentCard/${agent.id}`);
     expect([401, 403], `AgentCard (no auth) returned ${res.status}`).not.toContain(res.status);
+  }, 30_000);
+
+  test("ADMIN-ONLY: non-admin agent POST /MemoryReindex is denied (allowCreate → isAdmin)", async () => {
+    const path = "/MemoryReindex";
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "POST",
+      headers: { Authorization: ed25519Header(agent, "POST", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ dryRun: true }),
+    });
+    expect(res.status, `non-admin /MemoryReindex returned ${res.status} (expected 403)`).toBe(403);
+  }, 30_000);
+
+  test("ADMIN-ONLY: admin agent POST /MemoryReindex is authorized (allowCreate permits admins)", async () => {
+    const path = "/MemoryReindex";
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "POST",
+      headers: { Authorization: ed25519Header(adminAgent, "POST", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ dryRun: true }),
+    });
+    expect([401, 403], `admin /MemoryReindex returned ${res.status} (expected authorized)`).not.toContain(res.status);
   }, 30_000);
 
   test("DE-ELEVATION: agent POST /sql is forbidden (flair_agent has no operations grant)", async () => {
