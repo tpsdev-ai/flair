@@ -220,8 +220,23 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     expect(attack.status, `cross-agent overwrite returned ${attack.status} (expected 403)`).toBe(403);
   }, 30_000);
 
-  // PENDING per-resource migration: creating a NEW Memory tagged with another
-  // agent's agentId is NOT blocked today (the gate only guards existing-record
-  // ownership). Memory.allowCreate must enforce body.agentId === verified agent.
-  test.todo("ISOLATION: agent cannot CREATE a Memory tagged as another agent (needs Memory.allowCreate)");
+  test("ISOLATION: agent cannot write another agent's WorkspaceState (body-scoping regression guard)", async () => {
+    const id = `${other.id}-ws-spoof`;
+    const path = `/WorkspaceState/${id}`;
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PUT",
+      headers: { Authorization: ed25519Header(agent, "PUT", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ id, agentId: other.id, state: "spoof" }),
+    });
+    expect(res.status, `WS spoof returned ${res.status} (expected 403)`).toBe(403);
+  }, 30_000);
+
+  // PRE-EXISTING gap (not a reshape regression): an agent can CREATE a Memory
+  // tagged with another agent's id. Resists the obvious fixes — a Table's allow*
+  // can't see the request in Harper's auth phase, and the gate's body-scoping
+  // (which works for WorkspaceState, proven by the guard above) silently fails to
+  // read the body for /Memory specifically (Memory's custom class changes how the
+  // request body stream is consumed). Needs deeper Harper-internals investigation;
+  // best solved alongside the gate-removal identity-attachment design. Surfaced.
+  test.todo("ISOLATION: agent cannot CREATE a Memory tagged as another agent (Memory body-read quirk — surfaced)");
 });
