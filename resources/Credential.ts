@@ -16,7 +16,7 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 export class Credential extends (databases as any).flair.Credential {
 
   async search(query?: any) {
-    const auth = await resolveAgentAuth((this as any).getContext?.()?.request);
+    const auth = await resolveAgentAuth((this as any).getContext?.());
 
     // Anonymous HTTP must NOT read credentials. (Previously `!authAgent` was
     // treated as trusted/unfiltered — which leaked every credential to an
@@ -48,7 +48,7 @@ export class Credential extends (databases as any).flair.Credential {
     const result = await super.get();
     if (!result) return result;
 
-    const auth = await resolveAgentAuth((this as any).getContext?.()?.request);
+    const auth = await resolveAgentAuth((this as any).getContext?.());
 
     // Anonymous HTTP must NOT read a credential (previously it fell through the
     // ownership check and returned the record sans tokenHash — a metadata leak).

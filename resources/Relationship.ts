@@ -16,7 +16,7 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 export class Relationship extends (databases as any).flair.Relationship {
 
   async search(query?: any) {
-    const auth = await resolveAgentAuth((this as any).getContext?.()?.request);
+    const auth = await resolveAgentAuth((this as any).getContext?.());
 
     // Anonymous HTTP must NOT read relationships (previously `!authAgent` was
     // treated as unfiltered — the anonymous-read leak).

@@ -164,18 +164,48 @@ export type AgentAuthVerdict =
  * Three-way auth verdict for a resource — the safe replacement for the old
  * `if (!authAgent) → unfiltered/trusted` pattern that leaked to anonymous callers
  * once the gate stopped rejecting them. Distinguishes:
- *   - **internal**: no HTTP request context → a programmatic/in-process call
+ *   - **internal**: no HTTP request at all → a programmatic/in-process call
  *     (maintenance, consolidation). Trusted; callers may run unfiltered.
- *   - **agent**: request carries a valid TPS-Ed25519 signature → the agent.
- *   - **anonymous**: request present but NO valid agent → an unauthenticated HTTP
- *     caller. MUST be denied. (This is the case the old code wrongly trusted.)
+ *   - **agent**: a verified agent (Ed25519). Carries agentId + isAdmin.
+ *   - **anonymous**: an HTTP request with NO valid agent → MUST be denied.
  *
- * Mirrors @harperfast/oauth's withOAuthValidation: no request object → pass
- * through; request without valid auth → reject. Pass `getContext()?.request`.
+ * Pass the RESOURCE CONTEXT (`getContext()`), not `getContext().request`:
+ * `getContext().request` is inconsistently populated across resource methods
+ * (present for search/GET, undefined for PUT/POST in Table resources), so we read
+ * the gate's annotations off `context.request ?? context` — exactly how the
+ * pre-reshape resources read `request.tpsAgent`. Resolution order:
+ *   1. explicit anonymous marker (`tpsAnonymous`, set by the non-rejecting gate)
+ *   2. gate's verified-agent annotation (`tpsAgent` / `tpsAgentIsAdmin`)
+ *   3. per-agent identity on `context.user` (the de-elevated user; username=agentId)
+ *   4. header verify (custom-resource allow*, where the raw request is present)
+ *      — and if a request object IS present but yields no agent → anonymous
+ *   5. nothing at all → trusted internal call
  */
-export async function resolveAgentAuth(request: any): Promise<AgentAuthVerdict> {
-  if (!request) return { kind: "internal" };
-  const auth = await verifyAgentRequest(request);
-  if (auth) return { kind: "agent", agentId: auth.agentId, isAdmin: auth.isAdmin };
-  return { kind: "anonymous" };
+export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> {
+  const c = context?.request ?? context;
+  if (!c) return { kind: "internal" };
+
+  if (c.tpsAnonymous === true) return { kind: "anonymous" };
+
+  if (c.tpsAgent) {
+    return { kind: "agent", agentId: String(c.tpsAgent), isAdmin: c.tpsAgentIsAdmin === true };
+  }
+
+  const user = context?.user ?? c.user;
+  if (user?.role?.permission?.super_user === true) {
+    return { kind: "agent", agentId: String(user.username ?? "admin"), isAdmin: true };
+  }
+  if (user?.username && user.username !== FLAIR_AGENT_USERNAME) {
+    return { kind: "agent", agentId: String(user.username), isAdmin: false };
+  }
+
+  // A raw request with headers is present → verify it; an HTTP request that
+  // yields no agent is anonymous (NOT internal).
+  if (c.headers?.get || c.headers?.asObject) {
+    const auth = await verifyAgentRequest(c);
+    if (auth) return { kind: "agent", agentId: auth.agentId, isAdmin: auth.isAdmin };
+    return { kind: "anonymous" };
+  }
+
+  return { kind: "internal" };
 }

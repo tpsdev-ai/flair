@@ -19,7 +19,7 @@ export class Memory extends (databases as any).flair.Memory {
   async search(query?: any) {
     // Access request context via Harper's Resource instance context.
     const ctx = (this as any).getContext?.();
-    const auth = await resolveAgentAuth(ctx?.request);
+    const auth = await resolveAgentAuth(ctx);
 
     // Anonymous HTTP must NOT read memories. (Previously `!authAgent` was treated
     // as unfiltered — the anonymous-read leak once the gate stops rejecting.)
