@@ -11,7 +11,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { verifyAgentRequest } from "./agent-auth.js";
+import { allowVerified } from "./agent-auth.js";
 
 export class OrgEventCatchup extends Resource {
   // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
@@ -19,9 +19,7 @@ export class OrgEventCatchup extends Resource {
   // get(). Uses getContext().request — the reliable v5 path (this.request is not
   // populated on Harper v5 Resources).
   async allowRead(): Promise<boolean> {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    return !!(await verifyAgentRequest(request));
+    return allowVerified((this as any).getContext?.());
   }
 
   // HarperDB calls get(pathInfo, context) where pathInfo is the URL segment after /OrgEventCatchup/

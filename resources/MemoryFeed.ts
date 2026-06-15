@@ -1,5 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
-import { verifyAgentRequest } from "./agent-auth.js";
+import { allowVerified } from "./agent-auth.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 
 export class FeedMemories extends Resource {
@@ -8,9 +8,7 @@ export class FeedMemories extends Resource {
   // closing that create-spoofing gap is tracked with the table-resource
   // create-ownership work (Memory.allowCreate), not in this auth-coverage pass.
   async allowCreate(): Promise<boolean> {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    return !!(await verifyAgentRequest(request));
+    return allowVerified((this as any).getContext?.());
   }
 
   async post(content: any) {

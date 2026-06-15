@@ -1,5 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
-import { verifyAgentRequest } from "./agent-auth.js";
+import { allowVerified } from "./agent-auth.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { wrapUntrusted } from "./content-safety.js";
 
@@ -51,9 +51,7 @@ export class BootstrapMemories extends Resource {
   // Harper denies them for the least-privilege flair_agent role). Any verified
   // agent may bootstrap; per-agent scoping is enforced in post() below.
   async allowCreate(): Promise<boolean> {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    return !!(await verifyAgentRequest(request));
+    return allowVerified((this as any).getContext?.());
   }
 
   async post(data: any, _context?: any) {

@@ -18,7 +18,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { isAdmin, verifyAgentRequest } from "./agent-auth.js";
+import { isAdmin, allowAdmin } from "./agent-auth.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -40,9 +40,7 @@ export class AgentSeed extends Resource {
   // bypasses allow*); non-admin agents denied. Real authorization now that the
   // gate no longer elevates agents to admin.
   async allowCreate(): Promise<boolean> {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    return (await verifyAgentRequest(request))?.isAdmin === true;
+    return allowAdmin((this as any).getContext?.());
   }
 
   async post(data: any) {

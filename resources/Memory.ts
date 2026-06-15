@@ -81,13 +81,13 @@ export class Memory extends (databases as any).flair.Memory {
       if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "write");
     }
 
-    // Create ownership: a non-admin may only write memories it owns. The verified
-    // agentId is context.user.username (the auth gate stamps the per-agent identity
-    // onto request.user, which surfaces here); content.agentId is the body. Closes
-    // the create-spoofing gap. Internal calls (no user) and admins are exempt.
+    // Create ownership: a non-admin agent may only write memories it owns. Use
+    // resolveAgentAuth (reads the gate's tpsAgent annotation) — NOT context.user
+    // .username, which is the fallback "admin" super_user while de-elevation is
+    // dormant and would wrongly 403 every agent's own write. internal/admin → pass.
     {
-      const writer: string | undefined = ctx?.user?.username;
-      if (writer && content?.agentId && content.agentId !== writer && !(await isAdmin(writer))) {
+      const auth = await resolveAgentAuth(ctx);
+      if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
         return new Response(JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }), {
           status: 403, headers: { "Content-Type": "application/json" },
         });
@@ -182,13 +182,14 @@ export class Memory extends (databases as any).flair.Memory {
       return super.put(content);
     }
 
-    // Create/update ownership (same rule as post): a non-admin may only write
-    // memories it owns. Identity via context.user.username (per-agent), not the
-    // gate's request.tpsAgent annotation. The _reindex admin path above bypasses.
+    // Create/update ownership (same rule as post): a non-admin agent may only
+    // write memories it owns, via resolveAgentAuth (gate annotation), not
+    // context.user.username (the dormant-de-elevation fallback is "admin").
+    // The _reindex admin path above bypasses this.
     {
       const octx = (this as any).getContext?.();
-      const writer: string | undefined = octx?.user?.username;
-      if (writer && content?.agentId && content.agentId !== writer && !(await isAdmin(writer))) {
+      const auth = await resolveAgentAuth(octx);
+      if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
         return new Response(JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }), {
           status: 403, headers: { "Content-Type": "application/json" },
         });

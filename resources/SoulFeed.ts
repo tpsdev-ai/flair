@@ -1,14 +1,12 @@
 import { Resource, databases } from '@harperfast/harper';
-import { verifyAgentRequest } from './agent-auth.js';
+import { allowVerified } from './agent-auth.js';
 
 export class FeedSouls extends Resource {
   // Self-authorize the subscription via the Ed25519 agent verify (auth reshape
   // removes the gate's admin elevation). FeedSouls extends Resource (not a Table),
   // so getContext().request is reachable in allow* — same pattern as SemanticSearch.
   async allowRead(): Promise<boolean> {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    return !!(await verifyAgentRequest(request));
+    return allowVerified((this as any).getContext?.());
   }
 
   async *connect(target: any, incomingMessages: any) {

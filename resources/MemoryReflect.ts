@@ -21,7 +21,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { isAdmin, verifyAgentRequest } from "./agent-auth.js";
+import { isAdmin, allowVerified } from "./agent-auth.js";
 import { patchRecordSilent } from "./table-helpers.js";
 
 const FOCUS_PROMPTS: Record<string, string> = {
@@ -40,9 +40,7 @@ export class ReflectMemories extends Resource {
   // admin elevation). Any verified agent may reflect; the isAdmin checks in post()
   // handle finer-grained authorization.
   async allowCreate(): Promise<boolean> {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    return !!(await verifyAgentRequest(request));
+    return allowVerified((this as any).getContext?.());
   }
 
   async post(data: any) {

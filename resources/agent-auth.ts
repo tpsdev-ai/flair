@@ -181,6 +181,26 @@ export type AgentAuthVerdict =
  *      — and if a request object IS present but yields no agent → anonymous
  *   5. nothing at all → trusted internal call
  */
+/**
+ * allow* for AGENT-FACING resources: permit verified agents, admins/super_user,
+ * and trusted internal calls; deny anonymous HTTP. Pass getContext(). Per-record
+ * scoping/ownership is still enforced in the handler. Replaces the
+ * `!!verifyAgentRequest(request)` pattern, which wrongly denied Basic-admin/
+ * super_user (no TPS header) — breaking the CLI/consolidation path.
+ */
+export async function allowVerified(context: any): Promise<boolean> {
+  return (await resolveAgentAuth(context)).kind !== "anonymous";
+}
+
+/**
+ * allow* for ADMIN-ONLY resources: permit admin agents + super_user + trusted
+ * internal calls; deny non-admin agents and anonymous.
+ */
+export async function allowAdmin(context: any): Promise<boolean> {
+  const a = await resolveAgentAuth(context);
+  return a.kind === "internal" || (a.kind === "agent" && a.isAdmin);
+}
+
 export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> {
   const c = context?.request ?? context;
   if (!c) return { kind: "internal" };

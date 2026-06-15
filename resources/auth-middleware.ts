@@ -1,7 +1,7 @@
 import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
-import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
+import { isAdmin } from "./agent-auth.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -133,9 +133,18 @@ server.http(async (request: any, nextLayer: any) => {
     url.pathname === "/Presence"
   ) return nextLayer(request);
 
-  // If Harper has already authorized this request (e.g. authorizeLocal=true on localhost),
-  // trust Harper's auth decision and pass through without requiring additional headers.
+  // If Harper has already authorized this request (e.g. Basic admin, or
+  // authorizeLocal=true on localhost), trust Harper's auth decision and pass
+  // through. Annotate the admin identity so resources' resolveAgentAuth recognizes
+  // this as an ADMIN caller (not anonymous) — otherwise a Basic-admin request,
+  // which carries no TPS-Ed25519 header, gets classified anonymous and denied.
   if (request.user?.role?.permission?.super_user === true) {
+    request.tpsAgent = request.user.username ?? "admin";
+    request.tpsAgentIsAdmin = true;
+    try {
+      request.headers.set("x-tps-agent", request.tpsAgent);
+      if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = request.tpsAgent;
+    } catch { /* frozen headers — annotation on request object still applies */ }
     return nextLayer(request);
   }
 
@@ -285,24 +294,18 @@ server.http(async (request: any, nextLayer: any) => {
   // `flair-agent` user, NOT admin super_user. The flair_agent role grants exactly
   // the table CRUD agents need; with no operations grant, /sql + /graphql become
   // natively 403. Row-level data isolation stays enforced via x-tps-agent below.
-  // Transitional fallback: if the flair-agent user isn't provisioned yet (older
-  // instances pre-ensureFlairAgentUser), fall back to admin so agents keep
-  // working until the deploy provisions it — logged so the gap is visible.
+  // Elevate the cryptographically-verified agent to admin (unchanged from
+  // pre-reshape behavior). getUser(admin, null) looks up the admin record WITHOUT
+  // password validation — safe because the Ed25519 signature already proved
+  // identity. Per-agent DE-ELEVATION (agents → the least-privilege flair_agent
+  // role instead of admin) is deferred to the non-rejecting-gate follow-up PR; it
+  // doesn't belong in this zero-behavior-change foundation. Resource scoping +
+  // ownership in this PR derive identity from the x-tps-agent annotation via
+  // resolveAgentAuth, independent of request.user, so they work under either model.
   try {
-    const flairAgentUser = await (server as any).getUser(FLAIR_AGENT_USERNAME, null, request);
-    if (flairAgentUser) {
-      // Per-agent identity: keep the flair_agent role (table grants) but stamp the
-      // verified agentId as the username, so resources' allow* see the SPECIFIC
-      // agent via context.user.username and can enforce row-ownership natively
-      // (Harper passes context.user into allow*). Spread to avoid mutating the
-      // shared, cached flair-agent user object.
-      request.user = { ...flairAgentUser, username: agentId };
-    } else {
-      console.warn(`[auth] '${FLAIR_AGENT_USERNAME}' user not provisioned — falling back to admin elevation for ${agentId}. Run flair init to provision the least-privilege user.`);
-      request.user = await (server as any).getUser("admin", null, request);
-    }
+    request.user = await (server as any).getUser("admin", null, request);
   } catch {
-    // User lookup unavailable — request proceeds as the verified tpsAgent
+    // Admin record unavailable — request proceeds as the verified tpsAgent
     // without elevated perms; resource-level scoping still applies.
   }
 

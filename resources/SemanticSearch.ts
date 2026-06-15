@@ -1,5 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
-import { verifyAgentRequest, resolveAgentAuth } from "./agent-auth.js";
+import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -63,9 +63,7 @@ export class SemanticSearch extends Resource {
   // granted memories). Without this, Harper's default denies the POST for the
   // least-privilege flair_agent role (AccessViolation 403).
   async allowCreate(): Promise<boolean> {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    return !!(await verifyAgentRequest(request));
+    return allowVerified((this as any).getContext?.());
   }
 
   async post(data: any) {

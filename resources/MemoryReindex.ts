@@ -25,7 +25,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { isAdmin, verifyAgentRequest } from "./agent-auth.js";
+import { isAdmin, allowAdmin } from "./agent-auth.js";
 
 type AgentDrift = { agentId: string; primary: number; indexed: number; missing: number };
 
@@ -46,9 +46,7 @@ export class MemoryReindex extends Resource {
   // bypasses allow*); non-admin agents denied. Mirrors the handler's admin gate
   // but is the real authorization now that the gate no longer elevates agents.
   async allowCreate(): Promise<boolean> {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    return (await verifyAgentRequest(request))?.isAdmin === true;
+    return allowAdmin((this as any).getContext?.());
   }
 
   async post(data: any) {
