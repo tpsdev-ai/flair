@@ -1,6 +1,6 @@
 import { databases } from "@harperfast/harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
-import { isAdmin } from "./agent-auth.js";
+import { isAdmin, resolveAgentAuth } from "./agent-auth.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -17,18 +17,25 @@ export class Memory extends (databases as any).flair.Memory {
    * Non-admin calls also check MemoryGrant to include granted memories.
    */
   async search(query?: any) {
-    // Access request context via Harper's Resource instance context
+    // Access request context via Harper's Resource instance context.
     const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    const authAgent: string | undefined = request?.tpsAgent;
-    const isAdminAgent: boolean = request?.tpsAgentIsAdmin ?? false;
+    const auth = await resolveAgentAuth(ctx?.request);
 
-    // No auth context (internal admin call) or admin agent — unfiltered
-    if (!authAgent || isAdminAgent) {
+    // Anonymous HTTP must NOT read memories. (Previously `!authAgent` was treated
+    // as unfiltered — the anonymous-read leak once the gate stops rejecting.)
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "authentication required" }), {
+        status: 401, headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Trusted internal call (no request context) or admin agent — unfiltered.
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
       return super.search(query);
     }
 
-    // Collect agentIds this agent may read: own + any granted owners
+    // Non-admin agent: scope to own + granted owners.
+    const authAgent = auth.agentId;
     const allowedOwners: string[] = [authAgent];
     try {
       for await (const grant of (databases as any).flair.MemoryGrant.search({
