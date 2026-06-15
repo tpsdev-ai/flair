@@ -152,3 +152,30 @@ export async function verifyAgentRequest(request: any): Promise<AgentAuth | null
   try { request._flairAgentAuth = result; } catch { /* frozen request — fine, just no cache */ }
   return result;
 }
+
+// ─── Resource auth verdict ──────────────────────────────────────────────────
+
+export type AgentAuthVerdict =
+  | { kind: "internal" }                                  // no HTTP request → trusted in-process call
+  | { kind: "agent"; agentId: string; isAdmin: boolean }  // valid TPS-Ed25519 signature
+  | { kind: "anonymous" };                                // request present, no valid agent → DENY
+
+/**
+ * Three-way auth verdict for a resource — the safe replacement for the old
+ * `if (!authAgent) → unfiltered/trusted` pattern that leaked to anonymous callers
+ * once the gate stopped rejecting them. Distinguishes:
+ *   - **internal**: no HTTP request context → a programmatic/in-process call
+ *     (maintenance, consolidation). Trusted; callers may run unfiltered.
+ *   - **agent**: request carries a valid TPS-Ed25519 signature → the agent.
+ *   - **anonymous**: request present but NO valid agent → an unauthenticated HTTP
+ *     caller. MUST be denied. (This is the case the old code wrongly trusted.)
+ *
+ * Mirrors @harperfast/oauth's withOAuthValidation: no request object → pass
+ * through; request without valid auth → reject. Pass `getContext()?.request`.
+ */
+export async function resolveAgentAuth(request: any): Promise<AgentAuthVerdict> {
+  if (!request) return { kind: "internal" };
+  const auth = await verifyAgentRequest(request);
+  if (auth) return { kind: "agent", agentId: auth.agentId, isAdmin: auth.isAdmin };
+  return { kind: "anonymous" };
+}
