@@ -817,25 +817,30 @@ export async function provisionFabric(
 // — the resource's own allowCreate bypass handles route-level access once the
 // request gets through the auth gate.
 
-/** Canonical permission spec for flair_pair_initiator. */
+/**
+ * Canonical permission spec for flair_pair_initiator.
+ *
+ * The role intentionally carries NO table permissions — its only job is to exist
+ * so bootstrap credentials can pass Harper platform auth before reaching the
+ * FederationPair resource handler (the resource's own allowCreate bypass handles
+ * route-level access). A bare role with both flags false is valid, grants nothing,
+ * and is exactly that intent.
+ *
+ * This previously carried an all-false `flair.tables` block, but Harper's add_role
+ * REJECTED the whole spec with a 400 (verified live against a spawned Harper):
+ *   - `cluster_user` is not a recognized top-level key — Harper reads unknown keys
+ *     as database names ("database 'cluster_user' does not exist");
+ *   - the table names were the logical shorthand, not the real @table names
+ *     ("Table 'flair.Workspace' does not exist" — it's WorkspaceState; "Event" is
+ *     OrgEvent; "OAuth" is OAuthClient);
+ *   - each grant omitted the required `attribute_permissions` array.
+ * The all-false block granted nothing anyway, so dropping it loses no capability
+ * and unbreaks fresh hub provisioning (where add_role runs and the 400 aborted
+ * `flair init --remote`). Only top-level booleans Harper recognizes remain.
+ */
 const PAIR_INITIATOR_PERMISSION = {
   super_user: false,
-  cluster_user: false,
   structure_user: false,
-  flair: {
-    tables: {
-      Memory:       { read: false, insert: false, update: false, delete: false },
-      Soul:         { read: false, insert: false, update: false, delete: false },
-      Agent:        { read: false, insert: false, update: false, delete: false },
-      Workspace:    { read: false, insert: false, update: false, delete: false },
-      Event:        { read: false, insert: false, update: false, delete: false },
-      OAuth:        { read: false, insert: false, update: false, delete: false },
-      Instance:     { read: false, insert: false, update: false, delete: false },
-      Peer:         { read: false, insert: false, update: false, delete: false },
-      PairingToken: { read: false, insert: false, update: false, delete: false },
-      SyncLog:      { read: false, insert: false, update: false, delete: false },
-    },
-  },
 } as const;
 
 /**

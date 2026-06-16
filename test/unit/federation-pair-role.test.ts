@@ -3,25 +3,17 @@ import { ensureFlairPairInitiatorRole } from "../../src/cli";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Minimal canonical permission spec mirrored from cli.ts. */
+/**
+ * Minimal canonical permission spec mirrored from cli.ts. The role carries NO
+ * table permissions by design — an all-false `flair.tables` block granted nothing
+ * yet made Harper's add_role reject the whole spec (cluster_user misread as a db,
+ * shorthand table names that don't exist, missing attribute_permissions arrays).
+ * See test/integration/flair-pair-initiator-role.test.ts for the live add_role
+ * acceptance guard this mock can't provide.
+ */
 const CANONICAL_PERM = {
   super_user: false,
-  cluster_user: false,
   structure_user: false,
-  flair: {
-    tables: {
-      Memory:       { read: false, insert: false, update: false, delete: false },
-      Soul:         { read: false, insert: false, update: false, delete: false },
-      Agent:        { read: false, insert: false, update: false, delete: false },
-      Workspace:    { read: false, insert: false, update: false, delete: false },
-      Event:        { read: false, insert: false, update: false, delete: false },
-      OAuth:        { read: false, insert: false, update: false, delete: false },
-      Instance:     { read: false, insert: false, update: false, delete: false },
-      Peer:         { read: false, insert: false, update: false, delete: false },
-      PairingToken: { read: false, insert: false, update: false, delete: false },
-      SyncLog:      { read: false, insert: false, update: false, delete: false },
-    },
-  },
 };
 
 /** Builds a mock ops-API fetch that returns sequenced responses. */
