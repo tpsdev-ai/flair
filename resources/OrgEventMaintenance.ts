@@ -6,8 +6,16 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
+import { allowAdmin } from "./agent-auth.js";
 
 export class OrgEventMaintenance extends Resource {
+  // Admin-only: permit verified ADMIN agents (Basic-admin is super_user and
+  // bypasses allow*); non-admin agents denied. Real authorization now that the
+  // gate no longer elevates agents to admin.
+  async allowCreate(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
   async post(_data: any, context?: any) {
     // Admin-only
     if (!context?.request?.tpsAgentIsAdmin) {

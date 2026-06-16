@@ -1,5 +1,5 @@
 import { databases } from "@harperfast/harper";
-import { isAdmin } from "./auth-middleware.js";
+import { resolveAgentAuth } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 
 /**
@@ -16,17 +16,22 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 export class Relationship extends (databases as any).flair.Relationship {
 
   async search(query?: any) {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    const authAgent: string | undefined = request?.tpsAgent;
-    const isAdminAgent: boolean = request?.tpsAgentIsAdmin ?? false;
+    const auth = await resolveAgentAuth((this as any).getContext?.());
 
-    if (!authAgent || isAdminAgent) {
+    // Anonymous HTTP must NOT read relationships (previously `!authAgent` was
+    // treated as unfiltered — the anonymous-read leak).
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "authentication required" }), {
+        status: 401, headers: { "content-type": "application/json" },
+      });
+    }
+    // Trusted internal call or admin agent → unfiltered.
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
       return super.search(query);
     }
 
-    // Non-admin: scope to own relationships
-    const agentCondition = { attribute: "agentId", comparator: "equals", value: authAgent };
+    // Non-admin agent: scope to own relationships.
+    const agentCondition = { attribute: "agentId", comparator: "equals", value: auth.agentId };
     if (!query?.conditions) {
       return super.search({ conditions: [agentCondition], ...(query || {}) });
     }

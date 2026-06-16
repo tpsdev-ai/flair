@@ -18,7 +18,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { isAdmin } from "./auth-middleware.js";
+import { isAdmin, allowAdmin } from "./agent-auth.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -36,6 +36,13 @@ const DEFAULT_MEMORIES = (agentId: string, now: string) => [
 ];
 
 export class AgentSeed extends Resource {
+  // Admin-only: permit verified ADMIN agents (Basic-admin is super_user and
+  // bypasses allow*); non-admin agents denied. Real authorization now that the
+  // gate no longer elevates agents to admin.
+  async allowCreate(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
   async post(data: any) {
     const actorId = (this as any).request?.tpsAgent;
     if (!actorId || !(await isAdmin(actorId))) {

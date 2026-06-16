@@ -17,7 +17,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { isAdmin } from "./auth-middleware.js";
+import { isAdmin, allowVerified } from "./agent-auth.js";
 
 function parseDuration(s: string): number {
   const m = s.match(/^(\d+)([dhm])$/);
@@ -69,6 +69,13 @@ function evaluate(record: any, now: number, olderThanMs: number): Candidate {
 }
 
 export class ConsolidateMemories extends Resource {
+  // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
+  // admin elevation). Any verified agent may consolidate; the isAdmin checks in
+  // post() handle finer-grained authorization.
+  async allowCreate(): Promise<boolean> {
+    return allowVerified((this as any).getContext?.());
+  }
+
   async post(data: any) {
     const { agentId: bodyAgentId, scope = "persistent", olderThan = "30d", limit = 20 } = data || {};
 

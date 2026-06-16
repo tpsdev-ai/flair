@@ -1,4 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
+import { allowVerified } from "./agent-auth.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { wrapUntrusted } from "./content-safety.js";
 
@@ -45,6 +46,14 @@ function formatMemory(m: any, supersedes?: boolean): string {
 }
 
 export class BootstrapMemories extends Resource {
+  // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
+  // gate's admin super_user elevation, so custom resources must self-gate or
+  // Harper denies them for the least-privilege flair_agent role). Any verified
+  // agent may bootstrap; per-agent scoping is enforced in post() below.
+  async allowCreate(): Promise<boolean> {
+    return allowVerified((this as any).getContext?.());
+  }
+
   async post(data: any, _context?: any) {
     const {
       agentId: bodyAgentId,

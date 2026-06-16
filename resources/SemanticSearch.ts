@@ -1,4 +1,5 @@
 import { Resource, databases } from "@harperfast/harper";
+import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -55,6 +56,16 @@ function distanceToSimilarity(distance: number): number {
 const CANDIDATE_MULTIPLIER = 5;
 
 export class SemanticSearch extends Resource {
+  // Self-authorize via the Ed25519 agent verify instead of relying on the auth
+  // gate's admin super_user elevation (removed in the auth reshape). Any
+  // cryptographically-verified agent may search; per-agent RESULT scoping is
+  // enforced in post() below (an agent only sees its own + office-visible +
+  // granted memories). Without this, Harper's default denies the POST for the
+  // least-privilege flair_agent role (AccessViolation 403).
+  async allowCreate(): Promise<boolean> {
+    return allowVerified((this as any).getContext?.());
+  }
+
   async post(data: any) {
     const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since, asOf } = data || {};
 
@@ -63,13 +74,21 @@ export class SemanticSearch extends Resource {
     // silently returned undefined and the defense-in-depth scope check below
     // was bypassed, letting a non-admin agent read another agent's memories
     // by putting the victim's id in the body.
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    const authenticatedAgent: string | undefined =
-      request?.tpsAgent ?? request?.headers?.get?.("x-tps-agent");
-    const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true;
+    const auth = await resolveAgentAuth((this as any).getContext?.());
 
-    // Rate limiting — use authenticated agent ID, not client-supplied body
+    // Anonymous HTTP must NOT search. Previously the no-auth path fell through to
+    // honoring the body-supplied agentId (line below), so an unauthenticated
+    // caller could read any agent's memories by putting that id in the body.
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "authentication required" }), {
+        status: 401, headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const authenticatedAgent: string | undefined = auth.kind === "agent" ? auth.agentId : undefined;
+    const callerIsAdmin: boolean = auth.kind === "agent" && auth.isAdmin;
+
+    // Rate limiting — use authenticated agent ID (internal calls have none).
     if (authenticatedAgent) {
       const bucket = q && !queryEmbedding ? "embedding" : "general";
       const rl = checkRateLimit(authenticatedAgent, bucket);
@@ -84,15 +103,15 @@ export class SemanticSearch extends Resource {
 
     // Enforce agentId = authenticated agent for non-admins. A mismatched body
     // agentId is a cross-agent read attempt — reject outright. Admins can query
-    // any agentId (needed for bootstrap / consolidation scripts).
+    // any agentId (bootstrap / consolidation).
     if (authenticatedAgent && !callerIsAdmin && bodyAgentId && bodyAgentId !== authenticatedAgent) {
       return new Response(JSON.stringify({
         error: "forbidden: agentId must match authenticated agent",
       }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
 
-    // Scope search to the authenticated agent (own + granted). For admins or
-    // unauthenticated internal calls, honor the body-supplied agentId.
+    // Scope: non-admin agent → own (+ granted). Admin agent or trusted internal
+    // call (no request) → honor the body-supplied agentId.
     const agentId: string | undefined = (authenticatedAgent && !callerIsAdmin)
       ? authenticatedAgent
       : bodyAgentId;

@@ -1,7 +1,16 @@
 import { Resource, databases } from "@harperfast/harper";
+import { allowVerified } from "./agent-auth.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 
 export class FeedMemories extends Resource {
+  // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
+  // gate's admin elevation). NOTE: post() trusts content.agentId from the body —
+  // closing that create-spoofing gap is tracked with the table-resource
+  // create-ownership work (Memory.allowCreate), not in this auth-coverage pass.
+  async allowCreate(): Promise<boolean> {
+    return allowVerified((this as any).getContext?.());
+  }
+
   async post(content: any) {
     const agentId = String(content?.agentId ?? "");
     const body = String(content?.content ?? "");

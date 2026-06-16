@@ -2,6 +2,13 @@ import { Resource, databases } from "@harperfast/harper";
 import { type SoulLike, selectPublicDescription, selectPublicSkills } from "./agentcard-fields.js";
 
 export class AgentCard extends Resource {
+  // Public discovery metadata (per A2A spec, agent cards are intentionally
+  // public). Self-gates as public so it survives the global gate's removal — and
+  // its get() already returns only field-allowlisted public-safe data.
+  allowRead(): boolean {
+    return true;
+  }
+
   async get(pathInfo?: any) {
     const agentId =
       (typeof pathInfo === "string" ? pathInfo : null) ??

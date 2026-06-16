@@ -1,5 +1,5 @@
 import { databases } from "@harperfast/harper";
-import { isAdmin } from "./auth-middleware.js";
+import { resolveAgentAuth } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 
 /**
@@ -16,17 +16,24 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 export class Credential extends (databases as any).flair.Credential {
 
   async search(query?: any) {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    const authAgent: string | undefined = request?.tpsAgent;
-    const isAdminAgent: boolean = request?.tpsAgentIsAdmin ?? false;
+    const auth = await resolveAgentAuth((this as any).getContext?.());
 
-    if (!authAgent || isAdminAgent) {
+    // Anonymous HTTP must NOT read credentials. (Previously `!authAgent` was
+    // treated as trusted/unfiltered — which leaked every credential to an
+    // unauthenticated caller once the gate stopped rejecting.)
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "authentication required" }), {
+        status: 401, headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Trusted internal call or admin agent → unfiltered.
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
       return super.search(query);
     }
 
-    // Non-admin: scope to own credentials
-    const condition = { attribute: "principalId", comparator: "equals", value: authAgent };
+    // Non-admin agent: scope to own credentials.
+    const condition = { attribute: "principalId", comparator: "equals", value: auth.agentId };
     if (!query?.conditions) {
       return super.search({ conditions: [condition], ...(query || {}) });
     }
@@ -41,13 +48,18 @@ export class Credential extends (databases as any).flair.Credential {
     const result = await super.get();
     if (!result) return result;
 
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    const authAgent: string | undefined = request?.tpsAgent;
-    const isAdminAgent: boolean = request?.tpsAgentIsAdmin ?? false;
+    const auth = await resolveAgentAuth((this as any).getContext?.());
 
-    // Non-admin can only see their own credentials
-    if (authAgent && !isAdminAgent && result.principalId !== authAgent) {
+    // Anonymous HTTP must NOT read a credential (previously it fell through the
+    // ownership check and returned the record sans tokenHash — a metadata leak).
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "forbidden" }), {
+        status: 403, headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Non-admin agent can only see their own credentials. (Internal + admin pass.)
+    if (auth.kind === "agent" && !auth.isAdmin && result.principalId !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden" }), {
         status: 403, headers: { "content-type": "application/json" },
       });

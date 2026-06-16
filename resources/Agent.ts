@@ -1,5 +1,5 @@
 import { databases } from "@harperfast/harper";
-import { isAdmin } from "./auth-middleware.js";
+import { isAdmin } from "./agent-auth.js";
 
 /**
  * Agent resource — serves as the Principal table in 1.0.

@@ -1,6 +1,6 @@
 import { databases } from "@harperfast/harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
-import { isAdmin } from "./auth-middleware.js";
+import { isAdmin, resolveAgentAuth } from "./agent-auth.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -17,18 +17,25 @@ export class Memory extends (databases as any).flair.Memory {
    * Non-admin calls also check MemoryGrant to include granted memories.
    */
   async search(query?: any) {
-    // Access request context via Harper's Resource instance context
+    // Access request context via Harper's Resource instance context.
     const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    const authAgent: string | undefined = request?.tpsAgent;
-    const isAdminAgent: boolean = request?.tpsAgentIsAdmin ?? false;
+    const auth = await resolveAgentAuth(ctx);
 
-    // No auth context (internal admin call) or admin agent — unfiltered
-    if (!authAgent || isAdminAgent) {
+    // Anonymous HTTP must NOT read memories. (Previously `!authAgent` was treated
+    // as unfiltered — the anonymous-read leak once the gate stops rejecting.)
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "authentication required" }), {
+        status: 401, headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Trusted internal call (no request context) or admin agent — unfiltered.
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
       return super.search(query);
     }
 
-    // Collect agentIds this agent may read: own + any granted owners
+    // Non-admin agent: scope to own + granted owners.
+    const authAgent = auth.agentId;
     const allowedOwners: string[] = [authAgent];
     try {
       for await (const grant of (databases as any).flair.MemoryGrant.search({
@@ -72,6 +79,19 @@ export class Memory extends (databases as any).flair.Memory {
     if (authenticatedAgent) {
       const rl = checkRateLimit(authenticatedAgent, "general");
       if (!rl.allowed) return rateLimitResponse(rl.retryAfterMs!, "write");
+    }
+
+    // Create ownership: a non-admin agent may only write memories it owns. Use
+    // resolveAgentAuth (reads the gate's tpsAgent annotation) — NOT context.user
+    // .username, which is the fallback "admin" super_user while de-elevation is
+    // dormant and would wrongly 403 every agent's own write. internal/admin → pass.
+    {
+      const auth = await resolveAgentAuth(ctx);
+      if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
+        return new Response(JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }), {
+          status: 403, headers: { "Content-Type": "application/json" },
+        });
+      }
     }
 
     content.durability ||= "standard";
@@ -160,6 +180,20 @@ export class Memory extends (databases as any).flair.Memory {
       }
       delete content._reindex;
       return super.put(content);
+    }
+
+    // Create/update ownership (same rule as post): a non-admin agent may only
+    // write memories it owns, via resolveAgentAuth (gate annotation), not
+    // context.user.username (the dormant-de-elevation fallback is "admin").
+    // The _reindex admin path above bypasses this.
+    {
+      const octx = (this as any).getContext?.();
+      const auth = await resolveAgentAuth(octx);
+      if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
+        return new Response(JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }), {
+          status: 403, headers: { "Content-Type": "application/json" },
+        });
+      }
     }
 
     const now = new Date().toISOString();

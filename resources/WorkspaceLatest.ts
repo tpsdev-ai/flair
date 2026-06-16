@@ -6,8 +6,16 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
+import { allowVerified } from "./agent-auth.js";
 
 export class WorkspaceLatest extends Resource {
+  // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
+  // admin elevation). Any verified agent may read; the path-vs-agent ownership
+  // check stays in get().
+  async allowRead(): Promise<boolean> {
+    return allowVerified((this as any).getContext?.());
+  }
+
   async get(pathInfo?: any) {
     const request = (this as any).context?.request ?? (this as any).request;
     const callerAgent = request?.tpsAgent;

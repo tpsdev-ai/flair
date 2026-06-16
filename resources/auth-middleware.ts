@@ -1,6 +1,7 @@
 import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
+import { isAdmin } from "./agent-auth.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -36,37 +37,10 @@ const WINDOW_MS = 30_000;
 const nonceSeen = new Map<string, number>();
 
 // ─── Admin resolution ─────────────────────────────────────────────────────────
-// Admin agents: from FLAIR_ADMIN_AGENTS env var (comma-separated) OR
-// Agent records with role === "admin". Both sources are OR-combined.
-// Result is cached for 60s to avoid per-request DB hits.
-
-let adminCacheExpiry = 0;
-let adminCache: Set<string> = new Set();
-
-async function getAdminAgents(): Promise<Set<string>> {
-  const now = Date.now();
-  if (now < adminCacheExpiry) return adminCache;
-
-  const from_env = (process.env.FLAIR_ADMIN_AGENTS ?? "")
-    .split(",").map((s) => s.trim()).filter(Boolean);
-
-  let from_db: string[] = [];
-  try {
-    const results = await (databases as any).flair.Agent.search([{ attribute: "role", value: "admin", condition: "equals" }]);
-    for await (const row of results) {
-      if (row?.id) from_db.push(row.id);
-    }
-  } catch { /* Agent table might not be populated yet */ }
-
-  adminCache = new Set([...from_env, ...from_db]);
-  adminCacheExpiry = now + 60_000;
-  return adminCache;
-}
-
-export async function isAdmin(agentId: string): Promise<boolean> {
-  const admins = await getAdminAgents();
-  return admins.has(agentId);
-}
+// `isAdmin` (FLAIR_ADMIN_AGENTS env + Agent role==="admin", 60s-cached) now lives
+// in agent-auth.ts as the single source of truth, imported above. During the
+// auth reshape this gate and the per-resource allow* helpers must agree on who's
+// an admin — one implementation guarantees they can't diverge.
 
 // ─── Crypto helpers ───────────────────────────────────────────────────────────
 
@@ -159,9 +133,18 @@ server.http(async (request: any, nextLayer: any) => {
     url.pathname === "/Presence"
   ) return nextLayer(request);
 
-  // If Harper has already authorized this request (e.g. authorizeLocal=true on localhost),
-  // trust Harper's auth decision and pass through without requiring additional headers.
+  // If Harper has already authorized this request (e.g. Basic admin, or
+  // authorizeLocal=true on localhost), trust Harper's auth decision and pass
+  // through. Annotate the admin identity so resources' resolveAgentAuth recognizes
+  // this as an ADMIN caller (not anonymous) — otherwise a Basic-admin request,
+  // which carries no TPS-Ed25519 header, gets classified anonymous and denied.
   if (request.user?.role?.permission?.super_user === true) {
+    request.tpsAgent = request.user.username ?? "admin";
+    request.tpsAgentIsAdmin = true;
+    try {
+      request.headers.set("x-tps-agent", request.tpsAgent);
+      if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = request.tpsAgent;
+    } catch { /* frozen headers — annotation on request object still applies */ }
     return nextLayer(request);
   }
 
@@ -299,27 +282,26 @@ server.http(async (request: any, nextLayer: any) => {
   request.tpsAgentIsAdmin = await isAdmin(agentId);
 
   // Grant Harper-level permissions for the cryptographically-verified agent by
-  // setting request.user directly to the admin super_user.
+  // setting request.user directly. Setting request.user is the supported
+  // extension path (and the only one that works post-5.0.9: Harper resolves
+  // request.user from the Authorization header BEFORE this middleware runs, and
+  // a TPS-Ed25519 header matches no Basic/Bearer strategy, so request.user
+  // arrives null — see #456). getUser(name, null) looks up the record WITHOUT
+  // password validation, safe here because the Ed25519 signature already proved
+  // identity cryptographically.
   //
-  // Prior approach swapped the Authorization header to "Basic admin:<pass>" so
-  // Harper's auth pipeline would re-authenticate with full (HNSW-capable)
-  // permissions. That silently broke under Harper 5.0.9: its authentication
-  // layer (security/auth.ts `authentication()`) reads the Authorization header
-  // and resolves request.user BEFORE invoking this middleware via nextHandler.
-  // A TPS-Ed25519 header matches no Basic/Bearer strategy, so Harper sets
-  // request.user = null and never re-reads the header — our post-hoc swap was
-  // ignored, the request ran unauthenticated, and Harper surfaced it downstream
-  // as a generic "Login failed" 401. (Broke at the 2026-05-27 daemon restart,
-  // which loaded 5.0.9 fresh; the prior long-running process held an older
-  // in-memory Harper where the late header read still worked.)
-  //
-  // Setting request.user directly is the supported extension path and is honored
-  // by all downstream resources, including HNSW vector search. getUser(admin,
-  // null) looks up the admin record WITHOUT password validation — safe here
-  // because the Ed25519 signature verified above already proves agent identity
-  // cryptographically; no Basic credential is presented. This preserves the
-  // prior privilege model (verified agents act with admin perms; per-agent data
-  // isolation is still enforced downstream via the x-tps-agent header below).
+  // RESHAPE (auth-rbac): verified agents resolve to the least-privilege
+  // `flair-agent` user, NOT admin super_user. The flair_agent role grants exactly
+  // the table CRUD agents need; with no operations grant, /sql + /graphql become
+  // natively 403. Row-level data isolation stays enforced via x-tps-agent below.
+  // Elevate the cryptographically-verified agent to admin (unchanged from
+  // pre-reshape behavior). getUser(admin, null) looks up the admin record WITHOUT
+  // password validation — safe because the Ed25519 signature already proved
+  // identity. Per-agent DE-ELEVATION (agents → the least-privilege flair_agent
+  // role instead of admin) is deferred to the non-rejecting-gate follow-up PR; it
+  // doesn't belong in this zero-behavior-change foundation. Resource scoping +
+  // ownership in this PR derive identity from the x-tps-agent annotation via
+  // resolveAgentAuth, independent of request.user, so they work under either model.
   try {
     request.user = await (server as any).getUser("admin", null, request);
   } catch {
