@@ -244,4 +244,28 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     });
     expect(res.status, `spoofed create returned ${res.status} (expected 403)`).toBe(403);
   }, 30_000);
+
+  test("ANONYMOUS: no-auth GET /Memory is denied (anonymous HTTP rejected)", async () => {
+    const res = await fetch(`${harper.httpURL}/Memory/?agentId=${agent.id}`);
+    expect([401, 403], `anon GET /Memory returned ${res.status} (expected 401/403)`).toContain(res.status);
+  }, 30_000);
+
+  test("ANONYMOUS: no-auth POST /SemanticSearch is denied (anonymous HTTP rejected)", async () => {
+    const res = await fetch(`${harper.httpURL}/SemanticSearch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: agent.id, q: "anything", limit: 1 }),
+    });
+    expect([401, 403], `anon POST /SemanticSearch returned ${res.status} (expected 401/403)`).toContain(res.status);
+  }, 30_000);
+
+  test("ANONYMOUS: no-auth PUT /Memory is denied (anonymous write rejected)", async () => {
+    const id = `anon-write-${Date.now()}`;
+    const res = await fetch(`${harper.httpURL}/Memory/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, agentId: agent.id, content: "anon write attempt", durability: "standard" }),
+    });
+    expect([401, 403], `anon PUT /Memory returned ${res.status} (expected 401/403)`).toContain(res.status);
+  }, 30_000);
 });
