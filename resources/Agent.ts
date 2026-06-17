@@ -1,5 +1,5 @@
 import { databases } from "@harperfast/harper";
-import { isAdmin } from "./agent-auth.js";
+import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin } from "./agent-auth.js";
 
 /**
  * Agent resource — serves as the Principal table in 1.0.
@@ -18,6 +18,15 @@ import { isAdmin } from "./agent-auth.js";
  *   - subjects: soul-level subject interests
  */
 export class Agent extends (databases as any).flair.Agent {
+  // Self-authorize now that the global gate is non-rejecting. Verified agents read
+  // the principal table for discovery; an agent updates only its OWN record (put
+  // handler enforces ownership). Creating/deleting principals is admin-only
+  // (flair_agent grant: insert=false, delete=false). Anonymous denied throughout.
+  allowRead()   { return allowVerified((this as any).getContext?.()); }
+  allowCreate() { return allowAdmin((this as any).getContext?.()); }
+  allowUpdate() { return allowVerified((this as any).getContext?.()); }
+  allowDelete() { return allowAdmin((this as any).getContext?.()); }
+
   async post(content: any, context: any) {
     const now = new Date().toISOString();
 
@@ -42,15 +51,18 @@ export class Agent extends (databases as any).flair.Agent {
   }
 
   async put(content: any) {
-    const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    const authAgent: string | undefined = request?.tpsAgent;
-    const isAdminAgent: boolean = request?.tpsAgentIsAdmin ?? false;
-
-    // Only admin principals can modify other principals
-    if (authAgent && !isAdminAgent) {
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    // Anonymous denied (defense-in-depth alongside allowUpdate; the old check read
+    // tpsAgent and treated a missing agent as trusted, so anonymous slipped through).
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "authentication required" }), {
+        status: 401, headers: { "content-type": "application/json" },
+      });
+    }
+    // Only admin principals can modify OTHER principals; an agent updates its own.
+    if (auth.kind === "agent" && !auth.isAdmin) {
       const existing = await super.get();
-      if (existing && existing.id !== authAgent) {
+      if (existing && existing.id !== auth.agentId) {
         return new Response(JSON.stringify({ error: "only admin principals can modify other principals" }), {
           status: 403, headers: { "content-type": "application/json" },
         });

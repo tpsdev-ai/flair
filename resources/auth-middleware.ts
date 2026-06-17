@@ -1,7 +1,7 @@
 import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
-import { isAdmin } from "./agent-auth.js";
+import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -219,8 +219,17 @@ server.http(async (request: any, nextLayer: any) => {
           return nextLayer(request);
         }
       }
-    } catch { /* fall through to Ed25519 check */ }
-    return new Response(JSON.stringify({ error: "invalid_admin_credentials" }), { status: 401 });
+    } catch { /* fall through to anonymous */ }
+    // NON-REJECTING (auth-rbac flip): a Basic header that matched no admin/super_user/
+    // pair path → annotate anonymous + pass through (don't 401 — a sibling component's
+    // Basic auth on a shared Harper must not be rejected by flair's gate). Resource
+    // allow* denies if the path is flair-protected.
+    request.tpsAnonymous = true;
+    try {
+      request.headers.set("x-tps-anonymous", "1");
+      if (request.headers.asObject) (request.headers.asObject as any)["x-tps-anonymous"] = "1";
+    } catch { /* frozen headers */ }
+    return nextLayer(request);
   }
 
   // ── Ed25519 agent auth ────────────────────────────────────────────────────
@@ -241,7 +250,17 @@ server.http(async (request: any, nextLayer: any) => {
         },
       });
     }
-    return new Response(JSON.stringify({ error: "missing_or_invalid_authorization" }), { status: 401 });
+    // NON-REJECTING GATE (auth-rbac flip): no valid agent → annotate anonymous and
+    // pass through. Per-resource allow* (resolveAgentAuth → anonymous → deny) is the
+    // enforcement; the gate no longer 401s instance-wide, which was breaking sibling
+    // components on a shared Harper / composite hub. Anonymous reaches only public
+    // allow-listed paths + resources whose allow* permit it.
+    request.tpsAnonymous = true;
+    try {
+      request.headers.set("x-tps-anonymous", "1");
+      if (request.headers.asObject) (request.headers.asObject as any)["x-tps-anonymous"] = "1";
+    } catch { /* frozen headers — annotation on the request object still applies */ }
+    return nextLayer(request);
   }
 
   const [, agentId, tsRaw, nonce, signatureB64] = m;
@@ -290,23 +309,37 @@ server.http(async (request: any, nextLayer: any) => {
   // password validation, safe here because the Ed25519 signature already proved
   // identity cryptographically.
   //
-  // RESHAPE (auth-rbac): verified agents resolve to the least-privilege
-  // `flair-agent` user, NOT admin super_user. The flair_agent role grants exactly
-  // the table CRUD agents need; with no operations grant, /sql + /graphql become
-  // natively 403. Row-level data isolation stays enforced via x-tps-agent below.
-  // Elevate the cryptographically-verified agent to admin (unchanged from
-  // pre-reshape behavior). getUser(admin, null) looks up the admin record WITHOUT
-  // password validation — safe because the Ed25519 signature already proved
-  // identity. Per-agent DE-ELEVATION (agents → the least-privilege flair_agent
-  // role instead of admin) is deferred to the non-rejecting-gate follow-up PR; it
-  // doesn't belong in this zero-behavior-change foundation. Resource scoping +
-  // ownership in this PR derive identity from the x-tps-agent annotation via
-  // resolveAgentAuth, independent of request.user, so they work under either model.
+  // RESHAPE (auth-rbac) — THE FLIP: per-agent DE-ELEVATION. A cryptographically-
+  // verified NON-admin agent resolves to the least-privilege `flair-agent` user,
+  // NOT admin super_user. The flair_agent role grants exactly the table CRUD agents
+  // need; with no operations grant, /sql + /graphql are natively 403 (the hand-
+  // rolled raw-query block below becomes belt-and-suspenders). Admins still resolve
+  // to admin. getUser(name, null) looks up WITHOUT password validation — safe
+  // because the Ed25519 signature already proved identity. Row-level ownership stays
+  // enforced via x-tps-agent / resolveAgentAuth, independent of request.user.
+  //
+  // GRACEFUL FALLBACK: if the flair-agent user isn't provisioned on this instance
+  // yet (pre-migration — ensureFlairAgentUser hasn't run), fall back to admin so
+  // agents keep working. De-elevation activates per-instance once the user exists.
   try {
-    request.user = await (server as any).getUser("admin", null, request);
+    if (request.tpsAgentIsAdmin) {
+      request.user = await (server as any).getUser("admin", null, request);
+    } else {
+      let deElevated: any = null;
+      try { deElevated = await (server as any).getUser(FLAIR_AGENT_USERNAME, null, request); } catch { /* not provisioned */ }
+      // getUser(name, null) returns a ROLE-LESS phantom `{ username }` (not null,
+      // not a throw) for a nonexistent user — harper security/user.js
+      // findAndValidateUser: `if (!userTmp) { if (!validatePassword) return { username } }`.
+      // A phantom is truthy, so `deElevated ?? admin` would keep it and the request
+      // would carry NO role → 403 AccessViolation. Require a real role to use the
+      // de-elevated user; otherwise fall back to admin (pre-migration instances).
+      request.user = (deElevated && deElevated.role)
+        ? deElevated
+        : await (server as any).getUser("admin", null, request);
+    }
   } catch {
-    // Admin record unavailable — request proceeds as the verified tpsAgent
-    // without elevated perms; resource-level scoping still applies.
+    // No usable user record — request proceeds as the verified tpsAgent without
+    // elevated perms; resource-level scoping (x-tps-agent) still applies.
   }
 
   // Propagate authenticated agent to downstream resources via header.

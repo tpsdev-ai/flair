@@ -18,6 +18,7 @@
  */
 
 import { databases } from "@harperfast/harper";
+import { resolveAgentAuth } from "./agent-auth.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -337,5 +338,36 @@ export class Presence extends (databases as any).flair.Presence {
         { status: 500, headers: { "Content-Type": "application/json" } },
       );
     }
+  }
+
+  /**
+   * PUT/DELETE are not part of the agent heartbeat contract (writes go through
+   * POST, which carries its own Ed25519 auth). GET is intentionally public and
+   * allowCreate=true lets POST self-auth — but those bypasses must NOT extend to
+   * PUT/DELETE. The non-rejecting gate would otherwise let anonymous PUT/DELETE
+   * straight to Harper's default handler (the leak this closes). Require a verified
+   * non-anonymous principal, scoped to the agent's own record (Presence is keyed
+   * by agentId).
+   */
+  async put(content: any, context?: any) {
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
+    }
+    if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
+      return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
+    return super.put(content, context);
+  }
+
+  async delete(id: any) {
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
+    }
+    if (auth.kind === "agent" && !auth.isAdmin && id != null && String(id) !== auth.agentId) {
+      return new Response(JSON.stringify({ error: "forbidden: cannot delete presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
+    return super.delete(id);
   }
 }

@@ -87,6 +87,14 @@ export class Memory extends (databases as any).flair.Memory {
     // dormant and would wrongly 403 every agent's own write. internal/admin → pass.
     {
       const auth = await resolveAgentAuth(ctx);
+      // Anonymous HTTP must NOT write. Pre-flip the global gate rejected no-auth
+      // upstream; with the non-rejecting gate, each write path self-enforces (same
+      // rule search() applies to reads).
+      if (auth.kind === "anonymous") {
+        return new Response(JSON.stringify({ error: "authentication required" }), {
+          status: 401, headers: { "Content-Type": "application/json" },
+        });
+      }
       if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
         return new Response(JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }), {
           status: 403, headers: { "Content-Type": "application/json" },
@@ -189,6 +197,12 @@ export class Memory extends (databases as any).flair.Memory {
     {
       const octx = (this as any).getContext?.();
       const auth = await resolveAgentAuth(octx);
+      // Anonymous HTTP must NOT write (non-rejecting gate → self-enforce here).
+      if (auth.kind === "anonymous") {
+        return new Response(JSON.stringify({ error: "authentication required" }), {
+          status: 401, headers: { "Content-Type": "application/json" },
+        });
+      }
       if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
         return new Response(JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }), {
           status: 403, headers: { "Content-Type": "application/json" },

@@ -268,4 +268,46 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     });
     expect([401, 403], `anon PUT /Memory returned ${res.status} (expected 401/403)`).toContain(res.status);
   }, 30_000);
+
+  // Belt-and-suspenders: the non-rejecting gate returns BEFORE its per-resource
+  // mutation guards (those only run for verified agents), so EVERY agent-facing
+  // @table write path must self-enforce anonymous denial in its own handler/allow*.
+  // One anonymous PUT per agent-writable resource; any 200/204 is an auth leak.
+  // EVERY @export @table must reject anonymous writes. Harper's role gate denies
+  // admin/system tables for a no-user request (→ 403, passes); a 200/204 is a real
+  // leak in a table that relied on the (now non-rejecting) global gate. MemoryCandidate
+  // is intentionally NOT @export (not REST-routable) so it's excluded.
+  const AGENT_WRITE_RESOURCES: Array<{ name: string; body: (id: string) => any }> = [
+    // agent-facing (agent-owned data)
+    { name: "Soul",            body: (id) => ({ id, agentId: agent.id, content: "anon soul" }) },
+    { name: "WorkspaceState",  body: (id) => ({ id, agentId: agent.id, state: { x: 1 } }) },
+    { name: "Relationship",    body: (id) => ({ id, agentId: agent.id, otherId: "x", kind: "knows" }) },
+    { name: "Integration",     body: (id) => ({ id, agentId: agent.id, kind: "test" }) },
+    { name: "Presence",        body: (id) => ({ id, agentId: agent.id, status: "online" }) },
+    { name: "Credential",      body: (id) => ({ id, agentId: agent.id, name: "k", value: "v" }) },
+    { name: "MemoryGrant",     body: (id) => ({ id, ownerId: agent.id, granteeId: "x", scope: "read" }) },
+    { name: "OrgEvent",        body: (id) => ({ id, authorId: agent.id, kind: "note", body: "anon" }) },
+    { name: "Agent",           body: (id) => ({ id, displayName: "anon", role: "agent" }) },
+    // observatory read-models (public read; writes are system-driven → must deny anon)
+    { name: "ObsOffice",        body: (id) => ({ id, data: "anon" }) },
+    { name: "ObsAgentSnapshot", body: (id) => ({ id, agentId: agent.id, data: "anon" }) },
+    { name: "ObsEventFeed",     body: (id) => ({ id, data: "anon" }) },
+    // admin / system / federation tables (no agent grant → must deny anon)
+    { name: "Instance",        body: (id) => ({ id, name: "anon" }) },
+    { name: "Peer",            body: (id) => ({ id, url: "http://x" }) },
+    { name: "PairingToken",    body: (id) => ({ id, token: "anon" }) },
+    { name: "OAuthClient",     body: (id) => ({ id, clientId: "anon" }) },
+    { name: "IdpConfig",       body: (id) => ({ id, issuer: "anon" }) },
+  ];
+  for (const r of AGENT_WRITE_RESOURCES) {
+    test(`ANONYMOUS: no-auth PUT /${r.name} is denied (anonymous write rejected)`, async () => {
+      const id = `anon-${r.name}-${Date.now()}`;
+      const res = await fetch(`${harper.httpURL}/${r.name}/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(r.body(id)),
+      });
+      expect([401, 403], `anon PUT /${r.name} returned ${res.status} (expected 401/403)`).toContain(res.status);
+    }, 30_000);
+  }
 });

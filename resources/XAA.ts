@@ -1,4 +1,5 @@
 import { databases } from "@harperfast/harper";
+import { allowAdmin } from "./agent-auth.js";
 import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
@@ -285,6 +286,14 @@ export async function handleJwtBearerGrant(data: any): Promise<Response | object
  * Admin-only access.
  */
 export class IdpConfig extends (databases as any).flair.IdpConfig {
+  // Admin-only on every path (the "Admin-only" comment was previously unenforced —
+  // a pure put() override with no auth check, so the non-rejecting gate let
+  // anonymous through to Harper's handler). allowAdmin permits admin + internal.
+  allowRead()   { return allowAdmin((this as any).getContext?.()); }
+  allowCreate() { return allowAdmin((this as any).getContext?.()); }
+  allowUpdate() { return allowAdmin((this as any).getContext?.()); }
+  allowDelete() { return allowAdmin((this as any).getContext?.()); }
+
   async put(content: any) {
     const now = nowISO();
     content.enabled ??= true;
