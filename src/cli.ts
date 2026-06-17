@@ -1431,12 +1431,13 @@ program
         // Every flair instance has agents, so provision the least-privilege
         // flair_agent role (idempotent, harmless until a user is assigned to it).
         await ensureFlairAgentRole(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
-        // NOTE: ensureFlairAgentUser is intentionally NOT wired in yet. Provisioning
-        // the flair-agent user activates the gate's de-elevation (verified agents →
-        // flair_agent instead of admin), and that breaks any agent-facing CUSTOM
-        // resource still lacking an allow* (e.g. SemanticSearch relies on the admin
-        // super_user bypass today). Wire it in only once every agent-facing resource
-        // self-authorizes via allow*. Until then the gate falls back to admin.
+        // THE FLIP (auth-rbac): provision the shared least-privilege flair-agent user.
+        // This ACTIVATES the gate's per-agent de-elevation (verified non-admin agents
+        // resolve to flair-agent instead of admin super_user). Safe now: #487 gave
+        // every agent-facing resource its own allow* + resolveAgentAuth, so they no
+        // longer rely on the admin super_user bypass. The gate also falls back to
+        // admin if this user is ever absent, so de-elevation degrades gracefully.
+        await ensureFlairAgentUser(opsUrl, DEFAULT_ADMIN_USER, flairAdminPass);
       } else {
         // ── Existing behavior: --admin-pass required for already-running Flair ──
         if (!opts.adminPass) {

@@ -33,8 +33,11 @@ describe("Flair API E2E Smoke", () => {
 
   test("REST endpoint returns data", async () => {
     const res = await fetch(`${harper.httpURL}/Agent/smoke-test`);
-    // authorizeLocal: true means we expect 401 without auth
-    expect([200, 401]).toContain(res.status);
+    // No auth: 200 if authorizeLocal trusts localhost, else denied. Post auth-flip
+    // the Agent table self-authorizes (allowRead=allowVerified), so anonymous is
+    // denied with 403 (the public discovery surface is AgentCard, not Agent). 401
+    // is the pre-flip gate rejection — accept all three.
+    expect([200, 401, 403]).toContain(res.status);
     if (res.status === 200) {
       const body = await res.json();
       expect(body.id).toBe("smoke-test");
