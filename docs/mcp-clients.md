@@ -71,6 +71,52 @@ Or, if you prefer the project-scoped `.mcp.json` checked into your repo:
 }
 ```
 
+#### Auto-recall on session start (optional hook)
+
+The MCP server gives the agent *pull* access to memory — it calls `bootstrap` /
+`memory_search` when it decides to. If you'd rather have Flair context loaded
+automatically the moment a session opens (no "call the bootstrap tool" nudge),
+register Flair's `SessionStart` hook. It's a separate bin shipped in the same
+package and is entirely optional — it complements the MCP server, it doesn't
+replace it.
+
+Add a `SessionStart` hook to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "FLAIR_AGENT_ID=me npx -y @tpsdev-ai/flair-mcp flair-session-start"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Swap `me` for your `FLAIR_AGENT_ID`. The hook reads Claude Code's SessionStart
+payload on stdin, calls Flair's `bootstrap` (soul + relevant memories +
+predicted context, scoped to your project by the session's working directory),
+and emits it as `hookSpecificOutput.additionalContext` — which Claude Code
+injects into the new session's context. The matcher is omitted, so it fires on
+every session start (`startup`, `resume`, `clear`, `compact`); add
+`"matcher": "startup"` to a hook group if you only want it on fresh sessions.
+
+It honors the same env as the MCP server (`FLAIR_AGENT_ID`, `FLAIR_URL`,
+`FLAIR_KEY_PATH`), plus `FLAIR_HOOK_TIMEOUT_MS` (default 8000, clamped
+500–30000) for the bootstrap timeout.
+
+**It degrades to a no-op, always.** No `FLAIR_AGENT_ID`, Flair down, an auth
+error, or a hung daemon (past the timeout) → the hook prints `{}` and exits 0.
+Claude Code treats that as "no context to add" and starts normally. The hook
+can never block or break session startup. The injected context is clamped to
+≤10,000 characters to keep the session-start payload small.
+
 ### Gemini CLI
 
 Edit `~/.gemini/settings.json` (create it if absent):
