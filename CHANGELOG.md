@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.0 (2026-06-18)
+
+> **Auth-RBAC reshape + Claude Code auto-recall.** The agent-auth boundary moves from a single rejecting gate to a non-rejecting gate plus per-resource self-enforcement, with every agent running as a least-privilege identity. And Flair becomes *automatic* memory for Claude Code: a SessionStart hook injects soul + relevant memories at session start, no manual tool call.
+
+### 🔒 Auth-RBAC reshape: non-rejecting gate + per-agent de-elevation — #487, #489
+
+The HTTP auth boundary is rebuilt. The global gate no longer rejects; it annotates the request and every `@table`/custom resource self-enforces via a three-way verdict (internal / verified-agent / anonymous), denying anonymous writes per-resource. Each agent runs as a de-elevated least-privilege `flair-agent` user instead of admin. Closes anonymous-write holes across Memory, Soul, Integration, Presence, Agent, and the federation/pairing resources, and fixes a phantom-user fallback `getUser` returned for unprovisioned instances. (#487 laid the foundation — per-agent identity + the `flair_agent` role + resource hardening, gate unchanged; #489 flipped the gate and completed per-resource enforcement.)
+
+### 🐛 Fresh hub provisioning: flair_pair_initiator role spec — #488
+
+`add_role` rejected the `flair_pair_initiator` role spec, breaking fresh hub provisioning. Fixed so a new federation hub stands up cleanly.
+
+### ✨ Claude Code SessionStart auto-recall hook — #490
+
+`@tpsdev-ai/flair-mcp` ships a new `flair-session-start` bin: register it as a Claude Code SessionStart hook and every session boots with Flair's `bootstrap` context (soul + relevant memories) auto-injected — Flair as a *push* memory layer, not just pull tools. No-op on any failure (never blocks startup), context clamped, opt-in via `~/.claude/settings.json`. See `docs/mcp-clients.md`.
+
 ## 0.11.0 (2026-06-09)
 
 > **Presence & Heartbeat API — the live agent-activity layer.** Agents report liveness and current task via Ed25519-signed heartbeats; a field-allowlisted public read surface exposes derived status (active / idle / offline) without leaking private data. Built as the backend for The Office Space — a live visualization of the agent fleet — and a concrete instance of zero-trust agent identity: an agent can only write its own presence. Ships alongside federation and Harper-lifecycle hardening.
