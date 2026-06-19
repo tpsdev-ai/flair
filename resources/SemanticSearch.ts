@@ -5,46 +5,10 @@ import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { wrapUntrusted } from "./content-safety.js";
 
-// ─── Temporal Decay + Relevance Scoring ─────────────────────────────────────
-
-const DURABILITY_WEIGHTS: Record<string, number> = {
-  permanent: 1.0,
-  persistent: 0.9,
-  standard: 0.7,
-  ephemeral: 0.4,
-};
-
-// Half-life in days for exponential decay per durability level
-const DECAY_HALF_LIFE_DAYS: Record<string, number> = {
-  permanent: Infinity, // never decays
-  persistent: 90,
-  standard: 30,
-  ephemeral: 7,
-};
-
-function recencyFactor(createdAt: string, durability: string): number {
-  const halfLife = DECAY_HALF_LIFE_DAYS[durability] ?? 30;
-  if (halfLife === Infinity) return 1.0;
-  const ageDays = (Date.now() - Date.parse(createdAt)) / (1000 * 60 * 60 * 24);
-  const lambda = Math.LN2 / halfLife;
-  return Math.exp(-lambda * ageDays);
-}
-
-function retrievalBoost(retrievalCount: number): number {
-  if (!retrievalCount || retrievalCount <= 0) return 1.0;
-  return 1.0 + 0.1 * Math.log2(retrievalCount); // gentle boost: 10 retrievals → ~1.33x
-}
-
-function compositeScore(
-  semanticScore: number,
-  record: { durability?: string; createdAt?: string; retrievalCount?: number; supersedes?: string },
-): number {
-  const durability = record.durability ?? "standard";
-  const dWeight = DURABILITY_WEIGHTS[durability] ?? 0.7;
-  const rFactor = record.createdAt ? recencyFactor(record.createdAt, durability) : 1.0;
-  const rBoost = retrievalBoost(record.retrievalCount ?? 0);
-  return semanticScore * dWeight * rFactor * rBoost;
-}
+// Temporal decay + relevance scoring (incl. the OPS-AYGD retrievalBoost cap +
+// relevance floor) lives in ./scoring.ts — a Harper-free module so it can be
+// unit-tested directly (see test/unit/temporal-scoring.test.ts).
+import { compositeScore } from "./scoring.js";
 
 // Convert HNSW cosine distance (1 - similarity) to similarity score
 function distanceToSimilarity(distance: number): number {
