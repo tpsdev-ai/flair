@@ -27,13 +27,17 @@ export function recencyFactor(createdAt: string, durability: string): number {
   return Math.exp(-lambda * ageDays);
 }
 
-// OPS-AYGD: bound the retrieval boost. RBOOST_CAP clamps the otherwise-unbounded
-// log growth so a frequently-retrieved doc can't accumulate a runaway score
-// advantage (the rich-get-richer feedback loop). RBOOST_RELEVANCE_FLOOR gates the
-// boost in compositeScore so a popular-but-irrelevant doc isn't lifted into top-k
-// for queries it doesn't semantically match. Both tuned against recall-eval.mjs.
-export const RBOOST_CAP = 1.5;
-export const RBOOST_RELEVANCE_FLOOR = 0.5;
+// OPS-AYGD: the retrieval boost was unbounded and OVERRODE semantic ranking —
+// recall-eval 2026-06-19 showed composite p@3 0.83 vs raw 1.00, with a popular doc
+// magnetised into 5/6 queries (its rBoost lifted a 0.55-0.65 semantic score above
+// the correct docs). Bounded to a gentle nudge that breaks near-ties without
+// overriding a clear semantic winner. Tuned offline against the real corpus
+// (floor 0.5 + cap 1.1 → composite p@3 recovers to 1.00, magnet eliminated).
+// A query-relative tie-breaker gate (boost only within ~0.05 of the top raw score)
+// is the principled follow-up for graduated boosting; it needs the search loop to
+// pass the candidate-set top score, so it's deferred to its own change.
+export const RBOOST_CAP = 1.1; // max +10% — a tie-breaker, not an override
+export const RBOOST_RELEVANCE_FLOOR = 0.5; // no boost at all for clearly-irrelevant docs
 
 export function retrievalBoost(retrievalCount: number): number {
   if (!retrievalCount || retrievalCount <= 0) return 1.0;

@@ -33,22 +33,20 @@ describe("temporal decay scoring", () => {
   });
 });
 
-describe("retrieval boost (OPS-AYGD: bounded)", () => {
+describe("retrieval boost (OPS-AYGD: bounded to a gentle nudge)", () => {
   test("zero retrievals = no boost", () => {
     expect(retrievalBoost(0)).toBe(1.0);
   });
 
-  test("10 retrievals gives a moderate boost", () => {
-    const b = retrievalBoost(10);
-    expect(b).toBeGreaterThan(1.3);
-    expect(b).toBeLessThan(1.4);
+  test("a single retrieval is not yet boosted", () => {
+    expect(retrievalBoost(1)).toBe(1.0);
   });
 
-  test("boost is capped at 1.5 — no unbounded growth", () => {
-    // uncapped: 1 + 0.1*log2(100) ≈ 1.66, log2(1e6) ≈ 2.99 → all clamp to 1.5
-    expect(retrievalBoost(100)).toBe(1.5);
-    expect(retrievalBoost(10_000)).toBe(1.5);
-    expect(retrievalBoost(1_000_000)).toBe(1.5);
+  test("boost is capped at 1.1 — a tie-breaker, never an override", () => {
+    // uncapped this would be 1 + 0.1*log2(rc); it clamps to the 1.1 cap by rc≈2
+    expect(retrievalBoost(10)).toBe(1.1);
+    expect(retrievalBoost(100)).toBe(1.1);
+    expect(retrievalBoost(1_000_000)).toBe(1.1);
   });
 });
 
@@ -64,7 +62,7 @@ describe("composite scoring (OPS-AYGD: relevance-floor gate)", () => {
     const boosted = compositeScore(0.7, { durability: "standard", createdAt: now(), retrievalCount: 1000 });
     const cold = compositeScore(0.7, { durability: "standard", createdAt: now(), retrievalCount: 0 });
     expect(boosted).toBeGreaterThan(cold);
-    expect(boosted / cold).toBeCloseTo(1.5, 2); // capped ratio
+    expect(boosted / cold).toBeCloseTo(1.1, 2); // capped at +10%
   });
 
   test("MAGNET FIX: a low-semantic popular doc cannot outrank a high-semantic fresh doc", () => {
@@ -74,8 +72,9 @@ describe("composite scoring (OPS-AYGD: relevance-floor gate)", () => {
     expect(relevant).toBeGreaterThan(magnet);
   });
 
-  test("permanent + fresh + high semantic = highest score", () => {
-    expect(compositeScore(0.9, { durability: "permanent", createdAt: now(), retrievalCount: 5 })).toBeGreaterThan(1.0);
+  test("permanent + fresh + high semantic = a high score", () => {
+    // 0.9 sem * 1.0 (permanent) * ~1.0 (fresh) * 1.1 (capped boost) ≈ 0.99
+    expect(compositeScore(0.9, { durability: "permanent", createdAt: now(), retrievalCount: 5 })).toBeGreaterThan(0.95);
   });
 
   test("standard + fresh is between permanent and ephemeral", () => {
