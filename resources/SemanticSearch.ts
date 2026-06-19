@@ -204,8 +204,15 @@ export class SemanticSearch extends Resource {
         }
         const rawScore = semanticScore + (keywordHit ? 0.05 : 0);
 
-        let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
-        if (temporalBoost > 1.0) finalScore *= temporalBoost;
+        let finalScore: number;
+        if (scoring === "raw") {
+          finalScore = rawScore;
+          if (temporalBoost > 1.0) finalScore *= temporalBoost;
+        } else {
+          // Defer composite scoring — topRaw isn't known until all candidates
+          // are seen. Store rawScore; recomputed in the post-processing pass below.
+          finalScore = rawScore;
+        }
 
         const { $distance, ...rest } = record;
         const isFlagged = rest._safetyFlags && Array.isArray(rest._safetyFlags) && rest._safetyFlags.length > 0;
@@ -214,7 +221,7 @@ export class SemanticSearch extends Resource {
           ...rest,
           content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
           _score: Math.round(finalScore * 1000) / 1000,
-          _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
+          _rawScore: scoring !== "raw" ? rawScore : undefined,
           _source: source,
         });
       }
@@ -233,16 +240,20 @@ export class SemanticSearch extends Resource {
         if (asOf && record.validFrom && record.validFrom > asOf) continue;
         if (asOf && record.validTo && record.validTo <= asOf) continue;
 
-        let keywordHit = false;
-        if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
-          keywordHit = true;
-        }
+        const keywordHit = q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase());
         const rawScore = keywordHit ? 0.05 : 0;
         if (q && rawScore === 0) continue;
 
         const { embedding, ...rest } = record;
-        let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, rest);
-        if (temporalBoost > 1.0) finalScore *= temporalBoost;
+        let finalScore: number;
+        if (scoring === "raw") {
+          finalScore = rawScore;
+          if (temporalBoost > 1.0) finalScore *= temporalBoost;
+        } else {
+          // Defer composite scoring — topRaw isn't known until all candidates
+          // are seen. Store rawScore; recomputed in the post-processing pass below.
+          finalScore = rawScore;
+        }
 
         const isFlagged = rest._safetyFlags && Array.isArray(rest._safetyFlags) && rest._safetyFlags.length > 0;
         const source = record.agentId !== agentId ? record.agentId : undefined;
@@ -250,9 +261,24 @@ export class SemanticSearch extends Resource {
           ...rest,
           content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
           _score: Math.round(finalScore * 1000) / 1000,
-          _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
+          _rawScore: scoring !== "raw" ? rawScore : undefined,
           _source: source,
         });
+      }
+    }
+
+    // OPS-AYGD relative tie-breaker: recompute composite scores with the
+    // candidate-set top raw score so the retrieval boost only fires for docs
+    // within RBOOST_RELEVANCE_DELTA of the best semantic match. The raw scoring
+    // path (#510 KPI) is untouched.
+    if (scoring !== "raw" && results.length > 0) {
+      let topRaw = 0;
+      for (const r of results) {
+        if (r._rawScore > topRaw) topRaw = r._rawScore;
+      }
+      for (const r of results) {
+        const cs = compositeScore(r._rawScore, r, topRaw);
+        r._score = Math.round(cs * (temporalBoost > 1.0 ? temporalBoost : 1.0) * 1000) / 1000;
       }
     }
 

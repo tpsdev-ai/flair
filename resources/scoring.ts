@@ -30,30 +30,38 @@ export function recencyFactor(createdAt: string, durability: string): number {
 // OPS-AYGD: the retrieval boost was unbounded and OVERRODE semantic ranking —
 // recall-eval 2026-06-19 showed composite p@3 0.83 vs raw 1.00, with a popular doc
 // magnetised into 5/6 queries (its rBoost lifted a 0.55-0.65 semantic score above
-// the correct docs). Bounded to a gentle nudge that breaks near-ties without
-// overriding a clear semantic winner. Tuned offline against the real corpus
-// (floor 0.5 + cap 1.1 → composite p@3 recovers to 1.00, magnet eliminated).
-// A query-relative tie-breaker gate (boost only within ~0.05 of the top raw score)
-// is the principled follow-up for graduated boosting; it needs the search loop to
-// pass the candidate-set top score, so it's deferred to its own change.
-export const RBOOST_CAP = 1.1; // max +10% — a tie-breaker, not an override
-export const RBOOST_RELEVANCE_FLOOR = 0.5; // no boost at all for clearly-irrelevant docs
+// the correct docs). The absolute relevance floor (0.5) + cap (1.1) from #493
+// eliminated the magnet but flattened the boost to nearly binary.
+//
+// The principled fix: a QUERY-RELATIVE tie-breaker — only boost a doc whose
+// semantic score is within RBOOST_RELEVANCE_DELTA of the TOP raw score in the
+// candidate set. This lets the boost break genuine near-ties (where the embedding
+// cannot separate docs) while never overriding a clear semantic winner, and
+// restores graduated boosting (cap 1.5 instead of binary 1.1).
+//
+// Tuned offline by Flint against the real corpus: relDelta 0.05 with cap 1.5
+// gives composite p@3 1.00 with the magnet eliminated.
+export const RBOOST_CAP = 1.5; // max +50% — graduated boost
+export const RBOOST_RELEVANCE_DELTA = 0.05; // only boost docs within delta of top raw score
 
 export function retrievalBoost(retrievalCount: number): number {
   if (!retrievalCount || retrievalCount <= 0) return 1.0;
-  return Math.min(1.0 + 0.1 * Math.log2(retrievalCount), RBOOST_CAP); // gentle, capped
+  return Math.min(1.0 + 0.1 * Math.log2(retrievalCount), RBOOST_CAP);
 }
 
 export function compositeScore(
   semanticScore: number,
   record: { durability?: string; createdAt?: string; retrievalCount?: number; supersedes?: string },
+  topScore: number = semanticScore,
 ): number {
   const durability = record.durability ?? "standard";
   const dWeight = DURABILITY_WEIGHTS[durability] ?? 0.7;
   const rFactor = record.createdAt ? recencyFactor(record.createdAt, durability) : 1.0;
-  // OPS-AYGD: only apply the retrieval boost when the record is genuinely relevant to
-  // this query (semanticScore clears the floor). Below the floor, a popular doc gets
-  // no lift — kills the cross-query magnet while preserving boosts for relevant docs.
-  const rBoost = semanticScore >= RBOOST_RELEVANCE_FLOOR ? retrievalBoost(record.retrievalCount ?? 0) : 1.0;
+  // OPS-AYGD relative tie-breaker: only boost a doc whose semantic score is
+  // within RBOOST_RELEVANCE_DELTA of the top raw score in the candidate set.
+  // Default topScore = semanticScore keeps ungated callers boosting (backward
+  // compatible — a doc is always within delta of itself).
+  const eligible = semanticScore >= topScore - RBOOST_RELEVANCE_DELTA;
+  const rBoost = eligible ? retrievalBoost(record.retrievalCount ?? 0) : 1.0;
   return semanticScore * dWeight * rFactor * rBoost;
 }
