@@ -544,41 +544,11 @@ export async function seedAgentViaOpsApi(
   }
 }
 
-// Seed an agent record via the Harper REST API.
-// Uses localhost and the given HTTP port.
-export async function seedAgentViaRestApi(
-  httpPort: number,
-  agentId: string,
-  pubKeyB64url: string,
-  adminPass: string,
-): Promise<void> {
-  const baseUrl = `http://127.0.0.1:${httpPort}`;
-  const body = {
-    operation: "insert",
-    database: "flair",
-    table: "Agent",
-    records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
-  };
-
-  // Only send Authorization header if adminPass is provided.
-  // Matches the auth pattern in api() which respects authorizeLocal=true.
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (adminPass) {
-    headers.Authorization = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
-  }
-
-  const res = await fetch(`${baseUrl}/Agent`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
-    throw new Error(`REST API insert failed (${res.status}): ${text}`);
-  }
-}
+// NOTE: agent records are seeded exclusively via the Harper operations API
+// (seedAgentViaOpsApi above). A former seedAgentViaRestApi() helper POSTed the
+// ops-insert body to the REST root, which Harper 405s as a collection POST to
+// /Agent (the Agent table resource has no POST handler). It was removed in the
+// #499 fix; do not reintroduce a REST-root insert path.
 
 // ─── FederationInstance seed via ops API ──────────────────────────────────────
 //
@@ -2101,8 +2071,19 @@ program
       // Write config so other commands can find this instance
       writeConfig(httpPort);
     } else {
-      // Flair already initialized — resolve admin pass from env or running instance
+      // Flair already initialized — resolve admin pass from env, falling back to
+      // the persisted ~/.flair/admin-pass written at first install. Agent
+      // seeding now goes through the ops API (#499), which always requires Basic
+      // admin auth (it does NOT honor authorizeLocal), so a re-run of
+      // `flair install --agent <new-id>` against an already-initialized local
+      // Flair needs a real pass even when no env var is set.
       adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+      if (!adminPass) {
+        try {
+          const persisted = join(homedir(), ".flair", "admin-pass");
+          if (existsSync(persisted)) adminPass = readFileSync(persisted, "utf-8").trim();
+        } catch { /* fall through with empty pass */ }
+      }
     }
 
     const httpUrl = `http://127.0.0.1:${httpPort}`;
@@ -2166,16 +2147,18 @@ program
       const pubKeyB64url = b64url(kp.publicKey);
       console.log(`Keypair written: ${privPath} ✓`);
 
-      // Seed agent - use REST API for local Harper, Ops API only when --ops-target is specified
-      if (opts.opsTarget) {
-        // Remote Harper via explicit ops target
-        console.log(`Seeding agent '${agentId}' via operations API (--ops-target)...`);
-        await seedAgentViaOpsApi(opts.opsTarget, agentId, pubKeyB64url, adminUser, adminPass);
-      } else {
-        // Local Harper - use REST API
-        console.log(`Seeding agent '${agentId}' via REST API...`);
-        await seedAgentViaRestApi(httpPort, agentId, pubKeyB64url, adminPass);
-      }
+      // Seed agent via the Harper operations API. The Agent table is a REST
+      // resource without a POST handler, so the insert body must go to the ops
+      // API (POST <opsUrl>/ with {operation:"insert",...}), NOT the REST root
+      // (which 405s the body as a collection POST to /Agent). This is the same
+      // path `flair agent add` uses. (#499)
+      const seedOpsTarget = opts.opsTarget ?? opsPort;
+      console.log(
+        opts.opsTarget
+          ? `Seeding agent '${agentId}' via operations API (--ops-target)...`
+          : `Seeding agent '${agentId}' via operations API...`,
+      );
+      await seedAgentViaOpsApi(seedOpsTarget, agentId, pubKeyB64url, adminUser, adminPass);
       console.log(`Agent '${agentId}' registered ✓`);
     }
 
@@ -2341,10 +2324,16 @@ agent
     if (adminPass) {
       const opsPort = resolveOpsPort(opts);
       const auth = Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64");
+      // List every Agent without null-scanning the primary key. A
+      // `starts_with ""` on `id` makes Harper search the index for nulls, which
+      // the bundled Harper (5.0.21) rejects with "id is not indexed for nulls".
+      // Use `createdAt > 1970-01-01` as the total "select all" predicate: every
+      // Agent row has a non-null createdAt (schema: createdAt: String!), and its
+      // index is built — same pattern as the `flair reembed` Memory scan. (#500)
       const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
-        body: JSON.stringify({ operation: "search_by_value", schema: "flair", table: "Agent", search_attribute: "id", search_type: "starts_with", search_value: "", get_attributes: ["id", "name", "createdAt"] }),
+        body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table: "Agent", operator: "and", conditions: [{ search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" }], get_attributes: ["id", "name", "createdAt"] }),
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
@@ -7932,12 +7921,17 @@ soul.command("set")
   .option("--durability <d>", "permanent")
   .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
-    const out = await api("POST", "/Soul", {
-      id: `${opts.agent}:${opts.key}`,
+    // PUT /Soul/{agentId:key} (upsert by id), matching flair-client's soul.set().
+    // The Soul table resource has no POST handler, so a collection POST /Soul
+    // 405s; the record must be written by its primary key. (#498)
+    const id = `${opts.agent}:${opts.key}`;
+    const out = await api("PUT", `/Soul/${encodeURIComponent(id)}`, {
+      id,
       agentId: opts.agent,
       key: opts.key,
       value: opts.value,
       durability: opts.durability,
+      createdAt: new Date().toISOString(),
     });
     const mode = render.resolveOutputMode(opts);
     if (mode === "json") {
