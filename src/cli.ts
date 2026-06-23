@@ -4411,7 +4411,7 @@ rem
       console.log(result.prompt ?? "(no prompt returned)");
       console.log("--- End Prompt ---\n");
       console.log("Feed the prompt above to your LLM, then write insights back with:");
-      console.log("  flair memory add --agent <id> --content <insight> --durability persistent");
+      console.log("  flair memory add --agent <id> --content <insight> --durability persistent --derived-from <source-ids>");
     } catch (err: any) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
@@ -7274,6 +7274,7 @@ memory.command("add [content]").requiredOption("--agent <id>")
   .option("--durability <d>", "standard").option("--tags <csv>")
   .option("--summary <text>", "agent-set multi-sentence dense compression (3-tier chain: subject → summary → content; ops-wkoh)")
   .option("--subject <text>", "one-line title / entity this memory is about")
+  .option("--derived-from <csv>", "Comma-separated source Memory IDs this memory was distilled/reflected from (sets Memory.derivedFrom; used by the `rem rapid` reflection loop)")
   .action(async (contentArg, opts) => {
     const content = contentArg ?? opts.content;
     if (!content) { console.error("error: content required (positional arg or --content)"); process.exit(1); }
@@ -7285,6 +7286,9 @@ memory.command("add [content]").requiredOption("--agent <id>")
     };
     if (opts.summary) body.summary = opts.summary;
     if (opts.subject) body.subject = opts.subject;
+    if (opts.derivedFrom) {
+      body.derivedFrom = String(opts.derivedFrom).split(",").map((x: string) => x.trim()).filter(Boolean);
+    }
     const out = await api("PUT", `/Memory/${memId}`, body);
     console.log(JSON.stringify(out, null, 2));
   });
