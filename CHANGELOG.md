@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.13.0 (2026-06-23)
+
+> **Onboarding that actually works, plus sharper memory hygiene.** First-run `flair install` now provisions an agent cleanly end-to-end, recall stops letting a single hot memory dominate unrelated queries, and consolidation no longer flags brand-new memories for archival. Adds `memory add --derived-from` for reflection provenance, and the auth-middleware suite now runs against real Harper.
+
+### 🐛 First-run onboarding fixed — #501
+
+The one-command `flair install` couldn't register its own agent — it POSTed a Harper ops-API body to the REST root, which 405s as a collection write. Now it seeds via the ops API (the path `flair agent add` already uses). `flair soul set` now PUTs `/Soul/{agentId:key}` instead of POSTing the collection (was 405), and `flair agent list` no longer null-scans the primary key (was 400 on bundled Harper 5.0.21). A new end-to-end onboarding smoke test guards the `install → soul set → agent list` path so it can't regress. (Reported by @kriszyp dogfooding locally — closes #498, #499, #500.)
+
+### 🐛 Recall: bound the retrieval-boost feedback loop — #493
+
+`retrievalBoost` was an unbounded `1 + 0.1·log2(retrievalCount)`, auto-incremented on every recall — a rich-get-richer loop that let a frequently-retrieved memory float to the top of unrelated queries. It's now gated behind a semantic-relevance floor and capped at ×1.1 (a tie-breaker, not an override). Composite recall recovers toward raw and cross-query magnets are eliminated.
+
+### 🐛 Consolidation: don't archive brand-new memories — #505
+
+`rem` consolidation keyed staleness off `lastRetrieved` with no fallback, so a just-written, never-read memory read as "Infinity days" stale and became an archive candidate. Idle age is now `now − (lastRetrieved ?? createdAt)` with a creation-age grace window, and the consolidation scoring is extracted to a Harper-free, unit-tested lib. (Reported by @kriszyp — closes #502.)
+
+### ✨ `flair memory add --derived-from` — #505
+
+`memory add` can now set `derivedFrom` provenance, so the `rem rapid` reflection loop can link a distilled lesson back to its source memories as the prompt instructs. (Closes #503.)
+
+### 🧪 Auth-middleware tests → real Harper — #494
+
+The auth-middleware suite now exercises Harper's real auth chain instead of a simulator — closing the gap that previously let auth bugs slip past K&S-approved PRs.
+
+### 🔧 n8n example: K&S review capture → ephemeral — #497
+
+The shipped `ks-review-capture` example wrote memories at `persistent`, teaching an anti-pattern that floods recall; re-tiered to `ephemeral` with durability guidance in the README.
+
 ## 0.12.0 (2026-06-18)
 
 > **Auth-RBAC reshape + Claude Code auto-recall.** The agent-auth boundary moves from a single rejecting gate to a non-rejecting gate plus per-resource self-enforcement, with every agent running as a least-privilege identity. And Flair becomes *automatic* memory for Claude Code: a SessionStart hook injects soul + relevant memories at session start, no manual tool call.
