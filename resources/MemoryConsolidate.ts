@@ -18,55 +18,7 @@
 
 import { Resource, databases } from "@harperfast/harper";
 import { isAdmin, allowVerified } from "./agent-auth.js";
-
-function parseDuration(s: string): number {
-  const m = s.match(/^(\d+)([dhm])$/);
-  if (!m) return 30 * 86400_000;
-  const n = Number(m[1]);
-  if (m[2] === "d") return n * 86400_000;
-  if (m[2] === "h") return n * 3600_000;
-  if (m[2] === "m") return n * 60_000;
-  return 30 * 86400_000;
-}
-
-type Suggestion = "promote" | "archive" | "keep";
-
-interface Candidate {
-  memory: Record<string, unknown>;
-  suggestion: Suggestion;
-  reason: string;
-}
-
-function evaluate(record: any, now: number, olderThanMs: number): Candidate {
-  const ageMs = record.createdAt ? now - new Date(record.createdAt).getTime() : 0;
-  const count = record.retrievalCount ?? 0;
-  const daysSinceRetrieved = record.lastRetrieved
-    ? (now - new Date(record.lastRetrieved).getTime()) / 86400_000
-    : Infinity;
-  const { embedding, ...memory } = record;
-
-  // Promote: high retrieval + persistent durability
-  if (record.durability === "persistent" && count >= 5) {
-    return { memory, suggestion: "promote", reason: `Retrieved ${count} times — strong promotion candidate for permanent` };
-  }
-
-  // Promote: standard → persistent if retrieved frequently
-  if (record.durability === "standard" && count >= 3 && ageMs > 7 * 86400_000) {
-    return { memory, suggestion: "promote", reason: `Retrieved ${count} times over ${Math.round(ageMs / 86400_000)} days — worth persisting` };
-  }
-
-  // Archive: old + never retrieved
-  if (daysSinceRetrieved > 30 && count === 0 && ageMs > olderThanMs) {
-    return { memory, suggestion: "archive", reason: `Never retrieved, ${Math.round(ageMs / 86400_000)} days old` };
-  }
-
-  // Archive: last retrieved > 60 days
-  if (daysSinceRetrieved > 60 && count < 2) {
-    return { memory, suggestion: "archive", reason: `Not retrieved in ${Math.round(daysSinceRetrieved)} days (only ${count} total retrievals)` };
-  }
-
-  return { memory, suggestion: "keep", reason: `Retrieved ${count} times, ${Math.round(daysSinceRetrieved)} days since last retrieval` };
-}
+import { evaluate, parseDuration, type Suggestion, type Candidate } from "./memory-consolidate-lib.js";
 
 export class ConsolidateMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
