@@ -63,8 +63,8 @@
         "content": "={{ $json.content }}",
         "subject": "={{ $json.subject }}",
         "tags": "={{ $json.tags }}",
-        "durability": "persistent",
-        "type": "decision",
+        "durability": "ephemeral",
+        "type": "session",
         "skipEmpty": true
       },
       "id": "flair-write",

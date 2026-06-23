@@ -2,7 +2,7 @@
 
 This is the worked-example workflow for `@tpsdev-ai/n8n-nodes-flair`. It captures inbound TPS-mail review notes from the Kern (architecture) and Sherlock (security) review agents into Flair as structured, tagged memories — turning ephemeral review reasoning into a searchable, federated archive.
 
-It's also our first dogfood loop on n8n: every K&S review verdict that lands in Flint's TPS-mail inbox gets persisted with semantic search, durable across sessions and orchestrators.
+It's also our first dogfood loop on n8n: every K&S review verdict that lands in Flint's TPS-mail inbox gets captured with semantic search, searchable across sessions and orchestrators. The capture writes at the `ephemeral` tier by default — high-volume automated streams should decay, not accumulate in the durable tier (see the durability warning below); elevate the genuinely high-value subset deliberately.
 
 ## Why this workflow earns the worked-example slot
 
@@ -22,7 +22,7 @@ Schedule (5 min) → ls ~/.tps/mail/flint/new/*.json → Split paths
   → Read each file → Parse JSON → Filter from ∈ {kern, sherlock}
   → Dedup by mail.id (workflow static data)
   → Format (compose content, derive tags, set subject)
-  → Flair Write (durability=persistent, type=decision)
+  → Flair Write (durability=ephemeral, type=session)
 ```
 
 Notes on each step:
@@ -33,7 +33,9 @@ Notes on each step:
 - **Filter K&S only** — `containedInList` on `mail.from`. Flexible if you want to add `host` or `ember` later — comma-extend the list value.
 - **Skip already-written** — the dedup node uses `getWorkflowStaticData('global').processedIds` to avoid re-writing a memory each tick. Trims itself at >5000 entries (keeps last 4000) so the static data file doesn't bloat. Mail files in `flint/new/` may sit for hours before Flint drains them; without this, every tick would write the same review again.
 - **Format memory** — composes a multi-line content string, tries to extract a PR number from the body to tag/subject, and produces the `tags` and `subject` fields the Flair Write node consumes. PR-tagged memories share a `subject` so they group cleanly in `getBySubject` queries.
-- **Flair Write** — durability `persistent` (review reasoning is high-value, deserves the durable tier), type `decision` (review verdicts are decisions), tags surface the agent + date + PR for cross-cutting search.
+- **Flair Write** — durability `ephemeral` (this is a high-volume, automated capture — see the durability warning below), type `session` (a stream of review activity, not a curated decision record), tags surface the agent + date + PR for cross-cutting search.
+
+> **Durability warning — do not use `persistent` for automated high-volume captures.** A 5-minute polling loop that writes every K&S mail accumulates fast, and routine/coordination traffic (canary pings, "loop healthy", ack notes) dominates the volume. Writing all of that at `persistent` pollutes recall: the durable tier is meant for curated, high-value knowledge you want to surface for months, and flooding it with automated chatter drowns the signal you actually want. Default these loops to `ephemeral` (decays on its own) or `standard` (kept, but not pinned to the durable tier), and reserve `persistent`/`permanent` for memories a human or agent has deliberately decided are worth keeping. If you want to keep a *subset* — e.g. only mails that mention a PR number — branch durability in the Format step (see Tuning knobs) rather than blanket-tiering the whole stream.
 
 ## Setup
 
@@ -77,7 +79,8 @@ Notes on each step:
 ## Tuning knobs
 
 - **Filter expansion**: add `host`, `ember`, or any agent to the `containedInList` value to capture more sources. Pair with a `kind:` tag-update in the Format step so the search story stays clean.
-- **Deeper formatting**: the Format step is a Code node — you can pull more structure out of the body (e.g., bullet-point analysis vs paragraph prose), set `validFrom`/`validTo` for time-bounded reasoning, or branch durability by content (security flags → `permanent`, info → `standard`).
+- **Branch durability by value (recommended over blanket-tiering)**: the Format step is a Code node, so you can keep the stream cheap by default and only elevate the records worth keeping. Leave routine/coordination mail (canary pings, acks, "loop healthy") at `ephemeral`, and bump the genuinely high-value subset — e.g. a multi-paragraph verdict, or any mail that mentions a PR number — to `standard` (or, sparingly, `persistent`). This keeps the durable tier curated instead of flooded. See the durability warning above for why blanket `persistent` is the wrong default.
+- **Deeper formatting**: the Format step is also where you can pull more structure out of the body (e.g., bullet-point analysis vs paragraph prose) or set `validFrom`/`validTo` for time-bounded reasoning.
 - **Cross-instance**: this workflow writes to *one* Flair instance. The hub-spoke federation pair (local ↔ Fabric) propagates the writes without further n8n changes — every memory captured here becomes searchable from every federated peer.
 
 ## Operational notes
