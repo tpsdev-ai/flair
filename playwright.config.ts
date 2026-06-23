@@ -7,7 +7,16 @@ const basicAuth = "Basic " + Buffer.from(`admin:${adminPass}`).toString("base64"
 export default defineConfig({
   testDir: "./test/e2e",
   timeout: 30_000,
-  retries: 0,
+  // The E2E suite runs against the Docker Harper 5.0.1 image, which carries the
+  // HarperFast/harper#386 HNSW concurrent-write race (the integration tests dodge
+  // it via native spawn; the browser/UI E2E path still needs the Docker server).
+  // Parallel Playwright workers fire concurrent writes that trip that race, which
+  // momentarily drops the server → `socket hang up` / `ERR_CONNECTION_RESET`
+  // failures (ops-qhp0). On CI: serialize to one worker so writes don't race, and
+  // retry transient connection drops instead of failing the whole job. Locally
+  // (no CI env) keep full parallelism + no retries for fast, honest feedback.
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
   reporter: "list",
   use: {
     baseURL,
