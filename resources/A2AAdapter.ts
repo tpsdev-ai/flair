@@ -303,7 +303,10 @@ export class A2AAdapter extends Resource {
   // (GET /a2a passes through; POST /a2a must carry TPS-Ed25519 or admin
   // Basic). The post() handler below additionally enforces sender ==
   // params.agentId for message/send so an authenticated caller can only
-  // act AS themselves, not impersonate another agent.
+  // act AS themselves, not impersonate another agent. message/send routes
+  // a DIRECTED handoff to params.toAgentId (the recipient) by setting the
+  // OrgEvent's targetIds = [toAgentId]; OrgEventCatchup filters on that, so
+  // the recipient — not the sender — receives the message.
   allowRead() { return true; }
   allowCreate() { return true; }
 
@@ -472,24 +475,47 @@ export class A2AAdapter extends Resource {
         // Without this check, an authenticated agent could forge OrgEvents
         // attributed to any other agent — defeats the whole signed-envelopes
         // model that delegationChain enforces for TPS mail.
+        // NOTE: agentId is the SENDER. The recipient is params.toAgentId.
         if (!callerIsAdmin && callerAgent !== agentId) {
           return rpcError(id, -32001, "Forbidden", {
             detail: `caller ${callerAgent ?? "(anon)"} cannot send as ${agentId}`,
           });
         }
 
-        const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
-        if (!agent) {
+        const sender = await (databases as any).flair.Agent.get(agentId).catch(() => null);
+        if (!sender) {
           return rpcError(id, -32004, "Agent not found", { agentId });
+        }
+
+        // Directed handoff: params.toAgentId (the recipient) controls
+        // OrgEvent.targetIds, which is what OrgEventCatchup filters on
+        // (`targets.includes(participantId)`). The recipient must exist.
+        // Back-compat: if toAgentId is omitted, fall back to the legacy
+        // self-scoped broadcast (targetIds = [sender]) so existing callers
+        // that only set agentId keep working. The no-spoof guard above is
+        // unchanged — toAgentId only affects WHO receives the message, never
+        // who it is sent AS, so a sender can hand off to a peer without being
+        // able to impersonate anyone.
+        const toAgentId = cleanText(params.toAgentId);
+        let targetIds: string[];
+        if (toAgentId) {
+          const recipient = await (databases as any).flair.Agent.get(toAgentId).catch(() => null);
+          if (!recipient) {
+            return rpcError(id, -32004, "Recipient agent not found", { toAgentId });
+          }
+          targetIds = [toAgentId];
+        } else {
+          targetIds = [agentId];
         }
 
         const summary = truncate(firstTextPart(message) || "A2A message received", 200);
         await publishOrgEvent({
+          authorId: agentId,
           kind: "a2a.message",
           scope: agentId,
           summary,
-          detail: JSON.stringify({ message }),
-          targetIds: [agentId],
+          detail: JSON.stringify({ message, toAgentId: toAgentId || null }),
+          targetIds,
         });
 
         return rpcResult(id, {

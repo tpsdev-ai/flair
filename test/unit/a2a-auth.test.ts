@@ -173,3 +173,138 @@ describe("A2AAdapter.post() — message/send sender-match", () => {
     expect(r.rejected).toBe(true);
   });
 });
+
+// ─── message/send DIRECTED handoff routing (ops-f1e3) ─────────────────────
+
+/**
+ * Reproduces the message/send routing decision from A2AAdapter.post()
+ * (the "simulator" pattern this file already uses). Verifies the OrgEvent
+ * that would be published: who it is attributed to (scope/authorId = sender)
+ * and who receives it (targetIds = recipient). This is the core of the
+ * directed-handoff fix found in the Rivet × krais collision dogfood: before
+ * the fix, targetIds was [sender], so a message rivet→krais published an
+ * event targeting rivet and krais never received it.
+ *
+ * `knownAgents` simulates Agent.get(): membership = exists.
+ */
+type RoutingResult =
+  | { rejected: true; code: number; reason: string }
+  | { rejected: false; orgEvent: { authorId: string; scope: string; targetIds: string[] } };
+
+function messageSendRouting(
+  callerAgent: string | undefined,
+  callerIsAdmin: boolean,
+  agentId: string, // SENDER
+  toAgentId: string | undefined, // RECIPIENT (optional)
+  knownAgents: Set<string>,
+): RoutingResult {
+  // 1. No-spoof guard (unchanged): you can only send AS yourself.
+  if (!callerIsAdmin && callerAgent !== agentId) {
+    return { rejected: true, code: -32001, reason: "Forbidden" };
+  }
+  // 2. Sender must exist.
+  if (!knownAgents.has(agentId)) {
+    return { rejected: true, code: -32004, reason: "Agent not found" };
+  }
+  // 3. Directed routing: recipient (if given) must exist and becomes the target.
+  const recipient = (toAgentId ?? "").trim();
+  let targetIds: string[];
+  if (recipient) {
+    if (!knownAgents.has(recipient)) {
+      return { rejected: true, code: -32004, reason: "Recipient agent not found" };
+    }
+    targetIds = [recipient];
+  } else {
+    targetIds = [agentId]; // back-compat: legacy self-scoped broadcast
+  }
+  return { rejected: false, orgEvent: { authorId: agentId, scope: agentId, targetIds } };
+}
+
+/**
+ * OrgEventCatchup.ts line 83 filter (copied): an event reaches `participant`
+ * when targetIds is empty/null OR includes the participant. This is what
+ * makes targetIds = [recipient] the correct routing for a directed handoff.
+ */
+function catchupReceives(participant: string, targetIds: string[] | null | undefined): boolean {
+  return !targetIds || targetIds.length === 0 || targetIds.includes(participant);
+}
+
+describe("message/send — directed handoff routing (ops-f1e3)", () => {
+  const agents = new Set(["rivet", "krais", "flint"]);
+
+  test("(a) sender=rivet, toAgentId=krais → event scope=rivet, targetIds=[krais]; krais's catchup receives it", () => {
+    const r = messageSendRouting("rivet", false, "rivet", "krais", agents);
+    expect(r.rejected).toBe(false);
+    if (!r.rejected) {
+      expect(r.orgEvent.scope).toBe("rivet");
+      expect(r.orgEvent.authorId).toBe("rivet");
+      expect(r.orgEvent.targetIds).toEqual(["krais"]);
+      // krais's OrgEventCatchup would return it; rivet's would NOT (the bug).
+      expect(catchupReceives("krais", r.orgEvent.targetIds)).toBe(true);
+      expect(catchupReceives("rivet", r.orgEvent.targetIds)).toBe(false);
+    }
+  });
+
+  test("(b) no-spoof: caller rivet cannot send AS krais → Forbidden (-32001)", () => {
+    const r = messageSendRouting("rivet", false, "krais", "flint", agents);
+    expect(r.rejected).toBe(true);
+    if (r.rejected) {
+      expect(r.code).toBe(-32001);
+      expect(r.reason).toBe("Forbidden");
+    }
+  });
+
+  test("(c) unknown recipient → -32004 Recipient agent not found", () => {
+    const r = messageSendRouting("rivet", false, "rivet", "nobody", agents);
+    expect(r.rejected).toBe(true);
+    if (r.rejected) {
+      expect(r.code).toBe(-32004);
+      expect(r.reason).toBe("Recipient agent not found");
+    }
+  });
+
+  test("back-compat: toAgentId omitted → legacy self-scoped targetIds=[sender]", () => {
+    const r = messageSendRouting("rivet", false, "rivet", undefined, agents);
+    expect(r.rejected).toBe(false);
+    if (!r.rejected) {
+      expect(r.orgEvent.targetIds).toEqual(["rivet"]);
+      expect(catchupReceives("rivet", r.orgEvent.targetIds)).toBe(true);
+    }
+  });
+
+  test("back-compat: empty-string toAgentId is treated as omitted (self-scoped)", () => {
+    const r = messageSendRouting("rivet", false, "rivet", "", agents);
+    expect(r.rejected).toBe(false);
+    if (!r.rejected) expect(r.orgEvent.targetIds).toEqual(["rivet"]);
+  });
+
+  test("admin may send AS another agent and direct to a recipient", () => {
+    const r = messageSendRouting("admin-agent", true, "rivet", "krais", agents);
+    expect(r.rejected).toBe(false);
+    if (!r.rejected) {
+      expect(r.orgEvent.scope).toBe("rivet");
+      expect(r.orgEvent.targetIds).toEqual(["krais"]);
+    }
+  });
+
+  test("unknown SENDER → -32004 Agent not found (sender existence still checked)", () => {
+    const r = messageSendRouting("ghost", true, "ghost", "krais", agents);
+    expect(r.rejected).toBe(true);
+    if (r.rejected) {
+      expect(r.code).toBe(-32004);
+      expect(r.reason).toBe("Agent not found");
+    }
+  });
+});
+
+describe("OrgEventCatchup filter — directed routing reaches the recipient", () => {
+  test("empty/null targetIds is a broadcast — everyone receives", () => {
+    expect(catchupReceives("anyone", [])).toBe(true);
+    expect(catchupReceives("anyone", null)).toBe(true);
+    expect(catchupReceives("anyone", undefined)).toBe(true);
+  });
+  test("targetIds=[krais] reaches krais only", () => {
+    expect(catchupReceives("krais", ["krais"])).toBe(true);
+    expect(catchupReceives("rivet", ["krais"])).toBe(false);
+  });
+});
