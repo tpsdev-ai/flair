@@ -2,6 +2,7 @@ import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
+import { b64ToArrayBuffer } from "./b64.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -43,16 +44,8 @@ const nonceSeen = new Map<string, number>();
 // an admin — one implementation guarantees they can't diverge.
 
 // ─── Crypto helpers ───────────────────────────────────────────────────────────
-
-function b64ToArrayBuffer(b64: string): ArrayBuffer {
-  // Handle both standard and URL-safe base64
-  const std = b64.replace(/-/g, '+').replace(/_/g, '/');
-  const bin = atob(std);
-  const buf = new ArrayBuffer(bin.length);
-  const view = new Uint8Array(buf);
-  for (let i = 0; i < bin.length; i++) view[i] = bin.charCodeAt(i);
-  return buf;
-}
+// b64ToArrayBuffer lives in ./b64.ts (shared with agent-auth.ts + Presence.ts so
+// the base64/base64url decoder can't drift across the three auth call sites).
 
 const keyCache = new Map<string, CryptoKey>();
 async function importEd25519Key(publicKeyStr: string): Promise<CryptoKey> {

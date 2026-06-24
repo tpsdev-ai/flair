@@ -16,6 +16,7 @@
  * 30s timestamp window + a per-(agent,nonce) seen-set pruned to that window.
  */
 import { databases } from "@harperfast/harper";
+import { b64ToArrayBuffer } from "./b64.js";
 
 const WINDOW_MS = Number(process.env.FLAIR_AGENT_AUTH_WINDOW_MS) || 30_000;
 
@@ -31,16 +32,8 @@ export const FLAIR_AGENT_USERNAME = "flair-agent";
 const nonceSeen = new Map<string, number>();
 
 // ─── Crypto helpers ───────────────────────────────────────────────────────────
-
-function b64ToArrayBuffer(b64: string): ArrayBuffer {
-  // Handle both standard and URL-safe base64.
-  const std = b64.replace(/-/g, "+").replace(/_/g, "/");
-  const bin = atob(std);
-  const buf = new ArrayBuffer(bin.length);
-  const view = new Uint8Array(buf);
-  for (let i = 0; i < bin.length; i++) view[i] = bin.charCodeAt(i);
-  return buf;
-}
+// b64ToArrayBuffer lives in ./b64.ts (shared with auth-middleware.ts + Presence.ts
+// so the base64/base64url decoder can't drift across the three auth call sites).
 
 const keyCache = new Map<string, CryptoKey>();
 async function importEd25519Key(publicKeyStr: string): Promise<CryptoKey> {

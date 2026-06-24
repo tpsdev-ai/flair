@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { b64ToArrayBuffer } from "../../resources/b64.js";
 
 // Test the auth header regex parsing (same pattern used in auth-middleware.ts)
 const AUTH_REGEX = /^TPS-Ed25519\s+([^:]+):(\d+):([^:]+):(.+)$/;
@@ -47,14 +48,8 @@ describe("auth middleware logic", () => {
   });
 
   test("b64ToArrayBuffer roundtrip", () => {
-    // Same implementation as auth-middleware.ts
-    function b64ToArrayBuffer(b64: string): ArrayBuffer {
-      const bin = atob(b64);
-      const buf = new ArrayBuffer(bin.length);
-      const view = new Uint8Array(buf);
-      for (let i = 0; i < bin.length; i++) view[i] = bin.charCodeAt(i);
-      return buf;
-    }
+    // Uses the SHARED decoder from resources/b64.ts (no inline copy — see
+    // test/unit/b64.test.ts for the base64url + Ed25519 round-trip coverage).
     const original = new Uint8Array([1, 2, 3, 255, 0, 128]);
     const b64 = btoa(String.fromCharCode(...original));
     const result = new Uint8Array(b64ToArrayBuffer(b64));
