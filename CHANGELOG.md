@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### 🐛 A2A discovery advertised a dead port — #507
+
+The A2A agent-card `url` (and the streaming catch-up self-fetch) hardcoded port `9926`, but a default local install listens on `DEFAULT_HTTP_PORT` (`19926`) — so a remote A2A peer following discovery hit a dead port. The agent card now resolves the URL the caller actually reached us on (`FLAIR_PUBLIC_URL` → request `Host`/`X-Forwarded-*` headers → `127.0.0.1:${HTTP_PORT}`, mirroring the admin-pane `resolvePublicUrl` from #404), and the in-process catch-up fetch targets the real `HTTP_PORT` loopback. (Reported by @kriszyp — closes #507.)
+
+### ✨ `flair memory add --visibility` — #509
+
+`memory add` now accepts `--visibility <value>` (e.g. `--visibility office`) so a CLI-written memory can be shared office-wide with every team agent in one step, instead of needing a per-pair `flair grant` for each. Omitting it keeps the memory private-by-default. (Reported by @kriszyp — closes #509.)
+
 ## 0.13.0 (2026-06-23)
 
 > **Onboarding that actually works, plus sharper memory hygiene.** First-run `flair install` now provisions an agent cleanly end-to-end, recall stops letting a single hot memory dominate unrelated queries, and consolidation no longer flags brand-new memories for archival. Adds `memory add --derived-from` for reflection provenance, and the auth-middleware suite now runs against real Harper.
