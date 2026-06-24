@@ -2,6 +2,7 @@ import { Resource, databases } from "@harperfast/harper";
 import { promises as fsp } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { getRerankStatus } from "./rerank-provider.js";
 
 const db = databases as any;
 
@@ -442,6 +443,20 @@ export class HealthDetail extends Resource {
         };
       }
     } catch { stats.bridges = null; }
+
+    // ── Reranker ──
+    // Cross-encoder rerank stage. Reports flag/model/mode + live counters so we
+    // can see if it's silently degrading (fallbackCount climbing) in prod.
+    try {
+      const rr = getRerankStatus();
+      stats.rerank = rr;
+      if (rr.enabled && rr.state === "failed") {
+        warnings.push({ level: "warn", message: `reranker enabled but unavailable: ${rr.error ?? "init failed"} — recall falling back to vector order` });
+      }
+      if (rr.enabled && rr.rerankCount > 0 && rr.fallbackCount > rr.rerankCount) {
+        warnings.push({ level: "warn", message: `reranker falling back more than reranking (${rr.fallbackCount} fallbacks / ${rr.rerankCount} reranks) — check latency budget / topN` });
+      }
+    } catch { stats.rerank = null; }
 
     // ── Warnings ──
     stats.warnings = warnings;
