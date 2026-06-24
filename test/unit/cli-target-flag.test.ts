@@ -20,6 +20,7 @@ import {
   resolveHttpPort,
   program,
   seedFederationInstanceViaOpsApi,
+  seedAgentViaOpsApi,
 } from "../../src/cli.js";
 
 // ─── resolveTarget ────────────────────────────────────────────────────────────
@@ -302,6 +303,30 @@ describe("Commander program: --target option", () => {
     const status = findCommand("status");
     expect(hasOption(status, "--url")).toBe(true);
   });
+
+  // ─── #514: import / agent add must be able to seed the Agent on a remote ──────
+
+  test("flair import has --ops-target option (#514)", () => {
+    const importCmd = findCommand("import");
+    expect(importCmd).not.toBeNull();
+    expect(hasOption(importCmd, "--ops-target")).toBe(true);
+  });
+
+  test("flair import still has --url option (REST surface, back-compat)", () => {
+    const importCmd = findCommand("import");
+    expect(hasOption(importCmd, "--url")).toBe(true);
+  });
+
+  test("flair agent add has --ops-target option (#514)", () => {
+    const add = findSubcommand("agent", "add");
+    expect(add).not.toBeNull();
+    expect(hasOption(add, "--ops-target")).toBe(true);
+  });
+
+  test("flair agent add has --target option (#514)", () => {
+    const add = findSubcommand("agent", "add");
+    expect(hasOption(add, "--target")).toBe(true);
+  });
 });
 
 // ─── api() with baseUrl override routes to target URL ──────────────────────────
@@ -568,5 +593,112 @@ describe("seedFederationInstanceViaOpsApi", () => {
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+});
+
+// ─── #514: Agent seed targets the remote, not localhost ─────────────────────────
+//
+// Root cause: `flair import` / `flair agent add` resolved the ops target to a
+// NUMBER and handed it to seedAgentViaOpsApi, which builds http://127.0.0.1:<n>.
+// So a remote `--url`/`--ops-target` import seeded the Agent on LOCALHOST — a
+// split import (memories remote, principal local). These tests pin the resolved
+// ops target and the URL seedAgentViaOpsApi actually hits.
+
+describe("seedAgentViaOpsApi targets remote vs localhost (#514)", () => {
+  async function captureSeedUrl(opsPortOrUrl: number | string): Promise<string> {
+    const origFetch = globalThis.fetch;
+    let capturedUrl = "";
+    globalThis.fetch = async (url: any) => {
+      capturedUrl = typeof url === "string" ? url : url.toString();
+      return new Response(null, { status: 200 });
+    };
+    try {
+      await seedAgentViaOpsApi(opsPortOrUrl, "kris-agent", "pubkeyb64==", "admin", "sekret");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    return capturedUrl;
+  }
+
+  test("a remote ops URL string seeds the Agent on the REMOTE (not 127.0.0.1)", async () => {
+    const url = await captureSeedUrl("https://flair.example.harperfabric.com:9925");
+    expect(url).toBe("https://flair.example.harperfabric.com:9925/");
+    expect(url).not.toContain("127.0.0.1");
+  });
+
+  test("a numeric ops port still seeds on localhost (local default preserved)", async () => {
+    const url = await captureSeedUrl(19925);
+    expect(url).toBe("http://127.0.0.1:19925/");
+  });
+});
+
+// ─── #514: import / agent add seed-target resolution ────────────────────────────
+//
+// The command handlers compute the seed target with:
+//   resolveEffectiveOpsUrl({ target: <rest-url>, opsTarget: <ops-url> }) ?? opsPort
+// These tests mirror that exact expression: --ops-target wins; else derive from
+// the REST url; else fall back to the numeric localhost ops port. The number
+// fallback is what keeps the localhost default unchanged.
+
+describe("import / agent add seed-target resolution (#514)", () => {
+  let origFlairTarget: string | undefined;
+  let origFlairOpsTarget: string | undefined;
+
+  beforeEach(() => {
+    origFlairTarget = process.env.FLAIR_TARGET;
+    origFlairOpsTarget = process.env.FLAIR_OPS_TARGET;
+    delete process.env.FLAIR_TARGET;
+    delete process.env.FLAIR_OPS_TARGET;
+  });
+
+  afterEach(() => {
+    if (origFlairTarget === undefined) delete process.env.FLAIR_TARGET;
+    else process.env.FLAIR_TARGET = origFlairTarget;
+    if (origFlairOpsTarget === undefined) delete process.env.FLAIR_OPS_TARGET;
+    else process.env.FLAIR_OPS_TARGET = origFlairOpsTarget;
+  });
+
+  // localhost ops port stand-in: the handlers use `?? opsPort` (a number).
+  const LOCAL_OPS_PORT = 19925;
+
+  test("explicit --ops-target seeds on the REMOTE (string, not localhost number)", () => {
+    const seedTarget =
+      resolveEffectiveOpsUrl({
+        target: "https://flair.example.harperfabric.com",
+        opsTarget: "https://flair.example.harperfabric.com:9925",
+      }) ?? LOCAL_OPS_PORT;
+    expect(seedTarget).toBe("https://flair.example.harperfabric.com:9925");
+    expect(typeof seedTarget).toBe("string");
+  });
+
+  test("remote --url (no --ops-target) derives the remote ops URL — not localhost", () => {
+    // `flair import --url https://remote:9926` maps --url to `target`.
+    const seedTarget =
+      resolveEffectiveOpsUrl({ target: "https://remote.example.com:9926" }) ?? LOCAL_OPS_PORT;
+    expect(seedTarget).toBe("https://remote.example.com:9925"); // port-1, remote host
+    expect(seedTarget).not.toBe(LOCAL_OPS_PORT);
+  });
+
+  test("neither flag → falls back to the localhost numeric ops port (default unchanged)", () => {
+    const seedTarget =
+      resolveEffectiveOpsUrl({ target: undefined, opsTarget: undefined }) ?? LOCAL_OPS_PORT;
+    expect(seedTarget).toBe(LOCAL_OPS_PORT);
+    expect(typeof seedTarget).toBe("number");
+  });
+
+  test("--ops-target wins over a remote --url (no port-1 derivation contamination)", () => {
+    const seedTarget =
+      resolveEffectiveOpsUrl({
+        target: "https://remote.example.com:9926",
+        opsTarget: "https://ops.example.com:9925",
+      }) ?? LOCAL_OPS_PORT;
+    expect(seedTarget).toBe("https://ops.example.com:9925");
+  });
+
+  test("FLAIR_OPS_TARGET env seeds on the remote when no flags given", () => {
+    process.env.FLAIR_OPS_TARGET = "https://env-ops.example.com:9925";
+    const seedTarget =
+      resolveEffectiveOpsUrl({ target: undefined, opsTarget: undefined }) ?? LOCAL_OPS_PORT;
+    expect(seedTarget).toBe("https://env-ops.example.com:9925");
   });
 });

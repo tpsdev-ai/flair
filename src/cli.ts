@@ -2263,6 +2263,8 @@ agent
   .option("--admin-pass <pass>", "Admin password for registration")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--ops-port <port>", "Harper operations API port")
+  .option("--target <url>", "Remote Flair REST URL; derives the ops API URL (port-1) to seed the Agent there (env: FLAIR_TARGET)")
+  .option("--ops-target <url>", "Explicit ops API URL to seed the Agent on (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .action(async (id: string, opts) => {
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
@@ -2270,6 +2272,12 @@ agent
     const adminPass: string | undefined = opts.adminPass;
     const adminUser = DEFAULT_ADMIN_USER;
     const name: string = opts.name ?? id;
+    // Where to seed the Agent record. Default is localhost (opsPort). When
+    // --ops-target or --target is given, seed on the remote instead of localhost
+    // (#514 — agent add could only ever hit localhost ops). Precedence matches
+    // `flair import`: explicit --ops-target > derive from --target > localhost.
+    const seedOpsTarget: number | string =
+      resolveEffectiveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }) ?? opsPort;
 
     if (!adminPass) {
       console.error("Error: --admin-pass is required for agent add (needed to insert into Agent table)");
@@ -2296,8 +2304,12 @@ agent
       console.log(`Keypair written: ${privPath}`);
     }
 
-    await seedAgentViaOpsApi(opsPort, id, pubKeyB64url, adminUser, adminPass);
-    console.log(`✅ Agent '${id}' (${name}) registered`);
+    await seedAgentViaOpsApi(seedOpsTarget, id, pubKeyB64url, adminUser, adminPass);
+    console.log(
+      typeof seedOpsTarget === "string"
+        ? `✅ Agent '${id}' (${name}) registered (ops: ${seedOpsTarget})`
+        : `✅ Agent '${id}' (${name}) registered`,
+    );
     console.log(`   Private key: ${privPath}`);
     console.log(`   Public key:  ${pubKeyB64url}`);
   });
@@ -8962,11 +8974,21 @@ program
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--ops-target <url>", "Explicit ops API URL for the Agent seed (env: FLAIR_OPS_TARGET; bypasses port derivation). Use when --url is remote and the ops port isn't HTTP-1.")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
   .action(async (importPath, opts) => {
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
     const opsPort = resolveOpsPort(opts);
+    // Resolve where the Agent record is seeded. The Agent goes through the ops
+    // API (the REST surface has no Agent POST handler), so a remote --url import
+    // must NOT silently seed on localhost (#514 — split import). Precedence:
+    //   1. --ops-target / FLAIR_OPS_TARGET → use directly
+    //   2. --url given → derive ops URL from it (port-1 convention)
+    //   3. neither → localhost opsPort (preserves local default)
+    // The remote REST base (--url) is mapped to `target` for derivation.
+    const seedOpsTarget: number | string =
+      resolveEffectiveOpsUrl({ target: opts.url, opsTarget: opts.opsTarget }) ?? opsPort;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     if (!adminPass) { console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required"); process.exit(1); }
 
@@ -9011,9 +9033,13 @@ program
       : nacl.sign.keyPair.fromSeed(new Uint8Array(decodedSeed.subarray(0, 32))).publicKey;
     const pubKeyB64url = b64url(pubKey);
 
-    // Register agent via ops API
-    await seedAgentViaOpsApi(opsPort, agentId, pubKeyB64url, DEFAULT_ADMIN_USER, adminPass);
-    console.log(`  Agent registered`);
+    // Register agent via ops API (remote when --url/--ops-target points off-box)
+    await seedAgentViaOpsApi(seedOpsTarget, agentId, pubKeyB64url, DEFAULT_ADMIN_USER, adminPass);
+    console.log(
+      typeof seedOpsTarget === "string"
+        ? `  Agent registered (ops: ${seedOpsTarget})`
+        : `  Agent registered`,
+    );
 
     // Restore memories
     const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
