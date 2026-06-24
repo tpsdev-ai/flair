@@ -29,9 +29,20 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   async post(content: any) {
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
-    if (auth.kind === "agent" && !auth.isAdmin && content.authorId !== auth.agentId) {
-      return FORBIDDEN("forbidden: authorId must match authenticated agent");
+
+    // No-forge attribution: a non-admin agent's events are ALWAYS attributed to
+    // its authenticated identity (from the Ed25519 signature), never the body —
+    // an agent can only publish AS itself. We overwrite `authorId` rather than
+    // 403'ing a mismatch so a CLI client never has to echo its own id into the
+    // body (mirrors A2A message/send's "sender must match params.agentId" guard
+    // and Presence's "agentId from signature, NOT from body"). Admin agents may
+    // publish on behalf of another agent (body authorId honored, else their own).
+    if (auth.kind === "agent" && !auth.isAdmin) {
+      content.authorId = auth.agentId;
+    } else if (auth.kind === "agent" && auth.isAdmin) {
+      content.authorId ||= auth.agentId;
     }
+
     if (!content.id) content.id = `${content.authorId}-${new Date().toISOString()}`;
     content.createdAt = new Date().toISOString();
     // Harper 5: table resources use put() for create/upsert (post() removed).
