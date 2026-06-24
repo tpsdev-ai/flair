@@ -86,6 +86,59 @@ describe("MCP tool logic", () => {
   });
 });
 
+describe("coordination write surface (flair_workspace_set / flair_orgevent)", () => {
+  // The tools attribute writes from the SIGNED identity (flair.request signs with
+  // the agent's Ed25519 key), so the request BODY must never carry agentId /
+  // authorId — including those would let a body forge another agent's record.
+  // These tests pin the body-construction the tools perform (the same logic in
+  // src/index.ts), mirroring the in-isolation style of the rest of this file.
+
+  function buildWorkspaceBody(agentId: string, opts: { ref: string; label?: string; provider?: string; task?: string; phase?: string; summary?: string }) {
+    const body: Record<string, unknown> = {
+      id: `${agentId}:${opts.ref}`,
+      ref: opts.ref,
+      provider: opts.provider ?? "mcp",
+      timestamp: new Date().toISOString(),
+    };
+    if (opts.label) body.label = opts.label;
+    if (opts.task) body.taskId = opts.task;
+    if (opts.phase) body.phase = opts.phase;
+    if (opts.summary) body.summary = opts.summary;
+    return body;
+  }
+
+  function buildOrgEventBody(opts: { kind: string; summary: string; detail?: string; scope?: string; targets?: string[] }) {
+    const body: Record<string, unknown> = { kind: opts.kind, summary: opts.summary };
+    if (opts.detail) body.detail = opts.detail;
+    if (opts.scope) body.scope = opts.scope;
+    if (opts.targets && opts.targets.length > 0) body.targetIds = opts.targets;
+    return body;
+  }
+
+  test("flair_workspace_set body never carries agentId (no forging — attribute from signature)", () => {
+    const body = buildWorkspaceBody("agent-alpha", { ref: "main", phase: "implement", task: "ops-wmgx" });
+    expect(body).not.toHaveProperty("agentId");
+    expect(body.ref).toBe("main");
+    expect(body.phase).toBe("implement");
+    expect(body.taskId).toBe("ops-wmgx");
+    expect(body.provider).toBe("mcp");
+  });
+
+  test("flair_orgevent body never carries authorId (no forging — attribute from signature)", () => {
+    const body = buildOrgEventBody({ kind: "coord.claim", summary: "claim", targets: ["anvil", "ember"] });
+    expect(body).not.toHaveProperty("authorId");
+    expect(body.kind).toBe("coord.claim");
+    expect(body.targetIds).toEqual(["anvil", "ember"]);
+  });
+
+  test("flair_orgevent omits optional fields when absent", () => {
+    const body = buildOrgEventBody({ kind: "status", summary: "alive" });
+    expect(body).not.toHaveProperty("detail");
+    expect(body).not.toHaveProperty("scope");
+    expect(body).not.toHaveProperty("targetIds");
+  });
+});
+
 describe("temporal intent patterns", () => {
   // These patterns should be recognized by SemanticSearch
   const temporalPatterns = [

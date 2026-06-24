@@ -9476,6 +9476,160 @@ presence
     }
   });
 
+// ─── flair workspace ─────────────────────────────────────────────────────────
+//
+// Coordination write surface (ops-wmgx / Kris #510). `workspace set` writes the
+// agent's OWN WorkspaceState via a signed POST /WorkspaceState. Identity comes
+// from the Ed25519 signature — the body carries NO agentId, so an agent can only
+// write as itself (the WorkspaceState.post() handler overwrites agentId from the
+// signature regardless of body content). Mirrors `presence set`'s signed-POST shape.
+
+const MAX_WORKSPACE_FIELD_LENGTH = 2000;
+
+const workspace = program.command("workspace").description("Manage agent workspace state (The Office Space)");
+
+workspace
+  .command("set")
+  .description("Set your agent's current workspace state (POST /WorkspaceState)")
+  .requiredOption("--ref <ref>", "Workspace ref (branch, worktree, or task ref)")
+  .option("--label <text>", "Human-readable label for this workspace")
+  .option("--provider <name>", "Provider/runtime (e.g. claude-code, openclaw)", "cli")
+  .option("--task <id>", "Task/issue id this workspace is attached to")
+  .option("--phase <phase>", "Current phase (e.g. design, implement, review)")
+  .option("--summary <text>", "Short summary of current workspace state")
+  .option("--agent <id>", "Agent ID (env: FLAIR_AGENT_ID)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  .action(async (opts) => {
+    const agentId = resolveAgentIdOrEnv(opts);
+    if (!agentId) {
+      console.error("Error: agent ID required. Pass --agent <id> or set FLAIR_AGENT_ID environment variable.");
+      process.exit(1);
+    }
+
+    // Validate field lengths (free text → cap to bound the write).
+    for (const [name, val] of [["ref", opts.ref], ["label", opts.label], ["summary", opts.summary]] as const) {
+      if (val && String(val).length > MAX_WORKSPACE_FIELD_LENGTH) {
+        console.error(`Error: --${name} exceeds ${MAX_WORKSPACE_FIELD_LENGTH} character limit (got ${String(val).length}).`);
+        process.exit(1);
+      }
+    }
+
+    const keyPath = resolveKeyPath(agentId);
+    if (!keyPath) {
+      console.error(`Error: private key not found for agent '${agentId}'. Check ~/.flair/keys/ or set FLAIR_KEY_DIR.`);
+      process.exit(1);
+    }
+
+    const baseUrl = resolveBaseUrl(opts).replace(/\/$/, "");
+    const auth = buildEd25519Auth(agentId, "POST", "/WorkspaceState", keyPath);
+
+    // NOTE: agentId is intentionally NOT included in the body — the handler
+    // attributes the record from the Ed25519 signature (no forging).
+    const now = new Date().toISOString();
+    const body: Record<string, unknown> = {
+      id: `${agentId}:${opts.ref}`,
+      ref: opts.ref,
+      provider: opts.provider ?? "cli",
+      timestamp: now,
+    };
+    if (opts.label) body.label = opts.label;
+    if (opts.task) body.taskId = opts.task;
+    if (opts.phase) body.phase = opts.phase;
+    if (opts.summary) body.summary = opts.summary;
+
+    const res = await fetch(`${baseUrl}/WorkspaceState`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`Error: POST /WorkspaceState failed (${res.status}): ${text}`);
+      process.exit(1);
+    }
+
+    console.log(`✓ Workspace state updated for '${agentId}': ref=${opts.ref}${opts.phase ? `, phase=${opts.phase}` : ""}`);
+  });
+
+// ─── flair orgevent ──────────────────────────────────────────────────────────
+//
+// Coordination write surface (ops-wmgx / Kris #510). `orgevent` publishes an
+// OrgEvent ATTRIBUTED to the authenticated agent via a signed POST /OrgEvent.
+// The event's authorId comes from the Ed25519 signature — the body carries NO
+// authorId, so an agent CANNOT forge another agent's events (the OrgEvent.post()
+// handler overwrites authorId from the signature). Mirrors `presence set`'s shape.
+
+const MAX_ORGEVENT_SUMMARY_LENGTH = 500;
+const MAX_ORGEVENT_DETAIL_LENGTH = 8000;
+
+program
+  .command("orgevent")
+  .description("Publish an org-wide coordination event attributed to your agent (POST /OrgEvent)")
+  .requiredOption("--kind <kind>", "Event kind (e.g. coord.claim, coord.release, status)")
+  .requiredOption("--summary <text>", "Short summary of the event")
+  .option("--detail <text>", "Longer detail payload")
+  .option("--scope <scope>", "Scope of the event (e.g. an agent id, repo, or 'org')")
+  .option("--target <agentId>", "Recipient agent id (repeatable)", (val: string, acc: string[]) => { acc.push(val); return acc; }, [] as string[])
+  .option("--agent <id>", "Agent ID (env: FLAIR_AGENT_ID)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--target-url <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  .action(async (opts) => {
+    const agentId = resolveAgentIdOrEnv(opts);
+    if (!agentId) {
+      console.error("Error: agent ID required. Pass --agent <id> or set FLAIR_AGENT_ID environment variable.");
+      process.exit(1);
+    }
+
+    if (opts.summary && String(opts.summary).length > MAX_ORGEVENT_SUMMARY_LENGTH) {
+      console.error(`Error: --summary exceeds ${MAX_ORGEVENT_SUMMARY_LENGTH} character limit (got ${String(opts.summary).length}).`);
+      process.exit(1);
+    }
+    if (opts.detail && String(opts.detail).length > MAX_ORGEVENT_DETAIL_LENGTH) {
+      console.error(`Error: --detail exceeds ${MAX_ORGEVENT_DETAIL_LENGTH} character limit (got ${String(opts.detail).length}).`);
+      process.exit(1);
+    }
+
+    const keyPath = resolveKeyPath(agentId);
+    if (!keyPath) {
+      console.error(`Error: private key not found for agent '${agentId}'. Check ~/.flair/keys/ or set FLAIR_KEY_DIR.`);
+      process.exit(1);
+    }
+
+    // orgevent reuses --target for recipients, so the remote-URL override is
+    // --target-url here (env FLAIR_TARGET still honored via resolveBaseUrl).
+    const baseUrl = resolveBaseUrl({ target: opts.targetUrl, port: opts.port }).replace(/\/$/, "");
+    const auth = buildEd25519Auth(agentId, "POST", "/OrgEvent", keyPath);
+
+    // NOTE: authorId is intentionally NOT included in the body — the handler
+    // attributes the event from the Ed25519 signature (no forging).
+    const body: Record<string, unknown> = {
+      kind: opts.kind,
+      summary: opts.summary,
+    };
+    if (opts.detail) body.detail = opts.detail;
+    if (opts.scope) body.scope = opts.scope;
+    if (Array.isArray(opts.target) && opts.target.length > 0) body.targetIds = opts.target;
+
+    const res = await fetch(`${baseUrl}/OrgEvent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`Error: POST /OrgEvent failed (${res.status}): ${text}`);
+      process.exit(1);
+    }
+
+    const data = await res.json().catch(() => null);
+    const targets = Array.isArray(opts.target) && opts.target.length > 0 ? ` → ${opts.target.join(", ")}` : "";
+    console.log(`✓ OrgEvent published as '${agentId}': kind=${opts.kind}${targets}`);
+    if (data?.id) console.log(`  id: ${data.id}`);
+  });
+
 // Run CLI only when this is the entry point (not when imported for testing)
 if (import.meta.main) {
   await program.parseAsync();
@@ -9499,6 +9653,9 @@ export {
   api,
   VALID_PRESENCE_ACTIVITIES,
   MAX_TASK_LENGTH,
+  MAX_WORKSPACE_FIELD_LENGTH,
+  MAX_ORGEVENT_SUMMARY_LENGTH,
+  MAX_ORGEVENT_DETAIL_LENGTH,
 
   isLocalBase,
   isLikelyRealSecret,

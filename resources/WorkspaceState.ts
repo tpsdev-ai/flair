@@ -58,8 +58,18 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
     // Anonymous must NOT write (previously the agentId check was skipped when
     // there was no authenticated agent, so anonymous could write any record).
     if (auth.kind === "anonymous") return UNAUTH();
-    if (auth.kind === "agent" && !auth.isAdmin && content.agentId !== auth.agentId) {
-      return FORBIDDEN("forbidden: cannot write workspace state for another agent");
+
+    // No-forge: a non-admin agent's workspace record is ALWAYS attributed to the
+    // authenticated identity (from the Ed25519 signature), never the body. We do
+    // NOT trust `content.agentId` — overwriting it (rather than 403'ing a
+    // mismatch) mirrors Presence.post(): "agentId from signature, NOT from body".
+    // An admin may write on behalf of another agent (content.agentId honored if
+    // present, else defaults to the admin's own id). Internal in-process callers
+    // keep whatever agentId they pass.
+    if (auth.kind === "agent" && !auth.isAdmin) {
+      content.agentId = auth.agentId;
+    } else if (auth.kind === "agent" && auth.isAdmin) {
+      content.agentId ||= auth.agentId;
     }
 
     content.createdAt = new Date().toISOString();

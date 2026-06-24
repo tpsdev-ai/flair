@@ -11,6 +11,8 @@
  *   - bootstrap      — cold-start context (soul + recent memories)
  *   - soul_set       — set a personality/context entry
  *   - soul_get       — get a personality/context entry
+ *   - flair_workspace_set — write own WorkspaceState (Office Space coordination)
+ *   - flair_orgevent      — publish an OrgEvent attributed to self (no forging)
  *
  * Usage:
  *   npx @tpsdev-ai/flair-mcp
@@ -309,6 +311,75 @@ server.tool(
       const entry = await flair.soul.get(key);
       if (!entry) return { content: [{ type: "text", text: `No soul entry for '${key}'.` }] };
       return { content: [{ type: "text", text: entry.value }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
+  },
+);
+
+// ─── Coordination write surface (ops-wmgx / Kris #510) ───────────────────────
+//
+// flair_workspace_set + flair_orgevent let an agent write the Office Space
+// coordination layer without hand-rolling signed HTTP. Both go through
+// flair.request(), which signs with the agent's Ed25519 key — so identity
+// (WorkspaceState.agentId / OrgEvent.authorId) is taken from the SIGNATURE on
+// the server side, NEVER the body. We deliberately do NOT send agentId/authorId
+// in the body; the handlers attribute the write to the authenticated agent, so
+// an agent can only write AS itself (no forging).
+
+server.tool(
+  "flair_workspace_set",
+  "Set your agent's current workspace state in the Office Space coordination layer (ref/branch, phase, task). Attributed to you from your signed identity — you can only write your own state.",
+  {
+    ref: z.string().describe("Workspace ref — branch, worktree, or task ref"),
+    label: z.string().optional().describe("Human-readable label for this workspace"),
+    provider: z.string().optional().default("mcp").describe("Provider/runtime (e.g. claude-code, openclaw)"),
+    task: z.string().optional().describe("Task/issue id this workspace is attached to"),
+    phase: z.string().optional().describe("Current phase (e.g. design, implement, review)"),
+    summary: z.string().optional().describe("Short summary of current workspace state"),
+  },
+  async ({ ref, label, provider, task, phase, summary }) => {
+    try {
+      // No agentId in body — the server attributes from the signed identity.
+      const body: Record<string, unknown> = {
+        id: `${agentId}:${ref}`,
+        ref,
+        provider: provider ?? "mcp",
+        timestamp: new Date().toISOString(),
+      };
+      if (label) body.label = label;
+      if (task) body.taskId = task;
+      if (phase) body.phase = phase;
+      if (summary) body.summary = summary;
+      await flair.request("POST", "/WorkspaceState", body);
+      return { content: [{ type: "text", text: `Workspace state set: ref=${ref}${phase ? `, phase=${phase}` : ""} (attributed to ${agentId}).` }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
+  },
+);
+
+server.tool(
+  "flair_orgevent",
+  "Publish an org-wide coordination event (claim/release/status) to the Office Space. Attributed to you from your signed identity — you cannot publish as another agent.",
+  {
+    kind: z.string().describe("Event kind (e.g. coord.claim, coord.release, status)"),
+    summary: z.string().describe("Short summary of the event"),
+    detail: z.string().optional().describe("Longer detail payload"),
+    scope: z.string().optional().describe("Scope of the event (e.g. an agent id, repo, or 'org')"),
+    targets: z.array(z.string()).optional().describe("Recipient agent ids"),
+  },
+  async ({ kind, summary, detail, scope, targets }) => {
+    try {
+      // No authorId in body — the server attributes from the signed identity.
+      const body: Record<string, unknown> = { kind, summary };
+      if (detail) body.detail = detail;
+      if (scope) body.scope = scope;
+      if (targets && targets.length > 0) body.targetIds = targets;
+      const result = await flair.request<{ id?: string }>("POST", "/OrgEvent", body);
+      const targetStr = targets && targets.length > 0 ? ` → ${targets.join(", ")}` : "";
+      const idStr = result?.id ? ` (id: ${result.id})` : "";
+      return { content: [{ type: "text", text: `OrgEvent published: kind=${kind}${targetStr} (attributed to ${agentId})${idStr}.` }] };
     } catch (err) {
       return errorResult(err, flair.url);
     }
