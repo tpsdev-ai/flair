@@ -2,6 +2,7 @@ import { Resource, databases } from "@harperfast/harper";
 import { access, readFile, readdir } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, extname, join } from "node:path";
+import { localBaseUrl, resolvePublicBaseUrl } from "./a2a-url.js";
 
 type JsonRpcRequest = {
   jsonrpc: string;
@@ -307,7 +308,13 @@ export class A2AAdapter extends Resource {
   allowCreate() { return true; }
 
   async get() {
-    const host = process.env.FLAIR_PUBLIC_URL || "http://localhost:9926";
+    // Resolve the URL remote peers should use to reach this Flair. Prefer the
+    // request Host header (how the caller actually reached us) over a
+    // hardcoded port, so a default local install advertises the REAL HTTP
+    // port (19926), not the dead legacy 9926 (flair#507).
+    const ctx = (this as any).getContext?.() ?? {};
+    const ctxRequest = ctx.request ?? ctx;
+    const host = resolvePublicBaseUrl(ctxRequest);
     return new Response(JSON.stringify({
       name: "TPS Agent Team",
       description: "TPS — agent OS for humans and AI agents. Coordinates via Flair.",
@@ -402,7 +409,7 @@ export class A2AAdapter extends Resource {
               if (Date.now() - startedAt >= timeoutMs) { closeStream(); return; }
 
               const catchupUrl =
-                `http://localhost:9926/OrgEventCatchup/${encodeURIComponent(agentId)}?since=${lastSeen}`;
+                `${localBaseUrl()}/OrgEventCatchup/${encodeURIComponent(agentId)}?since=${lastSeen}`;
 
               let events: any[] = [];
               try {
