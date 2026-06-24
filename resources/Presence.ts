@@ -19,6 +19,7 @@
 
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { b64ToArrayBuffer } from "./b64.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -48,15 +49,8 @@ function pruneNonces() {
 }
 
 // ─── Crypto helpers ───────────────────────────────────────────────────────────
-
-function b64ToArrayBuffer(b64: string): ArrayBuffer {
-  const std = b64.replace(/-/g, "+").replace(/_/g, "/");
-  const bin = atob(std);
-  const buf = new ArrayBuffer(bin.length);
-  const view = new Uint8Array(buf);
-  for (let i = 0; i < bin.length; i++) view[i] = bin.charCodeAt(i);
-  return buf;
-}
+// b64ToArrayBuffer lives in ./b64.ts (shared with auth-middleware.ts + agent-auth.ts
+// so the base64/base64url decoder can't drift across the three auth call sites).
 
 const keyCache = new Map<string, CryptoKey>();
 

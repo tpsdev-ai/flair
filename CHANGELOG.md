@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 🐛 base64url Ed25519 pubkeys / signatures 401'd (cross-org interop) — ops-wjjx
+
+An Agent registered with a **base64url**-encoded public key (the `-` `_` alphabet, often unpadded — the JWK / `Buffer.toString('base64url')` form) failed Ed25519 signature verification with a 401. The `b64ToArrayBuffer` decoder was copy-pasted into three auth call sites (`resources/auth-middleware.ts`, `resources/agent-auth.ts`, `resources/Presence.ts`) and had drifted: at least one copy fed url-safe input straight to `atob`, which rejects `-`/`_` ("Invalid character"). The decoder now normalizes base64url → standard (`-`→`+`, `_`→`/`) **and** right-pads with `=` to a multiple of 4 before `atob`, so both standard base64 and (padded or unpadded) base64url decode correctly; standard input is unchanged. To stop the copies re-diverging, the single corrected decoder is extracted to `resources/b64.ts` and imported by all three (same "shared so it can't drift" rationale as HarperFast/harper#1466). Found in the Rivet × krais cross-org dogfood.
+
 ### 🐛 `flair import` / `flair agent add` could only seed the Agent on localhost — #514
 
 A remote `flair import <file> --url https://<remote>:9926` split: memories and soul PUT to the remote (correct), but the Agent principal was seeded via `seedAgentViaOpsApi(<numeric ops port>, …)`, which always builds `http://127.0.0.1:<port>` — so the agent record landed on the **local** instance, not the remote. `flair agent add` had the same localhost-only assumption. Both now accept `--ops-target <url>` (env `FLAIR_OPS_TARGET`), and `import` derives the remote ops URL from `--url` (port-1 convention) when `--ops-target` is omitted, so a remote import seeds the agent on the same remote instead of splitting. With neither flag set, seeding stays on localhost — local behavior is unchanged. (Reported by @kriszyp dogfooding the Fabric move — closes #514.)
