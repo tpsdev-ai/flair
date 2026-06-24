@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.14.0 (2026-06-24)
+
+> **A2A discovery fix + office-wide memory sharing from the CLI.** The A2A agent-card now advertises the port a caller actually reached us on (not a hardcoded dead port), and `flair memory add --visibility office` shares a memory team-wide in one step. Both reported by @kriszyp dogfooding the coordination layer.
 
 ### 🐛 A2A discovery advertised a dead port — #507
 
@@ -9,6 +11,10 @@ The A2A agent-card `url` (and the streaming catch-up self-fetch) hardcoded port 
 ### ✨ `flair memory add --visibility` — #509
 
 `memory add` now accepts `--visibility <value>` (e.g. `--visibility office`) so a CLI-written memory can be shared office-wide with every team agent in one step, instead of needing a per-pair `flair grant` for each. Omitting it keeps the memory private-by-default. (Reported by @kriszyp — closes #509.)
+
+### 🧹 Internal — #508
+
+The E2E Playwright suite now serializes on CI (`workers: 1`) so concurrent writes don't trip the Docker-Harper HNSW race (HarperFast/harper#386), plus transient connection drops auto-retry — ending the intermittent `socket hang up` / `ERR_CONNECTION_RESET` flake that reddened otherwise-green releases.
 
 ## 0.13.0 (2026-06-23)
 
