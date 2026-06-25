@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### ✨ BM25 + union-RRF hybrid retrieval (feature-flagged) — ops-i39b
+
+Flair semantic recall (HNSW over Q4-nomic embeddings) buries known-good **near-verbatim** memories past rank 100 — outside the HNSW candidate window — so `SemanticSearch` never returns them (confirmed by the recall-eval diagnosis, ops-ti82: 6 known-good memories missing in both raw and composite scoring; the misses are lexical exact-term cases the weak embedding cannot surface). This adds a **feature-flagged** BM25 + candidate-union Reciprocal Rank Fusion hybrid path in `resources/SemanticSearch.ts`, between the HNSW candidate fetch and the composite scoring.
+
+- **In-memory per-query BM25** (`k1=1.2`, `b=0.75`, lowercased tokenize, trivial-stopword drop, standard +1-variant IDF) over the caller's scoped corpus — no persistent index, no schema change, no write-path coupling. Extracted to the Harper-free `resources/bm25.ts` so the scoring + fusion are unit-tested against the shipped code.
+- **Candidate-UNION RRF** (`rrf = 1/(K+rank_sem) + 1/(K+rank_bm25)`, `K=60`, absent-from-a-list = 0 contribution) over the dedup'd union of the semantic and BM25 (top-50) candidate pools → **normalized** to `[0,1]` (`rrf / max_rrf_in_union`) → fed as the `rawScore` input to the existing `compositeScore`, so durability/recency/`retrievalBoost` and the `RBOOST_RELEVANCE_FLOOR` / `minScore` thresholds all still apply. Naive whole-corpus RRF was rejected (pilot: 0/6 — the broken semantic top-50 floods the fusion and buries BM25's rank-1 hits); union-RRF is the production shape.
+- **SECURITY — conditions-filter-before-fusion (the cross-agent trust boundary):** the BM25 candidate corpus is fetched WITH the same `conditions[]` filter the HNSW path uses (agent scoping, archived exclusion, tag/subject), AND the identical predicate + per-record temporal filters are re-applied in-process (`resources/bm25-filter.ts`, `isAllowedBm25Candidate`, fail-closed on unknown comparators) BEFORE the index is built or any score is fused. No other agent's content or term-frequency ever enters BM25 scoring or the union — defense at the boundary, not after fusion.
+- **Removes** the `+0.05` exact-substring keyword bump on the hybrid path (BM25 subsumes it). **No-embedding fallback** → BM25-only ranking (RRF degrades naturally as the semantic list is empty). `CANDIDATE_MULTIPLIER` (HNSW fetch size) unchanged; BM25 uses a fixed `SEM_LIMIT=50` candidate window.
+- **Feature flag `FLAIR_HYBRID_RETRIEVAL`** (`true` / `1` / `on`; default OFF). **Flag OFF is byte-identical to current behavior** — the legacy HNSW and no-embedding branches are untouched and only the flag-ON path runs the hybrid logic.
+
+Recall-eval (flag-ON vs flag-OFF, against the live flint corpus through the shipped modules): the NEW-8 within-cluster gate **p@3 holds 0.88** (no regression); the OLD-6 severe near-verbatim misses go from **0/6 → 4/6 into top-10** (1/6 into top-3). Sherlock-gated on the security boundary. (ops-i39b — spec `FLAIR-BM25-HYBRID-RETRIEVAL`.)
+
 ### ✨ Coordination write surface — `flair orgevent` + `flair workspace set` + MCP tools (ops-wmgx / Kris #510)
 
 Completes the Office Space coordination layer so multi-agent coordination no longer requires hand-rolling signed HTTP (validated need from the Rivet collision dogfood). Adds two CLI commands and two MCP tools that write the coordination layer:

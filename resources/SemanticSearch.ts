@@ -10,6 +10,12 @@ import { wrapUntrusted } from "./content-safety.js";
 // unit-tested directly (see test/unit/temporal-scoring.test.ts).
 import { compositeScore } from "./scoring.js";
 
+// BM25 + union-RRF hybrid retrieval (ops-i39b / FLAIR-BM25-HYBRID-RETRIEVAL).
+// Harper-free modules so the BM25 scoring, the candidate-union RRF, and the
+// SECURITY conditions-filter are unit-tested against the shipped code.
+import { buildBM25, fuseRrfNormalized, hybridEnabled, SEM_LIMIT } from "./bm25.js";
+import { isAllowedBm25Candidate, type Condition } from "./bm25-filter.js";
+
 // Convert HNSW cosine distance (1 - similarity) to similarity score
 function distanceToSimilarity(distance: number): number {
   return 1 - distance;
@@ -18,6 +24,10 @@ function distanceToSimilarity(distance: number): number {
 // Candidate multiplier: fetch more candidates than needed from the HNSW index
 // so composite re-ranking has enough headroom to reorder results.
 const CANDIDATE_MULTIPLIER = 5;
+
+// The BM25 + union-RRF hybrid path is feature-flagged via hybridEnabled()
+// (imported from ./bm25 — Harper-free so it's unit-testable). Flag OFF (default)
+// → byte-identical to the pre-hybrid HNSW + +0.05 keyword-bump behavior.
 
 export class SemanticSearch extends Resource {
   // Self-authorize via the Ed25519 agent verify instead of relying on the auth
@@ -169,9 +179,121 @@ export class SemanticSearch extends Resource {
     }
 
     const results: any[] = [];
+    const hybrid = hybridEnabled();
 
-    // ─── HNSW vector search path ───────────────────────────────────────────
-    if (qEmb) {
+    if (hybrid) {
+      // ─── BM25 + union-RRF hybrid path (ops-i39b) ─────────────────────────
+      // 1. Semantic candidates via HNSW (unchanged fetch). 2. BM25 lexical pass
+      //    over the SCOPED corpus. 3. SECURITY: the BM25 candidate set is filtered
+      //    by the SAME conditions[] + temporal filters BEFORE fusion (the corpus
+      //    is fetched with those conditions, AND re-checked in-process as
+      //    defense-in-depth) so no other agent's memory is ever scored or fused.
+      //    4. Candidate-union RRF → normalize → feed as rawScore to compositeScore.
+      const ctx = (this as any).getContext?.();
+
+      // ── (a) Semantic candidate records (best-first) ──────────────────────
+      // Same HNSW query as the legacy path; we keep the raw records so the BM25
+      // pass + fusion can re-derive rawScore. No embedding → empty semantic list
+      // (RRF degrades naturally to BM25-only).
+      const semRecords: any[] = [];
+      const semIds: string[] = [];
+      if (qEmb) {
+        const candidateLimit = limit * CANDIDATE_MULTIPLIER;
+        const semQuery: any = {
+          sort: { attribute: "embedding", target: qEmb, distance: "cosine" },
+          select: ["id", "agentId", "content", "contentHash", "visibility", "tags", "durability",
+            "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "lastRetrieved",
+            "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
+            "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject",
+            "validFrom", "validTo", "_safetyFlags", "$distance"],
+          limit: candidateLimit,
+        };
+        if (conditions.length > 0) semQuery.conditions = conditions;
+        const semResults = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(semQuery));
+        for await (const record of semResults) {
+          // Same per-record temporal gate as the legacy HNSW loop.
+          if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
+          if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
+          if (asOf && record.validFrom && record.validFrom > asOf) continue;
+          if (asOf && record.validTo && record.validTo <= asOf) continue;
+          semRecords.push(record);
+          semIds.push(record.id);
+        }
+      }
+
+      // ── (b) BM25 candidate records over the SCOPED corpus ────────────────
+      // SECURITY: fetch the corpus WITH the same conditions[] so Harper applies
+      // the agent boundary, then re-apply the identical predicate + temporal
+      // filters in-process (isAllowedBm25Candidate) BEFORE building/scoring the
+      // index. The BM25 index therefore only ever contains the caller's allowed
+      // memories — no other agent's content/term-frequency enters scoring or
+      // fusion. This is the conditions-filter-before-fusion gate.
+      // Explicit select (same fields as the HNSW path, no embedding / $distance)
+      // so the large embedding vector is never fetched into the BM25 corpus and
+      // never spread into a result payload.
+      const corpusSelect = ["id", "agentId", "content", "contentHash", "visibility", "tags", "durability",
+        "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "lastRetrieved",
+        "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
+        "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject",
+        "validFrom", "validTo", "_safetyFlags"];
+      const corpusQuery: any = conditions.length > 0
+        ? { conditions, select: corpusSelect }
+        : { select: corpusSelect };
+      const corpusResults = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(corpusQuery));
+      const allowedById = new Map<string, any>();
+      const bm25Docs: { id: string; content?: string }[] = [];
+      for await (const record of corpusResults) {
+        // Defense-in-depth: re-check the SAME conditions[] + temporal filters
+        // in-process. Even if a Harper query change ever let an out-of-scope
+        // record through, it is dropped here BEFORE it can be BM25-scored/fused.
+        if (!isAllowedBm25Candidate(record, conditions as Condition[], { sinceDate, asOf })) continue;
+        allowedById.set(record.id, record);
+        bm25Docs.push({ id: record.id, content: record.content });
+      }
+
+      // Carry semantic candidates that survived their temporal gate into the
+      // allowed map too (so a fused id always resolves to a record). Semantic
+      // records were fetched with the SAME conditions[], so they're in-scope.
+      for (const r of semRecords) {
+        if (!allowedById.has(r.id)) {
+          const { $distance, ...rest } = r;
+          allowedById.set(r.id, rest);
+        }
+      }
+
+      // ── (c) BM25 lexical ranking → top SEM_LIMIT (only when q present) ────
+      let bm25Ids: string[] = [];
+      if (q) {
+        const bm25 = buildBM25(bm25Docs);
+        const ranked = bm25.rank(String(q));
+        // Drop zero-score docs (no query-term overlap → contribute nothing) and
+        // cap at SEM_LIMIT — the production BM25 candidate window.
+        bm25Ids = ranked.filter(r => r.score > 0).slice(0, SEM_LIMIT).map(r => r.id);
+      }
+
+      // ── (d) Candidate-union RRF → normalized [0,1] rawScore ──────────────
+      // Union dedupes semantic ∪ bm25 ids; absent-from-a-list = 0 contribution.
+      const fused = fuseRrfNormalized(semIds, bm25Ids);
+
+      for (const [id, rrfRaw] of fused) {
+        const record = allowedById.get(id);
+        if (!record) continue; // should not happen — union ⊆ allowed
+        const rawScore = rrfRaw; // already normalized to [0,1]
+        let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
+        if (temporalBoost > 1.0) finalScore *= temporalBoost;
+
+        const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
+        const source = record.agentId !== agentId ? record.agentId : undefined;
+        results.push({
+          ...record,
+          content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
+          _score: Math.round(finalScore * 1000) / 1000,
+          _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
+          _source: source,
+        });
+      }
+    } else if (qEmb) {
+      // ─── HNSW vector search path ───────────────────────────────────────────
       const candidateLimit = limit * CANDIDATE_MULTIPLIER;
       const query: any = {
         sort: { attribute: "embedding", target: qEmb, distance: "cosine" },
