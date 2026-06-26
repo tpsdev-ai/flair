@@ -254,20 +254,29 @@ echo "📤 Pushing $RELEASE_BRANCH..."
 git -C "$ROOT" push -u origin "$RELEASE_BRANCH"
 
 echo "🔖 Opening release PR..."
-PR_URL="$($GH pr create \
-  --repo tpsdev-ai/flair \
-  --base main \
-  --head "$RELEASE_BRANCH" \
-  --title "release: v${VERSION}" \
-  --body "Version bump across workspace packages to v${VERSION}.
+# Open the PR via the REST API rather than `gh pr create`: the flint token 401s on
+# `gh pr create` (it goes through GraphQL), but `gh api` (REST) works. Build the
+# JSON payload with node so the multi-line body is escaped correctly.
+PR_PAYLOAD="$(mktemp)"
+trap 'rm -f "$PR_PAYLOAD"' EXIT
+PR_TITLE="release: v${VERSION}" PR_HEAD="$RELEASE_BRANCH" PR_VERSION="$VERSION" node -e '
+  const body = `Version bump across workspace packages to v${process.env.PR_VERSION}.
 
-See CHANGELOG.md for what's in this release.
+See CHANGELOG.md for what'"'"'s in this release.
 
 After CI is green and this is merged:
 \`\`\`
 git checkout main && git pull
-./scripts/release.sh ${VERSION} --publish
-\`\`\`")"
+./scripts/release.sh ${process.env.PR_VERSION} --publish
+\`\`\``;
+  process.stdout.write(JSON.stringify({
+    title: process.env.PR_TITLE,
+    head: process.env.PR_HEAD,
+    base: "main",
+    body,
+  }));
+' > "$PR_PAYLOAD"
+PR_URL="$($GH api -X POST repos/tpsdev-ai/flair/pulls --input "$PR_PAYLOAD" --jq '.html_url')"
 
 echo ""
 echo "✅ Release PR opened: $PR_URL"

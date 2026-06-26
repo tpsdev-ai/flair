@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### 🧹 Release-readiness — impl-term leak cleanup + gitignore + release.sh PR-create fix
+
+Unblocks the release build and removes two recurring release-time papercuts:
+
+- **Impl-term leak cleanup (release blocker):** the `check-impl-term-leaks` lint (pre-commit hook + CI "Doc/Code Lint") flags raw internal references in shipped/user-facing output. A coordination-layer comment in `packages/flair-mcp/src/index.ts` compiled into `packages/flair-mcp/dist/index.js` carrying an internal bead ID + person ref, failing the release build. Rephrased the comment to keep the intent and drop the internal refs — comment-only, no behavior change. The full lint (all freshly-built `dist/`, docs, READMEs) is clean.
+- **Gitignore disposable UI artifacts:** added `ui/_shoot*.mjs`, `ui/floor-*.png`, `ui/hero-*.png`, `ui/office-space*.html` (hero-mock screenshot scripts + pngs from prior sessions) to `.gitignore` so they stop dirtying the tree and tripping `release.sh`'s clean-tree check. None were tracked or shipped.
+- **`release.sh` PR-create via REST:** the release PR step used `gh pr create`, which 401s with the flint token (it routes through GraphQL). Switched to `gh api -X POST repos/tpsdev-ai/flair/pulls` (REST works) with the same title/body/head/base, so the PR step actually succeeds.
+
 ### ✨ `flair upgrade --target <fabric>` — one-command Fabric upgrade — ops-e5bh
 
 Upgrading a Flair instance deployed to a Harper Fabric cluster used to require a manual deploy dance: stand up a fresh temp dir, hand-write a `package.json` that depends on `@tpsdev-ai/flair@<version>` **and** carries an `overrides` block pinning `@harperfast/harper` to a fixed version (because the published flair declares an old Harper — `@harperfast/harper@5.0.21` as of `flair@0.14.0` — whose component packager emits an empty tarball when the package root is under `node_modules`, flair#513), `npm install`, then run `flair deploy`. `flair upgrade --target <fabric-url>` now bakes that whole thing into one command: it resolves the target version (latest published `@tpsdev-ai/flair`, or `--version`), prepares a clean deployable in an isolated temp dir with the Harper pin (>= 5.1.13) applied automatically, **confirms the staged Harper is the fix version before deploying**, then **reuses `flair deploy`** to push to the Fabric and verifies the result. `--check` shows the version diff + plan without deploying; credentials mirror `flair deploy` (`--fabric-user`/`--fabric-password`, `FABRIC_USER`/`FABRIC_PASSWORD` env) and are never printed. The local-package `flair upgrade` (no `--target`) is unchanged. (ops-e5bh.)

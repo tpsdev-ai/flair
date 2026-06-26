@@ -317,7 +317,7 @@ server.tool(
   },
 );
 
-// ─── Coordination write surface (ops-wmgx / Kris #510) ───────────────────────
+// ─── Coordination write surface ──────────────────────────────────────────────
 //
 // flair_workspace_set + flair_orgevent let an agent write the Office Space
 // coordination layer without hand-rolling signed HTTP. Both go through
