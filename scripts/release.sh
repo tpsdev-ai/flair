@@ -58,6 +58,25 @@ else
   GH="gh"
 fi
 
+# Authenticated push helper.
+#
+# Plain `git push origin` fails auth on hosts without a working cred helper for
+# the flair remote (rockit: "Password authentication is not supported"). Push
+# via the gh token embedded in the remote URL instead — same pattern we use
+# everywhere else. The token is read once here and NEVER echoed/printed (it would
+# leak into CI/operator logs); `set -x`-safe because we don't expand $TOK inline
+# in any traced command.
+TOK="$($GH auth token 2>/dev/null || gh auth token 2>/dev/null || true)"
+git_push_auth() {
+  # Usage: git_push_auth <refspec> [<refspec>...]
+  if [[ -z "${TOK:-}" ]]; then
+    echo "❌ No GitHub token available (tried '$GH auth token' and 'gh auth token')." >&2
+    echo "   Authenticate first (e.g. 'gh auth login') so release pushes can authenticate." >&2
+    return 1
+  fi
+  git -C "$ROOT" push "https://x-access-token:${TOK}@github.com/tpsdev-ai/flair.git" "$@"
+}
+
 # -----------------------------------------------------------------------------
 # Phase 2: publish after release PR is merged
 # -----------------------------------------------------------------------------
@@ -124,7 +143,7 @@ if [[ "$MODE" == "--publish" ]]; then
 
   echo "🏷️  Tagging v${VERSION} on main..."
   git -C "$ROOT" tag -a "v${VERSION}" -m "Release v${VERSION}"
-  git -C "$ROOT" push origin "v${VERSION}"
+  git_push_auth "v${VERSION}"
 
   echo ""
   echo "✅ Flair v${VERSION} published and tagged."
@@ -251,7 +270,10 @@ fi
 
 # 7. Push branch + open PR
 echo "📤 Pushing $RELEASE_BRANCH..."
-git -C "$ROOT" push -u origin "$RELEASE_BRANCH"
+# No -u upstream tracking: the PAT-in-URL push can't double as a tracking remote
+# without leaking the token into .git/config. The release flow doesn't need
+# tracking — it pushes once and opens the PR via the API below.
+git_push_auth "$RELEASE_BRANCH"
 
 echo "🔖 Opening release PR..."
 # Open the PR via the REST API rather than `gh pr create`: the flint token 401s on

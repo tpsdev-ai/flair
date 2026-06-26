@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### 🛡️ Release hardening — `release.sh` push-auth + impl-term leak check on every PR
+
+Closes the two recurring papercuts from the v0.15.0 release:
+
+- **`release.sh` pushes authenticate via the gh token (ops-cb5o):** both git-push points (the Phase-1 release-branch push and the Phase-2 tag push) used plain `git push origin`, which fails auth on hosts without a working cred helper for the flair remote (rockit: `Password authentication is not supported`). They now push via the gh token embedded in the remote URL (`git push https://x-access-token:<token>@github.com/tpsdev-ai/flair.git <ref>`), the same PAT-in-URL pattern used everywhere else. The token is read once and never echoed; if no token is available the push fails loudly with recovery guidance. The `-u` upstream tracking on the branch push was dropped (it would persist the token into `.git/config`; the release flow pushes once and opens the PR via the API). The `gh pr create` → `gh api` change from #528 is untouched.
+- **Impl-term leak check runs on every PR, scanning the built package surface (ops-aksm):** the `check-impl-term-leaks` lint scans `packages/*/dist/`, but the per-PR "Doc/Code Lint" CI job didn't build the packages — so a bead-ref/internal label in a package's **source** comment (which `tsc` compiles verbatim into `dist/`) was invisible at PR time and only failed at release. This is exactly what blocked v0.15.0: a coordination-write-surface comment in `packages/flair-mcp/src/index.ts` carried an internal ref into `dist/index.js`, caught only by the release-time check (#528). The `doclint` job now builds all publishable packages before running the check, so a source leak fails CI on the PR that introduces it, not at release.
+
 ## 0.15.0 (2026-06-26)
 
 ### 🧹 Release-readiness — impl-term leak cleanup + gitignore + release.sh PR-create fix
