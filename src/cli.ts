@@ -9630,13 +9630,24 @@ program
     if (data?.id) console.log(`  id: ${data.id}`);
   });
 
-// Run CLI only when this is the entry point (not when imported for testing)
-if (import.meta.main) {
+// Parse argv and run the CLI. Exported so the CommonJS preflight shim
+// (cli-shim.cts → dist/cli-shim.cjs, the real bin entry) can invoke it after
+// its Node-version check passes. The shim imports this module, so import.meta.main
+// is false there — without this explicit entry point the CLI would load but never run.
+async function runCli(): Promise<void> {
   await program.parseAsync();
+}
+
+// Run CLI directly when this file is the entry point — covers `node dist/cli.js`,
+// `bun src/cli.ts`, and the test harness (which spawns src/cli.ts under bun).
+// The packaged bin goes through cli-shim.cjs → runCli() instead.
+if (import.meta.main) {
+  await runCli();
 }
 
 // ─── Exported for testing ─────────────────────────────────────────────────────
 export {
+  runCli,
   resolveKeyPath,
   buildEd25519Auth,
   readPortFromConfig,
