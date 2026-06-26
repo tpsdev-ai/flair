@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.15.0 (2026-06-26)
+
 ### 🧹 Release-readiness — impl-term leak cleanup + gitignore + release.sh PR-create fix
 
 Unblocks the release build and removes two recurring release-time papercuts:
