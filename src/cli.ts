@@ -525,11 +525,29 @@ export async function seedAgentViaOpsApi(
   // Send Basic auth whenever the caller passed an adminPass. The caller decides
   // when to omit it (e.g., local target with authorizeLocal=true).
   const auth = adminPass !== undefined ? Buffer.from(`${adminUser}:${adminPass}`).toString("base64") : undefined;
+  // The ops-API insert bypasses the Agent resource layer, so Agent.post()'s
+  // 1.0 Principal defaults (kind/status/displayName/admin/defaultTrustTier/type)
+  // never run. Without them a remote-seeded agent lands kind=null, status=null
+  // and is invisible to roster/presence/Office-Space queries that filter on
+  // status='active' or kind='agent' (#521). Mirror Agent.post() exactly here.
+  const now = new Date().toISOString();
   const body = {
     operation: "insert",
     database: "flair",
     table: "Agent",
-    records: [{ id: agentId, name: agentId, publicKey: pubKeyB64url, createdAt: new Date().toISOString() }],
+    records: [{
+      id: agentId,
+      name: agentId,
+      type: "agent",
+      kind: "agent",
+      status: "active",
+      displayName: agentId,
+      admin: false,
+      defaultTrustTier: "unverified",
+      publicKey: pubKeyB64url,
+      createdAt: now,
+      updatedAt: now,
+    }],
   };
   const res = await fetch(url, {
     method: "POST",

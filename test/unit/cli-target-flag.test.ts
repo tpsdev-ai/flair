@@ -632,6 +632,54 @@ describe("seedAgentViaOpsApi targets remote vs localhost (#514)", () => {
   });
 });
 
+// ─── #521: seeded Agent carries roster/presence invariants ──────────────────────
+//
+// The ops-API insert bypasses the Agent resource layer, so Agent.post()'s
+// 1.0 Principal defaults never run. Before #521 the seed body only carried
+// {id, name, publicKey, createdAt}, so a remote-seeded agent landed
+// kind=null/status=null and was invisible to roster/presence/Office-Space
+// queries that filter status='active' or kind='agent'. These tests pin the
+// seed body to the same fields Agent.post() applies.
+describe("seedAgentViaOpsApi sets kind/status invariants (#521)", () => {
+  async function captureSeedBody(): Promise<any> {
+    const origFetch = globalThis.fetch;
+    let capturedBody: any;
+    globalThis.fetch = async (_url: any, opts: any) => {
+      capturedBody = JSON.parse(opts.body);
+      return new Response(null, { status: 200 });
+    };
+    try {
+      await seedAgentViaOpsApi(19925, "kris-agent", "pubkeyb64==", "admin", "sekret");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    return capturedBody;
+  }
+
+  test("seeded Agent record has kind=agent and status=active (not null)", async () => {
+    const body = await captureSeedBody();
+    const rec = body.records[0];
+    expect(rec.kind).toBe("agent");
+    expect(rec.status).toBe("active");
+    expect(rec.kind).not.toBeNull();
+    expect(rec.status).not.toBeNull();
+  });
+
+  test("seeded Agent record mirrors Agent.post() Principal defaults", async () => {
+    const body = await captureSeedBody();
+    const rec = body.records[0];
+    expect(rec.id).toBe("kris-agent");
+    expect(rec.name).toBe("kris-agent");
+    expect(rec.type).toBe("agent");
+    expect(rec.displayName).toBe("kris-agent");
+    expect(rec.admin).toBe(false);
+    expect(rec.defaultTrustTier).toBe("unverified");
+    expect(rec.publicKey).toBe("pubkeyb64==");
+    expect(rec.createdAt).toBeDefined();
+    expect(rec.updatedAt).toBeDefined();
+  });
+});
+
 // ─── #514: import / agent add seed-target resolution ────────────────────────────
 //
 // The command handlers compute the seed target with:
