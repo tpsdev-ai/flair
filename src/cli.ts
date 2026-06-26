@@ -23,6 +23,7 @@ import { createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } fro
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
 import { keystore } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
+import { fabricUpgrade } from "./fabric-upgrade.js";
 import { detectClients, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
@@ -6048,15 +6049,124 @@ statusCmd
     }
   });
 
+// ─── flair upgrade --target <fabric> ────────────────────────────────────────
+//
+// One-command upgrade of a Flair instance DEPLOYED to a Harper Fabric cluster.
+// Mirrors `flair deploy`'s credential handling (FABRIC_USER/FABRIC_PASSWORD env
+// fallbacks, password-via-flag warning) and NEVER prints credentials. The
+// version-resolution + @harperfast/harper pin + reuse of deploy() lives in
+// src/fabric-upgrade.ts; this wrapper only does CLI plumbing + the confirm.
+async function runFabricUpgrade(opts: any): Promise<void> {
+  const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+  const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+  const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+
+  const fabricUser = opts.fabricUser ?? process.env.FABRIC_USER;
+  const fabricPassword = opts.fabricPassword ?? process.env.FABRIC_PASSWORD;
+  const check = opts.check ?? false;
+
+  // Creds are not required for --check (read-only registry + best-effort GET),
+  // but ARE required to actually deploy.
+  if (!check && !(fabricUser && fabricPassword)) {
+    console.error(red("flair upgrade --target: credentials required to deploy"));
+    console.error(
+      "  pass --fabric-user + --fabric-password (or FABRIC_USER / FABRIC_PASSWORD env)",
+    );
+    console.error("  or use --check to preview the plan without credentials");
+    process.exit(1);
+  }
+
+  // Warn on password-via-flag (leaks to shell history). Env is preferred.
+  if (opts.fabricPassword && !process.env.FABRIC_PASSWORD) {
+    console.error(
+      dim("warning: --fabric-password leaks to shell history. Prefer FABRIC_PASSWORD env."),
+    );
+  }
+
+  const upgradeOpts = {
+    target: opts.target as string,
+    project: opts.project,
+    version: opts.version,
+    harperVersion: opts.harperVersion,
+    fabricUser,
+    fabricPassword,
+    check,
+    restart: opts.restart !== false,
+    replicated: opts.replicated !== false,
+  };
+
+  console.log(`${green("→")} Upgrading Fabric Flair at ${upgradeOpts.target}`);
+  if (check) console.log(dim("  (--check: plan only, no deploy)"));
+
+  try {
+    // For a real (non-check) run, confirm first unless --yes. Building the plan
+    // up front would double the registry round-trips; the plan prints inside
+    // fabricUpgrade. We confirm BEFORE invoking when interactive and not --yes.
+    if (!check && !opts.yes && process.stdin.isTTY) {
+      const { createInterface } = await import("node:readline");
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const answer: string = await new Promise((res) =>
+        rl.question(
+          `Deploy a fresh ${green("@tpsdev-ai/flair")} to ${upgradeOpts.target}? [y/N] `,
+          (a) => { rl.close(); res(a); },
+        ),
+      );
+      if (!/^y(es)?$/i.test(answer.trim())) {
+        console.log("Aborted.");
+        return;
+      }
+    }
+
+    const result = await fabricUpgrade(upgradeOpts);
+
+    if (check) {
+      console.log(
+        `\n${green("✓")} check complete — run without --check to deploy.`,
+      );
+      return;
+    }
+    if (result.plan.upToDate && !result.deployed) {
+      console.log(`\n${green("✓")} already up to date.`);
+      return;
+    }
+    console.log(`\n${green("✓")} Fabric upgrade complete.`);
+  } catch (err: any) {
+    console.error(red(`\n✗ fabric upgrade failed: ${err.message}`));
+    const hint = err.message?.toLowerCase() ?? "";
+    if (hint.includes("401") || hint.includes("unauthoriz")) {
+      console.error(dim("  hint: check Fabric Studio → Cluster Settings → Admin for the admin password"));
+    }
+    process.exit(1);
+  }
+}
+
 // ─── flair upgrade ────────────────────────────────────────────────────────────
 
 program
   .command("upgrade")
-  .description("Upgrade Flair and related packages to latest versions")
-  .option("--check", "Only check for updates, don't install")
+  .description("Upgrade Flair — local packages by default, or a deployed Fabric with --target")
+  .option("--check", "Only check for updates / show the plan, don't install or deploy")
   .option("--restart", "Restart Flair after upgrade")
   .option("--all", "Show transitive packages (e.g. flair-client) in the listing — verbose mode for debugging dep versions")
+  // ── Fabric upgrade (--target) ────────────────────────────────────────────
+  // When --target is passed, upgrade the Flair component DEPLOYED to that
+  // Harper Fabric URL instead of the local npm install. Reuses `flair deploy`
+  // under the hood with the @harperfast/harper pin baked in (flair#513).
+  .option("--target <url>", "Upgrade the Flair deployed to this Fabric URL (not the local install)")
+  .option("--fabric-user <user>", "Fabric admin username (env: FABRIC_USER) — for --target")
+  .option("--fabric-password <pass>", "Fabric admin password (env: FABRIC_PASSWORD) — for --target")
+  .option("--version <semver>", "Flair version to deploy with --target (default: latest published @tpsdev-ai/flair)")
+  .option("--harper-version <semver>", "Pin @harperfast/harper to this version for --target (default: registry latest, floored at the flair#513 fix)")
+  .option("--project <name>", "Fabric component name for --target", "flair")
+  .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
+  .option("--yes", "Skip the confirmation prompt for --target")
   .action(async (opts) => {
+    // ── Fabric-upgrade branch ───────────────────────────────────────────────
+    if (opts.target) {
+      await runFabricUpgrade(opts);
+      return;
+    }
+
     const { execSync, execFileSync } = await import("node:child_process");
     const checkOnly = opts.check ?? false;
     const showAll = opts.all ?? false;
