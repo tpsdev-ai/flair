@@ -10,6 +10,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/cli.ts"],
+  "include": ["src/cli.ts", "src/cli-shim.cts"],
   "exclude": ["node_modules", "test"]
 }
