@@ -11,3 +11,9 @@ test/e2e/screenshots/
 packages/**/__pycache__/
 plugins/**/*.pyc
 .pytest_cache/
+
+# Disposable hero-mock / screenshot artifacts (not shipped)
+ui/_shoot*.mjs
+ui/floor-*.png
+ui/hero-*.png
+ui/office-space*.html
