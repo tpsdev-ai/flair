@@ -1872,10 +1872,14 @@ program
       // Auto-wire MCP config into ~/.claude.json if Claude Code is installed
       const claudeJsonPath = join(homedir(), ".claude.json");
       const mcpEnv: Record<string, string> = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
+      // Zero-install wiring: `npx -y @tpsdev-ai/flair-mcp` fetches/runs the
+      // MCP server on demand, so this works without a prior global install and
+      // matches the npx form documented everywhere else (README, docs, and the
+      // `flair install` client-wiring snippets in src/install/clients.ts).
       const flairMcpConfig = {
         type: "stdio" as const,
-        command: "flair-mcp",
-        args: [] as string[],
+        command: "npx",
+        args: ["-y", "@tpsdev-ai/flair-mcp"] as string[],
         env: mcpEnv,
       };
       try {

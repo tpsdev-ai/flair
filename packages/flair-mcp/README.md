@@ -13,7 +13,7 @@ cat > .mcp.json << 'EOF'
   "mcpServers": {
     "flair": {
       "command": "npx",
-      "args": ["@tpsdev-ai/flair-mcp"],
+      "args": ["-y", "@tpsdev-ai/flair-mcp"],
       "env": {
         "FLAIR_AGENT_ID": "my-project"
       }
@@ -23,16 +23,15 @@ cat > .mcp.json << 'EOF'
 EOF
 ```
 
-Or install globally and configure once in `~/.claude/settings.json`.
+`npx -y @tpsdev-ai/flair-mcp` fetches and runs the server on demand — no global install needed. (`flair install` wires this for you automatically; see below.)
 
 ### Prerequisites
 
-You need a running Flair instance:
+You need a running Flair instance. The one-command front door:
 
 ```bash
 npm install -g @tpsdev-ai/flair
-flair init
-flair agent add my-project
+flair install --agent my-project   # installs Harper, creates the agent, wires MCP clients
 ```
 
 ## Tools
@@ -76,7 +75,7 @@ Point to a remote Flair instance:
   "mcpServers": {
     "flair": {
       "command": "npx",
-      "args": ["@tpsdev-ai/flair-mcp"],
+      "args": ["-y", "@tpsdev-ai/flair-mcp"],
       "env": {
         "FLAIR_AGENT_ID": "my-project",
         "FLAIR_URL": "http://your-server:19926"

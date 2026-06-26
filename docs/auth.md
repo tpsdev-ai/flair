@@ -2,6 +2,29 @@
 
 Flair supports three authentication methods, from simplest to most enterprise-ready.
 
+## Auth across surfaces (read this first)
+
+Different surfaces authenticate differently. The model in one place:
+
+| Surface | Auth | Scope | Notes |
+|---------|------|-------|-------|
+| **CLI / SDK clients** (`flair`, `flair-client`) | **Ed25519 per-agent** | This agent only | Default, recommended. Signs every request; cross-agent reads refused server-side. |
+| **MCP server** (`@tpsdev-ai/flair-mcp`) | **Ed25519 per-agent** | This agent only | Same per-agent identity as the CLI — key auto-resolved from `~/.flair/keys/<agent>.key`. |
+| **OpenClaw / pi / Hermes plugins** | **Ed25519 per-agent** | This agent only | Same secure path; auto-detect agent identity. |
+| **`n8n-nodes-flair`** | **Harper admin-password Basic auth** | ⚠️ **Whole instance, read + write** | The admin credential grants every workflow read/write to the *entire* memory store, not just the configured Agent ID. |
+
+**The default, secure path is Ed25519 per-agent** (see below): each agent holds its own key, signs every request, and the server refuses cross-agent reads. Use this everywhere you can.
+
+### Known limitation — n8n uses admin-password Basic auth
+
+The `n8n-nodes-flair` community node authenticates with the Harper **admin password** (Basic auth), which grants **whole-instance read/write access**, not per-agent isolation. The blast radius is the entire memory store. This is acceptable only when **all** of the following hold:
+
+- The n8n instance is single-tenant and operator-controlled.
+- Workflow inputs are trusted (your own CRM, your own webhook source).
+- Memory leakage between agents is acceptable for the use case.
+
+If any of those don't hold, use Flair's CLI / SDK clients (which support per-agent Ed25519 today) and wait for the n8n credential to gain Ed25519 per-agent auth (planned). Full guidance in [docs/n8n.md](n8n.md#security).
+
 ## Ed25519 Agent Auth (Default)
 
 Every agent has an Ed25519 key pair. Requests are signed with `agentId:timestamp:nonce:METHOD:/path` and verified against the agent's registered public key. 30-second replay window with nonce deduplication.

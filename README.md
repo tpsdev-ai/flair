@@ -182,27 +182,53 @@ Pluggable import/export to foreign memory systems. Every agent-memory format (ag
 
 ### Install & Run
 
+`flair install` is the front door. One command does everything: installs and starts Harper, creates your agent's Ed25519 identity, detects and wires your MCP clients (Claude Code / Cursor / Codex / Gemini) to the zero-install `npx -y @tpsdev-ai/flair-mcp` server, and runs a smoke test.
+
 ```bash
-# Install
+# Install the CLI
 npm install -g @tpsdev-ai/flair
 
-# Bootstrap a Flair instance (installs Harper, creates database, starts service)
-flair init
+# One command: init + agent + MCP wiring + smoke test
+flair install
+```
 
-# Register your first agent
-flair agent add mybot --name "My Bot" --role assistant
+That's it. Your agent now has identity and memory, and any detected MCP client is wired up. Restart your MCP client (e.g. Claude Code) to pick up the new config, then ask the agent "what do you remember about me?"
 
-# Check everything is working
-flair status
+Useful flags:
 
-# Lifecycle management
+```bash
+flair install --agent mybot          # name the agent (defaults to hostname short-form)
+flair install --client claude-code   # wire one specific client (claude-code, codex, gemini, cursor, all, none)
+flair install --no-mcp               # init + agent only, skip MCP wiring
+flair install --skip-smoke           # skip the MCP smoke test
+```
+
+Lifecycle management:
+
+```bash
+flair status        # Check everything is working
 flair stop          # Stop the Flair instance
 flair restart       # Restart the Flair instance
 flair uninstall     # Remove the service (keeps data)
 flair uninstall --purge  # Remove everything including data and keys
 ```
 
-That's it. Your agent now has identity and memory.
+### Advanced / manual setup
+
+Prefer to drive each step yourself, or scripting an unattended install? The individual commands `flair install` orchestrates are still available:
+
+```bash
+# Bootstrap a Flair instance (installs Harper, creates database, starts service)
+flair init
+
+# Register your first agent (generates an Ed25519 keypair, registers it)
+flair agent add mybot --name "My Bot"
+
+# Check everything is working
+flair status
+```
+
+`flair init --agent-id mybot` bootstraps the instance and registers an agent in one step (and auto-wires `~/.claude.json` if Claude Code is present). Wire other MCP clients manually using the snippets in **[docs/mcp-clients.md](docs/mcp-clients.md)** — all of them use the `npx -y @tpsdev-ai/flair-mcp` zero-install form.
 
 ## Integration
 
@@ -330,6 +356,12 @@ curl -H "Authorization: TPS-Ed25519 mybot:$TS:$NONCE:$SIG" \
 ```
 
 Auth is Ed25519 — sign `agentId:timestamp:nonce:METHOD:/path` with your private key. See [SECURITY.md](SECURITY.md) for the full protocol.
+
+### Auth across surfaces
+
+The default, secure path everywhere is **Ed25519 per-agent**: each agent holds its own key (`~/.flair/keys/<agent>.key`), signs every request, and the server refuses cross-agent reads. The CLI, the `flair-mcp` server, and the OpenClaw / pi / Hermes plugins all use it.
+
+One exception: the **`n8n-nodes-flair`** community node authenticates with the Harper **admin password** (Basic auth), which grants **whole-instance read/write** access — not per-agent isolation. That's acceptable only on a single-tenant, operator-controlled n8n with trusted workflow inputs; otherwise prefer the CLI/SDK Ed25519 path. Full breakdown in **[docs/auth.md](docs/auth.md#auth-across-surfaces-read-this-first)**.
 
 ## Architecture
 
