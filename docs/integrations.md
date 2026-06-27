@@ -32,18 +32,13 @@ Don't see your harness? If it speaks **MCP** — Flair already works with `flair
 
 [`@tpsdev-ai/flair-mcp`](https://www.npmjs.com/package/@tpsdev-ai/flair-mcp) is a [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes Flair as a memory tool to any MCP-speaking client. One server, every MCP client.
 
-Install:
-
-```bash
-npm install -g @tpsdev-ai/flair-mcp
-```
-
-Then wire into each tool's MCP config:
+No install step needed — every snippet below uses `npx -y @tpsdev-ai/flair-mcp`, which fetches and runs the server on demand (zero-install). The fastest path is `flair install`, which detects and wires these clients for you. To wire by hand, drop the relevant snippet into each tool's MCP config:
 
 **Claude Code** (`~/.config/claude-code/config.toml` or per-project `.claude/config.toml`):
 ```toml
 [mcp.servers.flair]
-command = "flair-mcp"
+command = "npx"
+args = ["-y", "@tpsdev-ai/flair-mcp"]
 env = { FLAIR_AGENT_ID = "claude-code" }
 ```
 
@@ -52,7 +47,8 @@ env = { FLAIR_AGENT_ID = "claude-code" }
 {
   "mcpServers": {
     "flair": {
-      "command": "flair-mcp",
+      "command": "npx",
+      "args": ["-y", "@tpsdev-ai/flair-mcp"],
       "env": { "FLAIR_AGENT_ID": "cursor" }
     }
   }
@@ -63,7 +59,7 @@ env = { FLAIR_AGENT_ID = "claude-code" }
 ```json
 {
   "mcpServers": {
-    "flair": { "command": "flair-mcp", "env": { "FLAIR_AGENT_ID": "codex" } }
+    "flair": { "command": "npx", "args": ["-y", "@tpsdev-ai/flair-mcp"], "env": { "FLAIR_AGENT_ID": "codex" } }
   }
 }
 ```
@@ -75,7 +71,8 @@ env = { FLAIR_AGENT_ID = "claude-code" }
 {
   "experimental": {
     "modelContextProtocolServer": {
-      "command": "flair-mcp",
+      "command": "npx",
+      "args": ["-y", "@tpsdev-ai/flair-mcp"],
       "env": { "FLAIR_AGENT_ID": "continue" }
     }
   }
@@ -87,7 +84,8 @@ env = { FLAIR_AGENT_ID = "claude-code" }
 default:
   extensions:
     flair:
-      cmd: flair-mcp
+      cmd: npx
+      args: ["-y", "@tpsdev-ai/flair-mcp"]
       envs: { FLAIR_AGENT_ID: goose }
 ```
 

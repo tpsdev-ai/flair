@@ -15,10 +15,10 @@
  *   - flair_orgevent      — publish an OrgEvent attributed to self (no forging)
  *
  * Usage:
- *   npx @tpsdev-ai/flair-mcp
+ *   npx -y @tpsdev-ai/flair-mcp
  *
  * Claude Code .mcp.json:
- *   { "mcpServers": { "flair": { "command": "npx", "args": ["@tpsdev-ai/flair-mcp"] } } }
+ *   { "mcpServers": { "flair": { "command": "npx", "args": ["-y", "@tpsdev-ai/flair-mcp"] } } }
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

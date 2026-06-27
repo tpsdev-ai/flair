@@ -61,13 +61,13 @@ This re-generates embeddings for all memories using the current model. Runs in t
 
 ## MCP Server Upgrade
 
-If you use the MCP server with Claude Code:
+The recommended wiring runs the MCP server via `npx -y @tpsdev-ai/flair-mcp`, which fetches the latest published version on demand. To pick up a new release, just **restart your MCP client** (Claude Code, Cursor, etc.) — `npx` will resolve the newest version on next launch (clear the npx cache with `npx clear-npx-cache` if it pins an old one). No config changes needed — the MCP server reads `FLAIR_URL` and `FLAIR_AGENT_ID` from environment.
+
+If you pinned a version (e.g. `["-y", "@tpsdev-ai/flair-mcp@0.6.0"]`) or installed globally, bump it explicitly:
 
 ```bash
-npm install -g @tpsdev-ai/flair-mcp@latest
+npm install -g @tpsdev-ai/flair-mcp@latest   # only if you opted into a global install
 ```
-
-Then restart Claude Code to pick up the new version. No config changes needed — the MCP server reads `FLAIR_URL` and `FLAIR_AGENT_ID` from environment.
 
 ## Rollback
 

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### 📚 Onboarding consistency — one zero-install MCP-wiring pattern + `flair install` as the front door
+
+Three contradictions in the onboarding story, fixed so the docs and the code agree:
+
+- **MCP-wiring contradiction (FIX 1):** the `flair init --agent-id` auto-wire wrote `~/.claude.json` with a bare `command: "flair-mcp"` (no args), which assumes a global `flair-mcp` on `PATH` — but the README, `docs/`, and the `flair install` client snippets all tell users the zero-install `npx -y @tpsdev-ai/flair-mcp` form. The auto-wire now writes `command: "npx"`, `args: ["-y", "@tpsdev-ai/flair-mcp"]` (src/cli.ts), so init and the docs agree on one pattern. Generated config validated against the Claude Code `~/.claude.json` MCP shape.
+- **`flair install` is the documented front door (FIX 2):** the root README Quick Start now leads with the one-command `flair install` (init + agent + MCP wiring + smoke test) and moves the manual `flair init → flair agent add → flair status` flow to an "Advanced / manual setup" section. Corrected an inaccurate `flair agent add --role` example (no such flag).
+- **Auth across surfaces documented in one place (FIX 3):** a new "Auth across surfaces" table in `docs/auth.md` (and a pointer in the README) makes the model legible — CLI / SDK / MCP / plugins all use per-agent Ed25519 (default, secure); `n8n-nodes-flair` uses Harper admin-password Basic auth, which grants whole-instance read/write, flagged as a known limitation with the conditions under which it's acceptable.
+- **Docs/skills currency:** standardized every MCP-wiring snippet to the `npx -y @tpsdev-ai/flair-mcp` zero-install form (`docs/integrations.md`, `docs/upgrade.md`, `packages/flair-mcp/README.md`, the `packages/flair-mcp/src/index.ts` usage comment) — no remaining bare-binary `command: "flair-mcp"` wiring instructions. The out-of-repo `flair-best-practices` Claude Code skill was updated to match.
+
 ### 🛡️ Release hardening — `release.sh` push-auth + impl-term leak check on every PR
 
 Closes the two recurring papercuts from the v0.15.0 release:
