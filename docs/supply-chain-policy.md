@@ -39,9 +39,9 @@ Override per-run via `FLAIR_DEP_KEEP_CURRENT="pkg1,pkg2,@scope/pkg3"` env (addit
 
 Every `dependencies` entry in any `package.json` must be a single concrete version (`"5.0.9"`), not a range (`"^5.0"`, `"~5.0.9"`, `">=5"`). Range specifiers expose us to silent supply-chain swaps every install — exactly the surface attackers exploit.
 
-- `devDependencies` and `peerDependencies` may use ranges (they don't ship in our published tarballs).
+- `peerDependencies` may use ranges (host-provided; never installed by us). `devDependencies` are also exact-pinned for build reproducibility, though they don't ship in our published tarballs.
 - `bun.lock` is committed and frozen-lockfile installed in CI. Any unintended dep drift fails the workspace-deps consistency gate.
-- Pin updates happen via deliberate PRs, not automated bumps. Renovate / Dependabot are not enabled.
+- Pin updates happen via deliberate, test-gated PRs — never auto-merged. **Renovate is enabled** (`.github/renovate.json`) to *propose* these updates on a schedule, but it respects the bake-time cooldown (`minimumReleaseAge: "7 days"`, matching `FLAIR_DEP_MIN_AGE_DAYS`) and opens PRs only — `automerge` is off, so every bump flows through the full test suite + K&S review. Renovate uses `rangeStrategy: "pin"` so it proposes exact-version bumps (never re-widens to ranges) and shares the keep-current allow-list with `check-dep-ages.mjs`. Vulnerability alerts bypass the cooldown so security fixes aren't delayed.
 
 ### 3. Internal dep version lockstep
 
@@ -71,6 +71,10 @@ Only Nathan publishes to npm (per the existing MFA boundary). Flint preps the re
 ---
 
 ## Automation
+
+### `.github/renovate.json` — deliberate, cooldown-gated update proposals
+
+Renovate opens PRs to propose dependency updates so we don't drift behind upstream indefinitely — but on our terms, not the registry's. It is configured to never auto-merge (`automerge: false`), to pin (`rangeStrategy: "pin"`, consistent with §2), and to respect the bake-time cooldown (`minimumReleaseAge: "7 days"`, matching `FLAIR_DEP_MIN_AGE_DAYS` in `check-dep-ages.mjs`) so it only proposes versions that have already cleared the detection window. Non-major updates are grouped; majors land as isolated PRs. The keep-current allow-list (`@harperfast/harper`, `harper-fabric-embeddings`) mirrors the script's `DEFAULT_KEEP_CURRENT` — keep the two in lockstep when either changes. Vulnerability alerts bypass the cooldown. Every Renovate PR still runs the full CI suite (including the bake-time and workspace-deps gates) and is K&S-reviewed before merge.
 
 ### `scripts/check-workspace-deps.mjs` (already shipped, PR #368)
 
