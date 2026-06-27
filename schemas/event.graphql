@@ -1,4 +1,4 @@
-type OrgEvent @table(database: "flair") @export {
+type OrgEvent @table(database: "flair") @export(mcp: false) {
   id: ID @primaryKey
   authorId: String! @indexed
   kind: String! @indexed

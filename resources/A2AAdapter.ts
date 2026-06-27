@@ -3,6 +3,7 @@ import { access, readFile, readdir } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { localBaseUrl, resolvePublicBaseUrl } from "./a2a-url.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 type JsonRpcRequest = {
   jsonrpc: string;
@@ -295,6 +296,8 @@ function statusFromOrgEvent(event: any): string | null {
 }
 
 export class A2AAdapter extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // A2A discovery surface — agent-card metadata (GET) is intentionally
   // public so other agents/clients can discover this Flair as a memory
   // peer. POST is JSON-RPC for actions (message/send writes OrgEvents,

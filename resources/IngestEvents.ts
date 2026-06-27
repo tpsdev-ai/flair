@@ -24,6 +24,7 @@
 
 import { Resource, databases } from "@harperfast/harper";
 import { createPublicKey, verify } from "node:crypto";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 const BATCH_LIMIT = 100;
 const RATE_LIMIT_MS = 10_000;
@@ -88,6 +89,8 @@ function verifyEd25519Signature(
 }
 
 export class IngestEvents extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Public POST by design: the handler self-verifies the OFFICE's Ed25519
   // signature against ObsOffice.publicKey (not an agent identity), so it can't use
   // agent auth. allowCreate=true lets the request reach post() where that

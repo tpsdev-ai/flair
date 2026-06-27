@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * Resolve the public URL operators reach this Flair on.
@@ -88,6 +89,8 @@ function resolveVersion(): string {
  * GET /AdminInstance — instance info, public key, version.
  */
 export class AdminInstance extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   async get() {
     const version = resolveVersion();
     // Pass the request through so URL resolution can derive from

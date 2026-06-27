@@ -1,5 +1,6 @@
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -13,6 +14,8 @@ const UNAUTH = () =>
  * agentId. Mirrors the WorkspaceState pattern.
  */
 export class Integration extends (databases as any).flair.Integration {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   private _auth() {
     return resolveAgentAuth((this as any).getContext?.());
   }

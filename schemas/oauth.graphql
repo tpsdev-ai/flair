@@ -4,7 +4,7 @@
 
 # Registered OAuth clients (via DCR or admin).
 # 1.0: only claude.com redirect URI permitted for DCR clients.
-type OAuthClient @table(database: "flair") @export {
+type OAuthClient @table(database: "flair") @export(mcp: false) {
   id: ID @primaryKey                # client_id
   clientSecret: String              # hashed — only for confidential clients
   name: String!
@@ -32,7 +32,7 @@ type OAuthAuthCode @table(database: "flair") {
 
 # IdP configuration for XAA (Enterprise-Managed Authorization).
 # Stores trusted enterprise IdP endpoints for ID-JAG validation.
-type IdpConfig @table(database: "flair") @export {
+type IdpConfig @table(database: "flair") @export(mcp: false) {
   id: ID @primaryKey                # stable UUID
   name: String!                     # display name ("Harper Corporate")
   issuer: String! @indexed          # must match ID-JAG `iss` (e.g., "https://accounts.google.com")

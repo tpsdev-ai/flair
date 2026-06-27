@@ -47,6 +47,57 @@ function signBody(body: Record<string, any>, secretKey: Uint8Array): string {
   return Buffer.from(sig).toString("base64url");
 }
 
+// ─── Native MCP (/mcp) enablement — feature-flagged, default-OFF ─────────────
+//
+// Harper's native MCP "application" profile is presence-gated: it mounts at /mcp
+// IFF the ROOT config (harper-config.yaml + HARPER_SET_CONFIG / launchd setConfig)
+// carries a top-level `mcp:` block with an `application` sub-block. flair's
+// COMPONENT config.yaml is NOT read for this — so the block is injected at both
+// root-config write points below (init/start env + launchd plist).
+//
+// Default-OFF via FLAIR_MCP_ENABLED: when off, mcpConfigBlock() returns {} and
+// the emitted root config is BYTE-IDENTICAL to today (no `mcp` key) → /mcp 404s,
+// exactly as before. The surface stays off in prod until the Bearer verifier
+// (slice 2/3, HarperFast/oauth#86) lands and Sherlock signs off on live enable.
+//
+// SECURITY NOTE — curation is NOT done here. In Harper 5.1.14 the application
+// profile does NOT honor `mcp.application.allow`/`deny` (only the *operations*
+// profile does; the application allow/deny config params exist but are never
+// read). The real curation boundary is resource-level: every flair Resource is
+// `static hidden` EXCEPT the curated `FlairMcp` (resources/mcp-curation.ts +
+// FlairMcp.ts). The `allow` list below is forward-compat documentation of intent
+// (the validator accepts it); it is the resource-level suppression + the curated
+// FlairMcp.mcpTools that actually restrict the surface to the 9 tools.
+const CURATED_MCP_TOOLS = [
+  "memory_search", "memory_store", "memory_get", "memory_delete", "bootstrap",
+  "soul_set", "soul_get", "flair_workspace_set", "flair_orgevent",
+] as const;
+
+function mcpEnabledForConfig(): boolean {
+  const raw = (process.env.FLAIR_MCP_ENABLED ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+/**
+ * The `mcp` root-config fragment to merge into HARPER_SET_CONFIG / setConfig.
+ * Returns {} when the flag is OFF (byte-identical config) and the enabling block
+ * when ON. Spread into the config object: `{ ...base, ...mcpConfigBlock() }`.
+ */
+function mcpConfigBlock(): Record<string, unknown> {
+  if (!mcpEnabledForConfig()) return {};
+  return {
+    mcp: {
+      application: {
+        mountPath: "/mcp",
+        // Forward-compat intent only (not enforced by Harper 5.1.14's application
+        // profile — see SECURITY NOTE above). Resource-level `static hidden` +
+        // FlairMcp.mcpTools are the enforced curation.
+        allow: [...CURATED_MCP_TOOLS],
+      },
+    },
+  };
+}
+
 // ─── Secret detection helpers ────────────────────────
 
 /**
@@ -1798,6 +1849,9 @@ program
           mqtt: { network: { port: null }, webSocket: false },
           localStudio: { enabled: false },
           authentication: { authorizeLocal: true, enableSessions: true },
+          // Native /mcp enablement — {} when FLAIR_MCP_ENABLED is off (byte-identical
+          // config); the enabling `mcp:` block when on. See mcpConfigBlock().
+          ...mcpConfigBlock(),
         });
 
         const env: Record<string, string> = {
@@ -1878,6 +1932,9 @@ program
             mqtt: { network: { port: null }, webSocket: false },
             localStudio: { enabled: false },
             authentication: { authorizeLocal: true, enableSessions: true },
+            // Native /mcp enablement — {} when FLAIR_MCP_ENABLED is off (byte-identical
+            // config); the enabling `mcp:` block when on. See mcpConfigBlock().
+            ...mcpConfigBlock(),
           });
           const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

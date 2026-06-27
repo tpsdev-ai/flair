@@ -62,7 +62,7 @@ type Soul @table(database: "flair") {
   updatedAt: String
 }
 
-type MemoryGrant @table(database: "flair") @export {
+type MemoryGrant @table(database: "flair") @export(mcp: false) {
   id: ID @primaryKey
   ownerId: String!
   granteeId: String!

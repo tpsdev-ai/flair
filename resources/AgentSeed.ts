@@ -19,6 +19,7 @@
 
 import { Resource, databases } from "@harperfast/harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -36,6 +37,8 @@ const DEFAULT_MEMORIES = (agentId: string, now: string) => [
 ];
 
 export class AgentSeed extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Admin-only: permit verified ADMIN agents (Basic-admin is super_user and
   // bypasses allow*); non-admin agents denied. Real authorization now that the
   // gate no longer elevates agents to admin.

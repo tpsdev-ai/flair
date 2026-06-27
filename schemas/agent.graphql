@@ -3,7 +3,7 @@
 # compatibility with existing code, queries, and exports. The `kind` field
 # distinguishes humans from agents. Pre-1.0 records without `kind` are treated
 # as agents.
-type Agent @table(database: "flair") @export {
+type Agent @table(database: "flair") @export(mcp: false) {
   id: ID @primaryKey
   name: String!
   role: String
@@ -27,7 +27,7 @@ type Agent @table(database: "flair") @export {
 # Credential table — auth surfaces for Principals.
 # A Principal can have multiple credentials (passkey + bearer token + Ed25519).
 # Credentials are NOT the Ed25519 signing keypair — they're authentication methods.
-type Credential @table(database: "flair") @export {
+type Credential @table(database: "flair") @export(mcp: false) {
   id: ID @primaryKey
   principalId: String! @indexed   # FK to Agent.id
   kind: String! @indexed          # "webauthn" | "bearer-token" | "ed25519" | "idp"
@@ -57,7 +57,7 @@ type Credential @table(database: "flair") @export {
 
 # Integration table — kept for backward compat with 0.x platform connections.
 # New code should use Credential instead.
-type Integration @table(database: "flair") @export {
+type Integration @table(database: "flair") @export(mcp: false) {
   id: ID @primaryKey
   agentId: String! @indexed
   platform: String! @indexed

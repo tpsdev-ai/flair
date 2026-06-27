@@ -23,6 +23,7 @@
 import { Resource, databases } from "@harperfast/harper";
 import { isAdmin, allowVerified } from "./agent-auth.js";
 import { patchRecordSilent } from "./table-helpers.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 const FOCUS_PROMPTS: Record<string, string> = {
   lessons_learned:
@@ -36,6 +37,8 @@ const FOCUS_PROMPTS: Record<string, string> = {
 };
 
 export class ReflectMemories extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
   // admin elevation). Any verified agent may reflect; the isAdmin checks in post()
   // handle finer-grained authorization.

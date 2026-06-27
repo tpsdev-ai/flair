@@ -13,6 +13,7 @@
 
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -20,6 +21,8 @@ const UNAUTH = () =>
   new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
 
 export class OrgEvent extends (databases as any).flair.OrgEvent {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   allowRead() { return allowVerified((this as any).getContext?.()); }
 
   private _auth() {

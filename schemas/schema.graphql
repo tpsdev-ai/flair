@@ -1,7 +1,7 @@
 
 # ─── Presence table ───────────────────────────────────────────────────────────
 
-type Presence @table(database: "flair") @export {
+type Presence @table(database: "flair") @export(mcp: false) {
   agentId: ID @primaryKey
   lastHeartbeatAt: BigInt        # unix ms timestamp
   currentTask: String            # short human string, e.g. "Reviewing flair#467"
@@ -10,7 +10,7 @@ type Presence @table(database: "flair") @export {
 
 # ─── Observatory tables ───────────────────────────────────────────────────────
 
-type ObsOffice @table(database: "flair") @export {
+type ObsOffice @table(database: "flair") @export(mcp: false) {
   id: ID @primaryKey        # e.g. "office1"
   name: String!
   publicKey: String!        # Ed25519 hex public key for auth verification
@@ -21,7 +21,7 @@ type ObsOffice @table(database: "flair") @export {
   updatedAt: String
 }
 
-type ObsAgentSnapshot @table(database: "flair") @export {
+type ObsAgentSnapshot @table(database: "flair") @export(mcp: false) {
   id: ID @primaryKey        # "{officeId}:{agentId}"
   officeId: String! @indexed
   agentId: String! @indexed
@@ -36,7 +36,7 @@ type ObsAgentSnapshot @table(database: "flair") @export {
   updatedAt: String!
 }
 
-type ObsEventFeed @table(database: "flair") @export {
+type ObsEventFeed @table(database: "flair") @export(mcp: false) {
   id: ID @primaryKey        # "{officeId}:{eventId}"
   officeId: String! @indexed
   kind: String! @indexed

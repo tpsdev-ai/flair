@@ -2,6 +2,7 @@ import { Resource, databases } from "@harperfast/harper";
 import { allowVerified } from "./agent-auth.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { wrapUntrusted } from "./content-safety.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * POST /MemoryBootstrap
@@ -46,6 +47,8 @@ function formatMemory(m: any, supersedes?: boolean): string {
 }
 
 export class BootstrapMemories extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
   // gate's admin super_user elevation, so custom resources must self-gate or
   // Harper denies them for the least-privilege flair_agent role). Any verified

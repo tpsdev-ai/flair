@@ -7,8 +7,11 @@
 
 import { Resource, databases } from "@harperfast/harper";
 import { allowVerified } from "./agent-auth.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 export class WorkspaceLatest extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
   // admin elevation). Any verified agent may read; the path-vs-agent ownership
   // check stays in get().

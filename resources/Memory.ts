@@ -4,8 +4,11 @@ import { isAdmin, resolveAgentAuth } from "./agent-auth.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 export class Memory extends (databases as any).flair.Memory {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   /**
    * Override search() to scope collection GETs by authenticated agent.
    *
