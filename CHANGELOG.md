@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 🛟 Loud Node-version preflight for `flair-mcp` — silent failure on old Node (ops-fomi)
+
+The `flair-mcp` bin (`dist/index.js`) is an ES module: top-level imports are hoisted and the whole module graph is linked + evaluated before the file body runs. flair-mcp's deps (`@modelcontextprotocol/sdk`, `@tpsdev-ai/flair-client` and its transitive deps) need a modern engine, so on an old Node the import graph crashes during linking — **before** any in-file version guard could run. Result: a user wiring `npx -y @tpsdev-ai/flair-mcp` on an unsupported Node gets zero output and a dead MCP server, with no actionable signal. This is the same exposure flair's CLI had, fixed in #524 — now mirrored for the MCP server.
+
+- **The `flair-mcp` bin now points at a CommonJS preflight shim** (`dist/mcp-shim.cjs`, compiled from `src/mcp-shim.cts`). CJS evaluates top-to-bottom with lazy `import()`, so the Node-version check runs and prints **before** anything loads the ESM server or any modern dep. On an unsupported Node → an actionable message (`flair-mcp requires Node.js >= 22. You are running Node.js X. ... https://nodejs.org/`) + `process.exit(1)`. On a supported Node → a transparent no-op that dynamically imports the server and hands off to `runMcp()`.
+- **The shim uses only ancient-safe syntax** (`var`, plain functions, string ops, `console.error`, `process.exit`) so the guard itself can never fail to parse on the oldest Node a user could have. `node --check` confirms parse-safety.
+- **`src/index.ts` now exports `runMcp()`** — all runtime side effects (the `FLAIR_AGENT_ID` check, `FlairClient` construction, the parent-exit watcher, tool registration, the stdio connect) moved inside it, so merely importing the module (from the shim before the version check, or from a test) does nothing until `runMcp()` is called. Direct invocation (`node dist/index.js`, `bun src/index.ts`) still works via an `import.meta.main` entry-point guard.
+- **`engines.node` bumped `>=18` → `>=22`** to match flair's CLI and the deps' real floor, so `npm install` also warns on an unsupported Node. Postinstall now `chmod +x` the shim.
+- New unit test (`test/mcp-node-preflight.test.ts`) proves: loud non-zero failure on a simulated old Node without loading the ESM server, no-op handoff to `runMcp()` on the supported Node the suite runs on, and parse-safety of the emitted shim. (packages/flair-mcp/*)
+
 ### 🛟 Harper watchdog now recovers an UNLOADED launchd job + alerts on state transitions (ops-6nv7)
 
 On 2026-06-27 ~04:20 prod Flair (`:9926`) was **down** — the `ai.tpsdev.flair` launchd job wasn't loaded (no Harper PID) — and it stayed down, undetected, until a memory write happened to fail. Two gaps: (1) `harper-watchdog.sh` only handled the *PID-alive-but-`/Health`-dead* zombie case (`kill -9` + `launchctl kickstart -k`); `kickstart`/`start` are **no-ops on an unloaded job**, so the job-unloaded failure mode went unrecovered. (2) There was **no alerting at all** — a Flair-down was invisible. Recovery was a manual `launchctl load ~/Library/LaunchAgents/ai.tpsdev.flair.plist`.
