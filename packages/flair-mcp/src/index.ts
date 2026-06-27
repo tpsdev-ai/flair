@@ -19,6 +19,16 @@
  *
  * Claude Code .mcp.json:
  *   { "mcpServers": { "flair": { "command": "npx", "args": ["-y", "@tpsdev-ai/flair-mcp"] } } }
+ *
+ * BIN ENTRY / NODE-VERSION PREFLIGHT
+ * ----------------------------------
+ * The published `flair-mcp` bin is NOT this file — it is the CommonJS preflight
+ * shim (dist/mcp-shim.cjs, compiled from src/mcp-shim.cts). This module is an
+ * ES module: its top-level imports are hoisted and the whole graph is linked +
+ * evaluated before any in-file guard could run, so on an old Node it crashes
+ * during linking (the SDK + flair deps need Node >= 22) before printing anything
+ * — the silent `npx -y @tpsdev-ai/flair-mcp` failure. The shim checks the Node
+ * version FIRST, then dynamically imports this module and calls runMcp().
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -66,74 +76,85 @@ function errorResult(err: unknown, flairUrl: string) {
   return { content: [{ type: "text" as const, text: classifyError(err, flairUrl) }], isError: true };
 }
 
-// ─── Parent-exit watcher ────────────────────────────────────────────────────
+// ─── Entry point ──────────────────────────────────────────────────────────────
 //
-// flair-mcp runs as a child of an MCP host (Claude Code, Cursor, etc) over
-// stdio. When the host exits cleanly it should close stdin/stdout — but in
-// practice we've seen flair-mcp processes orphaned for weeks (PID 1 as
-// parent), holding stale tokens and consuming RAM.
-//
-// Poll process.ppid every 5s. If it drops to 1 (init), the parent died and
-// we got reparented — exit cleanly. Cheap, cross-platform, no native deps.
+// runMcp() is the real entry point. It is exported so the CommonJS preflight
+// shim (mcp-shim.cts → dist/mcp-shim.cjs, the published bin) can invoke it after
+// its Node-version check passes — the shim imports this module, so a top-level
+// `import.meta.main` guard would be false there. Everything that has runtime
+// side effects (the FLAIR_AGENT_ID check, FlairClient construction, the parent-
+// exit watcher, tool registration, and the stdio connect) lives inside runMcp()
+// so that merely importing this module (e.g. from the shim before the version
+// check, or from a test) does nothing until runMcp() is called.
+export async function runMcp(): Promise<void> {
+  // ─── Parent-exit watcher ──────────────────────────────────────────────────
+  //
+  // flair-mcp runs as a child of an MCP host (Claude Code, Cursor, etc) over
+  // stdio. When the host exits cleanly it should close stdin/stdout — but in
+  // practice we've seen flair-mcp processes orphaned for weeks (PID 1 as
+  // parent), holding stale tokens and consuming RAM.
+  //
+  // Poll process.ppid every 5s. If it drops to 1 (init), the parent died and
+  // we got reparented — exit cleanly. Cheap, cross-platform, no native deps.
 
-// Clamp the poll interval to a safe range. `process.env.FOO ?? 5000` is NOT
-// safe on its own: `??` only falls through on null/undefined, so an empty-string
-// override (`FLAIR_MCP_PARENT_POLL_MS=`) yields `Number("") === 0` and creates
-// a tight CPU-busy loop. Validate explicitly. (Sherlock review on #315.)
-const PARENT_POLL_INTERVAL_MS = (() => {
-  const raw = process.env.FLAIR_MCP_PARENT_POLL_MS;
-  const parsed = raw != null ? Number(raw) : NaN;
-  const FLOOR_MS = 100;
-  const CEILING_MS = 30_000;
-  return Number.isFinite(parsed) && parsed >= FLOOR_MS && parsed <= CEILING_MS
-    ? parsed
-    : 5000;
-})();
-const initialPpid = process.ppid;
-setInterval(() => {
-  // ppid === 1 means init/launchd has adopted us — original parent died.
-  if (process.ppid === 1 && initialPpid !== 1) {
-    console.error("flair-mcp: parent process died (re-parented to init); exiting cleanly.");
+  // Clamp the poll interval to a safe range. `process.env.FOO ?? 5000` is NOT
+  // safe on its own: `??` only falls through on null/undefined, so an empty-string
+  // override (`FLAIR_MCP_PARENT_POLL_MS=`) yields `Number("") === 0` and creates
+  // a tight CPU-busy loop. Validate explicitly. (Sherlock review on #315.)
+  const PARENT_POLL_INTERVAL_MS = (() => {
+    const raw = process.env.FLAIR_MCP_PARENT_POLL_MS;
+    const parsed = raw != null ? Number(raw) : NaN;
+    const FLOOR_MS = 100;
+    const CEILING_MS = 30_000;
+    return Number.isFinite(parsed) && parsed >= FLOOR_MS && parsed <= CEILING_MS
+      ? parsed
+      : 5000;
+  })();
+  const initialPpid = process.ppid;
+  setInterval(() => {
+    // ppid === 1 means init/launchd has adopted us — original parent died.
+    if (process.ppid === 1 && initialPpid !== 1) {
+      console.error("flair-mcp: parent process died (re-parented to init); exiting cleanly.");
+      process.exit(0);
+    }
+  }, PARENT_POLL_INTERVAL_MS).unref();
+
+  // Also handle stdin EOF — MCP host closing the pipe means session ended.
+  // (StdioServerTransport handles this internally for the MCP protocol, but
+  // belt-and-suspenders: if stdin closes we exit, full stop.)
+  process.stdin.on("close", () => {
+    console.error("flair-mcp: stdin closed; exiting cleanly.");
     process.exit(0);
+  });
+  process.stdin.on("end", () => {
+    console.error("flair-mcp: stdin EOF; exiting cleanly.");
+    process.exit(0);
+  });
+
+  // ─── Client setup ────────────────────────────────────────────────────────────
+
+  const agentId = process.env.FLAIR_AGENT_ID;
+  if (!agentId) {
+    console.error("FLAIR_AGENT_ID is required. Set it in your .mcp.json env or shell.");
+    process.exit(1);
   }
-}, PARENT_POLL_INTERVAL_MS).unref();
 
-// Also handle stdin EOF — MCP host closing the pipe means session ended.
-// (StdioServerTransport handles this internally for the MCP protocol, but
-// belt-and-suspenders: if stdin closes we exit, full stop.)
-process.stdin.on("close", () => {
-  console.error("flair-mcp: stdin closed; exiting cleanly.");
-  process.exit(0);
-});
-process.stdin.on("end", () => {
-  console.error("flair-mcp: stdin EOF; exiting cleanly.");
-  process.exit(0);
-});
+  const flair = new FlairClient({
+    agentId,
+    url: process.env.FLAIR_URL,
+    keyPath: process.env.FLAIR_KEY_PATH,
+  });
 
-// ─── Client setup ────────────────────────────────────────────────────────────
+  // ─── MCP Server ──────────────────────────────────────────────────────────────
 
-const agentId = process.env.FLAIR_AGENT_ID;
-if (!agentId) {
-  console.error("FLAIR_AGENT_ID is required. Set it in your .mcp.json env or shell.");
-  process.exit(1);
-}
+  const server = new McpServer({
+    name: "flair",
+    version: "0.1.0",
+  });
 
-const flair = new FlairClient({
-  agentId,
-  url: process.env.FLAIR_URL,
-  keyPath: process.env.FLAIR_KEY_PATH,
-});
+  // ─── Tools ───────────────────────────────────────────────────────────────────
 
-// ─── MCP Server ──────────────────────────────────────────────────────────────
-
-const server = new McpServer({
-  name: "flair",
-  version: "0.1.0",
-});
-
-// ─── Tools ───────────────────────────────────────────────────────────────────
-
-server.tool(
+  server.tool(
   "memory_search",
   "Search memories by meaning. Understands temporal queries like 'what happened today'.",
   {
@@ -386,7 +407,29 @@ server.tool(
   },
 );
 
-// ─── Start ───────────────────────────────────────────────────────────────────
+  // ─── Start ───────────────────────────────────────────────────────────────────
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+// ─── Entry point dispatch ──────────────────────────────────────────────────────
+//
+// Run directly when this module is the entry point — covers `bun src/index.ts`
+// and `node dist/index.js`. The packaged bin goes through mcp-shim.cjs → runMcp()
+// after its Node-version check, so import.meta.main is false there; without this
+// the server would never start when invoked through the shim. (Matches the
+// session-start-hook + CLI shim entry-point pattern.)
+const importMeta = import.meta as ImportMeta & { main?: boolean };
+const isMain =
+  importMeta.main === true ||
+  (typeof process !== "undefined" &&
+    process.argv[1] != null &&
+    import.meta.url === `file://${process.argv[1]}`);
+
+if (isMain) {
+  void runMcp().catch((err) => {
+    console.error(err && (err as Error).stack ? (err as Error).stack : err);
+    process.exit(1);
+  });
+}

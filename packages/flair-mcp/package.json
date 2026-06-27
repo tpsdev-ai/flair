@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "flair-mcp": "dist/index.js",
+    "flair-mcp": "dist/mcp-shim.cjs",
     "flair-session-start": "dist/session-start-hook.js"
   },
   "files": [
@@ -17,13 +17,13 @@
     "build": "tsc --noCheck",
     "test": "bun test",
     "prepublishOnly": "npm run build",
-    "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');for(const p of ['dist/index.js','dist/session-start-hook.js']){try{if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair-mcp: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}}}catch(e){console.error('postinstall warn:',e.message)}\""
+    "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');for(const p of ['dist/mcp-shim.cjs','dist/index.js','dist/session-start-hook.js']){try{if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair-mcp: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}}}catch(e){console.error('postinstall warn:',e.message)}\""
   },
   "publishConfig": {
     "access": "public"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.27.1",
