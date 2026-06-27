@@ -44,8 +44,8 @@ jobs:
           push: false
           load: true
           tags: flair-test:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=from-scratch
+          cache-to: type=gha,mode=max,scope=from-scratch
 
       - name: Run from-scratch validation
         run: docker run --rm flair-test:ci
@@ -53,3 +53,44 @@ jobs:
       - name: Show container logs on failure
         if: failure()
         run: docker run --rm flair-test:ci || true
+
+  # ── Realistic clean-VM gate (ops-cd37) ──────────────────────────────────────
+  # The from-scratch job above runs as ROOT and sets FLAIR_MODELS_DIR (a writable
+  # override), so its "clean install" is NOT the user's environment — which is
+  # exactly why it never caught the #538 embeddings showstopper (a fresh
+  # `sudo npm install -g @tpsdev-ai/flair` left semantic search dead: the model
+  # targeted the root-owned package dir, Harper-as-user couldn't write it).
+  #
+  # This gate reproduces the REAL user env: a root/global `npm install -g` of the
+  # HEAD tarball, then `flair init` + Harper run as a NON-ROOT user with NO
+  # FLAIR_MODELS_DIR override. The assertion is a genuine embed→paraphrase
+  # semantic round-trip (#533 / `flair doctor`), not keyword-match — so if the
+  # #538 fix regresses, semantic search goes DEGRADED and this gate FAILS.
+  clean-vm-gate:
+    name: Realistic clean-VM gate (non-root sudo-install)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+
+      - name: Build clean-VM gate image
+        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
+        with:
+          context: .
+          file: docker/Dockerfile.clean-vm
+          push: false
+          load: true
+          tags: flair-clean-vm:ci
+          cache-from: type=gha,scope=clean-vm
+          cache-to: type=gha,mode=max,scope=clean-vm
+
+      - name: Run clean-VM gate (non-root sudo-install + embed→search verify)
+        run: docker run --rm flair-clean-vm:ci
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker run --rm flair-clean-vm:ci || true

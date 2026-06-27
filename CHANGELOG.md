@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 🧪 CI clean-VM gate — exercise the REALISTIC user env so the #538 embeddings showstopper can't silently regress (ops-cd37)
+
+The #538 fix (above) addressed a fresh `sudo npm install -g @tpsdev-ai/flair` leaving semantic search **dead** (model targeted the root-owned package dir; Harper-as-user couldn't write it). The uncomfortable part: **CI never caught it.** The existing `docker/Dockerfile.test` from-scratch job runs as **root** (no perms mismatch) *and* sets `FLAIR_MODELS_DIR=/opt/flair-models` (a writable override), so its "clean install" is not the user's environment — root + a pre-solved model path made the bug structurally invisible. The tarball smoke test (`test.yml`) also installs as root and its write/search round-trip uses a **keyword-matching** marker, so it passes even with embeddings dead.
+
+This adds a gate that reproduces what a real user actually has:
+
+- **New `docker/Dockerfile.clean-vm` + `docker/test-clean-vm.sh`.** Builds the **HEAD tarball** (`npm pack`, the exact published file set), installs it **globally as root** (`npm install -g` → root-owned `/usr/lib/node_modules` package dir), creates a **non-root `flairuser`**, and runs `flair init` + the daemon **as that user with NO `FLAIR_MODELS_DIR` override** — the real default model-path resolution (`<ROOTPATH=~/.flair/data>/models`, the #538 default). The embeddings model is pre-staged at that exact user-owned path (to avoid an ~80MB live download stalling the seed loop); if #538 regresses and the model resolves back to the package dir, that staged copy is in the wrong place → `EACCES` on download → DEGRADED.
+- **The assertion is genuine semantic recall, not keyword match.** The gate asserts `flair init` reports `Semantic search operational` (the #533 in-init check, which prints `DEGRADED` but does *not* exit non-zero), then runs `flair doctor` as the hard gate — `doctor` performs the same embed→**paraphrase** round-trip (`verifySemanticSearch`: query "a cat hunting a mouse in the evening" vs. content "feline predator stalked its rodent quarry at dusk", **zero keyword overlap**, real semantic score > 0.05) and `process.exit(1)` on degraded. Keyword-only fallback cannot satisfy it. Embeddings dead → the gate FAILS.
+- **Wired into `.github/workflows/docker-test.yml`** as a new `clean-vm-gate` job that runs on PRs, alongside (not replacing) the existing from-scratch job — the from-scratch coverage stays, the gate adds the realistic non-root / no-override variant. Each Docker build uses a distinct GHA cache scope. Validated locally: builds + runs green on current main (post-#538) with a real semantic score; the assertion is semantic, so it would catch a regression that the old root-+-override CI could not.
+
 ### 🩺 Fix dead semantic search on a sudo/root-owned global install — model dir defaults to `~/.flair` (ops-am0v)
 
 A fresh `sudo npm install -g @tpsdev-ai/flair` left semantic search **dead**: the package landed root-owned (e.g. `/usr/lib/node_modules`), Harper runs as the *user*, so the embeddings model download hit `EACCES` and recall silently fell back to keyword-only. The `flair doctor` / `flair init` round-trip check (#533) caught it loud, but recall was still broken — this fixes the underlying cause.
