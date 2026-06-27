@@ -1,3 +1,13 @@
+# loadEnv MUST come first (Harper requirement): it loads the app-root `.env` so
+# environment-driven config (e.g. FLAIR_ADMIN_AGENTS, and on Fabric the bootstrap
+# secrets) is available to the rest of the component. NOTE: the native /mcp
+# HARPER_CONFIG block is NOT delivered via loadEnv — loadEnv runs during component
+# load, after Harper resolves config, so it lands too late to mount /mcp. That var
+# is set as a real process env var instead (Fabric sources the `.env` pre-boot;
+# local/launchd sets it directly). See src/cli.ts CONFIG MECHANISM note.
+loadEnv:
+  files: .env
+
 name: flair
 rest: true
 

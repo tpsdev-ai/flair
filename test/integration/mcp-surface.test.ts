@@ -4,11 +4,16 @@
  * Boots a real Harper with flair loaded as a component and proves the SECURITY
  * boundary end-to-end:
  *
- *   1. Flag ON (mcp.application in root config) → POST /mcp `initialize` mounts,
- *      `tools/list` returns EXACTLY the 9 curated tools — NOT the ~147 auto-
- *      generated verb tools, and NO `create_*`/`update_*`/`delete_*` mutators.
+ *   1. Flag ON (HARPER_CONFIG carries mcp.application) → POST /mcp `initialize`
+ *      mounts, `tools/list` returns EXACTLY the 9 curated tools — NOT the ~147
+ *      auto-generated verb tools, and NO `create_*`/`update_*`/`delete_*` mutators.
  *   2. An unauthed `tools/call` is REJECTED (no verifier yet — slice 2/3).
- *   3. Flag OFF (no mcp block) → POST /mcp 404s (byte-identical to today).
+ *   3. Flag OFF (no HARPER_CONFIG) → POST /mcp 404s (byte-identical to today).
+ *
+ * CONFIG MECHANISM: the mcp block rides HARPER_CONFIG (the recommended merge-on-top
+ * env-config var), set as a real process env var — mirroring how flair delivers it
+ * on the local/launchd path and how Fabric delivers it (the deploy `.env` is sourced
+ * into the env pre-boot). HARPER_SET_CONFIG carries only the base ports/paths.
  *
  * This is the backstop for the resource-level curation (static hidden +
  * FlairMcp.mcpTools): if a future resource ships without `static hidden`, the
@@ -47,9 +52,12 @@ async function getFreePorts(count: number): Promise<number[]> {
 interface Booted { httpURL: string; installDir: string; proc: ChildProcess; }
 
 /**
- * Spawn Harper with flair as a component. `mcp` true → inject the
- * `mcp.application` block into the ROOT config (HARPER_SET_CONFIG) — the
- * flag-ON equivalent. `mcp` false → omit it (flag-OFF / byte-identical).
+ * Spawn Harper with flair as a component. `mcp` true → deliver the
+ * `mcp.application` block via HARPER_CONFIG set as a real process env var (the
+ * flag-ON path: this is exactly how flair delivers it locally/launchd, and how
+ * Fabric delivers it after sourcing the deploy `.env` into the env pre-boot).
+ * `mcp` false → omit it (flag-OFF / byte-identical). HARPER_SET_CONFIG always
+ * carries only the base ports/paths — the mcp block is NEVER folded into it.
  */
 async function boot(mcp: boolean): Promise<Booted> {
   const installDir = await mkdtemp(join(tmpdir(), "flair-mcp-test-"));
@@ -60,7 +68,7 @@ async function boot(mcp: boolean): Promise<Booted> {
   const [httpPort, opsPort] = await getFreePorts(2);
   const httpURL = `http://127.0.0.1:${httpPort}`;
 
-  const config: Record<string, unknown> = {
+  const baseConfig: Record<string, unknown> = {
     rootPath: installDir,
     http: { port: httpPort, cors: true },
     operationsApi: { network: { port: opsPort, cors: true } },
@@ -68,9 +76,6 @@ async function boot(mcp: boolean): Promise<Booted> {
     localStudio: { enabled: false },
     authentication: { authorizeLocal: true, enableSessions: true },
   };
-  if (mcp) {
-    config.mcp = { application: { mountPath: "/mcp", allow: [...CURATED] } };
-  }
 
   const baseEnv: Record<string, string> = {
     ...parentEnv,
@@ -84,11 +89,17 @@ async function boot(mcp: boolean): Promise<Booted> {
     NODE_HOSTNAME: "127.0.0.1",
     HTTP_PORT: String(httpPort),
     OPERATIONSAPI_NETWORK_PORT: String(opsPort),
-    HARPER_SET_CONFIG: JSON.stringify(config),
-    // Flag mirrors the config: ON injects the mcp block AND enables FlairMcp's
-    // tool-registration nudge; OFF leaves both absent (byte-identical default).
+    HARPER_SET_CONFIG: JSON.stringify(baseConfig),
+    // Flag mirrors the config: ON sets HARPER_CONFIG (mounting /mcp) AND enables
+    // FlairMcp's tool-registration nudge; OFF leaves both absent (byte-identical).
     FLAIR_MCP_ENABLED: mcp ? "1" : "false",
   };
+  if (mcp) {
+    // The mcp block rides HARPER_CONFIG as a real env var (merge-on-top), with
+    // mountPath only — no allow/deny (a no-op on the application profile; curation
+    // is resource-level static hidden + FlairMcp.mcpTools).
+    baseEnv.HARPER_CONFIG = JSON.stringify({ mcp: { application: { mountPath: "/mcp" } } });
+  }
 
   const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd: process.cwd(), env: baseEnv });
   await new Promise<void>((resolve, reject) => {
