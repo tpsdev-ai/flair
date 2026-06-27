@@ -1,4 +1,5 @@
 import { Resource } from "@harperfast/harper";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * GET /Admin — friendly redirect to /AdminDashboard.
@@ -8,6 +9,8 @@ import { Resource } from "@harperfast/harper";
  * canonical landing surface; redirect there.
  */
 export class Admin extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   async get() {
     return new Response("", {
       status: 302,

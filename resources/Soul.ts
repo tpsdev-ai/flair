@@ -1,5 +1,6 @@
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -23,6 +24,8 @@ async function enforceWriteAuth(self: any, data: any): Promise<Response | null> 
 }
 
 export class Soul extends (databases as any).flair.Soul {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   async post(content: any, context?: any) {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;

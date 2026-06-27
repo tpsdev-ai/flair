@@ -20,6 +20,7 @@
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { b64ToArrayBuffer } from "./b64.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -125,6 +126,8 @@ function pickAllowlisted(record: Record<string, unknown>): Record<string, unknow
  * public-safe roster view and post() for Ed25519-authed heartbeat writes.
  */
 export class Presence extends (databases as any).flair.Presence {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   /** Bypass Harper's role gate for GET (public-safe data only). */
   allowRead() {
     return true;

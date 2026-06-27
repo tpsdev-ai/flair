@@ -15,6 +15,7 @@ import { compositeScore } from "./scoring.js";
 // SECURITY conditions-filter are unit-tested against the shipped code.
 import { buildBM25, fuseRrfNormalized, hybridEnabled, SEM_LIMIT } from "./bm25.js";
 import { isAllowedBm25Candidate, type Condition } from "./bm25-filter.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 // Convert HNSW cosine distance (1 - similarity) to similarity score
 function distanceToSimilarity(distance: number): number {
@@ -30,6 +31,8 @@ const CANDIDATE_MULTIPLIER = 5;
 // → byte-identical to the pre-hybrid HNSW + +0.05 keyword-bump behavior.
 
 export class SemanticSearch extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Self-authorize via the Ed25519 agent verify instead of relying on the auth
   // gate's admin super_user elevation (removed in the auth reshape). Any
   // cryptographically-verified agent may search; per-agent RESULT scoping is

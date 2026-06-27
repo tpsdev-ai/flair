@@ -19,8 +19,11 @@
 
 import { Resource, databases } from "@harperfast/harper";
 import { isAdmin } from "./agent-auth.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 export class MemoryMaintenance extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   /** POST requires auth — either an agent acting on its own memories, or admin. */
   allowCreate(): boolean {
     const ctx = (this as any).getContext?.();

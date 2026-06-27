@@ -1,6 +1,7 @@
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * Relationship resource — entity-to-entity relationships with temporal validity.
@@ -14,6 +15,8 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
  * Admin agents can query across all agents.
  */
 export class Relationship extends (databases as any).flair.Relationship {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
 
   async search(query?: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());

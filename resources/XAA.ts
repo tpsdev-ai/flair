@@ -2,6 +2,7 @@ import { databases } from "@harperfast/harper";
 import { allowAdmin } from "./agent-auth.js";
 import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * XAA (Enterprise-Managed Authorization) — ID-JAG validation for Flair.
@@ -286,6 +287,8 @@ export async function handleJwtBearerGrant(data: any): Promise<Response | object
  * Admin-only access.
  */
 export class IdpConfig extends (databases as any).flair.IdpConfig {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Admin-only on every path (the "Admin-only" comment was previously unenforced —
   // a pure put() override with no auth check, so the non-rejecting gate let
   // anonymous through to Harper's handler). allowAdmin permits admin + internal.

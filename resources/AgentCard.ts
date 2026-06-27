@@ -1,7 +1,10 @@
 import { Resource, databases } from "@harperfast/harper";
 import { type SoulLike, selectPublicDescription, selectPublicSkills } from "./agentcard-fields.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 export class AgentCard extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Public discovery metadata (per A2A spec, agent cards are intentionally
   // public). Self-gates as public so it survives the global gate's removal — and
   // its get() already returns only field-allowlisted public-safe data.

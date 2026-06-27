@@ -26,6 +26,7 @@
 
 import { Resource, databases } from "@harperfast/harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 type AgentDrift = { agentId: string; primary: number; indexed: number; missing: number };
 
@@ -42,6 +43,8 @@ type ReindexStats = {
 };
 
 export class MemoryReindex extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Admin-only: permit verified ADMIN agents (Basic-admin is super_user and
   // bypasses allow*); non-admin agents denied. Mirrors the handler's admin gate
   // but is the real authorization now that the gate no longer elevates agents.

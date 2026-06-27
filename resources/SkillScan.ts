@@ -1,5 +1,6 @@
 import { Resource } from "@harperfast/harper";
 import { scanSkillContent } from "./scan/skill-scanner.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * POST /SkillScan/
@@ -32,6 +33,8 @@ import { scanSkillContent } from "./scan/skill-scanner.js";
  */
 
 export class SkillScan extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   async post(data: any, _context?: any) {
     const { content } = data || {};
 

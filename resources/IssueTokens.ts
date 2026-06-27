@@ -1,6 +1,9 @@
 import { Resource, databases } from "@harperfast/harper";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 export class IssueTokens extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   static loadAsInstance = false;
 
   async get(_target: unknown) {

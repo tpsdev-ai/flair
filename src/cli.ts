@@ -47,6 +47,78 @@ function signBody(body: Record<string, any>, secretKey: Uint8Array): string {
   return Buffer.from(sig).toString("base64url");
 }
 
+// ─── Native MCP (/mcp) enablement — feature-flagged, default-OFF ─────────────
+//
+// Harper's native MCP "application" profile is presence-gated: it mounts at /mcp
+// IFF the resolved config carries a top-level `mcp:` block with an `application`
+// sub-block that has ≥1 real key (Harper strips an empty `mcp.application:{}`, so
+// the block must carry `mountPath`). flair's COMPONENT config.yaml is NOT read
+// for this — the block must reach Harper via a config ENV VAR.
+//
+// CONFIG MECHANISM — HARPER_CONFIG (not HARPER_SET_CONFIG, not harper-config.yaml).
+// Verified empirically on pinned Harper 5.1.14 (2026-06-27): HARPER_CONFIG is the
+// recommended merge-on-top config var (precedence: HARPER_DEFAULT_CONFIG < config
+// file < HARPER_CONFIG < HARPER_SET_CONFIG; reasserts its named keys each boot).
+// It is applied at initConfig() time — so it MUST be a real process env var BEFORE
+// Harper boots. Two delivery paths, both set it as a real env var at boot:
+//   • Fabric: written into the deploy `.env` (buildDeployTarball). Fabric sources
+//     the component `.env` into the process environment before launching Harper —
+//     proven by HDB_ADMIN_PASSWORD having ridden that `.env` in prod since #302.
+//     We must NOT touch harper-config.yaml in Fabric; the `.env` is the contract.
+//   • Local/launchd: set HARPER_CONFIG directly in the spawned process env / plist
+//     EnvironmentVariables (we control the launcher).
+// NOTE: HARPER_CONFIG delivered ONLY via Harper's `loadEnv` component plugin does
+// NOT work — loadEnv runs during component load, AFTER initConfig() resolves the
+// config, so it lands too late. `loadEnv` is still declared first in config.yaml
+// (Fabric/local non-config env vars), but the mcp block rides a real env var.
+//
+// Default-OFF via FLAIR_MCP_ENABLED: when off, mcpConfigJson() returns null and no
+// HARPER_CONFIG is emitted — config is BYTE-IDENTICAL to today (no `mcp` key) →
+// /mcp 404s. The surface stays off in prod until the Bearer verifier (slice 2/3,
+// HarperFast/oauth#86) lands and Sherlock signs off on live enable.
+//
+// SECURITY NOTE — curation is NOT done in config. In Harper 5.1.14 the application
+// profile does NOT honor `mcp.application.allow`/`deny`: the `mcp_application_allow`
+// /`deny` params exist only as hdbTerms definitions (hdbTerms.js:516-517) and are
+// read NOWHERE (re-verified 2026-06-27). buildApplicationTools filters by
+// exportTypes(`mcp`!==false) + `ResourceClass.hidden===true` + verb/mcpTools
+// presence — nothing else. The real curation boundary is resource-level: every
+// flair Resource is `static hidden` EXCEPT the curated `FlairMcp`
+// (resources/mcp-curation.ts + FlairMcp.ts), which exposes ONLY the 9
+// `static mcpTools`. So an `mcp.application.allow` list would be dead config — it
+// is intentionally NOT emitted.
+
+function mcpEnabledForConfig(): boolean {
+  const raw = (process.env.FLAIR_MCP_ENABLED ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+/**
+ * The inline-JSON value for HARPER_CONFIG that enables the native /mcp surface,
+ * or `null` when the flag is OFF (no env var emitted → byte-identical config).
+ *
+ * Carries `mcp.application.mountPath` only (≥1 real key is required — Harper
+ * strips an empty `mcp.application:{}`). No `allow`/`deny` — those are a no-op on
+ * the application profile (see SECURITY NOTE); curation is resource-level.
+ */
+function mcpConfigJson(): string | null {
+  if (!mcpEnabledForConfig()) return null;
+  return JSON.stringify({
+    mcp: { application: { mountPath: "/mcp" } },
+  });
+}
+
+/**
+ * Merge the HARPER_CONFIG mcp env var into a process-env map when the flag is ON.
+ * No-op (byte-identical env) when OFF. Used for the local/launchd spawn path,
+ * where flair controls the launcher and sets HARPER_CONFIG as a real env var.
+ */
+function withMcpHarperConfig(env: Record<string, string>): Record<string, string> {
+  const json = mcpConfigJson();
+  if (json) env.HARPER_CONFIG = json;
+  return env;
+}
+
 // ─── Secret detection helpers ────────────────────────
 
 /**
@@ -794,13 +866,20 @@ export async function buildDeployTarball(
       }
     }
 
-    // Write .env with 600 permissions
-    const envContent = [
+    // Write .env with 600 permissions. Fabric sources this `.env` into the Harper
+    // process environment before boot (the contract HDB_ADMIN_PASSWORD has used
+    // since #302), so HARPER_CONFIG here becomes a real env var at boot — the only
+    // delivery that mounts /mcp (loadEnv-component delivery lands too late). We do
+    // NOT touch harper-config.yaml in Fabric. The mcp line is emitted only when
+    // FLAIR_MCP_ENABLED is on; otherwise the `.env` is byte-identical to today.
+    const envLines = [
       `HDB_ADMIN_PASSWORD=${flairAdminPass}`,
       `FLAIR_ADMIN_PASSWORD=${flairAdminPass}`,
-      "",
-    ].join("\n");
-    writeFileSync(join(tmpDir, ".env"), envContent, { mode: 0o600 });
+    ];
+    const mcpJson = mcpConfigJson();
+    if (mcpJson) envLines.push(`HARPER_CONFIG=${mcpJson}`);
+    envLines.push("");
+    writeFileSync(join(tmpDir, ".env"), envLines.join("\n"), { mode: 0o600 });
 
     // Build compressed tarball
     const tarballPath = join(tmpDir, "deploy.tar.gz");
@@ -1800,7 +1879,11 @@ program
           authentication: { authorizeLocal: true, enableSessions: true },
         });
 
-        const env: Record<string, string> = {
+        // Native /mcp enablement rides HARPER_CONFIG (merge-on-top), NOT
+        // HARPER_SET_CONFIG — see the CONFIG MECHANISM note above. withMcpHarperConfig
+        // adds HARPER_CONFIG only when FLAIR_MCP_ENABLED is on; otherwise the env is
+        // byte-identical to today (no HARPER_CONFIG → /mcp 404s).
+        const env: Record<string, string> = withMcpHarperConfig({
           ...(process.env as Record<string, string>),
           ROOTPATH: dataDir,
           HARPER_SET_CONFIG: harperSetConfig,
@@ -1812,7 +1895,7 @@ program
           HTTP_PORT: String(httpPort),
           OPERATIONSAPI_NETWORK_PORT: String(opsPort),
           LOCAL_STUDIO: "false",
-        };
+        });
 
         if (alreadyInstalled) {
           console.log("Existing Harper installation found — skipping install.");
@@ -1879,6 +1962,14 @@ program
             localStudio: { enabled: false },
             authentication: { authorizeLocal: true, enableSessions: true },
           });
+          const xmlEscape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+          // Native /mcp enablement rides HARPER_CONFIG (merge-on-top), set as a real
+          // plist env var — NOT folded into HARPER_SET_CONFIG. Emitted only when
+          // FLAIR_MCP_ENABLED is on; otherwise the plist is byte-identical to today.
+          const mcpJson = mcpConfigJson();
+          const harperConfigPlistEntry = mcpJson
+            ? `\n    <key>HARPER_CONFIG</key><string>${xmlEscape(mcpJson)}</string>`
+            : "";
           const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1895,7 +1986,7 @@ program
   <key>EnvironmentVariables</key>
   <dict>
     <key>ROOTPATH</key><string>${dataDir}</string>
-    <key>HARPER_SET_CONFIG</key><string>${setConfig.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;")}</string>
+    <key>HARPER_SET_CONFIG</key><string>${xmlEscape(setConfig)}</string>${harperConfigPlistEntry}
     <key>DEFAULTS_MODE</key><string>dev</string>
     <key>HDB_ADMIN_USERNAME</key><string>${adminUser}</string>
     <key>HDB_ADMIN_PASSWORD</key><string>${adminPass}</string>

@@ -1,6 +1,7 @@
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * Credential resource — authentication surfaces for Principals.
@@ -14,6 +15,8 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
  * are never returned in responses).
  */
 export class Credential extends (databases as any).flair.Credential {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
 
   async search(query?: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());

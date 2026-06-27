@@ -1,5 +1,6 @@
 import { Resource, databases } from "@harperfast/harper";
 import { layout, htmlResponse, esc } from "./admin-layout.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * GET /AdminMemory                browse + search memories (list view)
@@ -22,6 +23,8 @@ import { layout, htmlResponse, esc } from "./admin-layout.js";
  * from, what it superseded, and which peer it synced from.
  */
 export class AdminMemory extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   async get() {
     const request = (this as any).request;
     const url = new URL(request?.url ?? "http://localhost", "http://localhost");

@@ -1,10 +1,13 @@
 import { Resource, databases } from "@harperfast/harper";
 import { layout, htmlResponse } from "./admin-layout.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * GET /AdminDashboard — admin home page with system overview.
  */
 export class AdminDashboard extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   async get() {
     let principalCount = 0;
     let memoryCount = 0;

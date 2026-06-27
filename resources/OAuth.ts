@@ -1,6 +1,7 @@
 import { Resource, databases } from "@harperfast/harper";
 import { createHash, randomBytes } from "node:crypto";
 import { handleJwtBearerGrant } from "./XAA.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * OAuth 2.1 Authorization Server for Flair.
@@ -44,6 +45,8 @@ function futureISO(ms: number): string {
 // ─── Discovery metadata ──────────────────────────────────────────────────────
 
 export class OAuthMetadata extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // OAuth discovery metadata is intentionally public — RFC 8414 § 3 requires
   // it be accessible without authentication so clients can bootstrap their
   // flow. `allowRead() { return true }` opens Harper's role gate so remote
@@ -82,6 +85,8 @@ export class OAuthMetadata extends Resource {
 // ─── Dynamic Client Registration (RFC 7591) ──────────────────────────────────
 
 export class OAuthRegister extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Dynamic Client Registration (RFC 7591) — clients must be able to register
   // anonymously to bootstrap. Validation (redirect_uri allow-list, etc.)
   // happens in post(). Pattern matches FederationPair.allowCreate (#299).
@@ -132,6 +137,8 @@ export class OAuthRegister extends Resource {
 // ─── Authorization endpoint ──────────────────────────────────────────────────
 
 export class OAuthAuthorize extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // OAuth authorize endpoint must accept anonymous GET/POST — the whole
   // point of authorize is to start an unauthenticated user's flow. PKCE
   // and state-parameter validation in the handler enforce real auth.
@@ -251,6 +258,8 @@ ${scope.split(" ").map((s: string) => `<div class="scope">${s}</div>`).join("")}
 // ─── Token endpoint ──────────────────────────────────────────────────────────
 
 export class OAuthToken extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // OAuth token exchange — client must hit this without prior Harper auth
   // since they're trading code/refresh for a token. Authentication is in
   // the post() handler via PKCE verifier + client_secret_basic.
@@ -437,6 +446,8 @@ export class OAuthToken extends Resource {
 // ─── Revocation endpoint ─────────────────────────────────────────────────────
 
 export class OAuthRevoke extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // RFC 7009 — token revocation accepts the token itself as proof; clients
   // may not have a separate auth credential. Handler validates the token.
   allowCreate() { return true; }

@@ -10,6 +10,7 @@
 
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -17,6 +18,8 @@ const UNAUTH = () =>
   new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
 
 export class WorkspaceState extends (databases as any).flair.WorkspaceState {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   /** Auth verdict from the request context. internal = trusted in-process call;
    *  agent = verified Ed25519; anonymous = HTTP with no valid agent → deny. */
   private _auth() {

@@ -1,5 +1,6 @@
 import { databases } from "@harperfast/harper";
 import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin } from "./agent-auth.js";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 /**
  * Agent resource — serves as the Principal table in 1.0.
@@ -18,6 +19,8 @@ import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin } from "./agent-au
  *   - subjects: soul-level subject interests
  */
 export class Agent extends (databases as any).flair.Agent {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Self-authorize now that the global gate is non-rejecting. Verified agents read
   // the principal table for discovery; an agent updates only its OWN record (put
   // handler enforces ownership). Creating/deleting principals is admin-only

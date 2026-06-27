@@ -2,6 +2,7 @@ import { Resource, databases } from "@harperfast/harper";
 import { promises as fsp } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { MCP_HIDDEN } from "./mcp-curation.js";
 
 const db = databases as any;
 
@@ -37,6 +38,8 @@ const exists = async (path: string): Promise<boolean> => {
  * publicly exposed instances.
  */
 export class Health extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   // Anyone can call /Health — no auth, no role check. Truly public.
   allowRead(_user: any) {
     return true;
@@ -54,6 +57,8 @@ export class Health extends Resource {
  * schema downgrades to "not configured" rather than failing the whole call.
  */
 export class HealthDetail extends Resource {
+  // Suppress from the native MCP application profile (only FlairMcp is exposed). See mcp-curation.ts.
+  static hidden = MCP_HIDDEN;
   async get() {
     const stats: Record<string, any> = { ok: true };
     const nowMs = Date.now();
