@@ -1,0 +1,52 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "description": "Deliberate, test-gated dependency updates for Flair. Updates are PRs only (never auto-merged) and respect a supply-chain cooldown (minimumReleaseAge) that matches the dep-ages bake-time guard in scripts/check-dep-ages.mjs. See docs/supply-chain-policy.md.",
+  "timezone": "America/New_York",
+  "schedule": ["before 9am on monday"],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "rangeStrategy": "pin",
+  "minimumReleaseAge": "7 days",
+  "internalChecksFilter": "strict",
+  "configMigration": true,
+  "dependencyDashboard": true,
+  "labels": ["dependencies", "supply-chain"],
+  "automerge": false,
+  "ignorePaths": ["**/node_modules/**", "**/dist/**"],
+  "packageRules": [
+    {
+      "description": "Group all non-major updates into one PR per run to keep review surface small. Each still goes through the full test suite + K&S review before merge.",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "non-major dependencies"
+    },
+    {
+      "description": "Major updates land as their own PRs — they carry the most behavioral risk and deserve isolated review.",
+      "matchUpdateTypes": ["major"],
+      "groupName": null
+    },
+    {
+      "description": "Workspace-internal @tpsdev-ai/* deps are version-locked to what each workspace package ships (enforced by check-workspace-deps.mjs) and bumped by the release process, not Renovate.",
+      "matchPackageNames": ["@tpsdev-ai/**"],
+      "enabled": false
+    },
+    {
+      "description": "Keep-current allow-list — mirrors scripts/check-dep-ages.mjs DEFAULT_KEEP_CURRENT. These are tightly coupled to Flair runtime correctness (Harper / embedding fixes); we accept the bake-time risk and pull them eagerly, so Renovate skips the cooldown for them too. Keep this list in lockstep with the script and docs/supply-chain-policy.md.",
+      "matchPackageNames": ["@harperfast/harper", "harper-fabric-embeddings"],
+      "minimumReleaseAge": "0 days"
+    }
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 9am on the first day of the month"]
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security", "dependencies"],
+    "minimumReleaseAge": "0 days"
+  }
+}
