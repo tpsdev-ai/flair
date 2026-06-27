@@ -68,12 +68,14 @@ jobs:
           bun-version: "1.3.10"
       # Node 22+ is required by flair's engines. Integration tests spawn Harper
       # natively (matches how real users run Flair) instead of via the Docker
-      # image, because the harperfast/harper:5.0.1 Docker environment
-      # (bundled Node 24 + Debian bookworm) triggers an HNSW concurrent-write
+      # image, because the harperfast/harper Docker environment (bundled Node 24
+      # + Debian bookworm) has historically triggered an HNSW concurrent-write
       # race that doesn't reproduce on native Node 22 spawns. The Harper
       # server code is byte-identical across artifacts — only the runtime
-      # environment differs. Tracked upstream:
-      # https://github.com/HarperFast/harper/issues/386
+      # environment differs. The native-spawn choice is a version-agnostic
+      # mitigation; the E2E/smoke jobs run the Docker image (now 5.1.14, matching
+      # the bundled npm dep) and are where the race, if still present, surfaces.
+      # Tracked upstream: https://github.com/HarperFast/harper/issues/386
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
@@ -103,8 +105,8 @@ jobs:
           echo "Model downloaded ($(du -sh models/*.gguf | cut -f1))"
       - name: Run integration tests (native Harper spawn)
         # No HARPER_HTTP_URL — harper-lifecycle spawns Harper from node_modules
-        # per the npm-installed @harperfast/harper@5.0.1. Avoids the Docker
-        # runtime environment that triggers HarperFast/harper#386.
+        # per the npm-installed @harperfast/harper (5.1.14). Avoids the Docker
+        # runtime environment that has triggered HarperFast/harper#386.
         #
         # integration_repeats (workflow_dispatch input, default 1) runs the
         # suite N times in one job to reproduce the intermittent native-spawn
@@ -136,7 +138,7 @@ jobs:
             -e OPERATIONSAPI_NETWORK_PORT=9925 \
             -e HTTP_PORT=9926 \
             --entrypoint /bin/sh \
-            harperfast/harper:5.0.1 \
+            harperfast/harper:5.1.14 \
             -c "harper install && harper dev /flair"
           # Wait for Harper to be healthy (Basic auth required by Harper's authorizeLocal)
           for i in $(seq 1 60); do
