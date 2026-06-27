@@ -5,6 +5,14 @@
 //   - detect(): boolean - returns true if client is installed
 //   - wire(options: { agentId: string; flairUrl: string }): { ok: boolean; message: string }
 //
+// Wiring contract (FIX 4 — onboarding dogfood round 1):
+//   "wired" MUST mean a config file was actually written. A wire function returns
+//   { ok: true } ONLY when it merged the Flair MCP server into the client's real
+//   config file. If it cannot (unknown path, write error), it returns
+//   { ok: false } with the correct per-OS snippet to paste — never a vague
+//   "manual wiring required" while elsewhere the run claims the client is wired.
+//   All paths are resolved cross-platform (Linux included) via standard
+//   per-client locations under $HOME / $XDG_CONFIG_HOME.
 
 export type ClientId = "claude-code" | "codex" | "gemini" | "cursor";
 
@@ -18,7 +26,19 @@ export interface Client {
 // ---- Detection helpers ----------------------------------------------------------
 
 import { spawnSync } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
+/**
+ * Resolve the user's home dir. Prefer the live HOME/USERPROFILE env over
+ * os.homedir(), which caches the value at process start and so ignores a
+ * runtime HOME override — same convention as src/cli.ts ("so tests can
+ * override"). Production behavior is unchanged (HOME is set on every OS).
+ */
+function resolveHome(): string {
+  return process.env.HOME || process.env.USERPROFILE || homedir();
+}
 
 /**
  * Check if a command exists in PATH (cross-platform alternative to `which`).
@@ -86,98 +106,141 @@ function cursorDetect(): boolean {
   }
 }
 
+// ---- Shared config shapes -------------------------------------------------------
+
+/** The standard MCP stdio server entry every client (except Codex TOML) uses. */
+function flairMcpEntry(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }) {
+  return {
+    command: "npx",
+    args: ["-y", "@tpsdev-ai/flair-mcp"],
+    env: { FLAIR_AGENT_ID: env.FLAIR_AGENT_ID, FLAIR_URL: env.FLAIR_URL },
+  };
+}
+
+/** Pretty-printed JSON `mcpServers.flair` snippet for copy-paste fallbacks. */
+function jsonSnippet(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): string {
+  return JSON.stringify({ mcpServers: { flair: flairMcpEntry(env) } }, null, 2);
+}
+
+/** TOML `[mcp_servers.flair]` snippet (Codex format). */
+function tomlSnippet(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): string {
+  return [
+    `[mcp_servers.flair]`,
+    `command = "npx"`,
+    `args = ["-y", "@tpsdev-ai/flair-mcp"]`,
+    ``,
+    `[mcp_servers.flair.env]`,
+    `FLAIR_AGENT_ID = "${env.FLAIR_AGENT_ID}"`,
+    `FLAIR_URL = "${env.FLAIR_URL}"`,
+  ].join("\n");
+}
+
+/**
+ * Merge the Flair MCP server into a JSON config file with an `mcpServers` map.
+ * Creates the file (and parent dir) if absent; preserves existing servers and
+ * any other top-level keys. Returns ok:true only when the file was written.
+ */
+function wireJsonMcp(
+  configPath: string,
+  label: string,
+  env: { FLAIR_AGENT_ID: string; FLAIR_URL: string },
+): { ok: boolean; message: string } {
+  const home = resolveHome();
+  const display = configPath.startsWith(home) ? "~" + configPath.slice(home.length) : configPath;
+  try {
+    let config: any = {};
+    if (existsSync(configPath)) {
+      const raw = readFileSync(configPath, "utf-8").trim();
+      if (raw) config = JSON.parse(raw);
+    }
+    config.mcpServers = config.mcpServers || {};
+    const existing = config.mcpServers.flair;
+    if (existing && existing.env?.FLAIR_URL === env.FLAIR_URL && existing.env?.FLAIR_AGENT_ID === env.FLAIR_AGENT_ID) {
+      return { ok: true, message: `${label}: already wired in ${display}` };
+    }
+    config.mcpServers.flair = flairMcpEntry(env);
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
+    return { ok: true, message: `${label}: wired ${display} (restart ${label} to pick it up)` };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      message: `${label}: manual wiring needed (could not write ${display}: ${reason}).\n` +
+        `   Add this to ${display}:\n${indent(jsonSnippet(env))}`,
+    };
+  }
+}
+
+function indent(s: string): string {
+  return s.split("\n").map((l) => `     ${l}`).join("\n");
+}
+
+// ---- Per-client config paths (cross-platform, Linux included) --------------------
+
+/** Cursor: ~/.cursor/mcp.json on every OS. */
+function cursorConfigPath(): string {
+  return join(resolveHome(), ".cursor", "mcp.json");
+}
+
+/** Gemini CLI: ~/.gemini/settings.json on every OS. */
+function geminiConfigPath(): string {
+  return join(resolveHome(), ".gemini", "settings.json");
+}
+
+/** Codex CLI: ~/.codex/config.toml on every OS. */
+function codexConfigPath(): string {
+  return join(resolveHome(), ".codex", "config.toml");
+}
+
 // ---- Internal wiring functions --------------------------------------------------
+//
+// Claude Code wiring lives inline in src/cli.ts (it writes ~/.claude.json, the
+// one client the CLI safely edits, cross-platform). _wireClaudeCode here is the
+// fallback used when something calls the array form; it returns the snippet for
+// ~/.claude.json so the message is unambiguous and correct on every OS.
 
 function _wireClaudeCode(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
-  return {
-    ok: false,
-    message: `Manual wiring required for Claude Code:\n` +
-             `1. Locate Claude Code's settings file (usually ~/Library/Application Support/Claude/settings.json on macOS or %APPDATA%/Claude/settings.json on Windows)\n` +
-             `2. Add or update the "mcpServers" section:\n` +
-             `   {\n` +
-             `     "mcpServers": {\n` +
-             `       "flair": {\n` +
-             `         "command": "npx",\n` +
-             `         "args": ["-y", "@tpsdev-ai/flair-mcp"],\n` +
-             `         "env": {\n` +
-             `           "FLAIR_AGENT_ID": "${env.FLAIR_AGENT_ID}",\n` +
-             `           "FLAIR_URL": "${env.FLAIR_URL}"\n` +
-             `         }\n` +
-             `       }\n` +
-             `     }\n` +
-             `   }\n` +
-             `3. Restart Claude Code\n` +
-             `Note: This is a manual step - the Flair CLI cannot automatically modify Claude Code's settings due to security restrictions.`,
-  };
+  // The real auto-wire is inline in cli.ts. If reached via the array, point at
+  // the correct cross-platform path (~/.claude.json — same on macOS/Linux/Win)
+  // and give the exact snippet. Never emit macOS-only paths here.
+  return wireJsonMcp(join(resolveHome(), ".claude.json"), "Claude Code", env);
 }
 
 function _wireCodex(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
-  return {
-    ok: false,
-    message: `Manual wiring required for Codex:\n` +
-             `1. Locate Codex's configuration (check ~/.codex/config or similar)\n` +
-             `2. Add the Flair MCP server configuration:\n` +
-             `   {\n` +
-             `     "mcpServers": {\n` +
-             `       "flair": {\n` +
-             `         "command": "npx",\n` +
-             `         "args": ["-y", "@tpsdev-ai/flair-mcp"],\n` +
-             `         "env": {\n` +
-             `           "FLAIR_AGENT_ID": "${env.FLAIR_AGENT_ID}",\n` +
-             `           "FLAIR_URL": "${env.FLAIR_URL}"\n` +
-             `         }\n` +
-             `       }\n` +
-             `     }\n` +
-             `   }\n` +
-             `3. Restart Codex\n` +
-             `Note: This is a manual step - the Flair CLI cannot automatically modify Codex's configuration due to security restrictions.`,
-  };
+  // Codex uses TOML with a [mcp_servers.flair] table. We don't carry a TOML
+  // parser, and blind text-appending risks corrupting/duplicating an existing
+  // table — so we only auto-write when the file does NOT yet exist (clean
+  // create), otherwise emit the exact TOML block to paste.
+  const path = codexConfigPath();
+  const display = "~/.codex/config.toml";
+  try {
+    if (existsSync(path)) {
+      return {
+        ok: false,
+        message: `Codex: manual wiring needed — ${display} already exists.\n` +
+          `   Add this block to ${display}:\n${indent(tomlSnippet(env))}`,
+      };
+    }
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, tomlSnippet(env) + "\n");
+    return { ok: true, message: `Codex: wired ${display} (restart Codex to pick it up)` };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      message: `Codex: manual wiring needed (could not write ${display}: ${reason}).\n` +
+        `   Add this block to ${display}:\n${indent(tomlSnippet(env))}`,
+    };
+  }
 }
 
 function _wireGemini(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
-  return {
-    ok: false,
-    message: `Manual wiring required for Gemini:\n` +
-             `1. Locate Gemini's configuration (check ~/.gemini/config or similar)\n` +
-             `2. Add the Flair MCP server configuration:\n` +
-             `   {\n` +
-             `     "mcpServers": {\n` +
-             `       "flair": {\n` +
-             `         "command": "npx",\n` +
-             `         "args": ["-y", "@tpsdev-ai/flair-mcp"],\n` +
-             `         "env": {\n` +
-             `           "FLAIR_AGENT_ID": "${env.FLAIR_AGENT_ID}",\n` +
-             `           "FLAIR_URL": "${env.FLAIR_URL}"\n` +
-             `         }\n` +
-             `       }\n` +
-             `     }\n` +
-             `   }\n` +
-             `3. Restart Gemini\n` +
-             `Note: This is a manual step - the Flair CLI cannot automatically modify Gemini's configuration due to security restrictions.`,
-  };
+  return wireJsonMcp(geminiConfigPath(), "Gemini", env);
 }
 
 function _wireCursor(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
-  return {
-    ok: false,
-    message: `Manual wiring required for Cursor:\n` +
-             `1. Locate Cursor's settings file (usually ~/.cursor/settings.json)\n` +
-             `2. Add or update the "mcpServers" section:\n` +
-             `   {\n` +
-             `     "mcpServers": {\n` +
-             `       "flair": {\n` +
-             `         "command": "npx",\n` +
-             `         "args": ["-y", "@tpsdev-ai/flair-mcp"],\n` +
-             `         "env": {\n` +
-             `           "FLAIR_AGENT_ID": "${env.FLAIR_AGENT_ID}",\n` +
-             `           "FLAIR_URL": "${env.FLAIR_URL}"\n` +
-             `         }\n` +
-             `       }\n` +
-             `     }\n` +
-             `   }\n` +
-             `3. Restart Cursor\n` +
-             `Note: This is a manual step - the Flair CLI cannot automatically modify Cursor's settings due to security restrictions.`,
-  };
+  return wireJsonMcp(cursorConfigPath(), "Cursor", env);
 }
 
 // ---- Exported detection & wiring array ------------------------------------------
