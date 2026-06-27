@@ -178,17 +178,42 @@ Pluggable import/export to foreign memory systems. Every agent-memory format (ag
 ## Quick Start
 
 ### Prerequisites
-- [Node.js 22+](https://nodejs.org/)
+
+**1. Node.js 22+.** On a fresh box, install a current Node — the version in some distro repos is too old.
+
+```bash
+# Linux (Debian/Ubuntu) — NodeSource:
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs
+
+# macOS / Linux — nvm (no root, recommended):
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+# restart your shell, then:
+nvm install 22
+
+# Verify:
+node --version   # → v22.x or newer
+```
+
+**2. A user-writable npm global prefix (avoid `sudo`).** Installing globally with `sudo` makes the package root-owned. Flair's in-process embeddings component downloads/symlinks a model file under the package at runtime; when Harper later runs as **you** (not root) it gets `EACCES` and **semantic search silently degrades to keyword-only**. Point npm's global prefix at your home dir instead:
+
+```bash
+mkdir -p ~/.npm-global
+npm config set prefix ~/.npm-global
+# add to your shell rc (~/.bashrc, ~/.zshrc) so it persists:
+export PATH="$HOME/.npm-global/bin:$PATH"
+```
+
+> ⚠️ **Do not `sudo npm install -g @tpsdev-ai/flair`.** A root-owned install breaks the embeddings component (the package dir isn't writable by the user Harper runs as), and you'll get the loud `Semantic search DEGRADED` warning from `flair init` / `flair doctor`. Use the user-writable prefix above instead. `nvm` installs already give you a user-owned prefix, so no `sudo` is needed there.
 
 ### Install & Run
 
-`flair init` is the front door. The mental model is git's: install the CLI globally, then `init`. One command does everything: installs and starts Harper, creates your agent's Ed25519 identity, detects and wires your MCP clients (Claude Code / Cursor / Codex / Gemini) to the zero-install `npx -y @tpsdev-ai/flair-mcp` server, and runs a smoke test.
+`flair init` is the front door. The mental model is git's: install the CLI globally, then `init`. One command does everything: installs and starts Harper, creates your agent's Ed25519 identity, verifies semantic search actually works, detects and wires your MCP clients (Claude Code / Cursor / Codex / Gemini) to the zero-install `npx -y @tpsdev-ai/flair-mcp` server, and runs a smoke test.
 
 ```bash
-# Install the CLI
+# Install the CLI (no sudo — see prereqs above)
 npm install -g @tpsdev-ai/flair
 
-# One command: instance + agent + MCP wiring + smoke test
+# One command: instance + agent + semantic-search check + MCP wiring + smoke test
 flair init
 ```
 

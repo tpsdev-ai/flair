@@ -480,6 +480,134 @@ async function waitForHealth(httpPort: number, adminUser: string, adminPass: str
   throw new Error(`Harper at port ${httpPort} did not respond within ${timeoutMs}ms (${attempt} attempts)`);
 }
 
+/**
+ * Result of a real embed→search round-trip:
+ *   - ok:       semantic recall verified (paraphrase, no keyword overlap, matched by meaning)
+ *   - degraded: embeddings are NOT loaded — recall-by-meaning is dead (LOUD failure)
+ *   - skipped:  could not run the check (no agent / no key / write failed for unrelated reasons)
+ */
+export type SemanticVerifyResult =
+  | { state: "ok"; score: number }
+  | { state: "degraded"; detail: string }
+  | { state: "skipped"; detail: string };
+
+/**
+ * Verify that semantic search ACTUALLY works by storing a memory with a
+ * distinctive phrase and searching for a PARAPHRASE (different words, same
+ * meaning). If embeddings are loaded, the paraphrase recovers the memory by
+ * meaning with a genuine semantic score. If embeddings are NOT loaded,
+ * SemanticSearch falls back to keyword-only scan: the paraphrase shares no
+ * keywords with the stored content, so the memory is NOT recovered (or only via
+ * the `_warning` keyword-fallback marker) → "degraded".
+ *
+ * The probe is authenticated as a real agent (Ed25519) because SemanticSearch
+ * rejects anonymous callers (401) and per-agent scoping requires it. We pick the
+ * given agentId, else FLAIR_AGENT_ID, else the first `.key` in keysDir.
+ *
+ * Exported so the init smoke test and unit tests can reuse the exact same gate.
+ */
+export async function verifySemanticSearch(
+  baseUrl: string,
+  agentIdOpt: string | undefined,
+  keysDir: string,
+): Promise<SemanticVerifyResult> {
+  // Resolve an agent + key to sign with.
+  let agentId = agentIdOpt || process.env.FLAIR_AGENT_ID || undefined;
+  if (!agentId) {
+    try {
+      const keyFiles = readdirSync(keysDir).filter((f) => f.endsWith(".key"));
+      if (keyFiles.length > 0) agentId = keyFiles[0].replace(/\.key$/, "");
+    } catch { /* keysDir missing */ }
+  }
+  if (!agentId) {
+    return { state: "skipped", detail: "no agent id or key found" };
+  }
+  // Find the signing key. Prefer the standard locations (resolveKeyPath), but
+  // fall back to the keysDir we were handed — `flair init` keys live there and
+  // it may not be a standard location (e.g. --keys-dir, tests).
+  let keyPath = resolveKeyPath(agentId);
+  if (!keyPath) {
+    const candidate = join(keysDir, `${agentId}.key`);
+    if (existsSync(candidate)) keyPath = candidate;
+  }
+  if (!keyPath) {
+    return { state: "skipped", detail: `no private key for agent '${agentId}'` };
+  }
+
+  // Distinctive content vs. a PARAPHRASE query with deliberately ZERO shared
+  // content words. If the search recovers the memory it can ONLY be by meaning.
+  //   content: "The feline predator silently stalked its unsuspecting rodent quarry at dusk."
+  //   query:   "a cat hunting a mouse in the evening"
+  // No word in the query appears in the content (cat≠feline, mouse≠rodent,
+  // hunting≠stalked, evening≠dusk), so a keyword scan returns nothing.
+  const marker = `flair-doctor-embed-check-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = marker;
+  const content = `The feline predator silently stalked its unsuspecting rodent quarry at dusk. [${marker}]`;
+  const paraphrase = "a cat hunting a mouse in the evening";
+
+  let stored = false;
+  try {
+    // Write the test memory (ephemeral so it's never durable). PUT /Memory/<id>.
+    const writeRes = await authFetch(baseUrl, agentId, keyPath, "PUT", `/Memory/${id}`, {
+      id, agentId, content, durability: "ephemeral", createdAt: new Date().toISOString(),
+    });
+    if (!writeRes.ok && writeRes.status !== 204) {
+      const text = await writeRes.text().catch(() => "");
+      return { state: "skipped", detail: `could not write probe memory: HTTP ${writeRes.status} ${text.slice(0, 80)}` };
+    }
+    stored = true;
+
+    // Allow the HNSW index to catch up before searching.
+    await new Promise((r) => setTimeout(r, 1500));
+
+    // Search by PARAPHRASE. scoring: "raw" so we read the unweighted semantic
+    // similarity (_rawScore) directly, without recency/durability composites
+    // muddying the keyword-vs-semantic distinction.
+    const searchRes = await authFetch(baseUrl, agentId, keyPath, "POST", "/SemanticSearch", {
+      agentId, q: paraphrase, limit: 10, scoring: "raw",
+    });
+    if (!searchRes.ok) {
+      const text = await searchRes.text().catch(() => "");
+      return { state: "skipped", detail: `SemanticSearch failed: HTTP ${searchRes.status} ${text.slice(0, 80)}` };
+    }
+    const data = await searchRes.json() as { results?: any[]; _warning?: string };
+
+    // The server sets _warning ONLY when getMode() === "none" — i.e. the
+    // embedding engine failed to init and the search ran keyword-only. That is
+    // the unambiguous "embeddings not loaded" signal.
+    if (data._warning) {
+      return { state: "degraded", detail: data._warning };
+    }
+
+    const results = data.results ?? [];
+    const hit = results.find((r) => r.id === id);
+    if (!hit) {
+      // The paraphrase shares no keywords with the content, so a keyword-only
+      // fallback can't find it. Missing the memory == recall-by-meaning is dead.
+      return { state: "degraded", detail: "paraphrase did not recall the probe memory (keyword-only fallback active)" };
+    }
+
+    // A genuine semantic hit has a positive similarity score. The keyword bonus
+    // is +0.05; since there is no keyword overlap here, any score above that
+    // floor can only come from vector similarity. Require a real semantic score.
+    const score = typeof hit._rawScore === "number" ? hit._rawScore : (hit._score ?? 0);
+    if (score <= 0.05) {
+      return { state: "degraded", detail: `probe recalled with non-semantic score ${score} (keyword/zero)` };
+    }
+    return { state: "ok", score };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { state: "skipped", detail: `probe error: ${message.slice(0, 100)}` };
+  } finally {
+    // Best-effort cleanup of the ephemeral probe memory.
+    if (stored) {
+      try {
+        await authFetch(baseUrl, agentId, keyPath, "DELETE", `/Memory/${id}`);
+      } catch { /* leave the ephemeral row; it'll age out */ }
+    }
+  }
+}
+
 // Blocks until the given PID is gone (ESRCH from signal 0), or timeout.
 // Used during restart to confirm the old Harper process actually exited before
 // we start polling /Health — otherwise the still-shutting-down old process can
@@ -1828,6 +1956,25 @@ program
       if (!verifyRes.ok) throw new Error(`Ed25519 auth verification failed: ${verifyRes.status}`);
       console.log("Ed25519 auth verified ✓");
 
+      // Verify semantic search ACTUALLY works (real embed→paraphrase-search
+      // round-trip). A clean-VM dogfood found semantic search dead out of the box
+      // (sudo/root-owned install can't write the embeddings models symlink →
+      // EACCES) while init reported success. Never report a clean init when
+      // recall-by-meaning is broken. Skipped paths (no key yet) are non-fatal.
+      console.log("Verifying semantic search...");
+      const embedCheck = await verifySemanticSearch(httpUrl, agentId, keysDir);
+      if (embedCheck.state === "ok") {
+        console.log(`Semantic search operational ✓ ${render.wrap(render.c.dim, `(paraphrase recall verified, score ${embedCheck.score.toFixed(2)})`)}`);
+      } else if (embedCheck.state === "degraded") {
+        // LOUD — embeddings not loaded. Same message class as `flair doctor`.
+        console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Semantic search DEGRADED")} — embeddings not loaded; recall-by-meaning will NOT work.`);
+        console.log(`   ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
+        console.log(`   ${render.wrap(render.c.dim, "Common cause: the embeddings component lacks write access (sudo/root global installs).")}`);
+        console.log(`   ${render.wrap(render.c.dim, "Fix: install without sudo (see README Quick Start), then:")} flair restart && flair doctor`);
+      } else {
+        console.log(`${render.icons.warn} Semantic search not verified ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
+      }
+
       // Output — admin password printed once, never written to disk
       console.log("\n✅ Flair initialized successfully");
       console.log(`   Agent ID:    ${agentId}`);
@@ -1981,20 +2128,31 @@ program
           const mcpProc = spawn("npx", ["-y", "@tpsdev-ai/flair-mcp"], {
             env: { ...process.env, FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl },
             stdio: ["pipe", "pipe", "pipe"],
-            timeout: 15_000,
           });
           const initMsg = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "0.1", capabilities: {}, clientInfo: { name: "flair-init", version: "1.0.0" } } });
           mcpProc.stdin!.write(initMsg + "\n");
           mcpProc.stdin!.end();
           let stdout = "";
           mcpProc.stdout!.on("data", (d: Buffer) => { stdout += d.toString(); });
+          // A single timer drives the timeout AND cleanup. It MUST be cleared on
+          // settle — an un-cleared setTimeout is a live handle that keeps Node's
+          // event loop alive (the ~60s phantom hang after `flair init` printed
+          // success: the smoke timer + the lingering npx child both pinned the
+          // loop). We clear it on every exit path below.
+          let smokeTimer: ReturnType<typeof setTimeout> | null = null;
           await new Promise<void>((resolve, reject) => {
+            const settle = (fn: () => void) => {
+              if (smokeTimer) { clearTimeout(smokeTimer); smokeTimer = null; }
+              fn();
+            };
             mcpProc.on("exit", (code) => {
-              if (code === 0 && stdout.length > 0) resolve();
-              else reject(new Error(`MCP server exited with code ${code}`));
+              settle(() => {
+                if (code === 0 && stdout.length > 0) resolve();
+                else reject(new Error(`MCP server exited with code ${code}`));
+              });
             });
-            mcpProc.on("error", reject);
-            setTimeout(() => { mcpProc.kill(); reject(new Error("MCP smoke test timed out")); }, 15_000);
+            mcpProc.on("error", (err) => settle(() => reject(err)));
+            smokeTimer = setTimeout(() => settle(() => { mcpProc.kill("SIGKILL"); reject(new Error("MCP smoke test timed out")); }), 15_000);
           });
           try {
             const lines = stdout.split("\n").filter(l => l.trim());
@@ -2007,6 +2165,11 @@ program
             }
           } catch {
             console.log("   ⚠ MCP server responded but response could not be parsed");
+          } finally {
+            // Reap the child even on the resolve path: the MCP server exits on
+            // stdin close, but the `npx` wrapper can linger holding the loop.
+            // SIGKILL is safe — we already have the response we need.
+            try { if (mcpProc.exitCode === null) mcpProc.kill("SIGKILL"); } catch { /* already gone */ }
           }
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
@@ -2037,6 +2200,16 @@ program
       console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
     }
 
+    // All init work is genuinely done at this point: Harper is installed +
+    // running (detached, unref'd — survives this process exiting), the agent is
+    // registered, semantic search is verified, MCP clients are wired, and the
+    // smoke test ran. The MCP smoke subprocess can leave a lingering npx handle
+    // that pins Node's event loop for ~60s after success ("rc=0 but doesn't
+    // return"). We've cleared/unref'd the known timers above; exit explicitly so
+    // the prompt returns in a couple seconds regardless of any stray handle. The
+    // running Harper instance is unaffected.
+    await new Promise<void>((r) => process.stdout.write("", () => r()));
+    process.exit(0);
   });
 
 // ─── flair agent ─────────────────────────────────────────────────────────────
@@ -2106,6 +2279,8 @@ agent
   .command("list")
   .description("List all agents")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--agent <id>", "Agent ID to authenticate as via Ed25519 (or FLAIR_AGENT_ID env) when no admin pass")
+  .option("--keys-dir <dir>", "Directory holding the agent's Ed25519 key")
   .option("--port <port>", "Harper HTTP port")
   .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
@@ -2142,13 +2317,37 @@ agent
       }
       agents = await res.json() as any[];
     } else {
+      // No admin pass → authenticate as the AGENT via Ed25519. The Agent table's
+      // allowRead() is allowVerified — a bare unauthenticated GET /Agent returns
+      // 403 AccessViolation (the dogfood symptom: the natural "did my agent
+      // register?" check errored on a healthy install). A verified agent reads
+      // the principal table for discovery, so sign the request with its key.
       const baseUrl = `http://127.0.0.1:${port}`;
-      const res = await fetch(`${baseUrl}/Agent`, {
-        headers: { "Content-Type": "application/json" },
-      });
+      const agentId = opts.agent ?? process.env.FLAIR_AGENT_ID;
+      const keysDir: string = opts.keysDir ?? process.env.FLAIR_KEY_DIR ?? defaultKeysDir();
+      let res: Response;
+      if (agentId) {
+        const keyPath = resolveKeyPath(agentId) ?? join(keysDir, `${agentId}.key`);
+        if (!existsSync(keyPath)) {
+          console.error(`${render.icons.error} no key for agent '${agentId}' (looked in ${keysDir}). Pass --admin-pass, --keys-dir, or a registered --agent.`);
+          process.exit(1);
+        }
+        res = await authFetch(baseUrl, agentId, keyPath, "GET", "/Agent");
+      } else {
+        // No agent identity available either. Try anonymously, but if it 403s
+        // (the common case), tell the user exactly how to authenticate rather
+        // than dumping a raw AccessViolation.
+        res = await fetch(`${baseUrl}/Agent`, { headers: { "Content-Type": "application/json" } });
+      }
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        console.error(`${render.icons.error} ${res.status} ${text}`);
+        if (res.status === 403 && !agentId) {
+          console.error(`${render.icons.error} 403 — listing agents requires authentication.`);
+          console.error(`   Use ${render.wrap(render.c.cyan, "--agent <id>")} (or set FLAIR_AGENT_ID) to authenticate as a registered agent,`);
+          console.error(`   or ${render.wrap(render.c.cyan, "--admin-pass")} / FLAIR_ADMIN_PASS for the admin view.`);
+        } else {
+          console.error(`${render.icons.error} ${res.status} ${text}`);
+        }
         process.exit(1);
       }
       const data = await res.json();
@@ -6801,6 +7000,7 @@ program
   .command("doctor")
   .description("Diagnose common Flair problems and suggest fixes")
   .option("--port <port>", "Harper HTTP port")
+  .option("--agent <id>", "Agent ID to use for the semantic-search round-trip (or FLAIR_AGENT_ID env)")
   .option("--fix", "Automatically fix issues where possible")
   .option("--dry-run", "Show what --fix would do without making changes")
   .action(async (opts) => {
@@ -6947,29 +7147,38 @@ program
       console.log(`  ${render.icons.warn} No config file at ${render.wrap(render.c.dim, cfgPath)} — using defaults`);
     }
 
-    // 4. Embeddings check (only if Harper is responding)
+    // 4. Embeddings check — REAL semantic round-trip (only if Harper is responding).
+    //
+    // The dead-simple `{ q: "test" }` probe used to pass even when embeddings were
+    // not loaded: SemanticSearch falls back to keyword-only scan, and an
+    // unauthenticated probe 401s → "cannot verify" → no issue counted. A clean-VM
+    // dogfood found semantic search DEAD out of the box (sudo/root-owned install
+    // can't write the models symlink → EACCES) while `flair doctor` reported
+    // "no issues found". This now stores a memory with a distinctive phrase and
+    // searches for a PARAPHRASE (no shared keywords). If the top result isn't
+    // recovered by MEANING, recall-by-meaning is broken and doctor FAILS LOUDLY.
     if (harperResponding) {
-      try {
-        const testRes = await fetch(`${baseUrl}/SemanticSearch`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ q: "test", limit: 1 }),
-          signal: AbortSignal.timeout(10000),
-        });
-        if (testRes.ok) {
-          const data = await testRes.json() as { _warning?: string };
-          if (data._warning) {
-            console.log(`  ${render.icons.warn} Embeddings: keyword-only ${render.wrap(render.c.dim, `(${data._warning})`)}`);
-            console.log(`     ${render.wrap(render.c.dim, "Semantic search quality is degraded")}`);
-            console.log(`     ${render.wrap(render.c.dim, "Check:")} ls ~/.npm-global/lib/node_modules/@tpsdev-ai/flair/models/`);
-            issues++;
-          } else {
-            console.log(`  ${render.icons.ok} Embeddings: semantic search operational`);
-          }
-        } else if (testRes.status === 401) {
-          console.log(`  ${render.icons.warn} Embeddings: cannot verify ${render.wrap(render.c.dim, "(auth required for SemanticSearch)")}`);
-        }
-      } catch { /* fetch error, already flagged */ }
+      const semanticStatus = await verifySemanticSearch(baseUrl, opts.agent, defaultKeysDir());
+      switch (semanticStatus.state) {
+        case "ok":
+          console.log(`  ${render.icons.ok} Embeddings: semantic search operational ${render.wrap(render.c.dim, `(paraphrase recall verified, score ${semanticStatus.score.toFixed(2)})`)}`);
+          break;
+        case "degraded":
+          // LOUD failure — never report all-clear when recall-by-meaning is dead.
+          console.log(`  ${render.icons.error} Semantic search DEGRADED ${render.wrap(render.c.dim, `— ${semanticStatus.detail}`)}`);
+          console.log(`     ${render.wrap(render.c.red, "Embeddings are not loaded; recall-by-meaning will NOT work.")}`);
+          console.log(`     ${render.wrap(render.c.dim, "Common cause: the embeddings component lacks write access (sudo/root global installs).")}`);
+          console.log(`     ${render.wrap(render.c.dim, "See:")} docs/troubleshooting.md ${render.wrap(render.c.dim, "→ \"Semantic search DEGRADED\"")}`);
+          issues++;
+          break;
+        case "skipped":
+          // Could not run the round-trip (no agent / no key). Don't claim
+          // all-clear — surface that the check was skipped, but don't count it
+          // as a hard issue since the user may simply not have an agent yet.
+          console.log(`  ${render.icons.warn} Embeddings: not verified ${render.wrap(render.c.dim, `(${semanticStatus.detail})`)}`);
+          console.log(`     ${render.wrap(render.c.dim, "Pass --agent <id> (or set FLAIR_AGENT_ID) so doctor can run a real semantic round-trip.")}`);
+          break;
+      }
     }
 
     // 5. Stale PID file (skip if already reported in port check)

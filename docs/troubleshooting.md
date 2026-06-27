@@ -29,6 +29,26 @@ cat ~/.flair/data/log/hdb.log | tail -50
 journalctl --user -u flair --since "10 minutes ago"
 ```
 
+### "Semantic search DEGRADED — embeddings not loaded"
+
+**Symptoms:** `flair doctor` or `flair init` reports `Semantic search DEGRADED — embeddings not loaded; recall-by-meaning will NOT work.` A paraphrase search doesn't recall a memory it should match by meaning; search only finds exact keyword overlaps.
+
+**Cause:** The in-process embeddings component (`harper-fabric-embeddings` / the nomic model) failed to initialize, so `SemanticSearch` fell back to a keyword-only scan. The most common cause on a fresh box is a **root-owned global install**: `sudo npm install -g @tpsdev-ai/flair` makes the package directory owned by root, but Harper runs as your user and gets `EACCES` when the embeddings component tries to download/symlink the model file under that package.
+
+**Fix — reinstall without sudo (recommended):**
+```bash
+# Use a user-writable npm prefix so the package dir is yours (see README Quick Start)
+mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global
+export PATH="$HOME/.npm-global/bin:$PATH"     # add to your shell rc to persist
+
+npm uninstall -g @tpsdev-ai/flair             # remove the root-owned copy (may need sudo to remove it)
+npm install -g @tpsdev-ai/flair               # reinstall, no sudo
+flair restart
+flair doctor                                  # should now report semantic search operational
+```
+
+**Other causes:** a missing native llama.cpp addon for your platform, or a corrupted/partial model download. `flair doctor` prints the underlying init error; `flair reembed` re-downloads the model and regenerates embeddings once the component loads.
+
 ### "Embeddings: hash-fallback (512-dim)"
 
 **Symptoms:** `flair status` shows hash-fallback instead of nomic. Search returns poor results.
