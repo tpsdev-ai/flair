@@ -32,7 +32,7 @@ Don't see your harness? If it speaks **MCP** — Flair already works with `flair
 
 [`@tpsdev-ai/flair-mcp`](https://www.npmjs.com/package/@tpsdev-ai/flair-mcp) is a [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes Flair as a memory tool to any MCP-speaking client. One server, every MCP client.
 
-No install step needed — every snippet below uses `npx -y @tpsdev-ai/flair-mcp`, which fetches and runs the server on demand (zero-install). The fastest path is `flair install`, which detects and wires these clients for you. To wire by hand, drop the relevant snippet into each tool's MCP config:
+No install step needed — every snippet below uses `npx -y @tpsdev-ai/flair-mcp`, which fetches and runs the server on demand (zero-install). The fastest path is `flair init`, which detects and wires these clients for you. To wire by hand, drop the relevant snippet into each tool's MCP config:
 
 **Claude Code** (`~/.config/claude-code/config.toml` or per-project `.claude/config.toml`):
 ```toml

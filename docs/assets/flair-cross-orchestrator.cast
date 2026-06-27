@@ -2,7 +2,7 @@
 [0.245, "o", "\u001b[H\u001b[J"]
 [0.001, "o", "  Flair  \u00b7  same identity, every orchestrator\r\n  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\r\n\r\n"]
 [1.3, "o", "$ # One agent identity. One memory store. Three orchestrators.\r\n"]
-[1.2, "o", "$ flair install --claude --codex --gemini --agent flint\r\n"]
+[1.2, "o", "$ flair init --client all --agent flint\r\n"]
 [0.5, "o", "  \u001b[32m\u2713\u001b[0m Claude Code   wired (~/.claude/mcp.json)\r\n"]
 [0.18, "o", "  \u001b[32m\u2713\u001b[0m Codex CLI     wired (~/.codex/config.toml)\r\n"]
 [0.18, "o", "  \u001b[32m\u2713\u001b[0m Gemini CLI    wired (~/.gemini/settings.json)\r\n\r\n"]
