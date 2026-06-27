@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### 🛟 Harper watchdog now recovers an UNLOADED launchd job + alerts on state transitions (ops-6nv7)
+
+On 2026-06-27 ~04:20 prod Flair (`:9926`) was **down** — the `ai.tpsdev.flair` launchd job wasn't loaded (no Harper PID) — and it stayed down, undetected, until a memory write happened to fail. Two gaps: (1) `harper-watchdog.sh` only handled the *PID-alive-but-`/Health`-dead* zombie case (`kill -9` + `launchctl kickstart -k`); `kickstart`/`start` are **no-ops on an unloaded job**, so the job-unloaded failure mode went unrecovered. (2) There was **no alerting at all** — a Flair-down was invisible. Recovery was a manual `launchctl load ~/Library/LaunchAgents/ai.tpsdev.flair.plist`.
+
+The watchdog now recovers **both** failure modes and makes the event **known**:
+
+- **Unloaded-job recovery.** When `/Health` fails, the watchdog now distinguishes by `pgrep harper.js` + `launchctl print gui/$(id -u)/<label>` (with a `launchctl list` fallback). PID-alive → the existing zombie path (`kill -9` + `kickstart -k`). No PID + job loaded → nudge with `kickstart -k`. **No PID + job unloaded (the incident)** → `launchctl bootstrap gui/$(id -u) <plist>` with a `launchctl load` fallback — the operation that actually reloads an unloaded job.
+- **State-transition alerting (non-spammy).** A small `up`/`down` state file (`~/.tps/state/harper-watchdog.state`) gates alerts so they fire on **transitions** (down→recovered, or first failure-to-recover), not every 60s tick. Alert channel preference, reusing the house pattern from `mail-deliver-health.sh` / `mail-loop-canary.sh`: Discord webhook (`~/.tps/secrets/discord-webhook-tps-activity`, #tps-activity) → `tps mail send flint` fallback → a loud structured line to the watchdog log + stderr (always). A flair-down/recovery is now loud.
+- **Healthy + zombie paths intact.** `/Health` OK still exits silently (and clears any prior down-state, emitting a single RECOVERED alert on the down→up edge). The deadlock/zombie kill-and-restart path is unchanged, and the stale-build deploy tail is preserved.
+
+`bash -n` clean; all three cases (health-OK silent, health-dead+job-loaded kickstart, health-dead+job-unloaded bootstrap) plus the recovered / sustained-down / self-healed / mail-fallback transitions were dry-run against a stubbed `launchctl`/`curl`/`pgrep` harness (never against live prod). The live `ai.tpsdev.flair-watchdog` picks up the new script on its next 60s run after merge — no plist change required. (scripts/harper-watchdog.sh)
+
 ### ⬆️ Bump bundled Harper 5.0.21 → 5.1.14 (ops-xc0x)
 
 The bundled `@harperfast/harper` dependency moves from `5.0.21` to `5.1.14`, retiring the 5.0.21 pin that has been the source of recurring friction — the `packageComponent` empty-tarball bug under `node_modules` (#513) and the `flair upgrade --target` override dance that hard-coded a `>= 5.1.13` Harper pin to work around it. The Fabric already runs Flair on 5.1.14 (proven in production), so this brings the bundled dep to parity. This is step 0 of the native-MCP arc (ops-b6uk / #520): 5.1 unlocks Harper's native MCP support and the OAuth plugin.
