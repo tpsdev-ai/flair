@@ -63,9 +63,14 @@ RUN bun add @node-llama-cpp/linux-x64@3 --no-save 2>/dev/null || \
 # only downloads once — subsequent builds reuse the cached layer.
 # Required because Harper blocks on model download during schema init,
 # causing the seed retry loop to time out.
+#
+# HuggingFace intermittently 429s/503s the model download; retry with backoff
+# (--retry-all-errors so 4xx/5xx are retried, not just connection failures). A
+# bare curl here flaked the from-scratch build on an HF 503 — same root cause
+# the clean-vm gate hit (#463/#465 429/503 issue).
 ENV FLAIR_MODELS_DIR=/opt/flair-models
 RUN mkdir -p /opt/flair-models && \
-    curl -fSL \
+    curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
       "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
       -o /opt/flair-models/nomic-embed-text-v1.5.Q4_K_M.gguf && \
     echo "Embeddings model cached ($(du -sh /opt/flair-models/*.gguf | cut -f1))"

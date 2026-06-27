@@ -61,9 +61,11 @@ RUN npm pack && mv tpsdev-ai-flair-*.tgz /flair-head.tgz && \
 # the regression we are guarding.
 FROM node:24-slim AS cleanvm
 
-# Tools: curl for the model fetch; sudo not needed (we install as root, the
-# container's default user, then drop to flairuser via `su`/gosu-free `runuser`).
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+# Tools: ca-certificates for npm/HTTPS. The embeddings model is NOT curled here
+# (see below) — it is staged via COPY from the build context, so this image never
+# depends on a live HuggingFace download during `docker build`. (That live curl
+# is what flaked the gate on an HF 503 — the #463/#465 429/503 issue.)
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Create the realistic NON-ROOT user.
@@ -87,15 +89,28 @@ RUN GLOBAL_FLAIR_DIR="$(dirname "$(dirname "$(readlink -f "$(command -v flair)")
     npm install --no-save @node-llama-cpp/linux-x64@3 && \
     echo "Installed linux-x64 native addon into the global package."
 
-# Pre-stage the model in flairuser's home at the #538 default path. Done AS
-# flairuser so ownership is correct; NO FLAIR_MODELS_DIR is set anywhere.
+# Pre-stage the model in flairuser's home at the #538 default path, owned by
+# flairuser, with NO FLAIR_MODELS_DIR set anywhere.
+#
+# The model is COPIED from the build context — NOT curled from HuggingFace at
+# build time. The clean-vm-gate workflow job downloads the model ONCE (resilient
+# retry + actions/cache keyed on the model name) into the repo-root `models/`
+# dir before the build, so `docker build` never makes a live HF request. This
+# removes the build's dependency on a flaky HF endpoint (the gate previously
+# failed on an HF 503 mid-build — the #463/#465 429/503 issue).
+#
+# COPY runs as root (the active stage user before `USER flairuser` below). Its
+# --chown lands the file at the exact #538 default path
+# (<ROOTPATH=~/.flair/data>/models) owned by the non-root flairuser, and COPY
+# auto-creates the parent dirs with the same ownership. Identical end-state to
+# the old in-build curl, minus the live HF dependency.
+COPY --chown=flairuser:flairuser models/nomic-embed-text-v1.5.Q4_K_M.gguf \
+     /home/flairuser/.flair/data/models/nomic-embed-text-v1.5.Q4_K_M.gguf
+RUN echo "Model staged at the #538 default path (user-owned): $(du -sh /home/flairuser/.flair/data/models/*.gguf | cut -f1)" && \
+    ls -la /home/flairuser/.flair/data/models/
+
 USER flairuser
 WORKDIR /home/flairuser
-RUN mkdir -p /home/flairuser/.flair/data/models && \
-    curl -fSL \
-      "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
-      -o /home/flairuser/.flair/data/models/nomic-embed-text-v1.5.Q4_K_M.gguf && \
-    echo "Model staged at the #538 default path (user-owned): $(du -sh /home/flairuser/.flair/data/models/*.gguf | cut -f1)"
 
 # The test runs as flairuser. Explicitly DO NOT inherit any FLAIR_MODELS_DIR.
 COPY --chown=flairuser:flairuser docker/test-clean-vm.sh /home/flairuser/test-clean-vm.sh
