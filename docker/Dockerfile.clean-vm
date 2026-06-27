@@ -1,0 +1,121 @@
+# Dockerfile.clean-vm — the REALISTIC user-environment gate (ops-cd37)
+#
+# Extends the from-scratch CI to the environment a real user actually has:
+#   flair installed via a ROOT/global `npm install -g` (root-owned package dir),
+#   then `flair init` + Harper run as a NON-ROOT user, with NO FLAIR_MODELS_DIR
+#   override (the real default model-path resolution).
+#
+# This is the exact shape of the showstopper fixed in #538. The existing
+# Dockerfile.test runs as ROOT (no perms mismatch) AND sets
+# FLAIR_MODELS_DIR=/opt/flair-models (a writable override), so it can never
+# reproduce — or catch a regression of — the bug. This Dockerfile can.
+#
+# Build:  docker build -f docker/Dockerfile.clean-vm -t flair-clean-vm .
+# Run:    docker run --rm flair-clean-vm
+#
+# Tests the LOCAL HEAD build (the tarball packed from this branch), not the
+# published npm version.
+
+# ── Builder: build + pack the HEAD tarball ──────────────────────────────────
+FROM node:24-slim AS builder
+
+WORKDIR /app
+
+# Install bun (pinned to match bun.lock version — bump together).
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates && \
+    curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.10" && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.bun/bin:$PATH"
+ENV BUN_INSTALL="/root/.bun"
+
+# Copy repo (include workspace packages so bun lockfile is consistent).
+COPY package.json bun.lock* tsconfig.json tsconfig.cli.json config.yaml ./
+COPY src/ ./src/
+COPY resources/ ./resources/
+COPY schemas/ ./schemas/
+COPY packages/ ./packages/
+
+RUN bun install --frozen-lockfile
+RUN bun run build && bun run build:cli
+
+# Pack the exact published file set (dist/, schemas/, templates/, config.yaml…).
+# `npm pack` honors the package.json "files" array — this is byte-for-byte what
+# a user installs from the registry, so the gate exercises the published surface
+# (NOT the repo's resources/ TS source the dev Dockerfile.test relies on).
+RUN npm pack && mv tpsdev-ai-flair-*.tgz /flair-head.tgz && \
+    echo "Packed HEAD tarball: $(du -sh /flair-head.tgz | cut -f1)"
+
+# ── Pre-stage the embeddings model in the NON-ROOT user's home ───────────────
+# Why pre-stage: a live ~80MB download during `flair init` can outlast the
+# Harper seed retry loop (the same reason the dev Dockerfile.test pre-downloads).
+#
+# Where it goes is the whole point of the gate: the model is placed at the EXACT
+# path the #538 default resolves to for a non-root install —
+# <ROOTPATH=~/.flair/data>/models — owned by the non-root user. We do NOT set
+# FLAIR_MODELS_DIR; resolution is the real default.
+#
+# If #538 regresses (model resolves back to the root-owned package dir), this
+# user-home copy is in the WRONG place → cache miss → download attempt into the
+# root-owned dir → EACCES → semantic search DEGRADED → the gate FAILS. That is
+# the regression we are guarding.
+FROM node:24-slim AS cleanvm
+
+# Tools: ca-certificates for npm/HTTPS. The embeddings model is NOT curled here
+# (see below) — it is staged via COPY from the build context, so this image never
+# depends on a live HuggingFace download during `docker build`. (That live curl
+# is what flaked the gate on an HF 503 — the #463/#465 429/503 issue.)
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Create the realistic NON-ROOT user.
+RUN useradd --create-home --shell /bin/bash flairuser
+
+# ── Install flair GLOBALLY AS ROOT (the `sudo npm install -g` a user runs) ───
+# The package lands root-owned under /usr/lib/node_modules — Harper running as
+# flairuser cannot write into it. This is the perms mismatch the gate requires.
+COPY --from=builder /flair-head.tgz /flair-head.tgz
+RUN npm install -g /flair-head.tgz && \
+    echo "Installed flair globally (root-owned):" && \
+    ls -ld "$(dirname "$(readlink -f "$(command -v flair)")")/.."
+
+# Native embedding binary: flair declares mac-arm64 as the optional dep present
+# on dev machines; on linux x64 we ensure the matching native variant is
+# resolvable next to the globally-installed package so Harper's embeddings
+# component can load it. (Same need as the existing tarball smoke test.)
+RUN GLOBAL_FLAIR_DIR="$(dirname "$(dirname "$(readlink -f "$(command -v flair)")")")" && \
+    echo "Global flair package dir: $GLOBAL_FLAIR_DIR" && \
+    cd "$GLOBAL_FLAIR_DIR" && \
+    npm install --no-save @node-llama-cpp/linux-x64@3 && \
+    echo "Installed linux-x64 native addon into the global package."
+
+# Pre-stage the model in flairuser's home at the #538 default path, owned by
+# flairuser, with NO FLAIR_MODELS_DIR set anywhere.
+#
+# The model is COPIED from the build context — NOT curled from HuggingFace at
+# build time. The clean-vm-gate workflow job downloads the model ONCE (resilient
+# retry + actions/cache keyed on the model name) into the repo-root `models/`
+# dir before the build, so `docker build` never makes a live HF request. This
+# removes the build's dependency on a flaky HF endpoint (the gate previously
+# failed on an HF 503 mid-build — the #463/#465 429/503 issue).
+#
+# COPY runs as root (the active stage user before `USER flairuser` below). Its
+# --chown lands the file at the exact #538 default path
+# (<ROOTPATH=~/.flair/data>/models) owned by the non-root flairuser, and COPY
+# auto-creates the parent dirs with the same ownership. Identical end-state to
+# the old in-build curl, minus the live HF dependency.
+COPY --chown=flairuser:flairuser models/nomic-embed-text-v1.5.Q4_K_M.gguf \
+     /home/flairuser/.flair/data/models/nomic-embed-text-v1.5.Q4_K_M.gguf
+RUN echo "Model staged at the #538 default path (user-owned): $(du -sh /home/flairuser/.flair/data/models/*.gguf | cut -f1)" && \
+    ls -la /home/flairuser/.flair/data/models/
+
+USER flairuser
+WORKDIR /home/flairuser
+
+# The test runs as flairuser. Explicitly DO NOT inherit any FLAIR_MODELS_DIR.
+COPY --chown=flairuser:flairuser docker/test-clean-vm.sh /home/flairuser/test-clean-vm.sh
+USER root
+RUN chmod +x /home/flairuser/test-clean-vm.sh
+USER flairuser
+
+CMD ["/home/flairuser/test-clean-vm.sh"]
