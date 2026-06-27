@@ -10,9 +10,43 @@
  */
 
 import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 
 type InitState = "uninitialized" | "ready" | "failed";
 type HFE = typeof import("harper-fabric-embeddings");
+
+/**
+ * Resolve the directory the embeddings model lives in / downloads into.
+ *
+ * Resolution order (everything writable, never the read-only package dir):
+ *   1. FLAIR_MODELS_DIR        — explicit operator/docker override.
+ *   2. <ROOTPATH>/models       — Harper's data dir (Flair passes ROOTPATH =
+ *                                ~/.flair/data when it spawns Harper). User-
+ *                                owned and writable even on sudo-global installs.
+ *   3. <cwd>/models            — ONLY if a model already lives there. Backward
+ *                                compat for existing writable installs that
+ *                                downloaded into the package dir before this fix;
+ *                                never used as a download target on fresh installs.
+ *   4. ~/.flair/data/models    — last-resort default when ROOTPATH is unset.
+ *
+ * The chosen dir is always writable, so the embeddings engine can download the
+ * model on first use without hitting EACCES on a root-owned package dir.
+ */
+export function resolveModelsDir(): string {
+  const override = process.env.FLAIR_MODELS_DIR;
+  if (override) return override;
+
+  const rootPath = process.env.ROOTPATH;
+  if (rootPath) return join(rootPath, "models");
+
+  // Backward compat: a prior (writable) install may have the model cached in
+  // the package dir. Reuse it rather than re-downloading — but only if present.
+  const cwdModels = join(process.cwd(), "models");
+  if (existsSync(cwdModels)) return cwdModels;
+
+  return join(homedir(), ".flair", "data", "models");
+}
 
 let _state: InitState = "uninitialized";
 let _initError: string | undefined;
@@ -34,21 +68,23 @@ async function ensureInit(): Promise<void> {
     _state = "ready";
     return;
   } catch {
-    // Not initialized — init with modelsDir pointing to where Harper's
-    // plugin loader downloaded the model (process.cwd() is the app dir).
+    // Not initialized — init with modelsDir pointing at a USER-WRITABLE
+    // location. On a sudo/root-owned global install the Flair package dir
+    // (process.cwd()) is root-owned, so a model download into <cwd>/models
+    // fails with EACCES and semantic search silently dies (ops-am0v). The
+    // model — and everything else Flair writes — must live under ~/.flair.
+    //
     // NOTE: import.meta.dirname and __dirname are both undefined in Harper v5's
-    // VM sandbox / worker threads, so we use process.cwd() which points to the
-    // Flair application directory.
+    // VM sandbox / worker threads, so we resolve from env + process.cwd().
     try {
       if (!_hfe) {
         _hfe = await import("harper-fabric-embeddings");
       }
 
-      const modelsDir = join(process.cwd(), "models");
+      const modelsDir = resolveModelsDir();
 
       // Find the native addon binary explicitly to avoid __dirname-dependent
       // discovery in @node-llama-cpp which fails in Harper's VM sandbox.
-      const { existsSync } = await import("node:fs");
       const platforms = ["linux-x64", "mac-arm64-metal", "mac-arm64", "win-x64"];
       let addonPath: string | undefined;
       for (const platform of platforms) {

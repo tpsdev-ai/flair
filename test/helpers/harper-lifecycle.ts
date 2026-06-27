@@ -204,6 +204,13 @@ export async function startHarper(): Promise<HarperInstance> {
     ...parentEnv,
     ROOTPATH: installDir,
     HOME: installDir,               // isolate from system Harper install (~/.harperdb)
+    // Point the embeddings model dir at the repo-root models/ that CI / local
+    // runs pre-download into (the FLAIR_MODELS_DIR override; see ops-am0v and
+    // resources/embeddings-provider.ts:resolveModelsDir). Without this, the fix's
+    // new default — <ROOTPATH>/models, i.e. the fresh temp installDir — would
+    // re-download the ~80MB model on every startHarper (HuggingFace 429-prone,
+    // #463/#465). A pre-existing parent FLAIR_MODELS_DIR still wins.
+    FLAIR_MODELS_DIR: parentEnv.FLAIR_MODELS_DIR ?? join(process.cwd(), "models"),
     DEFAULTS_MODE: "dev",
     HDB_ADMIN_USERNAME: "admin",
     HDB_ADMIN_PASSWORD: "test123",
