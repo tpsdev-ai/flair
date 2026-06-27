@@ -88,8 +88,8 @@ afterAll(async () => {
 
 describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
   // #499: agent seeding goes through the ops API. `flair agent add` uses the
-  // exact seedAgentViaOpsApi(opsPort, ...) call the `flair install` fix now
-  // uses, so a green add proves the seed mechanism the install path depends on.
+  // exact seedAgentViaOpsApi(opsPort, ...) call the `flair init` agent path now
+  // uses, so a green add proves the seed mechanism the init path depends on.
   test("agent add seeds via ops API (#499)", async () => {
     // No --keys-dir: write the key to the default ~/.flair/keys (under the
     // isolated cliHome), so later Ed25519-authed commands resolve it.

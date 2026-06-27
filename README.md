@@ -182,14 +182,14 @@ Pluggable import/export to foreign memory systems. Every agent-memory format (ag
 
 ### Install & Run
 
-`flair install` is the front door. One command does everything: installs and starts Harper, creates your agent's Ed25519 identity, detects and wires your MCP clients (Claude Code / Cursor / Codex / Gemini) to the zero-install `npx -y @tpsdev-ai/flair-mcp` server, and runs a smoke test.
+`flair init` is the front door. The mental model is git's: install the CLI globally, then `init`. One command does everything: installs and starts Harper, creates your agent's Ed25519 identity, detects and wires your MCP clients (Claude Code / Cursor / Codex / Gemini) to the zero-install `npx -y @tpsdev-ai/flair-mcp` server, and runs a smoke test.
 
 ```bash
 # Install the CLI
 npm install -g @tpsdev-ai/flair
 
-# One command: init + agent + MCP wiring + smoke test
-flair install
+# One command: instance + agent + MCP wiring + smoke test
+flair init
 ```
 
 That's it. Your agent now has identity and memory, and any detected MCP client is wired up. Restart your MCP client (e.g. Claude Code) to pick up the new config, then ask the agent "what do you remember about me?"
@@ -197,10 +197,10 @@ That's it. Your agent now has identity and memory, and any detected MCP client i
 Useful flags:
 
 ```bash
-flair install --agent mybot          # name the agent (defaults to hostname short-form)
-flair install --client claude-code   # wire one specific client (claude-code, codex, gemini, cursor, all, none)
-flair install --no-mcp               # init + agent only, skip MCP wiring
-flair install --skip-smoke           # skip the MCP smoke test
+flair init --agent mybot           # name the agent (--agent-id also works)
+flair init --client claude-code    # wire one specific client (claude-code, codex, gemini, cursor, all, none)
+flair init --no-mcp                # instance + agent only, skip MCP wiring
+flair init --skip-smoke            # skip the MCP smoke test
 ```
 
 Lifecycle management:
@@ -215,11 +215,11 @@ flair uninstall --purge  # Remove everything including data and keys
 
 ### Advanced / manual setup
 
-Prefer to drive each step yourself, or scripting an unattended install? The individual commands `flair install` orchestrates are still available:
+Prefer to drive each step yourself, or scripting an unattended setup? Run `flair init --no-mcp` to bootstrap the instance + agent without wiring any MCP clients, then drive each step on its own:
 
 ```bash
-# Bootstrap a Flair instance (installs Harper, creates database, starts service)
-flair init
+# Bootstrap a Flair instance without registering an agent or wiring MCP
+flair init --no-mcp
 
 # Register your first agent (generates an Ed25519 keypair, registers it)
 flair agent add mybot --name "My Bot"
@@ -228,7 +228,7 @@ flair agent add mybot --name "My Bot"
 flair status
 ```
 
-`flair init --agent-id mybot` bootstraps the instance and registers an agent in one step (and auto-wires `~/.claude.json` if Claude Code is present). Wire other MCP clients manually using the snippets in **[docs/mcp-clients.md](docs/mcp-clients.md)** — all of them use the `npx -y @tpsdev-ai/flair-mcp` zero-install form.
+`flair init --agent mybot --no-mcp` bootstraps the instance and registers an agent in one step without touching any MCP client config. To wire clients later, re-run `flair init --agent mybot --client <name>`, or wire them manually using the snippets in **[docs/mcp-clients.md](docs/mcp-clients.md)** — all of them use the `npx -y @tpsdev-ai/flair-mcp` zero-install form.
 
 ## Integration
 

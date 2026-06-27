@@ -23,7 +23,7 @@ cat > .mcp.json << 'EOF'
 EOF
 ```
 
-`npx -y @tpsdev-ai/flair-mcp` fetches and runs the server on demand — no global install needed. (`flair install` wires this for you automatically; see below.)
+`npx -y @tpsdev-ai/flair-mcp` fetches and runs the server on demand — no global install needed. (`flair init` wires this for you automatically; see below.)
 
 ### Prerequisites
 
@@ -31,7 +31,7 @@ You need a running Flair instance. The one-command front door:
 
 ```bash
 npm install -g @tpsdev-ai/flair
-flair install --agent my-project   # installs Harper, creates the agent, wires MCP clients
+flair init --agent my-project   # installs Harper, creates the agent, wires MCP clients
 ```
 
 ## Tools

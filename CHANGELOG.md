@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### 🚪 Onboarding — consolidate `flair install` into `flair init` (one front door)
+
+The git mental model: `npm install -g @tpsdev-ai/flair`, then `flair init`. `flair install` (introduced in v0.15.0 as a separate one-command front door) is **removed entirely** — its full behavior (bootstrap the instance + register the agent + detect and wire MCP clients via the zero-install `npx -y @tpsdev-ai/flair-mcp` form + smoke test) now lives in `flair init`. No deprecated alias: `install` shipped only in v0.15.0 and is referenced by zero external scripts, so an alias would be needless baggage.
+
+- **`flair init` is now the full one-command setup.** It gained `install`'s flags — `--client <claude-code|codex|gemini|cursor|all|none>`, `--no-mcp`, `--skip-smoke` — alongside its existing instance/agent/remote/Fabric flags. With no MCP flag it detects and wires every installed client (Claude Code is auto-wired into `~/.claude.json`; others print copy-paste snippets) and runs an MCP smoke test, then degrades gracefully (warnings, never a hard failure). `--no-mcp` reduces it to the minimal instance + agent bootstrap, so existing callers like `flair init --agent-id X` keep working unchanged.
+- **Canonical agent flag is `--agent-id`** (init's existing flag, referenced in docs and callers); `--agent` (install's flag) is kept as a hidden alias so both forms work.
+- **Docs updated:** README Quick Start, `docs/integrations.md`, the cross-orchestrator demo cast, and `packages/flair-mcp/README.md` now lead with `flair init`. (ops-ogzp iteration 2.)
+
 ### 📚 Onboarding consistency — one zero-install MCP-wiring pattern + `flair install` as the front door
 
 Three contradictions in the onboarding story, fixed so the docs and the code agree:
