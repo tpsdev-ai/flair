@@ -1,10 +1,14 @@
-name: Release — stage-publish (OIDC)
+name: Release — stage-publish (OIDC) + GitHub release
 
 # Tokenless release pipeline, triggered by pushing a vX.Y.Z tag. Authenticates to
 # npm via OIDC trusted publishing (no NPM_TOKEN lives anywhere) and submits every
 # workspace package to npm's STAGING area via `npm stage publish` rather than
 # publishing live. A maintainer approves the staged tarballs on npmjs.com with 2FA
 # to go live — that approval is the release gate (see docs/releasing.md).
+#
+# A separate, INDEPENDENT job (github-release) cuts a GitHub release for the tag
+# from the matching CHANGELOG.md section. It does NOT depend on the npm staging
+# approval — the GitHub release documents the tagged commit immediately on push.
 #
 # Cut a release: after the `release: vX.Y.Z` PR merges to main, push the tag:
 #   git tag v0.11.0 && git push origin v0.11.0
@@ -179,3 +183,69 @@ jobs:
             echo "**To release:** open [npmjs.com → Staged Packages](https://www.npmjs.com/settings/tpsdev-ai/staging),"
             echo "review each tarball, and approve with 2FA. Or: \`npm stage list\` then \`npm stage approve <id>\`."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  github-release:
+    name: Cut GitHub release from CHANGELOG
+    runs-on: ubuntu-latest
+    # Independent of stage-publish on purpose: the GitHub release documents the
+    # tagged commit and can be cut immediately on tag push. It does NOT wait on
+    # the npm staging 2FA approval (a manual external gate) — that gate governs
+    # what goes LIVE on npm, not whether the tag is recorded on GitHub.
+    if: github.event_name == 'push'
+    permissions:
+      contents: write   # create/edit the GitHub release for the tag
+    steps:
+      - name: Resolve version
+        id: ver
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # tag push: github.ref_name is the tag (vX.Y.Z)
+          VERSION="${REF_NAME#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.11.0 or 1.0.0-rc.1)."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Extract CHANGELOG section
+        # The node script reads CHANGELOG.md and writes the matching section body
+        # to a file. Version flows through env, never ${{ }} interpolation in the
+        # script body, and the body is captured to a file (never re-emitted into a
+        # shell string) so neither the tag nor the CHANGELOG text can be parsed as
+        # shell. Fails loudly (non-zero) if the section is missing or empty.
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/changelog-extract.mjs "$VERSION" CHANGELOG.md > release-notes.md
+          echo "Extracted $(wc -l < release-notes.md) lines for v$VERSION"
+
+      - name: Create or update GitHub release
+        # Idempotent: if a release for the tag already exists (re-run, or the
+        # manually-cut v0.16.0), update it in place instead of failing. The notes
+        # body is passed via --notes-file (a file on disk), and the tag/title via
+        # env-expanded argv — content is never interpolated into the command text.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — updating notes."
+            gh release edit "$TAG" \
+              --title "v$VERSION" \
+              --notes-file release-notes.md
+          else
+            echo "Creating release $TAG."
+            gh release create "$TAG" \
+              --title "v$VERSION" \
+              --notes-file release-notes.md \
+              --verify-tag
+          fi
+          echo "Release URL: $(gh release view "$TAG" --json url --jq .url)"
