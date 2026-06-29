@@ -417,12 +417,20 @@ export default {
                             dedup: !supersedes,
                             dedupThreshold: 0.7,
                         });
-                        const wasDeduped = result.id !== memId;
+                        const wasDeduped = result.id !== memId || result.deduped === true;
                         return {
-                            content: [{ type: "text", text: wasDeduped
-                                        ? `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}`
-                                        : `Memory stored (id: ${memId})` }],
-                            details: { id: result.id, deduplicated: wasDeduped },
+                            content: [{
+                                    type: "text",
+                                    text: wasDeduped
+                                        ? `⚠️ DEDUPLICATED — new content was NOT written. Matched existing memory id=${result.id}: ${result.content?.slice(0, 200)}`
+                                        : `Memory stored (id: ${memId})`,
+                                }],
+                            details: {
+                                id: result.id,
+                                deduplicated: wasDeduped,
+                                written: !wasDeduped,
+                                ...(wasDeduped ? { mergedWith: result.id } : {}),
+                            },
                         };
                     }
                     catch (err) {
