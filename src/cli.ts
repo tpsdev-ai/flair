@@ -1286,6 +1286,26 @@ export function probeOpenclawPluginVersion(extensionName: string): string | null
 }
 
 /**
+ * Status of a package in the `flair upgrade` listing.
+ *   current  — installed version matches registry latest
+ *   outdated — installed version is older than latest
+ *   missing  — not detected; default packages → install advised
+ *   optional — openclaw plugin; openclaw isn't installed (don't nag)
+ */
+export type UpgradeStatus = "current" | "outdated" | "missing" | "optional";
+
+/**
+ * Whether a package's status line should be printed in the default `flair
+ * upgrade` listing. Suppresses optional-because-openclaw-is-absent lines
+ * (ops-p42n) — pure noise on machines without openclaw — unless `--all`
+ * (showAll) is set. All other statuses always print.
+ */
+export function shouldPrintUpgradeLine(status: UpgradeStatus, showAll: boolean): boolean {
+  if (status === "optional" && !showAll) return false;
+  return true;
+}
+
+/**
  * Order a soul key→count map for display: highest count first, ties broken
  * alphabetically for stable output. Soul entries are keyed identity facts
  * (role / project / standards / …) — this is the honest breakdown dimension.
@@ -6156,11 +6176,14 @@ program
     //     directly (the OpenClaw plugin install layout — not on $PATH, not in
     //     flair's module graph).
     //
-    // Default UI shows only end-user-facing packages: flair, flair-mcp,
-    // openclaw-flair. flair-client is a transitive dep of flair-mcp and
-    // showing it as a top-level upgrade item invites a misleading
-    // "❔ missing — install with npm install -g" suggestion for users who
-    // installed flair without flair-mcp (ops-h5cd). --all opts in.
+    // Default UI shows the npm-global packages (flair, flair-mcp) plus
+    // openclaw-flair WHEN openclaw is installed. On machines without openclaw
+    // the openclaw-flair line is suppressed entirely (ops-p42n) rather than
+    // nagging with an install hint for a plugin the user can't use. flair-client
+    // is a transitive dep of flair-mcp and showing it as a top-level upgrade
+    // item invites a misleading "❔ missing — install with npm install -g"
+    // suggestion for users who installed flair without flair-mcp (ops-h5cd).
+    // --all opts in to both flair-client and the suppressed openclaw line.
     type ProbeKind = "bin" | "lib" | "openclaw-plugin";
     const packages: Array<{
       name: string;
@@ -6176,7 +6199,13 @@ program
       {
         name: "@tpsdev-ai/flair-mcp",
         kind: "bin",
-        probe: () => probeBinVersion(execFileSync,"flair-mcp"),
+        // Older flair-mcp installs (e.g. 0.10.0) either aren't on PATH or
+        // don't support `--version`, so the bin probe returns null even when
+        // the package IS globally installed (ops-p42n). Fall back to the lib
+        // probe, which require.resolves the package.json from a sibling global
+        // install regardless of PATH or --version support. kind stays "bin" so
+        // it remains npm-upgradeable (npm install -g), not the openclaw path.
+        probe: () => probeBinVersion(execFileSync, "flair-mcp") ?? probeLibVersion("@tpsdev-ai/flair-mcp"),
       },
       {
         name: "@tpsdev-ai/openclaw-flair",
@@ -6191,13 +6220,8 @@ program
       },
     ];
 
-    // Three-state status per package, plus a fourth for openclaw-plugin
-    // packages that aren't installed (since openclaw is optional):
-    //   current    — installed version matches registry latest
-    //   outdated   — installed version is older than latest
-    //   missing    — not detected; default packages → install advised
-    //   optional   — openclaw plugin; openclaw isn't installed (don't nag)
-    type Status = "current" | "outdated" | "missing" | "optional";
+    // Per-package status — see the UpgradeStatus type for the four states.
+    type Status = UpgradeStatus;
     const findings: Array<{ name: string; installed: string | null; latest: string; status: Status; kind: ProbeKind }> = [];
 
     for (const { name, probe, kind, transitive } of packages) {
@@ -6221,6 +6245,13 @@ program
         }
         findings.push({ name, installed, latest, status, kind });
 
+        // Suppress the line for openclaw plugins that are optional-because-
+        // openclaw-is-absent (ops-p42n): on machines without openclaw the
+        // "○ … not installed (openclaw not detected) → … (install via …)"
+        // line is pure noise. Still print it when openclaw IS installed
+        // (current/outdated) or under --all.
+        if (!shouldPrintUpgradeLine(status, showAll)) continue;
+
         const icon = status === "current" ? "✅"
           : status === "outdated" ? "⬆️"
           : status === "optional" ? "○"
@@ -6233,6 +6264,10 @@ program
         console.log(`  ${icon} ${name}: ${installedLabel} → ${latest}${suffix}`);
       } catch { /* skip unavailable packages */ }
     }
+
+    // Scope footer (ops-p42n): make explicit what `flair upgrade` does and
+    // doesn't cover, so "were the others checked?" has a one-line answer.
+    console.log("\nScope: npm-global packages (flair, flair-mcp) + openclaw plugins. Other integrations (pi-flair, langgraph-flair, n8n-nodes-flair, hermes-flair) upgrade in their own ecosystems (pi / pip / n8n).");
 
     const outdated = findings.filter((f) => f.status === "outdated");
     const missing = findings.filter((f) => f.status === "missing");
@@ -6317,7 +6352,7 @@ program
         console.log("Run: flair restart");
       }
     } else {
-      console.log("\nRun: flair restart  to use the new version");
+      console.log("\nRun: flair restart to use the new version");
     }
   });
 
