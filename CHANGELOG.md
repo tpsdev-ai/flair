@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-07-01
+
+### 🐛 `flair upgrade` — detect an installed-but-stale flair-mcp, drop openclaw noise, fix formatting (#543)
+
+The bin `--version` probe missed a globally-installed `flair-mcp` (older installs predate `--version`) → it now falls back to the lib probe (reads the installed `package.json` version, version-independent), so a stale-but-present flair-mcp is correctly detected. The `openclaw-flair` line is suppressed when openclaw isn't installed (still shown under `--all`), dropping noise on machines without openclaw. Fixed a double-space in the restart hint. Added a one-line scope note: `flair upgrade` covers the npm-global surface + openclaw plugins; `pi-flair` / `langgraph-flair` / `n8n-nodes-flair` / `hermes-flair` upgrade within their own ecosystems. Fixes ops-p42n (surfaced by Kyle's real-world use).
+
+### 🤖 Auto-cut GitHub releases from the CHANGELOG on tag (#544)
+
+Every `v*` tag now creates its GitHub release from the matching CHANGELOG section — idempotent (create-or-edit), injection-safe (tag/version passed via env, notes via `--notes-file`), and independent of the npm 2FA staging gate.
+
 ## [0.16.0] - 2026-06-29
 
 ### 🧪 CI clean-VM gate — exercise the REALISTIC user env so the #538 embeddings showstopper can't silently regress (ops-cd37)
