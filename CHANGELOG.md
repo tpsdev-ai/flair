@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### 🔐 Native `/mcp` OAuth surface — Model 2 (custom `withMCPAuth`-guarded handler), default-OFF (ops-b6uk)
+
+Flair speaks MCP natively over a custom in-process `/mcp` JSON-RPC handler wrapped with `@harperfast/oauth`'s `withMCPAuth` — a per-agent OAuth identity replaces the local `flair-mcp` stdio proxy's key-holding. This is the **Model 2** path (Nathan approved 2026-07-01): a custom handler rather than Harper's native application-MCP profile, so it sidesteps the Harper native-MCP gating gaps and is curated **by construction** (the handler only implements the 9 flair tools — no raw CRUD surface).
+
+**Default-OFF behind `FLAIR_MCP_OAUTH`.** When the flag is unset (the shipped default), flair boots byte-identically: no `/mcp` route is registered, `@harperfast/oauth` is never imported, and the default auth chain (Ed25519) is unchanged. `resources/auth-middleware.ts`, `XAA.ts`, `OAuth.ts`, `config.yaml`, and every delegated handler resource are **untouched**.
+
+- **`resources/mcp-handler.ts`** — a minimal MCP handler (`initialize` / `tools/list` / `tools/call` / `ping`). On `tools/call` it resolves the `withMCPAuth`-verified token `sub` → a flair `Agent` via `Credential(kind:"idp", idpSubject=sub)` → `principalId` (the same identity surface XAA uses), establishes the `request.tpsAgent` scoping context, and delegates to the existing resource handler. An unresolvable `sub` is **denied** — never run as anonymous or admin. JIT-provisioning of an unknown sub is gated behind an explicit trust anchor (`FLAIR_MCP_JIT_PROVISION`, default OFF).
+- **`resources/mcp-tools.ts`** — the 9 curated tools (memory_search/store/get/delete, bootstrap, soul_set/get, flair_workspace_set, flair_orgevent), each a thin wrapper over the existing handler (Memory / SemanticSearch / BootstrapMemories / Soul / WorkspaceState / OrgEvent). Handlers lazy-loaded so the /mcp module graph carries no top-level Harper link. Fixed a soul-keying bug carried from the design-A slice (soul_set now PUTs with `id = agentId:key` so soul_get can find it).
+- **`resources/mcp-oauth.ts`** — registers `server.http(withMCPAuth(mcpHandler), { urlPath: '/mcp' })` **only when the flag is on** (its own dispatch chain; flair's default auth-middleware doesn't run for `/mcp`). `getConfig` pins issuer/resource so iss/aud checks match the minted tokens.
+- **Sherlock's 4 reqs:** (1) short-lived tokens via `mcp.accessTokenTtl` (5–15 min) + refresh; (2) RS256 pinning — the plugin is RS256-only by construction (`none`/HS256 structurally rejected); (3) dual-auth precedence — `/mcp` is OAuth-only on its own chain, Ed25519 never reaches it, they can't collide; (4) DCR authentication via `initialAccessToken` + the JIT trust anchor.
+- **`@harperfast/oauth@2.1.0`** added exact-pinned; on the supply-chain keep-current allow-list (same high-trust `@harperfast/*` owner as `@harperfast/harper`; only loaded when the default-OFF surface is enabled — zero exposure in the default build). Documented in `docs/supply-chain-policy.md` and `docs/notes/mcp-oauth-model2.md`.
+- **Deferred (not shipped):** live `config.yaml` wiring of the AS plugin (kept out to preserve byte-identical flag-OFF; documented for operators) and migrating the homegrown `OAuth.ts`/`XAA.ts` (deprecate-don't-delete — they stay for the Ed25519 path).
+
 ## [0.16.1] - 2026-07-01
 
 ### 🐛 `flair upgrade` — detect an installed-but-stale flair-mcp, drop openclaw noise, fix formatting (#543)

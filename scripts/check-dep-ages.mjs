@@ -75,6 +75,13 @@ if (!Number.isFinite(MIN_AGE_DAYS) || MIN_AGE_DAYS < 0) {
 const DEFAULT_KEEP_CURRENT = new Set([
   "@harperfast/harper",
   "harper-fabric-embeddings",
+  // @harperfast/oauth: same high-trust @harperfast/* owner as @harperfast/harper
+  // (already exempt). Used ONLY by the default-OFF native-MCP OAuth surface
+  // (FLAIR_MCP_OAUTH), which dynamically imports it only when the flag is on — so
+  // it is not loaded in the shipped default build (zero exposure until an operator
+  // opts in). Pinned to the exact version whose withMCPAuth API the surface was
+  // built against. See docs/supply-chain-policy.md §1a.
+  "@harperfast/oauth",
 ]);
 const KEEP_CURRENT = new Set([
   ...DEFAULT_KEEP_CURRENT,

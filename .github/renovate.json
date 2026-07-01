@@ -36,7 +36,7 @@
     },
     {
       "description": "Keep-current allow-list — mirrors scripts/check-dep-ages.mjs DEFAULT_KEEP_CURRENT. These are tightly coupled to Flair runtime correctness (Harper / embedding fixes); we accept the bake-time risk and pull them eagerly, so Renovate skips the cooldown for them too. Keep this list in lockstep with the script and docs/supply-chain-policy.md.",
-      "matchPackageNames": ["@harperfast/harper", "harper-fabric-embeddings"],
+      "matchPackageNames": ["@harperfast/harper", "harper-fabric-embeddings", "@harperfast/oauth"],
       "minimumReleaseAge": "0 days"
     }
   ],
