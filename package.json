@@ -56,6 +56,7 @@
   },
   "dependencies": {
     "@harperfast/harper": "5.1.14",
+    "@harperfast/oauth": "2.1.0",
     "@types/js-yaml": "4.0.9",
     "commander": "14.0.3",
     "harper-fabric-embeddings": "0.2.3",

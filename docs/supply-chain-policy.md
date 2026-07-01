@@ -25,6 +25,7 @@ Some deps are tightly coupled to Flair's runtime correctness — Harper bug fixe
 |---------|------------------|
 | `@harperfast/harper` | Foundational. Vector-index and HNSW correctness fixes land here; we want them ASAP. High-volume upstream, fast detection if compromised. |
 | `harper-fabric-embeddings` | Embedding model loader. Coupled to Harper version. Same trust-and-volume reasoning. |
+| `@harperfast/oauth` | Same high-trust `@harperfast/*` owner as `@harperfast/harper`. Used ONLY by the **default-OFF** native-MCP OAuth surface (`FLAIR_MCP_OAUTH`), which dynamically imports it only when the flag is on — it is **not loaded in the shipped default build**, so bake-time exposure is zero until an operator explicitly opts in. Pinned to the exact version whose `withMCPAuth` API the surface was built against; the API surface (not a floating range) is what we depend on. |
 
 Adding to this list is a deliberate decision. The bar:
 - The upstream is well-known and high-volume (gets eyeballs fast).
@@ -74,7 +75,7 @@ Only Nathan publishes to npm (per the existing MFA boundary). Flint preps the re
 
 ### `.github/renovate.json` — deliberate, cooldown-gated update proposals
 
-Renovate opens PRs to propose dependency updates so we don't drift behind upstream indefinitely — but on our terms, not the registry's. It is configured to never auto-merge (`automerge: false`), to pin (`rangeStrategy: "pin"`, consistent with §2), and to respect the bake-time cooldown (`minimumReleaseAge: "7 days"`, matching `FLAIR_DEP_MIN_AGE_DAYS` in `check-dep-ages.mjs`) so it only proposes versions that have already cleared the detection window. Non-major updates are grouped; majors land as isolated PRs. The keep-current allow-list (`@harperfast/harper`, `harper-fabric-embeddings`) mirrors the script's `DEFAULT_KEEP_CURRENT` — keep the two in lockstep when either changes. Vulnerability alerts bypass the cooldown. Every Renovate PR still runs the full CI suite (including the bake-time and workspace-deps gates) and is K&S-reviewed before merge.
+Renovate opens PRs to propose dependency updates so we don't drift behind upstream indefinitely — but on our terms, not the registry's. It is configured to never auto-merge (`automerge: false`), to pin (`rangeStrategy: "pin"`, consistent with §2), and to respect the bake-time cooldown (`minimumReleaseAge: "7 days"`, matching `FLAIR_DEP_MIN_AGE_DAYS` in `check-dep-ages.mjs`) so it only proposes versions that have already cleared the detection window. Non-major updates are grouped; majors land as isolated PRs. The keep-current allow-list (`@harperfast/harper`, `harper-fabric-embeddings`, `@harperfast/oauth`) mirrors the script's `DEFAULT_KEEP_CURRENT` — keep the two in lockstep when either changes. Vulnerability alerts bypass the cooldown. Every Renovate PR still runs the full CI suite (including the bake-time and workspace-deps gates) and is K&S-reviewed before merge.
 
 ### `scripts/check-workspace-deps.mjs` (already shipped, PR #368)
 
