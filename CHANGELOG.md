@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-02
+
+### 🔒 SECURITY: cross-agent isolation break — `getContext()` not `this.request` (#551, ops-sal4)
+
+**P0, live-confirmed.** Harper v5 never populates `this.request` on `Resource` subclasses; the #236/#487 `getContext()` sweep missed 8 handlers, so their per-agent ownership guards silently read `undefined` and became dead no-ops (fail-open). Any verified agent could read any other agent's **WorkspaceState** (`GET /WorkspaceLatest/{id}`) and **OrgEvent catch-up feed** (`GET /OrgEventCatchup/{id}`), and every approved **OAuth consent grant** was minted for the `admin` principal regardless of who approved it.
+
+All 8 handlers now resolve identity via the canonical `resolveAgentAuth(getContext())` helper (the same path 31 other resources already use), with **fail-closed** guards (anonymous → 403; a verified agent may only reach its own id; internal/admin pass). The OAuth authorize handler now returns 401 on an unresolved principal instead of silently granting `admin`. A new NECESSITY test suite (`cross-agent-isolation.test.ts`) asserts cross-agent reads are **denied** — the coverage gap (the deelevation suite only tested self-reads) that let this ship green — confirmed to fail on the unpatched tree and pass after the fix. Also fixes three fail-*closed* functional breaks from the same root cause (AgentSeed onboarding, IngestEvents, AdminMemory query params).
+
+### ✨ Bootstrap: team roster + cross-agent search nudge (#549)
+
+`BootstrapMemories` now emits a fixed-cost `## Team` section listing the other active agents in the office with a nudge to search their memories before deep-diving an unfamiliar problem — bootstrap previously only ever loaded the caller's own context, so agents never learned teammates' findings were one `memory_search` away. Agent IDs are wrapped via `wrapUntrusted` (registrant-chosen, untrusted). External contribution from @kriszyp.
+
 ### 🔐 Native `/mcp` OAuth surface — Model 2 (custom `withMCPAuth`-guarded handler), default-OFF (ops-b6uk)
 
 Flair speaks MCP natively over a custom in-process `/mcp` JSON-RPC handler wrapped with `@harperfast/oauth`'s `withMCPAuth` — a per-agent OAuth identity replaces the local `flair-mcp` stdio proxy's key-holding. This is the **Model 2** path (Nathan approved 2026-07-01): a custom handler rather than Harper's native application-MCP profile, so it sidesteps the Harper native-MCP gating gaps and is curated **by construction** (the handler only implements the 9 flair tools — no raw CRUD surface).
