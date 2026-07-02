@@ -1,6 +1,7 @@
 import { Resource, databases } from "@harperfast/harper";
 import { createHash, randomBytes } from "node:crypto";
 import { handleJwtBearerGrant } from "./XAA.js";
+import { resolveAgentAuth } from "./agent-auth.js";
 
 /**
  * OAuth 2.1 Authorization Server for Flair.
@@ -141,7 +142,12 @@ export class OAuthAuthorize extends Resource {
   async get() {
     // In 1.0, this returns a simple HTML consent page.
     // The user (Nathan) approves or denies, which POSTs back.
-    const request = (this as any).request;
+    // Harper v5 does not populate this.request on Resource subclasses —
+    // getContext() is the only reliable path (ops-sal4: the previous
+    // `(this as any).request` read was always undefined, so query params were
+    // always empty).
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
     const url = new URL(request?.url ?? "http://localhost", "http://localhost");
     const clientId = url.searchParams.get("client_id") ?? "";
     const redirectUri = url.searchParams.get("redirect_uri") ?? "";
@@ -222,9 +228,29 @@ ${scope.split(" ").map((s: string) => `<div class="scope">${s}</div>`).join("")}
       return Response.redirect(`${redirectUri}?${params}`, 302);
     }
 
-    // Determine authenticated principal
-    const request = (this as any).request;
-    const principalId: string = request?.tpsAgent ?? "admin";
+    // Determine authenticated principal. Harper v5 does not populate
+    // this.request on Resource subclasses, so `(this as any).request?.tpsAgent`
+    // was always undefined and this ALWAYS fell back to the hardcoded "admin" —
+    // every approved consent grant was minted for the admin principal
+    // regardless of who actually approved it (ops-sal4 identity spoof).
+    // resolveAgentAuth(getContext()) resolves Basic super_user/admin auth to
+    // { kind: "agent", agentId: username, isAdmin: true } (see agent-auth.ts).
+    // We do NOT silently fall back to "admin" on an unresolved principal — if
+    // no principal can be resolved, that's an error state, not an admin grant.
+    //
+    // SECURITY REVIEW (Sherlock): is resolving the approving principal via
+    // resolveAgentAuth the correct policy for "who may approve OAuth consent"
+    // in 1.0 — i.e. must the approver be Basic-authenticated as super_user/
+    // admin, or should any verified (non-admin) agent be able to approve its
+    // own consent grant? The previous code always resolved to "admin" for
+    // every caller, so this is a genuine policy decision, not just a bug fix.
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    if (auth.kind !== "agent") {
+      return new Response(JSON.stringify({ error: "authentication required" }), {
+        status: 401, headers: { "content-type": "application/json" },
+      });
+    }
+    const principalId: string = auth.agentId;
 
     // Generate authorization code
     const code = randomBytes(32).toString("base64url");

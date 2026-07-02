@@ -6,7 +6,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { allowVerified } from "./agent-auth.js";
+import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 
 export class WorkspaceLatest extends Resource {
   // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
@@ -17,9 +17,13 @@ export class WorkspaceLatest extends Resource {
   }
 
   async get(pathInfo?: any) {
-    const request = (this as any).context?.request ?? (this as any).request;
-    const callerAgent = request?.tpsAgent;
-    const callerIsAdmin = request?.tpsAgentIsAdmin === true;
+    // Harper v5 does not populate this.context / this.request on Resource
+    // subclasses — getContext() is the only reliable path to the gate's
+    // tpsAgent/tpsAgentIsAdmin annotations (ops-sal4: the previous
+    // `(this as any).context?.request ?? (this as any).request` read was always
+    // undefined, so the ownership check below never ran — fail-open cross-agent
+    // read).
+    const auth = await resolveAgentAuth((this as any).getContext?.());
 
     // Extract agentId from path: /WorkspaceLatest/{agentId}
     const agentId =
@@ -34,8 +38,16 @@ export class WorkspaceLatest extends Resource {
       );
     }
 
-    // Auth: requesting agent must match path agentId (or admin)
-    if (callerAgent && !callerIsAdmin && callerAgent !== agentId) {
+    // Auth: internal calls and admins pass unfiltered; a verified agent may only
+    // read its own workspace state; anonymous is denied. allowRead() already
+    // blocks anonymous HTTP, but this handler must fail closed on its own too.
+    if (auth.kind === "anonymous") {
+      return new Response(
+        JSON.stringify({ error: "forbidden: cannot read workspace state for another agent" }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (auth.kind === "agent" && !auth.isAdmin && auth.agentId !== agentId) {
       return new Response(
         JSON.stringify({ error: "forbidden: cannot read workspace state for another agent" }),
         { status: 403, headers: { "Content-Type": "application/json" } },

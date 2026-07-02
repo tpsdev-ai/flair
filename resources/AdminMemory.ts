@@ -23,7 +23,12 @@ import { layout, htmlResponse, esc } from "./admin-layout.js";
  */
 export class AdminMemory extends Resource {
   async get() {
-    const request = (this as any).request;
+    // Harper v5 does not populate this.request on Resource subclasses —
+    // getContext() is the only reliable path (ops-sal4: the previous
+    // `(this as any).request` read was always undefined, so query params
+    // (?id=, ?q=, ?subject=, ?limit=) were always ignored).
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
     const url = new URL(request?.url ?? "http://localhost", "http://localhost");
     const id = url.searchParams.get("id") ?? "";
 
