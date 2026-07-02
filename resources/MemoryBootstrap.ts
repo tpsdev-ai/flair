@@ -2,6 +2,7 @@ import { Resource, databases } from "@harperfast/harper";
 import { allowVerified } from "./agent-auth.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { wrapUntrusted } from "./content-safety.js";
+import { isTeammate, formatTeamLine } from "./memory-bootstrap-lib.js";
 
 /**
  * POST /MemoryBootstrap
@@ -14,6 +15,9 @@ import { wrapUntrusted } from "./content-safety.js";
  *   4. Task-relevant memories (semantic search if currentTask provided)
  *   5. Relationship context (active relationships for mentioned entities)
  *   6. Predicted context (based on channel/surface/subject hints)
+ *   7. Team roster (other active agents in this office + a search-first nudge —
+ *      bootstrap only ever loads the caller's own memories, so this is the one
+ *      place agents learn teammates' findings exist without a separate call)
  *
  * Prediction: when context signals (channel, surface, subjects) are provided,
  * the bootstrap loads more aggressively — Flair is fast enough that the
@@ -98,6 +102,7 @@ export class BootstrapMemories extends Resource {
     const sections: Record<string, string[]> = {
       soul: [],
       skills: [],
+      team: [],
       permanent: [],
       recent: [],
       predicted: [],
@@ -191,6 +196,30 @@ export class BootstrapMemories extends Resource {
         }
         sections.skills.push(line);
       }
+    }
+
+    // --- 1c. Team roster + cross-agent search nudge ---
+    // Bootstrap only ever loads the caller's OWN soul/memories (every query
+    // below filters record.agentId === agentId). Nothing here tells the agent
+    // that teammates exist or that their findings are one memory_search away
+    // — so agents never think to check before re-investigating something a
+    // teammate already solved. This section is fixed-cost (no query text to
+    // format per agent) so it's cheap enough to always include, not budgeted.
+    //
+    // Permissive kind/status checks are DELIBERATE: Agent.ts registration
+    // defaults both (`kind ||= "agent"`, `status ||= "active"`), so pre-1.0
+    // records missing either field are legacy agents/active — a strict
+    // `!== "agent"` check would silently drop them. Assumes single-tenant
+    // (one instance = one office); grant-filtered roster is the multi-tenant follow-up.
+    try {
+      const teammateIds: string[] = [];
+      for await (const record of (databases as any).flair.Agent.search()) {
+        if (isTeammate(record, agentId)) teammateIds.push(record.id);
+      }
+      const line = formatTeamLine(teammateIds);
+      if (line) sections.team.push(line);
+    } catch {
+      // Agent table may not exist in older / standalone deployments
     }
 
     // --- 2. Permanent memories (always included, highest priority) ---
@@ -405,6 +434,9 @@ export class BootstrapMemories extends Resource {
     if (sections.skills.length > 0) {
       parts.push("## Active Skills\n" + sections.skills.join("\n"));
     }
+    if (sections.team.length > 0) {
+      parts.push("## Team\n" + sections.team.join("\n"));
+    }
     if (sections.permanent.length > 0) {
       parts.push("## Core Principles\n" + sections.permanent.join("\n"));
     }
@@ -433,6 +465,7 @@ export class BootstrapMemories extends Resource {
       sections: {
         soul: sections.soul.length,
         skills: sections.skills.length,
+        team: sections.team.length,
         permanent: sections.permanent.length,
         recent: sections.recent.length,
         predicted: sections.predicted.length,
