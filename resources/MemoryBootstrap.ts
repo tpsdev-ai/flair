@@ -14,6 +14,9 @@ import { wrapUntrusted } from "./content-safety.js";
  *   4. Task-relevant memories (semantic search if currentTask provided)
  *   5. Relationship context (active relationships for mentioned entities)
  *   6. Predicted context (based on channel/surface/subject hints)
+ *   7. Team roster (other active agents in this office + a search-first nudge —
+ *      bootstrap only ever loads the caller's own memories, so this is the one
+ *      place agents learn teammates' findings exist without a separate call)
  *
  * Prediction: when context signals (channel, surface, subjects) are provided,
  * the bootstrap loads more aggressively — Flair is fast enough that the
@@ -98,6 +101,7 @@ export class BootstrapMemories extends Resource {
     const sections: Record<string, string[]> = {
       soul: [],
       skills: [],
+      team: [],
       permanent: [],
       recent: [],
       predicted: [],
@@ -191,6 +195,33 @@ export class BootstrapMemories extends Resource {
         }
         sections.skills.push(line);
       }
+    }
+
+    // --- 1c. Team roster + cross-agent search nudge ---
+    // Bootstrap only ever loads the caller's OWN soul/memories (every query
+    // below filters record.agentId === agentId). Nothing here tells the agent
+    // that teammates exist or that their findings are one memory_search away
+    // — so agents never think to check before re-investigating something a
+    // teammate already solved. This section is fixed-cost (no query text to
+    // format per agent) so it's cheap enough to always include, not budgeted.
+    try {
+      const teammateIds: string[] = [];
+      for await (const record of (databases as any).flair.Agent.search()) {
+        if (record.id === agentId) continue;
+        if (record.kind && record.kind !== "agent") continue;
+        if (record.status && record.status !== "active") continue;
+        teammateIds.push(record.id);
+      }
+      if (teammateIds.length > 0) {
+        const plural = teammateIds.length === 1 ? "agent shares" : "agents share";
+        const line =
+          `${teammateIds.length} other ${plural} this Flair office (${teammateIds.join(", ")}). ` +
+          `Before deep-diving an unfamiliar problem, search their memories for related work — ` +
+          `\`memory_search\` covers any agent you hold a search grant from.`;
+        sections.team.push(line);
+      }
+    } catch {
+      // Agent table may not exist in older / standalone deployments
     }
 
     // --- 2. Permanent memories (always included, highest priority) ---
@@ -405,6 +436,9 @@ export class BootstrapMemories extends Resource {
     if (sections.skills.length > 0) {
       parts.push("## Active Skills\n" + sections.skills.join("\n"));
     }
+    if (sections.team.length > 0) {
+      parts.push("## Team\n" + sections.team.join("\n"));
+    }
     if (sections.permanent.length > 0) {
       parts.push("## Core Principles\n" + sections.permanent.join("\n"));
     }
@@ -433,6 +467,7 @@ export class BootstrapMemories extends Resource {
       sections: {
         soul: sections.soul.length,
         skills: sections.skills.length,
+        team: sections.team.length,
         permanent: sections.permanent.length,
         recent: sections.recent.length,
         predicted: sections.predicted.length,
