@@ -2,6 +2,7 @@ import { Resource, databases } from "@harperfast/harper";
 import { allowVerified } from "./agent-auth.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { wrapUntrusted } from "./content-safety.js";
+import { isTeammate, formatTeamLine } from "./memory-bootstrap-lib.js";
 
 /**
  * POST /MemoryBootstrap
@@ -204,22 +205,19 @@ export class BootstrapMemories extends Resource {
     // — so agents never think to check before re-investigating something a
     // teammate already solved. This section is fixed-cost (no query text to
     // format per agent) so it's cheap enough to always include, not budgeted.
+    //
+    // Permissive kind/status checks are DELIBERATE: Agent.ts registration
+    // defaults both (`kind ||= "agent"`, `status ||= "active"`), so pre-1.0
+    // records missing either field are legacy agents/active — a strict
+    // `!== "agent"` check would silently drop them. Assumes single-tenant
+    // (one instance = one office); grant-filtered roster is the multi-tenant follow-up.
     try {
       const teammateIds: string[] = [];
       for await (const record of (databases as any).flair.Agent.search()) {
-        if (record.id === agentId) continue;
-        if (record.kind && record.kind !== "agent") continue;
-        if (record.status && record.status !== "active") continue;
-        teammateIds.push(record.id);
+        if (isTeammate(record, agentId)) teammateIds.push(record.id);
       }
-      if (teammateIds.length > 0) {
-        const plural = teammateIds.length === 1 ? "agent shares" : "agents share";
-        const line =
-          `${teammateIds.length} other ${plural} this Flair office (${teammateIds.join(", ")}). ` +
-          `Before deep-diving an unfamiliar problem, search their memories for related work — ` +
-          `\`memory_search\` covers any agent you hold a search grant from.`;
-        sections.team.push(line);
-      }
+      const line = formatTeamLine(teammateIds);
+      if (line) sections.team.push(line);
     } catch {
       // Agent table may not exist in older / standalone deployments
     }
