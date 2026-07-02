@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/n8n-nodes-flair",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "description": "n8n community node — use Flair as your AI Agent's memory backend. Includes FlairChatMemory (Memory port) and FlairSearch (Tool port).",
   "type": "commonjs",
   "main": "dist/index.js",
@@ -48,7 +48,7 @@
     "langchain"
   ],
   "dependencies": {
-    "@tpsdev-ai/flair-client": "0.16.1",
+    "@tpsdev-ai/flair-client": "0.17.0",
     "zod": "3.25.76"
   },
   "peerDependencies": {
