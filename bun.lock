@@ -59,7 +59,7 @@
       "name": "@tpsdev-ai/langgraph-flair",
       "version": "0.17.0",
       "dependencies": {
-        "@tpsdev-ai/flair-client": "0.16.0",
+        "@tpsdev-ai/flair-client": "0.17.0",
       },
       "peerDependencies": {
         "@langchain/langgraph-checkpoint": ">=0.0.10",
@@ -69,7 +69,7 @@
       "name": "@tpsdev-ai/n8n-nodes-flair",
       "version": "0.17.0",
       "dependencies": {
-        "@tpsdev-ai/flair-client": "0.16.0",
+        "@tpsdev-ai/flair-client": "0.17.0",
         "zod": "3.25.76",
       },
       "devDependencies": {
@@ -89,7 +89,7 @@
       "version": "0.17.0",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.16.0",
+        "@tpsdev-ai/flair-client": "0.17.0",
       },
       "devDependencies": {
         "typescript": "5.9.3",
@@ -103,7 +103,7 @@
       "version": "0.17.0",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.16.0",
+        "@tpsdev-ai/flair-client": "0.17.0",
       },
       "devDependencies": {
         "@mariozechner/pi-coding-agent": "0.73.0",
