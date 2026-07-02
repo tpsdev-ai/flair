@@ -11,7 +11,7 @@
  */
 
 import { Resource, databases } from "@harperfast/harper";
-import { allowVerified } from "./agent-auth.js";
+import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 
 export class OrgEventCatchup extends Resource {
   // Self-authorize via the Ed25519 agent verify (auth reshape removes the gate's
@@ -24,9 +24,12 @@ export class OrgEventCatchup extends Resource {
 
   // HarperDB calls get(pathInfo, context) where pathInfo is the URL segment after /OrgEventCatchup/
   async get(pathInfo?: any) {
-    const request = (this as any).request;
-    const callerAgent = request?.tpsAgent;
-    const callerIsAdmin = request?.tpsAgentIsAdmin === true;
+    // Harper v5 does not populate this.request on Resource subclasses —
+    // getContext() is the only reliable path to the gate's tpsAgent/
+    // tpsAgentIsAdmin annotations (ops-sal4: the previous `(this as
+    // any).request` read was always undefined, so the ownership check below
+    // never ran — fail-open cross-agent read).
+    const auth = await resolveAgentAuth((this as any).getContext?.());
 
     // Harper routes /OrgEventCatchup/{id} with pathInfo.id as the path segment
     const participantId: string | null =
@@ -42,8 +45,16 @@ export class OrgEventCatchup extends Resource {
       );
     }
 
-    // Auth: requesting agent must match participantId (or admin)
-    if (callerAgent && !callerIsAdmin && callerAgent !== participantId) {
+    // Auth: internal calls and admins pass unfiltered; a verified agent may only
+    // fetch its own catchup feed; anonymous is denied. allowRead() already
+    // blocks anonymous HTTP, but this handler must fail closed on its own too.
+    if (auth.kind === "anonymous") {
+      return new Response(
+        JSON.stringify({ error: "forbidden: can only fetch events for yourself" }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (auth.kind === "agent" && !auth.isAdmin && auth.agentId !== participantId) {
       return new Response(
         JSON.stringify({ error: "forbidden: can only fetch events for yourself" }),
         { status: 403, headers: { "Content-Type": "application/json" } },
