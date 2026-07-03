@@ -1,17 +1,17 @@
 /**
- * mcp-tools.ts — the 9 curated flair tools for the Model-2 custom /mcp handler.
+ * mcp-tools.ts — the 10 curated flair tools for the Model-2 custom /mcp handler.
  *
- * Curated BY CONSTRUCTION: this module implements exactly the 9 tools that the
+ * Curated BY CONSTRUCTION: this module implements exactly the 10 tools that the
  * `@tpsdev-ai/flair-mcp` stdio proxy exposes, each a thin wrapper over the
  * existing flair Resource handler. No business logic is re-implemented — the
  * wrapped handlers (Memory / SemanticSearch / BootstrapMemories / Soul /
  * WorkspaceState / OrgEvent) enforce per-agent scoping/ownership via
  * `resolveAgentAuth(getContext())`, so the MCP surface inherits the SAME security
  * model as the signed-REST path. There is no raw CRUD surface — the only way to
- * reach the datastore through /mcp is via one of these 9 semantic tools.
+ * reach the datastore through /mcp is via one of these 10 semantic tools.
  *
- *   memory_search · memory_store · memory_get · memory_delete · bootstrap ·
- *   soul_set · soul_get · flair_workspace_set · flair_orgevent
+ *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
+ *   bootstrap · soul_set · soul_get · flair_workspace_set · flair_orgevent
  *
  * ── The scoping seam ────────────────────────────────────────────────────────
  * The /mcp handler resolves the OAuth token's `sub` → a flair `Agent` id, then
@@ -153,6 +153,62 @@ async function memoryStore(agent: ResolvedAgent, args: any) {
   }));
 }
 
+/**
+ * memory_update — id-targeted, dedup-BYPASSED overwrite/version path (memory-
+ * integrity fix). Mirrors flair-client's MemoryApi.update() (packages/
+ * flair-client/src/client.ts), reimplemented against the resource instance
+ * API instead of HTTP since this handler calls the Memory resource directly
+ * (same pattern as memoryStore vs the flair-mcp stdio tool). Auth is enforced
+ * by Memory.get()/Memory.put()/Memory.post()'s EXISTING ownership checks — no
+ * parallel auth logic here.
+ *
+ * Default (preserveHistory unset/false): read the existing record, merge the
+ * new content on top (Harper PUT is full-record replacement — never send a
+ * bare partial), clear the stale embedding so the server regenerates it, and
+ * PUT the merged record back to the SAME id.
+ *
+ * preserveHistory: true: write a NEW id with `supersedes: id`. Memory.post()
+ * validates/authorizes the supersede (denying a cross-agent supersede without
+ * a "write" MemoryGrant) and closes the old record's validTo AFTER the new
+ * record is written (never the reverse — see resources/Memory.ts).
+ */
+async function memoryUpdate(agent: ResolvedAgent, args: any) {
+  const Cls = await handler("Memory");
+  const h = new Cls(undefined, delegationContext(agent));
+  const id = args?.id;
+  const content = args?.content;
+  const preserveHistory = args?.preserveHistory === true;
+
+  const existing = await h.get(id);
+  if (!existing) {
+    return { error: "memory not found", status: 404 };
+  }
+
+  if (preserveHistory) {
+    const newId = `${agent.agentId}-${crypto.randomUUID()}`;
+    const record: Record<string, unknown> = {
+      ...existing,
+      id: newId,
+      content,
+      supersedes: id,
+      createdAt: new Date().toISOString(),
+    };
+    delete record.updatedAt;
+    delete record.embedding;
+    delete record.embeddingModel;
+    delete record.validFrom;
+    delete record.validTo;
+    delete record.archivedAt;
+    (h as any).isCollection = true;
+    return unwrap(await h.post(record));
+  }
+
+  const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
+  delete merged.embedding;
+  delete merged.embeddingModel;
+  return unwrap(await h.put(merged));
+}
+
 async function memoryGet(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Memory");
   const h = new Cls(undefined, delegationContext(agent));
@@ -282,6 +338,25 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: memoryStore,
+  },
+  memory_update: {
+    def: {
+      name: "memory_update",
+      description:
+        "Update an existing memory by ID. Dedup-bypassed (this is an intentional overwrite, not a new write). " +
+        "Default: overwrites the same id in place. Pass preserveHistory=true to instead write a new version " +
+        "linked via `supersedes`, closing the old one's validity window.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "ID of the memory to update" },
+          content: { type: "string", description: "New content" },
+          preserveHistory: { type: "boolean", description: "Write a new version (supersedes-linked) instead of overwriting in place (default false)" },
+        },
+        required: ["id", "content"],
+      },
+    },
+    impl: memoryUpdate,
   },
   memory_get: {
     def: {

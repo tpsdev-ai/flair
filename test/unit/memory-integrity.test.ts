@@ -1,0 +1,484 @@
+/**
+ * memory-integrity.test.ts — regression guard for the memory-integrity fix
+ * (flair#526 silent-drop, flair#548 stale-read-after-update, ops-a4t5
+ * supersede silent-fail).
+ *
+ * Exercises resources/Memory.ts (post/put) directly against a mocked
+ * @harperfast/harper, same technique as coordination-write-auth.test.ts and
+ * resolve-agent-auth.test.ts. The auth verdict is injected via
+ * getContext().request.tpsAgent/tpsAgentIsAdmin — exactly what the
+ * non-rejecting gate sets after verifying a signature.
+ *
+ * ── Deterministic dedup testing without a real embedding model ──────────────
+ * getEmbedding() is mocked to return the SAME constant vector for every
+ * input, so raw cosine similarity is ALWAYS 1.0 between any two memories in
+ * this file. This is deliberate: it isolates the Jaccard/lexical gate as the
+ * ONLY discriminator, proving the co-gate requirement (cosine AND lexical)
+ * rather than the pre-fix raw-cosine-only behavior, which — under this same
+ * fake — would flag literally every second write as a "duplicate". The
+ * lexical side of the gate runs on the REAL text via the real tokenize()/
+ * jaccardSimilarity() implementations — nothing about that math is mocked.
+ */
+import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
+
+// Defensive: `bun test <dir>` runs every file in one process, and
+// resources/rate-limiter.ts reads process.env LAZILY (not cached at import
+// time). test/unit/rate-limiter.test.ts enables rate limiting for its own
+// assertions and restores it in afterAll — but this file's Memory.post()
+// calls (many, reusing a handful of fixed agent ids) must never be affected
+// by that or any future env leak, so pin it OFF explicitly here regardless
+// of load order.
+process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
+delete (process.env as any).FLAIR_PUBLIC;
+
+const FAKE_EMBEDDING = [1, 0, 0, 0];
+
+mock.module("../../resources/embeddings-provider.ts", () => ({
+  getEmbedding: async (_text: string) => FAKE_EMBEDDING,
+  getModelId: () => "mock-embedding-model",
+}));
+
+// ─── In-memory Harper Memory / MemoryGrant / Agent mock ─────────────────────
+
+function cosineSim(a: number[], b: number[]): number {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+function matchesCondition(record: any, cond: any): boolean {
+  if (cond.operator && Array.isArray(cond.conditions)) {
+    const results = cond.conditions.map((c: any) => matchesCondition(record, c));
+    return cond.operator === "or" ? results.some(Boolean) : results.every(Boolean);
+  }
+  const fieldVal = record[cond.attribute];
+  if (cond.comparator === "equals") return fieldVal === cond.value;
+  if (cond.comparator === "not_equal") return fieldVal !== cond.value;
+  return true;
+}
+
+let memoryStore: Map<string, any>;
+let memoryGrants: any[];
+let callOrder: string[];
+let idCounter: number;
+
+function memorySearchGen(query: any) {
+  let records = Array.from(memoryStore.values());
+  const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
+  for (const cond of conditions) records = records.filter((r) => matchesCondition(r, cond));
+  if (query?.sort?.attribute === "embedding" && query.sort.distance === "cosine") {
+    const target = query.sort.target;
+    records = records
+      .map((r) => ({ ...r, $distance: Array.isArray(r.embedding) ? 1 - cosineSim(r.embedding, target) : 1 }))
+      .sort((a, b) => a.$distance - b.$distance);
+  }
+  const limit = typeof query?.limit === "number" ? query.limit : undefined;
+  const sliced = limit !== undefined ? records.slice(0, limit) : records;
+  async function* gen() {
+    for (const r of sliced) yield r;
+  }
+  return gen();
+}
+
+class BaseMemory {
+  async post(content: any) {
+    const id = content.id ?? `mock-${++idCounter}`;
+    content.id = id; // mutate in place — matches real Harper create() semantics
+    callOrder.push(`post:${id}`);
+    const rec = { ...content };
+    memoryStore.set(id, rec);
+    return rec;
+  }
+  async put(content: any) {
+    callOrder.push(`put:${content.id}`);
+    const rec = { ...content };
+    memoryStore.set(content.id, rec);
+    return rec;
+  }
+  async get(id: any) {
+    return memoryStore.get(id) ?? null;
+  }
+  async delete(id: any) {
+    memoryStore.delete(id);
+    return { ok: true };
+  }
+  search(query: any) {
+    return memorySearchGen(query);
+  }
+
+  static async get(id: any) {
+    return memoryStore.get(id) ?? null;
+  }
+  static async put(content: any) {
+    callOrder.push(`static-put:${content.id}`);
+    const rec = { ...content };
+    memoryStore.set(content.id, rec);
+    return rec;
+  }
+  static search(query: any) {
+    return memorySearchGen(query);
+  }
+}
+
+const databasesMock = {
+  flair: {
+    Memory: BaseMemory,
+    MemoryGrant: {
+      search: (query: any) => {
+        const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
+        let grants = memoryGrants.slice();
+        for (const cond of conditions) grants = grants.filter((g) => matchesCondition(g, cond));
+        async function* gen() {
+          for (const g of grants) yield g;
+        }
+        return gen();
+      },
+    },
+    Agent: { get: async () => null, search: async () => [] },
+  },
+};
+
+mock.module("@harperfast/harper", () => ({ databases: databasesMock }));
+
+const { Memory } = await import("../../resources/Memory.ts");
+const { jaccardSimilarity, isConservativeMatch, computeMatchConfidence } = await import("../../resources/dedup.ts");
+const { tokenize } = await import("../../resources/bm25.ts");
+
+function makeMemory(ctxRequest: any) {
+  const r: any = new (Memory as any)();
+  r.getContext = () => ({ request: ctxRequest });
+  return r;
+}
+const agentCtx = (agentId: string, isAdmin = false) => ({ tpsAgent: agentId, tpsAgentIsAdmin: isAdmin });
+const anonCtx = () => ({ tpsAnonymous: true });
+
+beforeEach(() => {
+  memoryStore = new Map();
+  memoryGrants = [];
+  callOrder = [];
+  idCounter = 0;
+});
+
+// ─── Fixture text for the #526 replay ────────────────────────────────────────
+// Models the real field case: two findings that share vocabulary (both about
+// federation "replication") but are substantively DIFFERENT facts, plus a
+// genuine reword of one of them (same substance, different phrasing).
+const FINDING_A =
+  "Federation replication direction is governed by a per-pair sends and receives knob in the pairing config.";
+const FINDING_B_DISTINCT =
+  "DDL and schema changes never replicate automatically across a federation pair; you must apply column additions manually on each spoke.";
+const FINDING_A_REWORDED =
+  "Federation replication direction is controlled by a per-pair sends/receives knob inside the pairing configuration.";
+
+// ─── Pure Jaccard / cosine co-gate math (Harper-free, no mocking needed) ─────
+describe("dedup co-gate — pure math (resources/dedup.ts)", () => {
+  it("topic collision: shares vocabulary but is substantively distinct → LOW jaccard", () => {
+    const j = jaccardSimilarity(tokenize(FINDING_A), tokenize(FINDING_B_DISTINCT));
+    expect(j).toBeLessThan(0.5);
+  });
+
+  it("true near-duplicate: reworded but same substance → HIGH jaccard", () => {
+    const j = jaccardSimilarity(tokenize(FINDING_A), tokenize(FINDING_A_REWORDED));
+    expect(j).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it("isConservativeMatch requires BOTH cosine and lexical thresholds to clear", () => {
+    expect(isConservativeMatch(0.99, 0.2)).toBe(false); // high cosine, low lexical — topic collision
+    expect(isConservativeMatch(0.99, 0.6)).toBe(true); // both high — true near-dup
+    expect(isConservativeMatch(0.8, 0.9)).toBe(false); // low cosine, high lexical
+  });
+
+  it("computeMatchConfidence rounds to 3dp and derives lexical from real tokenize()", () => {
+    const conf = computeMatchConfidence("hello world foo", "hello world bar", 0.99996);
+    expect(conf.cosine).toBe(1);
+    expect(conf.lexical).toBeGreaterThan(0);
+    expect(conf.lexical).toBeLessThan(1);
+  });
+
+  it("jaccardSimilarity of two empty/no-overlap sets is 0, never treated as a match", () => {
+    expect(jaccardSimilarity([], [])).toBe(0);
+    expect(jaccardSimilarity(["a", "b"], [])).toBe(0);
+  });
+});
+
+// ─── #526 replay + never-silent-loss ─────────────────────────────────────────
+describe("Memory.post — server-side dedup gate never suppresses a write", () => {
+  it("#526 replay: two topically-close but DISTINCT findings are BOTH written (not merged)", async () => {
+    const m1 = makeMemory(agentCtx("agent-1"));
+    const r1 = await m1.post({ agentId: "agent-1", content: FINDING_A });
+    expect(r1.written).toBe(true);
+
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const r2 = await m2.post({ agentId: "agent-1", content: FINDING_B_DISTINCT });
+
+    // THE regression: both records must exist — the second must NOT have
+    // been dropped/merged into the first, even though cosine is (mocked) 1.0.
+    expect(memoryStore.size).toBe(2);
+    expect(r2.written).toBe(true);
+    expect(r2.id).not.toBe(r1.id);
+    expect(r2.deduplicated).toBe(false);
+    const stored2 = await BaseMemory.get(r2.id);
+    expect(stored2.content).toBe(FINDING_B_DISTINCT);
+  });
+
+  it("a true near-duplicate is flagged (deduplicated:true) but STILL written as a new record", async () => {
+    const m1 = makeMemory(agentCtx("agent-1"));
+    const r1 = await m1.post({ agentId: "agent-1", content: FINDING_A });
+
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const r2 = await m2.post({ agentId: "agent-1", content: FINDING_A_REWORDED });
+
+    expect(memoryStore.size).toBe(2); // never-suppress invariant
+    expect(r2.written).toBe(true);
+    expect(r2.deduplicated).toBe(true);
+    expect(r2.matchedId).toBe(r1.id);
+    expect(r2.matchConfidence.cosine).toBeGreaterThanOrEqual(0.95);
+    expect(r2.matchConfidence.lexical).toBeGreaterThanOrEqual(0.5);
+    const stored2 = await BaseMemory.get(r2.id);
+    expect(stored2.content).toBe(FINDING_A_REWORDED); // new content, never swapped for the old
+  });
+
+  it("never-silent-loss: a store whose content matches an existing record still produces a written record", async () => {
+    const m1 = makeMemory(agentCtx("agent-1"));
+    await m1.post({ agentId: "agent-1", content: FINDING_A });
+    const before = memoryStore.size;
+
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const r2 = await m2.post({ agentId: "agent-1", content: FINDING_A_REWORDED });
+
+    expect(memoryStore.size).toBe(before + 1);
+    expect(await BaseMemory.get(r2.id)).not.toBeNull();
+  });
+
+  it("short content (<20 chars) bypasses the gate entirely — identical short content is never flagged", async () => {
+    const m1 = makeMemory(agentCtx("agent-1"));
+    await m1.post({ agentId: "agent-1", content: "hi there" });
+
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const r2 = await m2.post({ agentId: "agent-1", content: "hi there" });
+
+    expect(r2.deduplicated).toBe(false);
+    expect(memoryStore.size).toBe(2);
+  });
+
+  it("collision-signal shape: deduplicated:true + matchedId present when flagged; written always true", async () => {
+    const m1 = makeMemory(agentCtx("agent-1"));
+    const r1 = await m1.post({ agentId: "agent-1", content: FINDING_A });
+    expect(r1.written).toBe(true);
+    expect(r1.deduplicated).toBe(false);
+    expect(r1.matchedId).toBeUndefined();
+
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const r2 = await m2.post({ agentId: "agent-1", content: FINDING_A_REWORDED });
+    expect(r2.written).toBe(true);
+    expect(r2.deduplicated).toBe(true);
+    expect(typeof r2.matchedId).toBe("string");
+    expect(r2.matchConfidence).toEqual({ cosine: expect.any(Number), lexical: expect.any(Number) });
+  });
+
+  it("dedup match is scoped to the SAME agentId — no cross-agent false positive", async () => {
+    const m1 = makeMemory(agentCtx("agent-1"));
+    await m1.post({ agentId: "agent-1", content: FINDING_A });
+
+    const m2 = makeMemory(agentCtx("agent-2"));
+    const r2 = await m2.post({ agentId: "agent-2", content: FINDING_A_REWORDED }); // same text, different agent
+
+    expect(r2.deduplicated).toBe(false);
+    expect(memoryStore.size).toBe(2);
+  });
+
+  it("anonymous write is still denied (401), and never reaches the dedup gate", async () => {
+    const m = makeMemory(anonCtx());
+    const res = await m.post({ agentId: "agent-1", content: FINDING_A });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(401);
+    expect(memoryStore.size).toBe(0);
+  });
+});
+
+// ─── #548 replay: memory_update same-id overwrite ────────────────────────────
+describe("#548 replay: memory_update — same-id overwrite reflects new content", () => {
+  it("a subsequent read returns the NEW content (not stale); the old id resolves to current", async () => {
+    const owner = agentCtx("agent-1");
+    const m = makeMemory(owner);
+    const initial = await m.post({ agentId: "agent-1", content: "Deploy status: pending review (evolving state)." });
+    const id = initial.id;
+
+    // Simulate memory_update's default mode: read existing, merge new content
+    // on top (never a bare partial — Harper PUT is full-record replacement),
+    // clear the stale embedding, PUT to the SAME id. Dedup-bypassed (no
+    // dedup/dedupThreshold hints set, and the id already exists).
+    const existing = await BaseMemory.get(id);
+    const merged: any = { ...existing, content: "Deploy status: shipped and verified in prod.", updatedAt: new Date().toISOString() };
+    delete merged.embedding;
+    delete merged.embeddingModel;
+
+    const mUpdate = makeMemory(owner);
+    const putResult = await mUpdate.put(merged);
+
+    expect(putResult.written).toBe(true);
+    expect(putResult.deduplicated).toBe(false); // update is dedup-bypassed, never flagged
+
+    const after = await BaseMemory.get(id);
+    expect(after.content).toBe("Deploy status: shipped and verified in prod.");
+    expect(after.id).toBe(id); // the OLD id resolves to the CURRENT content
+    expect(memoryStore.size).toBe(1); // same-id overwrite — no duplicate record
+  });
+
+  it("update requires ownership — a non-owner's PUT to another agent's memory id is denied, content untouched", async () => {
+    const mOwner = makeMemory(agentCtx("agent-owner"));
+    const owned = await mOwner.post({ agentId: "agent-owner", content: "Owner's evolving-state memory, long enough for the gate." });
+
+    const existing = await BaseMemory.get(owned.id);
+    const mAttacker = makeMemory(agentCtx("agent-attacker"));
+    const res = await mAttacker.put({ ...existing, content: "Hijacked content" });
+
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    const stillOriginal = await BaseMemory.get(owned.id);
+    expect(stillOriginal.content).toBe("Owner's evolving-state memory, long enough for the gate.");
+  });
+
+  it("a fresh PUT with a not-yet-existing id still runs the dedup gate (only an EXISTING id bypasses it)", async () => {
+    const owner = agentCtx("agent-1");
+    const m1 = makeMemory(owner);
+    await m1.post({ agentId: "agent-1", content: FINDING_A });
+
+    const m2 = makeMemory(owner);
+    const r2 = await m2.put({ id: "agent-1-fresh-put-id", agentId: "agent-1", content: FINDING_A_REWORDED });
+
+    expect(r2.written).toBe(true);
+    expect(r2.deduplicated).toBe(true); // fresh id via PUT — not an update, gate applies
+    expect(memoryStore.size).toBe(2);
+  });
+});
+
+// ─── Supersede auth — reuses existing ownership/grant machinery ─────────────
+describe("supersede auth (memory_update preserveHistory mode)", () => {
+  it("cross-agent supersede WITHOUT a write grant is denied (403), nothing written, old record untouched", async () => {
+    const mOwner = makeMemory(agentCtx("agent-owner"));
+    const owned = await mOwner.post({ agentId: "agent-owner", content: "Owner's original finding, long enough for the dedup gate." });
+
+    const mAttacker = makeMemory(agentCtx("agent-attacker"));
+    const res = await mAttacker.post({
+      agentId: "agent-attacker",
+      content: "Attacker's replacement content, long enough for the gate too.",
+      supersedes: owned.id,
+    });
+
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(memoryStore.size).toBe(1); // nothing new written
+    const stillOwned = await BaseMemory.get(owned.id);
+    expect(stillOwned.validTo).toBeUndefined(); // old record untouched
+  });
+
+  it("cross-agent supersede WITH a write grant succeeds and closes the old record", async () => {
+    const mOwner = makeMemory(agentCtx("agent-owner"));
+    const owned = await mOwner.post({ agentId: "agent-owner", content: "Owner's original finding, long enough for the dedup gate." });
+
+    memoryGrants.push({ granteeId: "agent-attacker", ownerId: "agent-owner", scope: "write" });
+
+    const mGranted = makeMemory(agentCtx("agent-attacker"));
+    const res = await mGranted.post({
+      agentId: "agent-attacker",
+      content: "Granted agent's replacement content, long enough for the gate too.",
+      supersedes: owned.id,
+    });
+
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).written).toBe(true);
+    const closedOld = await BaseMemory.get(owned.id);
+    expect(closedOld.validTo).toBeDefined();
+  });
+
+  it("a read-only grant (scope: read) does NOT satisfy the write-grant requirement", async () => {
+    const mOwner = makeMemory(agentCtx("agent-owner"));
+    const owned = await mOwner.post({ agentId: "agent-owner", content: "Owner's original finding, long enough for the dedup gate." });
+
+    memoryGrants.push({ granteeId: "agent-attacker", ownerId: "agent-owner", scope: "read" });
+
+    const mAttacker = makeMemory(agentCtx("agent-attacker"));
+    const res = await mAttacker.post({
+      agentId: "agent-attacker",
+      content: "Attacker's replacement content, long enough for the gate too.",
+      supersedes: owned.id,
+    });
+
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+  });
+
+  it("same-owner supersede needs no grant", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const owned = await m.post({ agentId: "agent-1", content: "Original finding text, long enough for the gate." });
+
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const res = await m2.post({ agentId: "agent-1", content: "Updated finding text, long enough for the gate.", supersedes: owned.id });
+
+    expect((res as any).written).toBe(true);
+    const closedOld = await BaseMemory.get(owned.id);
+    expect(closedOld.validTo).toBeDefined();
+  });
+
+  it("supersedes must be a string — a non-string value is rejected with 400", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const res = await m.post({ agentId: "agent-1", content: "Some content, long enough for the gate.", supersedes: 12345 });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(400);
+  });
+});
+
+// ─── Supersede transaction — write-new BEFORE close-old, observable failure ──
+describe("supersede transaction (ops-a4t5 fix)", () => {
+  it("write-new happens BEFORE close-old (call order)", async () => {
+    const owner = agentCtx("agent-1");
+    const mOwner = makeMemory(owner);
+    const owned = await mOwner.post({ agentId: "agent-1", content: "Original evolving state, long enough for the gate." });
+    callOrder.length = 0; // reset — only care about the ordering of the SECOND write
+
+    const mNew = makeMemory(owner);
+    await mNew.post({ agentId: "agent-1", content: "New version, long enough for the gate.", supersedes: owned.id });
+
+    const newWriteIdx = callOrder.findIndex((c) => c.startsWith("post:"));
+    const closeWriteIdx = callOrder.findIndex((c) => c.startsWith("static-put:"));
+    expect(newWriteIdx).toBeGreaterThanOrEqual(0);
+    expect(closeWriteIdx).toBeGreaterThan(newWriteIdx);
+  });
+
+  it("a close-old failure is logged (observable), never silent — and the new record is still safely written", async () => {
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const owner = agentCtx("agent-1");
+      const mOwner = makeMemory(owner);
+      const owned = await mOwner.post({ agentId: "agent-1", content: "Original evolving state, long enough for the gate." });
+
+      // Force the close-old step to fail: remove the target record out from
+      // under it (simulates a lost/racing record) right before the superseding
+      // write — the write-new-before-close-old ordering means the auth check's
+      // earlier .get() already ran/passed for a same-owner supersede (no grant
+      // lookup needed), so removing it here only affects the LATER close step.
+      memoryStore.delete(owned.id);
+
+      const mNew = makeMemory(owner);
+      const result = await mNew.post({ agentId: "agent-1", content: "New version, long enough for the gate.", supersedes: owned.id });
+
+      // The new record's write must have succeeded regardless of the failed close.
+      expect((result as any).written).toBe(true);
+      expect(memoryStore.has((result as any).id)).toBe(true);
+
+      // The failure was logged, not swallowed (ops-a4t5).
+      expect(errorSpy).toHaveBeenCalled();
+      const loggedMsg = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(loggedMsg).toContain("ops-a4t5");
+      expect(loggedMsg).toContain(owned.id);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});

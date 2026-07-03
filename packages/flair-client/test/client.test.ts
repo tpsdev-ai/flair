@@ -155,17 +155,108 @@ describe("MemoryApi", () => {
     expect(call[1].method).toBe("DELETE");
   });
 
-  test("dedup skips for short content", async () => {
-    // Short content should NOT trigger a search
+  test("write() with dedup:true makes exactly one call — the gate is server-side now", async () => {
+    // No client-side pre-flight search exists anymore (memory-integrity fix,
+    // flair#526) — dedup/dedupThreshold are forwarded as hints in the SAME
+    // PUT body, never a separate search-then-write round trip.
     mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
     globalThis.fetch = mockFetch as any;
 
     const client = new FlairClient({ agentId: "test" });
     const result = await client.memory.write("short", { dedup: true });
 
-    // Should have made only 1 call (PUT), not 2 (search + PUT)
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(result.content).toBe("short");
+    const call = (mockFetch as any).mock.calls[0];
+    expect(call[1].method).toBe("PUT");
+    const body = JSON.parse(call[1].body);
+    expect(body.dedup).toBe(true);
+  });
+
+  test("write() surfaces a server-reported dedup collision signal, never suppresses", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response(JSON.stringify({
+      deduplicated: true,
+      matchedId: "test-existing-1",
+      matchConfidence: { cosine: 0.96, lexical: 0.7 },
+      written: true,
+    }), { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    const result = await client.memory.write("new distinct content that is long enough", { dedup: true });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(result.content).toBe("new distinct content that is long enough");
+    expect(result.id).not.toBe("test-existing-1");
+    expect((result as any).deduplicated).toBe(true);
+    expect((result as any).matchedId).toBe("test-existing-1");
+    expect((result as any).written).toBe(true);
+  });
+
+  test("update() default mode: reads existing, PUTs merged content to the SAME id, clears stale embedding", async () => {
+    const existing = {
+      id: "mem-1", agentId: "test", content: "old content", type: "session",
+      durability: "standard", tags: [], createdAt: "2026-01-01T00:00:00Z",
+      embedding: [0.1, 0.2, 0.3], embeddingModel: "test-model",
+    };
+    mockFetch = mock((_url: string, init?: any) => {
+      if (init?.method === "GET") {
+        return Promise.resolve(new Response(JSON.stringify(existing), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ written: true, deduplicated: false }), { status: 200 }));
+    });
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    const result = await client.memory.update("mem-1", "new content");
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const putCall = (mockFetch as any).mock.calls.find((c: any) => c[1].method === "PUT");
+    expect(putCall[0]).toContain("/Memory/mem-1");
+    const putBody = JSON.parse(putCall[1].body);
+    expect(putBody.id).toBe("mem-1");
+    expect(putBody.content).toBe("new content");
+    expect(putBody.embedding).toBeUndefined();
+    expect(result.id).toBe("mem-1");
+    expect(result.content).toBe("new content");
+  });
+
+  test("update() preserveHistory: writes a NEW id with supersedes = old id", async () => {
+    const existing = {
+      id: "mem-1", agentId: "test", content: "old content", type: "session",
+      durability: "standard", tags: [], createdAt: "2026-01-01T00:00:00Z",
+      embedding: [0.1, 0.2, 0.3], embeddingModel: "test-model", validFrom: "2026-01-01T00:00:00Z",
+    };
+    mockFetch = mock((_url: string, init?: any) => {
+      if (init?.method === "GET") {
+        return Promise.resolve(new Response(JSON.stringify(existing), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ written: true, deduplicated: false }), { status: 200 }));
+    });
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    const result = await client.memory.update("mem-1", "new version", { preserveHistory: true });
+
+    const putCall = (mockFetch as any).mock.calls.find((c: any) => c[1].method === "PUT");
+    const putBody = JSON.parse(putCall[1].body);
+    expect(putBody.id).not.toBe("mem-1");
+    expect(putBody.supersedes).toBe("mem-1");
+    expect(putBody.content).toBe("new version");
+    expect(putBody.embedding).toBeUndefined();
+    expect(putBody.validFrom).toBeUndefined();
+    expect(result.id).not.toBe("mem-1");
+    expect(result.content).toBe("new version");
+  });
+
+  test("update() on a nonexistent id throws rather than writing", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response('{"error":"not found"}', { status: 404 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await expect(client.memory.update("nonexistent", "x")).rejects.toThrow();
+    // Only the GET happened — no PUT was attempted.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   test("list POSTs conditions body with agentId scope", async () => {

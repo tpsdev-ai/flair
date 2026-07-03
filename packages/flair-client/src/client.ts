@@ -128,37 +128,35 @@ export class FlairClient {
 class MemoryApi {
   constructor(private client: FlairClient) {}
 
-  /** Write a memory. Optionally checks for near-duplicates before writing. */
+  /**
+   * Write a memory. NEVER suppresses the write — the record is always
+   * created. `dedup`/`dedupThreshold` are passthrough HINTS forwarded to the
+   * server, which runs a conservative (cosine + lexical) near-duplicate check
+   * and, when a match is found, attaches a collision signal to the response
+   * (`deduplicated`, `matchedId`, `matchConfidence`) instead of dropping the
+   * new content. (Historical note: a near-duplicate previously short-circuited
+   * this method to return the EXISTING record without writing — that silently
+   * dropped distinct-but-similar content, e.g. flair#526. The check now lives
+   * server-side in Memory.put()/Memory.post() and never suppresses a write.)
+   */
   async write(content: string, opts: {
     id?: string;
     type?: MemoryType;
     durability?: Durability;
     tags?: string[];
     subject?: string;
-    /** Check for similar existing memories before writing. If a near-duplicate
-     *  is found (score >= threshold), returns it instead of creating a new one.
-     *  Default: false (no dedup check). */
+    /** Ask the server to run its conservative near-duplicate check for this
+     *  write and report a collision signal if found. Does NOT suppress the
+     *  write either way. Default: false (server still applies its own
+     *  default gate — this only requests the signal be computed/reported;
+     *  see dedupThreshold to tune it). */
     dedup?: boolean;
-    /** Similarity threshold for dedup. Default: 0.95 */
+    /** Cosine-similarity threshold hint for the server's dedup gate.
+     *  Default (server-side): 0.95 */
     dedupThreshold?: number;
   } = {}): Promise<Memory> {
-    // Near-duplicate check — skip for very short content where similarity
-    // is unreliable (e.g., "ok", "thanks" would match each other)
-    if (opts.dedup && content.length >= 20) {
-      const threshold = opts.dedupThreshold ?? 0.95;
-      // Use raw scoring to avoid retrieval-boost feedback loop where repeated
-      // dedup checks inflate scores above the threshold.
-      const existing = await this.search(content, { limit: 1, minScore: threshold, scoring: "raw" });
-      if (existing.length > 0) {
-        // Return the existing memory instead of creating a duplicate.
-        // Flag deduped so callers know this write was suppressed.
-        const match = await this.get(existing[0].id);
-        if (match) return { ...match, deduped: true };
-      }
-    }
-
     const id = opts.id ?? `${this.client.agentId}-${crypto.randomUUID()}`;
-    const record = {
+    const record: Record<string, unknown> = {
       id,
       agentId: this.client.agentId,
       content,
@@ -168,9 +166,81 @@ class MemoryApi {
       subject: opts.subject,
       createdAt: new Date().toISOString(),
     };
-    await this.client.request("PUT", `/Memory/${id}`, record);
-    // Harper PUT returns {} — return the record we constructed
-    return record as Memory;
+    // Passthrough hints — the server strips these before persisting; they are
+    // never stored on the record itself.
+    if (opts.dedup !== undefined) record.dedup = opts.dedup;
+    if (opts.dedupThreshold !== undefined) record.dedupThreshold = opts.dedupThreshold;
+
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, record);
+    // Merge the server response (deduplicated/matchedId/matchConfidence/
+    // written, plus any echoed fields) over the locally-constructed record —
+    // the write always happens, so `record` always reflects what was sent,
+    // and the server's signal fields (if any) always come through.
+    return { ...record, ...(response ?? {}) } as unknown as Memory;
+  }
+
+  /**
+   * Update an existing memory by id. Dedup-BYPASSED (this IS the intentional
+   * overwrite/version path, not an ambiguous new write) — always writes.
+   * Auth: the caller must own the memory (enforced server-side by the SAME
+   * ownership check Memory.put()/Memory.post() already run — no parallel
+   * check here).
+   *
+   * Default (`preserveHistory` unset/false): same-id overwrite via a
+   * full-record PUT. Harper's PUT is FULL RECORD REPLACEMENT, so we read the
+   * existing record first and merge the new content on top (never a bare
+   * partial). The stale embedding is cleared so the server's existing
+   * "generate embedding if missing" step recomputes it for the new content.
+   *
+   * `opts.preserveHistory: true`: write a NEW id with `supersedes: id`; the
+   * server closes the old record's `validTo` afterward, write-new BEFORE
+   * close-old (safe failure = two active records, never a lost write). If the
+   * old record is owned by a DIFFERENT agent, the server requires a "write"
+   * MemoryGrant from that owner — otherwise it denies the request (cross-agent
+   * write).
+   */
+  async update(id: string, content: string, opts: { preserveHistory?: boolean } = {}): Promise<Memory> {
+    const existing = await this.get(id);
+    if (!existing) {
+      throw new FlairError("PUT", `/Memory/${id}`, 404, `memory ${id} not found`);
+    }
+
+    if (opts.preserveHistory) {
+      const newId = `${this.client.agentId}-${crypto.randomUUID()}`;
+      const record: Record<string, unknown> = {
+        ...existing,
+        id: newId,
+        content,
+        supersedes: id,
+        createdAt: new Date().toISOString(),
+      };
+      delete record.updatedAt;
+      delete record.embedding;
+      delete record.embeddingModel;
+      delete record.validFrom;
+      delete record.validTo;
+      delete record.archivedAt;
+      delete record.deduped;
+      // The Memory schema does not expose a working HTTP POST route (see
+      // resources/Memory.ts) — Memory.post() is only reachable in-process
+      // (resources/mcp-tools.ts). So the supersede-link write goes through
+      // the same PUT-with-explicit-(new)-id path as a normal create; the
+      // server's Memory.put() validates/authorizes `supersedes`, writes this
+      // new record, then closes the old one transactionally (write-new
+      // BEFORE close-old — see resources/Memory.ts's closeSupersededIfNeeded).
+      // `supersedes` being set also makes the server bypass the dedup gate
+      // for this write (it's an intentional version link, not an ambiguous
+      // new write).
+      const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${newId}`, record);
+      return { ...record, ...(response ?? {}) } as unknown as Memory;
+    }
+
+    const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
+    delete merged.embedding;
+    delete merged.embeddingModel;
+    delete merged.deduped;
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, merged);
+    return { ...merged, id, ...(response ?? {}) } as unknown as Memory;
   }
 
   /** Search memories by meaning. Optionally filter to facts valid at a specific point in time. */

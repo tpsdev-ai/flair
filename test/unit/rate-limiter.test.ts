@@ -1,10 +1,35 @@
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 
-// We need to enable rate limiting for tests
+// We need to enable rate limiting for tests. `checkRateLimit`/`isEnabled`
+// read process.env LAZILY on every call (not cached at import time), so it's
+// safe to set these here and restore them in afterAll below.
+//
+// Test-isolation note: `bun test <dir>` runs every file in ONE process, so an
+// unrestored `process.env` mutation here leaks into every OTHER test file
+// that runs afterward — including ones that exercise Memory.post()'s own
+// checkRateLimit("general") call with a small, fixed number of test agent
+// ids. Once this file set FLAIR_RATE_LIMIT_RPM=5 without cleanup, any other
+// suite doing >5 writes for the same agentId within the shared 60s window
+// started intermittently 429'ing depending on file execution order (caught
+// by test/unit/memory-integrity.test.ts flaking only in the full-suite run,
+// never in isolation — see that file's own defensive env override too).
+const ORIGINAL_ENV = {
+  FLAIR_RATE_LIMIT_ENABLED: process.env.FLAIR_RATE_LIMIT_ENABLED,
+  FLAIR_RATE_LIMIT_RPM: process.env.FLAIR_RATE_LIMIT_RPM,
+  FLAIR_RATE_LIMIT_EMBED: process.env.FLAIR_RATE_LIMIT_EMBED,
+  FLAIR_RATE_LIMIT_STORAGE: process.env.FLAIR_RATE_LIMIT_STORAGE,
+};
 process.env.FLAIR_RATE_LIMIT_ENABLED = "true";
 process.env.FLAIR_RATE_LIMIT_RPM = "5"; // Low limit for testing
 process.env.FLAIR_RATE_LIMIT_EMBED = "3";
 process.env.FLAIR_RATE_LIMIT_STORAGE = "100";
+
+afterAll(() => {
+  for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
+    if (value === undefined) delete (process.env as any)[key];
+    else process.env[key] = value;
+  }
+});
 
 // Import after setting env vars
 const { checkRateLimit, checkStorageQuota, rateLimitResponse, storageQuotaResponse } = await import("../../resources/rate-limiter");
