@@ -183,15 +183,28 @@ describe("auth-middleware e2e (real Harper)", () => {
   // NOTE: /FederationPair and /FederationSync are in the public allowlist
   // (auth-middleware.ts lines 112-116) — they pass through without auth and
   // return resource-level errors (400 for missing body), not 401.
-  // /Soul GET does not enforce auth (only POST does). These endpoints are
-  // excluded from the no-auth invariant.
+  // /FederationPair and /FederationSync remain excluded (public allowlist,
+  // above). /Soul GET now DOES enforce auth via allowRead()=allowVerified
+  // (ops-ckrr read-gate fix) — it has its own invariant below.
   // ═══════════════════════════════════════════════════════════════════════════
 
-  test("AUTH INVARIANT: no Authorization header on /Memory → 401", async () => {
+  test("AUTH INVARIANT: no Authorization header on /Memory → 403 (allowRead gate denies anonymous table access, like /Agent)", async () => {
     const res = await fetch(
       `${harper.httpURL}/Memory/?agentId=${agent.id}`,
     );
-    expect(res.status).toBe(401);
+    // Post-ops-ckrr: Memory defines allowRead()=allowVerified to close the
+    // by-id / collection-describe anonymous-read leak that search()'s custom
+    // 401 never covered (search() only guarded the query path). Anonymous
+    // reads are now denied at Harper's allow-gate with 403 — the same
+    // convention as /Agent below — rather than search()'s prior 401.
+    expect(res.status).toBe(403);
+  }, 30_000);
+
+  test("AUTH INVARIANT: no Authorization header on /Soul → 403 (allowRead gate denies anonymous table access)", async () => {
+    const res = await fetch(`${harper.httpURL}/Soul`);
+    // Post-ops-ckrr: Soul defines allowRead()=allowVerified (previously GET
+    // enforced nothing — the anonymous-read leak Sherlock's sweep flagged).
+    expect(res.status).toBe(403);
   }, 30_000);
 
   test("AUTH INVARIANT: no Authorization header on /Agent → 403 (Harper default denies anonymous table access)", async () => {

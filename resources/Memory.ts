@@ -1,6 +1,6 @@
 import { databases } from "@harperfast/harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
-import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
+import { isAdmin, resolveAgentAuth, allowVerified, type AgentAuthVerdict } from "./agent-auth.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -17,6 +17,29 @@ const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
 const UNAUTH = () =>
   new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
+const NOT_FOUND = () =>
+  new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+
+/**
+ * Owner ids a non-admin agent may READ: itself, plus any owner who has
+ * granted it a "read" or "search" scoped MemoryGrant. Shared by search()
+ * (collection scoping) and get() (per-id ownership check, memory-soul-read-
+ * gate fix) so the two paths cannot drift apart — this was previously
+ * computed inline only inside search().
+ */
+async function resolveAllowedOwners(authAgentId: string): Promise<string[]> {
+  const allowedOwners: string[] = [authAgentId];
+  try {
+    for await (const grant of (databases as any).flair.MemoryGrant.search({
+      conditions: [{ attribute: "granteeId", comparator: "equals", value: authAgentId }],
+    })) {
+      if (grant.ownerId && (grant.scope === "read" || grant.scope === "search")) {
+        allowedOwners.push(grant.ownerId);
+      }
+    }
+  } catch { /* MemoryGrant table not yet populated — ignore */ }
+  return allowedOwners;
+}
 
 /**
  * ─── Server-side conservative-duplicate gate (memory-integrity fix) ──────────
@@ -254,6 +277,71 @@ async function closeSupersededIfNeeded(ctx: any, content: any, methodLabel: "pos
 
 export class Memory extends (databases as any).flair.Memory {
   /**
+   * Self-authorize now that the global gate is non-rejecting. Closes the P0
+   * leak: Harper routes `GET /Memory/<id>` to get() and the collection
+   * describe (`GET /Memory`) to a path outside search() — neither was gated
+   * before this fix, so an anonymous caller got a 200 with full record
+   * content / schema even though search() (and the write paths) correctly
+   * 401/403'd. Per-record ownership/grant scoping happens in get() below;
+   * the collection scope is still in search().
+   *
+   * allowCreate/allowUpdate/allowDelete are deliberately NOT added here:
+   * post()/put()/delete() already self-enforce per-agent ownership inline
+   * (resolveAgentAuth + explicit agentId checks in post()/put(), and the
+   * isAdmin durability check in delete()). Adding allow* on top of that,
+   * unverified, risks regressing owner writes/deletes on a P0 security fix
+   * that is scoped to the read leak — left as-is on purpose.
+   */
+  allowRead() { return allowVerified((this as any).getContext?.()); }
+
+  /**
+   * Override get() to scope by-id reads the same way search() scopes
+   * collection reads (memory-soul-read-gate fix). Never distinguishes
+   * "doesn't exist" from "exists but not yours" — both return 404, never
+   * 403, so a denied caller can't use get() to enumerate other agents'
+   * memory ids.
+   */
+  async get(target?: any) {
+    // Collection / query reads — the `GET /Memory/?<query>` form and the bare
+    // collection — arrive as a RequestTarget with `isCollection === true`, and
+    // are governed by search() (same owner/grant scoping). Only a genuine by-id
+    // get is ownership-checked below. Without this guard, get() would receive
+    // the query's RequestTarget, super.get() would return the (truthy) result
+    // set, the single-record check would find no `.agentId` on it, and a valid
+    // authenticated self-query would 404 (regression caught by the auth-
+    // middleware e2e "TPS-Ed25519 on GET /Memory/?agentId=X → 200"). A by-id
+    // get (RequestTarget with isCollection false, or a bare id) falls through.
+    if (!target || (typeof target === "object" && target.isCollection)) {
+      return this.search(target);
+    }
+
+    const ctx = (this as any).getContext?.();
+    const auth = await resolveAgentAuth(ctx);
+
+    // Anonymous by-id read is already blocked at the allowRead() gate (403);
+    // this is defense-in-depth if get() is ever reached directly.
+    if (auth.kind === "anonymous") {
+      return NOT_FOUND();
+    }
+
+    // Trusted internal call or admin agent — unfiltered, unchanged behavior.
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
+      return super.get(target);
+    }
+
+    // Non-admin agent: only its own memories, or an owner's memories it holds
+    // a read/search MemoryGrant for (same owner-set as search() — shared
+    // resolveAllowedOwners helper so the two paths cannot drift).
+    const record = await super.get(target);
+    if (!record) return NOT_FOUND();
+
+    const allowedOwners = await resolveAllowedOwners(auth.agentId);
+    if (!allowedOwners.includes(record.agentId)) return NOT_FOUND();
+
+    return record;
+  }
+
+  /**
    * Override search() to scope collection GETs by authenticated agent.
    *
    * Security Critical: the agentId condition is wrapped as the outermost
@@ -283,16 +371,7 @@ export class Memory extends (databases as any).flair.Memory {
 
     // Non-admin agent: scope to own + granted owners.
     const authAgent = auth.agentId;
-    const allowedOwners: string[] = [authAgent];
-    try {
-      for await (const grant of (databases as any).flair.MemoryGrant.search({
-        conditions: [{ attribute: "granteeId", comparator: "equals", value: authAgent }],
-      })) {
-        if (grant.ownerId && (grant.scope === "read" || grant.scope === "search")) {
-          allowedOwners.push(grant.ownerId);
-        }
-      }
-    } catch { /* MemoryGrant table not yet populated — ignore */ }
+    const allowedOwners = await resolveAllowedOwners(authAgent);
 
     // Build the agentId scope condition
     const agentIdCondition: any = allowedOwners.length === 1
@@ -562,7 +641,15 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async delete(id: any) {
-    const record = await this.get(id);
+    // Use super.get(id), NOT this.get(id): the new get() override above 404s
+    // (a truthy Response) for a non-owner/non-granted id, which would
+    // otherwise short-circuit the `record.durability === "permanent"` check
+    // below (a Response has no .durability) and silently bypass the
+    // admin-only permanent-delete guard for cross-agent deletes. This keeps
+    // delete()'s own pre-existing ownership/admin logic exactly as it was
+    // before the read-gate fix — the read-scoping override must not leak
+    // into delete()'s internal record lookup.
+    const record = await super.get(id);
     if (!record) return super.delete(id);
 
     if (record.durability === "permanent") {
