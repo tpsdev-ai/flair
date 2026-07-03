@@ -4,6 +4,13 @@ import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { wrapUntrusted } from "./content-safety.js";
+import {
+  isRerankEnabled,
+  getRerankTopN,
+  getRerankBudgetMs,
+  getRerankMinCandidates,
+  rerankCandidates,
+} from "./rerank-provider.js";
 
 // Temporal decay + relevance scoring (incl. the OPS-AYGD retrievalBoost cap +
 // relevance floor) lives in ./scoring.ts — a Harper-free module so it can be
@@ -181,6 +188,17 @@ export class SemanticSearch extends Resource {
     const results: any[] = [];
     const hybrid = hybridEnabled();
 
+    // When the reranker is on, widen the legacy HNSW fetch so it has a deeper
+    // pool to re-score (retrieve topN → rerank → slice to limit). Decoupled
+    // from CANDIDATE_MULTIPLIER so composite re-ranking keeps its existing
+    // headroom. Scoped to the legacy (non-hybrid) vector path below — the
+    // hybrid path's candidate pool is already governed by CANDIDATE_MULTIPLIER
+    // (semantic leg) + SEM_LIMIT (BM25 leg) via RRF union (ops-i39b); the
+    // reranker still applies to its output further down regardless of which
+    // path produced `filteredResults`.
+    const rerankOn = isRerankEnabled();
+    const rerankTopN = getRerankTopN();
+
     if (hybrid) {
       // ─── BM25 + union-RRF hybrid path (ops-i39b) ─────────────────────────
       // 1. Semantic candidates via HNSW (unchanged fetch). 2. BM25 lexical pass
@@ -293,8 +311,10 @@ export class SemanticSearch extends Resource {
         });
       }
     } else if (qEmb) {
-      // ─── HNSW vector search path ───────────────────────────────────────────
-      const candidateLimit = limit * CANDIDATE_MULTIPLIER;
+      // ─── HNSW vector search path (legacy, hybrid flag OFF) ────────────────
+      const candidateLimit = rerankOn
+        ? Math.max(limit * CANDIDATE_MULTIPLIER, rerankTopN)
+        : limit * CANDIDATE_MULTIPLIER;
       const query: any = {
         sort: { attribute: "embedding", target: qEmb, distance: "cosine" },
         select: ["id", "agentId", "content", "contentHash", "visibility", "tags", "durability",
@@ -393,7 +413,31 @@ export class SemanticSearch extends Resource {
       filteredResults = filteredResults.filter((r: any) => r._score >= minScore);
     }
 
-    filteredResults.sort((a: any, b: any) => b._score - a._score);
+    // ─── Cross-encoder rerank (best-effort, fail-open to vector order) ───────
+    // Re-scores query+candidate TOGETHER (cross-attention the pooled embedding
+    // can't do) and reorders before the final slice. Reorders whatever
+    // `filteredResults` the retrieval stage above produced — legacy HNSW-only
+    // OR the BM25+union-RRF hybrid path (ops-i39b) — since both converge into
+    // the same `results`/`filteredResults` shape before this point; hybrid
+    // retrieves+fuses, the reranker only reorders the fused set. Still gated
+    // on `qEmb` (an embedding was actually generated); the pure keyword-only
+    // fallback (no qEmb at all) is untouched either way. The reranker
+    // overwrites `_score` with the rerank score (so margin measurement reads it)
+    // and preserves the semantic score as `_semScore`; `_rawScore` is left as-is
+    // so recall-bench's scoring:"raw" path stays reproducible. On init failure,
+    // timeout, or any throw, rerankCandidates returns the input UNCHANGED and we
+    // fall through to the existing vector-order sort — recall is never blocked.
+    if (rerankOn && qEmb && q && filteredResults.length >= getRerankMinCandidates()) {
+      // Pre-sort by vector order so the topN fed to the reranker is the most
+      // semantically-promising slice (filteredResults isn't sorted yet here).
+      filteredResults.sort((a: any, b: any) => b._score - a._score);
+      filteredResults = await rerankCandidates(String(q), filteredResults, {
+        topN: rerankTopN,
+        budgetMs: getRerankBudgetMs(),
+      });
+    } else {
+      filteredResults.sort((a: any, b: any) => b._score - a._score);
+    }
     const topResults = filteredResults.slice(0, limit);
 
     // Async hit tracking — don't block the response

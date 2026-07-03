@@ -62,6 +62,7 @@
     "harper-fabric-embeddings": "0.2.3",
     "jose": "6.2.2",
     "js-yaml": "4.1.1",
+    "node-llama-cpp": "3.18.1",
     "tar": "7.5.13",
     "tweetnacl": "1.0.3"
   },
