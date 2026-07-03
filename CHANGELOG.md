@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-03
+
+The read-gate security sweep: three distinct anonymous/cross-agent read exposures, all found from one Sherlock sweep RED and closed.
+
+### 🔒 SECURITY: Memory/Soul by-id reads were ungated — anonymous content leak (#556, ops-ckrr)
+
+Memory and Soul gated writes and `search()` but defined no `allowRead()` and no `get()` override, so Harper's direct by-id path (`GET /Memory/<id>`) and the collection-describe (`GET /Memory`) were ungated — an anonymous caller received full record content, and a verified non-admin agent could read another agent's memory by enumerable id (`search()` only guarded the query path). Fix: `allowRead()=allowVerified` on both; an owner/grant-scoped `get()` on Memory (**404 never 403**, no id enumeration) branching on `isCollection` so collection/query reads delegate to the already-scoped `search()`; `delete()` reads via `super.get()` to preserve the permanent-delete guard.
+
+### 🔒 SECURITY: admin console reachable by verified non-admin agents (#557, ops-2ty0)
+
+**P0, live-confirmed.** The `/Admin` auth-middleware gate only 401s requests with **no** Authorization header; a validly-signed non-admin Ed25519 agent passed verification, de-elevated to `flair-agent`, and reached the seven custom `Admin*` resources — which had no `allowRead` — returning the full admin console (`/AdminMemory` all-agents memory browse + provenance, `/AdminPrincipals`, `/AdminDashboard`). Fix: `allowRead()=allowAdmin` on all seven (Basic super_user and admin agents retain access; non-admins → 403).
+
+### 🔒 SECURITY: family read-gate — WorkspaceState / Relationship / Integration / MemoryGrant (#557, ops-oox7)
+
+The same by-id/describe leak class as Memory: `search()` and writes gated, but no `allowRead()`/`get()`. Fix: `allowRead()=allowVerified` + `isCollection`-branched owner-scoped `get()` (**404 never 403**) on all four; MemoryGrant scopes `ownerId` **OR** `granteeId` (both parties to a grant); `delete()` uses `super.get()`.
+
 ## [0.18.0] - 2026-07-03
 
 ### 🧠 Memory integrity: the dedup gate no longer silently loses writes (#553 — closes #526, #548)
