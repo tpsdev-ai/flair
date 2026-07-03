@@ -240,10 +240,14 @@ async function closeSupersededIfNeeded(ctx: any, content: any, methodLabel: "pos
       updatedAt: content.createdAt ?? content.updatedAt,
     });
   } catch (err) {
+    // Constant format string + structured data: memory ids are agent-controlled,
+    // so interpolating them into console.error's format position (with a trailing
+    // `err` arg) would let an id containing %s/%o consume/hide the real error
+    // (semgrep unsafe-formatstring). Keep all dynamic values in the data object.
     console.error(
-      `Memory.${methodLabel}: failed to close superseded record ${content.supersedes} after writing ${content.id} ` +
-      `(ops-a4t5 — observable, not silent; new record is safely written, old record remains active until retried):`,
-      err,
+      "Memory.closeSuperseded: failed to close superseded record after writing new record " +
+      "(ops-a4t5 — observable, not silent; new record is safely written, old record remains active until retried)",
+      { method: methodLabel, supersededId: content.supersedes, newRecordId: content.id, err },
     );
   }
 }

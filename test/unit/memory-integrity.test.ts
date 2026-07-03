@@ -472,9 +472,14 @@ describe("supersede transaction (ops-a4t5 fix)", () => {
       expect((result as any).written).toBe(true);
       expect(memoryStore.has((result as any).id)).toBe(true);
 
-      // The failure was logged, not swallowed (ops-a4t5).
+      // The failure was logged, not swallowed (ops-a4t5). The log uses a
+      // constant format string + a structured data object (the record ids are
+      // agent-controlled, so they must not sit in console.error's format
+      // position — semgrep unsafe-formatstring), so flatten object args too.
       expect(errorSpy).toHaveBeenCalled();
-      const loggedMsg = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const loggedMsg = errorSpy.mock.calls
+        .map((c) => c.map((a) => (a && typeof a === "object" ? JSON.stringify(a, (_k, v) => (v instanceof Error ? v.message : v)) : String(a))).join(" "))
+        .join("\n");
       expect(loggedMsg).toContain("ops-a4t5");
       expect(loggedMsg).toContain(owned.id);
     } finally {
