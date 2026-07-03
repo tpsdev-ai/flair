@@ -302,12 +302,24 @@ export class Memory extends (databases as any).flair.Memory {
    * memory ids.
    */
   async get(target?: any) {
+    // Collection / query reads — the `GET /Memory/?<query>` form and the bare
+    // collection — arrive as a RequestTarget with `isCollection === true`, and
+    // are governed by search() (same owner/grant scoping). Only a genuine by-id
+    // get is ownership-checked below. Without this guard, get() would receive
+    // the query's RequestTarget, super.get() would return the (truthy) result
+    // set, the single-record check would find no `.agentId` on it, and a valid
+    // authenticated self-query would 404 (regression caught by the auth-
+    // middleware e2e "TPS-Ed25519 on GET /Memory/?agentId=X → 200"). A by-id
+    // get (RequestTarget with isCollection false, or a bare id) falls through.
+    if (!target || (typeof target === "object" && target.isCollection)) {
+      return this.search(target);
+    }
+
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
 
-    // Anonymous HTTP must not read a memory by id. allowRead() already blocks
-    // this at the gate; this is defense-in-depth if get() is ever reached
-    // directly.
+    // Anonymous by-id read is already blocked at the allowRead() gate (403);
+    // this is defense-in-depth if get() is ever reached directly.
     if (auth.kind === "anonymous") {
       return NOT_FOUND();
     }

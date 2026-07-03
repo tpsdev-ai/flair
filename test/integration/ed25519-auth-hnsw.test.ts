@@ -73,11 +73,16 @@ describe("Ed25519 → HNSW auth path (flair#457 / regression guard for #456)", (
 
   afterAll(async () => { if (harper) await stopHarper(harper); });
 
-  test("AUTH INVARIANT: no Authorization header → 401 (path is actually guarded, not authorizeLocal-bypassed)", async () => {
+  test("AUTH INVARIANT: no Authorization header → 403 (path is actually guarded, not authorizeLocal-bypassed)", async () => {
     const res = await fetch(`${harper.httpURL}/Memory/?agentId=${agent.id}`);
     // If this returns 200, the harness is authorizeLocal-bypassing and the
     // Ed25519 assertions below would be theater — fail loudly so we notice.
-    expect(res.status).toBe(401);
+    // Post-ops-ckrr: Memory's allowRead()=allowVerified denies anonymous reads
+    // at Harper's allow-gate with 403 (was search()'s 401 before the read-gate
+    // fix, which only covered the query path). The invariant — anonymous is
+    // DENIED, not bypassed — is unchanged; only the denial code moved 401→403,
+    // matching the /Agent convention.
+    expect(res.status).toBe(403);
   }, 30_000);
 
   test("AUTH INVARIANT: tampered signature → 401 invalid_signature", async () => {
