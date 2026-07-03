@@ -84,6 +84,39 @@ async function adminOp(
 
 let harper: HarperInstance;
 const agent = mkAgent("auth-e2e-agent");
+// Second agent for the family read-gate cross-agent 404 checks (ops-oox7).
+const agent2 = mkAgent("auth-e2e-agent-2");
+
+// ─── Family read-gate fixtures (ops-oox7) ────────────────────────────────────
+// WorkspaceState/Relationship/Integration/MemoryGrant — same P0 leak as
+// Memory.ts/Soul.ts (e1e3012, ops-ckrr): each gated write+search but had no
+// allowRead()/get() override, so anonymous GET /<Resource>/<id> and the
+// collection describe GET /<Resource> both returned 200 with full record
+// content. One record per table, owned by `agent`, seeded via direct DB
+// insert in beforeAll below (bypasses each resource's own write path — this
+// file exercises READS, not writes).
+const FAMILY_READ_GATE_RESOURCES: Array<{ table: string; id: string; seed: Record<string, any> }> = [
+  {
+    table: "WorkspaceState",
+    id: `family-ws-${Date.now()}`,
+    seed: { agentId: agent.id, ref: "main", provider: "cli", timestamp: new Date().toISOString(), createdAt: new Date().toISOString() },
+  },
+  {
+    table: "Relationship",
+    id: `family-rel-${Date.now()}`,
+    seed: { agentId: agent.id, subject: "nathan", predicate: "manages", object: "flint", createdAt: new Date().toISOString() },
+  },
+  {
+    table: "Integration",
+    id: `family-int-${Date.now()}`,
+    seed: { agentId: agent.id, platform: "slack", createdAt: new Date().toISOString() },
+  },
+  {
+    table: "MemoryGrant",
+    id: `family-grant-${Date.now()}`,
+    seed: { ownerId: agent.id, granteeId: "family-read-gate-someone-else", scope: "read", createdAt: new Date().toISOString() },
+  },
+];
 
 const PAIR_BOOTSTRAP_USER = "pair-bootstrap-test1234";
 const PAIR_BOOTSTRAP_PASS = "bootstrap-pass-123";
@@ -123,6 +156,23 @@ describe("auth-middleware e2e (real Harper)", () => {
       ],
     });
     expect(agentRes.status).toBe(200);
+
+    // 2b. Second agent (ops-oox7 family read-gate cross-agent checks).
+    const agent2Res = await adminOp(harper, {
+      operation: "insert",
+      database: "flair",
+      table: "Agent",
+      records: [
+        {
+          id: agent2.id,
+          name: agent2.id,
+          role: "agent",
+          publicKey: agent2.publicKey,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+    expect(agent2Res.status).toBe(200);
 
     // 3. Create pair-bootstrap user with flair_pair_initiator role + active:true.
     //    This makes getUser return the REAL object-shaped role
@@ -167,6 +217,20 @@ describe("auth-middleware e2e (real Harper)", () => {
       active: true,
     });
     expect([200, 409]).toContain(nonSuperRes.status);
+
+    // 6. Seed one record per FAMILY_READ_GATE_RESOURCES table, owned by
+    //    `agent`. Direct DB insert (bypasses each resource's own write path —
+    //    irrelevant here, this file tests READS) so the by-id read-gate
+    //    invariants below have real records to fetch.
+    for (const r of FAMILY_READ_GATE_RESOURCES) {
+      const seedRes = await adminOp(harper, {
+        operation: "insert",
+        database: "flair",
+        table: r.table,
+        records: [{ id: r.id, ...r.seed }],
+      });
+      expect(seedRes.status, `seed ${r.table} returned ${seedRes.status}`).toBe(200);
+    }
   }, 180_000);
 
   afterAll(async () => {
@@ -446,4 +510,37 @@ describe("auth-middleware e2e (real Harper)", () => {
     );
     expect(res.status).toBe(403);
   }, 30_000);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FAMILY READ-GATE (ops-oox7): WorkspaceState / Relationship / Integration /
+  // MemoryGrant — applying the Memory.ts/Soul.ts allowRead()+get() pattern
+  // (e1e3012, ops-ckrr) to the remaining agent-owned @table resources that had
+  // the identical anonymous by-id / collection-describe read leak. These are
+  // REAL-Harper invariants exercising the actual RequestTarget routing
+  // (isCollection branch) that a mocked unit test cannot — see get()'s doc
+  // comment in each resource for why the branch matters.
+  // ═══════════════════════════════════════════════════════════════════════════
+  for (const r of FAMILY_READ_GATE_RESOURCES) {
+    test(`FAMILY READ-GATE: anonymous GET /${r.table} → 403 (allowRead gate denies anonymous, collection describe)`, async () => {
+      const res = await fetch(`${harper.httpURL}/${r.table}`);
+      expect(res.status, `anon GET /${r.table} returned ${res.status}`).toBe(403);
+    }, 30_000);
+
+    test(`FAMILY READ-GATE: authenticated self GET /${r.table}/<id> → 200`, async () => {
+      const path = `/${r.table}/${r.id}`;
+      const res = await fetch(`${harper.httpURL}${path}`, {
+        headers: { Authorization: ed25519Header(agent, "GET", path) },
+      });
+      const text = await res.text();
+      expect(res.status, `self GET ${path} returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+    }, 30_000);
+
+    test(`FAMILY READ-GATE: cross-agent GET /${r.table}/<id> → 404 (no enumeration — never 403)`, async () => {
+      const path = `/${r.table}/${r.id}`;
+      const res = await fetch(`${harper.httpURL}${path}`, {
+        headers: { Authorization: ed25519Header(agent2, "GET", path) },
+      });
+      expect(res.status, `cross-agent GET ${path} returned ${res.status}`).toBe(404);
+    }, 30_000);
+  }
 });

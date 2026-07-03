@@ -189,6 +189,29 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     expect([401, 403], `admin /MemoryReindex returned ${res.status} (expected authorized)`).not.toContain(res.status);
   }, 30_000);
 
+  // ops-oox7: Admin* custom (non-@table) Resources previously had NO
+  // resource-level read gate at all — reachability depended entirely on the
+  // auth-middleware's /Admin* pathname check, which only 401s when there's NO
+  // Authorization header. A validly-verified NON-admin agent (real TPS-Ed25519
+  // signature, just not an admin) sailed straight through to full dashboard
+  // data with zero admin check. allowRead()=allowAdmin closes that gap —
+  // same pattern MemoryReindex already uses for allowCreate above.
+  test("ADMIN-ONLY: non-admin agent GET /AdminDashboard is denied (allowRead → isAdmin)", async () => {
+    const path = "/AdminDashboard";
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      headers: { Authorization: ed25519Header(agent, "GET", path) },
+    });
+    expect(res.status, `non-admin /AdminDashboard returned ${res.status} (expected 403)`).toBe(403);
+  }, 30_000);
+
+  test("ADMIN-ONLY: admin agent GET /AdminDashboard is authorized (allowRead permits admins)", async () => {
+    const path = "/AdminDashboard";
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      headers: { Authorization: ed25519Header(adminAgent, "GET", path) },
+    });
+    expect([401, 403], `admin /AdminDashboard returned ${res.status} (expected authorized)`).not.toContain(res.status);
+  }, 30_000);
+
   test("DE-ELEVATION: agent POST /sql is forbidden (flair_agent has no operations grant)", async () => {
     const path = "/sql";
     const res = await fetch(`${harper.httpURL}${path}`, {

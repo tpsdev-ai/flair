@@ -1,5 +1,6 @@
 import { Resource, databases } from "@harperfast/harper";
 import { layout, htmlResponse, esc } from "./admin-layout.js";
+import { allowAdmin } from "./agent-auth.js";
 
 /**
  * GET /AdminMemory                browse + search memories (list view)
@@ -20,8 +21,16 @@ import { layout, htmlResponse, esc } from "./admin-layout.js";
  * "memory that follows the agent across orchestrators" — the provenance pane
  * makes that legible: every memory shows where it came from, what it derived
  * from, what it superseded, and which peer it synced from.
+ *
+ * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts — this
+ * page surfaces full memory content across ALL agents, so the gap it closes
+ * matters more here than on the other Admin* pages.
  */
 export class AdminMemory extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
   async get() {
     // Harper v5 does not populate this.request on Resource subclasses —
     // getContext() is the only reliable path (ops-sal4: the previous
