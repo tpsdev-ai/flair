@@ -9,18 +9,72 @@
  */
 
 import { databases } from "@harperfast/harper";
-import { resolveAgentAuth } from "./agent-auth.js";
+import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
 const UNAUTH = () =>
   new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
+const NOT_FOUND = () =>
+  new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
 
 export class WorkspaceState extends (databases as any).flair.WorkspaceState {
   /** Auth verdict from the request context. internal = trusted in-process call;
    *  agent = verified Ed25519; anonymous = HTTP with no valid agent → deny. */
   private _auth() {
     return resolveAgentAuth((this as any).getContext?.());
+  }
+
+  /**
+   * Self-authorize now that the global gate is non-rejecting (memory-soul-
+   * read-gate family fix, ops-oox7 — applying the Memory.ts/Soul.ts pattern
+   * to WorkspaceState/Relationship/Integration/MemoryGrant). Closes the same
+   * P0 leak: Harper routes `GET /WorkspaceState/<id>` to get() and the
+   * collection describe (`GET /WorkspaceState`) to a path outside search(),
+   * so neither was gated before this fix — an anonymous caller got a 200 with
+   * full record content. Per-record ownership scoping happens in get() below;
+   * the collection scope is still in search().
+   */
+  allowRead() { return allowVerified((this as any).getContext?.()); }
+
+  /**
+   * Override get() to scope by-id reads the same way search() scopes
+   * collection reads (memory-soul-read-gate family fix). Never distinguishes
+   * "doesn't exist" from "exists but not yours" — both return 404, never
+   * 403, so a denied caller can't use get() to enumerate other agents'
+   * workspace-state ids.
+   */
+  async get(target?: any) {
+    // Collection / query reads — the `GET /WorkspaceState/?<query>` form and
+    // the bare collection — arrive as a RequestTarget with `isCollection ===
+    // true`, and are governed by search() (same owner scoping). Only a
+    // genuine by-id get is ownership-checked below. Without this guard,
+    // get() would receive the query's RequestTarget, super.get() would
+    // return the (truthy) result set, and the single-record ownership check
+    // would find no `.agentId` on it (see Memory.ts's get() for the full
+    // rationale — same bug class).
+    if (!target || (typeof target === "object" && target.isCollection)) {
+      return this.search(target);
+    }
+
+    const auth = await this._auth();
+
+    // Anonymous by-id read is already blocked at the allowRead() gate (403);
+    // this is defense-in-depth if get() is ever reached directly.
+    if (auth.kind === "anonymous") {
+      return NOT_FOUND();
+    }
+
+    // Trusted internal call or admin agent — unfiltered, unchanged behavior.
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
+      return super.get(target);
+    }
+
+    // Non-admin agent: only its own workspace-state records.
+    const record = await super.get(target);
+    if (!record) return NOT_FOUND();
+    if (record.agentId !== auth.agentId) return NOT_FOUND();
+    return record;
   }
 
   /**
@@ -97,7 +151,12 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
       return super.delete(id);
     }
 
-    const record = await this.get(id);
+    // Use super.get(id), NOT this.get(id): the new get() override above 404s
+    // (a truthy Response) for a non-owner id, which would otherwise defeat
+    // the `if (!record)` check below and mis-route a genuinely-missing
+    // record into the FORBIDDEN branch instead of a clean super.delete(id)
+    // no-op. Mirrors Memory.ts's delete() — same rationale, same fix.
+    const record = await super.get(id);
     if (!record) return super.delete(id);
     if (record.agentId !== auth.agentId) {
       return FORBIDDEN("forbidden: cannot delete workspace state for another agent");

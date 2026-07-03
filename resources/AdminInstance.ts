@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { allowAdmin } from "./agent-auth.js";
 
 /**
  * Resolve the public URL operators reach this Flair on.
@@ -86,8 +87,14 @@ function resolveVersion(): string {
 
 /**
  * GET /AdminInstance — instance info, public key, version.
+ *
+ * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts.
  */
 export class AdminInstance extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
   async get() {
     const version = resolveVersion();
     // Pass the request through so URL resolution can derive from

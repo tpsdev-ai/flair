@@ -3,7 +3,7 @@ import { mock, describe, it, expect } from "bun:test";
 // agent-auth.ts imports `databases` from @harperfast/harper (throws outside a
 // Harper runtime). Mock it — the annotation/internal/anonymous paths exercised
 // here never reach databases (they return before any Agent.get).
-mock.module("@harperfast/harper", () => ({ databases: {} }));
+mock.module("@harperfast/harper", () => ({ databases: {}, Resource: class {} }));
 
 const { allowVerified, allowAdmin } = await import("../../resources/agent-auth.ts");
 

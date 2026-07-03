@@ -1,10 +1,20 @@
 import { Resource, databases } from "@harperfast/harper";
 import { layout, htmlResponse } from "./admin-layout.js";
+import { allowAdmin } from "./agent-auth.js";
 
 /**
  * GET /AdminDashboard — admin home page with system overview.
+ *
+ * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts for why
+ * this closes a real gap, not just belt-and-suspenders — a verified
+ * non-admin agent could otherwise read full instance stats (principal/agent/
+ * memory/relationship counts) with no admin check at all.
  */
 export class AdminDashboard extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
   async get() {
     let principalCount = 0;
     let memoryCount = 0;

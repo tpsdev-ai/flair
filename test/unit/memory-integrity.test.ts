@@ -149,7 +149,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock }));
+mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Memory } = await import("../../resources/Memory.ts");
 const { jaccardSimilarity, isConservativeMatch, computeMatchConfidence } = await import("../../resources/dedup.ts");

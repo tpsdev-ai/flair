@@ -1,10 +1,17 @@
 import { Resource, databases } from "@harperfast/harper";
 import { layout, htmlResponse, esc } from "./admin-layout.js";
+import { allowAdmin } from "./agent-auth.js";
 
 /**
  * GET /AdminConnectors — OAuth clients and active sessions.
+ *
+ * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts.
  */
 export class AdminConnectors extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
   async get() {
     const clients: any[] = [];
 

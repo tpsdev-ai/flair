@@ -64,7 +64,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock }));
+mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Soul } = await import("../../resources/Soul.ts");
 

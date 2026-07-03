@@ -1,10 +1,17 @@
 import { Resource, databases } from "@harperfast/harper";
 import { layout, htmlResponse, esc } from "./admin-layout.js";
+import { allowAdmin } from "./agent-auth.js";
 
 /**
  * GET /AdminPrincipals — list all principals with kind, trust, status.
+ *
+ * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts.
  */
 export class AdminPrincipals extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
   async get() {
     const principals: any[] = [];
 

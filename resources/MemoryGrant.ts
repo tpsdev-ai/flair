@@ -1,10 +1,12 @@
 import { databases } from "@harperfast/harper";
-import { resolveAgentAuth } from "./agent-auth.js";
+import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
 const UNAUTH = () =>
   new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
+const NOT_FOUND = () =>
+  new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
 
 /**
  * MemoryGrant — an agent (ownerId) grants another (granteeId) scoped access to its
@@ -19,6 +21,56 @@ const UNAUTH = () =>
 export class MemoryGrant extends (databases as any).flair.MemoryGrant {
   private _auth() {
     return resolveAgentAuth((this as any).getContext?.());
+  }
+
+  /**
+   * Self-authorize now that the global gate is non-rejecting (memory-soul-
+   * read-gate family fix, ops-oox7 — same pattern as Memory.ts/Soul.ts/
+   * WorkspaceState.ts/Relationship.ts/Integration.ts). Closes the same P0
+   * leak: Harper routes `GET /MemoryGrant/<id>` to get() and the collection
+   * describe (`GET /MemoryGrant`) outside search(), so neither was gated
+   * before this fix — an anonymous caller got a 200 with full grant content.
+   * Per-record owner/grantee scoping happens in get() below; the collection
+   * scope is still in search().
+   */
+  allowRead() { return allowVerified((this as any).getContext?.()); }
+
+  /**
+   * Override get() to scope by-id reads the same way search() scopes
+   * collection reads (memory-soul-read-gate family fix). A grant is visible
+   * to either party (ownerId OR granteeId), mirroring search()'s owner-OR-
+   * grantee scope. Never distinguishes "doesn't exist" from "exists but not
+   * yours" — both return 404, never 403, so a denied caller can't use get()
+   * to enumerate other agents' grant ids.
+   */
+  async get(target?: any) {
+    // Collection / query reads arrive as a RequestTarget with
+    // `isCollection === true`, and are governed by search() (same owner/
+    // grantee scoping). Only a genuine by-id get is ownership-checked below
+    // — see Memory.ts's get() for the full rationale (same bug class).
+    if (!target || (typeof target === "object" && target.isCollection)) {
+      return this.search(target);
+    }
+
+    const auth = await this._auth();
+
+    // Anonymous by-id read is already blocked at the allowRead() gate (403);
+    // this is defense-in-depth if get() is ever reached directly.
+    if (auth.kind === "anonymous") {
+      return NOT_FOUND();
+    }
+
+    // Trusted internal call or admin agent — unfiltered, unchanged behavior.
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
+      return super.get(target);
+    }
+
+    // Non-admin agent: visible if it's the owner OR the grantee (parity with
+    // search()'s owner-OR-grantee scope).
+    const record = await super.get(target);
+    if (!record) return NOT_FOUND();
+    if (record.ownerId !== auth.agentId && record.granteeId !== auth.agentId) return NOT_FOUND();
+    return record;
   }
 
   async search(query?: any) {
@@ -63,7 +115,13 @@ export class MemoryGrant extends (databases as any).flair.MemoryGrant {
     if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
       return super.delete(id, context);
     }
-    const record = await this.get(id);
+    // Use super.get(id), NOT this.get(id): the new get() override above 404s
+    // (a truthy Response) for a non-owner/non-grantee id, which would
+    // otherwise defeat the `if (!record)` check below and mis-route a
+    // genuinely-missing record into the FORBIDDEN branch instead of a clean
+    // super.delete(id, context) no-op. Mirrors Memory.ts's delete() — same
+    // rationale, same fix.
+    const record = await super.get(id);
     if (!record) return super.delete(id, context);
     if (record.ownerId !== auth.agentId) {
       return FORBIDDEN("forbidden: cannot delete a grant owned by another agent");

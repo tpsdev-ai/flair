@@ -1,6 +1,9 @@
 import { databases } from "@harperfast/harper";
-import { resolveAgentAuth } from "./agent-auth.js";
+import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
+
+const NOT_FOUND = () =>
+  new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
 
 /**
  * Relationship resource — entity-to-entity relationships with temporal validity.
@@ -14,6 +17,56 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
  * Admin agents can query across all agents.
  */
 export class Relationship extends (databases as any).flair.Relationship {
+  /**
+   * Self-authorize now that the global gate is non-rejecting (memory-soul-
+   * read-gate family fix, ops-oox7 — same pattern as Memory.ts/Soul.ts/
+   * WorkspaceState.ts). Closes the same P0 leak: Harper routes
+   * `GET /Relationship/<id>` to get() and the collection describe
+   * (`GET /Relationship`) outside search(), so neither was gated before this
+   * fix — an anonymous caller got a 200 with full record content. Per-record
+   * ownership scoping happens in get() below; the collection scope is still
+   * in search().
+   */
+  allowRead() { return allowVerified((this as any).getContext?.()); }
+
+  /**
+   * Override get() to scope by-id reads the same way search() scopes
+   * collection reads (memory-soul-read-gate family fix). Never distinguishes
+   * "doesn't exist" from "exists but not yours" — both return 404, never
+   * 403, so a denied caller can't use get() to enumerate other agents'
+   * relationship ids.
+   */
+  async get(target?: any) {
+    // Collection / query reads arrive as a RequestTarget with
+    // `isCollection === true`, and are governed by search() (same owner
+    // scoping). Only a genuine by-id get is ownership-checked below — see
+    // Memory.ts's get() for the full rationale (same bug class: without this
+    // guard, a query's RequestTarget would flow into super.get(), return the
+    // whole result set, and the single-record ownership check below would
+    // find no `.agentId` on it).
+    if (!target || (typeof target === "object" && target.isCollection)) {
+      return this.search(target);
+    }
+
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+
+    // Anonymous by-id read is already blocked at the allowRead() gate (403);
+    // this is defense-in-depth if get() is ever reached directly.
+    if (auth.kind === "anonymous") {
+      return NOT_FOUND();
+    }
+
+    // Trusted internal call or admin agent — unfiltered, unchanged behavior.
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
+      return super.get(target);
+    }
+
+    // Non-admin agent: only its own relationships.
+    const record = await super.get(target);
+    if (!record) return NOT_FOUND();
+    if (record.agentId !== auth.agentId) return NOT_FOUND();
+    return record;
+  }
 
   async search(query?: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());
