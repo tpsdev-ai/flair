@@ -69,7 +69,13 @@ let idCounter: number;
 
 function memorySearchGen(query: any) {
   let records = Array.from(memoryStore.values());
-  const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
+  // Memory.search()'s instance method passes either a query OBJECT
+  // ({conditions: [...], ...}) or, in its "plain array / internal call"
+  // fallback branch, the conditions ARRAY directly (memory-soul-read-gate
+  // fix — search() previously was only ever exercised here via post()/put()'s
+  // internal dedup-gate calls, which always pass an object; the instance
+  // search() itself, now covered below, hits the plain-array branch too).
+  const conditions = Array.isArray(query) ? query : Array.isArray(query?.conditions) ? query.conditions : [];
   for (const cond of conditions) records = records.filter((r) => matchesCondition(r, cond));
   if (query?.sort?.attribute === "embedding" && query.sort.distance === "cosine") {
     const target = query.sort.target;
@@ -485,5 +491,159 @@ describe("supersede transaction (ops-a4t5 fix)", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+// ─── memory-soul-read-gate fix: Memory.allowRead + Memory.get() ownership scoping ──
+//
+// P0 regression guard for the read-gate fix: Memory.ts previously gated the
+// WRITE paths (post/put, above) and search(), but neither defined
+// `allowRead()` nor overrode `get()`. Harper routes `GET /Memory/<id>` to
+// get() and the collection-describe `GET /Memory` outside search(), so BOTH
+// were ungated — an anonymous caller got a 200 with full record content.
+//
+// These tests live in THIS file (rather than a separate one) deliberately:
+// bun runs every file in test/unit/ in one process, and a second file that
+// also `mock.module("@harperfast/harper", ...)` + dynamically imports
+// "../../resources/Memory.ts" collides with THIS file's mock — the Memory
+// class is a singleton across the whole run (its `class Memory extends
+// (databases as any).flair.Memory` superclass reference is captured once, at
+// whichever file's import happens to win), so a second competing import
+// silently makes both files' Memory instances write into ONE file's
+// in-memory store instead of their own. Reusing this file's existing
+// mock/import avoids that collision entirely. (Soul.ts has no other
+// importer in test/unit/, so its read-gate tests are a separate file.)
+describe("Memory.allowRead — closes the anonymous GET /Memory/<id> and describe leak", () => {
+  it("anonymous is denied", async () => {
+    const m = makeMemory(anonCtx());
+    expect(await (m as any).allowRead()).toBe(false);
+  });
+
+  it("a verified non-admin agent is allowed (per-record scoping is in get())", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    expect(await (m as any).allowRead()).toBe(true);
+  });
+
+  it("an admin agent is allowed", async () => {
+    const m = makeMemory(agentCtx("agent-admin", true));
+    expect(await (m as any).allowRead()).toBe(true);
+  });
+
+  it("an internal call (no request context) is allowed", async () => {
+    const r: any = new (Memory as any)();
+    r.getContext = () => undefined;
+    expect(await r.allowRead()).toBe(true);
+  });
+});
+
+describe("Memory.get() — anonymous denied, owner/grant scoped for non-admin, unfiltered for internal/admin", () => {
+  it("anonymous get(<id>) → 404, never leaks record content", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "secret" });
+    const m = makeMemory(anonCtx());
+    const res = await (m as any).get("mem-1");
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(404);
+    const body = await (res as Response).json();
+    expect(JSON.stringify(body)).not.toContain("secret");
+  });
+
+  it("verified non-admin get() of ANOTHER agent's id → 404 (not 403 — no existence confirmation)", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "secret" });
+    const m = makeMemory(agentCtx("agent-attacker"));
+    const res = await (m as any).get("mem-1");
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(404);
+  });
+
+  it("verified non-admin get() of ITS OWN id → returns the real record", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "my content" });
+    const m = makeMemory(agentCtx("agent-owner"));
+    const res = await (m as any).get("mem-1");
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("my content");
+  });
+
+  it("verified non-admin get() of a GRANTED owner's id (scope: read) → returns the record", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "shared content" });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+    const m = makeMemory(agentCtx("agent-grantee"));
+    const res = await (m as any).get("mem-1");
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("shared content");
+  });
+
+  it("verified non-admin get() of a GRANTED owner's id (scope: search) → returns the record too", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "shared via search scope" });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "search" });
+    const m = makeMemory(agentCtx("agent-grantee"));
+    const res = await (m as any).get("mem-1");
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("shared via search scope");
+  });
+
+  it("a WRITE-scoped grant does NOT satisfy the read/get requirement → still 404", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "secret" });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "write" });
+    const m = makeMemory(agentCtx("agent-grantee"));
+    const res = await (m as any).get("mem-1");
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(404);
+  });
+
+  it("a non-existent id for a non-admin agent → 404 (same as denied — no oracle for existence)", async () => {
+    const m = makeMemory(agentCtx("agent-owner"));
+    const res = await (m as any).get("does-not-exist");
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(404);
+  });
+
+  it("internal call (no request context) → returns any id unchanged", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "secret" });
+    const r: any = new (Memory as any)();
+    r.getContext = () => undefined;
+    const res = await r.get("mem-1");
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("secret");
+  });
+
+  it("admin agent → returns any id unchanged, no ownership check", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "secret" });
+    const m = makeMemory(agentCtx("agent-admin", true));
+    const res = await (m as any).get("mem-1");
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("secret");
+  });
+});
+
+describe("Memory.search() — grant scoping parity with get() (shared resolveAllowedOwners helper)", () => {
+  it("non-admin search sees own + granted-owner records, not an unrelated agent's", async () => {
+    memoryStore.set("mem-own", { id: "mem-own", agentId: "agent-1", content: "mine" });
+    memoryStore.set("mem-granted", { id: "mem-granted", agentId: "agent-owner", content: "shared" });
+    memoryStore.set("mem-other", { id: "mem-other", agentId: "agent-other", content: "not mine" });
+    memoryGrants.push({ granteeId: "agent-1", ownerId: "agent-owner", scope: "read" });
+
+    const m = makeMemory(agentCtx("agent-1"));
+    const results: any[] = [];
+    for await (const r of await (m as any).search({ conditions: [] })) results.push(r);
+    const ids = results.map((r) => r.id).sort();
+    expect(ids).toEqual(["mem-granted", "mem-own"]);
+  });
+});
+
+describe("Memory.delete() — durability/ownership check uses the raw record (super.get), not the new scoped get()", () => {
+  it("owner can still delete its own non-permanent memory", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", durability: "standard" });
+    const m = makeMemory(agentCtx("agent-owner"));
+    await (m as any).delete("mem-1");
+    expect(await BaseMemory.get("mem-1")).toBeNull();
+  });
+
+  it("a non-admin cannot delete ANOTHER agent's PERMANENT memory (durability check still fires — not bypassed by the new get() override)", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", durability: "permanent" });
+    const m = makeMemory(agentCtx("agent-attacker"));
+    const res = await (m as any).delete("mem-1");
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(403);
+    expect(await BaseMemory.get("mem-1")).not.toBeNull(); // untouched
   });
 });
