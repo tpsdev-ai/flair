@@ -1,9 +1,256 @@
 import { databases } from "@harperfast/harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
-import { isAdmin, resolveAgentAuth } from "./agent-auth.js";
+import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
+import {
+  DEDUP_COSINE_THRESHOLD_DEFAULT,
+  DEDUP_LEXICAL_THRESHOLD_DEFAULT,
+  DEDUP_MIN_CONTENT_LENGTH,
+  computeMatchConfidence,
+  isConservativeMatch,
+  type DedupMatch,
+} from "./dedup.js";
+
+const FORBIDDEN = (msg: string) =>
+  new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
+const UNAUTH = () =>
+  new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
+
+/**
+ * ─── Server-side conservative-duplicate gate (memory-integrity fix) ──────────
+ *
+ * NEVER SUPPRESSES A WRITE. This gate only computes a SIGNAL — the caller
+ * (Memory.post / Memory.put) always proceeds to write the new record. When a
+ * conservative match is found, the signal is attached to the RESPONSE only
+ * (deduplicated/matchedId/matchConfidence). There must be no code path where
+ * finding a match causes the write to be skipped: that was the #526 bug (two
+ * topically-close but DISTINCT findings — one about replication
+ * route-directionality, one about DDL/schema replication — and the SECOND was
+ * silently dropped because the old client-side gate returned the existing
+ * record instead of writing).
+ *
+ * Conservative match = raw cosine >= cosineThreshold AND Jaccard token-overlap
+ * >= lexicalThreshold, checked ONLY against the SINGLE top-cosine candidate
+ * (scoped to the same agentId as the write — never cross-agent). If that one
+ * candidate fails either gate, there is no match; we do not fall back to the
+ * 2nd-most-similar candidate.
+ *
+ * Previously this lived client-side (packages/flair-client/src/client.ts,
+ * pre-fix) and only ran for callers that opted into `dedup:true` over HTTP
+ * PUT — the Model-2 /mcp handler (resources/mcp-tools.ts), which calls
+ * Memory.post() directly, got ZERO dedup checking. Moving the gate here makes
+ * it apply uniformly regardless of transport (HTTP PUT vs in-process post()).
+ *
+ * NOTE on HTTP verbs: the Memory schema only exposes PUT over HTTP (a raw
+ * HTTP POST /Memory returns "Memory does not have a post method implemented"
+ * — see src/cli.ts's `flair test` command and commit 2fa6d22 / ops-pj5).
+ * `Memory.post()` IS reachable, but only via an in-process resource
+ * instantiation (as resources/mcp-tools.ts does) — never via the real HTTP
+ * POST route. Because flair-client's write() (used by flair-mcp, the CLI, and
+ * every other integration package) issues an HTTP PUT, the actual
+ * field-observed bug (#526) flows through Memory.put(), not Memory.post().
+ * The gate below is therefore a SHARED helper invoked from both post() and
+ * put() — anchored in the same place the design calls out (Memory.post), but
+ * wired into put() too so the write path real callers actually use is
+ * protected. See memory-integrity-fix report for the full writeup of this
+ * deviation from a literal "gate lives only in Memory.post" reading.
+ */
+async function findConservativeDedupMatch(
+  ctx: any,
+  agentId: string | undefined,
+  contentText: string,
+  embedding: number[] | null | undefined,
+  cosineThreshold: number,
+  lexicalThreshold: number,
+): Promise<DedupMatch | null> {
+  if (!agentId || !embedding || embedding.length === 0) return null;
+  try {
+    const query: any = {
+      sort: { attribute: "embedding", target: embedding, distance: "cosine" },
+      conditions: [
+        { attribute: "agentId", comparator: "equals", value: agentId },
+        { attribute: "archived", comparator: "not_equal", value: true },
+      ],
+      select: ["id", "content", "$distance"],
+      limit: 1,
+    };
+    let top: any = null;
+    // Detach ctx.transaction around this search — same rationale as
+    // Memory.search()/SemanticSearch.ts: a drained search generator can leave
+    // a CLOSED transaction in ctx's chain that the subsequent WRITE
+    // (super.post/super.put, right after this gate runs) would otherwise
+    // inherit. Detaching here protects that write, not this read.
+    const results = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(query));
+    for await (const record of results) {
+      top = record;
+      break; // single top-cosine candidate only — never fall back further
+    }
+    if (!top) return null;
+    const cosine = 1 - (top.$distance ?? 1);
+    const confidence = computeMatchConfidence(contentText, top.content, cosine);
+    if (!isConservativeMatch(confidence.cosine, confidence.lexical, cosineThreshold, lexicalThreshold)) {
+      return null;
+    }
+    return { matchedId: top.id, cosine: confidence.cosine, lexical: confidence.lexical };
+  } catch {
+    // Dedup-check failures (embedding engine down, search error, etc.) must
+    // NEVER block or alter the write — treat as "no match found".
+    return null;
+  }
+}
+
+/**
+ * Run the dedup gate for a create-shaped write. Mutates `content.embedding` /
+ * `content.embeddingModel` when it computes a fresh embedding, so the
+ * existing "generate embedding if missing" step later in post()/put() reuses
+ * it instead of recomputing. Always strips the client-forwarded hint fields
+ * (dedup / dedupThreshold / lexicalThreshold) so they never persist onto the
+ * stored record — they are passthrough tuning hints, not schema fields.
+ *
+ * Returns the match signal, or null (no match / gate not applicable).
+ */
+async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> {
+  const cosineThreshold = typeof content.dedupThreshold === "number" ? content.dedupThreshold : DEDUP_COSINE_THRESHOLD_DEFAULT;
+  const lexicalThreshold = typeof content.lexicalThreshold === "number" ? content.lexicalThreshold : DEDUP_LEXICAL_THRESHOLD_DEFAULT;
+  delete content.dedup;
+  delete content.dedupThreshold;
+  delete content.lexicalThreshold;
+
+  if (typeof content.content !== "string" || content.content.length < DEDUP_MIN_CONTENT_LENGTH) {
+    return null;
+  }
+
+  let embedding: number[] | null = Array.isArray(content.embedding) ? content.embedding : null;
+  if (!embedding) {
+    try {
+      embedding = await getEmbedding(content.content);
+    } catch {
+      embedding = null;
+    }
+    if (embedding) {
+      content.embedding = embedding;
+      content.embeddingModel = getModelId();
+    }
+  }
+  if (!embedding) return null;
+
+  return findConservativeDedupMatch(ctx, content.agentId, content.content, embedding, cosineThreshold, lexicalThreshold);
+}
+
+/** Build the final write response: always `written: true`, always includes
+ *  `id`, and layers the dedup collision signal on top when present. Never a
+ *  code path where a match suppresses these base fields. */
+function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | null): any {
+  const base = result && typeof result === "object" && !Array.isArray(result) ? result : {};
+  const response: any = {
+    id: content.id,
+    ...base,
+    written: true,
+    deduplicated: !!dedupMatch,
+  };
+  if (dedupMatch) {
+    response.matchedId = dedupMatch.matchedId;
+    response.matchConfidence = { cosine: dedupMatch.cosine, lexical: dedupMatch.lexical };
+  }
+  return response;
+}
+
+/**
+ * Read-modify-write close of a superseded record, with the SAME transaction
+ * detachment discipline as findConservativeDedupMatch (each discrete Harper
+ * call individually wrapped — see withDetachedTxn's doc for why a single
+ * wrap around a multi-await async function would not protect the later
+ * call). Does NOT swallow failures (ops-a4t5 fix) — throws so the caller can
+ * log it. Never called before the new record is already written.
+ */
+async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<string, unknown>): Promise<void> {
+  const existing = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(oldId));
+  if (!existing) {
+    throw new Error(`supersede-close: record ${oldId} not found`);
+  }
+  await withDetachedTxn(ctx, () => (databases as any).flair.Memory.put({ ...existing, ...patch }));
+}
+
+/** Does an agent hold a "write" grant from `ownerId`? Same MemoryGrant lookup
+ *  pattern as Memory.search()/SemanticSearch.ts (read/search scopes) — reused
+ *  here for the "write" scope that gates cross-agent supersede. */
+async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolean> {
+  try {
+    for await (const grant of (databases as any).flair.MemoryGrant.search({
+      conditions: [
+        { attribute: "granteeId", comparator: "equals", value: granteeId },
+        { attribute: "ownerId", comparator: "equals", value: ownerId },
+      ],
+    })) {
+      if (grant.scope === "write") return true;
+    }
+  } catch {
+    /* MemoryGrant table not yet populated — no grant */
+  }
+  return false;
+}
+
+/**
+ * Shared by post() AND put(): the Memory schema only exposes a working HTTP
+ * PUT route (a raw HTTP POST /Memory 404s with "Memory does not have a post
+ * method implemented" — see src/cli.ts's `flair test` command / commit
+ * 2fa6d22 / ops-pj5). Memory.post() IS reachable, but only via an in-process
+ * resource instantiation (resources/mcp-tools.ts does this). Since
+ * flair-client's write()/update() — used by flair-mcp, the CLI, and every
+ * other integration package — issue HTTP PUT, `supersedes` must be fully
+ * handled (validated, authorized, and closed) from BOTH entry points for the
+ * real-world write path to actually get the fix, not just the in-process one.
+ *
+ * Validates the `supersedes` field's shape and, for a cross-agent supersede,
+ * requires a "write" MemoryGrant from the target's owner (reuses the existing
+ * agent-auth/grant machinery — no parallel auth logic). Returns a Response to
+ * short-circuit with (400/403), or null to continue.
+ */
+async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdict): Promise<Response | null> {
+  if (content.supersedes !== undefined && typeof content.supersedes !== "string") {
+    return new Response(JSON.stringify({ error: "supersedes must be a string (memory ID)" }), {
+      status: 400, headers: { "Content-Type": "application/json" },
+    });
+  }
+  if (content.supersedes && auth.kind === "agent" && !auth.isAdmin) {
+    const target = await (databases as any).flair.Memory.get(content.supersedes).catch(() => null);
+    if (target && target.agentId !== auth.agentId) {
+      if (!(await hasWriteGrant(auth.agentId, target.agentId))) {
+        return FORBIDDEN("forbidden: cannot supersede a memory owned by another agent without a write grant");
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Close the superseded record — called AFTER the new record has already been
+ * written (write-new-BEFORE-close-old, ops-a4t5 fix). Safe failure state is
+ * two active records (recoverable), never a tombstoned-old-with-lost-new.
+ * Failure is logged (observable), never silently swallowed. No-op if
+ * `content.supersedes` is not set.
+ */
+async function closeSupersededIfNeeded(ctx: any, content: any, methodLabel: "post" | "put"): Promise<void> {
+  if (!content.supersedes) return;
+  try {
+    await closeSupersededRecord(ctx, content.supersedes, {
+      validTo: content.validFrom ?? content.createdAt,
+      updatedAt: content.createdAt ?? content.updatedAt,
+    });
+  } catch (err) {
+    // Constant format string + structured data: memory ids are agent-controlled,
+    // so interpolating them into console.error's format position (with a trailing
+    // `err` arg) would let an id containing %s/%o consume/hide the real error
+    // (semgrep unsafe-formatstring). Keep all dynamic values in the data object.
+    console.error(
+      "Memory.closeSuperseded: failed to close superseded record after writing new record " +
+      "(ops-a4t5 — observable, not silent; new record is safely written, old record remains active until retried)",
+      { method: methodLabel, supersededId: content.supersedes, newRecordId: content.id, err },
+    );
+  }
+}
 
 export class Memory extends (databases as any).flair.Memory {
   /**
@@ -85,20 +332,17 @@ export class Memory extends (databases as any).flair.Memory {
     // resolveAgentAuth (reads the gate's tpsAgent annotation) — NOT context.user
     // .username, which is the fallback "admin" super_user while de-elevation is
     // dormant and would wrongly 403 every agent's own write. internal/admin → pass.
+    let auth: AgentAuthVerdict;
     {
-      const auth = await resolveAgentAuth(ctx);
+      auth = await resolveAgentAuth(ctx);
       // Anonymous HTTP must NOT write. Pre-flip the global gate rejected no-auth
       // upstream; with the non-rejecting gate, each write path self-enforces (same
       // rule search() applies to reads).
       if (auth.kind === "anonymous") {
-        return new Response(JSON.stringify({ error: "authentication required" }), {
-          status: 401, headers: { "Content-Type": "application/json" },
-        });
+        return UNAUTH();
       }
       if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
-        return new Response(JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }), {
-          status: 403, headers: { "Content-Type": "application/json" },
-        });
+        return FORBIDDEN("forbidden: cannot write memory owned by another agent");
       }
     }
 
@@ -120,23 +364,15 @@ export class Memory extends (databases as any).flair.Memory {
       }
     }
 
-    // supersedes: optional reference to the ID of the memory this one replaces
-    if (content.supersedes !== undefined && typeof content.supersedes !== "string") {
-      return new Response(JSON.stringify({ error: "supersedes must be a string (memory ID)" }), {
-        status: 400, headers: { "Content-Type": "application/json" },
-      });
-    }
+    // supersedes: optional reference to the ID of the memory this one
+    // replaces. Validates shape + cross-agent-write authorization (shared
+    // with put() — see validateAndAuthorizeSupersedes doc).
+    const supersedesError = await validateAndAuthorizeSupersedes(content, auth);
+    if (supersedesError) return supersedesError;
 
     // Temporal validity: validFrom defaults to now, validTo left null for active facts.
-    // When a memory supersedes another, close the superseded memory's validity window.
     if (!content.validFrom) {
       content.validFrom = content.createdAt;
-    }
-    if (content.supersedes) {
-      patchRecord((databases as any).flair.Memory, content.supersedes, {
-        validTo: content.validFrom,
-        updatedAt: content.createdAt,
-      }).catch(() => {});
     }
 
     if (content.durability === "ephemeral" && !content.expiresAt) {
@@ -160,13 +396,39 @@ export class Memory extends (databases as any).flair.Memory {
       }
     }
 
-    // Generate embedding from content text
+    // Server-side conservative-duplicate gate (memory-integrity fix). A
+    // supersede write is an intentional version-link, not an ambiguous "is
+    // this a duplicate of something else" situation — bypass the gate for it
+    // (this also gives memory_update's preserveHistory mode dedup-bypass for
+    // free, without a separate flag). NEVER suppresses the write either way.
+    let dedupMatch: DedupMatch | null = null;
+    if (!content.supersedes) {
+      dedupMatch = await runDedupGate(ctx, content);
+    } else {
+      delete content.dedup;
+      delete content.dedupThreshold;
+      delete content.lexicalThreshold;
+    }
+
+    // Generate embedding from content text (no-op if the dedup gate above
+    // already computed one for this content).
     if (content.content && !content.embedding) {
       const vec = await getEmbedding(content.content);
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
-    return super.post(content);
+    // ── Write the new record FIRST ──────────────────────────────────────────
+    const result = await super.post(content);
+
+    // ── THEN close the superseded record (ops-a4t5 fix) ─────────────────────
+    // Write-new-BEFORE-close-old: the previous order (close-old via a fire-
+    // and-forget `.catch(()=>{})` BEFORE the new write) could tombstone the
+    // old record and then lose the new one if the write failed afterward.
+    // Now the safe failure state is two active records (recoverable), never
+    // a lost write — and the failure is logged, never silently swallowed.
+    await closeSupersededIfNeeded(ctx, content, "post");
+
+    return buildWriteResponse(content, result, dedupMatch);
   }
 
   async put(content: any) {
@@ -194,19 +456,16 @@ export class Memory extends (databases as any).flair.Memory {
     // write memories it owns, via resolveAgentAuth (gate annotation), not
     // context.user.username (the dormant-de-elevation fallback is "admin").
     // The _reindex admin path above bypasses this.
+    const ctx = (this as any).getContext?.();
+    let auth: AgentAuthVerdict;
     {
-      const octx = (this as any).getContext?.();
-      const auth = await resolveAgentAuth(octx);
+      auth = await resolveAgentAuth(ctx);
       // Anonymous HTTP must NOT write (non-rejecting gate → self-enforce here).
       if (auth.kind === "anonymous") {
-        return new Response(JSON.stringify({ error: "authentication required" }), {
-          status: 401, headers: { "Content-Type": "application/json" },
-        });
+        return UNAUTH();
       }
       if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
-        return new Response(JSON.stringify({ error: "forbidden: cannot write memory owned by another agent" }), {
-          status: 403, headers: { "Content-Type": "application/json" },
-        });
+        return FORBIDDEN("forbidden: cannot write memory owned by another agent");
       }
     }
 
@@ -215,6 +474,16 @@ export class Memory extends (databases as any).flair.Memory {
     // Set defaults that post() sets — put() is also used for new records via CLI
     content.archived = content.archived ?? false;
     content.createdAt = content.createdAt ?? now;
+
+    // supersedes: optional reference to the ID of the memory this one
+    // replaces. Validates shape + cross-agent-write authorization (shared
+    // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
+    // this too: it's the only HTTP-reachable create path).
+    const supersedesError = await validateAndAuthorizeSupersedes(content, auth);
+    if (supersedesError) return supersedesError;
+    if (content.supersedes && !content.validFrom) {
+      content.validFrom = content.createdAt;
+    }
 
     // Content safety scan on updated content + summary (ops-i2jb).
     if (content.content || content.summary) {
@@ -234,7 +503,34 @@ export class Memory extends (databases as any).flair.Memory {
       }
     }
 
-    // Re-generate embedding if content changed
+    // Server-side conservative-duplicate gate (memory-integrity fix). PUT is
+    // an upsert: only run the gate for a FRESH create (target id does not yet
+    // exist) that is NOT a supersede-link write. An update of an EXISTING id
+    // (memory_update's default same-id overwrite path) is an intentional,
+    // explicit overwrite, and a supersede-link write is an intentional
+    // version-link — neither is an ambiguous "is this a duplicate of
+    // something else" write, so both are dedup-bypassed automatically, no
+    // separate flag needed. NEVER suppresses the write either way.
+    let dedupMatch: DedupMatch | null = null;
+    if (content.supersedes) {
+      delete content.dedup;
+      delete content.dedupThreshold;
+      delete content.lexicalThreshold;
+    } else if (content.id) {
+      const preExisting = await (databases as any).flair.Memory.get(content.id).catch(() => null);
+      if (!preExisting) {
+        dedupMatch = await runDedupGate(ctx, content);
+      } else {
+        delete content.dedup;
+        delete content.dedupThreshold;
+        delete content.lexicalThreshold;
+      }
+    } else {
+      dedupMatch = await runDedupGate(ctx, content);
+    }
+
+    // Re-generate embedding if content changed (no-op if the dedup gate above
+    // already computed one for this content).
     if (content.content && !content.embedding) {
       const vec = await getEmbedding(content.content);
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
@@ -256,7 +552,13 @@ export class Memory extends (databases as any).flair.Memory {
       content.durability = "permanent";
     }
 
-    return super.put(content);
+    // ── Write the new/updated record FIRST ──────────────────────────────────
+    const result = await super.put(content);
+
+    // ── THEN close the superseded record (ops-a4t5 fix; see post()) ────────
+    await closeSupersededIfNeeded(ctx, content, "put");
+
+    return buildWriteResponse(content, result, dedupMatch);
   }
 
   async delete(id: any) {

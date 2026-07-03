@@ -6,6 +6,7 @@
  * Tools:
  *   - memory_search  — semantic search across memories
  *   - memory_store   — save a memory with type + durability
+ *   - memory_update  — update an existing memory by ID (dedup-bypassed)
  *   - memory_get     — retrieve a specific memory by ID
  *   - memory_delete  — delete a memory
  *   - bootstrap      — cold-start context (soul + recent memories)
@@ -206,41 +207,64 @@ server.tool(
         dedup: true,
         dedupThreshold: 0.95,
       });
-      // Dedup path: existing memory matched, NEW content was NOT written.
-      // Emit both prose AND structuredContent so callers can react
-      // programmatically even when LLMs compress prose imprecisely
-      // (see flair#449 — work agent missed dedup signal and lost data).
-      if ((result as any).deduped) {
-        const sc = {
-          deduplicated: true,
-          mergedWith: result.id,
-          existingContent: result.content,
-          written: false,
-        };
-        return {
-          content: [{
-            type: "text",
-            text:
-              `⚠️ DEDUPLICATED — new content was NOT written. ` +
-              `Matched existing memory id=${result.id}: ${result.content?.slice(0, 200)}\n\n` +
-              `If the new content is genuinely distinct, retry with different phrasing ` +
-              `or call memory_store with the same id to update.`,
-          }],
-          structuredContent: sc,
-        };
-      }
+      // The server's conservative dedup gate NEVER suppresses a write
+      // (memory-integrity fix, flair#526) — `result.deduplicated` is a
+      // collision SIGNAL, not a "was this dropped" flag. The new content at
+      // `result.id` is ALWAYS written; when flagged, `result.matchedId` names
+      // the similar existing memory (see result.matchConfidence for the
+      // cosine/lexical scores). Emit both prose AND structuredContent so
+      // callers can react programmatically even when LLMs compress prose
+      // imprecisely. (Historical note: this tool used to treat a dedup hit as
+      // "new content was NOT written" — that WAS the flair#449/#526 silent
+      // data-loss bug. The gate is server-side now and never suppresses.)
+      const deduplicated = (result as any).deduplicated === true;
+      const matchedId = (result as any).matchedId as string | undefined;
       const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
       const tagStr = tags && tags.length > 0 ? tags.join(", ") : "none";
-      const text = [
+      const lines = [
         `Memory stored (id: ${result.id})`,
         `Preview: ${preview}`,
         `Size: ${content.length} chars`,
         `Tags: ${tagStr}`,
         `Type: ${type}, Durability: ${durability}`,
-      ].join("\n");
+      ];
+      if (deduplicated && matchedId) {
+        lines.push(
+          "",
+          `Note: similar to existing memory id=${matchedId} — both are kept. ` +
+          `If this was meant to UPDATE that memory rather than add a new one, use memory_update instead.`,
+        );
+      }
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        structuredContent: { deduplicated, id: result.id, written: true, ...(deduplicated ? { matchedId } : {}) },
+      };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
+  },
+);
+
+server.tool(
+  "memory_update",
+  "Update an existing memory by ID. Dedup-bypassed — this is an intentional overwrite/version, not an ambiguous new write. " +
+    "Default: overwrites the same id in place. Pass preserveHistory=true to instead write a new version linked via " +
+    "`supersedes`, closing the old one's validity window (requires owning the memory, or a write grant if it's another agent's).",
+  {
+    id: z.string().describe("ID of the memory to update"),
+    content: z.string().describe("New content"),
+    preserveHistory: z.coerce.boolean().optional().default(false)
+      .describe("Write a new supersedes-linked version instead of overwriting in place (default false)"),
+  },
+  async ({ id, content, preserveHistory }) => {
+    try {
+      const result = await flair.memory.update(id, content, { preserveHistory });
+      const text = preserveHistory
+        ? `Memory updated: new version stored (id: ${result.id}), supersedes ${id}.`
+        : `Memory updated (id: ${id}).`;
       return {
         content: [{ type: "text", text }],
-        structuredContent: { deduplicated: false, id: result.id, written: true },
+        structuredContent: { id: result.id, supersedes: preserveHistory ? id : undefined, written: true },
       };
     } catch (err) {
       return errorResult(err, flair.url);

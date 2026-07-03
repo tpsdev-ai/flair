@@ -19,8 +19,26 @@ export interface Memory {
   subject?: string;
   createdAt: string;
   updatedAt?: string;
-  /** Set to true when write() returned an existing near-duplicate instead of
-   *  creating a new entry. Omitted/undefined for new writes. */
+  /** Always true after a successful write()/update() — the server never
+   *  suppresses a write, so this is never false/absent on a real response. */
+  written?: boolean;
+  /** True when the server's conservative dedup gate found a near-duplicate.
+   *  The new content was ALWAYS written regardless — this is a signal, not a
+   *  suppression flag. See `matchedId` / `matchConfidence`. */
+  deduplicated?: boolean;
+  /** The id of the existing memory the server's dedup gate matched against,
+   *  when `deduplicated` is true. */
+  matchedId?: string;
+  /** Confidence pair for the `matchedId` collision: raw cosine similarity and
+   *  Jaccard token-overlap against the new content, both in [0, 1]. */
+  matchConfidence?: { cosine: number; lexical: number };
+  /**
+   * @deprecated Historical field from the pre-fix client-side dedup gate,
+   * which suppressed the write and returned the EXISTING record instead
+   * (silently dropping distinct-but-similar content — flair#526). The gate is
+   * now server-side and NEVER suppresses a write; use `deduplicated` instead.
+   * No longer set by write()/update().
+   */
   deduped?: boolean;
 }
 

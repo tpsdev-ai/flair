@@ -4,7 +4,7 @@
  * These are the auth-critical assertions the integration harness can't make at
  * the unit level:
  *
- *   - tools/list returns EXACTLY the 9 curated tools (no raw CRUD, no extras).
+ *   - tools/list returns EXACTLY the 10 curated tools (no raw CRUD, no extras).
  *   - sub → Agent resolution: an existing Credential(kind:"idp", idpSubject=sub)
  *     maps to its principalId; an unknown sub with JIT OFF is DENIED (not run as
  *     anonymous/admin); an unknown sub with JIT ON provisions a NON-admin agent.
@@ -44,7 +44,12 @@ class MemoryMock {
   isCollection = false;
   constructor(_id: any, ctx: any) { this._ctx = ctx; }
   async post(args: any) { lastCall = { resource: "Memory.post", ctx: this._ctx, args }; return { ok: true, resource: "Memory.post", agentId: this._ctx?.request?.tpsAgent }; }
-  async get(id: any) { lastCall = { resource: "Memory.get", ctx: this._ctx, args: id }; return { ok: true, resource: "Memory.get", agentId: this._ctx?.request?.tpsAgent }; }
+  async put(args: any) { lastCall = { resource: "Memory.put", ctx: this._ctx, args }; return { ok: true, resource: "Memory.put", agentId: this._ctx?.request?.tpsAgent }; }
+  async get(id: any) {
+    lastCall = { resource: "Memory.get", ctx: this._ctx, args: id };
+    if (id === "missing-id") return null;
+    return { id, agentId: this._ctx?.request?.tpsAgent, content: "existing content", ok: true, resource: "Memory.get" };
+  }
   async delete(id: any) { lastCall = { resource: "Memory.delete", ctx: this._ctx, args: id }; return { ok: true, resource: "Memory.delete", agentId: this._ctx?.request?.tpsAgent }; }
 }
 class SoulMock {
@@ -127,8 +132,8 @@ afterAll(() => {
 });
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
-describe("tools/list — exactly the 9 curated tools", () => {
-  it("returns exactly 9, matching the flair-mcp surface, no CRUD mutators", async () => {
+describe("tools/list — exactly the 10 curated tools", () => {
+  it("returns exactly 10, matching the flair-mcp surface, no raw CRUD mutators", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);
     const names = body.result.tools.map((t: any) => t.name).sort();
@@ -140,11 +145,14 @@ describe("tools/list — exactly the 9 curated tools", () => {
       "memory_get",
       "memory_search",
       "memory_store",
+      "memory_update",
       "soul_get",
       "soul_set",
     ]);
-    // No create_/update_/delete_ raw-resource mutators leaked in.
-    expect(names.some((n: string) => /^(create|update|delete)_/.test(n))).toBe(false);
+    // No raw create_/delete_ resource mutators leaked in. (memory_update
+    // itself is a curated semantic tool, not a raw `update_<resource>`
+    // mutator — it's explicitly allow-listed here rather than excluded.)
+    expect(names.some((n: string) => /^(create|delete)_/.test(n))).toBe(false);
   });
 });
 
@@ -234,6 +242,41 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
     expect(lastCall?.resource).toBe("Memory.post");
     expect(lastCall?.args.agentId).toBe("agt_bob");
     expect(lastCall?.ctx.request.tpsAgent).toBe("agt_bob");
+  });
+
+  it("memory_update (default) reads then PUTs the same id, merging new content", async () => {
+    await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_update", arguments: { id: "mem-1", content: "updated content" } } },
+      { sub: "sub-bob" },
+    ));
+    expect(lastCall?.resource).toBe("Memory.put");
+    expect(lastCall?.args.id).toBe("mem-1");
+    expect(lastCall?.args.content).toBe("updated content");
+    // Stale embedding must be cleared so the server regenerates it.
+    expect(lastCall?.args).not.toHaveProperty("embedding");
+  });
+
+  it("memory_update (preserveHistory) POSTs a NEW id with supersedes = old id", async () => {
+    await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_update", arguments: { id: "mem-1", content: "new version", preserveHistory: true } } },
+      { sub: "sub-bob" },
+    ));
+    expect(lastCall?.resource).toBe("Memory.post");
+    expect(lastCall?.args.id).not.toBe("mem-1");
+    expect(lastCall?.args.supersedes).toBe("mem-1");
+    expect(lastCall?.args.content).toBe("new version");
+    expect(lastCall?.ctx.request.tpsAgent).toBe("agt_bob");
+  });
+
+  it("memory_update on a missing id returns a 404-shaped error, no write attempted", async () => {
+    const res = await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_update", arguments: { id: "missing-id", content: "x" } } },
+      { sub: "sub-bob" },
+    ));
+    const body = await parse(res);
+    expect(lastCall?.resource).toBe("Memory.get");
+    expect(body.result.isError).toBe(true);
+    expect(body.result.structuredContent.status).toBe(404);
   });
 
   it("soul_set PUTs with id = agentId:key (so soul_get can find it)", async () => {

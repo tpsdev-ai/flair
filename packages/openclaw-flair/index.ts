@@ -582,23 +582,26 @@ export default {
               dedup: !supersedes, // skip dedup when explicitly superseding
               dedupThreshold: 0.7,
             });
-            // Two signals available: (1) id-mismatch (explicit memId vs
-            // returned id), (2) flair-client's `deduped` flag. Use both —
-            // the deduped flag is the authoritative one from flair-client,
-            // id-mismatch is the legacy check. Match either to be safe.
-            const wasDeduped = result.id !== memId || (result as any).deduped === true;
+            // The server's conservative dedup gate NEVER suppresses a write
+            // (memory-integrity fix, flair#526) — `result.deduplicated` is a
+            // collision SIGNAL, not a "was this dropped" flag; the content at
+            // `memId` is always written. (Historical note: this used to check
+            // the now-removed `result.deduped` flag AND an id-mismatch
+            // heuristic, both signals of the old client-side gate that DID
+            // suppress the write — that suppression is gone.)
+            const wasDeduplicated = (result as any).deduplicated === true;
             return {
               content: [{
                 type: "text",
-                text: wasDeduped
-                  ? `⚠️ DEDUPLICATED — new content was NOT written. Matched existing memory id=${result.id}: ${result.content?.slice(0, 200)}`
+                text: wasDeduplicated
+                  ? `Memory stored (id: ${memId}) — similar to existing memory id=${(result as any).matchedId}: ${result.content?.slice(0, 200)}`
                   : `Memory stored (id: ${memId})`,
               }],
               details: {
                 id: result.id,
-                deduplicated: wasDeduped,
-                written: !wasDeduped,
-                ...(wasDeduped ? { mergedWith: result.id } : {}),
+                deduplicated: wasDeduplicated,
+                written: true,
+                ...(wasDeduplicated ? { matchedId: (result as any).matchedId } : {}),
               },
             };
           } catch (err: any) {

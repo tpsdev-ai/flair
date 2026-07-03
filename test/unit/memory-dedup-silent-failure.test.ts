@@ -1,116 +1,86 @@
 import { describe, it, expect, mock } from "bun:test";
 import { FlairClient } from "../../packages/flair-client/src/client";
-import type { Memory } from "../../packages/flair-client/src/types";
 
 /**
- * P0 regression: The dedup branch in write() returned the existing memory
- * without any signal, so callers got a success-shaped response with a real
- * ID + content + "Memory stored" when nothing was actually written.
+ * P0 regression (historical): the dedup branch in write() used to run a
+ * client-side pre-flight search and, on a match, return the EXISTING record
+ * WITHOUT writing the new content — a success-shaped response with a real
+ * ID + content + "Memory stored" when nothing new was actually persisted.
  *
- * Fix: dedup branch sets `deduped: true` on the return so callers can detect
- * that a new write was suppressed.
+ * Memory-integrity fix (flair#526): the dedup gate moved SERVER-SIDE
+ * (resources/Memory.ts, Memory.post()/Memory.put()) and NEVER suppresses a
+ * write. write() now always issues exactly one PUT and always returns the
+ * record it sent, merged with whatever collision signal the server reports
+ * (`deduplicated` / `matchedId` / `matchConfidence`) — never the old
+ * `deduped: true` + existing-record-swap shape. These tests guard against
+ * that suppression ever being reintroduced client-side.
  */
-describe("memory dedup silent failure (P0 regression)", () => {
+describe("memory dedup — never-silent-loss (flair#526 fix)", () => {
   const content1 = "Test memory about widgets and gadgets";
   const content2 = "Test memory about widgets";
 
-  const fakeMemory: Memory = {
-    id: "mem-abc-123",
-    agentId: "test-agent",
-    content: content1,
-    type: "session",
-    durability: "standard",
-    tags: [],
-    createdAt: new Date().toISOString(),
-  };
-
   it("first write succeeds and returns the written memory", async () => {
-    // For the first write: search returns empty (no dup), then PUT succeeds.
     const requestSpy = mock(async (_method: string, _path: string, _body?: unknown) => ({}));
-
     const client = new FlairClient({ agentId: "test-agent" });
     client.request = requestSpy as any;
 
-    // Override search to return empty (no duplicate)
-    const searchSpy = mock(async () => []);
-    (client.memory as any).search = searchSpy;
-
-    const result = await client.memory.write(content1, {
-      dedup: true,
-      dedupThreshold: 0.95,
-    });
+    const result = await client.memory.write(content1, { dedup: true, dedupThreshold: 0.95 });
 
     expect(result.id).toBeDefined();
     expect(result.content).toBe(content1);
-    expect(result.deduped).toBeUndefined();
-    expect(searchSpy).toHaveBeenCalledTimes(1);
-    expect(requestSpy).toHaveBeenCalled();
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    expect(requestSpy.mock.calls[0][0]).toBe("PUT");
   });
 
-  it("second write (near-duplicate) returns deduped: true with first write's content", async () => {
-    // For the second write: search returns a hit, then get resolves to fakeMemory.
-    // No PUT should be called.
-    const requestSpy = mock(async (_method: string, _path: string, _body?: unknown) => {
-      throw new Error("PUT should not be called on dedup hit");
-    });
-
+  it("a near-duplicate write is STILL written — never suppressed, never dropped", async () => {
+    // Simulate the server's dedup gate finding a conservative match: it
+    // still returns a normal PUT-success shape, PLUS the collision signal.
+    const requestSpy = mock(async (_method: string, _path: string, _body?: unknown) => ({
+      deduplicated: true,
+      matchedId: "test-agent-existing-1",
+      matchConfidence: { cosine: 0.97, lexical: 0.8 },
+      written: true,
+    }));
     const client = new FlairClient({ agentId: "test-agent" });
     client.request = requestSpy as any;
 
-    // Simulate search returning a near-duplicate hit
-    const searchSpy = mock(async () => [{ id: fakeMemory.id, content: fakeMemory.content, score: 0.97 }]);
-    (client.memory as any).search = searchSpy;
+    const result = await client.memory.write(content2, { dedup: true, dedupThreshold: 0.95 });
 
-    // get returns the existing memory
-    const getSpy = mock(async () => fakeMemory);
-    (client.memory as any).get = getSpy;
+    // Exactly one write call — no client-side pre-flight search exists anymore.
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    expect(requestSpy.mock.calls[0][0]).toBe("PUT");
+    // The NEW content was written under a NEW id — never swapped for the
+    // existing match's id/content (the old bug's exact failure mode).
+    expect(result.id).not.toBe("test-agent-existing-1");
+    expect(result.content).toBe(content2);
+    expect((result as any).written).toBe(true);
+    // The collision signal passes through as a SIGNAL, not a suppression flag.
+    expect((result as any).deduplicated).toBe(true);
+    expect((result as any).matchedId).toBe("test-agent-existing-1");
+    expect((result as any).matchConfidence).toEqual({ cosine: 0.97, lexical: 0.8 });
+  });
 
-    const result = await client.memory.write(content2, {
-      dedup: true,
-      dedupThreshold: 0.95,
+  it("dedup/dedupThreshold are forwarded as passthrough hints in the request body", async () => {
+    const requestSpy = mock(async (_method: string, _path: string, body?: unknown) => {
+      expect((body as any).dedup).toBe(true);
+      expect((body as any).dedupThreshold).toBe(0.8);
+      return {};
     });
-
-    // Must signal dedup was suppressed
-    expect((result as any).deduped).toBe(true);
-    // ID matches the first write's ID, not a newly generated one
-    expect(result.id).toBe(fakeMemory.id);
-    // Content matches the FIRST write, not the second
-    expect(result.content).toBe(content1);
-    // Search was called
-    expect(searchSpy).toHaveBeenCalledTimes(1);
-    // get was called
-    expect(getSpy).toHaveBeenCalled();
-  });
-
-  it("reads the originally-written memory — content matches first write, not second", async () => {
     const client = new FlairClient({ agentId: "test-agent" });
+    client.request = requestSpy as any;
 
-    const getSpy = mock(async () => fakeMemory);
-    (client.memory as any).get = getSpy;
-
-    const mem = await client.memory.get(fakeMemory.id);
-    expect(mem).not.toBeNull();
-    expect(mem!.content).toBe(content1);
+    await client.memory.write(content1, { dedup: true, dedupThreshold: 0.8 });
+    expect(requestSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("dedup not triggered when content is short (< 20 chars)", async () => {
-    const shortContent = "ok";
+  it("short content still writes normally (server applies its own length bypass)", async () => {
     const requestSpy = mock(async () => ({}));
-
     const client = new FlairClient({ agentId: "test-agent" });
     client.request = requestSpy as any;
 
-    const searchSpy = mock(async () => [{ id: "match", content: "ok", score: 0.99 }]);
-    (client.memory as any).search = searchSpy;
+    const result = await client.memory.write("ok", { dedup: true, dedupThreshold: 0.95 });
 
-    await client.memory.write(shortContent, {
-      dedup: true,
-      dedupThreshold: 0.95,
-    });
-
-    // Search should NOT have been called for short content
-    expect(searchSpy).not.toHaveBeenCalled();
-    // PUT should have been called (it creates a new entry)
-    expect(requestSpy).toHaveBeenCalled();
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    expect(result.content).toBe("ok");
   });
 });

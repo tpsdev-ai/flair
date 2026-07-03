@@ -236,38 +236,35 @@ export default function (pi: ExtensionAPI) {
           dedupThreshold: 0.95,
         });
 
-        // Dedup signal: use the explicit `deduped` flag that flair-client
-        // sets on the returned record. The previous prefix-match check
-        // (`!result.id.startsWith(`${agentId}-`)`) was unreliable — when
-        // a dedup hit returned an existing memory from the SAME agent,
-        // both IDs start with the same prefix and the check silently
-        // returned the success path, dropping the new content. Same fix
-        // class as #358 (P0 silent data loss) applied to flair-mcp;
-        // pi-flair was missed. See flair#449 (filed by a Claude Code
-        // session that hit this exact failure).
-        const wasDeduped = (result as any).deduped === true;
-
-        if (wasDeduped) {
-          return {
-            content: [{
-              type: "text",
-              text: `Similar memory already exists (id: ${result.id}): ${result.content?.slice(0, 200)}\n(no new entry written)`,
-            }],
-            details: { deduplicated: true, mergedWith: result.id },
-          };
-        }
+        // Dedup signal: the server's conservative gate NEVER suppresses a
+        // write (memory-integrity fix, flair#526) — `result.deduplicated`
+        // is a collision SIGNAL, not a "was this dropped" flag. The content
+        // is always written; when flagged, `result.matchedId` names the
+        // similar existing memory. (Historical note: this tool used to check
+        // the now-removed `result.deduped` flag from a client-side gate that
+        // DID suppress the write, and told the user "no new entry written" —
+        // that was the #449/#526 silent-data-loss failure mode. Both the
+        // suppression and the misleading text are gone.)
+        const wasDeduplicated = (result as any).deduplicated === true;
+        const matchedId = (result as any).matchedId as string | undefined;
 
         const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
         const tagStr = (params.tags as string[] | undefined)?.length ? (params.tags as string[]).join(", ") : "none";
-        const text = [
+        const lines = [
           `Memory stored (id: ${result.id})`,
           `Preview: ${preview}`,
           `Size: ${content.length} chars`,
           `Tags: ${tagStr}`,
           `Durability: ${durability}`,
-        ].join("\n");
+        ];
+        if (wasDeduplicated && matchedId) {
+          lines.push(`Note: similar to existing memory (id: ${matchedId}) — both are kept.`);
+        }
 
-        return { content: [{ type: "text", text }], details: { deduplicated: false, id: result.id } };
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: { deduplicated: wasDeduplicated, id: result.id, written: true, ...(wasDeduplicated ? { matchedId } : {}) },
+        };
       } catch (err) {
         return errorResult(err, flair.url);
       }
