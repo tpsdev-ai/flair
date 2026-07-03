@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-03
+
+### 🧠 Memory integrity: the dedup gate no longer silently loses writes (#553 — closes #526, #548)
+
+`memory_store`'s dedup gate was raw-cosine-only at 0.95 and **silently dropped** the new write on a match — so distinct-but-topically-close findings vanished (#526, the field case: replication route-directionality vs an unrelated DDL/schema memory) and update-intent writes preserved stale state (#548). Since `flair-mcp` enabled dedup by default, every MCP write was exposed. The fix:
+
+- **Never-silent-loss invariant** — the gate never suppresses a write. It always writes; a near-duplicate is surfaced only as a signal (`deduplicated` / `matchedId` / `matchConfidence`), never a reason to drop.
+- **Conservative same-fact detection** — a candidate is a duplicate only if cosine **AND** lexical (Jaccard token-overlap) both clear their thresholds, so a topic collision (high cosine, low lexical) is no longer merged.
+- **Gate moved server-side** into `Memory` — both the HTTP write path and the native `/mcp` path (which previously had *no* dedup) now behave identically.
+- **`memory_update`** (new MCP tool, both surfaces) — id-targeted, dedup-bypassed, default **same-id overwrite**; opt-in supersede-link mode. Retires the racy, identity-breaking delete+store workaround.
+- **Supersede is transactional + observable** — validity-window close is write-new-before-close-old and logs on failure (no more silent `.catch(() => {})`); a cross-agent supersede requires a `write` grant.
+
+### 🔎 Cross-encoder reranker in SemanticSearch — default-OFF (#496)
+
+An in-process cross-encoder re-scores query+candidate together and reorders the retrieval set before the final slice, composing with the BM25+union-RRF hybrid path, fail-open to vector order. **Default-OFF** behind `FLAIR_RERANK_ENABLED`; enabling waits on the recall measurement gate.
+
 ## [0.17.0] - 2026-07-02
 
 ### 🔒 SECURITY: cross-agent isolation break — `getContext()` not `this.request` (#551, ops-sal4)
