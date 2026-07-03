@@ -106,7 +106,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock }));
+mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { WorkspaceState } = await import("../../resources/WorkspaceState.ts");
 const { OrgEvent } = await import("../../resources/OrgEvent.ts");

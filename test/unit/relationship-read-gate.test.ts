@@ -63,7 +63,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock }));
+mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Relationship } = await import("../../resources/Relationship.ts");
 

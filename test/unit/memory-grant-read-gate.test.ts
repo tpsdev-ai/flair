@@ -68,7 +68,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock }));
+mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { MemoryGrant } = await import("../../resources/MemoryGrant.ts");
 
