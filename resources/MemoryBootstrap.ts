@@ -14,6 +14,12 @@ import { resolveReadScope } from "./memory-read-scope.js";
  *   2. Permanent memories (safety rules, core principles)
  *   3. Recent memories (adaptive window)
  *   4. Task-relevant memories (semantic search if currentTask provided)
+ *   4b. Teammate findings relevant to your task (flair#550 — the SAME scored
+ *      task-relevant set as #4, split by origin: a grant-visible teammate's
+ *      SHARED memory that scores against currentTask lands here instead of
+ *      #4, attributed via "[via <agentId>]". Presentation only — what's
+ *      readable is entirely Layer 1's resolveReadScope()/ops-2dm3; this only
+ *      changes how an already-read cross-agent record is formatted/sectioned)
  *   5. Relationship context (active relationships for mentioned entities)
  *   6. Predicted context (based on channel/surface/subject hints)
  *   7. Team roster (other active agents in this office + a search-first nudge —
@@ -38,13 +44,24 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-function formatMemory(m: any, supersedes?: boolean): string {
+// `agentId` is the BOOTSTRAPPING agent (the caller) — used only to decide
+// whether to annotate attribution, never to change what's read (that
+// boundary is resolveReadScope()'s job, upstream of this function). A
+// cross-agent record always carries `_source` (set once, above, when the
+// record's own agentId differs from the bootstrapping agent — see the
+// allMemories loop), so `m._source !== agentId` is the "is this a
+// teammate's finding" check; own memories never carry `_source` at all.
+function formatMemory(m: any, agentId?: string): string {
   const tag = m.durability === "permanent" ? "🔒" : m.durability === "persistent" ? "📌" : "📝";
   const date = m.createdAt ? ` (${m.createdAt.slice(0, 10)})` : "";
   const chain = m.supersedes ? " [supersedes earlier decision]" : "";
-  const base = `${tag} ${m.content}${date}${chain}`;
+  const attribution = m._source && m._source !== agentId ? `[via ${m._source}] ` : "";
+  const base = `${tag} ${attribution}${m.content}${date}${chain}`;
 
-  // Wrap flagged memories in safety delimiters
+  // Wrap flagged memories in safety delimiters — composes with attribution
+  // above (attribution is baked into `base` before wrapping, so a flagged
+  // teammate memory renders with BOTH the "[via <agent>]" tag and the
+  // untrusted-content wrapper).
   if (m._safetyFlags && Array.isArray(m._safetyFlags) && m._safetyFlags.length > 0) {
     return wrapUntrusted(base, m._source);
   }
@@ -110,6 +127,7 @@ export class BootstrapMemories extends Resource {
       predicted: [],
       relationships: [],
       relevant: [],
+      teammate: [],
       events: [],
     };
     let tokenBudget = maxTokens;
@@ -268,7 +286,7 @@ export class BootstrapMemories extends Resource {
 
     const permanent = activeMemories.filter((m) => m.durability === "permanent");
     for (const m of permanent) {
-      const line = formatMemory(m);
+      const line = formatMemory(m, agentId);
       const cost = estimateTokens(line);
       if (cost <= tokenBudget) {
         sections.permanent.push(line);
@@ -305,7 +323,7 @@ export class BootstrapMemories extends Resource {
     const recentBudget = Math.floor(tokenBudget * 0.4);
     let recentSpent = 0;
     for (const m of recent) {
-      const line = formatMemory(m);
+      const line = formatMemory(m, agentId);
       const cost = estimateTokens(line);
       if (recentSpent + cost > recentBudget) {
         memoriesTruncated++;
@@ -344,7 +362,7 @@ export class BootstrapMemories extends Resource {
       const predictedBudget = Math.floor(tokenBudget * 0.3);
       let predictedSpent = 0;
       for (const m of subjectMemories) {
-        const line = formatMemory(m);
+        const line = formatMemory(m, agentId);
         const cost = estimateTokens(line);
         if (predictedSpent + cost > predictedBudget) {
           memoriesTruncated++;
@@ -414,11 +432,23 @@ export class BootstrapMemories extends Resource {
           .filter((s) => s.score > 0.3)
           .sort((a, b) => b.score - a.score);
 
+        // #550: split the scored, task-relevant set by origin. Own findings
+        // go to `relevant` as before; a teammate's (grant-visible, already
+        // read-scoped by Layer 1 — `m._source` is only ever set for a
+        // cross-agent record, see the allMemories loop above) go to the new
+        // `teammate` section so the agent can tell it apart at a glance.
+        // Both draw from the SAME `tokenBudget` in one score-ordered pass —
+        // highest-relevance memories win the remaining budget regardless of
+        // which section they land in, so neither section double-spends.
         for (const { memory: m } of scored) {
-          const line = formatMemory(m);
+          const line = formatMemory(m, agentId);
           const cost = estimateTokens(line);
           if (cost > tokenBudget) continue;
-          sections.relevant.push(line);
+          if (m._source) {
+            sections.teammate.push(line);
+          } else {
+            sections.relevant.push(line);
+          }
           tokenBudget -= cost;
           memoriesIncluded++;
         }
@@ -480,6 +510,13 @@ export class BootstrapMemories extends Resource {
     if (sections.relevant.length > 0) {
       parts.push("## Relevant Knowledge\n" + sections.relevant.join("\n"));
     }
+    // #550: teammate findings relevant to the current task — right after the
+    // agent's own task-relevant knowledge. Empty section renders nothing
+    // (no header) so a bootstrap with no grant-visible teammate findings for
+    // this task looks exactly as it did before this feature.
+    if (sections.teammate.length > 0) {
+      parts.push("## Teammate findings relevant to your task\n" + sections.teammate.join("\n"));
+    }
     if (sections.events.length > 0) {
       parts.push("## Recent Org Events\n" + sections.events.join("\n"));
     }
@@ -499,6 +536,7 @@ export class BootstrapMemories extends Resource {
         predicted: sections.predicted.length,
         relationships: sections.relationships.length,
         relevant: sections.relevant.length,
+        teammate: sections.teammate.length,
         events: sections.events.length,
       },
       tokenEstimate: soulTokens + memoryTokens,
