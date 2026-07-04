@@ -222,6 +222,24 @@ done
 echo "🔒 Refreshing bun.lock..."
 (cd "$ROOT" && bun install) || { echo "❌ bun install failed"; exit 1; }
 
+# 3b. `bun install` does NOT rewrite the workspace internal-dep specifiers in
+# bun.lock's per-package sections (ops-i9w8): the leaf packages (langgraph/n8n/
+# openclaw/pi-flair) keep the OLD @tpsdev-ai/flair-client version even though
+# their package.json now declares $VERSION. `bun install` above passes, so it
+# looks clean — but any downstream `--frozen-lockfile` install fails on the
+# desync. This bit both v0.18.0 and v0.19.0 (each needed a manual fixup; Kern
+# caught the v0.19.0 one on the release PR). Explicitly align every leaf
+# specifier to $VERSION (the @workspace: resolution line and non-flair-client
+# deps are left
+# untouched — the regex only matches the "x.y.z" version-string form), then
+# HARD-VERIFY with --frozen-lockfile so a residual desync fails the release loud
+# instead of silently shipping a broken lockfile.
+echo "🔗 Aligning bun.lock internal-dep specifiers (ops-i9w8)..."
+perl -i -pe 's{("\@tpsdev-ai/flair-client":\s*")\d+\.\d+\.\d+(")}{${1}'"$VERSION"'${2}}g' "$ROOT/bun.lock"
+(cd "$ROOT" && bun install --frozen-lockfile) || {
+  echo "❌ bun.lock still desynced after specifier alignment (ops-i9w8) — investigate before releasing."; exit 1;
+}
+
 # 4. Build
 echo "🔨 Building..."
 (cd "$ROOT" && npm run build && npm run build:cli) || { echo "❌ Build failed"; exit 1; }
