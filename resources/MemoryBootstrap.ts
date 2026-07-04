@@ -3,6 +3,7 @@ import { allowVerified } from "./agent-auth.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { wrapUntrusted } from "./content-safety.js";
 import { isTeammate, formatTeamLine } from "./memory-bootstrap-lib.js";
+import { resolveReadScope } from "./memory-read-scope.js";
 
 /**
  * POST /MemoryBootstrap
@@ -16,8 +17,9 @@ import { isTeammate, formatTeamLine } from "./memory-bootstrap-lib.js";
  *   5. Relationship context (active relationships for mentioned entities)
  *   6. Predicted context (based on channel/surface/subject hints)
  *   7. Team roster (other active agents in this office + a search-first nudge —
- *      bootstrap only ever loads the caller's own memories, so this is the one
- *      place agents learn teammates' findings exist without a separate call)
+ *      bootstrap loads the caller's own memories plus any granted owner's
+ *      SHARED memories (ops-2dm3 Layer 1, never their private ones), so this
+ *      section nudges toward memory_search for anything beyond that window)
  *
  * Prediction: when context signals (channel, surface, subjects) are provided,
  * the bootstrap loads more aggressively — Flair is fast enough that the
@@ -199,12 +201,13 @@ export class BootstrapMemories extends Resource {
     }
 
     // --- 1c. Team roster + cross-agent search nudge ---
-    // Bootstrap only ever loads the caller's OWN soul/memories (every query
-    // below filters record.agentId === agentId). Nothing here tells the agent
-    // that teammates exist or that their findings are one memory_search away
-    // — so agents never think to check before re-investigating something a
-    // teammate already solved. This section is fixed-cost (no query text to
-    // format per agent) so it's cheap enough to always include, not budgeted.
+    // Soul is still caller-own-only (unaffected here). Memory loading below
+    // (step 2) now also includes granted owners' SHARED memories (ops-2dm3
+    // Layer 1) — but this section stays: memory_search/SemanticSearch remains
+    // the deliberate, query-driven way to find a teammate's finding, vs.
+    // bootstrap's fixed recent/permanent window. This section is fixed-cost
+    // (no query text to format per agent) so it's cheap enough to always
+    // include, not budgeted.
     //
     // Permissive kind/status checks are DELIBERATE: Agent.ts registration
     // defaults both (`kind ||= "agent"`, `status ||= "active"`), so pre-1.0
@@ -223,11 +226,27 @@ export class BootstrapMemories extends Resource {
     }
 
     // --- 2. Permanent memories (always included, highest priority) ---
+    // Read-scope: own (any visibility) + granted owners' SHARED memories only
+    // (ops-2dm3 Layer 1 — never a granted owner's private ones). Centralized
+    // in resolveReadScope(): the condition is pushed into the Harper query
+    // (so the table itself never returns an out-of-scope row), and
+    // `scope.isAllowed` re-checks in-process as defense-in-depth (same
+    // belt-and-suspenders discipline as SemanticSearch's BM25 pre-fusion
+    // filter) — this is the #550 foundation: bootstrap can now safely expand
+    // beyond own-only without a parallel scoping rule.
+    const scope = await resolveReadScope(agentId);
     const allMemories: any[] = [];
-    for await (const record of (databases as any).flair.Memory.search()) {
-      if (record.agentId !== agentId) continue;
+    for await (const record of (databases as any).flair.Memory.search({ conditions: [scope.condition] })) {
+      if (!scope.isAllowed(record)) continue;
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
-      allMemories.push(record);
+      // Attribution for cross-agent (granted-owner) records — same convention
+      // SemanticSearch.ts already uses: formatMemory() below only USES this
+      // when the record also carries _safetyFlags (labels the untrusted-data
+      // wrapper with whose memory it is), it never forces wrapping on its own.
+      // Real Harper's search() results are non-extensible objects — mutating
+      // `record._source = ...` directly throws ("object is not extensible");
+      // shallow-copy instead of mutating in place.
+      allMemories.push(record.agentId !== agentId ? { ...record, _source: record.agentId } : record);
     }
     memoriesAvailable = allMemories.length;
 

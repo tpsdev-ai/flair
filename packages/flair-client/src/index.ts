@@ -5,6 +5,7 @@ export type {
   Memory,
   MemoryType,
   Durability,
+  Visibility,
   SoulEntry,
   SearchResult,
   BootstrapResult,

@@ -20,7 +20,15 @@ function checkAgentScope(
   return "forbidden: agentId must match authenticated agent";
 }
 
-/** Returns 403 message if agent tries to read another agent's memory without grant */
+/**
+ * Returns 403 message if agent tries to read another agent's memory without
+ * a grant, or if the memory is private (ops-2dm3 Layer 1 — mirrors
+ * resources/memory-read-scope.ts's resolveReadScope().isAllowed()). The
+ * pre-2dm3 `visibility === "office"` global bypass (any authenticated agent,
+ * no grant needed) is GONE — that was the ops-nzxa leak. A grant only ever
+ * covers an owner's SHARED memories (or ones with no visibility field at
+ * all — the migration invariant: absent reads as shared, never private).
+ */
 function checkMemoryReadScope(
   authenticatedAgent: string,
   memoryOwner: string,
@@ -30,9 +38,9 @@ function checkMemoryReadScope(
 ): string | null {
   if (isAdmin) return null;
   if (memoryOwner === authenticatedAgent) return null;
-  if (memoryVisibility === "office") return null;
-  if (hasGrant) return null;
-  return `forbidden: cannot read memory owned by ${memoryOwner}`;
+  if (!hasGrant) return `forbidden: cannot read memory owned by ${memoryOwner}`;
+  if (memoryVisibility === "private") return `forbidden: cannot read memory owned by ${memoryOwner}`;
+  return null;
 }
 
 /** Soul reads are open to authenticated agents for cross-team coordination */
@@ -74,16 +82,29 @@ describe("checkAgentScope (SemanticSearch / BootstrapMemories / Memory POST)", (
 });
 
 describe("checkMemoryReadScope (Memory GET by ID)", () => {
-  it("allows reading own memory", () => {
+  it("allows reading own memory, any visibility (even private)", () => {
     expect(checkMemoryReadScope("anvil", "anvil", "standard", false, false)).toBeNull();
+    expect(checkMemoryReadScope("anvil", "anvil", "private", false, false)).toBeNull();
   });
 
-  it("allows reading office-wide memory", () => {
-    expect(checkMemoryReadScope("anvil", "flint", "office", false, false)).toBeNull();
+  it("no grant at all → blocked regardless of the owner's visibility choice (ops-nzxa: no more global bypass)", () => {
+    const err = checkMemoryReadScope("anvil", "flint", "shared", false, false);
+    expect(err).not.toBeNull();
+    expect(err).toContain("flint");
   });
 
-  it("allows reading with MemoryGrant", () => {
-    expect(checkMemoryReadScope("anvil", "flint", "standard", true, false)).toBeNull();
+  it("allows reading a granted owner's SHARED memory", () => {
+    expect(checkMemoryReadScope("anvil", "flint", "shared", true, false)).toBeNull();
+  });
+
+  it("allows reading a granted owner's memory with NO visibility field (migration invariant: absent == shared)", () => {
+    expect(checkMemoryReadScope("anvil", "flint", undefined, true, false)).toBeNull();
+  });
+
+  it("blocks reading a granted owner's PRIVATE memory — the private-exclusion invariant", () => {
+    const err = checkMemoryReadScope("anvil", "flint", "private", true, false);
+    expect(err).not.toBeNull();
+    expect(err).toContain("flint");
   });
 
   it("blocks reading another agent's standard memory without grant", () => {
@@ -92,11 +113,12 @@ describe("checkMemoryReadScope (Memory GET by ID)", () => {
     expect(err).toContain("flint");
   });
 
-  it("allows admin to read any memory", () => {
+  it("allows admin to read any memory, including another agent's private one", () => {
     expect(checkMemoryReadScope("admin", "flint", "standard", false, true)).toBeNull();
+    expect(checkMemoryReadScope("admin", "flint", "private", false, true)).toBeNull();
   });
 
-  it("blocks kern reading sherlock's private memory", () => {
+  it("blocks kern reading sherlock's memory with no grant held", () => {
     const err = checkMemoryReadScope("kern", "sherlock", undefined, false, false);
     expect(err).not.toBeNull();
     expect(err).toContain("sherlock");
@@ -128,9 +150,18 @@ describe("cross-agent scoping scenarios", () => {
     expect(checkAgentScope("pulse", "pulse", false)).toBeNull();
   });
 
-  it("office memory is public to all agents", () => {
+  it("shared memory is NEVER public without a grant (ops-nzxa: the old office-wide bypass is gone)", () => {
     for (const reader of ["anvil", "flint", "kern", "pulse", "sherlock"]) {
-      expect(checkMemoryReadScope(reader, "flint", "office", false, false)).toBeNull();
+      if (reader === "flint") continue; // owner reading its own — not a cross-agent case
+      const err = checkMemoryReadScope(reader, "flint", "shared", false, false);
+      expect(err).not.toBeNull();
+    }
+  });
+
+  it("a grant makes a SHARED memory visible, but never a PRIVATE one", () => {
+    for (const reader of ["anvil", "kern", "pulse", "sherlock"]) {
+      expect(checkMemoryReadScope(reader, "flint", "shared", true, false)).toBeNull();
+      expect(checkMemoryReadScope(reader, "flint", "private", true, false)).not.toBeNull();
     }
   });
 

@@ -16,6 +16,7 @@ import type {
   Memory,
   MemoryType,
   Durability,
+  Visibility,
   SoulEntry,
   SearchResult,
   BootstrapResult,
@@ -145,6 +146,12 @@ class MemoryApi {
     durability?: Durability;
     tags?: string[];
     subject?: string;
+    /** Writer-controlled sharing intent. Omit to let the
+     *  server apply its durability-keyed default (permanent/persistent →
+     *  shared, standard/ephemeral → private) — only forwarded when the
+     *  caller explicitly sets it, so omitting this is a no-op change from
+     *  today's behavior. */
+    visibility?: Visibility;
     /** Ask the server to run its conservative near-duplicate check for this
      *  write and report a collision signal if found. Does NOT suppress the
      *  write either way. Default: false (server still applies its own
@@ -166,6 +173,11 @@ class MemoryApi {
       subject: opts.subject,
       createdAt: new Date().toISOString(),
     };
+    // Forward visibility ONLY when the caller set it — an unset visibility
+    // must reach the server as "absent" (not e.g. defaulted client-side) so
+    // the server's durability-keyed default (Memory.post/put) is the one
+    // source of truth for the default, never duplicated here.
+    if (opts.visibility !== undefined) record.visibility = opts.visibility;
     // Passthrough hints — the server strips these before persisting; they are
     // never stored on the record itself.
     if (opts.dedup !== undefined) record.dedup = opts.dedup;

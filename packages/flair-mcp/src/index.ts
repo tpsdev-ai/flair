@@ -197,13 +197,20 @@ server.tool(
         "ephemeral — scratch state, auto-expires 72h (e.g., 'currently debugging issue #42')",
       ),
     tags: z.array(z.string()).optional().describe("Array of tag strings"),
+    visibility: z.enum(["private", "shared"]).optional().describe(
+      "Writer-controlled sharing intent (omit to use the server's durability-keyed default: " +
+      "permanent/persistent -> shared, standard/ephemeral -> private). " +
+      "private -- never visible to another agent, even one with a memory grant. " +
+      "shared -- visible to the owner and any agent holding a read/search grant.",
+    ),
   },
-  async ({ content, type, durability, tags }) => {
+  async ({ content, type, durability, tags, visibility }) => {
     try {
       const result = await flair.memory.write(content, {
         type: type as any,
         durability: durability as any,
         tags,
+        visibility: visibility as any,
         dedup: true,
         dedupThreshold: 0.95,
       });
@@ -219,6 +226,7 @@ server.tool(
       // data-loss bug. The gate is server-side now and never suppresses.)
       const deduplicated = (result as any).deduplicated === true;
       const matchedId = (result as any).matchedId as string | undefined;
+      const effectiveVisibility = (result as any).visibility as string | undefined;
       const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
       const tagStr = tags && tags.length > 0 ? tags.join(", ") : "none";
       const lines = [
@@ -226,7 +234,7 @@ server.tool(
         `Preview: ${preview}`,
         `Size: ${content.length} chars`,
         `Tags: ${tagStr}`,
-        `Type: ${type}, Durability: ${durability}`,
+        `Type: ${type}, Durability: ${durability}, Visibility: ${effectiveVisibility ?? "(server default)"}`,
       ];
       if (deduplicated && matchedId) {
         lines.push(

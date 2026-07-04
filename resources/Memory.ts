@@ -4,6 +4,7 @@ import { isAdmin, resolveAgentAuth, allowVerified, type AgentAuthVerdict } from 
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
+import { resolveAllowedOwners, resolveReadScope } from "./memory-read-scope.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -22,25 +23,17 @@ const NOT_FOUND = () =>
   new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
 
 /**
- * Owner ids a non-admin agent may READ: itself, plus any owner who has
- * granted it a "read" or "search" scoped MemoryGrant. Shared by search()
- * (collection scoping) and get() (per-id ownership check, memory-soul-read-
- * gate fix) so the two paths cannot drift apart — this was previously
- * computed inline only inside search().
+ * Owner ids a non-admin agent may READ (resolveAllowedOwners) and the full
+ * read-scope condition + private-exclusion predicate (resolveReadScope) now
+ * live in ./memory-read-scope.ts — the ONE centralized helper every
+ * cross-agent Memory read path (search()/get() here, SemanticSearch.ts,
+ * MemoryBootstrap.ts, auth-middleware.ts's by-id guard) resolves its scope
+ * through, so the scoping rule cannot drift per-path again (ops-nzxa: a
+ * SemanticSearch inline `visibility === "office"` OR-clause leaked office
+ * memories to any authenticated agent because the rule had scattered). See
+ * that module's doc for the migration invariant (no-visibility-field reads
+ * as "shared", never "private").
  */
-async function resolveAllowedOwners(authAgentId: string): Promise<string[]> {
-  const allowedOwners: string[] = [authAgentId];
-  try {
-    for await (const grant of (databases as any).flair.MemoryGrant.search({
-      conditions: [{ attribute: "granteeId", comparator: "equals", value: authAgentId }],
-    })) {
-      if (grant.ownerId && (grant.scope === "read" || grant.scope === "search")) {
-        allowedOwners.push(grant.ownerId);
-      }
-    }
-  } catch { /* MemoryGrant table not yet populated — ignore */ }
-  return allowedOwners;
-}
 
 /**
  * ─── Server-side conservative-duplicate gate (memory-integrity fix) ──────────
@@ -331,6 +324,21 @@ async function closeSupersededIfNeeded(ctx: any, content: any, methodLabel: "pos
   }
 }
 
+/**
+ * ─── Durability-keyed default visibility (ops-2dm3 Layer 1, part A) ─────────
+ *
+ * Writer intent: an explicit `visibility` on the write ALWAYS overrides this
+ * (callers check `content.visibility == null` before calling this). When
+ * unset, the default is keyed off durability — a durable write (the agent
+ * chose to make this stick around) defaults to shared; anything else
+ * defaults to private. "absent" durability (not yet defaulted by the caller)
+ * falls into the private branch, matching the spec's
+ * "standard|ephemeral|absent → private".
+ */
+function defaultVisibilityForDurability(durability: unknown): "private" | "shared" {
+  return durability === "permanent" || durability === "persistent" ? "shared" : "private";
+}
+
 export class Memory extends (databases as any).flair.Memory {
   /**
    * Self-authorize now that the global gate is non-rejecting. Closes the P0
@@ -385,14 +393,15 @@ export class Memory extends (databases as any).flair.Memory {
       return super.get(target);
     }
 
-    // Non-admin agent: only its own memories, or an owner's memories it holds
-    // a read/search MemoryGrant for (same owner-set as search() — shared
-    // resolveAllowedOwners helper so the two paths cannot drift).
+    // Non-admin agent: only its own memories (any visibility), or a granted
+    // owner's SHARED memories — never that owner's private ones (ops-2dm3
+    // Layer 1 private-exclusion). Centralized in resolveReadScope() so this
+    // and search() below cannot drift.
     const record = await super.get(target);
     if (!record) return NOT_FOUND();
 
-    const allowedOwners = await resolveAllowedOwners(auth.agentId);
-    if (!allowedOwners.includes(record.agentId)) return NOT_FOUND();
+    const scope = await resolveReadScope(auth.agentId);
+    if (!scope.isAllowed(record)) return NOT_FOUND();
 
     return record;
   }
@@ -425,14 +434,12 @@ export class Memory extends (databases as any).flair.Memory {
       return super.search(query);
     }
 
-    // Non-admin agent: scope to own + granted owners.
+    // Non-admin agent: scope to own (any visibility) + granted owners' SHARED
+    // memories only (ops-2dm3 Layer 1 private-exclusion). Centralized in
+    // resolveReadScope() so get() above and search() here cannot drift.
     const authAgent = auth.agentId;
-    const allowedOwners = await resolveAllowedOwners(authAgent);
-
-    // Build the agentId scope condition
-    const agentIdCondition: any = allowedOwners.length === 1
-      ? { attribute: "agentId", comparator: "equals", value: allowedOwners[0] }
-      : { conditions: allowedOwners.map(id => ({ attribute: "agentId", comparator: "equals", value: id })), operator: "or" };
+    const scope = await resolveReadScope(authAgent);
+    const agentIdCondition: any = scope.condition;
 
     // Harper passes `query` as a RequestTarget (extends URLSearchParams) or a
     // conditions array. For URL-based GET /Memory?... calls, URL params are no
@@ -485,6 +492,17 @@ export class Memory extends (databases as any).flair.Memory {
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
     content.archived = content.archived ?? false;
+
+    // ─── Default visibility (durability-keyed) — ops-2dm3 Layer 1, part A ────
+    // post() only ever creates a NEW record — patchRecord/supersede-close/
+    // retrievalCount bumps all route through put() instead (see put()'s
+    // pre-existing-record guard below), so there is no "don't overwrite an
+    // existing record's visibility" concern here. Explicit visibility on the
+    // write ALWAYS overrides; only stamp the default when the caller left it
+    // unset. permanent|persistent → shared; standard|ephemeral|absent → private.
+    if (content.visibility === undefined || content.visibility === null) {
+      content.visibility = defaultVisibilityForDurability(content.durability);
+    }
 
     // Validate derivedFrom source IDs exist (best-effort, non-blocking)
     if (Array.isArray(content.derivedFrom) && content.derivedFrom.length > 0) {
@@ -610,6 +628,28 @@ export class Memory extends (databases as any).flair.Memory {
     content.archived = content.archived ?? false;
     content.createdAt = content.createdAt ?? now;
 
+    // Fetch the pre-existing record (if any) ONCE — reused below both to
+    // decide whether this PUT is a fresh create (dedup gate applies, default
+    // visibility stamped) or an update/patch (dedup-bypassed, visibility left
+    // untouched). See the dedup-gate block further down for why an existing
+    // id skips the gate; the SAME "does a record already exist" check gates
+    // the visibility default (ops-2dm3 Layer 1 part A): patchRecord/supersede-
+    // close/retrievalCount bumps all route through put() with a MERGED
+    // `{...existing, ...patch}` payload, and must never have their stored
+    // visibility overwritten by a default recomputed from that merged content
+    // — only a genuinely NEW id gets the default stamped.
+    const preExisting = content.id
+      ? await (databases as any).flair.Memory.get(content.id).catch(() => null)
+      : null;
+
+    // ─── Default visibility (durability-keyed) — ops-2dm3 Layer 1, part A ────
+    // Explicit visibility on the write ALWAYS overrides; only stamp the
+    // default when the caller left it unset AND this is a fresh record.
+    // permanent|persistent → shared; standard|ephemeral|absent → private.
+    if (!preExisting && (content.visibility === undefined || content.visibility === null)) {
+      content.visibility = defaultVisibilityForDurability(content.durability);
+    }
+
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
@@ -652,7 +692,6 @@ export class Memory extends (databases as any).flair.Memory {
       delete content.dedupThreshold;
       delete content.lexicalThreshold;
     } else if (content.id) {
-      const preExisting = await (databases as any).flair.Memory.get(content.id).catch(() => null);
       if (!preExisting) {
         dedupMatch = await runDedupGate(ctx, content);
       } else {
