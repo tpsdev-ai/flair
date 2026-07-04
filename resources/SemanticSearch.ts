@@ -5,6 +5,7 @@ import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { wrapUntrusted } from "./content-safety.js";
 import { resolveReadScope } from "./memory-read-scope.js";
+import { cosineSimilarity } from "./dedup.js";
 import {
   isRerankEnabled,
   getRerankTopN,
@@ -324,7 +325,47 @@ export class SemanticSearch extends Resource {
         if (asOf && record.validFrom && record.validFrom > asOf) continue;
         if (asOf && record.validTo && record.validTo <= asOf) continue;
 
-        const semanticScore = distanceToSimilarity(record.$distance ?? 1);
+        let semanticScore: number;
+        if (record.$distance !== undefined) {
+          semanticScore = distanceToSimilarity(record.$distance);
+        } else {
+          // ─── ops-syzm: Harper's cosine-sort query omits $distance for a
+          // SINGLETON post-filter result set — the SAME quirk root-caused and
+          // fixed for the dedup path in ops-ume4 (resources/Memory.ts
+          // findConservativeDedupMatch / resources/dedup.ts cosineSimilarity).
+          // Sort ORDER is still correct; only the numeric `$distance`
+          // annotation is missing on that one record, regardless of the
+          // query's own `limit` (reproduced here with candidateLimit=50, not
+          // just limit=1 — the trigger is the post-filter MATCH COUNT, not the
+          // requested limit).
+          //
+          // ops-2dm3 Layer 1 made this common: the no-grants agent scope used
+          // to ALWAYS be a compound `{operator:"or", conditions:[{agentId},
+          // {visibility=="office"}]}` condition; resolveReadScope() now emits
+          // a PLAIN single `{agentId==X}` condition for the common (no-grants)
+          // case, so a scoped search against an agent with exactly one
+          // matching memory hits this Harper quirk directly. Before, the OR
+          // wrap incidentally avoided the singleton shape. The old `?? 1`
+          // fallback silently collapsed this to similarity 0 — read by
+          // callers (including the clean-VM CI gate's single-memory init
+          // probe, #533) as "embeddings not loaded", which is WRONG:
+          // embeddings ARE loaded, only the score was computed incorrectly.
+          //
+          // Fix: point-lookup the record by id (a plain get(), unaffected by
+          // the sort-query quirk — selecting "embedding" directly on the SAME
+          // sort-by-embedding query comes back as a bare scalar per ops-ume4's
+          // findings) and compute cosine similarity ourselves in JS from its
+          // real stored `embedding` vector against this query's `qEmb`, via
+          // the same math as the ume4 fallback (dedup.ts's cosineSimilarity).
+          // Only done on this (rare) undefined-$distance branch — never adds
+          // a point-lookup to the normal per-record path. If the stored
+          // embedding is missing/empty (e.g. a legacy pre-embedding record),
+          // cosineSimilarity returns 0 — the same safe "no match" the old
+          // `?? 1` fallback produced, never a false-high score.
+          const full = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(record.id));
+          const storedEmbedding = Array.isArray(full?.embedding) ? full.embedding : [];
+          semanticScore = cosineSimilarity(qEmb, storedEmbedding);
+        }
         let keywordHit = false;
         if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
           keywordHit = true;

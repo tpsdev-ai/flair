@@ -182,4 +182,33 @@ describe("SemanticSearch.post() — ops-2dm3 Layer 1 centralized read-scoping", 
     const res: any = await s.post({});
     expect(res.results.map((r: any) => r.id)).toEqual(["live"]);
   });
+
+  // ─── ops-syzm: singleton $distance-omission fallback ───────────────────────
+  // This mock's Memory.search() never annotates `$distance` on returned
+  // records (that's a Harper-computed sort-query field with no equivalent in
+  // the in-memory mock) — so any test that takes the HNSW (qEmb-truthy)
+  // branch below exercises the undefined-$distance fallback path by
+  // construction, standing in for Harper's real singleton-result-set quirk
+  // (see resources/SemanticSearch.ts's scoring block for the full writeup,
+  // and test/integration/semantic-search-singleton-score.test.ts for the
+  // real-Harper reproduction this was root-caused against).
+  it("ops-syzm: undefined $distance falls back to a point-lookup cosine computation instead of scoring 0", async () => {
+    reset();
+    const qEmb = [1, 0, 0];
+    // Orthogonal to qEmb — the pre-fix `?? 1` fallback and the fixed
+    // point-lookup cosine computation would BOTH read as "not similar" here,
+    // so this record is a control: it must never be mistaken for a match.
+    memoryStore.set("m-orthogonal", { id: "m-orthogonal", agentId: "agent-1", content: "unrelated", visibility: "private", embedding: [0, 1, 0] });
+    // Identical to qEmb — cosineSimilarity == 1 exactly. Pre-fix this record
+    // would score 0 (distanceToSimilarity(undefined ?? 1) === 0); post-fix it
+    // must score a real positive similarity via the embedding point-lookup.
+    memoryStore.set("m-identical", { id: "m-identical", agentId: "agent-1", content: "matches the query", visibility: "private", embedding: [1, 0, 0] });
+
+    const s = makeSearch(agentCtx("agent-1"));
+    const res: any = await s.post({ queryEmbedding: qEmb, scoring: "raw", limit: 10 });
+
+    const byId = new Map(res.results.map((r: any) => [r.id, r]));
+    expect(byId.get("m-identical")?._score).toBe(1);
+    expect(byId.get("m-orthogonal")?._score).toBe(0);
+  });
 });

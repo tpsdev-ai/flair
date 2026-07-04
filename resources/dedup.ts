@@ -38,11 +38,14 @@ export interface DedupMatch {
 
 /**
  * Cosine similarity of two equal-length embedding vectors, computed directly
- * in JS. Used as a fallback (ops-ume4) when Harper's HNSW cosine-sort query
- * doesn't attach a computed `$distance` to its top candidate — see
- * findConservativeDedupMatch in ./Memory.ts for when/why. A mismatched
- * length, empty vector, or zero-magnitude side yields 0 (no signal, never
- * treated as "identical" by a degenerate computation).
+ * in JS. Used as a fallback for Harper's HNSW cosine-sort query omitting a
+ * computed `$distance` on its top candidate when the query's post-filter
+ * result set contains exactly ONE matching record (ops-ume4, found in
+ * resources/Memory.ts's findConservativeDedupMatch; the identical quirk is
+ * also fixed in resources/SemanticSearch.ts's scoring loop for the same
+ * reason — see ops-syzm there). A mismatched length, empty vector, or
+ * zero-magnitude side yields 0 (no signal, never treated as "identical" by a
+ * degenerate computation).
  */
 export function cosineSimilarity(a: number[], b: number[]): number {
   if (!Array.isArray(a) || !Array.isArray(b) || a.length === 0 || a.length !== b.length) return 0;
