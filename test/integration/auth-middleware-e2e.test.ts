@@ -475,6 +475,38 @@ describe("auth-middleware e2e (real Harper)", () => {
   }, 30_000);
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // bd ops-c4op — shared nonce store consolidation (3 independent nonceSeen
+  // Maps -> resources/ed25519-auth.ts, one singleton). Real HTTP replay
+  // coverage for auth-middleware.ts's Ed25519 branch didn't previously exist
+  // (only unit-level simulator logic did). Real-Harper is also the only place
+  // this is reliably testable end-to-end: auth-middleware.ts's `import {
+  // server } from "@harperfast/harper"` can't be safely mocked in the unit
+  // suite (bun's mock.module is process-global and ~10+ sibling unit test
+  // files mock @harperfast/harper without a `server` export — any of them
+  // can end up "active" when auth-middleware.ts's import resolves, racing
+  // unpredictably). Real cross-path closure between the OTHER two sites
+  // (agent-auth.ts <-> Presence.ts) is covered at the unit level in
+  // test/unit/ed25519-auth-cross-site.test.ts, where no such mock exists.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  test("nonce replay: same TPS-Ed25519 header sent twice → 2nd request 401 nonce_replay_detected", async () => {
+    const path = `/Memory/?agentId=${agent.id}`;
+    const header = ed25519Header(agent, "GET", path);
+
+    const first = await fetch(`${harper.httpURL}${path}`, {
+      headers: { Authorization: header },
+    });
+    expect(first.status).toBe(200);
+
+    const replay = await fetch(`${harper.httpURL}${path}`, {
+      headers: { Authorization: header },
+    });
+    expect(replay.status).toBe(401);
+    const body: any = await replay.json().catch(() => ({}));
+    expect(body.error).toBe("nonce_replay_detected");
+  }, 30_000);
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // Bug 1 — Basic / Path 2: super_user
   //
   // The old simulator tests used a mock getUser that returned hand-written

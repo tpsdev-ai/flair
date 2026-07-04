@@ -2,7 +2,7 @@ import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
-import { b64ToArrayBuffer } from "./b64.js";
+import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer } from "./ed25519-auth.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -34,37 +34,18 @@ function getAdminPass(): string | null {
   return null;
 }
 
-const WINDOW_MS = 30_000;
-const nonceSeen = new Map<string, number>();
-
 // ─── Admin resolution ─────────────────────────────────────────────────────────
 // `isAdmin` (FLAIR_ADMIN_AGENTS env + Agent role==="admin", 60s-cached) now lives
 // in agent-auth.ts as the single source of truth, imported above. During the
 // auth reshape this gate and the per-resource allow* helpers must agree on who's
 // an admin — one implementation guarantees they can't diverge.
 
-// ─── Crypto helpers ───────────────────────────────────────────────────────────
-// b64ToArrayBuffer lives in ./b64.ts (shared with agent-auth.ts + Presence.ts so
-// the base64/base64url decoder can't drift across the three auth call sites).
-
-const keyCache = new Map<string, CryptoKey>();
-async function importEd25519Key(publicKeyStr: string): Promise<CryptoKey> {
-  if (keyCache.has(publicKeyStr)) return keyCache.get(publicKeyStr)!;
-  // Accept hex (64-char) or base64 (44-char) encoded 32-byte Ed25519 public key
-  let raw: ArrayBuffer;
-  if (/^[0-9a-f]{64}$/i.test(publicKeyStr)) {
-    // Hex-encoded raw key (TPS CLI default: Buffer.toString('hex'))
-    const bytes = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) bytes[i] = parseInt(publicKeyStr.slice(i * 2, i * 2 + 2), 16);
-    raw = bytes.buffer;
-  } else {
-    raw = b64ToArrayBuffer(publicKeyStr);
-  }
-  const key = await crypto.subtle.importKey("raw", raw, { name: "Ed25519" } as any, false, ["verify"]);
-  keyCache.set(publicKeyStr, key);
-  return key;
-}
-
+// ─── Crypto + replay-guard helpers ────────────────────────────────────────────
+// WINDOW_MS, isNonceReplay/recordNonce (the ONE shared nonce store), and
+// importEd25519Key all live in ./ed25519-auth.ts (bd ops-c4op) — the single
+// shared implementation imported by auth-middleware.ts, agent-auth.ts, and
+// Presence.ts so a nonce recorded via any one of the three call sites is
+// visible to the other two, and the crypto/decoder logic can't drift.
 
 async function backfillEmbedding(memoryId: string): Promise<void> {
   try {
@@ -263,11 +244,7 @@ server.http(async (request: any, nextLayer: any) => {
   if (!Number.isFinite(ts) || Math.abs(now - ts) > WINDOW_MS)
     return new Response(JSON.stringify({ error: "timestamp_out_of_window" }), { status: 401 });
 
-  for (const [k, signatureTs] of nonceSeen.entries())
-    if (now - signatureTs > WINDOW_MS) nonceSeen.delete(k);
-
-  const nonceKey = `${agentId}:${nonce}`;
-  if (nonceSeen.has(nonceKey))
+  if (isNonceReplay(agentId, nonce, now))
     return new Response(JSON.stringify({ error: "nonce_replay_detected" }), { status: 401 });
 
   const agent = await (databases as any).flair.Agent.get(agentId);
@@ -288,7 +265,7 @@ server.http(async (request: any, nextLayer: any) => {
       return new Response(JSON.stringify({ error: "signature_verification_failed", detail: e?.message }), { status: 401 });
   }
 
-  nonceSeen.set(nonceKey, ts);
+  recordNonce(agentId, nonce, ts);
   request.tpsAgent = agentId;
   (request as any)._tpsAuthVerified = true;
   request.tpsAgentIsAdmin = await isAdmin(agentId);

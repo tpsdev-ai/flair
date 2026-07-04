@@ -19,11 +19,10 @@
 
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth } from "./agent-auth.js";
-import { b64ToArrayBuffer } from "./b64.js";
+import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer } from "./ed25519-auth.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const WINDOW_MS = 30_000;
 const CURRENT_TASK_MAX_LENGTH = 200;
 const VALID_ACTIVITIES = new Set(["coding", "reviewing", "planning", "idle"]);
 
@@ -37,37 +36,12 @@ function offlineThresholdMs(): number {
   return env ? Number(env) || 600_000 : 600_000;
 }
 
-// ─── Nonce replay protection ──────────────────────────────────────────────────
-
-const nonceSeen = new Map<string, number>();
-
-function pruneNonces() {
-  const now = Date.now();
-  for (const [k, ts] of nonceSeen.entries()) {
-    if (now - ts > WINDOW_MS) nonceSeen.delete(k);
-  }
-}
-
-// ─── Crypto helpers ───────────────────────────────────────────────────────────
-// b64ToArrayBuffer lives in ./b64.ts (shared with auth-middleware.ts + agent-auth.ts
-// so the base64/base64url decoder can't drift across the three auth call sites).
-
-const keyCache = new Map<string, CryptoKey>();
-
-async function importEd25519Key(publicKeyStr: string): Promise<CryptoKey> {
-  if (keyCache.has(publicKeyStr)) return keyCache.get(publicKeyStr)!;
-  let raw: ArrayBuffer;
-  if (/^[0-9a-f]{64}$/i.test(publicKeyStr)) {
-    const bytes = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) bytes[i] = parseInt(publicKeyStr.slice(i * 2, i * 2 + 2), 16);
-    raw = bytes.buffer;
-  } else {
-    raw = b64ToArrayBuffer(publicKeyStr);
-  }
-  const key = await crypto.subtle.importKey("raw", raw, { name: "Ed25519" } as any, false, ["verify"]);
-  keyCache.set(publicKeyStr, key);
-  return key;
-}
+// ─── Nonce replay + crypto helpers ─────────────────────────────────────────────
+// WINDOW_MS, isNonceReplay/recordNonce (the ONE shared nonce store), and
+// importEd25519Key all live in ./ed25519-auth.ts (bd ops-c4op) — the single
+// shared implementation imported by auth-middleware.ts, agent-auth.ts, and
+// Presence.ts so a nonce recorded via any one of the three call sites is
+// visible to the other two, and the crypto/decoder logic can't drift.
 
 // ─── Status derivation (pure — exported for unit testing) ─────────────────────
 
@@ -236,9 +210,7 @@ export class Presence extends (databases as any).flair.Presence {
         );
       }
 
-      pruneNonces();
-      const nonceKey = `${headerAgentId}:${nonce}`;
-      if (nonceSeen.has(nonceKey)) {
+      if (isNonceReplay(headerAgentId, nonce, now)) {
         return new Response(
           JSON.stringify({ error: "nonce_replay_detected" }),
           { status: 401, headers: { "Content-Type": "application/json" } },
@@ -280,7 +252,7 @@ export class Presence extends (databases as any).flair.Presence {
         );
       }
 
-      nonceSeen.set(nonceKey, ts);
+      recordNonce(headerAgentId, nonce, ts);
       agentId = headerAgentId;
     }
 
