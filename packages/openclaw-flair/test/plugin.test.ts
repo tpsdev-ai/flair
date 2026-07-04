@@ -2,6 +2,7 @@ import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { FlairClient } from "@tpsdev-ai/flair-client";
 
 // Minimal mock of OpenClawPluginApi
 function createMockApi(config: Record<string, unknown> = {}) {
@@ -571,5 +572,138 @@ describe("isValidAgentId / assertValidAgentId (ops-pnwq)", () => {
     }
     // Simpler: directly call assertValidAgentId on what would flow through.
     expect(() => assertValidAgentId("../escape")).toThrow();
+  });
+});
+
+// ─── memory_store supersede — write-then-close ordering (ops-mmh9) ──────────
+// The hand-rolled supersede used to archive the OLD record BEFORE writing the
+// NEW one — if the write then failed, the old fact was gone and the new one
+// never landed (silent loss; same class as ops-a4t5, fixed server-side in
+// resources/Memory.ts). These tests exercise the fixed ordering directly
+// against the real FlairClient class (flair-client's HTTP boundary,
+// `FlairClient.prototype.request`, is monkey-patched per test so no network
+// call is made — everything above that boundary, including memory.write()/
+// memory.get()'s real logic, runs unmodified).
+
+describe("memory_store supersede — write-then-close ordering (ops-mmh9)", () => {
+  const originalRequest = FlairClient.prototype.request;
+
+  afterEach(() => {
+    FlairClient.prototype.request = originalRequest;
+  });
+
+  test("new memory is written even when closing the superseded record fails (no data loss)", async () => {
+    const calls: Array<{ method: string; path: string; body?: any }> = [];
+    (FlairClient.prototype as any).request = async function (method: string, path: string, body?: any) {
+      calls.push({ method, path, body });
+      if (method === "GET" && path === "/Memory/old-mem-1") {
+        return { id: "old-mem-1", content: "old fact", agentId: "test-agent" };
+      }
+      if (method === "PUT" && path === "/Memory/old-mem-1") {
+        throw new Error("simulated close failure");
+      }
+      // Any other PUT is the new-memory write — let it succeed.
+      return { written: true };
+    };
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const tool = api._tools.get("memory_store")!;
+    const result = await tool.execute("test", { text: "new fact", supersedes: "old-mem-1" });
+
+    // The new memory must still be reported as written — the close failure
+    // must not propagate into the tool's error branch.
+    expect(result.details.written).toBe(true);
+    expect(result.content[0].text).toContain("Memory stored");
+    expect(result.content[0].text).not.toContain("unavailable");
+
+    // Ordering: the new-memory PUT happened BEFORE the close attempt
+    // (get-old, then put-old) — write-new-BEFORE-close-old.
+    const newWriteIdx = calls.findIndex((c) => c.method === "PUT" && c.path !== "/Memory/old-mem-1");
+    const closeGetIdx = calls.findIndex((c) => c.method === "GET" && c.path === "/Memory/old-mem-1");
+    const closePutIdx = calls.findIndex((c) => c.method === "PUT" && c.path === "/Memory/old-mem-1");
+    expect(newWriteIdx).toBeGreaterThanOrEqual(0);
+    expect(closeGetIdx).toBeGreaterThan(newWriteIdx);
+    expect(closePutIdx).toBeGreaterThan(closeGetIdx);
+
+    // The close failure must be observable (logged), never silently swallowed.
+    const warnCalls = (api.logger.warn as any).mock.calls;
+    const sawCloseFailureWarning = warnCalls.some((args: any[]) =>
+      String(args[0]).includes("failed to close superseded memory"),
+    );
+    expect(sawCloseFailureWarning).toBe(true);
+  });
+
+  test("happy path: supersede writes the new memory AND closes the old one", async () => {
+    const calls: Array<{ method: string; path: string; body?: any }> = [];
+    (FlairClient.prototype as any).request = async function (method: string, path: string, body?: any) {
+      calls.push({ method, path, body });
+      if (method === "GET" && path === "/Memory/old-mem-2") {
+        return { id: "old-mem-2", content: "old fact", agentId: "test-agent" };
+      }
+      return { written: true };
+    };
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const tool = api._tools.get("memory_store")!;
+    const result = await tool.execute("test", { text: "new fact v2", supersedes: "old-mem-2" });
+
+    expect(result.details.written).toBe(true);
+
+    const newWriteIdx = calls.findIndex((c) => c.method === "PUT" && c.path !== "/Memory/old-mem-2");
+    const closePutIdx = calls.findIndex((c) => c.method === "PUT" && c.path === "/Memory/old-mem-2");
+    expect(newWriteIdx).toBeGreaterThanOrEqual(0);
+    expect(closePutIdx).toBeGreaterThan(newWriteIdx);
+
+    const closingPut = calls[closePutIdx];
+    expect(closingPut.body.archived).toBe(true);
+    expect(typeof closingPut.body.archivedAt).toBe("string");
+    expect(closingPut.body.supersededBy).toBeDefined();
+  });
+
+  test("supersede write bypasses dedup (dedup hint is false when supersedes is set)", async () => {
+    const calls: Array<{ method: string; path: string; body?: any }> = [];
+    (FlairClient.prototype as any).request = async function (method: string, path: string, body?: any) {
+      calls.push({ method, path, body });
+      if (method === "GET" && path === "/Memory/old-mem-3") {
+        return { id: "old-mem-3", content: "old fact", agentId: "test-agent" };
+      }
+      return { written: true };
+    };
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const tool = api._tools.get("memory_store")!;
+    await tool.execute("test", { text: "new fact v3", supersedes: "old-mem-3" });
+
+    const newWritePut = calls.find((c) => c.method === "PUT" && c.path !== "/Memory/old-mem-3");
+    expect(newWritePut).toBeDefined();
+    expect(newWritePut!.body.dedup).toBe(false);
+  });
+
+  test("non-supersede write still requests dedup (dedup hint is true when supersedes is absent)", async () => {
+    const calls: Array<{ method: string; path: string; body?: any }> = [];
+    (FlairClient.prototype as any).request = async function (method: string, path: string, body?: any) {
+      calls.push({ method, path, body });
+      return { written: true };
+    };
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi();
+    plugin.register(api as any);
+
+    const tool = api._tools.get("memory_store")!;
+    await tool.execute("test", { text: "plain fact, no supersede" });
+
+    const writePut = calls.find((c) => c.method === "PUT");
+    expect(writePut).toBeDefined();
+    expect(writePut!.body.dedup).toBe(true);
   });
 });

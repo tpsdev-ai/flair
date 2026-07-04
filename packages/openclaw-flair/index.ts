@@ -557,7 +557,39 @@ export default {
           try {
             const client = getCurrentClient();
             const memId = `${client.agentId}-${Date.now()}`;
-            // If superseding an old memory, archive it
+
+            // Write the NEW memory FIRST (ops-a4t5 discipline: write-new-
+            // BEFORE-close-old). Note: `client.memory.write()` does not
+            // forward a `supersedes` field to the server (flair-client's
+            // MemoryApi.write() opts have no such field — see client.ts),
+            // so this can't be routed through the server's transactional
+            // `Memory.put()` supersede path (closeSupersededIfNeeded) the
+            // way `client.memory.update(id, content, {preserveHistory:true})`
+            // is. Separately, that server path closes the old record via
+            // `validTo` (temporal-validity), not `archived` — and default
+            // semantic search (SemanticSearch.ts) only filters `validTo`
+            // when the caller passes `asOf` (which memory_search here does
+            // not), but unconditionally filters `archived:true`. Routing
+            // through the server would therefore leave superseded content
+            // resurfacing in ordinary recall — a regression, not a fix.
+            // So: keep the archived/supersededBy close mechanism (it's
+            // load-bearing for recall correctness — SemanticSearch.ts,
+            // MemoryConsolidate.ts, MemoryReflect.ts, AdminMemory.ts, and
+            // health.ts all key off `archived`), but apply the same
+            // write-then-close ORDERING discipline as the server fix, with
+            // a non-swallowing catch below.
+            const result = await client.memory.write(text, {
+              id: memId,
+              tags,
+              durability: durability as any,
+              type: type as any,
+              dedup: !supersedes, // skip dedup when explicitly superseding
+              dedupThreshold: 0.7,
+            });
+
+            // THEN close the superseded record, if any. Safe failure state
+            // is two active records (recoverable), never a lost write — and
+            // any failure is logged (observable), never silently swallowed.
             if (supersedes) {
               try {
                 const old = await client.memory.get(supersedes);
@@ -568,20 +600,18 @@ export default {
                     archivedAt: new Date().toISOString(),
                     supersededBy: memId,
                   });
+                } else {
+                  api.logger.warn(
+                    `openclaw-flair: supersede target ${supersedes} not found — new memory ${memId} written; nothing to close`,
+                  );
                 }
-              } catch {
-                // Old memory not found — continue with the write
+              } catch (closeErr: any) {
+                api.logger.warn(
+                  `openclaw-flair: failed to close superseded memory ${supersedes} after writing ${memId}: ${closeErr.message} ` +
+                  `(not lost — new record is safely written; old record remains active until retried)`,
+                );
               }
             }
-
-            const result = await client.memory.write(text, {
-              id: memId,
-              tags,
-              durability: durability as any,
-              type: type as any,
-              dedup: !supersedes, // skip dedup when explicitly superseding
-              dedupThreshold: 0.7,
-            });
             // The server's conservative dedup gate NEVER suppresses a write
             // (memory-integrity fix, flair#526) — `result.deduplicated` is a
             // collision SIGNAL, not a "was this dropped" flag; the content at
