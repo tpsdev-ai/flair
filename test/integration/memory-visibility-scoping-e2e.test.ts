@@ -186,14 +186,26 @@ describe("ops-2dm3 Layer 1 — private/shared visibility + centralized read-scop
 
   // ─── Path 3: MemoryBootstrap ────────────────────────────────────────────────
   describe("POST /BootstrapMemories (path 3 — flair#550 foundation)", () => {
-    test("grantee's bootstrap context includes owner's legacy + shared findings, not the private one", async () => {
+    test("grantee's bootstrap READ-SCOPE includes owner's legacy + shared findings (not the private one); post-#550 those teammate records don't bleed into own-context sections", async () => {
       const res = await authFetch(harper, grantee, "POST", "/BootstrapMemories", { agentId: grantee.id, maxTokens: 4000 });
       const bodyText = await res.text();
       expect(res.status, `bootstrap → ${res.status}: ${bodyText.slice(0, 2000)}`).toBe(200);
       const body: any = JSON.parse(bodyText);
-      expect(body.context ?? "").toContain("pre-migration finding");
-      expect(body.context ?? "").toContain("explicitly shared finding");
+      // Layer 1's read boundary (what this file owns): the legacy (no-visibility
+      // → reads as shared) + explicitly-shared records are in the grantee's
+      // read-scope; the owner's PRIVATE record is not. `memoriesAvailable` is
+      // the read-scope signal (allMemories.length), independent of rendering.
+      expect(body.memoriesAvailable, `grantee read-scope should be exactly legacy+shared=2 — got ${body.memoriesAvailable}`).toBe(2);
+      // #550 design boundary: these owner records are grant-visible TEAMMATE
+      // memories, and they were raw-inserted (no embeddings) so they can't
+      // surface via the task-relevant "Teammate findings" path either. With
+      // own-context sections now own-only, none of them render in this
+      // no-currentTask bootstrap — critically, the private note never leaks.
+      // (The rendered teammate-findings surfacing is covered end-to-end, with
+      // real embeddings, in bootstrap-teammate-findings-e2e.test.ts.)
       expect(body.context ?? "").not.toContain("explicitly private note");
+      expect(body.context ?? "").not.toContain("pre-migration finding");
+      expect(body.context ?? "").not.toContain("explicitly shared finding");
     }, 60_000);
 
     test("stranger's bootstrap context contains none of owner's memories", async () => {
