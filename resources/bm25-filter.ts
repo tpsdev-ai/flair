@@ -91,6 +91,14 @@ export function passesRecordFilters(record: any, f: RecordTimeFilters = {}): boo
   if (f.sinceDate && record?.createdAt && new Date(record.createdAt) < f.sinceDate) return false;
   if (f.asOf && record?.validFrom && record.validFrom > f.asOf) return false;
   if (f.asOf && record?.validTo && record.validTo <= f.asOf) return false;
+  // ops-9rc6: a past validTo ALWAYS means the record has been closed out —
+  // either by the server supersede path (Memory.ts closeSupersededRecord sets
+  // validTo without necessarily setting `archived`) or any other writer. This
+  // is unconditional (not gated on `f.asOf`) so a server-superseded record
+  // can never resurface in the DEFAULT (no-asOf) recall path just because its
+  // successor happened not to be co-present in the same result set. A record
+  // with no validTo, or a future validTo, is unaffected.
+  if (record?.validTo && Date.parse(record.validTo) < now) return false;
   return true;
 }
 

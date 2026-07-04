@@ -220,6 +220,9 @@ export class SemanticSearch extends Resource {
           if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
           if (asOf && record.validFrom && record.validFrom > asOf) continue;
           if (asOf && record.validTo && record.validTo <= asOf) continue;
+          // ops-9rc6: unconditional past-validTo exclusion (see legacy HNSW
+          // loop below for the full rationale) — applies regardless of asOf.
+          if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
           semRecords.push(record);
           semIds.push(record.id);
         }
@@ -324,6 +327,15 @@ export class SemanticSearch extends Resource {
         // Temporal validity: if asOf is specified, only include memories valid at that point
         if (asOf && record.validFrom && record.validFrom > asOf) continue;
         if (asOf && record.validTo && record.validTo <= asOf) continue;
+        // ops-9rc6: a past validTo ALWAYS means the record has been closed out
+        // (server supersede path — Memory.ts closeSupersededRecord — sets
+        // validTo without necessarily setting `archived`). Unconditional, not
+        // gated on `asOf`, so a server-superseded record can't resurface in
+        // the DEFAULT recall path just because its successor isn't
+        // co-present in this result set (the supersededIds filter further
+        // down only catches co-presence). A record with no validTo, or a
+        // future validTo, is unaffected.
+        if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
 
         let semanticScore: number;
         if (record.$distance !== undefined) {
@@ -400,6 +412,9 @@ export class SemanticSearch extends Resource {
         if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
         if (asOf && record.validFrom && record.validFrom > asOf) continue;
         if (asOf && record.validTo && record.validTo <= asOf) continue;
+        // ops-9rc6: unconditional past-validTo exclusion (see legacy HNSW
+        // loop above for the full rationale) — applies regardless of asOf.
+        if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
 
         let keywordHit = false;
         if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
