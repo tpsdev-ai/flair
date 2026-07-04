@@ -16,9 +16,7 @@
  * 30s timestamp window + a per-(agent,nonce) seen-set pruned to that window.
  */
 import { databases } from "@harperfast/harper";
-import { b64ToArrayBuffer } from "./b64.js";
-
-const WINDOW_MS = Number(process.env.FLAIR_AGENT_AUTH_WINDOW_MS) || 30_000;
+import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer } from "./ed25519-auth.js";
 
 /**
  * Shared Harper user that verified Ed25519 agents resolve to (least-privilege
@@ -28,30 +26,12 @@ const WINDOW_MS = Number(process.env.FLAIR_AGENT_AUTH_WINDOW_MS) || 30_000;
  */
 export const FLAIR_AGENT_USERNAME = "flair-agent";
 
-// Replay protection: remember recently-seen (agent:nonce), pruned by the window.
-const nonceSeen = new Map<string, number>();
-
-// ─── Crypto helpers ───────────────────────────────────────────────────────────
-// b64ToArrayBuffer lives in ./b64.ts (shared with auth-middleware.ts + Presence.ts
-// so the base64/base64url decoder can't drift across the three auth call sites).
-
-const keyCache = new Map<string, CryptoKey>();
-async function importEd25519Key(publicKeyStr: string): Promise<CryptoKey> {
-  const cached = keyCache.get(publicKeyStr);
-  if (cached) return cached;
-  // Accept hex (64-char) or base64 (44-char) encoded 32-byte Ed25519 public key.
-  let raw: ArrayBuffer;
-  if (/^[0-9a-f]{64}$/i.test(publicKeyStr)) {
-    const bytes = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) bytes[i] = parseInt(publicKeyStr.slice(i * 2, i * 2 + 2), 16);
-    raw = bytes.buffer;
-  } else {
-    raw = b64ToArrayBuffer(publicKeyStr);
-  }
-  const key = await crypto.subtle.importKey("raw", raw, { name: "Ed25519" } as any, false, ["verify"]);
-  keyCache.set(publicKeyStr, key);
-  return key;
-}
+// ─── Crypto + replay-guard helpers ────────────────────────────────────────────
+// WINDOW_MS, isNonceReplay/recordNonce (the ONE shared nonce store), and
+// importEd25519Key all live in ./ed25519-auth.ts (bd ops-c4op) — the single
+// shared implementation imported by auth-middleware.ts, agent-auth.ts, and
+// Presence.ts so a nonce recorded via any one of the three call sites is
+// visible to the other two, and the crypto/decoder logic can't drift.
 
 // ─── Admin resolution ─────────────────────────────────────────────────────────
 // Admin agents come from FLAIR_ADMIN_AGENTS (comma-separated) OR Agent records
@@ -101,10 +81,8 @@ async function doVerify(request: any): Promise<AgentAuth | null> {
   const now = Date.now();
   if (!Number.isFinite(ts) || Math.abs(now - ts) > WINDOW_MS) return null;
 
-  // Prune expired nonces, then reject replays within the window.
-  for (const [k, t] of nonceSeen) if (now - t > WINDOW_MS) nonceSeen.delete(k);
-  const nonceKey = `${agentId}:${nonce}`;
-  if (nonceSeen.has(nonceKey)) return null;
+  // Reject replays within the window (isNonceReplay prunes expired entries first).
+  if (isNonceReplay(agentId, nonce, now)) return null;
 
   const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
   if (!agent?.publicKey) return null;
@@ -126,7 +104,7 @@ async function doVerify(request: any): Promise<AgentAuth | null> {
     return null;
   }
 
-  nonceSeen.set(nonceKey, ts);
+  recordNonce(agentId, nonce, ts);
   return { agentId, isAdmin: await isAdmin(agentId) };
 }
 
