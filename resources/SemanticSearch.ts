@@ -4,6 +4,8 @@ import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { wrapUntrusted } from "./content-safety.js";
+import { resolveReadScope } from "./memory-read-scope.js";
+import { cosineSimilarity } from "./dedup.js";
 import {
   isRerankEnabled,
   getRerankTopN,
@@ -40,8 +42,9 @@ export class SemanticSearch extends Resource {
   // Self-authorize via the Ed25519 agent verify instead of relying on the auth
   // gate's admin super_user elevation (removed in the auth reshape). Any
   // cryptographically-verified agent may search; per-agent RESULT scoping is
-  // enforced in post() below (an agent only sees its own + office-visible +
-  // granted memories). Without this, Harper's default denies the POST for the
+  // enforced in post() below (an agent only sees its own memories, any
+  // visibility, plus granted owners' SHARED memories — never their private
+  // ones). Without this, Harper's default denies the POST for the
   // least-privilege flair_agent role (AccessViolation 403).
   async allowCreate(): Promise<boolean> {
     return allowVerified((this as any).getContext?.());
@@ -97,20 +100,13 @@ export class SemanticSearch extends Resource {
       ? authenticatedAgent
       : bodyAgentId;
 
-    const searchAgentIds = new Set<string>();
-    if (agentId) searchAgentIds.add(agentId);
-
-    if (agentId) {
-      try {
-        for await (const grant of (databases as any).flair.MemoryGrant.search({
-          conditions: [{ attribute: "granteeId", comparator: "equals", value: agentId }],
-        })) {
-          if (grant.scope === "search" || grant.scope === "read") {
-            searchAgentIds.add(grant.ownerId);
-          }
-        }
-      } catch { /* MemoryGrant may not exist */ }
-    }
+    // Read-scope: own (any visibility) + granted owners' SHARED memories only
+    // (ops-2dm3 Layer 1). Centralized in resolveReadScope() — this used to be
+    // an inline grant-resolution loop here PLUS a `visibility === "office"`
+    // global OR-clause below that leaked ANY authenticated agent's read of
+    // ANY other agent's office-visible memories (ops-nzxa). Both are gone;
+    // this is the ONE scoping resolution for this endpoint now.
+    const scope = agentId ? await resolveReadScope(agentId) : null;
 
     // Generate query embedding
     let qEmb = queryEmbedding;
@@ -148,22 +144,12 @@ export class SemanticSearch extends Resource {
     // ─── Build conditions for Harper query ──────────────────────────────────
     const conditions: any[] = [];
 
-    // Agent scoping: filter to allowed agent IDs or office-visible memories
-    if (searchAgentIds.size === 1) {
-      const [id] = searchAgentIds;
-      conditions.push({
-        operator: "or",
-        conditions: [
-          { attribute: "agentId", comparator: "equals", value: id },
-          { attribute: "visibility", comparator: "equals", value: "office" },
-        ],
-      });
-    } else if (searchAgentIds.size > 1) {
-      const agentConditions = [...searchAgentIds].map(id => (
-        { attribute: "agentId", comparator: "equals", value: id }
-      ));
-      agentConditions.push({ attribute: "visibility", comparator: "equals", value: "office" } as any);
-      conditions.push({ operator: "or", conditions: agentConditions });
+    // Agent scoping: own (any visibility) OR granted-owner's SHARED memories
+    // (private-exclusion) — the centralized read-scope condition. No agentId
+    // → no scoping condition pushed (trusted internal call / admin without a
+    // target agentId — matches the pre-existing unscoped fallback).
+    if (scope) {
+      conditions.push(scope.condition);
     }
 
     // Exclude archived records. Use "not_equal" (Harper v5 comparator) instead of
@@ -339,7 +325,47 @@ export class SemanticSearch extends Resource {
         if (asOf && record.validFrom && record.validFrom > asOf) continue;
         if (asOf && record.validTo && record.validTo <= asOf) continue;
 
-        const semanticScore = distanceToSimilarity(record.$distance ?? 1);
+        let semanticScore: number;
+        if (record.$distance !== undefined) {
+          semanticScore = distanceToSimilarity(record.$distance);
+        } else {
+          // ─── ops-syzm: Harper's cosine-sort query omits $distance for a
+          // SINGLETON post-filter result set — the SAME quirk root-caused and
+          // fixed for the dedup path in ops-ume4 (resources/Memory.ts
+          // findConservativeDedupMatch / resources/dedup.ts cosineSimilarity).
+          // Sort ORDER is still correct; only the numeric `$distance`
+          // annotation is missing on that one record, regardless of the
+          // query's own `limit` (reproduced here with candidateLimit=50, not
+          // just limit=1 — the trigger is the post-filter MATCH COUNT, not the
+          // requested limit).
+          //
+          // ops-2dm3 Layer 1 made this common: the no-grants agent scope used
+          // to ALWAYS be a compound `{operator:"or", conditions:[{agentId},
+          // {visibility=="office"}]}` condition; resolveReadScope() now emits
+          // a PLAIN single `{agentId==X}` condition for the common (no-grants)
+          // case, so a scoped search against an agent with exactly one
+          // matching memory hits this Harper quirk directly. Before, the OR
+          // wrap incidentally avoided the singleton shape. The old `?? 1`
+          // fallback silently collapsed this to similarity 0 — read by
+          // callers (including the clean-VM CI gate's single-memory init
+          // probe, #533) as "embeddings not loaded", which is WRONG:
+          // embeddings ARE loaded, only the score was computed incorrectly.
+          //
+          // Fix: point-lookup the record by id (a plain get(), unaffected by
+          // the sort-query quirk — selecting "embedding" directly on the SAME
+          // sort-by-embedding query comes back as a bare scalar per ops-ume4's
+          // findings) and compute cosine similarity ourselves in JS from its
+          // real stored `embedding` vector against this query's `qEmb`, via
+          // the same math as the ume4 fallback (dedup.ts's cosineSimilarity).
+          // Only done on this (rare) undefined-$distance branch — never adds
+          // a point-lookup to the normal per-record path. If the stored
+          // embedding is missing/empty (e.g. a legacy pre-embedding record),
+          // cosineSimilarity returns 0 — the same safe "no match" the old
+          // `?? 1` fallback produced, never a false-high score.
+          const full = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(record.id));
+          const storedEmbedding = Array.isArray(full?.embedding) ? full.embedding : [];
+          semanticScore = cosineSimilarity(qEmb, storedEmbedding);
+        }
         let keywordHit = false;
         if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
           keywordHit = true;

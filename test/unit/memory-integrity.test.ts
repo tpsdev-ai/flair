@@ -36,6 +36,16 @@ const FAKE_EMBEDDING = [1, 0, 0, 0];
 mock.module("../../resources/embeddings-provider.ts", () => ({
   getEmbedding: async (_text: string) => FAKE_EMBEDDING,
   getModelId: () => "mock-embedding-model",
+  // getMode is unused by this file's own tests, but MUST still be exported —
+  // `bun test test/unit` runs every file in one process, and another file's
+  // dynamic import of a module that (transitively) imports embeddings-
+  // provider.ts can resolve to whichever mock reached the module cache
+  // first. An incomplete mock here previously broke
+  // test/unit/semantic-search-scoping.test.ts (SemanticSearch.ts imports
+  // getMode too) with "Export named 'getMode' not found" when run in the
+  // same process — keep this mock's export surface a superset of every
+  // consumer's named imports, not just this file's own.
+  getMode: () => "local",
 }));
 
 // ─── In-memory Harper Memory / MemoryGrant / Agent mock ─────────────────────
@@ -172,6 +182,11 @@ mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: c
 const { Memory } = await import("../../resources/Memory.ts");
 const { jaccardSimilarity, isConservativeMatch, computeMatchConfidence, cosineSimilarity } = await import("../../resources/dedup.ts");
 const { tokenize } = await import("../../resources/bm25.ts");
+// Dynamic (not static) import — MUST run after mock.module() above, same
+// reason as the three imports directly above: a static `import ... from`
+// here would be hoisted and evaluate before the @harperfast/harper mock is
+// registered, binding this module's `databases` to the REAL package instead.
+const { resolveAllowedOwners: scopeAllowedOwners, resolveReadScope } = await import("../../resources/memory-read-scope.ts");
 
 function makeMemory(ctxRequest: any) {
   const r: any = new (Memory as any)();
@@ -794,6 +809,261 @@ describe("Memory.search() — grant scoping parity with get() (shared resolveAll
     for await (const r of await (m as any).search({ conditions: [] })) results.push(r);
     const ids = results.map((r) => r.id).sort();
     expect(ids).toEqual(["mem-granted", "mem-own"]);
+  });
+});
+
+// ─── ops-2dm3 Layer 1: private/shared visibility + centralized read-scoping ──
+//
+// Security boundary tests. resources/memory-read-scope.ts's resolveReadScope()
+// is the ONE centralized helper Memory.search()/Memory.get() (this file),
+// SemanticSearch.ts, MemoryBootstrap.ts, and auth-middleware.ts's by-id guard
+// all resolve their scope through — see that module's doc for the full
+// rationale (closes ops-nzxa, the SemanticSearch office-OR global leak).
+// scopeAllowedOwners/resolveReadScope are imported dynamically near the top
+// of this file (after mock.module) alongside Memory/dedup/bm25.
+
+describe("ops-2dm3 Layer 1 — durability-keyed default visibility (write path)", () => {
+  it("Memory.post: persistent write with no visibility → stored shared", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "A persistent lesson, long enough for the gate.", durability: "persistent" });
+    expect((await BaseMemory.get(r.id)).visibility).toBe("shared");
+  });
+
+  it("Memory.post: permanent write with no visibility → stored shared", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "A permanent principle, long enough for the gate.", durability: "permanent" });
+    expect((await BaseMemory.get(r.id)).visibility).toBe("shared");
+  });
+
+  it("Memory.post: ephemeral write with no visibility → stored private", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "Scratch state, long enough for the gate.", durability: "ephemeral" });
+    expect((await BaseMemory.get(r.id)).visibility).toBe("private");
+  });
+
+  it("Memory.post: standard (or absent) durability with no visibility → stored private", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r1 = await m.post({ agentId: "agent-1", content: "Working memory, long enough for the gate.", durability: "standard" });
+    expect((await BaseMemory.get(r1.id)).visibility).toBe("private");
+
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const r2 = await m2.post({ agentId: "agent-1", content: "No durability set at all, long enough for the gate." });
+    expect((await BaseMemory.get(r2.id)).visibility).toBe("private");
+  });
+
+  it("Memory.post: an explicit visibility ALWAYS overrides the durability default", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "Explicitly private despite being permanent.", durability: "permanent", visibility: "private" });
+    expect((await BaseMemory.get(r.id)).visibility).toBe("private");
+
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const r2 = await m2.post({ agentId: "agent-1", content: "Explicitly shared despite being ephemeral.", durability: "ephemeral", visibility: "shared" });
+    expect((await BaseMemory.get(r2.id)).visibility).toBe("shared");
+  });
+
+  it("Memory.put (fresh id, not yet existing): same durability-keyed default applies", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.put({ id: "agent-1-fresh-visibility", agentId: "agent-1", content: "Fresh PUT create, long enough for the gate.", durability: "persistent" });
+    expect((await BaseMemory.get(r.id)).visibility).toBe("shared");
+  });
+
+  it("Memory.put on an EXISTING id (update/patch) NEVER stamps a default — visibility is left exactly as merged in", async () => {
+    // Simulate memory_update's default same-id overwrite: read existing
+    // (already has a stored visibility from its post()), merge new content on
+    // top, PUT back. The merged payload carries the EXISTING visibility
+    // forward — put() must not recompute/overwrite it from durability.
+    const m = makeMemory(agentCtx("agent-1"));
+    const initial = await m.post({ agentId: "agent-1", content: "Original note, long enough for the gate.", durability: "standard", visibility: "shared" });
+    expect((await BaseMemory.get(initial.id)).visibility).toBe("shared"); // explicit override honored
+
+    const existing = await BaseMemory.get(initial.id);
+    const merged = { ...existing, content: "Updated note, long enough for the gate.", updatedAt: new Date().toISOString() };
+    delete (merged as any).embedding;
+    delete (merged as any).embeddingModel;
+
+    const mUpdate = makeMemory(agentCtx("agent-1"));
+    await mUpdate.put(merged);
+    // Still "shared" — untouched by the update, NOT recomputed to "private"
+    // (which is what durability:"standard"'s default would incorrectly stamp
+    // if the fresh-record guard were broken).
+    expect((await BaseMemory.get(initial.id)).visibility).toBe("shared");
+  });
+
+  it("Memory.put on an EXISTING id with NO stored visibility (pre-migration record) stays absent — never stamped", async () => {
+    // A pre-migration record has no visibility field at all (simulates data
+    // written before this field existed).
+    memoryStore.set("legacy-1", { id: "legacy-1", agentId: "agent-1", content: "Pre-migration content.", durability: "standard" });
+    const existing = await BaseMemory.get("legacy-1");
+    expect(existing.visibility).toBeUndefined();
+
+    const merged = { ...existing, content: "Patched pre-migration content.", updatedAt: new Date().toISOString() };
+    const m = makeMemory(agentCtx("agent-1"));
+    await m.put(merged);
+
+    const after = await BaseMemory.get("legacy-1");
+    expect(after.visibility).toBeUndefined(); // NOT stamped to "private" (standard's default)
+  });
+});
+
+describe("ops-2dm3 Layer 1 — migration-equivalence (no-visibility-field memories)", () => {
+  it("Memory.search: a grant-holder sees a no-visibility-field owner record exactly as before (absent reads as shared)", async () => {
+    memoryStore.set("legacy-owned", { id: "legacy-owned", agentId: "agent-owner", content: "pre-migration finding" }); // no visibility field at all
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+
+    const m = makeMemory(agentCtx("agent-grantee"));
+    const results: any[] = [];
+    for await (const r of await (m as any).search({ conditions: [] })) results.push(r);
+    expect(results.map((r) => r.id)).toEqual(["legacy-owned"]);
+  });
+
+  it("Memory.get: a grant-holder can get() a no-visibility-field owner record by id (absent reads as shared)", async () => {
+    memoryStore.set("legacy-1", { id: "legacy-1", agentId: "agent-owner", content: "pre-migration finding" });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+
+    const m = makeMemory(agentCtx("agent-grantee"));
+    const res = await (m as any).get("legacy-1");
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("pre-migration finding");
+  });
+
+  it("without a grant, a no-visibility-field record is STILL invisible (absence of a grant, not the field, is what gates access)", async () => {
+    memoryStore.set("legacy-ungranted", { id: "legacy-ungranted", agentId: "agent-owner", content: "pre-migration finding" });
+    // No grant pushed at all.
+    const m = makeMemory(agentCtx("agent-stranger"));
+    const res = await (m as any).get("legacy-ungranted");
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(404);
+  });
+});
+
+describe("ops-2dm3 Layer 1 — private-exclusion invariant (the K&S acceptance criterion)", () => {
+  it("Memory.search: a granted owner's PRIVATE memory is never returned to the grant-holder", async () => {
+    memoryStore.set("mem-shared", { id: "mem-shared", agentId: "agent-owner", content: "shared finding", visibility: "shared" });
+    memoryStore.set("mem-private", { id: "mem-private", agentId: "agent-owner", content: "private note", visibility: "private" });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+
+    const m = makeMemory(agentCtx("agent-grantee"));
+    const results: any[] = [];
+    for await (const r of await (m as any).search({ conditions: [] })) results.push(r);
+    const ids = results.map((r) => r.id).sort();
+    expect(ids).toEqual(["mem-shared"]);
+    expect(ids).not.toContain("mem-private");
+  });
+
+  it("Memory.get: a granted owner's PRIVATE memory 404s for the grant-holder (non-enumerating — same shape as no-grant)", async () => {
+    memoryStore.set("mem-private", { id: "mem-private", agentId: "agent-owner", content: "private note", visibility: "private" });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+
+    const m = makeMemory(agentCtx("agent-grantee"));
+    const res = await (m as any).get("mem-private");
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(404);
+  });
+
+  it("the OWNER still sees its own private memory via both search() and get()", async () => {
+    memoryStore.set("mem-private", { id: "mem-private", agentId: "agent-owner", content: "my private note", visibility: "private" });
+
+    const m = makeMemory(agentCtx("agent-owner"));
+    const getRes = await (m as any).get("mem-private");
+    expect(getRes instanceof Response).toBe(false);
+    expect((getRes as any).content).toBe("my private note");
+
+    const m2 = makeMemory(agentCtx("agent-owner"));
+    const results: any[] = [];
+    for await (const r of await (m2 as any).search({ conditions: [] })) results.push(r);
+    expect(results.map((r) => r.id)).toEqual(["mem-private"]);
+  });
+
+  it("admin sees a private memory unfiltered (internal/admin bypass unaffected)", async () => {
+    memoryStore.set("mem-private", { id: "mem-private", agentId: "agent-owner", content: "private note", visibility: "private" });
+    const m = makeMemory(agentCtx("agent-admin", true));
+    const res = await (m as any).get("mem-private");
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("private note");
+  });
+
+  it("a stranger with NO grant at all cannot see a SHARED memory either (grant is still required — private-exclusion narrows, never replaces, the grant gate)", async () => {
+    memoryStore.set("mem-shared", { id: "mem-shared", agentId: "agent-owner", content: "shared finding", visibility: "shared" });
+    const m = makeMemory(agentCtx("agent-stranger"));
+    const res = await (m as any).get("mem-shared");
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(404);
+  });
+});
+
+describe("ops-2dm3 Layer 1 — resolveReadScope() condition shape + injection safety", () => {
+  it("no grants held → condition is the plain self leaf (unchanged shape from pre-2dm3)", async () => {
+    const scope = await resolveReadScope("agent-1");
+    expect(scope.allowedOwners).toEqual(["agent-1"]);
+    expect(scope.condition).toEqual({ attribute: "agentId", comparator: "equals", value: "agent-1" });
+  });
+
+  it("one grant held → condition is (self) OR (owner AND visibility != 'private')", async () => {
+    memoryGrants.push({ granteeId: "agent-1", ownerId: "agent-owner", scope: "read" });
+    const scope = await resolveReadScope("agent-1");
+    expect(scope.condition).toEqual({
+      operator: "or",
+      conditions: [
+        { attribute: "agentId", comparator: "equals", value: "agent-1" },
+        {
+          operator: "and",
+          conditions: [
+            { attribute: "agentId", comparator: "equals", value: "agent-owner" },
+            { attribute: "visibility", comparator: "not_equal", value: "private" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("uses not_equal 'private' — NEVER equals 'shared' (the migration-invariant is baked into the condition itself)", async () => {
+    memoryGrants.push({ granteeId: "agent-1", ownerId: "agent-owner", scope: "search" });
+    const scope = await resolveReadScope("agent-1");
+    const json = JSON.stringify(scope.condition);
+    expect(json).toContain("not_equal");
+    expect(json).not.toContain('"equals","value":"shared"');
+  });
+
+  it("isAllowed() agrees with the condition shape for every combination", async () => {
+    memoryGrants.push({ granteeId: "agent-1", ownerId: "agent-owner", scope: "read" });
+    const scope = await resolveReadScope("agent-1");
+    expect(scope.isAllowed({ agentId: "agent-1", visibility: "private" })).toBe(true); // own private
+    expect(scope.isAllowed({ agentId: "agent-owner", visibility: "shared" })).toBe(true); // granted + shared
+    expect(scope.isAllowed({ agentId: "agent-owner" })).toBe(true); // granted + no field (migration invariant)
+    expect(scope.isAllowed({ agentId: "agent-owner", visibility: "private" })).toBe(false); // granted + PRIVATE
+    expect(scope.isAllowed({ agentId: "agent-stranger", visibility: "shared" })).toBe(false); // ungranted
+    expect(scope.isAllowed(null)).toBe(false);
+    expect(scope.isAllowed(undefined)).toBe(false);
+  });
+
+  it("injection: a reader cannot craft a search query to surface a granted owner's private record", async () => {
+    memoryStore.set("mem-private", { id: "mem-private", agentId: "agent-owner", content: "private note", visibility: "private" });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+
+    // Attacker-supplied conditions try to OR their way around the scope, or
+    // directly assert visibility equals "private" to force a match — Memory.
+    // search() always wraps the resolved scope condition as the OUTERMOST
+    // element of an implicit-AND conditions[] array, so a user-supplied
+    // "or"/wildcard condition can only ever narrow the result set further,
+    // never broaden past the scope.
+    const attackerQuery = {
+      conditions: [
+        { attribute: "visibility", comparator: "equals", value: "private" },
+        "or",
+        { attribute: "id", comparator: "starts_with", value: "" },
+      ],
+    };
+    const m = makeMemory(agentCtx("agent-grantee"));
+    const results: any[] = [];
+    for await (const r of await (m as any).search(attackerQuery)) results.push(r);
+    expect(results.map((r: any) => r.id)).not.toContain("mem-private");
+  });
+
+  it("resolveAllowedOwners() (the owner-set-only helper) is unchanged in shape — still self + granted owner ids", async () => {
+    memoryGrants.push({ granteeId: "agent-1", ownerId: "agent-owner-a", scope: "read" });
+    memoryGrants.push({ granteeId: "agent-1", ownerId: "agent-owner-b", scope: "search" });
+    const owners = await scopeAllowedOwners("agent-1");
+    expect(owners.sort()).toEqual(["agent-1", "agent-owner-a", "agent-owner-b"]);
   });
 });
 

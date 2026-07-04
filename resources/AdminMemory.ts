@@ -369,7 +369,7 @@ export class AdminMemory extends Resource {
         <dl style="display:grid;grid-template-columns:200px 1fr;gap:6px;margin-top:8px;font-family:ui-monospace,SF Mono,monospace;font-size:0.85em">
           <dt style="color:#666">id</dt><dd>${esc(m.id)}</dd>
           <dt style="color:#666">contentHash</dt><dd>${esc(m.contentHash ?? "—")}</dd>
-          <dt style="color:#666">visibility</dt><dd>${esc(m.visibility ?? "private")}</dd>
+          <dt style="color:#666">visibility</dt><dd>${esc(m.visibility ?? "shared (no field — pre-migration default)")}</dd>
         </dl>
       </div>
     `;

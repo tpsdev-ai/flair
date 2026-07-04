@@ -193,6 +193,42 @@ describe("MemoryApi", () => {
     expect((result as any).written).toBe(true);
   });
 
+  test("write() forwards visibility ONLY when the caller sets it (ops-2dm3 Layer 1)", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.write("content long enough to matter", { visibility: "private" });
+
+    const call = (mockFetch as any).mock.calls[0];
+    const body = JSON.parse(call[1].body);
+    expect(body.visibility).toBe("private");
+  });
+
+  test("write() omits visibility entirely when the caller doesn't set it — no client-side default duplicated", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.write("content long enough to matter");
+
+    const call = (mockFetch as any).mock.calls[0];
+    const body = JSON.parse(call[1].body);
+    expect("visibility" in body).toBe(false);
+  });
+
+  test("write() forwards visibility:'shared' too (not just a falsy-check bug)", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.write("content long enough to matter", { visibility: "shared" });
+
+    const call = (mockFetch as any).mock.calls[0];
+    const body = JSON.parse(call[1].body);
+    expect(body.visibility).toBe("shared");
+  });
+
   test("update() default mode: reads existing, PUTs merged content to the SAME id, clears stale embedding", async () => {
     const existing = {
       id: "mem-1", agentId: "test", content: "old content", type: "session",

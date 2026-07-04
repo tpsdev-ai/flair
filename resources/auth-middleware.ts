@@ -3,6 +3,7 @@ import { server, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer } from "./ed25519-auth.js";
+import { resolveReadScope } from "./memory-read-scope.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -495,26 +496,16 @@ server.http(async (request: any, nextLayer: any) => {
         if (memId) {
           const record = await (databases as any).flair.Memory.get(memId);
           if (record && record.agentId && record.agentId !== agentId) {
-            // Allow office-wide memories
-            if (record.visibility !== "office") {
-              // Check MemoryGrant
-              let hasGrant = false;
-              try {
-                for await (const grant of (databases as any).flair.MemoryGrant.search({
-                  conditions: [{ attribute: "granteeId", comparator: "equals", value: agentId }],
-                })) {
-                  if (grant.ownerId === record.agentId &&
-                      (grant.scope === "read" || grant.scope === "search")) {
-                    hasGrant = true;
-                    break;
-                  }
-                }
-              } catch {}
-              if (!hasGrant) {
-                return new Response(JSON.stringify({
-                  error: `forbidden: cannot read memory owned by ${record.agentId}`,
-                }), { status: 403, headers: { "Content-Type": "application/json" } });
-              }
+            // Centralized read-scope (ops-2dm3 Layer 1): a grant only covers
+            // the owner's SHARED memories, never their private ones. This
+            // used to be a `visibility === "office"` bypass (any authenticated
+            // agent, no grant needed) — that's gone; the private-exclusion is
+            // now enforced the same way every other read path enforces it.
+            const scope = await resolveReadScope(agentId);
+            if (!scope.isAllowed(record)) {
+              return new Response(JSON.stringify({
+                error: `forbidden: cannot read memory owned by ${record.agentId}`,
+              }), { status: 403, headers: { "Content-Type": "application/json" } });
             }
           }
         }

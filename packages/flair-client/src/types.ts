@@ -8,6 +8,16 @@ export type Durability = "permanent" | "persistent" | "standard" | "ephemeral";
 /** Memory type classification. */
 export type MemoryType = "session" | "lesson" | "decision" | "preference" | "fact" | "goal";
 
+/**
+ * Writer-controlled sharing intent. "private" — owner only,
+ * never returned to another agent even if that agent holds a MemoryGrant.
+ * "shared" — visible to owner + any grant-holder (subject to the grant's
+ * scope). When unset on write, the server defaults it from `durability`:
+ * permanent/persistent → shared, standard/ephemeral/absent → private. An
+ * explicit value here always overrides the server default.
+ */
+export type Visibility = "private" | "shared";
+
 /** A memory record. */
 export interface Memory {
   id: string;
@@ -17,6 +27,11 @@ export interface Memory {
   durability: Durability;
   tags: string[];
   subject?: string;
+  /** Writer-controlled sharing intent. Absent on records written before this
+   *  field existed — the server treats absence as "shared" (migration-
+   *  invariant: an existing memory keeps reading to exactly whoever holds a
+   *  grant today), never as "private". */
+  visibility?: Visibility;
   createdAt: string;
   updatedAt?: string;
   /** Always true after a successful write()/update() — the server never
