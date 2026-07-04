@@ -284,7 +284,17 @@ export class BootstrapMemories extends Resource {
     }
     const activeMemories = allMemories.filter((m) => !supersededIds.has(m.id));
 
-    const permanent = activeMemories.filter((m) => m.durability === "permanent");
+    // #550 design boundary: the permanent / recent / predicted sections are the
+    // agent's OWN working context — own-only, always. Post-Layer-1
+    // `activeMemories` also carries grant-visible teammate records (`_source`
+    // set), but grant-visibility exists to feed the task-relevant "Teammate
+    // findings" surfacing (#550) below, NOT to blend a teammate's memories into
+    // the reader's recent/permanent/predicted view. So these three sections
+    // filter to own (`!m._source`); team knowledge surfaces only when
+    // task-relevant (the teammate section) or via an explicit memory_search.
+    const ownMemories = activeMemories.filter((m) => !m._source);
+
+    const permanent = ownMemories.filter((m) => m.durability === "permanent");
     for (const m of permanent) {
       const line = formatMemory(m, agentId);
       const cost = estimateTokens(line);
@@ -300,7 +310,7 @@ export class BootstrapMemories extends Resource {
     // --- 3. Recent memories (adaptive window) ---
     // Start with 48h. If nothing found, widen to 7d, then 30d.
     // This prevents empty recent sections for agents that were idle.
-    const nonPermanent = activeMemories
+    const nonPermanent = ownMemories
       .filter((m) => m.durability !== "permanent" && m.createdAt)
       .sort((a: any, b: any) => (b.createdAt || "").localeCompare(a.createdAt || ""));
 
@@ -350,7 +360,7 @@ export class BootstrapMemories extends Resource {
         ...recent.filter((_: any, i: number) => i < sections.recent.length).map((m: any) => m.id),
       ]);
 
-      const subjectMemories = activeMemories
+      const subjectMemories = ownMemories
         .filter((m: any) =>
           !includedIds.has(m.id) &&
           m.subject &&

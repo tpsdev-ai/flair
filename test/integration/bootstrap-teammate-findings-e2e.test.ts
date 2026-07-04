@@ -135,6 +135,17 @@ const CONTENT_SHARED = "flair-550 marker: for the Acme Corp vendor contract rene
 const CONTENT_PRIVATE = "flair-550 marker: for the Acme Corp vendor contract renegotiation, our internal walk-away margin floor is 18 percent — never disclose this to Acme.";
 const CONTENT_OWN = "flair-550 marker: for the Acme Corp vendor contract renegotiation, legal flagged the indemnification clause as the first blocker to resolve.";
 
+// Two PERMANENT memories (own + teammate) — permanent records ALWAYS render in
+// bootstrap's "Core Principles" section regardless of recency/currentTask, so
+// they're the sharpest real-Harper probe of the own-only design boundary: an
+// own permanent renders there, a grant-visible TEAMMATE permanent must NOT
+// bleed into it (pre-fix it did, because that section filtered the reader's
+// full Layer-1 read-scope with no own-agent gate).
+const ID_OWN_PERM = `${grantee.id}-own-perm`;
+const ID_SHARED_PERM = `${owner.id}-shared-perm`;
+const CONTENT_OWN_PERM = "flair-550 marker: standing rule — I always double-check indemnification caps before signing any vendor agreement.";
+const CONTENT_SHARED_PERM = "flair-550 marker: standing rule — the procurement team requires two competing quotes on file before any renewal above fifty thousand dollars.";
+
 const BACKDATED = new Date(Date.now() - 40 * 24 * 3600_000).toISOString();
 
 describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task' (real Harper, real embeddings)", () => {
@@ -153,6 +164,13 @@ describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task
     await putMemory(harper, grantee, ID_OWN, {
       agentId: grantee.id, content: CONTENT_OWN, durability: "standard", createdAt: BACKDATED,
     });
+    // Permanent pair for the own-only non-bleed probe (see constants above).
+    await putMemory(harper, grantee, ID_OWN_PERM, {
+      agentId: grantee.id, content: CONTENT_OWN_PERM, durability: "permanent", createdAt: BACKDATED,
+    });
+    await putMemory(harper, owner, ID_SHARED_PERM, {
+      agentId: owner.id, content: CONTENT_SHARED_PERM, durability: "permanent", visibility: "shared", createdAt: BACKDATED,
+    });
   }, 180_000);
 
   afterAll(async () => { if (harper) await stopHarper(harper); });
@@ -166,10 +184,15 @@ describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task
     // content) must never appear anywhere in the response.
     expect(context, "owner's PRIVATE memory must never appear in grantee's bootstrap").not.toContain(CONTENT_PRIVATE);
 
-    // Section-count structure: exactly one own task-relevant finding, exactly
-    // one teammate task-relevant finding.
+    // Section-count structure: exactly one own task-relevant finding
+    // (CONTENT_OWN — the own PERMANENT memory is excluded from the scored path
+    // via includedIds, so it can't inflate this), and at least one teammate
+    // task-relevant finding. `teammate` is `>= 1` rather than exactly 1 because
+    // the seed's teammate PERMANENT rule (CONTENT_SHARED_PERM, about vendor
+    // renewals) is legitimately task-relevant too and correctly lands here —
+    // proving the split by ORIGIN, not that only one teammate memory can show.
     expect(body.sections?.relevant, `sections.relevant — full response: ${JSON.stringify(body.sections)}`).toBe(1);
-    expect(body.sections?.teammate, `sections.teammate — full response: ${JSON.stringify(body.sections)}`).toBe(1);
+    expect(body.sections?.teammate, `sections.teammate — full response: ${JSON.stringify(body.sections)}`).toBeGreaterThanOrEqual(1);
 
     const relevantSection = extractSection(context, "Relevant Knowledge");
     const teammateSection = extractSection(context, "Teammate findings relevant to your task");
@@ -186,10 +209,23 @@ describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task
     expect(relevantSection).not.toContain(CONTENT_SHARED);
   }, 60_000);
 
-  test("no currentTask → no 'Teammate findings' section at all (empty section renders no header)", async () => {
+  test("no currentTask → no 'Teammate findings' section, AND a grant-visible teammate PERMANENT memory does NOT bleed into the reader's own Core Principles", async () => {
     const body = await bootstrap(harper, grantee, { agentId: grantee.id, maxTokens: 8000 });
     const context: string = body.context ?? "";
+
+    // No currentTask → the task-relevant teammate surface is inactive.
     expect(context).not.toContain("Teammate findings relevant to your task");
     expect(body.sections?.teammate).toBe(0);
+
+    // Own-only design boundary, real-Harper proof: the reader's OWN permanent
+    // memory renders in Core Principles ...
+    const principles = extractSection(context, "Core Principles");
+    expect(principles, `own permanent memory missing from Core Principles — full context:\n${context}`).toContain(CONTENT_OWN_PERM);
+    // ... while the grant-visible TEAMMATE permanent memory (in read-scope,
+    // but a teammate's) must NOT appear anywhere — no bleed into own context.
+    expect(context, "teammate PERMANENT memory bled into the reader's own-context view").not.toContain(CONTENT_SHARED_PERM);
+    // The standard-durability teammate SHARED memory likewise stays out with
+    // no currentTask (backdated beyond the recent window AND own-only).
+    expect(context).not.toContain(CONTENT_SHARED);
   }, 60_000);
 });

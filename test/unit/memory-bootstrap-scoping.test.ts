@@ -109,9 +109,14 @@ function reset() {
 }
 
 // formatMemory() (resources/MemoryBootstrap.ts) renders each memory's content
-// verbatim into the "## Recent Context" / "## Core Principles" sections, so
-// asserting on `result.context` is a reasonable proxy for "was this memory
-// actually surfaced" without reaching into internal state.
+// verbatim into its section, so asserting on `result.context` is a reasonable
+// proxy for "was this memory actually surfaced" without reaching into internal
+// state. NOTE (#550 design boundary): for a TEAMMATE (grant-visible) record
+// that proxy holds ONLY when the record is task-relevant — the permanent /
+// recent / predicted sections are own-only, so a teammate record entering
+// read-scope (`memoriesAvailable`) is decoupled from whether it renders. The
+// read-scope tests below therefore assert `memoriesAvailable` for teammate
+// records, and rendering is covered by the #550 describe block further down.
 
 describe("MemoryBootstrap.post() — ops-2dm3 Layer 1 centralized read-scoping", () => {
   it("includes only the caller's own memories when no grants are held", async () => {
@@ -126,15 +131,20 @@ describe("MemoryBootstrap.post() — ops-2dm3 Layer 1 centralized read-scoping",
     expect(res.memoriesAvailable).toBe(1);
   });
 
-  it("a grant-holder now ALSO sees the owner's SHARED memory (the flair#550 gap this closes)", async () => {
+  it("a grant-holder's read-scope now includes the owner's SHARED memory (the flair#550 gap this closes) — but it does NOT bleed into own-context sections", async () => {
     reset();
     memoryStore.set("shared-1", { id: "shared-1", agentId: "agent-owner", content: "TEAMMATE-SHARED-FINDING", visibility: "shared", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
-    const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false });
-    expect(res.context).toContain("TEAMMATE-SHARED-FINDING");
+    const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false }); // no currentTask
+    // Layer 1: the SHARED memory is in the reader's read-scope ...
     expect(res.memoriesAvailable).toBe(1);
+    // ... but the #550 design boundary keeps it out of the reader's OWN
+    // permanent/recent/predicted view — with no currentTask, its only surface
+    // (the task-relevant "Teammate findings" section) is inactive, so it
+    // renders nowhere. This is the non-bleed guarantee.
+    expect(res.context).not.toContain("TEAMMATE-SHARED-FINDING");
   });
 
   it("private-exclusion: a grant-holder does NOT see the owner's PRIVATE memory", async () => {
@@ -148,14 +158,20 @@ describe("MemoryBootstrap.post() — ops-2dm3 Layer 1 centralized read-scoping",
     expect(res.memoriesAvailable).toBe(0);
   });
 
-  it("migration invariant: a grant-holder sees a NO-visibility-field owner record (absent reads as shared)", async () => {
+  it("migration invariant: a grant-holder's read-scope includes a NO-visibility-field owner record (absent reads as shared) — but it too stays out of own-context sections", async () => {
     reset();
     memoryStore.set("legacy-1", { id: "legacy-1", agentId: "agent-owner", content: "LEGACY-PRE-MIGRATION-FINDING", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" }); // no visibility field
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "search" });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
     const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false });
-    expect(res.context).toContain("LEGACY-PRE-MIGRATION-FINDING");
+    // Migration invariant lives at the READ-SCOPE layer: an absent visibility
+    // field reads as shared, so the legacy record enters the grantee's scope
+    // (vs. a private record, which would not — see the private-exclusion test's
+    // memoriesAvailable === 0). Rendering is still own-only, so with no
+    // currentTask it doesn't bleed into the reader's own-context view.
+    expect(res.memoriesAvailable).toBe(1);
+    expect(res.context).not.toContain("LEGACY-PRE-MIGRATION-FINDING");
   });
 
   it("without any grant, an ungranted owner's SHARED memory is still invisible (no bypass)", async () => {
@@ -200,14 +216,19 @@ const OLD_DATE = "2020-01-01T00:00:00Z";
 describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + section", () => {
   it("formatMemory attributes a grant-visible teammate SHARED memory with [via <ownerId>]", async () => {
     reset();
+    // A teammate record only RENDERS via the task-relevant teammate section
+    // (own-context sections are own-only), so make it task-relevant: embedding
+    // + currentTask (mocked getEmbedding → cosine 1.0 clears score > 0.3).
     memoryStore.set("shared-attr", {
       id: "shared-attr", agentId: "agent-owner", content: "TEAMMATE-ATTR-FINDING",
-      visibility: "shared", durability: "permanent", createdAt: "2026-01-01T00:00:00Z",
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
-    const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false });
+    const res: any = await b.post({
+      agentId: "agent-grantee", includeSoul: false, currentTask: "investigate the thing",
+    });
     expect(res.context).toContain("[via agent-owner] TEAMMATE-ATTR-FINDING");
   });
 
@@ -227,15 +248,19 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
 
   it("attribution composes with the safety wrap — a flagged teammate memory shows BOTH", async () => {
     reset();
+    // Task-relevant (embedding + currentTask) so the flagged teammate record
+    // reaches the teammate section where it renders — see the note above.
     memoryStore.set("shared-flagged", {
       id: "shared-flagged", agentId: "agent-owner", content: "TEAMMATE-FLAGGED-FINDING",
-      visibility: "shared", durability: "permanent", createdAt: "2026-01-01T00:00:00Z",
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
       _safetyFlags: ["prompt_injection"],
     });
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
-    const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false });
+    const res: any = await b.post({
+      agentId: "agent-grantee", includeSoul: false, currentTask: "investigate the thing",
+    });
     // Both markers present ...
     expect(res.context).toContain("[⚠️ SAFETY:");
     expect(res.context).toContain("[via agent-owner]");
@@ -336,5 +361,98 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false }); // no currentTask
     expect(res.context).not.toContain("## Teammate findings relevant to your task");
     expect(res.sections.teammate).toBe(0);
+  });
+
+  // ─── Own-context sections are OWN-ONLY (the design-correction boundary) ─────
+  // Post-Layer-1 `activeMemories` carries grant-visible teammate records; the
+  // permanent / recent / predicted sections must NOT blend them into the
+  // reader's own working context. Grant-visibility feeds ONLY the
+  // task-relevant "Teammate findings" surface (or an explicit memory_search).
+
+  it("a teammate's grant-visible PERMANENT memory does NOT appear in the reader's Core Principles (permanent) section", async () => {
+    reset();
+    // Give the reader an OWN permanent memory too, so the section renders and
+    // we're asserting the teammate one is absent from a LIVE section (not just
+    // that the section is empty).
+    memoryStore.set("own-perm", {
+      id: "own-perm", agentId: "agent-grantee", content: "MY-OWN-PERMANENT-RULE",
+      durability: "permanent", createdAt: "2026-01-01T00:00:00Z",
+    });
+    memoryStore.set("teammate-perm", {
+      id: "teammate-perm", agentId: "agent-owner", content: "TEAMMATE-PERMANENT-RULE",
+      visibility: "shared", durability: "permanent", createdAt: "2026-01-01T00:00:00Z",
+    });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+
+    const b = makeBootstrap(agentCtx("agent-grantee"));
+    const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false }); // no currentTask
+    expect(res.context).toContain("## Core Principles");
+    expect(res.context).toContain("MY-OWN-PERMANENT-RULE");         // own → renders
+    expect(res.context).not.toContain("TEAMMATE-PERMANENT-RULE");   // teammate → no bleed
+    expect(res.memoriesAvailable).toBe(2);                          // both in read-scope
+  });
+
+  it("a teammate's grant-visible RECENT memory does NOT appear in the reader's Recent Context section", async () => {
+    reset();
+    const recentDate = new Date(Date.now() - 3600_000).toISOString(); // 1h ago — inside the 48h window
+    memoryStore.set("own-recent", {
+      id: "own-recent", agentId: "agent-grantee", content: "MY-OWN-RECENT-NOTE",
+      durability: "standard", createdAt: recentDate,
+    });
+    memoryStore.set("teammate-recent", {
+      id: "teammate-recent", agentId: "agent-owner", content: "TEAMMATE-RECENT-NOTE",
+      visibility: "shared", durability: "standard", createdAt: recentDate,
+    });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+
+    const b = makeBootstrap(agentCtx("agent-grantee"));
+    const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false }); // no currentTask
+    expect(res.context).toContain("## Recent Context");
+    expect(res.context).toContain("MY-OWN-RECENT-NOTE");        // own → renders
+    expect(res.context).not.toContain("TEAMMATE-RECENT-NOTE");  // teammate → no bleed
+  });
+
+  it("a teammate's grant-visible subject-tagged memory does NOT appear in the reader's Predicted Context section", async () => {
+    reset();
+    memoryStore.set("own-subj", {
+      id: "own-subj", agentId: "agent-grantee", content: "MY-OWN-SUBJECT-NOTE",
+      durability: "standard", subject: "billing", createdAt: "2026-01-01T00:00:00Z",
+    });
+    memoryStore.set("teammate-subj", {
+      id: "teammate-subj", agentId: "agent-owner", content: "TEAMMATE-SUBJECT-NOTE",
+      visibility: "shared", durability: "standard", subject: "billing", createdAt: "2026-01-01T00:00:00Z",
+    });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+
+    const b = makeBootstrap(agentCtx("agent-grantee"));
+    const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false, subjects: ["billing"] });
+    expect(res.context).toContain("## Predicted Context");
+    expect(res.context).toContain("MY-OWN-SUBJECT-NOTE");       // own → renders
+    expect(res.context).not.toContain("TEAMMATE-SUBJECT-NOTE"); // teammate → no bleed
+  });
+
+  it("a teammate's grant-visible PERMANENT memory that IS task-relevant surfaces in 'Teammate findings' (not 'Core Principles')", async () => {
+    reset();
+    // durability: "permanent" — proves the teammate surface is by ORIGIN, not
+    // durability: a permanent-durability teammate record is excluded from the
+    // (own-only) permanent section yet still reaches the scored teammate path.
+    memoryStore.set("teammate-perm-task", {
+      id: "teammate-perm-task", agentId: "agent-owner", content: "TEAMMATE-PERMANENT-TASK-FINDING",
+      visibility: "shared", durability: "permanent", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+    });
+    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+
+    const b = makeBootstrap(agentCtx("agent-grantee"));
+    const res: any = await b.post({
+      agentId: "agent-grantee", includeSoul: false, currentTask: "investigate the thing",
+    });
+    // Surfaces in the teammate section, attributed ...
+    expect(res.context).toContain("## Teammate findings relevant to your task");
+    expect(res.context).toContain("[via agent-owner] TEAMMATE-PERMANENT-TASK-FINDING");
+    expect(res.sections.teammate).toBe(1);
+    // ... and never in Core Principles (the permanent section stayed own-only,
+    // which here is empty → no header at all).
+    expect(res.context).not.toContain("## Core Principles");
+    expect(res.sections.permanent).toBe(0);
   });
 });
