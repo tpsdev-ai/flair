@@ -16,6 +16,10 @@ jobs:
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest
+    # No job timeout here either (ops-fumh): this job's `sfw bun install` below
+    # hung 16+ min on 2026-07-04, blocking merge on a required check. Unit tests
+    # run in ~1 min; 10 min bounds a hung install/runner.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - name: "Check for local file: deps"
@@ -434,6 +438,13 @@ jobs:
   audit:
     name: Dependency Audit
     runs-on: ubuntu-latest
+    # This job was the ONLY one in this file without a job timeout, so when the
+    # Socket firewall (`sfw`) install below hung (ops-fumh, seen 2026-07-04) it
+    # ran 33+ min with nothing to cancel it, indefinitely blocking merge on a
+    # required check. A job timeout makes a hung sfw install fail-fast and
+    # re-runnable instead of hanging. `sfw bun install --frozen-lockfile` with
+    # no dep changes is normally seconds; 10 min is generous headroom.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -442,7 +453,9 @@ jobs:
       - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
         with:
           mode: firewall-free
-      - run: sfw bun install --frozen-lockfile
+      - name: sfw bun install (frozen — 5 min guard against sfw hangs, ops-fumh)
+        timeout-minutes: 5
+        run: sfw bun install --frozen-lockfile
       - name: Run audit (advisory-only for transitive deps)
         run: bun audit || echo "::warning::Audit found vulnerabilities — all in harper transitive deps (unreleased v5 build)"
         continue-on-error: true
