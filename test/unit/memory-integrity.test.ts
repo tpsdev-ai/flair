@@ -66,6 +66,13 @@ let memoryStore: Map<string, any>;
 let memoryGrants: any[];
 let callOrder: string[];
 let idCounter: number;
+// ops-ume4 simulation switch: when true, memorySearchGen's cosine-sort branch
+// omits `$distance` from every candidate (real Harper's observed behavior for
+// a SINGLETON cosine-query result set) instead of computing a real one —
+// letting the "ops-ume4 fallback" describe block below exercise
+// findConservativeDedupMatch's manual-cosine fallback deterministically,
+// without needing a live Harper.
+let forceUndefinedDistance = false;
 
 function memorySearchGen(query: any) {
   let records = Array.from(memoryStore.values());
@@ -79,9 +86,13 @@ function memorySearchGen(query: any) {
   for (const cond of conditions) records = records.filter((r) => matchesCondition(r, cond));
   if (query?.sort?.attribute === "embedding" && query.sort.distance === "cosine") {
     const target = query.sort.target;
-    records = records
-      .map((r) => ({ ...r, $distance: Array.isArray(r.embedding) ? 1 - cosineSim(r.embedding, target) : 1 }))
-      .sort((a, b) => a.$distance - b.$distance);
+    if (forceUndefinedDistance) {
+      records = records.map((r) => ({ ...r, $distance: undefined }));
+    } else {
+      records = records
+        .map((r) => ({ ...r, $distance: Array.isArray(r.embedding) ? 1 - cosineSim(r.embedding, target) : 1 }))
+        .sort((a, b) => a.$distance - b.$distance);
+    }
   }
   const limit = typeof query?.limit === "number" ? query.limit : undefined;
   const sliced = limit !== undefined ? records.slice(0, limit) : records;
@@ -159,7 +170,7 @@ const databasesMock = {
 mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Memory } = await import("../../resources/Memory.ts");
-const { jaccardSimilarity, isConservativeMatch, computeMatchConfidence } = await import("../../resources/dedup.ts");
+const { jaccardSimilarity, isConservativeMatch, computeMatchConfidence, cosineSimilarity } = await import("../../resources/dedup.ts");
 const { tokenize } = await import("../../resources/bm25.ts");
 
 function makeMemory(ctxRequest: any) {
@@ -175,6 +186,7 @@ beforeEach(() => {
   memoryGrants = [];
   callOrder = [];
   idCounter = 0;
+  forceUndefinedDistance = false;
 });
 
 // ─── Fixture text for the #526 replay ────────────────────────────────────────
@@ -216,6 +228,26 @@ describe("dedup co-gate — pure math (resources/dedup.ts)", () => {
   it("jaccardSimilarity of two empty/no-overlap sets is 0, never treated as a match", () => {
     expect(jaccardSimilarity([], [])).toBe(0);
     expect(jaccardSimilarity(["a", "b"], [])).toBe(0);
+  });
+
+  // cosineSimilarity backs the ops-ume4 fallback in findConservativeDedupMatch
+  // (resources/Memory.ts) — computed directly in JS when Harper's cosine-sort
+  // query doesn't attach a $distance (see that function's doc comment).
+  it("cosineSimilarity: identical vectors → 1, orthogonal vectors → 0", () => {
+    expect(cosineSimilarity([1, 0, 0, 0], [1, 0, 0, 0])).toBeCloseTo(1, 10);
+    expect(cosineSimilarity([1, 0, 0, 0], [0, 1, 0, 0])).toBe(0);
+  });
+
+  it("cosineSimilarity: a known non-trivial angle computes the exact expected value", () => {
+    const a = [1, 0, 0, 0];
+    const near = [0.9, Math.sqrt(1 - 0.81), 0, 0]; // unit vector
+    expect(cosineSimilarity(a, near)).toBeCloseTo(0.9, 10);
+  });
+
+  it("cosineSimilarity: mismatched length, empty, or zero-magnitude vectors safely yield 0 (never a false 'identical')", () => {
+    expect(cosineSimilarity([1, 2], [1, 2, 3])).toBe(0);
+    expect(cosineSimilarity([], [])).toBe(0);
+    expect(cosineSimilarity([0, 0, 0], [1, 2, 3])).toBe(0);
   });
 });
 
@@ -311,6 +343,54 @@ describe("Memory.post — server-side dedup gate never suppresses a write", () =
     expect(res instanceof Response).toBe(true);
     expect((res as Response).status).toBe(401);
     expect(memoryStore.size).toBe(0);
+  });
+});
+
+// ─── ops-ume4: findConservativeDedupMatch's manual-cosine fallback ───────────
+// Real Harper's cosine-sort query omits `$distance` (comes back `undefined`)
+// when its post-filter result set is a SINGLETON — in practice, an agent's
+// SECOND-ever memory compared against its first. That behavior can't be
+// reproduced by memorySearchGen's default mock, which always computes a
+// real $distance (see this file's top-of-file doc comment) — so this block
+// flips forceUndefinedDistance to simulate exactly that shape and proves
+// findConservativeDedupMatch's fallback (resources/Memory.ts: fetch the
+// candidate's full record and compute cosine manually via dedup.ts's
+// cosineSimilarity) fires correctly. See
+// test/integration/dedup-supersede-e2e.test.ts's Scenario 2 for the same
+// behavior proven against REAL Harper.
+describe("ops-ume4: findConservativeDedupMatch falls back to a manual cosine computation when $distance is undefined", () => {
+  it("a near-duplicate whose ONLY candidate has $distance undefined is still correctly flagged (real cosine, not the pre-fix 0 sentinel)", async () => {
+    const m1 = makeMemory(agentCtx("agent-1"));
+    const r1 = await m1.post({ agentId: "agent-1", content: FINDING_A });
+    expect(r1.written).toBe(true);
+
+    forceUndefinedDistance = true;
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const r2 = await m2.post({ agentId: "agent-1", content: FINDING_A_REWORDED });
+    forceUndefinedDistance = false;
+
+    expect(r2.written).toBe(true); // never-suppress invariant
+    expect(r2.deduplicated).toBe(true);
+    expect(r2.matchedId).toBe(r1.id);
+    // This mock's getEmbedding() returns the SAME constant vector for every
+    // input (file-level FAKE_EMBEDDING), so a correctly-firing fallback
+    // computes cosine === 1 exactly. The pre-fix code (`1 - (undefined ?? 1)`)
+    // would have computed cosine === 0 here instead, forcing
+    // deduplicated:false regardless of true similarity — this is the
+    // regression the fallback closes.
+    expect(r2.matchConfidence.cosine).toBe(1);
+  });
+
+  it("if the candidate's stored embedding is ALSO missing (legacy record), the fallback safely yields cosine 0 — never suppresses the write", async () => {
+    memoryStore.set("legacy-1", { id: "legacy-1", agentId: "agent-1", content: FINDING_A, archived: false });
+
+    forceUndefinedDistance = true;
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const r2 = await m2.post({ agentId: "agent-1", content: FINDING_A_REWORDED });
+    forceUndefinedDistance = false;
+
+    expect(r2.written).toBe(true); // never-suppress invariant, even in this double-degenerate case
+    expect(r2.deduplicated).toBe(false); // cosineSimilarity(embedding, []) === 0 — safe no-match signal
   });
 });
 

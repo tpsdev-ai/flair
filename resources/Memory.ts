@@ -9,6 +9,7 @@ import {
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
   DEDUP_MIN_CONTENT_LENGTH,
   computeMatchConfidence,
+  cosineSimilarity,
   isConservativeMatch,
   type DedupMatch,
 } from "./dedup.js";
@@ -111,7 +112,62 @@ async function findConservativeDedupMatch(
       break; // single top-cosine candidate only — never fall back further
     }
     if (!top) return null;
-    const cosine = 1 - (top.$distance ?? 1);
+
+    // ─── ops-ume4: Harper's cosine-sort query omits $distance for a SINGLETON
+    // result set ─────────────────────────────────────────────────────────────
+    // Initial working theory was a per-agentId HNSW "cold-start" (first-ever
+    // query cold, second query warm) and the initially-recommended fix was a
+    // same-query retry. Empirically FALSIFIED: a plain retry of the identical
+    // query, 8x with 300ms delays (2.4s total), never recovered a `$distance`
+    // for a genuinely singleton candidate set (exactly one record matching
+    // `agentId equals X AND archived not_equal true`). The actual trigger,
+    // confirmed by direct probing: when this query's post-filter result set
+    // has exactly ONE matching record, `$distance` comes back `undefined` for
+    // it — regardless of how many prior queries have run for that agentId,
+    // how long you wait, or how many other agentIds/records already exist in
+    // the table. The moment a SECOND matching record exists, `$distance` is
+    // populated correctly on the very first query ever issued for that
+    // agentId — no warm-up needed. In practice the singleton case is exactly
+    // an agent's SECOND-ever memory (compared against their first) — the most
+    // common real-world trigger for this bug, and why it looked "permanent
+    // per-agent for the first near-dup query."
+    //
+    // Also NOT a query-shape/conditions issue: the `{operator:"or"}` wrap
+    // SemanticSearch.ts uses elsewhere is unrelated, and neither raising
+    // `limit` past 1 nor changing the conditions shape changes the result —
+    // confirmed empirically. Harper's SORT ordering is correct even in the
+    // singleton case (the right record comes back as `top`); only the
+    // numeric `$distance` annotation is missing. Also confirmed: selecting
+    // "embedding" directly on THIS sort-by-embedding query does not help
+    // either — it comes back as a bare scalar (Harper appears to special-case
+    // the sort attribute in `select`), not the stored vector.
+    //
+    // Fix: when `$distance` is undefined, fetch the ONE candidate's full
+    // record by id (a plain point lookup — not a vector-sort query, so
+    // unaffected by the quirk above) and compute cosine similarity ourselves
+    // in JS from its real stored `embedding` vector against this write's own
+    // `embedding` (this function's parameter), via the same math Harper would
+    // have used (dedup.ts's cosineSimilarity, Harper-free and unit-tested).
+    // This sidesteps the underlying engine quirk entirely rather than
+    // depending on its timing, and works identically whether this is the
+    // agent's first query ever or its thousandth. Never suppresses the write
+    // either way: if the candidate's embedding is somehow also missing (e.g.
+    // a legacy record written before embeddings existed), `cosineSimilarity`
+    // returns 0 — the same safe "no match" signal the pre-fix `?? 1`
+    // fallback produced.
+    let cosine: number;
+    if (top.$distance !== undefined) {
+      cosine = 1 - top.$distance;
+    } else {
+      console.error(
+        "Memory.findConservativeDedupMatch: $distance undefined on a singleton cosine result (ops-ume4) — " +
+        "falling back to a manual cosine computation from the candidate's stored embedding",
+        { agentId, candidateId: top.id },
+      );
+      const fullCandidate = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(top.id));
+      const candidateEmbedding = Array.isArray(fullCandidate?.embedding) ? fullCandidate.embedding : [];
+      cosine = cosineSimilarity(embedding, candidateEmbedding);
+    }
     const confidence = computeMatchConfidence(contentText, top.content, cosine);
     if (!isConservativeMatch(confidence.cosine, confidence.lexical, cosineThreshold, lexicalThreshold)) {
       return null;

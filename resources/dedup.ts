@@ -36,6 +36,26 @@ export interface DedupMatch {
   lexical: number;
 }
 
+/**
+ * Cosine similarity of two equal-length embedding vectors, computed directly
+ * in JS. Used as a fallback (ops-ume4) when Harper's HNSW cosine-sort query
+ * doesn't attach a computed `$distance` to its top candidate — see
+ * findConservativeDedupMatch in ./Memory.ts for when/why. A mismatched
+ * length, empty vector, or zero-magnitude side yields 0 (no signal, never
+ * treated as "identical" by a degenerate computation).
+ */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length === 0 || a.length !== b.length) return 0;
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
 /** Jaccard similarity of two token sets: |A∩B| / |A∪B|. An empty side yields 0
  *  (no signal — never treated as "fully similar" by vacuous set equality). */
 export function jaccardSimilarity(tokensA: string[], tokensB: string[]): number {
