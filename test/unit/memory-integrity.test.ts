@@ -106,7 +106,14 @@ class BaseMemory {
     memoryStore.set(content.id, rec);
     return rec;
   }
-  async get(id: any) {
+  async get(target: any) {
+    // Real Harper's get() receives a RequestTarget object (pathname, search,
+    // id, isCollection, sort) for HTTP-routed reads, NOT a plain string — only
+    // direct in-process calls (e.g. this file's other post()/put() helpers)
+    // pass a bare id. Support both so get() unit tests can exercise the real
+    // RequestTarget shape (ops-qjyq) without breaking the existing string-id
+    // call sites in this file.
+    const id = typeof target === "string" ? target : target?.id;
     return memoryStore.get(id) ?? null;
   }
   async delete(id: any) {
@@ -612,6 +619,86 @@ describe("Memory.get() — anonymous denied, owner/grant scoped for non-admin, u
     const res = await (m as any).get("mem-1");
     expect(res instanceof Response).toBe(false);
     expect((res as any).content).toBe("secret");
+  });
+});
+
+// ─── ops-qjyq: shift the isCollection routing class left to the unit layer ──
+//
+// The above Memory.get() describe block only ever calls get("mem-1") — a
+// plain string. Real Harper's get() is invoked with a RequestTarget object
+// (pathname, search, id, isCollection, sort), NOT a plain string. A bug where
+// Memory.get() failed to branch on target.isCollection was caught ONLY by the
+// real-Harper integration suite: super.get(target) received the whole
+// RequestTarget, found no truthy `.agentId` on it, and a valid authenticated
+// self-query (`GET /Memory/?agentId=X`) 404'd. These tests use a RequestTarget-
+// shaped plain object (not a string) so this routing class can be caught here,
+// at the unit layer, in ~seconds instead of the 75s integration job.
+function requestTarget(overrides: Partial<{ pathname: string; search: string; id: string; isCollection: boolean; sort: any }>) {
+  return { pathname: "/Memory/", search: "", id: undefined, isCollection: false, sort: undefined, ...overrides };
+}
+
+describe("Memory.get() — RequestTarget routing, isCollection branch (ops-qjyq)", () => {
+  it("collection/query target (isCollection: true) delegates to search() and returns the caller's OWN records — not a 404, not a single-record mis-route (the exact regression)", async () => {
+    memoryStore.set("mem-own", { id: "mem-own", agentId: "agent-1", content: "mine" });
+    memoryStore.set("mem-other", { id: "mem-other", agentId: "agent-other", content: "not mine" });
+    const m = makeMemory(agentCtx("agent-1"));
+    const target = requestTarget({ search: "?agentId=agent-1", isCollection: true });
+    const res: any = await (m as any).get(target);
+
+    // THE regression: if the isCollection branch is lost, this falls through
+    // to super.get(target) — a result-set has no `.agentId`, so the ownership
+    // check 404s a perfectly valid authenticated self-query.
+    expect(res instanceof Response).toBe(false);
+
+    const results: any[] = [];
+    for await (const r of res) results.push(r);
+    expect(results.map((r) => r.id)).toEqual(["mem-own"]);
+  });
+
+  it("by-id target (isCollection: false, id set) — own id returns the record", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "my content" });
+    const m = makeMemory(agentCtx("agent-owner"));
+    const target = requestTarget({ pathname: "/Memory/mem-1", id: "mem-1", isCollection: false });
+    const res = await (m as any).get(target);
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("my content");
+  });
+
+  it("by-id target — another agent's id → 404 (never 403 — no existence oracle)", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "secret" });
+    const m = makeMemory(agentCtx("agent-attacker"));
+    const target = requestTarget({ pathname: "/Memory/mem-1", id: "mem-1", isCollection: false });
+    const res = await (m as any).get(target);
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(404);
+  });
+
+  it("by-id target — admin agent is unfiltered", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "secret" });
+    const m = makeMemory(agentCtx("agent-admin", true));
+    const target = requestTarget({ pathname: "/Memory/mem-1", id: "mem-1", isCollection: false });
+    const res = await (m as any).get(target);
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("secret");
+  });
+
+  it("by-id target — internal call (no request context) is unfiltered", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "secret" });
+    const r: any = new (Memory as any)();
+    r.getContext = () => undefined;
+    const target = requestTarget({ pathname: "/Memory/mem-1", id: "mem-1", isCollection: false });
+    const res = await r.get(target);
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("secret");
+  });
+
+  it("anonymous with a by-id RequestTarget → 404 (blocked, same as the string-id path)", async () => {
+    memoryStore.set("mem-1", { id: "mem-1", agentId: "agent-owner", content: "secret" });
+    const m = makeMemory(anonCtx());
+    const target = requestTarget({ pathname: "/Memory/mem-1", id: "mem-1", isCollection: false });
+    const res = await (m as any).get(target);
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(404);
   });
 });
 
