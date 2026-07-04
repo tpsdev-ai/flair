@@ -239,6 +239,15 @@ export class BootstrapMemories extends Resource {
     for await (const record of (databases as any).flair.Memory.search({ conditions: [scope.condition] })) {
       if (!scope.isAllowed(record)) continue;
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
+      // ops-hesq: a past validTo ALWAYS means the record has been closed out
+      // (server supersede path — Memory.ts closeSupersededRecord — sets
+      // validTo without necessarily setting `archived`), same root cause and
+      // fix as ops-9rc6's SemanticSearch/bm25-filter exclusion. Unconditional
+      // so a server-superseded record can't resurface in bootstrap just
+      // because its successor isn't co-present in this result set (the
+      // supersededIds filter further down only catches co-presence). A
+      // record with no validTo, or a future validTo, is unaffected.
+      if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
       // Attribution for cross-agent (granted-owner) records — same convention
       // SemanticSearch.ts already uses: formatMemory() below only USES this
       // when the record also carries _safetyFlags (labels the untrusted-data
