@@ -97,65 +97,44 @@ async function registerAgent(harper: HarperInstance, agent: TestAgent): Promise<
 /**
  * ═══════════════════════════════════════════════════════════════════════════
  * DISCOVERED BEHAVIORAL DIVERGENCE (real Harper vs. the mocked unit suite) —
- * ops-2gby's whole reason for existing. Reported in full in the task
- * writeup; summarized here so the workaround below is self-explanatory.
+ * ops-2gby's original reason for existing, RESOLVED by ops-ume4.
  *
  * test/unit/memory-integrity.test.ts's in-memory mock computes the cosine
  * "$distance" synchronously in plain JS (a real, always-populated number) for
  * every query. Real Harper's HNSW-backed `sort: {attribute:"embedding",
  * distance:"cosine"}` query, when combined with a `conditions` filter (e.g.
  * `agentId equals X` — exactly findConservativeDedupMatch's shape in
- * resources/Memory.ts), does NOT behave this way: live probes against this
- * harness showed the FIRST such query issued for a GIVEN agentId value (per
- * Harper process — a fresh agentId is cold again even after OTHER agentIds
- * have already "warmed up" their own queries; confirmed with two
- * independently-fresh agents in the same running Harper instance, both cold
- * on their own first query and both fixed by their own second) returns a
- * candidate record whose `$distance` field is `undefined` (present as an
- * object key, but with no value) — even for a BYTE-IDENTICAL duplicate.
- * findConservativeDedupMatch computes `const cosine = 1 - (top.$distance ??
- * 1)`, so an undefined `$distance` silently resolves to `cosine = 0` — below
- * any sane threshold — meaning EVERY agent's very first near-duplicate
- * comparison, ever, is GUARANTEED to be flagged `deduplicated: false`
- * regardless of true similarity. That agent's SECOND and all subsequent
- * HNSW-cosine queries reliably return a real, correctly-populated
- * `$distance` (confirmed by re-running the same comparison shape repeatedly
- * — attempt 0 broken, attempt 1+ consistently working, across multiple
- * independent Harper instances AND multiple independent agentIds).
+ * resources/Memory.ts), does NOT behave this way: when that query's
+ * post-filter result set has exactly ONE matching record (a SINGLETON
+ * candidate set — in practice, an agent's SECOND-ever memory compared
+ * against its first), `$distance` comes back `undefined` for it — even for a
+ * BYTE-IDENTICAL duplicate — regardless of how many prior queries have run
+ * for that agentId or how long you wait. The moment a SECOND matching record
+ * exists, `$distance` is populated correctly, even on the very first query
+ * ever issued for that agentId. findConservativeDedupMatch previously
+ * computed `const cosine = 1 - (top.$distance ?? 1)`, so the undefined
+ * `$distance` silently resolved to `cosine = 0` — below any sane threshold —
+ * meaning EVERY agent's very first near-duplicate comparison, ever, was
+ * GUARANTEED to be flagged `deduplicated: false` regardless of true
+ * similarity (ops-ume4).
  *
- * This is NOT the never-suppress write-safety invariant breaking — the
- * WRITE always lands (confirmed in every probe). It is the `deduplicated`
- * SIGNAL silently failing to fire on literally the first opportunity it
- * ever gets for a given agent, which is exactly the shape of bug a
- * synchronous, always-correct mock can never surface. Production impact:
- * EVERY agent's very first near-duplicate write, following its very first
- * memory write ever, will never be flagged — not a one-time cold-start cost,
- * but a permanent per-agent miss on write #1's dedup check.
+ * This was NOT the never-suppress write-safety invariant breaking — the
+ * WRITE always landed. It was the `deduplicated` SIGNAL silently failing to
+ * fire on literally the first opportunity it ever gets for a given agent,
+ * which is exactly the shape of bug a synchronous, always-correct mock can
+ * never surface.
  *
- * warmUpAgentDedupGate() below deliberately BURNS that agent's first, broken
- * query on disposable scratch records under the SAME agentId that will be
- * used for the real assertion-bearing writes — a real write + real
- * comparison against real Harper, not a stub — so Scenario 2 asserts the
- * co-gate's STEADY-STATE (2nd-query-onward) behavior for that agent, rather
- * than the guaranteed-miss its actual first-ever query would hit. Reported
- * as the headline integration finding; the underlying fix belongs in
- * resources/Memory.ts (out of scope for this test-only change — see the
- * task report).
+ * FIXED in resources/Memory.ts's findConservativeDedupMatch: when
+ * `$distance` comes back undefined, it now fetches the one candidate's full
+ * record by id (a plain point lookup, unaffected by the sort-query quirk
+ * above) and computes cosine similarity itself in JS from the real stored
+ * embedding vectors (dedup.ts's cosineSimilarity). No warm-up write is
+ * needed any more — Scenario 2 below now asserts this directly on a
+ * completely fresh agent's first-ever near-dup comparison. (The formerly-used
+ * warmUpAgentDedupGate() workaround is removed — see git history for its
+ * implementation if you need the pre-fix reproduction shape.)
  * ═══════════════════════════════════════════════════════════════════════════
  */
-async function warmUpAgentDedupGate(harper: HarperInstance, agent: TestAgent): Promise<void> {
-  const WARM_TEXT = "Warm-up content for the dedup cosine gate, needs to be long enough to clear the length floor.";
-  await putMemory(harper, agent, `${agent.id}-warmup-seed`, { agentId: agent.id, content: WARM_TEXT, durability: "standard" });
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const res = await putMemory(harper, agent, `${agent.id}-warmup-probe-${attempt}`, {
-      agentId: agent.id, content: WARM_TEXT, durability: "standard", dedupThreshold: 0.5, lexicalThreshold: 0.5,
-    });
-    const body: any = await res.json().catch(() => ({}));
-    if (body.deduplicated === true) return;
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  throw new Error(`warmUpAgentDedupGate: agent ${agent.id} never observed a working $distance after 20 attempts`);
-}
 
 /**
  * Secondary, separate concern from the cold-start bug above: even once the
@@ -269,10 +248,17 @@ describe("dedup / supersede / memory_update e2e (real Harper, ops-2gby)", () => 
   }, 60_000);
 
   // ═══════════════════════════════════════════════════════════════════════
-  // Scenario 2 — never-silent-loss: a true near-duplicate is FLAGGED
-  // (deduplicated:true + matchedId) but STILL written as a brand-new record
-  // with the reworded content intact (never swapped for the old record's
-  // content). Jaccard/lexical overlap between FINDING_A and
+  // Scenario 2 — never-silent-loss AND ops-ume4 regression guard: a true
+  // near-duplicate is FLAGGED (deduplicated:true + matchedId) but STILL
+  // written as a brand-new record with the reworded content intact (never
+  // swapped for the old record's content). This agent's near-dup write below
+  // is its SECOND memory ever (compared against its first, idOrig) — exactly
+  // the singleton-candidate-set query ops-ume4 fixed (before the fix, this
+  // exact shape was a GUARANTEED miss: `deduplicated:false` regardless of
+  // true similarity, on every fresh agent's first near-dup comparison, with
+  // no warm-up query able to change that). No warm-up write precedes this
+  // one — that IS the regression proof: this test fails on pre-fix code.
+  // Jaccard/lexical overlap between FINDING_A and
   // FINDING_A_REWORDED is real and high (same math the unit test pins
   // >= 0.5). The cosine side is exercised against the REAL embedding model —
   // dedupThreshold is passed as an explicit, permissive per-write tuning
@@ -283,16 +269,9 @@ describe("dedup / supersede / memory_update e2e (real Harper, ops-2gby)", () => 
   // + real HNSW cosine search + real jaccard) wired correctly, using the
   // exact knob production callers use to tune it.
   // ═══════════════════════════════════════════════════════════════════════
-  test("Scenario 2: a true near-duplicate is flagged deduplicated:true + matchedId, AND still written as a new record with the reworded content", async () => {
+  test("Scenario 2 (ops-ume4): a FRESH agent's FIRST-EVER near-duplicate write is flagged deduplicated:true + matchedId, AND still written as a new record with the reworded content", async () => {
     const agent = mkAgent(`dedup-nearmatch-${randomUUID()}`);
     await registerAgent(harper, agent);
-
-    // See warmUpAgentDedupGate's doc comment: THIS agent's first-ever
-    // HNSW-cosine dedup query is a guaranteed miss (real Harper bug) — burn
-    // it on disposable scratch content before the real assertion-bearing
-    // writes below, so this test asserts the co-gate's steady-state
-    // behavior for this agent rather than its guaranteed-broken debut query.
-    await warmUpAgentDedupGate(harper, agent);
 
     const idOrig = `${agent.id}-orig`;
     const idReword = `${agent.id}-reword`;
@@ -330,10 +309,22 @@ describe("dedup / supersede / memory_update e2e (real Harper, ops-2gby)", () => 
     expect(bodyReword.written).toBe(true);
     expect(bodyReword.id).toBe(idReword);
 
-    // The collision signal fired against the REAL top-cosine candidate.
+    // The collision signal fired against the REAL top-cosine candidate. Per
+    // ops-ume4: this query's underlying result set is a SINGLETON (exactly
+    // one candidate, idOrig) — the case where Harper's raw `$distance` field
+    // itself is undefined BY DESIGN (that never changes; findConservativeDedupMatch's
+    // fix doesn't make Harper populate it, it computes cosine itself from the
+    // stored embedding vectors instead — see resources/Memory.ts's doc
+    // comment). So the correct regression assertion here is NOT "$distance is
+    // a real number" (it structurally isn't, for this exact query shape) —
+    // it's that the SIGNAL this function computes (matchConfidence.cosine)
+    // is a real, non-zero number reflecting genuine similarity (not the
+    // pre-fix sentinel of exactly 0, which a real-but-undefined-$distance
+    // forces via `1 - (undefined ?? 1)`).
     expect(bodyReword.deduplicated).toBe(true);
     expect(bodyReword.matchedId).toBe(idOrig);
     expect(typeof bodyReword.matchConfidence?.cosine).toBe("number");
+    expect(bodyReword.matchConfidence.cosine).not.toBe(0);
     expect(bodyReword.matchConfidence.cosine).toBeGreaterThanOrEqual(0.6);
     expect(bodyReword.matchConfidence.lexical).toBeGreaterThanOrEqual(0.5);
 
