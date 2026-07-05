@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-07-05
+
+### 🛠 Self-verifying `flair deploy` (#573)
+
+The deploy CLI can no longer report false success — it verifies the deployed component is actually serving before declaring victory.
+
+- **Timeout passthrough** — `--deployment-timeout` / `--install-timeout` (default 600000, env `FABRIC_DEPLOYMENT_TIMEOUT` / `FABRIC_INSTALL_TIMEOUT`), threaded into the harper deploy args. Fixes the 120s peer-replication abort that previously forced hand-rolled deploys.
+- **Post-deploy served-API verification** — after harper reports success, the CLI polls the served target through the post-deploy restart, then GETs each of the component's resources (derived from the built package, not hardcoded) and **fails loudly on 404** (`component is not serving; likely deployed the wrong package root`). A 401/200 means serving. `--no-verify` escape hatch; `--verify-resource <name>` override; `--verify-timeout <ms>` (default 300000). `flair upgrade` inherits the same protection.
+
 ## [0.20.0] - 2026-07-05
 
 Writer-controlled memory sharing (Kris flair#522/#550), a memory recall-correctness sweep, and cross-agent authz hardening.
