@@ -31,6 +31,9 @@ type Memory @table(database: "flair") {
   validFrom: String @indexed   # ISO timestamp — when this fact became true
   validTo: String @indexed     # ISO timestamp — when this fact stopped being true (null = still valid)
   _safetyFlags: [String]       # content safety flags from scanContent()
+  provenance: String           # JSON blob (memory-provenance slice 1): { v, verified: { agentId, timestamp }, claimed?: { model } }
+                               # Nullable by design — existing rows read back provenance = null, unchanged behavior (clean-upgrade-path gate).
+                               # Same idiom as Soul.metadata below. Stamped server-side in resources/Memory.ts; never client-writable.
 }
 
 # Explicit entity-to-entity relationships with temporal validity.
