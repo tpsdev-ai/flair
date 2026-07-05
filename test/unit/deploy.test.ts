@@ -16,6 +16,12 @@ import {
   validatePackageLayout,
   deploy,
   REQUIRED_PACKAGE_FILES,
+  buildHarperDeployArgs,
+  DEFAULT_DEPLOYMENT_TIMEOUT_MS,
+  DEFAULT_INSTALL_TIMEOUT_MS,
+  deriveVerifyResources,
+  FALLBACK_VERIFY_RESOURCE,
+  verifyDeployServing,
 } from "../../src/deploy.js";
 
 describe("flair deploy: validateOptions", () => {
@@ -163,5 +169,256 @@ describe("flair deploy: dry-run end-to-end", () => {
         // missing cluster + creds
       } as any),
     ).rejects.toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Incident fix: harper's deploy CLI defaults to a 120s peer-replication
+// timeout with no override, which aborted a real Fabric deploy. These tests
+// cover the two closes: (A) timeout passthrough, (B) post-deploy verification
+// that the served API is actually serving (not just harper claiming success).
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("flair deploy: buildHarperDeployArgs (timeout passthrough)", () => {
+  test("defaults deployment_timeout and install_timeout to 600000ms", () => {
+    expect(DEFAULT_DEPLOYMENT_TIMEOUT_MS).toBe(600_000);
+    expect(DEFAULT_INSTALL_TIMEOUT_MS).toBe(600_000);
+
+    const args = buildHarperDeployArgs(
+      { fabricOrg: "acme", fabricCluster: "prod", fabricUser: "a", fabricPassword: "b" },
+      "https://prod.acme.harperfabric.com",
+      "flair",
+    );
+    expect(args).toContain("deployment_timeout=600000");
+    expect(args).toContain("install_timeout=600000");
+  });
+
+  test("threads deploymentTimeoutMs / installTimeoutMs overrides through", () => {
+    const args = buildHarperDeployArgs(
+      { deploymentTimeoutMs: 900_000, installTimeoutMs: 45_000 },
+      "https://custom.host",
+      "flair",
+    );
+    expect(args).toContain("deployment_timeout=900000");
+    expect(args).toContain("install_timeout=45000");
+  });
+
+  test("still carries target/project/restart/replicated alongside the new timeout args", () => {
+    const args = buildHarperDeployArgs(
+      { restart: false, replicated: false },
+      "https://custom.host",
+      "myproject",
+    );
+    expect(args).toEqual([
+      "deploy",
+      "target=https://custom.host",
+      "project=myproject",
+      "restart=false",
+      "replicated=false",
+      "deployment_timeout=600000",
+      "install_timeout=600000",
+    ]);
+  });
+});
+
+describe("flair deploy: deriveVerifyResources", () => {
+  test("derives table-backed Resource classes, skips helpers and generic-Resource action endpoints", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-deploy-derive-"));
+    const resourcesDir = join(dir, "dist", "resources");
+    mkdirSync(resourcesDir, { recursive: true });
+    try {
+      // Real table-backed resources (the kind curled in the incident).
+      writeFileSync(
+        join(resourcesDir, "Memory.js"),
+        "export class Memory extends databases.flair.Memory {}\n",
+      );
+      writeFileSync(
+        join(resourcesDir, "Soul.js"),
+        "export class Soul extends databases.flair.Soul {}\n",
+      );
+      // Action-style endpoint extending the generic Resource base — not a
+      // GET-able collection, must be excluded.
+      writeFileSync(
+        join(resourcesDir, "AgentCard.js"),
+        "export class AgentCard extends Resource {}\n",
+      );
+      // Lowercase helper module — never a route, must be excluded.
+      writeFileSync(
+        join(resourcesDir, "agent-auth.js"),
+        "export function allowAdmin() { return true; }\n",
+      );
+
+      const resources = deriveVerifyResources(dir);
+      expect(resources).toEqual(["Memory", "Soul"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("falls back to FALLBACK_VERIFY_RESOURCE when dist/resources can't be scanned", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-deploy-derive-missing-"));
+    try {
+      expect(deriveVerifyResources(dir)).toEqual([FALLBACK_VERIFY_RESOURCE]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("flair deploy: verifyDeployServing (served-API verification)", () => {
+  // Fast settling for tests: 1ms poll interval, 1-response streak unless a
+  // test needs to exercise the flap/retry path specifically.
+  const FAST = { pollIntervalMs: 1, settleStreak: 1, timeoutMs: 2000 };
+
+  test("404 on the resource fails loudly with a clear message (the incident: empty deploy, harper said success)", async () => {
+    const fetchImpl = (async (url: any) => {
+      const u = String(url);
+      return new Response("", { status: u.endsWith("/Memory") ? 404 : 200 });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      verifyDeployServing({
+        baseUrl: "https://cluster.org.harperfabric.com",
+        resources: ["Memory"],
+        fetchImpl,
+        ...FAST,
+      }),
+    ).rejects.toThrow(/deploy reported success but \/Memory returns 404 — component is not serving/);
+  });
+
+  test("401 (auth-gated) and 200 both count as serving — no throw", async () => {
+    let call = 0;
+    const fetchImpl = (async () => {
+      call++;
+      // First call is the settle probe against baseUrl; alternate 401/200
+      // for the resource checks to prove both are accepted.
+      return new Response("", { status: call % 2 === 0 ? 401 : 200 });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      verifyDeployServing({
+        baseUrl: "https://cluster.org.harperfabric.com",
+        resources: ["Memory", "Agent"],
+        fetchImpl,
+        ...FAST,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("connection-flap (network failure, then reachable) retries the settle probe then passes", async () => {
+    let call = 0;
+    const fetchImpl = (async () => {
+      call++;
+      if (call <= 2) throw new Error("connect ECONNREFUSED (simulated post-restart flap)");
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      verifyDeployServing({
+        baseUrl: "https://cluster.org.harperfabric.com",
+        resources: ["Memory"],
+        fetchImpl,
+        pollIntervalMs: 1,
+        settleStreak: 3,
+        timeoutMs: 5000,
+      }),
+    ).resolves.toBeUndefined();
+    // 2 failures + 3-streak settle (3 more calls) + 1 resource check = 6
+    expect(call).toBeGreaterThanOrEqual(6);
+  });
+
+  test("endpoint never comes back (always unreachable) fails with a settle-timeout message", async () => {
+    const fetchImpl = (async () => {
+      throw new Error("connect ECONNREFUSED");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      verifyDeployServing({
+        baseUrl: "https://cluster.org.harperfabric.com",
+        resources: ["Memory"],
+        fetchImpl,
+        pollIntervalMs: 5,
+        settleStreak: 3,
+        timeoutMs: 20,
+      }),
+    ).rejects.toThrow(/did not settle within 20ms after restart/);
+  });
+});
+
+describe("flair deploy: deploy() gating — --no-verify and --dry-run both skip verification", () => {
+  function synthPkgRootForGatingTests(): string {
+    const dir = mkdtempSync(join(tmpdir(), "flair-deploy-gating-"));
+    for (const f of REQUIRED_PACKAGE_FILES) {
+      const p = join(dir, f);
+      if (f.endsWith(".yaml")) writeFileSync(p, "port: 9926\n");
+      else mkdirSync(p, { recursive: true });
+    }
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test" }),
+    );
+    return dir;
+  }
+
+  function addStubHarperBinary(packageRoot: string): void {
+    // Stands in for the real harper CLI so spawnHarper() succeeds without
+    // touching a real Fabric cluster — exits 0 immediately.
+    const binDir = join(packageRoot, "node_modules", "@harperfast", "harper", "dist", "bin");
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(binDir, "harper.js"), "process.exit(0);\n");
+  }
+
+  test("verify: false skips the served-API check entirely (--no-verify)", async () => {
+    const pkgRoot = synthPkgRootForGatingTests();
+    addStubHarperBinary(pkgRoot);
+    const origFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response("", { status: 200 });
+    }) as any;
+    try {
+      const result = await deploy({
+        fabricOrg: "acme",
+        fabricCluster: "prod",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        packageRoot: pkgRoot,
+        verify: false,
+      });
+      expect(result.dryRun).toBe(false);
+      expect(fetchCalls).toBe(0);
+    } finally {
+      globalThis.fetch = origFetch;
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("--dry-run skips both the harper deploy call AND verification", async () => {
+    // Deliberately no stub harper binary present — if deploy() incorrectly
+    // tried to spawn harper, resolveHarperBin() would throw before we ever
+    // got here, failing this test.
+    const pkgRoot = synthPkgRootForGatingTests();
+    const origFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      throw new Error("fetch must not be called during --dry-run");
+    }) as any;
+    try {
+      const result = await deploy({
+        fabricOrg: "acme",
+        fabricCluster: "prod",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        packageRoot: pkgRoot,
+        dryRun: true,
+      });
+      expect(result.dryRun).toBe(true);
+      expect(fetchCalls).toBe(0);
+    } finally {
+      globalThis.fetch = origFetch;
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
   });
 });
