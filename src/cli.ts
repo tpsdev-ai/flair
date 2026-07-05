@@ -47,6 +47,22 @@ function signBody(body: Record<string, any>, secretKey: Uint8Array): string {
   return Buffer.from(sig).toString("base64url");
 }
 
+// Federation push private-visibility filter — inlined for the SAME reason as
+// the crypto helpers above (see comment there; also resources/memory-
+// visibility.ts, the canonical definition; the two must stay in sync).
+//
+// federation-edge-hardening slice 2 (ops-nzxa: one rule, one place): the
+// push side of federation sync (runFederationSyncOnce below) must exclude
+// `private` Memory rows from what gets sent to peers, using the EXACT same
+// "not private" semantics as resources/memory-read-scope.ts's resolveReadScope()
+// — a record with NO visibility field (legacy, pre-dates the field) is NOT
+// private and must keep syncing exactly as before. Only `visibility ===
+// "private"` is excluded; null/undefined/"shared"/anything else is included.
+const FEDERATION_PRIVATE_VISIBILITY = "private";
+function isFederationPrivateVisibility(visibility: string | null | undefined): boolean {
+  return visibility === FEDERATION_PRIVATE_VISIBILITY;
+}
+
 // ─── Secret detection helpers ────────────────────────
 
 /**
@@ -3881,8 +3897,17 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         }
         const batch = await res.json() as any[];
         // For null-updatedAt rows, use createdAt as the effective timestamp.
-        // Skip rows created before the last sync cursor.
-        rows = rows.concat(batch.filter((r: any) => r.updatedAt !== null || r.createdAt > since));
+        // Skip rows created before the last sync cursor. Only Memory carries
+        // a `visibility` field (Soul/Agent/Relationship don't — see
+        // schemas/memory.graphql vs agent.graphql), so the private-exclusion
+        // filter only applies there; on the other 3 tables `row.visibility`
+        // is always undefined, which isFederationPrivateVisibility() treats
+        // as non-private (included) — a no-op for them.
+        rows = rows.concat(
+          batch
+            .filter((r: any) => r.updatedAt !== null || r.createdAt > since)
+            .filter((r: any) => table !== "Memory" || !isFederationPrivateVisibility(r.visibility)),
+        );
       }
       if (rows.length === 0) continue;
 
