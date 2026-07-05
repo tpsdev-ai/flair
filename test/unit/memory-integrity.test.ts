@@ -1084,3 +1084,159 @@ describe("Memory.delete() — durability/ownership check uses the raw record (su
     expect(await BaseMemory.get("mem-1")).not.toBeNull(); // untouched
   });
 });
+
+// ─── memory-provenance slice 1: write-time provenance stamp ─────────────────
+//
+// Foundational capture for an emergent-trust model (see resources/Memory.ts's
+// buildProvenance() doc). Deliberately minimal — verified fields only:
+//   { v: 1, verified: { agentId, timestamp }, claimed?: { model } }
+//
+// These tests live in THIS file (rather than a new one) for the same reason
+// the ops-2dm3 migration-equivalence block above does: bun runs every
+// test/unit/ file in one process, and resources/Memory.ts's `class Memory
+// extends (databases as any).flair.Memory` superclass reference is captured
+// ONCE at whichever file's mock.module("@harperfast/harper", ...) + dynamic
+// import wins first — a second file doing the same thing would silently
+// collide instead of getting its own isolated Memory/mock pairing. This
+// file's existing mock/import is reused instead.
+describe("memory-provenance slice 1 — Memory.post() write-time stamp", () => {
+  it("stamps valid, parseable JSON with v:1 and the authed agent's id", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "A note long enough for the dedup gate to inspect." });
+    const stored = await BaseMemory.get(r.id);
+    expect(typeof stored.provenance).toBe("string");
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.v).toBe(1);
+    expect(prov.verified.agentId).toBe("agent-1");
+    expect(typeof prov.verified.timestamp).toBe("string");
+    // Reuses the same server-clock createdAt the method computed for this write.
+    expect(prov.verified.timestamp).toBe(stored.createdAt);
+  });
+
+  it("omits claimed.model when the write payload has no model field", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "No model field on this write at all." });
+    const prov = JSON.parse((await BaseMemory.get(r.id)).provenance);
+    expect(prov.claimed).toBeUndefined();
+  });
+
+  it("includes claimed.model ONLY when the payload carries one — never invented", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "This write claims a model, unverified.", model: "claude-opus-4-7" });
+    const prov = JSON.parse((await BaseMemory.get(r.id)).provenance);
+    expect(prov.claimed).toEqual({ model: "claude-opus-4-7" });
+    // claimed.model is UNVERIFIED passthrough — verified.agentId is still the
+    // authenticated identity, entirely independent of the claimed model.
+    expect(prov.verified.agentId).toBe("agent-1");
+  });
+
+  it("an empty-string model is treated as absent (not a real claim)", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "Empty-string model field on this write.", model: "" });
+    const prov = JSON.parse((await BaseMemory.get(r.id)).provenance);
+    expect(prov.claimed).toBeUndefined();
+  });
+
+  it("no authenticated agent (internal call) stamps verified.agentId: null — never throws", async () => {
+    const r: any = new (Memory as any)();
+    r.getContext = () => undefined; // no request at all → resolveAgentAuth() → { kind: "internal" }
+    const result = await r.post({ agentId: "agent-1", content: "Internal in-process write, long enough for the gate." });
+    expect(result.written).toBe(true);
+    const stored = await BaseMemory.get(result.id);
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.v).toBe(1);
+    expect(prov.verified.agentId).toBeNull();
+    expect(typeof prov.verified.timestamp).toBe("string");
+  });
+});
+
+describe("memory-provenance slice 1 — Memory.put() stamps the identical shape (shared helper)", () => {
+  it("a fresh PUT (not-yet-existing id) stamps provenance the same as post()", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.put({ id: "agent-1-fresh-prov", agentId: "agent-1", content: "Fresh PUT create, long enough for the gate." });
+    const stored = await BaseMemory.get(r.id);
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.v).toBe(1);
+    expect(prov.verified.agentId).toBe("agent-1");
+    expect(typeof prov.verified.timestamp).toBe("string");
+  });
+
+  it("an update (same-id overwrite) re-stamps provenance reflecting the CURRENT authenticated actor", async () => {
+    const owner = agentCtx("agent-1");
+    const m = makeMemory(owner);
+    const initial = await m.post({ agentId: "agent-1", content: "Original note, long enough for the gate." });
+
+    const existing = await BaseMemory.get(initial.id);
+    const merged = { ...existing, content: "Updated note, long enough for the gate.", updatedAt: new Date().toISOString() };
+    delete (merged as any).embedding;
+    delete (merged as any).embeddingModel;
+
+    const mUpdate = makeMemory(owner);
+    await mUpdate.put(merged);
+
+    const after = await BaseMemory.get(initial.id);
+    const prov = JSON.parse(after.provenance);
+    expect(prov.v).toBe(1);
+    expect(prov.verified.agentId).toBe("agent-1");
+  });
+
+  it("claimed.model passthrough on put() is gated identically to post()", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.put({ id: "agent-1-put-model", agentId: "agent-1", content: "PUT with a claimed model field.", model: "gpt-5" });
+    const prov = JSON.parse((await BaseMemory.get(r.id)).provenance);
+    expect(prov.claimed).toEqual({ model: "gpt-5" });
+
+    const m2 = makeMemory(agentCtx("agent-1"));
+    const r2 = await m2.put({ id: "agent-1-put-no-model", agentId: "agent-1", content: "PUT with no claimed model field." });
+    const prov2 = JSON.parse((await BaseMemory.get(r2.id)).provenance);
+    expect(prov2.claimed).toBeUndefined();
+  });
+
+  it("no authenticated agent (internal call) via put() also stamps verified.agentId: null — never throws", async () => {
+    const r: any = new (Memory as any)();
+    r.getContext = () => undefined;
+    const result = await r.put({ id: "internal-put-prov", agentId: "agent-1", content: "Internal in-process PUT, long enough for the gate." });
+    expect(result.written).toBe(true);
+    const prov = JSON.parse((await BaseMemory.get(result.id)).provenance);
+    expect(prov.verified.agentId).toBeNull();
+  });
+});
+
+describe("memory-provenance slice 1 — migration-equivalence (no-provenance-field memories)", () => {
+  it("an existing/old row with no provenance field reads back fine — provenance is purely additive, not required for reads", async () => {
+    memoryStore.set("legacy-no-prov", { id: "legacy-no-prov", agentId: "agent-owner", content: "pre-migration content, no provenance field at all." });
+    const m = makeMemory(agentCtx("agent-owner"));
+    const res = await (m as any).get("legacy-no-prov");
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("pre-migration content, no provenance field at all.");
+    expect((res as any).provenance).toBeUndefined();
+  });
+
+  it("search() over a mix of legacy (no provenance) and new (stamped) records returns both, unaffected by the new field", async () => {
+    memoryStore.set("legacy-no-prov", { id: "legacy-no-prov", agentId: "agent-1", content: "legacy record, no provenance" });
+    const m = makeMemory(agentCtx("agent-1"));
+    await m.post({ agentId: "agent-1", content: "new record, gets provenance stamped, long enough for the gate." });
+
+    const results: any[] = [];
+    for await (const r of await (m as any).search({ conditions: [] })) results.push(r);
+    const ids = results.map((r) => r.id).sort();
+    expect(ids).toContain("legacy-no-prov");
+    expect(results.length).toBe(2);
+  });
+
+  it("updating a legacy (no-provenance) record via put() adds provenance additively without disturbing any other field", async () => {
+    memoryStore.set("legacy-2", { id: "legacy-2", agentId: "agent-1", content: "legacy content", durability: "standard", archived: false });
+    const existing = await BaseMemory.get("legacy-2");
+    expect(existing.provenance).toBeUndefined();
+
+    const merged = { ...existing, content: "patched legacy content", updatedAt: new Date().toISOString() };
+    const m = makeMemory(agentCtx("agent-1"));
+    await m.put(merged);
+
+    const after = await BaseMemory.get("legacy-2");
+    expect(after.content).toBe("patched legacy content"); // untouched aside from the intended patch
+    expect(typeof after.provenance).toBe("string"); // additively gains provenance on this write
+    const prov = JSON.parse(after.provenance);
+    expect(prov.v).toBe(1);
+  });
+});
