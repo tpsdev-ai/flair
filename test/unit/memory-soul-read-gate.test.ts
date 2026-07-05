@@ -32,6 +32,9 @@ delete (process.env as any).FLAIR_PUBLIC;
 // ─── In-memory Harper Soul mock ─────────────────────────────────────────────
 
 let soulStore: Map<string, any>;
+// federation-edge-hardening slice 1: resources/instance-identity.ts's
+// localInstanceId() reads this via databases.flair.Instance.search().
+let instanceRow: any = null;
 
 class BaseSoul {
   async post(content: any) {
@@ -61,12 +64,21 @@ class BaseSoul {
 const databasesMock = {
   flair: {
     Soul: BaseSoul,
+    Instance: {
+      search: () => {
+        async function* gen() {
+          if (instanceRow) yield instanceRow;
+        }
+        return gen();
+      },
+    },
   },
 };
 
 mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Soul } = await import("../../resources/Soul.ts");
+const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
 
 function makeSoul(ctxRequest: any) {
   const r: any = new (Soul as any)();
@@ -78,6 +90,8 @@ const anonCtx = () => ({ tpsAnonymous: true });
 
 beforeEach(() => {
   soulStore = new Map();
+  instanceRow = null;
+  _resetLocalInstanceIdCacheForTests();
 });
 
 // ─── Soul.allowRead — anonymous denied, any verified agent allowed (no per-agent scoping) ──
@@ -134,5 +148,49 @@ describe("Soul write gates — unaffected by the read-gate fix", () => {
     const s = makeSoul(agentCtx("agent-1"));
     const res: any = await s.post({ agentId: "agent-1", identity: "my identity" });
     expect(res.identity).toBe("my identity");
+  });
+});
+
+// ─── federation-edge-hardening slice 1: write-time originatorInstanceId stamp ──
+// See resources/Memory.ts's stampOriginatorInstanceId doc for the full
+// contract (write-time, cached local instance id, anti-clobber for
+// federation-synced records). Soul.ts stamps in both post() and put().
+describe("federation-edge-hardening slice 1 — Soul.post()/put() write-time originatorInstanceId stamp", () => {
+  it("post() stamps the local instance id on a fresh local write", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const s = makeSoul(agentCtx("agent-1"));
+    const res: any = await s.post({ agentId: "agent-1", key: "identity", value: "my soul" });
+    expect(res.originatorInstanceId).toBe("flair_local_test");
+  });
+
+  it("stamps null when this instance has no Instance row yet — never invents one", async () => {
+    instanceRow = null;
+    const s = makeSoul(agentCtx("agent-1"));
+    const res: any = await s.post({ agentId: "agent-1", key: "identity", value: "my soul" });
+    expect(res.originatorInstanceId).toBeNull();
+  });
+
+  it("THE KEY TEST — a soul record already carrying another instance's originatorInstanceId is NEVER clobbered with the local id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const s = makeSoul(agentCtx("agent-1"));
+    const res: any = await s.post({
+      agentId: "agent-1",
+      key: "identity",
+      value: "authored on instance B",
+      originatorInstanceId: "instance-B",
+    });
+    expect(res.originatorInstanceId).toBe("instance-B");
+    expect(res.originatorInstanceId).not.toBe("flair_local_test");
+  });
+
+  it("put() also stamps the local instance id, and also never clobbers an already-set origin", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const s1 = makeSoul(agentCtx("agent-1"));
+    const fresh: any = await s1.put({ id: "soul-1", agentId: "agent-1", key: "identity", value: "fresh put" });
+    expect(fresh.originatorInstanceId).toBe("flair_local_test");
+
+    const s2 = makeSoul(agentCtx("agent-1"));
+    const synced: any = await s2.put({ id: "soul-2", agentId: "agent-1", key: "identity", value: "synced put", originatorInstanceId: "instance-B" });
+    expect(synced.originatorInstanceId).toBe("instance-B");
   });
 });

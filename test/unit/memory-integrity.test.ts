@@ -76,6 +76,12 @@ let memoryStore: Map<string, any>;
 let memoryGrants: any[];
 let callOrder: string[];
 let idCounter: number;
+// federation-edge-hardening slice 1: the local instance's own identity row
+// (resources/instance-identity.ts's localInstanceId() reads this). null by
+// default in most describe blocks above (no Instance table row — matches a
+// never-federated instance); the originatorInstanceId describe block below
+// sets this to a fixed test id.
+let instanceRow: any = null;
 // ops-ume4 simulation switch: when true, memorySearchGen's cosine-sort branch
 // omits `$distance` from every candidate (real Harper's observed behavior for
 // a SINGLETON cosine-query result set) instead of computing a real one —
@@ -174,12 +180,23 @@ const databasesMock = {
       },
     },
     Agent: { get: async () => null, search: async () => [] },
+    // federation-edge-hardening slice 1: resources/instance-identity.ts's
+    // localInstanceId() reads this table to find THIS instance's own row.
+    Instance: {
+      search: () => {
+        async function* gen() {
+          if (instanceRow) yield instanceRow;
+        }
+        return gen();
+      },
+    },
   },
 };
 
 mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Memory } = await import("../../resources/Memory.ts");
+const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
 const { jaccardSimilarity, isConservativeMatch, computeMatchConfidence, cosineSimilarity } = await import("../../resources/dedup.ts");
 const { tokenize } = await import("../../resources/bm25.ts");
 // Dynamic (not static) import — MUST run after mock.module() above, same
@@ -202,6 +219,8 @@ beforeEach(() => {
   callOrder = [];
   idCounter = 0;
   forceUndefinedDistance = false;
+  instanceRow = null;
+  _resetLocalInstanceIdCacheForTests();
 });
 
 // ─── Fixture text for the #526 replay ────────────────────────────────────────
@@ -1238,5 +1257,136 @@ describe("memory-provenance slice 1 — migration-equivalence (no-provenance-fie
     expect(typeof after.provenance).toBe("string"); // additively gains provenance on this write
     const prov = JSON.parse(after.provenance);
     expect(prov.v).toBe(1);
+  });
+});
+
+// ─── federation-edge-hardening slice 1: write-time originatorInstanceId stamp ──
+//
+// New nullable field on the 4 synced tables (Memory/Soul/Agent/Relationship),
+// stamped server-side from resources/instance-identity.ts's localInstanceId()
+// on every LOCAL write. Distinct from the legacy `_originatorInstanceId`
+// (Federation.ts's mergeRecord — receiver-stamped at merge time, forgeable);
+// this field is stamped by the ORIGINATING instance and must survive a
+// federation sync unchanged. These tests live in THIS file for the same
+// mock+import-collision reason as the memory-provenance slice 1 block above
+// (this file already owns the Memory mock+import).
+describe("federation-edge-hardening slice 1 — Memory.post() write-time originatorInstanceId stamp", () => {
+  it("stamps the local instance id on a fresh local write", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "A note long enough for the dedup gate to inspect." });
+    const stored = await BaseMemory.get(r.id);
+    expect(stored.originatorInstanceId).toBe("flair_local_test");
+  });
+
+  it("stamps null when this instance has no Instance row yet (never federation-bootstrapped) — never invents one", async () => {
+    instanceRow = null;
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "Written before this instance ever paired." });
+    const stored = await BaseMemory.get(r.id);
+    expect(stored.originatorInstanceId).toBeNull();
+  });
+
+  it("THE KEY TEST — a record already carrying another instance's originatorInstanceId is NEVER clobbered with the local id", async () => {
+    // Simulates the shape a federation-synced record would carry (this
+    // instance's own local id is "flair_local_test", but the write itself
+    // already carries instance B's origin — e.g. a caller re-writing synced
+    // data through this class rather than the raw table object). The stamp
+    // must be a no-op here: the record's TRUE author (instance B) must never
+    // be overwritten by whichever instance happens to run this write.
+    instanceRow = { id: "flair_local_test" };
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({
+      agentId: "agent-1",
+      content: "This record was authored on instance B, long enough for the gate.",
+      originatorInstanceId: "instance-B",
+    });
+    const stored = await BaseMemory.get(r.id);
+    expect(stored.originatorInstanceId).toBe("instance-B");
+    expect(stored.originatorInstanceId).not.toBe("flair_local_test");
+  });
+});
+
+describe("federation-edge-hardening slice 1 — Memory.put() stamps the identical shape (shared helper)", () => {
+  it("a fresh PUT (not-yet-existing id) stamps the local instance id the same as post()", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.put({ id: "agent-1-fresh-origin", agentId: "agent-1", content: "Fresh PUT create, long enough for the gate." });
+    const stored = await BaseMemory.get(r.id);
+    expect(stored.originatorInstanceId).toBe("flair_local_test");
+  });
+
+  it("THE KEY TEST via put() — an update carrying instance B's originatorInstanceId retains it, never re-stamped to the local id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.put({
+      id: "agent-1-synced-origin",
+      agentId: "agent-1",
+      content: "Synced-shaped record authored on instance B, long enough for the gate.",
+      originatorInstanceId: "instance-B",
+    });
+    const stored = await BaseMemory.get(r.id);
+    expect(stored.originatorInstanceId).toBe("instance-B");
+
+    // A SUBSEQUENT update (e.g. memory_update's read-merge-PUT pattern) that
+    // carries the existing record forward must ALSO preserve instance B's
+    // origin — this is the realistic shape of an update to an already-synced
+    // record (the merged payload spreads the existing stored fields).
+    const existing = await BaseMemory.get(r.id);
+    const merged = { ...existing, content: "Edited locally after sync, long enough for the gate.", updatedAt: new Date().toISOString() };
+    const mUpdate = makeMemory(agentCtx("agent-1"));
+    await mUpdate.put(merged);
+    const after = await BaseMemory.get(r.id);
+    expect(after.originatorInstanceId).toBe("instance-B");
+    expect(after.content).toBe("Edited locally after sync, long enough for the gate.");
+  });
+
+  it("no authenticated agent (internal call) via put() still stamps the local instance id — never throws", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const r: any = new (Memory as any)();
+    r.getContext = () => undefined;
+    const result = await r.put({ id: "internal-put-origin", agentId: "agent-1", content: "Internal in-process PUT, long enough for the gate." });
+    expect(result.written).toBe(true);
+    const stored = await BaseMemory.get(result.id);
+    expect(stored.originatorInstanceId).toBe("flair_local_test");
+  });
+});
+
+describe("federation-edge-hardening slice 1 — migration-equivalence (no-originatorInstanceId-field memories)", () => {
+  it("an existing/old row with no originatorInstanceId field reads back fine — the field is purely additive, not required for reads", async () => {
+    memoryStore.set("legacy-no-origin", { id: "legacy-no-origin", agentId: "agent-owner", content: "pre-migration content, no originatorInstanceId field at all." });
+    const m = makeMemory(agentCtx("agent-owner"));
+    const res = await (m as any).get("legacy-no-origin");
+    expect(res instanceof Response).toBe(false);
+    expect((res as any).content).toBe("pre-migration content, no originatorInstanceId field at all.");
+    expect((res as any).originatorInstanceId).toBeUndefined();
+  });
+
+  it("search() over a mix of legacy (no originatorInstanceId) and new (stamped) records returns both, unaffected by the new field", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("legacy-no-origin", { id: "legacy-no-origin", agentId: "agent-1", content: "legacy record, no originatorInstanceId" });
+    const m = makeMemory(agentCtx("agent-1"));
+    await m.post({ agentId: "agent-1", content: "new record, gets originatorInstanceId stamped, long enough for the gate." });
+
+    const results: any[] = [];
+    for await (const r of await (m as any).search({ conditions: [] })) results.push(r);
+    const ids = results.map((r) => r.id).sort();
+    expect(ids).toContain("legacy-no-origin");
+    expect(results.length).toBe(2);
+  });
+
+  it("updating a legacy (no-originatorInstanceId) record via put() adds the field additively without disturbing any other field", async () => {
+    instanceRow = { id: "flair_local_test" };
+    memoryStore.set("legacy-origin-2", { id: "legacy-origin-2", agentId: "agent-1", content: "legacy content", durability: "standard", archived: false });
+    const existing = await BaseMemory.get("legacy-origin-2");
+    expect(existing.originatorInstanceId).toBeUndefined();
+
+    const merged = { ...existing, content: "patched legacy content", updatedAt: new Date().toISOString() };
+    const m = makeMemory(agentCtx("agent-1"));
+    await m.put(merged);
+
+    const after = await BaseMemory.get("legacy-origin-2");
+    expect(after.content).toBe("patched legacy content"); // untouched aside from the intended patch
+    expect(after.originatorInstanceId).toBe("flair_local_test"); // additively gains the stamp on this write
   });
 });
