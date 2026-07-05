@@ -168,8 +168,11 @@ export function validatePackageLayout(packageRoot: string): void {
 // WorkspaceLatest, action-style endpoints) are deliberately excluded here —
 // they're action/command endpoints, not GET-able collections, and asserting
 // non-404 on them would be the wrong check.
-const TABLE_RESOURCE_RE = (name: string) =>
-  new RegExp(`export class ${name} extends databases\\.[A-Za-z_$][\\w$]*\\.${name}\\b`);
+// Literal regex (no interpolation — satisfies semgrep detect-non-literal-regexp):
+// matches `export class <Name> extends databases.<db>.<Name>` where the `\1`
+// backreference forces the class name and the table name to be identical.
+// Capture group 1 is the resource name; the caller matches it against the filename.
+const EXPORTED_TABLE_CLASS_RE = /export class (\w+) extends databases\.[A-Za-z_$][\w$]*\.\1\b/g;
 
 export function deriveVerifyResources(packageRoot: string): string[] {
   const resourcesDir = join(packageRoot, "dist", "resources");
@@ -191,7 +194,11 @@ export function deriveVerifyResources(packageRoot: string): string[] {
     } catch {
       continue;
     }
-    if (TABLE_RESOURCE_RE(base).test(src)) names.push(base);
+    // The file serves a table resource iff it exports a class whose name matches
+    // its filename (base) and extends databases.<db>.<sameName>.
+    for (const m of src.matchAll(EXPORTED_TABLE_CLASS_RE)) {
+      if (m[1] === base) { names.push(base); break; }
+    }
   }
   names.sort();
   return names.length ? names : [FALLBACK_VERIFY_RESOURCE];
