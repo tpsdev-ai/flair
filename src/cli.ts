@@ -6966,6 +6966,11 @@ program
   .option("--no-restart", "Do not restart the component after deploy (default: restart=true)")
   .option("--dry-run", "Resolve package, validate args, skip the deploy call")
   .option("--package-root <dir>", "Override package root (mainly for testing)")
+  .option("--deployment-timeout <ms>", "Milliseconds harper waits for cluster-wide peer replication (env: FABRIC_DEPLOYMENT_TIMEOUT; default: 600000 — harper's own 120s default is too short for Fabric)")
+  .option("--install-timeout <ms>", "Milliseconds harper waits for package install (env: FABRIC_INSTALL_TIMEOUT; default: 600000)")
+  .option("--no-verify", "Skip post-deploy served-API verification (default: verify — on by design, so the CLI can't report success on an empty/broken deploy)")
+  .option("--verify-timeout <ms>", "Milliseconds to wait for the served API to settle after harper's post-deploy restart before verifying (default: 300000)")
+  .option("--verify-resource <name>", "Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)", (val: string, prev: string[]) => [...prev, val], [] as string[])
   .action(async (opts) => {
     const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
     const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
@@ -6984,6 +6989,12 @@ program
       restart: opts.restart !== false,
       dryRun: opts.dryRun ?? false,
       packageRoot: opts.packageRoot,
+      deploymentTimeoutMs: Number(opts.deploymentTimeout ?? process.env.FABRIC_DEPLOYMENT_TIMEOUT ?? 600_000),
+      installTimeoutMs: Number(opts.installTimeout ?? process.env.FABRIC_INSTALL_TIMEOUT ?? 600_000),
+      verify: opts.verify !== false,
+      verifyResources: (opts.verifyResource as string[] | undefined)?.length ? opts.verifyResource : undefined,
+      verifyTimeoutMs: Number(opts.verifyTimeout ?? 300_000),
+      onProgress: (msg: string) => console.log(dim(`  ${msg}`)),
     };
 
     const errors = validateDeployOptions(deployOpts);
@@ -7012,7 +7023,7 @@ program
         console.log(dim(`  package root: ${result.packageRoot}`));
         return;
       }
-      console.log(`\n${green("✓")} Flair ${result.version} deployed`);
+      console.log(`\n${green("✓")} Flair ${result.version} deployed${deployOpts.verify ? " and verified serving" : ""}`);
       console.log(`\n  URL:     ${result.url}`);
       console.log(`  Project: ${result.project}`);
       console.log(`\nNext steps:`);
@@ -7024,6 +7035,12 @@ program
       const hint = err.message?.toLowerCase();
       if (hint?.includes("401") || hint?.includes("unauthoriz")) {
         console.error(dim("  hint: check Fabric Studio → Cluster Settings → Admin for the admin password"));
+      }
+      if (hint?.includes("component is not serving")) {
+        console.error(dim("  hint: harper reported success but the served API disagrees — check the Fabric Studio component logs for the real deploy error, then retry"));
+      }
+      if (hint?.includes("did not settle")) {
+        console.error(dim("  hint: Harper may still be restarting — check Fabric Studio, or retry with a longer --verify-timeout"));
       }
       process.exit(1);
     }
