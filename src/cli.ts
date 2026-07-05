@@ -4334,6 +4334,186 @@ federation
     if (exitCode !== 0) process.exit(exitCode);
   });
 
+// ─── flair migrate visibility-backfill ───────────────────────────────────────
+//
+// Conservative visibility-backfill for the within-org-read-open change
+// (resources/memory-read-scope.ts's resolveReadScope() — see that module's
+// doc for the full model). Opening reads broadens who can see an existing
+// `shared`/no-visibility-field memory: before that change, only a grant-
+// holder could read it; after, EVERY agent on the instance can. A memory
+// that was `shared` (or had no visibility field at all) but had NO
+// MemoryGrant covering it was, in practice, owner-only — the open-read
+// change would newly expose it. This migration pins that "effectively
+// private" state to `private` FIRST, so nothing that was effectively-private
+// becomes a surprise org-open exposure.
+//
+// ── THE ORDERING THAT MATTERS ────────────────────────────────────────────────
+// This backfill MUST be run BEFORE deploying the open-read code in
+// resources/memory-read-scope.ts. If the open-read code goes live first,
+// existing null-visibility memories briefly read as org-open (pure-open) —
+// exactly the exposure this migration exists to prevent. This is a
+// deliberate OPERATOR step, never auto-run (not at startup, not in the
+// deploy, no "has this run yet" runtime gate on the read path itself — see
+// resolveReadScope()'s doc for why that gate is deliberately NOT added: the
+// emergent-trust reframe rejects knobs). Run it, THEN deploy.
+//
+// ── The grant-aware backfill rule ────────────────────────────────────────────
+// For each Memory row with NO `visibility` field: if any MemoryGrant exists
+// with scope "read" or "search" whose ownerId === that memory's agentId
+// (someone could already read this owner under the pre-open-read rule) →
+// stamp `visibility: "shared"` (this is the intended, documented broadening
+// — it was already readable by at least one other agent). Otherwise → stamp
+// `visibility: "private"` (nobody could read it before; keep it owner-only).
+// A record that already carries ANY visibility value (including an explicit
+// "shared" or "private") is left untouched — idempotent, safe to re-run.
+//
+// ── Pattern ───────────────────────────────────────────────────────────────────
+// Same shape as `flair reembed`'s admin-ops-API bulk path above: search_by_
+// conditions with the "createdAt > 1970-01-01" select-all trick (Harper
+// rejects an unconstrained/empty-value condition), admin Basic auth against
+// the ops port, batched `operation: "update"` writes. Exported as a plain
+// function (runVisibilityBackfillOnce) so it's unit-testable the same way
+// test/unit/federation-sync-push-privacy.test.ts exercises
+// runFederationSyncOnce: mock global fetch, dynamically import src/cli.ts,
+// call the function directly — no live Harper needed.
+export interface VisibilityBackfillResult {
+  scanned: number;
+  skipped: number;
+  backfilledShared: number;
+  backfilledPrivate: number;
+  dryRun: boolean;
+  error?: Error;
+}
+
+export async function runVisibilityBackfillOnce(opts: any): Promise<VisibilityBackfillResult> {
+  const dryRun = !!opts.dryRun;
+  const base: Omit<VisibilityBackfillResult, "error"> = {
+    scanned: 0, skipped: 0, backfilledShared: 0, backfilledPrivate: 0, dryRun,
+  };
+
+  const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD ?? "";
+  if (!adminPass) {
+    return { ...base, error: new Error("Admin password required (set --admin-pass, FLAIR_ADMIN_PASS, or HDB_ADMIN_PASSWORD)") };
+  }
+
+  const opsPort = resolveOpsPort(opts);
+  const opsEndpoint = `http://127.0.0.1:${opsPort}`;
+  const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+
+  async function opsPost(body: Record<string, any>): Promise<any[]> {
+    const res = await fetch(`${opsEndpoint}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`ops API ${body.operation} on ${body.table} failed (${res.status}): ${text}`);
+    }
+    const raw = await res.json() as unknown;
+    return Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
+  }
+
+  // The "select all" idiom used elsewhere in this file (flair reembed, `flair
+  // federation sync`): every Memory row has a createdAt, so `createdAt >
+  // 1970-01-01` is a total comparison Harper will accept (an unconstrained/
+  // empty-value condition is rejected as "not indexed for nulls").
+  const SELECT_ALL_CONDITION = { search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" };
+
+  try {
+    const allMemories = await opsPost({
+      operation: "search_by_conditions",
+      database: "flair",
+      table: "Memory",
+      operator: "and",
+      conditions: [SELECT_ALL_CONDITION],
+      get_attributes: ["id", "agentId", "visibility"],
+    });
+
+    // MemoryGrant may not exist/be populated yet on a fresh instance —
+    // same defensive posture as resolveAllowedOwners()'s try/catch.
+    const allGrants = await opsPost({
+      operation: "search_by_conditions",
+      database: "flair",
+      table: "MemoryGrant",
+      operator: "and",
+      conditions: [SELECT_ALL_CONDITION],
+      get_attributes: ["ownerId", "scope"],
+    }).catch(() => [] as any[]);
+
+    const readableOwners = new Set<string>(
+      allGrants
+        .filter((g: any) => g.scope === "read" || g.scope === "search")
+        .map((g: any) => g.ownerId)
+        .filter((id: any) => typeof id === "string" && id.length > 0),
+    );
+
+    const updates: Array<{ id: string; visibility: "shared" | "private" }> = [];
+    const result = { ...base };
+
+    for (const m of allMemories) {
+      result.scanned++;
+      // Idempotent: any row that already carries a visibility value
+      // (including one this same migration stamped on a prior run) is left
+      // exactly as-is — only a genuinely no-field row is a backfill candidate.
+      if (m.visibility !== undefined && m.visibility !== null) {
+        result.skipped++;
+        continue;
+      }
+      const visibility: "shared" | "private" = readableOwners.has(m.agentId) ? "shared" : "private";
+      if (visibility === "shared") result.backfilledShared++; else result.backfilledPrivate++;
+      updates.push({ id: m.id, visibility });
+    }
+
+    if (!dryRun && updates.length > 0) {
+      const BATCH_SIZE = 200;
+      for (let i = 0; i < updates.length; i += BATCH_SIZE) {
+        await opsPost({
+          operation: "update",
+          database: "flair",
+          table: "Memory",
+          records: updates.slice(i, i + BATCH_SIZE),
+        });
+      }
+    }
+
+    return result;
+  } catch (err: any) {
+    return { ...base, error: err instanceof Error ? err : new Error(String(err)) };
+  }
+}
+
+const migrate = program.command("migrate").description("One-off data migrations — deliberate operator steps, never auto-run");
+
+migrate
+  .command("visibility-backfill")
+  .description(
+    "Pin visibility on pre-existing (no-visibility-field) Memory rows BEFORE deploying the within-org-read-open change. " +
+    "A no-visibility row whose owner has an existing read/search MemoryGrant becomes 'shared' (already readable by someone); " +
+    "everything else becomes 'private' (was effectively owner-only). Idempotent — safe to re-run; rows that already have " +
+    "a visibility value are left untouched. MUST be run before the open-read code is deployed to an instance with existing data."
+  )
+  .option("--admin-pass <pass>", "Harper admin password (or set FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD)")
+  .option("--ops-port <port>", "Harper ops API port")
+  .option("--dry-run", "Report counts without writing anything")
+  .action(async (opts) => {
+    const r = await runVisibilityBackfillOnce(opts);
+    if (r.error) {
+      console.error(`❌ visibility-backfill failed: ${r.error.message}`);
+      process.exit(1);
+    }
+    console.log(`Scanned: ${r.scanned} Memory row(s)`);
+    console.log(`Already had a visibility value (untouched): ${r.skipped}`);
+    console.log(`${r.dryRun ? "Would backfill" : "Backfilled"} → shared (owner has an existing read/search grant): ${r.backfilledShared}`);
+    console.log(`${r.dryRun ? "Would backfill" : "Backfilled"} → private (no grant found — was effectively owner-only): ${r.backfilledPrivate}`);
+    if (r.dryRun) {
+      console.log("\nDry run — no records were written. Re-run without --dry-run to apply.");
+    } else {
+      console.log("\n✅ Backfill complete. Safe to deploy the within-org-read-open change now.");
+    }
+  });
+
 // ─── flair rem ───────────────────────────────────────────────────────────────
 // Memory hygiene and reflection: light (NREM), rapid (REM), restorative (deep).
 

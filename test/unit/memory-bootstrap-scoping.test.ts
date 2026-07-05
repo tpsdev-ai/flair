@@ -2,14 +2,17 @@
  * memory-bootstrap-scoping.test.ts — ops-2dm3 Layer 1 unit coverage for
  * resources/MemoryBootstrap.ts's read-scoping.
  *
- * Before this change, bootstrap only ever loaded the caller's OWN memories
- * (`record.agentId !== agentId → continue`) — no grant traversal at all, so
- * an agent holding a MemoryGrant on a teammate never saw that teammate's
- * memories through bootstrap (the gap flair#550 was filed against). Bootstrap
- * now resolves its scope through the SAME centralized helper every other read
- * path uses (resources/memory-read-scope.ts resolveReadScope()): own (any
- * visibility) + granted owners' SHARED memories, never a granted owner's
- * private ones.
+ * Originally (ops-2dm3 Layer 1), bootstrap only ever loaded the caller's OWN
+ * memories (`record.agentId !== agentId → continue`) — no grant traversal at
+ * all, so an agent holding a MemoryGrant on a teammate never saw that
+ * teammate's memories through bootstrap (the gap flair#550 was filed
+ * against). Layer 1 fixed that via grant-gated cross-agent reads; the
+ * within-org-read-open change (see resources/memory-read-scope.ts's module
+ * doc) supersedes the grant gate entirely. Bootstrap now resolves its scope
+ * through the SAME centralized helper every other read path uses
+ * (resources/memory-read-scope.ts resolveReadScope()): own (any visibility)
+ * + EVERY other agent's non-private memories — a MemoryGrant is no longer
+ * consulted at all.
  *
  * Same in-memory-store mocking technique as memory-integrity.test.ts /
  * semantic-search-scoping.test.ts. This file owns MemoryBootstrap.ts's
@@ -119,16 +122,23 @@ function reset() {
 // records, and rendering is covered by the #550 describe block further down.
 
 describe("MemoryBootstrap.post() — ops-2dm3 Layer 1 centralized read-scoping", () => {
-  it("includes only the caller's own memories when no grants are held", async () => {
+  it("read-scope includes the caller's own memories PLUS any other agent's non-private memory — no grant required (within-org-read-open)", async () => {
     reset();
     memoryStore.set("m1", { id: "m1", agentId: "agent-1", content: "MY-OWN-FINDING", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" });
-    memoryStore.set("m2", { id: "m2", agentId: "agent-other", content: "NOT-MINE-FINDING", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" });
+    memoryStore.set("m2", { id: "m2", agentId: "agent-other", content: "NOT-MINE-BUT-ORG-OPEN-FINDING", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" }); // no visibility field
+    memoryStore.set("m3", { id: "m3", agentId: "agent-other", content: "NOT-MINE-PRIVATE-FINDING", visibility: "private", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" });
 
     const b = makeBootstrap(agentCtx("agent-1"));
     const res: any = await b.post({ agentId: "agent-1", includeSoul: false });
     expect(res.context).toContain("MY-OWN-FINDING");
-    expect(res.context).not.toContain("NOT-MINE-FINDING");
-    expect(res.memoriesAvailable).toBe(1);
+    // m2 is in read-scope (memoriesAvailable) but — per the #550 own-context
+    // design boundary — a teammate record only RENDERS via the task-relevant
+    // "Teammate findings" section; with no currentTask here it doesn't bleed
+    // into the reader's own-context sections. m3 (private) never enters
+    // scope at all.
+    expect(res.context).not.toContain("NOT-MINE-BUT-ORG-OPEN-FINDING");
+    expect(res.context).not.toContain("NOT-MINE-PRIVATE-FINDING");
+    expect(res.memoriesAvailable).toBe(2);
   });
 
   it("a grant-holder's read-scope now includes the owner's SHARED memory (the flair#550 gap this closes) — but it does NOT bleed into own-context sections", async () => {
@@ -174,13 +184,23 @@ describe("MemoryBootstrap.post() — ops-2dm3 Layer 1 centralized read-scoping",
     expect(res.context).not.toContain("LEGACY-PRE-MIGRATION-FINDING");
   });
 
-  it("without any grant, an ungranted owner's SHARED memory is still invisible (no bypass)", async () => {
+  it("within-org-read-open: an ungranted owner's SHARED memory IS now in read-scope (memoriesAvailable), though it still doesn't bleed into own-context sections without a currentTask", async () => {
     reset();
     memoryStore.set("shared-no-grant", { id: "shared-no-grant", agentId: "agent-owner", content: "SHARED-BUT-UNGRANTED", visibility: "shared", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" });
 
     const b = makeBootstrap(agentCtx("agent-stranger"));
     const res: any = await b.post({ agentId: "agent-stranger", includeSoul: false });
     expect(res.context).not.toContain("SHARED-BUT-UNGRANTED");
+    expect(res.memoriesAvailable).toBe(1);
+  });
+
+  it("private-exclusion still holds without a grant: a stranger's read-scope never includes another agent's PRIVATE memory", async () => {
+    reset();
+    memoryStore.set("private-no-grant", { id: "private-no-grant", agentId: "agent-owner", content: "PRIVATE-AND-UNGRANTED", visibility: "private", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" });
+
+    const b = makeBootstrap(agentCtx("agent-stranger"));
+    const res: any = await b.post({ agentId: "agent-stranger", includeSoul: false });
+    expect(res.context).not.toContain("PRIVATE-AND-UNGRANTED");
     expect(res.memoriesAvailable).toBe(0);
   });
 

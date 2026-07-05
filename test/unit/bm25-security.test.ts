@@ -12,97 +12,80 @@ import {
   type Condition,
 } from "../../resources/bm25-filter.ts";
 
-// Reconstruct the EXACT conditions[] SemanticSearch.ts builds for a single-agent
-// scope (ops-2dm3 Layer 1, resources/memory-read-scope.ts resolveReadScope()):
-//   (agentId == me) AND archived != true
-// (no grants held → the condition is just the plain self leaf — see the
-// multi-agent-scope test below for the granted-owner + private-exclusion shape).
+// Reconstruct the EXACT conditions[] SemanticSearch.ts builds for the read
+// scope (resources/memory-read-scope.ts resolveReadScope(), within-org-read-
+// open — see that module's doc): resolveReadScope() ALWAYS emits this SAME
+// compound shape now — there is no separate "no grants held" plain-leaf
+// variant anymore, because MemoryGrant is no longer consulted at all:
+//   (agentId == me) OR (visibility != 'private')
+// AND archived != true. Reconstructed here rather than imported so this file
+// stays a pure Harper-free predicate test (matches the existing pattern:
+// bm25-filter.ts's shipped predicate is Harper-free and exercised directly,
+// with the condition SHAPE hand-built to mirror the real caller).
 function conditionsForAgent(me: string, extra: Condition[] = []): Condition[] {
-  return [
-    { attribute: "agentId", comparator: "equals", value: me },
-    { attribute: "archived", comparator: "not_equal", value: true },
-    ...extra,
-  ];
-}
-
-// The granted-owner shape: (agentId == me) OR (agentId IN grantedOwners AND
-// visibility != 'private'). This is resolveReadScope()'s `condition` when the
-// reader holds at least one grant — reconstructed here rather than imported so
-// this file stays a pure Harper-free predicate test (matches the existing
-// pattern: bm25-filter.ts's shipped predicate is Harper-free and exercised
-// directly, with the condition SHAPE hand-built to mirror the real caller).
-function conditionsForAgentWithGrants(me: string, grantedOwners: string[]): Condition[] {
-  const grantedOwnerCondition: Condition = grantedOwners.length === 1
-    ? { attribute: "agentId", comparator: "equals", value: grantedOwners[0] }
-    : { operator: "or", conditions: grantedOwners.map((id) => ({ attribute: "agentId", comparator: "equals", value: id })) };
   return [
     {
       operator: "or",
       conditions: [
         { attribute: "agentId", comparator: "equals", value: me },
-        {
-          operator: "and",
-          conditions: [
-            grantedOwnerCondition,
-            { attribute: "visibility", comparator: "not_equal", value: "private" },
-          ],
-        },
+        { attribute: "visibility", comparator: "not_equal", value: "private" },
       ],
     },
     { attribute: "archived", comparator: "not_equal", value: true },
+    ...extra,
   ];
 }
 
-describe("conditions-filter-before-fusion (cross-agent leak gate)", () => {
+describe("conditions-filter-before-fusion (cross-agent leak gate — now within-org-read-open)", () => {
   const me = "flint";
   const conditions = conditionsForAgent(me);
 
-  test("a BM25 candidate belonging to ANOTHER agent (no grant) is excluded BEFORE fusion", () => {
+  test("a BM25 candidate belonging to ANOTHER agent, non-private → allowed (within-org-read-open, no grant needed); a PRIVATE one is still excluded", () => {
     const mine = { id: "m1", agentId: "flint", content: "Harper getUser phantom user", visibility: "private" };
-    const theirs = { id: "t1", agentId: "anvil", content: "Harper getUser phantom user", visibility: "shared" };
+    const theirsShared = { id: "t1", agentId: "anvil", content: "Harper getUser phantom user", visibility: "shared" };
+    const theirsPrivate = { id: "t2", agentId: "anvil", content: "Harper getUser phantom user", visibility: "private" };
 
     expect(isAllowedBm25Candidate(mine, conditions)).toBe(true);
-    // The leak case: identical content owned by anvil — MUST be excluded (no
-    // grant held for anvil at all, regardless of anvil's own visibility
-    // choice) so its term-frequency never enters the BM25 index/union/fusion.
-    expect(isAllowedBm25Candidate(theirs, conditions)).toBe(false);
+    // Within-org-read-open: anvil's SHARED doc is now allowed into the BM25
+    // corpus — this is the intended, documented broadening (Kern-approved),
+    // not a leak. Only anvil's PRIVATE doc stays excluded.
+    expect(isAllowedBm25Candidate(theirsShared, conditions)).toBe(true);
+    expect(isAllowedBm25Candidate(theirsPrivate, conditions)).toBe(false);
   });
 
-  test("simulated full pre-fusion filter: only the caller's docs survive (no grants held)", () => {
+  test("simulated full pre-fusion filter: every non-private doc survives, regardless of owner — only PRIVATE docs (others' or, if not self, one's own) are excluded", () => {
     const corpus = [
-      { id: "m1", agentId: "flint", content: "secret flint plan alpha", visibility: "private" },
-      { id: "m2", agentId: "flint", content: "flint roadmap beta", visibility: "private" },
-      { id: "t1", agentId: "anvil", content: "secret anvil plan alpha", visibility: "private" },
-      { id: "t2", agentId: "kern", content: "kern review notes", visibility: "private" },
-      // ops-nzxa regression: this used to be `visibility: "office"`, which the
-      // OLD global OR-clause exposed to ANY authenticated agent with no grant
-      // at all. That clause is gone — a `shared` memory from an UNGRANTED
-      // owner must be excluded exactly like a private one.
-      { id: "o1", agentId: "anvil", content: "shared doc, no grant held for anvil", visibility: "shared" },
+      { id: "m1", agentId: "flint", content: "secret flint plan alpha", visibility: "private" }, // own — always allowed
+      { id: "m2", agentId: "flint", content: "flint roadmap beta", visibility: "private" }, // own — always allowed
+      { id: "t1", agentId: "anvil", content: "secret anvil plan alpha", visibility: "private" }, // other + PRIVATE — excluded
+      { id: "t2", agentId: "kern", content: "kern review notes", visibility: "private" }, // other + PRIVATE — excluded
+      // within-org-read-open: a `shared` memory from ANY other agent is now
+      // allowed, no grant required — the intended broadening this module's
+      // doc describes (formerly excluded pre-open-read; ops-nzxa's leak was a
+      // DIFFERENT bug — an accidental `visibility:"office"` bypass BEFORE any
+      // grant-gating existed at all — not this deliberate design decision).
+      { id: "o1", agentId: "anvil", content: "shared doc, no grant needed", visibility: "shared" },
     ];
     const allowed = corpus.filter(r => isAllowedBm25Candidate(r, conditions));
     const allowedIds = allowed.map(r => r.id).sort();
-    // ONLY flint's own (m1, m2) — nothing from anvil or kern, grant or not.
-    expect(allowedIds).toEqual(["m1", "m2"]);
+    expect(allowedIds).toEqual(["m1", "m2", "o1"]);
     expect(allowed.some(r => r.id === "t1")).toBe(false);
     expect(allowed.some(r => r.id === "t2")).toBe(false);
-    expect(allowed.some(r => r.id === "o1")).toBe(false);
   });
 
-  test("office-OR leak closed: an ungranted owner's SHARED memory is never allowed (ops-nzxa)", () => {
-    const sharedNoGrant = { id: "o1", agentId: "anvil", content: "office wide note", visibility: "shared" };
-    expect(isAllowedBm25Candidate(sharedNoGrant, conditions)).toBe(false);
+  test("within-org-read-open (was: office-OR leak closed, ops-nzxa): an owner's SHARED memory IS allowed for any other agent — no grant needed, this is intentional", () => {
+    const shared = { id: "o1", agentId: "anvil", content: "org-wide note", visibility: "shared" };
+    expect(isAllowedBm25Candidate(shared, conditions)).toBe(true);
   });
 
-  test("private-exclusion: a GRANTED owner's private memory is excluded, shared/no-field is allowed", () => {
-    const grantConditions = conditionsForAgentWithGrants("flint", ["anvil"]);
+  test("private-exclusion: another agent's private memory is excluded, shared/no-field is allowed — a grant is never consulted", () => {
     const anvilPrivate = { id: "p1", agentId: "anvil", content: "anvil's private note", visibility: "private" };
     const anvilShared = { id: "s1", agentId: "anvil", content: "anvil's shared note", visibility: "shared" };
     const anvilNoField = { id: "n1", agentId: "anvil", content: "anvil's pre-migration note" }; // no visibility field
-    expect(isAllowedBm25Candidate(anvilPrivate, grantConditions)).toBe(false);
-    expect(isAllowedBm25Candidate(anvilShared, grantConditions)).toBe(true);
-    // Migration invariant: absent visibility reads as shared, not private.
-    expect(isAllowedBm25Candidate(anvilNoField, grantConditions)).toBe(true);
+    expect(isAllowedBm25Candidate(anvilPrivate, conditions)).toBe(false);
+    expect(isAllowedBm25Candidate(anvilShared, conditions)).toBe(true);
+    // Migration invariant: absent visibility reads as non-private (org-open).
+    expect(isAllowedBm25Candidate(anvilNoField, conditions)).toBe(true);
   });
 
   test("own records are NEVER private-excluded, regardless of visibility", () => {
@@ -120,17 +103,16 @@ describe("conditions-filter-before-fusion (cross-agent leak gate)", () => {
     expect(isAllowedBm25Candidate(noField, conditions)).toBe(true);
   });
 
-  test("multi-agent scope (grants): each granted owner's SHARED docs, never ungranted, never a granted owner's private", () => {
-    // flint holds a grant on anvil (but not kern).
-    const grantConditions = conditionsForAgentWithGrants("flint", ["anvil"]);
+  test("multi-agent scope: EVERY other agent's non-private docs are allowed (no grant relationship needed at all), own docs unrestricted, only PRIVATE is excluded", () => {
+    // No grants exist anywhere in this test — the point is that none are needed.
     const flintDoc = { id: "f", agentId: "flint", visibility: "private" }; // own — unrestricted
-    const anvilSharedGranted = { id: "g", agentId: "anvil", visibility: "shared" }; // granted + shared — allowed
-    const anvilPrivateGranted = { id: "gp", agentId: "anvil", visibility: "private" }; // granted but PRIVATE — excluded
-    const kernUngranted = { id: "k", agentId: "kern", visibility: "shared" }; // no grant at all — excluded regardless of visibility
-    expect(isAllowedBm25Candidate(flintDoc, grantConditions)).toBe(true);
-    expect(isAllowedBm25Candidate(anvilSharedGranted, grantConditions)).toBe(true);
-    expect(isAllowedBm25Candidate(anvilPrivateGranted, grantConditions)).toBe(false);
-    expect(isAllowedBm25Candidate(kernUngranted, grantConditions)).toBe(false);
+    const anvilShared = { id: "g", agentId: "anvil", visibility: "shared" }; // no relationship to flint — still allowed
+    const anvilPrivate = { id: "gp", agentId: "anvil", visibility: "private" }; // PRIVATE — excluded regardless of anything
+    const kernShared = { id: "k", agentId: "kern", visibility: "shared" }; // a totally different, unrelated agent — still allowed
+    expect(isAllowedBm25Candidate(flintDoc, conditions)).toBe(true);
+    expect(isAllowedBm25Candidate(anvilShared, conditions)).toBe(true);
+    expect(isAllowedBm25Candidate(anvilPrivate, conditions)).toBe(false);
+    expect(isAllowedBm25Candidate(kernShared, conditions)).toBe(true);
   });
 
   test("tag/subject conditions are applied to the BM25 set too", () => {
