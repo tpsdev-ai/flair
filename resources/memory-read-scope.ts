@@ -1,4 +1,5 @@
 import { databases } from "@harperfast/harper";
+import { PRIVATE_VISIBILITY, isPrivateVisibility } from "./memory-visibility.js";
 
 /**
  * ─── Centralized Memory read-scoping (ops-2dm3 Layer 1) ─────────────────────
@@ -93,8 +94,6 @@ export interface ReadScope {
   isAllowed: (record: ScopableRecord | null | undefined) => boolean;
 }
 
-const PRIVATE = "private";
-
 /**
  * Resolve the full read-scope (owner set + condition + in-process predicate)
  * for a reader. This is the ONE function every cross-agent Memory read path
@@ -130,7 +129,7 @@ export async function resolveReadScope(authAgentId: string): Promise<ReadScope> 
             // NO visibility field must still read as shared. This is the
             // migration-equivalence invariant, enforced in the condition
             // itself so every path that uses it gets it for free.
-            { attribute: "visibility", comparator: "not_equal", value: PRIVATE },
+            { attribute: "visibility", comparator: "not_equal", value: PRIVATE_VISIBILITY },
           ],
         },
       ],
@@ -142,7 +141,7 @@ export async function resolveReadScope(authAgentId: string): Promise<ReadScope> 
     if (!record) return false;
     if (record.agentId === authAgentId) return true;
     if (!record.agentId || !grantedSet.has(record.agentId)) return false;
-    return record.visibility !== PRIVATE;
+    return !isPrivateVisibility(record.visibility);
   };
 
   return { allowedOwners, condition, isAllowed };
