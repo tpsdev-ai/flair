@@ -1,6 +1,7 @@
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
+import { localInstanceId } from "./instance-identity.js";
 
 const NOT_FOUND = () =>
   new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
@@ -137,6 +138,15 @@ export class Relationship extends (databases as any).flair.Relationship {
     content.validFrom = content.validFrom || now;
     // validTo left as null/undefined for active relationships
     content.confidence = content.confidence ?? 1.0;
+
+    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
+    // 1) — see resources/Memory.ts's stampOriginatorInstanceId doc for the
+    // full contract. No-op if already set (never fires for a genuine local
+    // write; a federation-synced record never reaches this method — the
+    // merge path writes via the raw table object, bypassing this class).
+    if (content.originatorInstanceId == null) {
+      content.originatorInstanceId = await localInstanceId();
+    }
 
     return super.put(content);
   }

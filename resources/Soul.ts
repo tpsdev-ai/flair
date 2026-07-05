@@ -1,5 +1,6 @@
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { localInstanceId } from "./instance-identity.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -41,6 +42,14 @@ export class Soul extends (databases as any).flair.Soul {
     content.durability ||= "permanent";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
+    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
+    // 1) — see resources/Memory.ts's stampOriginatorInstanceId doc for the
+    // full contract. No-op if already set (never fires for a genuine local
+    // write; a federation-synced record never reaches this method — the
+    // merge path writes via the raw table object, bypassing this class).
+    if (content.originatorInstanceId == null) {
+      content.originatorInstanceId = await localInstanceId();
+    }
     return super.post(content, context);
   }
 
@@ -48,6 +57,11 @@ export class Soul extends (databases as any).flair.Soul {
     const denied = await enforceWriteAuth(this, content);
     if (denied) return denied;
     content.updatedAt = new Date().toISOString();
+    // Write-time originatorInstanceId stamp — see post() above / Memory.ts's
+    // stampOriginatorInstanceId doc. No-op if already set.
+    if (content.originatorInstanceId == null) {
+      content.originatorInstanceId = await localInstanceId();
+    }
     return super.put(content, context);
   }
 }

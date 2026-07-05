@@ -1,5 +1,6 @@
 import { databases } from "@harperfast/harper";
 import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin } from "./agent-auth.js";
+import { localInstanceId } from "./instance-identity.js";
 
 /**
  * Agent resource — serves as the Principal table in 1.0.
@@ -47,6 +48,15 @@ export class Agent extends (databases as any).flair.Agent {
     content.createdAt = now;
     content.updatedAt = now;
 
+    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
+    // 1) — see resources/Memory.ts's stampOriginatorInstanceId doc for the
+    // full contract. No-op if already set (never fires for a genuine local
+    // write; a federation-synced record never reaches this method — the
+    // merge path writes via the raw table object, bypassing this class).
+    if (content.originatorInstanceId == null) {
+      content.originatorInstanceId = await localInstanceId();
+    }
+
     return super.post(content, context);
   }
 
@@ -74,6 +84,12 @@ export class Agent extends (databases as any).flair.Agent {
     // Protect immutable fields
     delete content.createdAt;
     delete content.publicKey; // key rotation goes through dedicated endpoint
+
+    // Write-time originatorInstanceId stamp — see post() above / Memory.ts's
+    // stampOriginatorInstanceId doc. No-op if already set.
+    if (content.originatorInstanceId == null) {
+      content.originatorInstanceId = await localInstanceId();
+    }
 
     return super.put(content);
   }

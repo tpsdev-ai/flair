@@ -20,6 +20,9 @@ import { describe, it, expect, beforeEach, mock } from "bun:test";
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 
 let relationshipStore: Map<string, any>;
+// federation-edge-hardening slice 1: resources/instance-identity.ts's
+// localInstanceId() reads this via databases.flair.Instance.search().
+let instanceRow: any = null;
 
 function matchesCondition(record: any, cond: any): boolean {
   if (cond.operator && Array.isArray(cond.conditions)) {
@@ -60,12 +63,21 @@ const databasesMock = {
   flair: {
     Relationship: BaseRelationship,
     Agent: { get: async () => null, search: async () => [] },
+    Instance: {
+      search: () => {
+        async function* gen() {
+          if (instanceRow) yield instanceRow;
+        }
+        return gen();
+      },
+    },
   },
 };
 
 mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Relationship } = await import("../../resources/Relationship.ts");
+const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
 
 function makeRelationship(ctxRequest: any) {
   const r: any = new (Relationship as any)();
@@ -77,6 +89,8 @@ const anonCtx = () => ({ tpsAnonymous: true });
 
 beforeEach(() => {
   relationshipStore = new Map();
+  instanceRow = null;
+  _resetLocalInstanceIdCacheForTests();
 });
 
 describe("Relationship.allowRead — closes the anonymous GET /Relationship/<id> and describe leak", () => {
@@ -161,5 +175,39 @@ describe("Relationship.get() — anonymous denied, owner-scoped for non-admin, u
     const results: any[] = [];
     for await (const rec of res) results.push(rec);
     expect(results.map((rec) => rec.id)).toEqual(["rel-own"]);
+  });
+});
+
+// ─── federation-edge-hardening slice 1: write-time originatorInstanceId stamp ──
+// See resources/Memory.ts's stampOriginatorInstanceId doc for the full
+// contract. Relationship.ts only exposes put() as a write path (no post()
+// override — same idiom as Memory.ts's HTTP-reachable-only-via-PUT note).
+describe("federation-edge-hardening slice 1 — Relationship.put() write-time originatorInstanceId stamp", () => {
+  it("stamps the local instance id on a fresh local write", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-fresh", subject: "nathan", predicate: "manages", object: "flint" });
+    expect(res.originatorInstanceId).toBe("flair_local_test");
+  });
+
+  it("stamps null when this instance has no Instance row yet — never invents one", async () => {
+    instanceRow = null;
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-no-instance", subject: "nathan", predicate: "manages", object: "flint" });
+    expect(res.originatorInstanceId).toBeNull();
+  });
+
+  it("THE KEY TEST — a relationship already carrying another instance's originatorInstanceId is NEVER clobbered with the local id", async () => {
+    instanceRow = { id: "flair_local_test" };
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({
+      id: "rel-synced",
+      subject: "nathan",
+      predicate: "manages",
+      object: "flint",
+      originatorInstanceId: "instance-B",
+    });
+    expect(res.originatorInstanceId).toBe("instance-B");
+    expect(res.originatorInstanceId).not.toBe("flair_local_test");
   });
 });

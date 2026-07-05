@@ -1,6 +1,7 @@
 import { databases } from "@harperfast/harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, allowVerified, type AgentAuthVerdict } from "./agent-auth.js";
+import { localInstanceId } from "./instance-identity.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -396,6 +397,38 @@ function buildProvenance(auth: AgentAuthVerdict, createdAt: string, content: any
   return JSON.stringify(provenance);
 }
 
+/**
+ * ─── Write-time originatorInstanceId stamp (federation-edge-hardening slice 1) ──
+ *
+ * Stamps this instance's own federation identity (resources/instance-
+ * identity.ts's localInstanceId(), cached — never a DB read per write) onto
+ * every LOCAL write. Deliberately a no-op when `content.originatorInstanceId`
+ * already carries a non-null value: this is the anti-clobber rule that keeps
+ * a federation-synced record's true origin intact.
+ *
+ * Why this can never clobber a synced record: FederationSync.post()
+ * (resources/Federation.ts) merges incoming records via the RAW table object
+ * (`(databases as any).flair.Memory.put(mergedData)`) — Harper's static
+ * table-level put, not this Resource subclass's instance put() below. The
+ * merge path never runs this function at all, so a record arriving from
+ * instance B keeps whatever `originatorInstanceId` it already carried in
+ * `mergedData` (that instance's own write-time stamp, carried through in the
+ * synced row) with no risk of this instance overwriting it with its own id.
+ * The `content.originatorInstanceId == null` guard below is still applied —
+ * defense-in-depth for any future path that might route a synced payload
+ * through this class's post()/put() — so the invariant holds even if that
+ * assumption ever changes.
+ *
+ * `localInstanceId()` resolves to null on an instance that has never been
+ * federation-bootstrapped (no Instance row yet) — the field is nullable by
+ * design, so this stamps null rather than inventing an id.
+ */
+async function stampOriginatorInstanceId(content: any): Promise<void> {
+  if (content.originatorInstanceId == null) {
+    content.originatorInstanceId = await localInstanceId();
+  }
+}
+
 export class Memory extends (databases as any).flair.Memory {
   /**
    * Self-authorize now that the global gate is non-rejecting. Closes the P0
@@ -632,6 +665,11 @@ export class Memory extends (databases as any).flair.Memory {
     // reflects the final resolved `content.createdAt`.
     content.provenance = buildProvenance(auth, content.createdAt, content);
 
+    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
+    // 1) — see stampOriginatorInstanceId's doc above. No-op if already set
+    // (never fires for a genuine local write — no client sets this field).
+    await stampOriginatorInstanceId(content);
+
     // ── Write the new record FIRST ──────────────────────────────────────────
     const result = await super.post(content);
 
@@ -794,6 +832,15 @@ export class Memory extends (databases as any).flair.Memory {
     // always gets a freshly-stamped provenance reflecting the CURRENT
     // authenticated actor performing this write.
     content.provenance = buildProvenance(auth, content.createdAt, content);
+
+    // Write-time originatorInstanceId stamp (federation-edge-hardening slice
+    // 1) — see stampOriginatorInstanceId's doc above post(). No-op if
+    // already set: an update/patch of an existing local record carries its
+    // own already-stamped originatorInstanceId forward unchanged (the
+    // `{...existing, ...patch}` merge pattern every put() caller uses), and a
+    // federation-synced record never reaches this method at all (see that
+    // function's doc for why the merge path can't clobber it here either).
+    await stampOriginatorInstanceId(content);
 
     // ── Write the new/updated record FIRST ──────────────────────────────────
     const result = await super.put(content);

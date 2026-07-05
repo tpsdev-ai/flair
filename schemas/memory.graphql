@@ -34,6 +34,13 @@ type Memory @table(database: "flair") {
   provenance: String           # JSON blob (memory-provenance slice 1): { v, verified: { agentId, timestamp }, claimed?: { model } }
                                # Nullable by design — existing rows read back provenance = null, unchanged behavior (clean-upgrade-path gate).
                                # Same idiom as Soul.metadata below. Stamped server-side in resources/Memory.ts; never client-writable.
+  originatorInstanceId: String @indexed  # federation-edge-hardening slice 1: WRITE-TIME instance identity, stamped server-side in
+                               # resources/Memory.ts from resources/instance-identity.ts's localInstanceId() — never client-writable.
+                               # Nullable (existing rows read null = clean upgrade). Distinct from the legacy _originatorInstanceId
+                               # (Federation.ts's mergeRecord — stamped by the RECEIVER at merge time, forgeable/lossy); this field is
+                               # stamped by the ORIGINATING instance itself and preserved (never re-stamped) as the record flows through
+                               # sync merges. @indexed for the later sync push-query filter (per-record signature verification and the
+                               # classifier org-gate are separate, later slices — not built here).
 }
 
 # Explicit entity-to-entity relationships with temporal validity.
@@ -51,6 +58,9 @@ type Relationship @table(database: "flair") {
   source: String                   # where this was learned (memory ID, conversation, etc.)
   createdAt: String! @indexed
   updatedAt: String
+  originatorInstanceId: String @indexed  # federation-edge-hardening slice 1 — see Memory.originatorInstanceId's doc above
+                                    # for the full contract (write-time stamp, nullable, preserved across sync merges).
+                                    # Stamped server-side in resources/Relationship.ts's put().
 }
 
 type Soul @table(database: "flair") {
@@ -63,6 +73,9 @@ type Soul @table(database: "flair") {
   durability: String @indexed
   createdAt: String!
   updatedAt: String
+  originatorInstanceId: String @indexed  # federation-edge-hardening slice 1 — see Memory.originatorInstanceId's doc above
+                                    # for the full contract (write-time stamp, nullable, preserved across sync merges).
+                                    # Stamped server-side in resources/Soul.ts's post()/put().
 }
 
 type MemoryGrant @table(database: "flair") @export {

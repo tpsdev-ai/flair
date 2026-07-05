@@ -22,6 +22,13 @@ type Agent @table(database: "flair") @export {
 
   createdAt: String!
   updatedAt: String
+  originatorInstanceId: String @indexed  # federation-edge-hardening slice 1 — write-time instance identity,
+                                   # stamped server-side in resources/Agent.ts's post()/put() from
+                                   # resources/instance-identity.ts's localInstanceId(). Nullable (existing rows
+                                   # read null = clean upgrade); preserved (never re-stamped) as the record flows
+                                   # through federation sync merges. See schemas/memory.graphql's Memory.
+                                   # originatorInstanceId for the full contract — same field, same idiom, this is
+                                   # one of the 4 synced tables (Memory/Soul/Agent/Relationship).
 }
 
 # Credential table — auth surfaces for Principals.
