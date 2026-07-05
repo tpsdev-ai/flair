@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-07-05
+
+Writer-controlled memory sharing (Kris flair#522/#550), a memory recall-correctness sweep, and cross-agent authz hardening.
+
+### ✨ Writer-controlled memory sharing (#522 / #550)
+
+- **Layer 1 — `Memory.visibility` = private/shared + centralized read-scoping (#565).** A single chokepoint (`resolveReadScope`) that every cross-agent read path routes through (Memory.search/get, SemanticSearch, MemoryBootstrap, the by-id guard). Durability-keyed default (permanent/persistent → shared, ephemeral → private); a `private` memory is never returned to a non-owner on any path. Migration-invariant — existing memories keep their exact access (`visibility != private` treats no-visibility as shared). Also deletes the SemanticSearch `visibility=="office"` global read leak.
+- **Surface teammate findings (#568).** Bootstrap surfaces grant-visible teammate memories relevant to `currentTask` in a distinct, attributed section; the agent's own-context sections stay own-only.
+
+### 🔧 Memory recall correctness
+
+- **Dedup signal on singleton results (#564, ops-ume4).** Harper omits `$distance` when a cosine-sort result set is a singleton → dedup silently scored 0. Fallback: point-lookup the candidate and compute cosine directly.
+- **Superseded records no longer resurface in recall (#566 SemanticSearch/BM25, #567 bootstrap).** A server-superseded record (past `validTo`, not archived) not co-present with its successor could resurface; now excluded unconditionally in every recall path.
+- **openclaw-flair supersede: write-new-before-close-old + observable failure (#563, ops-mmh9).**
+
+### 🔒 Security
+
+- **Cross-agent delete authz regression guards** for `Relationship.delete` (#569) and `Credential.delete` (#570) — both verified safe against real Harper (the target record is bound before the method runs), now guarded so a future refactor can't silently reintroduce a bypass.
+- **Consolidated 3 Ed25519 nonce caches + crypto helpers into one shared guard (#559, ops-c4op).**
+
+### 🧰 Tooling / CI
+
+- **`release.sh` aligns bun.lock leaf specifiers after bump** — stops the recurring `--frozen-lockfile` desync (#560, ops-i9w8).
+- **Fail-fast timeouts on the two timeout-less CI jobs** whose sfw (Socket firewall) install could hang and block merge indefinitely (#571, ops-fumh).
+- **Real-Harper dedup/supersede e2e** (#562, which found ops-ume4) + Memory.get RequestTarget routing coverage (#561).
+
 ## [0.19.0] - 2026-07-03
 
 The read-gate security sweep: three distinct anonymous/cross-agent read exposures, all found from one Sherlock sweep RED and closed.
