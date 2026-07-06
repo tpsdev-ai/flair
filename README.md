@@ -240,6 +240,29 @@ flair uninstall     # Remove the service (keeps data)
 flair uninstall --purge  # Remove everything including data and keys
 ```
 
+### Upgrading
+
+`flair status` and `flair doctor` both check your installed version against the latest published release (cached, offline-tolerant — this never blocks or fails either command) and print a nudge when you're behind:
+
+```
+⚠ flair 0.16.1 is behind — latest is 0.20.1 (4 releases behind). Upgrade: npm i -g @tpsdev-ai/flair@latest
+```
+
+To upgrade:
+
+```bash
+npm install -g @tpsdev-ai/flair@latest
+
+# Or check what's outdated across the whole toolchain (flair, flair-mcp, the
+# openclaw-flair plugin) without installing anything:
+flair upgrade --check
+
+# Then apply:
+flair upgrade
+```
+
+`flair upgrade` also restarts the running instance for you with `--restart`. If you deployed Flair to a Harper Fabric cluster (rather than running it locally), use `flair upgrade --target <fabric-url>` instead — see `flair upgrade --help`.
+
 ### Advanced / manual setup
 
 Prefer to drive each step yourself, or scripting an unattended setup? Run `flair init --no-mcp` to bootstrap the instance + agent without wiring any MCP clients, then drive each step on its own:

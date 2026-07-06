@@ -24,6 +24,7 @@ import { create as tarCreate, extract as tarExtract, list as tarList } from "tar
 import { keystore } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
+import { checkVersion, formatVersionNudge } from "./version-check.js";
 import { detectClients, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
@@ -5507,9 +5508,16 @@ const statusCmd = program
       discoveredPort = await discoverLocalFlairPort(baseUrl);
     }
 
+    // Version-behind check (flair#587) — offline-tolerant + cached, so this
+    // never adds meaningful latency or fails `status` when the registry is
+    // unreachable. Independent of Harper health; runs either way.
+    const versionCheckResult = await checkVersion(__pkgVersion);
+    const versionNudge = formatVersionNudge(versionCheckResult);
+
     if (opts.json) {
       const out: any = { healthy, url: baseUrl, flairVersion: __pkgVersion, ...healthData };
       if (discoveredPort != null) out.discoveredPort = discoveredPort;
+      if (versionCheckResult.latest) out.latestVersion = versionCheckResult.latest;
       console.log(JSON.stringify(out, null, 2));
       if (!healthy) process.exit(1);
       return;
@@ -5527,6 +5535,10 @@ const statusCmd = program
         console.log(`  Or: flair doctor (when port-drift detection lands there)`);
       } else {
         console.log(`\n  Run: flair start  or  flair doctor`);
+      }
+      if (versionNudge) {
+        const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
+        console.log(`\n  ${render.wrap(color, "⚠")} ${render.wrap(color, versionNudge.message)}`);
       }
       process.exit(1);
     }
@@ -5581,6 +5593,11 @@ const statusCmd = program
     const metaParts = [pidPart, uptimePart].filter(Boolean).join(render.wrap(render.c.dim, " · "));
     console.log(`${versionStr} ${render.wrap(render.c.dim, "—")} ${runStatus}${metaParts ? `  ${metaParts}` : ""}`);
     console.log(render.kv("URL", baseUrl));
+
+    if (versionNudge) {
+      const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
+      console.log(`\n  ${render.wrap(color, "⚠")} ${render.wrap(color, versionNudge.message)}`);
+    }
 
     if (scopedWarnings.length > 0) {
       console.log(`\n${render.wrap(render.c.bold, "Warnings")}  ${render.wrap(render.c.dim, `(${scopedWarnings.length})`)}`);
@@ -7228,6 +7245,23 @@ program
     let harperResponding = false;
 
     console.log(`\n${render.wrap(render.c.bold, "🩺 Flair Doctor")}\n`);
+
+    // 0. Version check (flair#587) — offline-tolerant + cached, independent
+    // of Harper being up. A gap of ≥2 minor versions (or any major) is
+    // treated as loud/red — heuristic for "likely missed a security fix"
+    // since we don't have advisory data, only the version gap. A red gap
+    // counts as an issue (exit 1); a quieter yellow gap (one minor, or
+    // patch-only) is printed but doesn't fail doctor.
+    const versionCheckResult = await checkVersion(__pkgVersion);
+    const versionNudge = formatVersionNudge(versionCheckResult);
+    if (versionNudge) {
+      const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
+      const icon = versionNudge.severity === "red" ? render.wrap(render.c.red, "✗") : render.icons.warn;
+      console.log(`  ${icon} ${render.wrap(color, versionNudge.message)}`);
+      if (versionNudge.severity === "red") issues++;
+    } else if (versionCheckResult.latest) {
+      console.log(`  ${render.icons.ok} flair ${__pkgVersion} is current`);
+    }
 
     // Helper: try to reach Harper on a given port
     async function probePort(p: number): Promise<boolean> {
