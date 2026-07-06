@@ -2,8 +2,10 @@
 
 ## Overview
 
-Flair uses cryptographic identity (Ed25519) for agent authentication and
-collection-level scoping to enforce data isolation between agents.
+Flair uses cryptographic identity (Ed25519) for agent authentication. Within
+an org, memory reads are open — agents see each other's non-private memories —
+while writes are isolated per agent and private memories stay strictly
+owner-only. The hard access boundary is the federation edge (cross-instance).
 
 ## Authentication
 
@@ -37,25 +39,29 @@ at Harper startup. **It is never stored on the filesystem by Flair.**
 
 ## Data Scoping
 
-### Memory Isolation
+### Memory Read/Write Model
 
-Each agent can only read and write its own memories. This is enforced at
-the database layer (Harper resource `search()` override), not application
-logic:
+Reads are open **within an org**; writes are isolated per agent. Enforced at
+the database layer (Harper resource `search()` override via a single
+centralized read-scope rule), not application logic:
 
-- `GET /Memory/` — returns only the authenticated agent's memories
-- `POST /Memory` — writes with the authenticated agent's ID
-- `POST /MemorySearch` — searches only the authenticated agent's memories
+- `GET /Memory/` — returns the authenticated agent's own memories (any
+  visibility) plus every **non-private** memory in the org
+- `POST /MemorySearch` — same read scope: own memories plus all non-private
+- `POST /Memory` — writes are attributed to the authenticated agent; an
+  agent cannot write as another (write isolation)
 
-### Cross-Agent Access
+**Private memories are strictly owner-only** — a memory written with
+`visibility: private` is returned only to its author, never to another agent.
 
-Explicit grants allow one agent to read another's memories:
+### Cross-Agent Access (within an org)
 
-```
-MemoryGrant { fromAgentId, toAgentId, scope: "read" }
-```
-
-Grants are created by admin or by the granting agent.
+Within an org, an agent reads every non-private memory directly — no grant
+required. This is deliberate: the goal is relevance (surface what's useful to
+the org) over secrecy. A writer keeps something private by marking it
+`visibility: private`, which keeps it strictly owner-only. The access boundary
+that stays hard is the **federation edge** (cross-instance / cross-org), not
+within-org reads.
 
 ### Admin Bypass
 
