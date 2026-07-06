@@ -100,6 +100,8 @@ Flair fixes that with three primitives:
 
 Built on [Harper](https://harper.fast). Single process. No sidecars. Zero external API calls for embeddings. **[Supply-chain policy](docs/supply-chain-policy.md)** documents the bake-time + dep-pinning we run to keep this honest.
 
+See **[DESIGN.md](DESIGN.md)** for the design invariants behind these three primitives — why they're shaped the way they are.
+
 ## How It Works
 
 Flair is a native [Harper v5](https://harper.fast) application. Harper handles HTTP, persistence (RocksDB), and application logic in a single process.
