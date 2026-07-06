@@ -1,6 +1,6 @@
 /**
  * relationship-read-gate.test.ts — regression guard for the memory-soul-
- * read-gate FAMILY fix (ops-oox7): Relationship.ts previously gated
+ * read-gate FAMILY fix: Relationship.ts previously gated
  * post()/put()/delete() (via search()'s own 401 and put()/delete()'s
  * tpsAgent checks) but never defined `allowRead()` nor overrode `get()`.
  * Harper routes `GET /Relationship/<id>` to get() and the collection-

@@ -19,7 +19,7 @@ import {
 // unit-tested directly (see test/unit/temporal-scoring.test.ts).
 import { compositeScore } from "./scoring.js";
 
-// BM25 + union-RRF hybrid retrieval (ops-i39b / FLAIR-BM25-HYBRID-RETRIEVAL).
+// BM25 + union-RRF hybrid retrieval (FLAIR-BM25-HYBRID-RETRIEVAL).
 // Harper-free modules so the BM25 scoring, the candidate-union RRF, and the
 // SECURITY conditions-filter are unit-tested against the shipped code.
 import { buildBM25, fuseRrfNormalized, hybridEnabled, SEM_LIMIT } from "./bm25.js";
@@ -101,10 +101,10 @@ export class SemanticSearch extends Resource {
       : bodyAgentId;
 
     // Read-scope: own (any visibility) + granted owners' SHARED memories only
-    // (ops-2dm3 Layer 1). Centralized in resolveReadScope() — this used to be
+    // (Layer 1). Centralized in resolveReadScope() — this used to be
     // an inline grant-resolution loop here PLUS a `visibility === "office"`
     // global OR-clause below that leaked ANY authenticated agent's read of
-    // ANY other agent's office-visible memories (ops-nzxa). Both are gone;
+    // ANY other agent's office-visible memories. Both are gone;
     // this is the ONE scoping resolution for this endpoint now.
     const scope = agentId ? await resolveReadScope(agentId) : null;
 
@@ -179,14 +179,14 @@ export class SemanticSearch extends Resource {
     // from CANDIDATE_MULTIPLIER so composite re-ranking keeps its existing
     // headroom. Scoped to the legacy (non-hybrid) vector path below — the
     // hybrid path's candidate pool is already governed by CANDIDATE_MULTIPLIER
-    // (semantic leg) + SEM_LIMIT (BM25 leg) via RRF union (ops-i39b); the
+    // (semantic leg) + SEM_LIMIT (BM25 leg) via RRF union; the
     // reranker still applies to its output further down regardless of which
     // path produced `filteredResults`.
     const rerankOn = isRerankEnabled();
     const rerankTopN = getRerankTopN();
 
     if (hybrid) {
-      // ─── BM25 + union-RRF hybrid path (ops-i39b) ─────────────────────────
+      // ─── BM25 + union-RRF hybrid path ────────────────────────────────────
       // 1. Semantic candidates via HNSW (unchanged fetch). 2. BM25 lexical pass
       //    over the SCOPED corpus. 3. SECURITY: the BM25 candidate set is filtered
       //    by the SAME conditions[] + temporal filters BEFORE fusion (the corpus
@@ -220,7 +220,7 @@ export class SemanticSearch extends Resource {
           if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
           if (asOf && record.validFrom && record.validFrom > asOf) continue;
           if (asOf && record.validTo && record.validTo <= asOf) continue;
-          // ops-9rc6: unconditional past-validTo exclusion (see legacy HNSW
+          // Unconditional past-validTo exclusion (see legacy HNSW
           // loop below for the full rationale) — applies regardless of asOf.
           if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
           semRecords.push(record);
@@ -327,7 +327,7 @@ export class SemanticSearch extends Resource {
         // Temporal validity: if asOf is specified, only include memories valid at that point
         if (asOf && record.validFrom && record.validFrom > asOf) continue;
         if (asOf && record.validTo && record.validTo <= asOf) continue;
-        // ops-9rc6: a past validTo ALWAYS means the record has been closed out
+        // A past validTo ALWAYS means the record has been closed out
         // (server supersede path — Memory.ts closeSupersededRecord — sets
         // validTo without necessarily setting `archived`). Unconditional, not
         // gated on `asOf`, so a server-superseded record can't resurface in
@@ -341,9 +341,9 @@ export class SemanticSearch extends Resource {
         if (record.$distance !== undefined) {
           semanticScore = distanceToSimilarity(record.$distance);
         } else {
-          // ─── ops-syzm: Harper's cosine-sort query omits $distance for a
+          // ─── Harper's cosine-sort query omits $distance for a
           // SINGLETON post-filter result set — the SAME quirk root-caused and
-          // fixed for the dedup path in ops-ume4 (resources/Memory.ts
+          // fixed for the dedup path (resources/Memory.ts
           // findConservativeDedupMatch / resources/dedup.ts cosineSimilarity).
           // Sort ORDER is still correct; only the numeric `$distance`
           // annotation is missing on that one record, regardless of the
@@ -351,7 +351,7 @@ export class SemanticSearch extends Resource {
           // just limit=1 — the trigger is the post-filter MATCH COUNT, not the
           // requested limit).
           //
-          // ops-2dm3 Layer 1 made this common: the no-grants agent scope used
+          // Layer 1 made this common: the no-grants agent scope used
           // to ALWAYS be a compound `{operator:"or", conditions:[{agentId},
           // {visibility=="office"}]}` condition; resolveReadScope() now emits
           // a PLAIN single `{agentId==X}` condition for the common (no-grants)
@@ -365,8 +365,8 @@ export class SemanticSearch extends Resource {
           //
           // Fix: point-lookup the record by id (a plain get(), unaffected by
           // the sort-query quirk — selecting "embedding" directly on the SAME
-          // sort-by-embedding query comes back as a bare scalar per ops-ume4's
-          // findings) and compute cosine similarity ourselves in JS from its
+          // sort-by-embedding query comes back as a bare scalar, per the same
+          // investigation above) and compute cosine similarity ourselves in JS from its
           // real stored `embedding` vector against this query's `qEmb`, via
           // the same math as the ume4 fallback (dedup.ts's cosineSimilarity).
           // Only done on this (rare) undefined-$distance branch — never adds
@@ -412,7 +412,7 @@ export class SemanticSearch extends Resource {
         if (sinceDate && record.createdAt && new Date(record.createdAt) < sinceDate) continue;
         if (asOf && record.validFrom && record.validFrom > asOf) continue;
         if (asOf && record.validTo && record.validTo <= asOf) continue;
-        // ops-9rc6: unconditional past-validTo exclusion (see legacy HNSW
+        // Unconditional past-validTo exclusion (see legacy HNSW
         // loop above for the full rationale) — applies regardless of asOf.
         if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
 
@@ -458,7 +458,7 @@ export class SemanticSearch extends Resource {
     // Re-scores query+candidate TOGETHER (cross-attention the pooled embedding
     // can't do) and reorders before the final slice. Reorders whatever
     // `filteredResults` the retrieval stage above produced — legacy HNSW-only
-    // OR the BM25+union-RRF hybrid path (ops-i39b) — since both converge into
+    // OR the BM25+union-RRF hybrid path — since both converge into
     // the same `results`/`filteredResults` shape before this point; hybrid
     // retrieves+fuses, the reranker only reorders the fused set. Still gated
     // on `qEmb` (an embedding was actually generated); the pure keyword-only

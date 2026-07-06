@@ -1,6 +1,6 @@
 /**
  * golden-path.test.ts — Smoke test: golden path end-to-end
- * (ops-t0i3 — scaffold + scenario 1)
+ * (initial scaffold, covering scenario 1)
  *
  * Tests the full agent lifecycle against a real Flair instance:
  *   1. Create agent

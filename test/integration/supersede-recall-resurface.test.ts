@@ -1,4 +1,4 @@
-// ops-9rc6 — a server-superseded memory resurfaces in the DEFAULT (no-asOf)
+// A server-superseded memory resurfaces in the DEFAULT (no-asOf)
 // recall path when its successor isn't semantically/conditions co-present in
 // the same search result set.
 //
@@ -100,10 +100,10 @@ async function search(harper: HarperInstance, agent: TestAgent, body: Record<str
 }
 
 let harper: HarperInstance;
-const agent = mkAgent(`ops-9rc6-${randomUUID()}`);
+const agent = mkAgent(`semantic-resurface-${randomUUID()}`);
 
-const SUBJECT = "ops-9rc6-budget-approval";
-const OTHER_SUBJECT = "ops-9rc6-unrelated-kitchen-topic";
+const SUBJECT = "semantic-resurface-budget-approval";
+const OTHER_SUBJECT = "semantic-resurface-unrelated-kitchen-topic";
 
 const ID_A = `${agent.id}-a`; // superseded (server path) — must NOT resurface
 const ID_B = `${agent.id}-b`; // successor — different subject, never co-present with A's search
@@ -116,7 +116,7 @@ const CONTENT_C = "The finance team's Q3 budget sign-off is expected in mid-Marc
 const CONTENT_D = "The annual budget planning retreat for department heads is confirmed for next spring.";
 const QUERY = "When is the marketing budget deadline approved?";
 
-describe("ops-9rc6 — server-superseded (validTo, not archived) memory must not resurface in default recall", () => {
+describe("server-superseded (validTo, not archived) memory must not resurface in default recall", () => {
   beforeAll(async () => {
     harper = await startHarper();
     await registerAgent(harper, agent);
@@ -141,7 +141,7 @@ describe("ops-9rc6 — server-superseded (validTo, not archived) memory must not
     expect(bodyB.written).toBe(true);
 
     // Confirm the server actually closed A (validTo set) — the documented
-    // ops-9rc6 mechanism (Memory.ts closeSupersededRecord), NOT archived.
+    // closeSupersededRecord mechanism (Memory.ts), NOT archived.
     const getA = await getMemory(harper, agent, ID_A);
     expect(getA.status).toBe(200);
     const recA: any = await getA.json();

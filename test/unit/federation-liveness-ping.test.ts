@@ -2,7 +2,7 @@ import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import nacl from "tweetnacl";
 
 /**
- * ops-c7t9: no-change federation syncs must still ping the hub for liveness.
+ * No-change federation syncs must still ping the hub for liveness.
  *
  * Before the fix, when a spoke had no records to push, it returned early
  * without contacting the hub — so idle-but-alive spokes looked dead

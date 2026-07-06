@@ -1,5 +1,5 @@
 /**
- * a2a-auth.test.ts — covers the P0 fix (ops-yhrr / similar): A2AAdapter
+ * a2a-auth.test.ts — covers the P0 fix (unauthenticated POST /a2a): A2AAdapter
  * POST /a2a was unauthenticated, allowing any caller to forge OrgEvents
  * impersonating any agent and read all Beads issues.
  *
@@ -13,7 +13,7 @@
  *    unset (no upstream auth) and not admin, reject with JSON-RPC -32001.
  *    For message/send, sender must match params.agentId unless admin.
  *
- * Note: these tests use the "simulator" pattern (per ops-ketv P1 backlog
+ * Note: these tests use the "simulator" pattern (a known P1 backlog item
  * to convert to real-module tests). They exercise the decision logic of
  * the two guards but do NOT exercise Harper's full request/auth pipeline.
  */
@@ -174,7 +174,7 @@ describe("A2AAdapter.post() — message/send sender-match", () => {
   });
 });
 
-// ─── message/send DIRECTED handoff routing (ops-f1e3) ─────────────────────
+// ─── message/send DIRECTED handoff routing (Rivet × krais collision fix) ──
 
 /**
  * Reproduces the message/send routing decision from A2AAdapter.post()
@@ -229,7 +229,7 @@ function catchupReceives(participant: string, targetIds: string[] | null | undef
   return !targetIds || targetIds.length === 0 || targetIds.includes(participant);
 }
 
-describe("message/send — directed handoff routing (ops-f1e3)", () => {
+describe("message/send — directed handoff routing (Rivet × krais collision fix)", () => {
   const agents = new Set(["rivet", "krais", "flint"]);
 
   test("(a) sender=rivet, toAgentId=krais → event scope=rivet, targetIds=[krais]; krais's catchup receives it", () => {

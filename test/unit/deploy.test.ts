@@ -427,7 +427,7 @@ describe("flair deploy: deploy() gating — --no-verify and --dry-run both skip 
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// ops-2i8x: flaky-peer-replication resilience. A real Fabric deploy hit
+// Flaky-peer-replication resilience. A real Fabric deploy hit
 //   "Component 'flair' was deployed on the origin node but failed to
 //    replicate to 1 of 1 peer node(s): ... (Error: Connection closed 1006)"
 // and hard-exited 1 — a bare manual retry cleared it with no other change.

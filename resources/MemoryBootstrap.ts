@@ -18,13 +18,13 @@ import { resolveReadScope } from "./memory-read-scope.js";
  *      task-relevant set as #4, split by origin: a grant-visible teammate's
  *      SHARED memory that scores against currentTask lands here instead of
  *      #4, attributed via "[via <agentId>]". Presentation only — what's
- *      readable is entirely Layer 1's resolveReadScope()/ops-2dm3; this only
+ *      readable is entirely Layer 1's resolveReadScope(); this only
  *      changes how an already-read cross-agent record is formatted/sectioned)
  *   5. Relationship context (active relationships for mentioned entities)
  *   6. Predicted context (based on channel/surface/subject hints)
  *   7. Team roster (other active agents in this office + a search-first nudge —
  *      bootstrap loads the caller's own memories plus any granted owner's
- *      SHARED memories (ops-2dm3 Layer 1, never their private ones), so this
+ *      SHARED memories (Layer 1, never their private ones), so this
  *      section nudges toward memory_search for anything beyond that window)
  *
  * Prediction: when context signals (channel, surface, subjects) are provided,
@@ -220,8 +220,8 @@ export class BootstrapMemories extends Resource {
 
     // --- 1c. Team roster + cross-agent search nudge ---
     // Soul is still caller-own-only (unaffected here). Memory loading below
-    // (step 2) now also includes granted owners' SHARED memories (ops-2dm3
-    // Layer 1) — but this section stays: memory_search/SemanticSearch remains
+    // (step 2) now also includes granted owners' SHARED memories (Layer 1)
+    // — but this section stays: memory_search/SemanticSearch remains
     // the deliberate, query-driven way to find a teammate's finding, vs.
     // bootstrap's fixed recent/permanent window. This section is fixed-cost
     // (no query text to format per agent) so it's cheap enough to always
@@ -245,7 +245,7 @@ export class BootstrapMemories extends Resource {
 
     // --- 2. Permanent memories (always included, highest priority) ---
     // Read-scope: own (any visibility) + granted owners' SHARED memories only
-    // (ops-2dm3 Layer 1 — never a granted owner's private ones). Centralized
+    // (Layer 1 — never a granted owner's private ones). Centralized
     // in resolveReadScope(): the condition is pushed into the Harper query
     // (so the table itself never returns an out-of-scope row), and
     // `scope.isAllowed` re-checks in-process as defense-in-depth (same
@@ -257,10 +257,11 @@ export class BootstrapMemories extends Resource {
     for await (const record of (databases as any).flair.Memory.search({ conditions: [scope.condition] })) {
       if (!scope.isAllowed(record)) continue;
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
-      // ops-hesq: a past validTo ALWAYS means the record has been closed out
+      // A past validTo ALWAYS means the record has been closed out
       // (server supersede path — Memory.ts closeSupersededRecord — sets
       // validTo without necessarily setting `archived`), same root cause and
-      // fix as ops-9rc6's SemanticSearch/bm25-filter exclusion. Unconditional
+      // fix as SemanticSearch.ts's unconditional past-validTo/bm25-filter
+      // exclusion. Unconditional
       // so a server-superseded record can't resurface in bootstrap just
       // because its successor isn't co-present in this result set (the
       // supersededIds filter further down only catches co-presence). A

@@ -22,14 +22,14 @@ import { FlairClient } from "@tpsdev-ai/flair-client";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveAgentId } from "./key-resolver.js";
 
-// ─── Defense-in-depth: agentId path-traversal guard (ops-pnwq) ───────────────
+// ─── Defense-in-depth: agentId path-traversal guard ──────────────────────────
 // agentId flows into resolve() to compose ~/.openclaw/workspace-<agentId>/...
 // resolve() normalizes "../" but doesn't reject — an attacker-controlled
 // agentId of "../../../etc" could traverse out of the workspace dir.
 // Today's threat surface is low (agentId comes from plugin config or session
 // context, both within the agent's host trust boundary), but a fail-closed
 // regex guard is cheap and surfaces invalid input rather than silently
-// mangling. Per Sherlock review of PR #317 (filed as ops-pnwq).
+// mangling. Per Sherlock review of PR #317.
 const AGENT_ID_PATTERN = /^[a-z0-9_-]{1,64}$/i;
 
 export function isValidAgentId(agentId: string | null | undefined): boolean {
@@ -267,8 +267,9 @@ function detectRelationships(text: string): DetectedRelationship[] {
 //
 // Replaces the standalone `flair-context-engine` plugin (retired 2026-05-03).
 // Anchor re-injection was the only feature that earned its slot per the
-// ops-czop audit; the rest was noise (compaction-extract regex, auto-ingest
-// dead path) or duplicates (HEARTBEAT_OK filter is built into openclaw).
+// plugin-consolidation audit done at retirement time; the rest was noise
+// (compaction-extract regex, auto-ingest dead path) or duplicates
+// (HEARTBEAT_OK filter is built into openclaw).
 
 const ANCHOR_FILES = ["IDENTITY.md", "SOUL.md", "AGENTS.md"];
 
@@ -307,7 +308,7 @@ class FlairBehavioralAnchorEngine {
     private logger: { info: Function; warn: Function },
   ) {
     // Defense-in-depth: agentId flows into resolve() to compose the workspace
-    // path. Reject malformed input at construction time (ops-pnwq).
+    // path. Reject malformed input at construction time.
     assertValidAgentId(agentId);
   }
 
@@ -420,7 +421,7 @@ export default {
       const id = agentId || (cfg.agentId && cfg.agentId !== "auto" ? cfg.agentId : null) || currentAgentId || fallbackAgentId;
       if (!id || id === "auto") throw new Error("no agentId available — set agentId in plugin config, FLAIR_AGENT_ID env var, or ensure OpenClaw provides it via session context (before_agent_start)");
       // Defense-in-depth: validate before flowing into FlairClient + workspace
-      // path composition (ops-pnwq).
+      // path composition.
       assertValidAgentId(id);
       let client = clientPool.get(id);
       if (!client) {
@@ -558,8 +559,8 @@ export default {
             const client = getCurrentClient();
             const memId = `${client.agentId}-${Date.now()}`;
 
-            // Write the NEW memory FIRST (ops-a4t5 discipline: write-new-
-            // BEFORE-close-old). Note: `client.memory.write()` does not
+            // Write the NEW memory FIRST (write-new-BEFORE-close-old
+            // discipline). Note: `client.memory.write()` does not
             // forward a `supersedes` field to the server (flair-client's
             // MemoryApi.write() opts have no such field — see client.ts),
             // so this can't be routed through the server's transactional

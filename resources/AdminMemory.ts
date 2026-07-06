@@ -22,7 +22,7 @@ import { allowAdmin } from "./agent-auth.js";
  * makes that legible: every memory shows where it came from, what it derived
  * from, what it superseded, and which peer it synced from.
  *
- * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts — this
+ * allowRead()=allowAdmin (defense-in-depth): see Admin.ts — this
  * page surfaces full memory content across ALL agents, so the gap it closes
  * matters more here than on the other Admin* pages.
  */
@@ -33,7 +33,7 @@ export class AdminMemory extends Resource {
 
   async get() {
     // Harper v5 does not populate this.request on Resource subclasses —
-    // getContext() is the only reliable path (ops-sal4: the previous
+    // getContext() is the only reliable path (the previous
     // `(this as any).request` read was always undefined, so query params
     // (?id=, ?q=, ?subject=, ?limit=) were always ignored).
     const ctx = (this as any).getContext?.();

@@ -1,6 +1,6 @@
 /**
  * memory-grant-read-gate.test.ts — regression guard for the memory-soul-
- * read-gate FAMILY fix (ops-oox7): MemoryGrant.ts previously gated
+ * read-gate FAMILY fix: MemoryGrant.ts previously gated
  * search()/post()/put()/delete() but never defined `allowRead()` nor
  * overrode `get()`. Harper routes `GET /MemoryGrant/<id>` to get() and the
  * collection-describe `GET /MemoryGrant` outside search(), so both were

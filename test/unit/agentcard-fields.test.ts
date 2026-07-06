@@ -7,7 +7,7 @@ import {
 } from "../../resources/agentcard-fields";
 
 /**
- * Tests for what the public (unauthenticated) AgentCard exposes — ops-vz6j.
+ * Tests for what the public (unauthenticated) AgentCard exposes.
  *
  * `GET /AgentCard/{id}` bypasses auth (A2A spec). The prior code fell back to
  * publishing the first soul with ANY content as the description when no
@@ -27,7 +27,7 @@ describe("selectPublicDescription", () => {
     expect(selectPublicDescription(souls)).toBe("Strategic cofounder agent.");
   });
 
-  test("SECURITY: no description soul → empty string, never a private soul (ops-vz6j)", () => {
+  test("SECURITY: no description soul → empty string, never a private soul", () => {
     const souls = [
       { kind: "note", content: "INTERNAL reminder: rotate the admin pass" },
       { kind: "prompt", content: "You have access to the production keys at..." },

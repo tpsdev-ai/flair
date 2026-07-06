@@ -1,5 +1,5 @@
 /**
- * local-no-auth.test.ts — Unit tests for implicit local auth skip (ops-vu31)
+ * local-no-auth.test.ts — Unit tests for implicit local auth skip
  *
  * When targeting localhost with no admin pass, api() should send no
  * Authorization header. Auth-middleware should let the request through

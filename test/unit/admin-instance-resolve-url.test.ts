@@ -3,7 +3,8 @@
  * 127.0.0.1 URLs on remote deployments).
  *
  * Tests the predicate logic of `resolvePublicUrl` from
- * resources/AdminInstance.ts. Simulator-pattern (per ops-ketv) — exercises
+ * resources/AdminInstance.ts. Simulator-pattern (a known P1 backlog item to
+ * convert to real-module tests) — exercises
  * the decision branches without importing the real Resource class (which
  * pulls Harper at import time).
  */

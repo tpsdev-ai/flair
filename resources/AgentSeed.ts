@@ -45,7 +45,7 @@ export class AgentSeed extends Resource {
 
   async post(data: any) {
     // Harper v5 does not populate this.request on Resource subclasses —
-    // getContext() is the only reliable path (ops-sal4: the previous
+    // getContext() is the only reliable path (the previous
     // `(this as any).request` read was always undefined, so actorId was always
     // undefined and this belt-and-suspenders check fail-closed every request,
     // even from a real admin already verified by allowCreate()).

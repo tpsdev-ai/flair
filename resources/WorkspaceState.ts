@@ -27,7 +27,7 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
 
   /**
    * Self-authorize now that the global gate is non-rejecting (memory-soul-
-   * read-gate family fix, ops-oox7 — applying the Memory.ts/Soul.ts pattern
+   * read-gate family fix — applying the Memory.ts/Soul.ts pattern
    * to WorkspaceState/Relationship/Integration/MemoryGrant). Closes the same
    * P0 leak: Harper routes `GET /WorkspaceState/<id>` to get() and the
    * collection describe (`GET /WorkspaceState`) to a path outside search(),

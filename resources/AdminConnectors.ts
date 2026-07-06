@@ -5,7 +5,7 @@ import { allowAdmin } from "./agent-auth.js";
 /**
  * GET /AdminConnectors — OAuth clients and active sessions.
  *
- * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts.
+ * allowRead()=allowAdmin (defense-in-depth): see Admin.ts.
  */
 export class AdminConnectors extends Resource {
   async allowRead(): Promise<boolean> {

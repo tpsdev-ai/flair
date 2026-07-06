@@ -26,7 +26,7 @@ export class OrgEventCatchup extends Resource {
   async get(pathInfo?: any) {
     // Harper v5 does not populate this.request on Resource subclasses —
     // getContext() is the only reliable path to the gate's tpsAgent/
-    // tpsAgentIsAdmin annotations (ops-sal4: the previous `(this as
+    // tpsAgentIsAdmin annotations (the previous `(this as
     // any).request` read was always undefined, so the ownership check below
     // never ran — fail-open cross-agent read).
     const auth = await resolveAgentAuth((this as any).getContext?.());

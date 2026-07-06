@@ -5,7 +5,7 @@ import { allowAdmin } from "./agent-auth.js";
 /**
  * GET /AdminPrincipals — list all principals with kind, trust, status.
  *
- * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts.
+ * allowRead()=allowAdmin (defense-in-depth): see Admin.ts.
  */
 export class AdminPrincipals extends Resource {
   async allowRead(): Promise<boolean> {

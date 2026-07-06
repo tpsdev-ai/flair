@@ -1,6 +1,6 @@
 /**
  * cli-port-autodiscover.test.ts — Unit tests for the port-drift autodiscover
- * helpers (ops-mbdi).
+ * helpers.
  *
  * The discoverLocalFlairPort helper probes a small candidate-port set when the
  * configured Flair URL is unreachable. Tests cover:

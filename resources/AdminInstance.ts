@@ -88,7 +88,7 @@ function resolveVersion(): string {
 /**
  * GET /AdminInstance — instance info, public key, version.
  *
- * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts.
+ * allowRead()=allowAdmin (defense-in-depth): see Admin.ts.
  */
 export class AdminInstance extends Resource {
   async allowRead(): Promise<boolean> {

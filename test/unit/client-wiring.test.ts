@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { wireGemini, wireCursor, wireCodex } from "../../src/install/clients.ts";
 
 /**
- * FIX 4 (onboarding dogfood round 1, ops-9czl):
+ * FIX 4 (onboarding dogfood round 1):
  * "wired" MUST mean a config file was actually written. The Codex/Gemini/Cursor
  * wire functions used to ALWAYS return "Manual wiring required" while the run
  * elsewhere claimed the client was wired. They now write the real client config

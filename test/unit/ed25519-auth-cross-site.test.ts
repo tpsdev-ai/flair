@@ -1,6 +1,6 @@
 /**
- * ed25519-auth-cross-site.test.ts — REAL cross-module closure proof (bd
- * ops-c4op): agent-auth.ts's verifyAgentRequest() and Presence.ts's post()
+ * ed25519-auth-cross-site.test.ts — REAL cross-module closure proof (shared
+ * nonce-store consolidation): agent-auth.ts's verifyAgentRequest() and Presence.ts's post()
  * fallback verification are two of the three independent TPS-Ed25519 call
  * sites that used to carry their OWN nonceSeen Map. This test imports BOTH
  * real modules under one @harperfast/harper mock (bun's module cache is

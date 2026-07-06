@@ -5,7 +5,7 @@
 # and ALERTS on every state transition (down→recovered, or failure-to-recover) so a
 # Flair-down is KNOWN rather than found by accident.
 #
-# INCIDENT (2026-06-27 ~04:20, ops-6nv7): prod Flair was DOWN — the ai.tpsdev.flair
+# INCIDENT (2026-06-27 ~04:20): prod Flair was DOWN — the ai.tpsdev.flair
 # launchd job was not loaded (no Harper PID). The old watchdog only handled (a):
 # `launchctl kickstart -k` / `start` are NO-OPS on an unloaded job, so (b) silently
 # went unrecovered, AND there was no alert — the outage was found only when a memory
@@ -109,7 +109,7 @@ PREV_STATE=$(read_state)
 if curl -sf --max-time 5 "$HEALTH_URL" -o /dev/null 2>/dev/null; then
   if [ "$PREV_STATE" = "down" ]; then
     write_state "up"
-    alert "✅ **Flair (:${HARPER_PORT}) RECOVERED** — /Health responding again. (ops-6nv7 watchdog)"
+    alert "✅ **Flair (:${HARPER_PORT}) RECOVERED** — /Health responding again. (watchdog)"
   fi
   exit 0
 fi
@@ -170,19 +170,19 @@ if [ "$RECOVERED" -eq 0 ] && [ "$HEALTH_BACK" -eq 0 ]; then
   # Recovery action ran and /Health is back. Mark up so CASE 1 stays quiet.
   if [ "$PREV_STATE" != "up" ]; then
     write_state "up"
-    alert "✅ **Flair (:${HARPER_PORT}) RECOVERED by watchdog** — was down: ${RECOVERY_DESC}. /Health responding again. (ops-6nv7)"
+    alert "✅ **Flair (:${HARPER_PORT}) RECOVERED by watchdog** — was down: ${RECOVERY_DESC}. /Health responding again. (watchdog)"
   else
     # We were "up", briefly dipped, and self-healed within this tick. Announce the
     # blip once so it's not invisible, then stay up.
     write_state "up"
-    alert "⚠️ **Flair (:${HARPER_PORT}) self-healed** — transient outage recovered within one watchdog tick: ${RECOVERY_DESC}. (ops-6nv7)"
+    alert "⚠️ **Flair (:${HARPER_PORT}) self-healed** — transient outage recovered within one watchdog tick: ${RECOVERY_DESC}. (watchdog)"
   fi
 else
   # Either the recovery action failed, OR /Health is still dead after acting.
   # Alert ONLY on the up→down transition (first failure); suppress repeats while down.
   if [ "$PREV_STATE" != "down" ]; then
     write_state "down"
-    alert "🚨 **Flair (:${HARPER_PORT}) DOWN** — recovery attempted (${RECOVERY_DESC}) but /Health still failing. Manual intervention may be needed: launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/${LAUNCHD_LABEL}.plist. Check ${LOG}. (ops-6nv7)"
+    alert "🚨 **Flair (:${HARPER_PORT}) DOWN** — recovery attempted (${RECOVERY_DESC}) but /Health still failing. Manual intervention may be needed: launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/${LAUNCHD_LABEL}.plist. Check ${LOG}. (watchdog)"
   else
     log "still DOWN (${RECOVERY_DESC}) — already alerted on transition, suppressing repeat"
   fi

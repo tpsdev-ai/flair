@@ -11,7 +11,7 @@ const MAX_SPAWN_ATTEMPTS = 3;
 // Harper logs exactly this ("Unable to bind to port NNNNN: Address already in
 // use") when its HTTP/ops listener can't bind, but it STILL prints "successfully
 // started" — so without detecting it, the health poll hammers a dead port for the
-// full 60s timeout and the test fails at ~64s (the ops-wumd flake: a random port
+// full 60s timeout and the test fails at ~64s (a random port
 // occasionally collided with an in-use one).
 //
 // Match ONLY Harper's specific bind-failure message — NOT a bare "address already
@@ -205,7 +205,7 @@ export async function startHarper(): Promise<HarperInstance> {
     ROOTPATH: installDir,
     HOME: installDir,               // isolate from system Harper install (~/.harperdb)
     // Point the embeddings model dir at the repo-root models/ that CI / local
-    // runs pre-download into (the FLAIR_MODELS_DIR override; see ops-am0v and
+    // runs pre-download into (the FLAIR_MODELS_DIR override; see
     // resources/embeddings-provider.ts:resolveModelsDir). Without this, the fix's
     // new default — <ROOTPATH>/models, i.e. the fresh temp installDir — would
     // re-download the ~80MB model on every startHarper (HuggingFace 429-prone,

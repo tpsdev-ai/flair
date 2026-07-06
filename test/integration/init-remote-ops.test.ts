@@ -1,6 +1,6 @@
 /**
- * init-remote-ops-2kyi.test.ts — Integration tests for the atomic
- * `flair init --remote` provisioning flow (ops-2kyi).
+ * init-remote-ops.test.ts — Integration tests for the atomic
+ * `flair init --remote` provisioning flow.
  *
  * Mocks fetch() to simulate the ops API and Flair REST endpoints.
  * Verifies operation ordering, idempotence, timeout handling, and

@@ -493,14 +493,14 @@ describe("FlairBehavioralAnchorEngine — anchor re-injection", () => {
   });
 });
 
-// ─── isValidAgentId / assertValidAgentId — ops-pnwq defense-in-depth ─────────
+// ─── isValidAgentId / assertValidAgentId — path-traversal defense-in-depth ───
 // Sanitizer for agentId before path composition. Sherlock review of PR #317
 // flagged that agentId flows into resolve() unchecked; "../" segments would
 // compose into a workspace-dir escape. This is the fail-closed regex guard.
 
 import { isValidAgentId, assertValidAgentId } from "../index.ts";
 
-describe("isValidAgentId / assertValidAgentId (ops-pnwq)", () => {
+describe("isValidAgentId / assertValidAgentId (path-traversal defense-in-depth)", () => {
   test("accepts standard agent names", () => {
     for (const id of ["flint", "anvil", "kern", "sherlock", "ember"]) {
       expect(isValidAgentId(id)).toBe(true);
@@ -575,17 +575,17 @@ describe("isValidAgentId / assertValidAgentId (ops-pnwq)", () => {
   });
 });
 
-// ─── memory_store supersede — write-then-close ordering (ops-mmh9) ──────────
+// ─── memory_store supersede — write-then-close ordering ─────────────────────
 // The hand-rolled supersede used to archive the OLD record BEFORE writing the
 // NEW one — if the write then failed, the old fact was gone and the new one
-// never landed (silent loss; same class as ops-a4t5, fixed server-side in
-// resources/Memory.ts). These tests exercise the fixed ordering directly
-// against the real FlairClient class (flair-client's HTTP boundary,
+// never landed (silent loss; same class as the write-new-before-close-old bug,
+// fixed server-side in resources/Memory.ts). These tests exercise the fixed
+// ordering directly against the real FlairClient class (flair-client's HTTP boundary,
 // `FlairClient.prototype.request`, is monkey-patched per test so no network
 // call is made — everything above that boundary, including memory.write()/
 // memory.get()'s real logic, runs unmodified).
 
-describe("memory_store supersede — write-then-close ordering (ops-mmh9)", () => {
+describe("memory_store supersede — write-then-close ordering", () => {
   const originalRequest = FlairClient.prototype.request;
 
   afterEach(() => {

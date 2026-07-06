@@ -1,4 +1,4 @@
-// dedup / supersede / memory_update e2e — real-Harper integration tests (ops-2gby).
+// dedup / supersede / memory_update e2e — real-Harper integration tests.
 //
 // PR #553 fixed a memory-integrity bug (silent-write-loss on the dedup/
 // supersede path) with: a cosine+lexical co-gate for dedup, a memory_update
@@ -97,7 +97,8 @@ async function registerAgent(harper: HarperInstance, agent: TestAgent): Promise<
 /**
  * ═══════════════════════════════════════════════════════════════════════════
  * DISCOVERED BEHAVIORAL DIVERGENCE (real Harper vs. the mocked unit suite) —
- * ops-2gby's original reason for existing, RESOLVED by ops-ume4.
+ * this suite's original reason for existing, RESOLVED by the
+ * findConservativeDedupMatch singleton-candidate cosine fix described below.
  *
  * test/unit/memory-integrity.test.ts's in-memory mock computes the cosine
  * "$distance" synchronously in plain JS (a real, always-populated number) for
@@ -116,7 +117,7 @@ async function registerAgent(harper: HarperInstance, agent: TestAgent): Promise<
  * `$distance` silently resolved to `cosine = 0` — below any sane threshold —
  * meaning EVERY agent's very first near-duplicate comparison, ever, was
  * GUARANTEED to be flagged `deduplicated: false` regardless of true
- * similarity (ops-ume4).
+ * similarity.
  *
  * This was NOT the never-suppress write-safety invariant breaking — the
  * WRITE always landed. It was the `deduplicated` SIGNAL silently failing to
@@ -191,7 +192,7 @@ const FINDING_A_REWORDED =
 
 let harper: HarperInstance;
 
-describe("dedup / supersede / memory_update e2e (real Harper, ops-2gby)", () => {
+describe("dedup / supersede / memory_update e2e (real Harper)", () => {
   beforeAll(async () => {
     harper = await startHarper();
   }, 180_000);
@@ -248,12 +249,13 @@ describe("dedup / supersede / memory_update e2e (real Harper, ops-2gby)", () => 
   }, 60_000);
 
   // ═══════════════════════════════════════════════════════════════════════
-  // Scenario 2 — never-silent-loss AND ops-ume4 regression guard: a true
+  // Scenario 2 — never-silent-loss AND findConservativeDedupMatch singleton-
+  // candidate-cosine regression guard: a true
   // near-duplicate is FLAGGED (deduplicated:true + matchedId) but STILL
   // written as a brand-new record with the reworded content intact (never
   // swapped for the old record's content). This agent's near-dup write below
   // is its SECOND memory ever (compared against its first, idOrig) — exactly
-  // the singleton-candidate-set query ops-ume4 fixed (before the fix, this
+  // the singleton-candidate-set query findConservativeDedupMatch fixed (before the fix, this
   // exact shape was a GUARANTEED miss: `deduplicated:false` regardless of
   // true similarity, on every fresh agent's first near-dup comparison, with
   // no warm-up query able to change that). No warm-up write precedes this
@@ -269,7 +271,7 @@ describe("dedup / supersede / memory_update e2e (real Harper, ops-2gby)", () => 
   // + real HNSW cosine search + real jaccard) wired correctly, using the
   // exact knob production callers use to tune it.
   // ═══════════════════════════════════════════════════════════════════════
-  test("Scenario 2 (ops-ume4): a FRESH agent's FIRST-EVER near-duplicate write is flagged deduplicated:true + matchedId, AND still written as a new record with the reworded content", async () => {
+  test("Scenario 2 (singleton-candidate cosine fix): a FRESH agent's FIRST-EVER near-duplicate write is flagged deduplicated:true + matchedId, AND still written as a new record with the reworded content", async () => {
     const agent = mkAgent(`dedup-nearmatch-${randomUUID()}`);
     await registerAgent(harper, agent);
 
@@ -310,7 +312,7 @@ describe("dedup / supersede / memory_update e2e (real Harper, ops-2gby)", () => 
     expect(bodyReword.id).toBe(idReword);
 
     // The collision signal fired against the REAL top-cosine candidate. Per
-    // ops-ume4: this query's underlying result set is a SINGLETON (exactly
+    // Singleton-candidate cosine fix: this query's underlying result set is a SINGLETON (exactly
     // one candidate, idOrig) — the case where Harper's raw `$distance` field
     // itself is undefined BY DESIGN (that never changes; findConservativeDedupMatch's
     // fix doesn't make Harper populate it, it computes cosine itself from the

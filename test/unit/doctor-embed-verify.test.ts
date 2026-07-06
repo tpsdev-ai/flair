@@ -7,7 +7,7 @@ import nacl from "tweetnacl";
 import { verifySemanticSearch } from "../../src/cli.ts";
 
 /**
- * FIX 1 (onboarding dogfood round 1, ops-9czl):
+ * FIX 1 (onboarding dogfood round 1):
  * `flair doctor` / `flair init` must run a REAL embed→paraphrase-search
  * round-trip and FAIL LOUDLY when embeddings are not loaded — never report
  * all-clear while recall-by-meaning is dead.

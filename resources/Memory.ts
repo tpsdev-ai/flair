@@ -29,7 +29,7 @@ const NOT_FOUND = () =>
  * live in ./memory-read-scope.ts — the ONE centralized helper every
  * cross-agent Memory read path (search()/get() here, SemanticSearch.ts,
  * MemoryBootstrap.ts, auth-middleware.ts's by-id guard) resolves its scope
- * through, so the scoping rule cannot drift per-path again (ops-nzxa: a
+ * through, so the scoping rule cannot drift per-path again (a
  * SemanticSearch inline `visibility === "office"` OR-clause leaked office
  * memories to any authenticated agent because the rule had scattered). See
  * that module's doc for the migration invariant (no-visibility-field reads
@@ -107,7 +107,7 @@ async function findConservativeDedupMatch(
     }
     if (!top) return null;
 
-    // ─── ops-ume4: Harper's cosine-sort query omits $distance for a SINGLETON
+    // ─── Harper's cosine-sort query omits $distance for a SINGLETON
     // result set ─────────────────────────────────────────────────────────────
     // Initial working theory was a per-agentId HNSW "cold-start" (first-ever
     // query cold, second query warm) and the initially-recommended fix was a
@@ -154,7 +154,7 @@ async function findConservativeDedupMatch(
       cosine = 1 - top.$distance;
     } else {
       console.error(
-        "Memory.findConservativeDedupMatch: $distance undefined on a singleton cosine result (ops-ume4) — " +
+        "Memory.findConservativeDedupMatch: $distance undefined on a singleton cosine result — " +
         "falling back to a manual cosine computation from the candidate's stored embedding",
         { agentId, candidateId: top.id },
       );
@@ -235,7 +235,7 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
  * detachment discipline as findConservativeDedupMatch (each discrete Harper
  * call individually wrapped — see withDetachedTxn's doc for why a single
  * wrap around a multi-await async function would not protect the later
- * call). Does NOT swallow failures (ops-a4t5 fix) — throws so the caller can
+ * call). Does NOT swallow failures — throws so the caller can
  * log it. Never called before the new record is already written.
  */
 async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<string, unknown>): Promise<void> {
@@ -300,7 +300,7 @@ async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdi
 
 /**
  * Close the superseded record — called AFTER the new record has already been
- * written (write-new-BEFORE-close-old, ops-a4t5 fix). Safe failure state is
+ * written (write-new-BEFORE-close-old). Safe failure state is
  * two active records (recoverable), never a tombstoned-old-with-lost-new.
  * Failure is logged (observable), never silently swallowed. No-op if
  * `content.supersedes` is not set.
@@ -319,14 +319,14 @@ async function closeSupersededIfNeeded(ctx: any, content: any, methodLabel: "pos
     // (semgrep unsafe-formatstring). Keep all dynamic values in the data object.
     console.error(
       "Memory.closeSuperseded: failed to close superseded record after writing new record " +
-      "(ops-a4t5 — observable, not silent; new record is safely written, old record remains active until retried)",
+      "(observable, not silent; new record is safely written, old record remains active until retried)",
       { method: methodLabel, supersededId: content.supersedes, newRecordId: content.id, err },
     );
   }
 }
 
 /**
- * ─── Durability-keyed default visibility (ops-2dm3 Layer 1, part A) ─────────
+ * ─── Durability-keyed default visibility (Layer 1, part A) ─────────────────
  *
  * Writer intent: an explicit `visibility` on the write ALWAYS overrides this
  * (callers check `content.visibility == null` before calling this). When
@@ -484,8 +484,8 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     // Non-admin agent: only its own memories (any visibility), or a granted
-    // owner's SHARED memories — never that owner's private ones (ops-2dm3
-    // Layer 1 private-exclusion). Centralized in resolveReadScope() so this
+    // owner's SHARED memories — never that owner's private ones (Layer 1
+    // private-exclusion). Centralized in resolveReadScope() so this
     // and search() below cannot drift.
     const record = await super.get(target);
     if (!record) return NOT_FOUND();
@@ -525,7 +525,7 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     // Non-admin agent: scope to own (any visibility) + granted owners' SHARED
-    // memories only (ops-2dm3 Layer 1 private-exclusion). Centralized in
+    // memories only (Layer 1 private-exclusion). Centralized in
     // resolveReadScope() so get() above and search() here cannot drift.
     const authAgent = auth.agentId;
     const scope = await resolveReadScope(authAgent);
@@ -583,7 +583,7 @@ export class Memory extends (databases as any).flair.Memory {
     content.updatedAt = content.createdAt;
     content.archived = content.archived ?? false;
 
-    // ─── Default visibility (durability-keyed) — ops-2dm3 Layer 1, part A ────
+    // ─── Default visibility (durability-keyed) — Layer 1, part A ────────────
     // post() only ever creates a NEW record — patchRecord/supersede-close/
     // retrievalCount bumps all route through put() instead (see put()'s
     // pre-existing-record guard below), so there is no "don't overwrite an
@@ -624,7 +624,7 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     // Content safety scan — covers content + summary (defense-in-depth for
-    // agent-set summaries, ops-i2jb).
+    // agent-set summaries).
     if (content.content || content.summary) {
       const safety = scanFields(content, ["content", "summary"]);
       if (!safety.safe) {
@@ -673,7 +673,7 @@ export class Memory extends (databases as any).flair.Memory {
     // ── Write the new record FIRST ──────────────────────────────────────────
     const result = await super.post(content);
 
-    // ── THEN close the superseded record (ops-a4t5 fix) ─────────────────────
+    // ── THEN close the superseded record ────────────────────────────────────
     // Write-new-BEFORE-close-old: the previous order (close-old via a fire-
     // and-forget `.catch(()=>{})` BEFORE the new write) could tombstone the
     // old record and then lose the new one if the write failed afterward.
@@ -733,7 +733,7 @@ export class Memory extends (databases as any).flair.Memory {
     // visibility stamped) or an update/patch (dedup-bypassed, visibility left
     // untouched). See the dedup-gate block further down for why an existing
     // id skips the gate; the SAME "does a record already exist" check gates
-    // the visibility default (ops-2dm3 Layer 1 part A): patchRecord/supersede-
+    // the visibility default (Layer 1 part A): patchRecord/supersede-
     // close/retrievalCount bumps all route through put() with a MERGED
     // `{...existing, ...patch}` payload, and must never have their stored
     // visibility overwritten by a default recomputed from that merged content
@@ -742,7 +742,7 @@ export class Memory extends (databases as any).flair.Memory {
       ? await (databases as any).flair.Memory.get(content.id).catch(() => null)
       : null;
 
-    // ─── Default visibility (durability-keyed) — ops-2dm3 Layer 1, part A ────
+    // ─── Default visibility (durability-keyed) — Layer 1, part A ────────────
     // Explicit visibility on the write ALWAYS overrides; only stamp the
     // default when the caller left it unset AND this is a fresh record.
     // permanent|persistent → shared; standard|ephemeral|absent → private.
@@ -760,7 +760,7 @@ export class Memory extends (databases as any).flair.Memory {
       content.validFrom = content.createdAt;
     }
 
-    // Content safety scan on updated content + summary (ops-i2jb).
+    // Content safety scan on updated content + summary.
     if (content.content || content.summary) {
       const safety = scanFields(content, ["content", "summary"]);
       if (!safety.safe) {
@@ -845,7 +845,7 @@ export class Memory extends (databases as any).flair.Memory {
     // ── Write the new/updated record FIRST ──────────────────────────────────
     const result = await super.put(content);
 
-    // ── THEN close the superseded record (ops-a4t5 fix; see post()) ────────
+    // ── THEN close the superseded record (see post()) ───────────────────────
     await closeSupersededIfNeeded(ctx, content, "put");
 
     return buildWriteResponse(content, result, dedupMatch);

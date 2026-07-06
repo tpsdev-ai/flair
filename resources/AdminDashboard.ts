@@ -5,7 +5,7 @@ import { allowAdmin } from "./agent-auth.js";
 /**
  * GET /AdminDashboard — admin home page with system overview.
  *
- * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts for why
+ * allowRead()=allowAdmin (defense-in-depth): see Admin.ts for why
  * this closes a real gap, not just belt-and-suspenders — a verified
  * non-admin agent could otherwise read full instance stats (principal/agent/
  * memory/relationship counts) with no admin check at all.

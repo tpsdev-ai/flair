@@ -8,11 +8,11 @@ import { resolveModelsDir } from "../../resources/embeddings-provider";
 /**
  * resolveModelsDir() decides where the embeddings model lives / downloads.
  *
- * The whole point of ops-am0v: the chosen dir must ALWAYS be user-writable, so a
+ * The whole point of this resolution: the chosen dir must ALWAYS be user-writable, so a
  * sudo/root-owned global install (package dir owned by root) never targets the
  * read-only package dir and silently kills semantic search.
  */
-describe("resolveModelsDir (ops-am0v)", () => {
+describe("resolveModelsDir (user-writable dir enforcement)", () => {
   const SAVED = {
     FLAIR_MODELS_DIR: process.env.FLAIR_MODELS_DIR,
     ROOTPATH: process.env.ROOTPATH,

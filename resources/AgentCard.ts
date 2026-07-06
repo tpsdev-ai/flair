@@ -38,7 +38,7 @@ export class AgentCard extends Resource {
     return {
       name: String(agent.name ?? agent.id ?? agentId),
       // Only an explicit kind="description" soul publishes — no private-soul
-      // fallback (ops-vz6j). See agentcard-fields.ts for the security rationale.
+      // fallback. See agentcard-fields.ts for the security rationale.
       description: selectPublicDescription(souls),
       url: String(agent.url ?? ""),
       version: String(agent.version ?? "1.0.0"),

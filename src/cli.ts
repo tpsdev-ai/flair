@@ -782,7 +782,7 @@ export async function seedFederationInstanceViaOpsApi(
   }
 }
 
-// ─── Provision Flair on Harper Fabric (ops-2kyi) ───────────────────────────
+// ─── Provision Flair on Harper Fabric ──────────────────────────────────────
 //
 // Atomic provisioning for a fresh Harper Fabric cluster: builds a deploy
 // tarball with .env baked in, deploys via ops API, waits for restart, and
@@ -904,7 +904,7 @@ export async function provisionFabric(
   console.log("Flair is running ✓");
 
   // 3. Provision Harper super_user
-  // Since ops-lzmg is merged, the username doesn't have to be "admin".
+  // Since custom-admin-username support is merged, the username doesn't have to be "admin".
   // We can use the cluster-admin user directly if it's already a super_user.
   // Check if cluster admin is already a super_user first:
   let clusterAdminIsSuperUser = false;
@@ -1330,7 +1330,7 @@ export type UpgradeStatus = "current" | "outdated" | "missing" | "optional";
 /**
  * Whether a package's status line should be printed in the default `flair
  * upgrade` listing. Suppresses optional-because-openclaw-is-absent lines
- * (ops-p42n) — pure noise on machines without openclaw — unless `--all`
+ * — pure noise on machines without openclaw — unless `--all`
  * (showAll) is set. All other statuses always print.
  */
 export function shouldPrintUpgradeLine(status: UpgradeStatus, showAll: boolean): boolean {
@@ -4025,7 +4025,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     }
 
     if (totalBatches === 0) {
-      // ops-c7t9: no-change syncs must still ping the hub so it updates the
+      // No-change syncs must still ping the hub so it updates the
       // spoke's lastSyncAt (liveness). Without this, idle-but-alive spokes
       // look indistinguishable from dead ones on the hub dashboard.
       try {
@@ -5316,7 +5316,7 @@ function oauthDetailLines(o: any): string[] {
 
 // Common localhost ports a running Flair daemon might be on. Used by
 // discoverLocalFlairPort when the configured URL is unreachable, to detect
-// config-vs-daemon port drift (ops-mbdi). Order is ad-hoc — first hit wins.
+// config-vs-daemon port drift. Order is ad-hoc — first hit wins.
 //
 // 9926: original default (long-running early installs predate the bump)
 // 19926: current default (DEFAULT_PORT)
@@ -5432,7 +5432,7 @@ const statusCmd = program
     const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
 
     // When unreachable on a localhost URL, probe candidate ports to detect
-    // config-vs-daemon port drift (ops-mbdi). Surface the actually-listening
+    // config-vs-daemon port drift. Surface the actually-listening
     // port with a fix recipe — better UX than just "unreachable."
     let discoveredPort: number | null = null;
     if (!healthy && isLocalhostUrl(baseUrl)) {
@@ -6258,11 +6258,11 @@ program
     //
     // Default UI shows the npm-global packages (flair, flair-mcp) plus
     // openclaw-flair WHEN openclaw is installed. On machines without openclaw
-    // the openclaw-flair line is suppressed entirely (ops-p42n) rather than
+    // the openclaw-flair line is suppressed entirely rather than
     // nagging with an install hint for a plugin the user can't use. flair-client
     // is a transitive dep of flair-mcp and showing it as a top-level upgrade
     // item invites a misleading "❔ missing — install with npm install -g"
-    // suggestion for users who installed flair without flair-mcp (ops-h5cd).
+    // suggestion for users who installed flair without flair-mcp.
     // --all opts in to both flair-client and the suppressed openclaw line.
     type ProbeKind = "bin" | "lib" | "openclaw-plugin";
     const packages: Array<{
@@ -6281,7 +6281,7 @@ program
         kind: "bin",
         // Older flair-mcp installs (e.g. 0.10.0) either aren't on PATH or
         // don't support `--version`, so the bin probe returns null even when
-        // the package IS globally installed (ops-p42n). Fall back to the lib
+        // the package IS globally installed. Fall back to the lib
         // probe, which require.resolves the package.json from a sibling global
         // install regardless of PATH or --version support. kind stays "bin" so
         // it remains npm-upgradeable (npm install -g), not the openclaw path.
@@ -6326,7 +6326,7 @@ program
         findings.push({ name, installed, latest, status, kind });
 
         // Suppress the line for openclaw plugins that are optional-because-
-        // openclaw-is-absent (ops-p42n): on machines without openclaw the
+        // openclaw-is-absent: on machines without openclaw the
         // "○ … not installed (openclaw not detected) → … (install via …)"
         // line is pure noise. Still print it when openclaw IS installed
         // (current/outdated) or under --all.
@@ -6345,7 +6345,7 @@ program
       } catch { /* skip unavailable packages */ }
     }
 
-    // Scope footer (ops-p42n): make explicit what `flair upgrade` does and
+    // Scope footer: make explicit what `flair upgrade` does and
     // doesn't cover, so "were the others checked?" has a one-line answer.
     console.log("\nScope: npm-global packages (flair, flair-mcp) + openclaw plugins. Other integrations (pi-flair, langgraph-flair, n8n-nodes-flair, hermes-flair) upgrade in their own ecosystems (pi / pip / n8n).");
 
@@ -7380,7 +7380,7 @@ program
   });
 
 // ─── flair session snapshot ──────────────────────────────────────────────────
-// Slice 2 of FLAIR-AGENT-CONTEXT-TIERS-B (ops-9wji-B / ops-ojht). Snapshot a
+// Slice 2 of FLAIR-AGENT-CONTEXT-TIERS-B. Snapshot a
 // session jsonl + label metadata into a tar.gz under ~/.flair/snapshots/<agent>/sessions/.
 //
 // Three subcommands: create | list | restore. Mirrors FLAIR-NIGHTLY-REM's
@@ -7534,7 +7534,7 @@ const memory = program.command("memory").description("Manage agent memories");
 memory.command("add [content]").requiredOption("--agent <id>")
   .option("--content <text>", "memory content (alias for positional arg)")
   .option("--durability <d>", "standard").option("--tags <csv>")
-  .option("--summary <text>", "agent-set multi-sentence dense compression (3-tier chain: subject → summary → content; ops-wkoh)")
+  .option("--summary <text>", "agent-set multi-sentence dense compression (3-tier chain: subject → summary → content)")
   .option("--subject <text>", "one-line title / entity this memory is about")
   .option("--derived-from <csv>", "Comma-separated source Memory IDs this memory was distilled/reflected from (sets Memory.derivedFrom; used by the `rem rapid` reflection loop)")
   .option("--visibility <value>", "Writer-controlled sharing intent (sets Memory.visibility): 'private' (owner-only, never visible to any other agent) or 'shared' (visible to owner + every other agent on this instance — open within the org, not gated by a MemoryGrant). Omit to use the server's durability-keyed default: permanent/persistent -> shared, standard/ephemeral -> private (flair#509)")
@@ -7557,7 +7557,7 @@ memory.command("add [content]").requiredOption("--agent <id>")
     console.log(JSON.stringify(out, null, 2));
   });
 // ─── flair memory write-task-summary ────────────────────────────────────────
-// Slice 1 of FLAIR-AGENT-CONTEXT-TIERS-B (ops-9wji-B / ops-3xyd). Standalone
+// Slice 1 of FLAIR-AGENT-CONTEXT-TIERS-B. Standalone
 // helper that any agent harness (or a manual operator) can invoke at task
 // close to capture a structured task summary as a persistent Memory row
 // before resetting the session.
@@ -7575,7 +7575,7 @@ memory.command("add [content]").requiredOption("--agent <id>")
 memory.command("write-task-summary")
   .description("Capture a structured task summary as a persistent Memory row (used by session-reset harness; standalone-callable by operators)")
   .requiredOption("--agent <id>", "Agent the summary belongs to")
-  .requiredOption("--beads <ops-id>", "Bead/PR/task identifier this summary is about (e.g. ops-3xyd)")
+  .requiredOption("--beads <ops-id>", "Bead/PR/task identifier this summary is about")
   .requiredOption("--outcome <s>", "Outcome of the task: merged | rejected | abandoned")
   .option("--summary <text>", "Multi-sentence dense compression (populates Memory.summary; will be the agent's read-time view)")
   .option("--files-touched <csv>", "Comma-separated list of files touched during the task (becomes part of content)")
@@ -7774,7 +7774,7 @@ memory.command("list")
 
 // ─── flair memory hygiene ────────────────────────────────────────────────────
 // Detect + remove junk memory rows that accumulate over time. Surfaced from
-// the 2026-05-07 manual cleanup (ops-ucyy): an instance had 627 records, ~250 of
+// a 2026-05-07 manual cleanup: an instance had 627 records, ~250 of
 // them were noise — `*-compact-*` ID fragments from an old pipeline, pangram
 // test content ("the quick brown fox..." / "Flair 251 test ..."), and
 // near-empty rows (<25 chars). We did the cleanup ad-hoc with raw curl + jq;
@@ -7789,8 +7789,8 @@ memory.command("list")
 // Default is all three, dry-run. Flip --apply to actually delete. Always
 // requires admin pass to read across agent scopes (uses ops API).
 //
-// Federation note: this only deletes on the local instance. ops-esun
-// (federation distributed-delete via tombstones) is the systemic answer for
+// Federation note: this only deletes on the local instance. Federation
+// distributed-delete via tombstones is the systemic answer for
 // fan-out — until that lands, run `flair memory hygiene` on each peer.
 
 // Exported for unit testing — keeps the predicate logic separable from
@@ -7927,7 +7927,7 @@ memory.command("hygiene")
     console.log(`\n\n✅ Deleted ${deleted} rows.`);
     console.log("");
     console.log("Note: this is a local-instance delete. Federated peers will keep their copies until");
-    console.log("ops-esun (tombstone-based distributed delete) lands. Until then, run `flair memory");
+    console.log("tombstone-based distributed delete lands. Until then, run `flair memory");
     console.log("hygiene --apply` on each peer to fan out.");
   });
 
@@ -9728,7 +9728,7 @@ presence
 
 // ─── flair workspace ─────────────────────────────────────────────────────────
 //
-// Coordination write surface (ops-wmgx / Kris #510). `workspace set` writes the
+// Coordination write surface (Kris #510). `workspace set` writes the
 // agent's OWN WorkspaceState via a signed POST /WorkspaceState. Identity comes
 // from the Ed25519 signature — the body carries NO agentId, so an agent can only
 // write as itself (the WorkspaceState.post() handler overwrites agentId from the
@@ -9805,7 +9805,7 @@ workspace
 
 // ─── flair orgevent ──────────────────────────────────────────────────────────
 //
-// Coordination write surface (ops-wmgx / Kris #510). `orgevent` publishes an
+// Coordination write surface (Kris #510). `orgevent` publishes an
 // OrgEvent ATTRIBUTED to the authenticated agent via a signed POST /OrgEvent.
 // The event's authorId comes from the Ed25519 signature — the body carries NO
 // authorId, so an agent CANNOT forge another agent's events (the OrgEvent.post()

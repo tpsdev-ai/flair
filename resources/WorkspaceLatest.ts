@@ -19,7 +19,7 @@ export class WorkspaceLatest extends Resource {
   async get(pathInfo?: any) {
     // Harper v5 does not populate this.context / this.request on Resource
     // subclasses — getContext() is the only reliable path to the gate's
-    // tpsAgent/tpsAgentIsAdmin annotations (ops-sal4: the previous
+    // tpsAgent/tpsAgentIsAdmin annotations (the previous
     // `(this as any).context?.request ?? (this as any).request` read was always
     // undefined, so the ownership check below never ran — fail-open cross-agent
     // read).
