@@ -43,11 +43,16 @@ control is reserved for a different problem entirely (below).
 
 ## Access model: open within the org, closed at the federation edge
 
-> **Rollout note:** open-within-org read is the design and the direction Flair is
-> converging on; the current release still gates cross-agent reads by explicit grant
-> (see [SECURITY.md](SECURITY.md)) — the two converge when the within-org open-read
-> change deploys (blocked on hardening the federation edge first; see below). This doc
-> describes the model Flair is built toward, not a claim about today's default behavior.
+> **Rollout note:** open-within-org read is the shipped model. `resolveReadScope()`
+> (`resources/memory-read-scope.ts`) grants every reader its own records (any
+> visibility) plus every other agent's non-private record on the instance — no
+> per-owner MemoryGrant required to read a `shared` (or no-visibility-field) record.
+> `private` is the one remaining owner-only exception. There is no migration or
+> backfill step: existing records with no `visibility` field read as non-private
+> the moment this code runs — pinning that to a pre-deploy operator step would
+> itself be a knob the "zero knobs" invariant below rejects. This landed after the
+> federation edge was hardened (see below), so within-org openness never outran
+> the one hard boundary it depends on.
 
 Inside one Flair instance, every agent is inside the same trust boundary — that's what
 "one org" means (a Flair deployment *is* an org: the set of agents sharing one instance).

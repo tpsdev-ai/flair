@@ -2,7 +2,7 @@ import { databases } from "@harperfast/harper";
 import { PRIVATE_VISIBILITY, isPrivateVisibility } from "./memory-visibility.js";
 
 /**
- * ─── Centralized Memory read-scoping (ops-2dm3 Layer 1 → within-org-read-open) ─
+ * ─── Centralized Memory read-scoping (the original grant-gated read model → within-org-read-open) ─
  *
  * The SINGLE source every cross-agent Memory read path resolves its scope
  * through: Memory.search()/Memory.get() (resources/Memory.ts), SemanticSearch
@@ -11,7 +11,7 @@ import { PRIVATE_VISIBILITY, isPrivateVisibility } from "./memory-visibility.js"
  * existed, SemanticSearch had its OWN inline grant-resolution + a
  * `visibility === "office"` global OR-clause that leaked ANY authenticated
  * agent's read of ANY other agent's memories once that memory happened to
- * carry `visibility: "office"` (ops-nzxa). Scattering the scoping rule per
+ * carry `visibility: "office"` (the office-visibility read leak). Scattering the scoping rule per
  * path is exactly how that leak happened — this module exists so it can't
  * happen again: one rule, one place, every path imports it.
  *
@@ -31,7 +31,7 @@ import { PRIVATE_VISIBILITY, isPrivateVisibility } from "./memory-visibility.js"
  * no longer consulted by this module at all (see resolveAllowedOwners's doc
  * below for why the function itself still exists).
  *
- * ── The migration invariant (non-negotiable, unchanged) ──────────────────────
+ * ── The no-visibility-field invariant (non-negotiable) ───────────────────────
  * Existing memories (written before the `visibility` field existed) have NO
  * `visibility` field. A record with no `visibility` field is NOT private — it
  * reads exactly like an explicit `shared` record (org-open). This is why the
@@ -39,21 +39,11 @@ import { PRIVATE_VISIBILITY, isPrivateVisibility } from "./memory-visibility.js"
  * INCLUDES records missing the field entirely), never `visibility == 'shared'`
  * (`equals`, which would EXCLUDE them and silently retroactively privatize
  * every legacy row) — nothing is retroactively made private, nothing is
- * excluded from the broadening that wasn't already excluded before it.
- *
- * ── Rollout ordering (operator responsibility, not a code gate) ──────────────
- * Opening reads broadens who can see an existing `shared`/no-visibility-field
- * memory: before this change, only a grant-holder could; after, every agent
- * on the instance can. A memory that was `shared` (or had no visibility field)
- * but had NO grant covering it was, in practice, owner-only — this change
- * would newly expose it unless that "effectively private" state is pinned to
- * `private` FIRST. See `flair migrate visibility-backfill` (src/cli.ts,
- * runVisibilityBackfillOnce) for the conservative backfill that MUST be run
- * before this open-read code is deployed to an instance with existing data.
- * This module deliberately does NOT gate itself on "has the backfill run" —
- * that would add a runtime knob/detection mechanism the emergent-trust reframe
- * rejects (zero knobs). The ordering is an operator responsibility, documented
- * here and in the backfill's own comment, not something this code checks.
+ * excluded from the broadening that wasn't already excluded before it. There
+ * is no migration/backfill step: pure-open means every pre-existing record
+ * reads as non-private automatically, the moment this code is deployed —
+ * gating that on an operator-run step would itself be a knob the
+ * emergent-trust reframe rejects (zero knobs).
  */
 
 /**

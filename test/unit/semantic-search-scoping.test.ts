@@ -2,12 +2,13 @@
  * semantic-search-scoping.test.ts — unit coverage for
  * resources/SemanticSearch.ts's read-scoping.
  *
- * ops-2dm3 Layer 1 (superseded by within-org-read-open, see resources/
- * memory-read-scope.ts's module doc): SemanticSearch used to have its OWN
- * inline grant-resolution loop PLUS a `visibility === "office"` global
- * OR-clause: ANY authenticated agent could read ANY other agent's memory
- * once it happened to carry `visibility: "office"` — no grant required at
- * all (ops-nzxa, an unintentional LEAK). Both are gone; SemanticSearch now
+ * The original grant-gated read model (superseded by within-org-read-open,
+ * see resources/memory-read-scope.ts's module doc): SemanticSearch used to
+ * have its OWN inline grant-resolution loop PLUS a `visibility === "office"`
+ * global OR-clause: ANY authenticated agent could read ANY other agent's
+ * memory once it happened to carry `visibility: "office"` — no grant
+ * required at all (the office-visibility read leak, an unintentional LEAK).
+ * Both are gone; SemanticSearch now
  * resolves its scope through the ONE centralized helper
  * (resources/memory-read-scope.ts resolveReadScope()), the same one
  * Memory.search()/Memory.get() use — which now DELIBERATELY grants that same
@@ -110,7 +111,7 @@ function reset() {
   memoryGrants = [];
 }
 
-describe("SemanticSearch.post() — ops-2dm3 Layer 1 centralized read-scoping", () => {
+describe("SemanticSearch.post() — centralized read-scoping", () => {
   it("anonymous is denied (401)", async () => {
     reset();
     const s = makeSearch(anonCtx());
@@ -133,7 +134,7 @@ describe("SemanticSearch.post() — ops-2dm3 Layer 1 centralized read-scoping", 
     expect(ids).toEqual(["m1", "m2"]);
   });
 
-  it("within-org-read-open (was: office-OR leak closed, ops-nzxa): an UNGRANTED owner's SHARED memory IS now returned — this is the intended, documented broadening, not a leak", async () => {
+  it("within-org-read-open (was: office-OR leak closed): an UNGRANTED owner's SHARED memory IS now returned — this is the intended, documented broadening, not a leak", async () => {
     reset();
     memoryStore.set("shared-no-grant", { id: "shared-no-grant", agentId: "agent-owner", content: "shared, no grant held, still org-open", visibility: "shared" });
     const s = makeSearch(agentCtx("agent-stranger"));

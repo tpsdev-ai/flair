@@ -23,15 +23,16 @@ function checkAgentScope(
 /**
  * Returns 403 message if agent tries to read another agent's PRIVATE memory,
  * null otherwise (within-org-read-open — mirrors resources/memory-read-
- * scope.ts's resolveReadScope().isAllowed()). Originally (ops-2dm3 Layer 1)
- * this also required a MemoryGrant for any cross-agent read of a non-private
- * memory; that grant gate is GONE now — see resources/memory-read-scope.ts's
- * module doc for the full model (Kern-approved security-boundary change).
- * `private` is the ONLY remaining owner-only exception; `shared` or a
- * no-visibility-field (legacy) record is readable by ANY verified agent, no
- * grant needed. (Not to be confused with the UNRELATED pre-2dm3 `visibility
- * === "office"` global bypass, ops-nzxa — that was an accidental leak fixed
- * by Layer 1's grant-gating; this is a deliberate, later design decision that
+ * scope.ts's resolveReadScope().isAllowed()). Originally (the original
+ * grant-gated read model) this also required a MemoryGrant for any
+ * cross-agent read of a non-private memory; that grant gate is GONE now —
+ * see resources/memory-read-scope.ts's module doc for the full model
+ * (Kern-approved security-boundary change). `private` is the ONLY remaining
+ * owner-only exception; `shared` or a no-visibility-field (legacy) record is
+ * readable by ANY verified agent, no grant needed. (Not to be confused with
+ * the UNRELATED, earlier `visibility === "office"` global bypass — the
+ * office-visibility read leak — that was an accidental leak fixed by the
+ * grant-gated model; this is a deliberate, later design decision that
  * supersedes the grant gate itself.)
  */
 function checkMemoryReadScope(

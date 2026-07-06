@@ -115,7 +115,7 @@ describe("Authenticated agent journey", () => {
         content: memoryContent(i),
         subject: SUBJECT,
         durability: "standard",
-        // ops-2dm3 Layer 1: durability:"standard" with no explicit visibility
+        // The durability-keyed default-visibility rule: durability:"standard" with no explicit visibility
         // now defaults SERVER-SIDE to "private" — which would make the grant
         // test below (bob sees alice's rows via a MemoryGrant) fail, since a
         // private memory is never returned to a grant-holder. Explicit

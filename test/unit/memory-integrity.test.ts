@@ -1,7 +1,7 @@
 /**
  * memory-integrity.test.ts — regression guard for the memory-integrity fix
- * (flair#526 silent-drop, flair#548 stale-read-after-update, ops-a4t5
- * supersede silent-fail).
+ * (flair#526 silent-drop, flair#548 stale-read-after-update, the supersede
+ * silent-fail fix).
  *
  * Exercises resources/Memory.ts (post/put) directly against a mocked
  * @harperfast/harper, same technique as coordination-write-auth.test.ts and
@@ -82,12 +82,12 @@ let idCounter: number;
 // never-federated instance); the originatorInstanceId describe block below
 // sets this to a fixed test id.
 let instanceRow: any = null;
-// ops-ume4 simulation switch: when true, memorySearchGen's cosine-sort branch
-// omits `$distance` from every candidate (real Harper's observed behavior for
-// a SINGLETON cosine-query result set) instead of computing a real one —
-// letting the "ops-ume4 fallback" describe block below exercise
-// findConservativeDedupMatch's manual-cosine fallback deterministically,
-// without needing a live Harper.
+// Singleton-cosine-fallback simulation switch: when true, memorySearchGen's
+// cosine-sort branch omits `$distance` from every candidate (real Harper's
+// observed behavior for a SINGLETON cosine-query result set) instead of
+// computing a real one — letting the "manual-cosine fallback" describe block
+// below exercise findConservativeDedupMatch's manual-cosine fallback
+// deterministically, without needing a live Harper.
 let forceUndefinedDistance = false;
 
 function memorySearchGen(query: any) {
@@ -138,7 +138,7 @@ class BaseMemory {
     // id, isCollection, sort) for HTTP-routed reads, NOT a plain string — only
     // direct in-process calls (e.g. this file's other post()/put() helpers)
     // pass a bare id. Support both so get() unit tests can exercise the real
-    // RequestTarget shape (ops-qjyq) without breaking the existing string-id
+    // RequestTarget shape without breaking the existing string-id
     // call sites in this file.
     const id = typeof target === "string" ? target : target?.id;
     return memoryStore.get(id) ?? null;
@@ -264,7 +264,7 @@ describe("dedup co-gate — pure math (resources/dedup.ts)", () => {
     expect(jaccardSimilarity(["a", "b"], [])).toBe(0);
   });
 
-  // cosineSimilarity backs the ops-ume4 fallback in findConservativeDedupMatch
+  // cosineSimilarity backs the manual-cosine fallback in findConservativeDedupMatch
   // (resources/Memory.ts) — computed directly in JS when Harper's cosine-sort
   // query doesn't attach a $distance (see that function's doc comment).
   it("cosineSimilarity: identical vectors → 1, orthogonal vectors → 0", () => {
@@ -380,7 +380,7 @@ describe("Memory.post — server-side dedup gate never suppresses a write", () =
   });
 });
 
-// ─── ops-ume4: findConservativeDedupMatch's manual-cosine fallback ───────────
+// ─── findConservativeDedupMatch's manual-cosine fallback ────────────────────
 // Real Harper's cosine-sort query omits `$distance` (comes back `undefined`)
 // when its post-filter result set is a SINGLETON — in practice, an agent's
 // SECOND-ever memory compared against its first. That behavior can't be
@@ -392,7 +392,7 @@ describe("Memory.post — server-side dedup gate never suppresses a write", () =
 // cosineSimilarity) fires correctly. See
 // test/integration/dedup-supersede-e2e.test.ts's Scenario 2 for the same
 // behavior proven against REAL Harper.
-describe("ops-ume4: findConservativeDedupMatch falls back to a manual cosine computation when $distance is undefined", () => {
+describe("findConservativeDedupMatch falls back to a manual cosine computation when $distance is undefined", () => {
   it("a near-duplicate whose ONLY candidate has $distance undefined is still correctly flagged (real cosine, not the pre-fix 0 sentinel)", async () => {
     const m1 = makeMemory(agentCtx("agent-1"));
     const r1 = await m1.post({ agentId: "agent-1", content: FINDING_A });
@@ -562,7 +562,7 @@ describe("supersede auth (memory_update preserveHistory mode)", () => {
 });
 
 // ─── Supersede transaction — write-new BEFORE close-old, observable failure ──
-describe("supersede transaction (ops-a4t5 fix)", () => {
+describe("supersede transaction (write-new-before-close-old fix)", () => {
   it("write-new happens BEFORE close-old (call order)", async () => {
     const owner = agentCtx("agent-1");
     const mOwner = makeMemory(owner);
@@ -599,7 +599,7 @@ describe("supersede transaction (ops-a4t5 fix)", () => {
       expect((result as any).written).toBe(true);
       expect(memoryStore.has((result as any).id)).toBe(true);
 
-      // The failure was logged, not swallowed (ops-a4t5). The log uses a
+      // The failure was logged, not swallowed. The log uses a
       // constant format string + a structured data object (the record ids are
       // agent-controlled, so they must not sit in console.error's format
       // position — semgrep unsafe-formatstring), so flatten object args too.
@@ -607,7 +607,7 @@ describe("supersede transaction (ops-a4t5 fix)", () => {
       const loggedMsg = errorSpy.mock.calls
         .map((c) => c.map((a) => (a && typeof a === "object" ? JSON.stringify(a, (_k, v) => (v instanceof Error ? v.message : v)) : String(a))).join(" "))
         .join("\n");
-      expect(loggedMsg).toContain("ops-a4t5");
+      expect(loggedMsg).toContain("failed to close superseded record after writing new record");
       expect(loggedMsg).toContain(owned.id);
     } finally {
       errorSpy.mockRestore();
@@ -748,7 +748,7 @@ describe("Memory.get() — anonymous denied, owner/grant scoped for non-admin, u
   });
 });
 
-// ─── ops-qjyq: shift the isCollection routing class left to the unit layer ──
+// ─── Shift the isCollection routing class left to the unit layer ───────────
 //
 // The above Memory.get() describe block only ever calls get("mem-1") — a
 // plain string. Real Harper's get() is invoked with a RequestTarget object
@@ -763,7 +763,7 @@ function requestTarget(overrides: Partial<{ pathname: string; search: string; id
   return { pathname: "/Memory/", search: "", id: undefined, isCollection: false, sort: undefined, ...overrides };
 }
 
-describe("Memory.get() — RequestTarget routing, isCollection branch (ops-qjyq)", () => {
+describe("Memory.get() — RequestTarget routing, isCollection branch", () => {
   it("collection/query target (isCollection: true) delegates to search() and returns the reader's open read-scope — not a 404, not a single-record mis-route (the exact regression)", async () => {
     memoryStore.set("mem-own", { id: "mem-own", agentId: "agent-1", content: "mine" });
     memoryStore.set("mem-other", { id: "mem-other", agentId: "agent-other", content: "not mine, but org-open" }); // no visibility field
@@ -851,17 +851,18 @@ describe("Memory.search() — within-org-read-open parity with get()", () => {
   });
 });
 
-// ─── ops-2dm3 Layer 1: private/shared visibility + centralized read-scoping ──
+// ─── Private/shared visibility + centralized read-scoping ──────────────────
 //
 // Security boundary tests. resources/memory-read-scope.ts's resolveReadScope()
 // is the ONE centralized helper Memory.search()/Memory.get() (this file),
 // SemanticSearch.ts, MemoryBootstrap.ts, and auth-middleware.ts's by-id guard
 // all resolve their scope through — see that module's doc for the full
-// rationale (closes ops-nzxa, the SemanticSearch office-OR global leak).
+// rationale (closes the office-visibility read leak, the SemanticSearch
+// office-OR global leak).
 // scopeAllowedOwners/resolveReadScope are imported dynamically near the top
 // of this file (after mock.module) alongside Memory/dedup/bm25.
 
-describe("ops-2dm3 Layer 1 — durability-keyed default visibility (write path)", () => {
+describe("durability-keyed default visibility (write path)", () => {
   it("Memory.post: persistent write with no visibility → stored shared", async () => {
     const m = makeMemory(agentCtx("agent-1"));
     const r = await m.post({ agentId: "agent-1", content: "A persistent lesson, long enough for the gate.", durability: "persistent" });
@@ -1126,7 +1127,7 @@ describe("Memory.delete() — durability/ownership check uses the raw record (su
 //   { v: 1, verified: { agentId, timestamp }, claimed?: { model } }
 //
 // These tests live in THIS file (rather than a new one) for the same reason
-// the ops-2dm3 migration-equivalence block above does: bun runs every
+// the within-org-read-open migration-equivalence block above does: bun runs every
 // test/unit/ file in one process, and resources/Memory.ts's `class Memory
 // extends (databases as any).flair.Memory` superclass reference is captured
 // ONCE at whichever file's mock.module("@harperfast/harper", ...) + dynamic

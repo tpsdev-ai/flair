@@ -1,15 +1,15 @@
 /**
- * memory-bootstrap-scoping.test.ts — ops-2dm3 Layer 1 unit coverage for
- * resources/MemoryBootstrap.ts's read-scoping.
+ * memory-bootstrap-scoping.test.ts — centralized read-scoping unit coverage
+ * for resources/MemoryBootstrap.ts.
  *
- * Originally (ops-2dm3 Layer 1), bootstrap only ever loaded the caller's OWN
- * memories (`record.agentId !== agentId → continue`) — no grant traversal at
- * all, so an agent holding a MemoryGrant on a teammate never saw that
- * teammate's memories through bootstrap (the gap flair#550 was filed
- * against). Layer 1 fixed that via grant-gated cross-agent reads; the
- * within-org-read-open change (see resources/memory-read-scope.ts's module
- * doc) supersedes the grant gate entirely. Bootstrap now resolves its scope
- * through the SAME centralized helper every other read path uses
+ * Originally, bootstrap only ever loaded the caller's OWN memories
+ * (`record.agentId !== agentId → continue`) — no grant traversal at all, so
+ * an agent holding a MemoryGrant on a teammate never saw that teammate's
+ * memories through bootstrap (the gap flair#550 was filed against). The
+ * original grant-gated read model fixed that via grant-gated cross-agent
+ * reads; the within-org-read-open change (see resources/memory-read-scope.ts's
+ * module doc) supersedes the grant gate entirely. Bootstrap now resolves its
+ * scope through the SAME centralized helper every other read path uses
  * (resources/memory-read-scope.ts resolveReadScope()): own (any visibility)
  * + EVERY other agent's non-private memories — a MemoryGrant is no longer
  * consulted at all.
@@ -121,7 +121,7 @@ function reset() {
 // read-scope tests below therefore assert `memoriesAvailable` for teammate
 // records, and rendering is covered by the #550 describe block further down.
 
-describe("MemoryBootstrap.post() — ops-2dm3 Layer 1 centralized read-scoping", () => {
+describe("MemoryBootstrap.post() — centralized read-scoping", () => {
   it("read-scope includes the caller's own memories PLUS any other agent's non-private memory — no grant required (within-org-read-open)", async () => {
     reset();
     memoryStore.set("m1", { id: "m1", agentId: "agent-1", content: "MY-OWN-FINDING", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" });
@@ -148,7 +148,7 @@ describe("MemoryBootstrap.post() — ops-2dm3 Layer 1 centralized read-scoping",
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
     const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false }); // no currentTask
-    // Layer 1: the SHARED memory is in the reader's read-scope ...
+    // The grant-gated model: the SHARED memory is in the reader's read-scope ...
     expect(res.memoriesAvailable).toBe(1);
     // ... but the #550 design boundary keeps it out of the reader's OWN
     // permanent/recent/predicted view — with no currentTask, its only surface
@@ -168,14 +168,14 @@ describe("MemoryBootstrap.post() — ops-2dm3 Layer 1 centralized read-scoping",
     expect(res.memoriesAvailable).toBe(0);
   });
 
-  it("migration invariant: a grant-holder's read-scope includes a NO-visibility-field owner record (absent reads as shared) — but it too stays out of own-context sections", async () => {
+  it("no-visibility-field invariant: a grant-holder's read-scope includes a NO-visibility-field owner record (absent reads as shared) — but it too stays out of own-context sections", async () => {
     reset();
     memoryStore.set("legacy-1", { id: "legacy-1", agentId: "agent-owner", content: "LEGACY-PRE-MIGRATION-FINDING", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" }); // no visibility field
     memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "search" });
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
     const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false });
-    // Migration invariant lives at the READ-SCOPE layer: an absent visibility
+    // The no-visibility-field invariant lives at the READ-SCOPE layer: an absent visibility
     // field reads as shared, so the legacy record enters the grantee's scope
     // (vs. a private record, which would not — see the private-exclusion test's
     // memoriesAvailable === 0). Rendering is still own-only, so with no
@@ -216,14 +216,14 @@ describe("MemoryBootstrap.post() — ops-2dm3 Layer 1 centralized read-scoping",
 
 // ─── flair#550 — teammate findings attribution + "Teammate findings" section ─
 //
-// Layer 1 (above) already made grant-visible teammate SHARED memories
+// The read-scoping above already made grant-visible teammate SHARED memories
 // reachable through bootstrap's read scope; these tests cover the
 // PRESENTATION gap: (1) formatMemory() attributes a cross-agent record with
 // "[via <ownerId>]" and composes with the safety wrap, and (2) the
 // currentTask-scored path splits by origin into sections.relevant (own) vs
 // the new sections.teammate (grant-visible teammate), never mixing them, and
 // never letting a teammate's PRIVATE memory reach the scored path at all
-// (Layer 1's exclusion, re-asserted here as a guard on the NEW split code).
+// (that exclusion, re-asserted here as a guard on the NEW split code).
 //
 // All records below carry embedding: FAKE_EMBEDDING so they clear the
 // `score > 0.3` deterministic-cosine-1.0 threshold against any currentTask
@@ -352,7 +352,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     expect(res.sections.teammate).toBe(1);
   });
 
-  it("guard: a teammate's PRIVATE memory never reaches the task-relevant scored path (Layer 1 exclusion holds under the new split)", async () => {
+  it("guard: a teammate's PRIVATE memory never reaches the task-relevant scored path (the private-exclusion invariant holds under the new split)", async () => {
     reset();
     memoryStore.set("teammate-private-task", {
       id: "teammate-private-task", agentId: "agent-owner", content: "TEAMMATE-PRIVATE-TASK-FINDING",
@@ -384,7 +384,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
   });
 
   // ─── Own-context sections are OWN-ONLY (the design-correction boundary) ─────
-  // Post-Layer-1 `activeMemories` carries grant-visible teammate records; the
+  // `activeMemories` carries grant-visible teammate records; the
   // permanent / recent / predicted sections must NOT blend them into the
   // reader's own working context. Grant-visibility feeds ONLY the
   // task-relevant "Teammate findings" surface (or an explicit memory_search).

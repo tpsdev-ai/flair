@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 // ─── SECURITY: conditions-filter-before-fusion (Sherlock's gate) ────────────
-// FLAIR-BM25-HYBRID §26/§45-46, ops-i39b. The HARD trust boundary: a BM25
+// FLAIR-BM25-HYBRID §26/§45-46. The HARD trust boundary: a BM25
 // candidate belonging to another agent MUST be excluded BEFORE the union/fusion,
 // so no cross-agent term-frequency / content metadata leaks. These tests
 // exercise the SHIPPED predicate (resources/bm25-filter.ts) that the
@@ -61,9 +61,10 @@ describe("conditions-filter-before-fusion (cross-agent leak gate — now within-
       { id: "t2", agentId: "kern", content: "kern review notes", visibility: "private" }, // other + PRIVATE — excluded
       // within-org-read-open: a `shared` memory from ANY other agent is now
       // allowed, no grant required — the intended broadening this module's
-      // doc describes (formerly excluded pre-open-read; ops-nzxa's leak was a
-      // DIFFERENT bug — an accidental `visibility:"office"` bypass BEFORE any
-      // grant-gating existed at all — not this deliberate design decision).
+      // doc describes (formerly excluded pre-open-read; the office-visibility
+      // read leak was a DIFFERENT bug — an accidental `visibility:"office"`
+      // bypass BEFORE any grant-gating existed at all — not this deliberate
+      // design decision).
       { id: "o1", agentId: "anvil", content: "shared doc, no grant needed", visibility: "shared" },
     ];
     const allowed = corpus.filter(r => isAllowedBm25Candidate(r, conditions));
@@ -73,7 +74,7 @@ describe("conditions-filter-before-fusion (cross-agent leak gate — now within-
     expect(allowed.some(r => r.id === "t2")).toBe(false);
   });
 
-  test("within-org-read-open (was: office-OR leak closed, ops-nzxa): an owner's SHARED memory IS allowed for any other agent — no grant needed, this is intentional", () => {
+  test("within-org-read-open (was: office-OR leak closed): an owner's SHARED memory IS allowed for any other agent — no grant needed, this is intentional", () => {
     const shared = { id: "o1", agentId: "anvil", content: "org-wide note", visibility: "shared" };
     expect(isAllowedBm25Candidate(shared, conditions)).toBe(true);
   });

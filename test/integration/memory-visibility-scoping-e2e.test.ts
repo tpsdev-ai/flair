@@ -3,7 +3,7 @@
 // `private` must NEVER cross to a non-owner (the ONE remaining exception);
 // every other memory (`shared`, or a pre-existing no-visibility-field record)
 // is readable by ANY verified agent on the instance — no MemoryGrant required
-// (superseding ops-2dm3 Layer 1's grant-gated model; see resources/memory-
+// (superseding the original grant-gated read model; see resources/memory-
 // read-scope.ts's module doc for the full design, Kern-approved). All four
 // read paths the design doc calls out are exercised against a real spawned
 // Harper: Memory.get() (by-id), Memory.search() (collection), SemanticSearch,
