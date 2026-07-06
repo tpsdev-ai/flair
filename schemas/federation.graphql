@@ -39,6 +39,18 @@ type Peer @table(database: "flair") @export {
   updatedAt: String
 }
 
+# Anti-replay nonce store (federation-edge-hardening slice 4).
+# Persists nonces recorded by verifyBodySignatureFresh (federation-crypto.ts)
+# so an instance restart doesn't wipe recently-seen nonces — closes the
+# ±30s freshness-window replay gap a restart would otherwise reopen. Nonces
+# are already globally unique (128-bit random, generated per request by
+# signBodyFresh), so the nonce string itself is the primary key — no scope
+# prefix needed. Internal bookkeeping only: never served, never replicated.
+type Nonce @table(database: "flair") {
+  id: ID @primaryKey               # the nonce string (base64url, 128-bit random)
+  seenAt: Int! @indexed            # ms-epoch when first recorded — eviction cutoff
+}
+
 # Sync log — audit trail for federation operations.
 type SyncLog @table(database: "flair") {
   id: ID @primaryKey

@@ -111,8 +111,16 @@ jobs:
         with:
           mode: firewall-free
 
-      - name: Install
-        run: sfw bun install --frozen-lockfile
+      - name: Install (sfw — retry on intermittent Socket-firewall hang, ops-fumh)
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::sfw bun install (attempt $attempt/3)"
+            if timeout 300 sfw bun install --frozen-lockfile; then echo "::endgroup::"; exit 0; fi
+            echo "::endgroup::"
+            echo "sfw install attempt $attempt failed or timed out (5m) — the sfw hang is intermittent; retrying in 10s"
+            sleep 10
+          done
+          echo "sfw bun install failed after 3 attempts"; exit 1
 
       - name: Verify all workspace versions match the tag
         # All values flow through env, never ${{ }} interpolation inside the

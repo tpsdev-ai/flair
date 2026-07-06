@@ -47,6 +47,23 @@ function signBody(body: Record<string, any>, secretKey: Uint8Array): string {
   return Buffer.from(sig).toString("base64url");
 }
 
+// Per-record principalId (federation-edge-hardening slice 3a) — INFORMATIONAL
+// only; the receiver (resources/Federation.ts) never treats it as verified
+// identity or uses it in any auth decision. Sourced from the write-time
+// provenance stamp (memory-provenance slice 1, Memory.ts's buildProvenance)
+// when present. `provenance` is persisted as a JSON STRING (not an object),
+// so it must be parsed — a raw `row.provenance?.verified?.agentId` would
+// silently always be undefined. Soul/Agent/Relationship rows never carry a
+// provenance stamp today, so this is a no-op for them.
+function principalIdFromRow(row: any): string | undefined {
+  if (typeof row?.provenance !== "string" || row.provenance.length === 0) return undefined;
+  try {
+    return JSON.parse(row.provenance)?.verified?.agentId ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // Federation push private-visibility filter — inlined for the SAME reason as
 // the crypto helpers above (see comment there; also resources/memory-
 // visibility.ts, the canonical definition; the two must stay in sync).
@@ -3911,11 +3928,49 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
       if (rows.length === 0) continue;
 
+      // Records are signed (below) before they're batched, so the secret key
+      // is needed here rather than only inside sendBatch. Still deferred
+      // until we know THIS table has rows to send — preserves the "don't
+      // load the key on a no-op run" property the original lazy load had.
+      if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
+
       let batch: any[] = [];
       let batchBytes = 0;
 
       for (const row of rows) {
-        const sr = { table, id: row.id, data: row, updatedAt: row.updatedAt ?? row.createdAt, originatorInstanceId: instance.id };
+        const updatedAt = row.updatedAt ?? row.createdAt;
+        const originatorInstanceId = instance.id;
+
+        // Per-record signature (federation-edge-hardening slice 3a): signed by
+        // THIS instance — the originator — over a versioned canonical form, so
+        // a receiver (including a hub relaying this record onward to other
+        // spokes) can verify authorship independent of who forwarded the
+        // batch. Closes the hub-relay forgery hole — see
+        // resources/Federation.ts FederationSync.post's verification gate.
+        //
+        // CONTRACT — must match Federation.ts's verification payload
+        // byte-for-byte: keys { v, table, id, data, updatedAt,
+        // originatorInstanceId }. canonicalize() sorts keys, so field ORDER
+        // doesn't matter, but the field SET and values do. `v: 1` versions the
+        // canonical form itself: bump it on BOTH sides together if the signed
+        // field set ever changes, so an old signature fails closed instead of
+        // silently mis-verifying under a new form.
+        //
+        // Additive/backward-compatible: pre-3a receivers don't read
+        // `signature`/`principalId` at all and merge exactly as before.
+        const signature = signBody(
+          { v: 1, table, id: row.id, data: row, updatedAt, originatorInstanceId },
+          secretKey,
+        );
+
+        const sr: Record<string, any> = { table, id: row.id, data: row, updatedAt, originatorInstanceId, signature };
+
+        // Informational only (see principalIdFromRow) — never verified by the
+        // receiver as proof of authorship. Omitted entirely when the row
+        // carries no write-time provenance stamp.
+        const principalId = principalIdFromRow(row);
+        if (principalId) sr.principalId = principalId;
+
         const srBytes = JSON.stringify(sr).length;
 
         if (batch.length >= BUDGET_RECORDS || (batch.length > 0 && batchBytes + srBytes > BUDGET_BYTES)) {
@@ -7176,9 +7231,12 @@ program
   .option("--no-verify", "Skip post-deploy served-API verification (default: verify — on by design, so the CLI can't report success on an empty/broken deploy)")
   .option("--verify-timeout <ms>", "Milliseconds to wait for the served API to settle after harper's post-deploy restart before verifying (default: 300000)")
   .option("--verify-resource <name>", "Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)", (val: string, prev: string[]) => [...prev, val], [] as string[])
+  .option("--deploy-retries <n>", "Retry the full harper deploy this many times on a detected flaky peer-replication failure ONLY — a normal deploy failure (auth, bad package, ...) never retries (default: 2; 0 disables)", "2")
+  .option("--ignore-replication-errors", "If peer replication is still failing once retries are exhausted, treat it as a non-fatal warning and succeed with an origin-only deploy (the peer catches up via federation sync or a later deploy)")
   .action(async (opts) => {
     const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
     const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+    const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
     const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
     const deployOpts = {
@@ -7199,6 +7257,8 @@ program
       verify: opts.verify !== false,
       verifyResources: (opts.verifyResource as string[] | undefined)?.length ? opts.verifyResource : undefined,
       verifyTimeoutMs: Number(opts.verifyTimeout ?? 300_000),
+      deployRetries: Number(opts.deployRetries ?? 2),
+      ignoreReplicationErrors: opts.ignoreReplicationErrors ?? false,
       onProgress: (msg: string) => console.log(dim(`  ${msg}`)),
     };
 
@@ -7228,7 +7288,11 @@ program
         console.log(dim(`  package root: ${result.packageRoot}`));
         return;
       }
-      console.log(`\n${green("✓")} Flair ${result.version} deployed${deployOpts.verify ? " and verified serving" : ""}`);
+      if (result.replicationWarning) {
+        console.log(`\n${yellow("⚠")} Flair ${result.version} deployed to the ORIGIN NODE ONLY — peer replication did not complete (see warning above). The peer will catch up via federation sync or a later deploy.`);
+      } else {
+        console.log(`\n${green("✓")} Flair ${result.version} deployed${deployOpts.verify ? " and verified serving" : ""}`);
+      }
       console.log(`\n  URL:     ${result.url}`);
       console.log(`  Project: ${result.project}`);
       console.log(`\nNext steps:`);
@@ -7246,6 +7310,9 @@ program
       }
       if (hint?.includes("did not settle")) {
         console.error(dim("  hint: Harper may still be restarting — check Fabric Studio, or retry with a longer --verify-timeout"));
+      }
+      if (hint?.includes("peer replication failed after")) {
+        console.error(dim("  hint: pass --ignore-replication-errors to accept an origin-only deploy, or re-run once the peer link recovers"));
       }
       process.exit(1);
     }

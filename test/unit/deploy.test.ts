@@ -22,6 +22,9 @@ import {
   deriveVerifyResources,
   FALLBACK_VERIFY_RESOURCE,
   verifyDeployServing,
+  REPLICATION_FAILURE_RE,
+  DEFAULT_DEPLOY_RETRIES,
+  DEPLOY_RETRY_BACKOFF_MS,
 } from "../../src/deploy.js";
 
 describe("flair deploy: validateOptions", () => {
@@ -418,6 +421,254 @@ describe("flair deploy: deploy() gating — --no-verify and --dry-run both skip 
       expect(fetchCalls).toBe(0);
     } finally {
       globalThis.fetch = origFetch;
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// ops-2i8x: flaky-peer-replication resilience. A real Fabric deploy hit
+//   "Component 'flair' was deployed on the origin node but failed to
+//    replicate to 1 of 1 peer node(s): ... (Error: Connection closed 1006)"
+// and hard-exited 1 — a bare manual retry cleared it with no other change.
+// These tests cover: (A) the replication-signature detector itself, (B) the
+// retry loop firing ONLY on that signature, (C) --deploy-retries 0 disabling
+// retry, (D) --ignore-replication-errors turning a still-failing replication
+// error into a warned success.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("flair deploy: REPLICATION_FAILURE_RE (signature detection)", () => {
+  test("matches the real incident message", () => {
+    expect(
+      "Component 'flair' was deployed on the origin node but failed to replicate to 1 of 1 peer node(s): timeout (Error: Connection closed 1006)",
+    ).toMatch(REPLICATION_FAILURE_RE);
+  });
+
+  test("matches a bare 'Connection closed 1006'", () => {
+    expect("socket error: Connection closed 1006").toMatch(REPLICATION_FAILURE_RE);
+  });
+
+  test("matches a 'failed to replicate to N peer(s)' without 'of M'", () => {
+    expect("failed to replicate to 2 peer nodes").toMatch(REPLICATION_FAILURE_RE);
+  });
+
+  test("does NOT match an unrelated deploy failure", () => {
+    expect("Error: ENOENT: no such file or directory, package tarball not found").not.toMatch(
+      REPLICATION_FAILURE_RE,
+    );
+  });
+
+  test("does NOT match a plain auth failure", () => {
+    expect("Error: 401 Unauthorized").not.toMatch(REPLICATION_FAILURE_RE);
+  });
+
+  test("does NOT match benign mentions of 'peer' with no failure", () => {
+    expect("Fabric cluster has 3 peer nodes, all healthy").not.toMatch(REPLICATION_FAILURE_RE);
+  });
+});
+
+describe("flair deploy: buildHarperDeployArgs (--ignore-replication-errors passthrough)", () => {
+  test("omits ignore_replication_errors by default", () => {
+    const args = buildHarperDeployArgs(
+      { fabricOrg: "acme", fabricCluster: "prod", fabricUser: "a", fabricPassword: "b" },
+      "https://prod.acme.harperfabric.com",
+      "flair",
+    );
+    expect(args.some((a) => a.startsWith("ignore_replication_errors"))).toBe(false);
+  });
+
+  test("appends ignore_replication_errors=true when set", () => {
+    const args = buildHarperDeployArgs(
+      { ignoreReplicationErrors: true },
+      "https://custom.host",
+      "flair",
+    );
+    expect(args).toContain("ignore_replication_errors=true");
+  });
+});
+
+describe("flair deploy: deploy() replication-flake retry + --ignore-replication-errors", () => {
+  function synthPkgRootForReplicationTests(): string {
+    const dir = mkdtempSync(join(tmpdir(), "flair-deploy-replication-"));
+    for (const f of REQUIRED_PACKAGE_FILES) {
+      const p = join(dir, f);
+      if (f.endsWith(".yaml")) writeFileSync(p, "port: 9926\n");
+      else mkdirSync(p, { recursive: true });
+    }
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test" }),
+    );
+    return dir;
+  }
+
+  // Scripted stub harper binary: on each invocation, consults `behaviors`
+  // (indexed by attempt number, clamped to the last entry) and either exits
+  // 0 ("success"), exits 1 with the real replication-failure message
+  // ("replication-fail"), or exits 1 with an unrelated message ("other-fail").
+  // Attempt count is persisted to a counter file on disk so it survives
+  // across separate process spawns (one spawn per retry attempt).
+  function addScriptedHarperBinary(packageRoot: string, behaviors: string[]): string {
+    const binDir = join(packageRoot, "node_modules", "@harperfast", "harper", "dist", "bin");
+    mkdirSync(binDir, { recursive: true });
+    const counterPath = join(packageRoot, ".attempt-count");
+    writeFileSync(counterPath, "0");
+    const script = `
+const fs = require('fs');
+const counterPath = ${JSON.stringify(counterPath)};
+const behaviors = ${JSON.stringify(behaviors)};
+let n = parseInt(fs.readFileSync(counterPath, 'utf8'), 10) || 0;
+n += 1;
+fs.writeFileSync(counterPath, String(n));
+const behavior = behaviors[Math.min(n - 1, behaviors.length - 1)];
+if (behavior === 'success') {
+  console.log('Successfully deployed');
+  process.exit(0);
+} else if (behavior === 'replication-fail') {
+  console.error("Component 'flair' was deployed on the origin node but failed to replicate to 1 of 1 peer node(s): timeout waiting for ack (Error: Connection closed 1006)");
+  process.exit(1);
+} else {
+  console.error('Error: ENOENT: package tarball not found');
+  process.exit(1);
+}
+`;
+    writeFileSync(join(binDir, "harper.js"), script);
+    return counterPath;
+  }
+
+  function attemptCount(counterPath: string): number {
+    return parseInt(readFileSync(counterPath, "utf8"), 10) || 0;
+  }
+
+  test("defaults: DEFAULT_DEPLOY_RETRIES=2, DEPLOY_RETRY_BACKOFF_MS=[5000,10000]", () => {
+    expect(DEFAULT_DEPLOY_RETRIES).toBe(2);
+    expect(DEPLOY_RETRY_BACKOFF_MS).toEqual([5_000, 10_000]);
+  });
+
+  test("non-replication failure fails immediately — no retry, even with retries available", async () => {
+    const pkgRoot = synthPkgRootForReplicationTests();
+    // If a retry incorrectly fired, attempt 2 would succeed — proves the
+    // assertion is about retry behavior, not just eventual failure.
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["other-fail", "success"]);
+    try {
+      await expect(
+        deploy({
+          fabricOrg: "acme",
+          fabricCluster: "prod",
+          fabricUser: "admin",
+          fabricPassword: "pw",
+          packageRoot: pkgRoot,
+          verify: false,
+          deployRetries: 2,
+          deployRetryBackoffMs: [1, 1],
+        }),
+      ).rejects.toThrow(/harper deploy exited with code 1/);
+      expect(attemptCount(counterPath)).toBe(1);
+    } finally {
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("succeeds on attempt 2 after a replication flake on attempt 1 (loud retry log)", async () => {
+    const pkgRoot = synthPkgRootForReplicationTests();
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail", "success"]);
+    const origWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (msg: any) => { warnings.push(String(msg)); };
+    try {
+      const result = await deploy({
+        fabricOrg: "acme",
+        fabricCluster: "prod",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        packageRoot: pkgRoot,
+        verify: false,
+        deployRetries: 2,
+        deployRetryBackoffMs: [1, 1],
+      });
+      expect(result.dryRun).toBe(false);
+      expect(result.replicationWarning).toBe(false);
+      expect(attemptCount(counterPath)).toBe(2);
+      expect(warnings.some((w) => /replication flake on attempt 1\/3/.test(w))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("--deploy-retries 0 disables retry — first replication flake fails immediately", async () => {
+    const pkgRoot = synthPkgRootForReplicationTests();
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail", "success"]);
+    try {
+      await expect(
+        deploy({
+          fabricOrg: "acme",
+          fabricCluster: "prod",
+          fabricUser: "admin",
+          fabricPassword: "pw",
+          packageRoot: pkgRoot,
+          verify: false,
+          deployRetries: 0,
+        }),
+      ).rejects.toThrow(/peer replication failed after 1 attempt/);
+      expect(attemptCount(counterPath)).toBe(1);
+    } finally {
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("--ignore-replication-errors: still-failing replication after retries exhausted becomes a warned success", async () => {
+    const pkgRoot = synthPkgRootForReplicationTests();
+    // Always fails with the replication signature — simulates harper's own
+    // ignore_replication_errors not fully suppressing the non-zero exit.
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail"]);
+    const origWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (msg: any) => { warnings.push(String(msg)); };
+    try {
+      const result = await deploy({
+        fabricOrg: "acme",
+        fabricCluster: "prod",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        packageRoot: pkgRoot,
+        verify: false,
+        deployRetries: 0,
+        ignoreReplicationErrors: true,
+      });
+      expect(result.dryRun).toBe(false);
+      expect(result.replicationWarning).toBe(true);
+      expect(attemptCount(counterPath)).toBe(1);
+      expect(warnings.some((w) => /WARNED SUCCESS/.test(w))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("--ignore-replication-errors composes with retry: retries first, then falls back to warned success", async () => {
+    const pkgRoot = synthPkgRootForReplicationTests();
+    const counterPath = addScriptedHarperBinary(pkgRoot, [
+      "replication-fail",
+      "replication-fail",
+      "replication-fail",
+    ]);
+    try {
+      const result = await deploy({
+        fabricOrg: "acme",
+        fabricCluster: "prod",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        packageRoot: pkgRoot,
+        verify: false,
+        deployRetries: 2,
+        deployRetryBackoffMs: [1, 1],
+        ignoreReplicationErrors: true,
+      });
+      expect(result.replicationWarning).toBe(true);
+      // 1 initial attempt + 2 retries = 3 total attempts before falling back.
+      expect(attemptCount(counterPath)).toBe(3);
+    } finally {
       rmSync(pkgRoot, { recursive: true, force: true });
     }
   });
