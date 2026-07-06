@@ -7051,9 +7051,12 @@ program
   .option("--no-verify", "Skip post-deploy served-API verification (default: verify — on by design, so the CLI can't report success on an empty/broken deploy)")
   .option("--verify-timeout <ms>", "Milliseconds to wait for the served API to settle after harper's post-deploy restart before verifying (default: 300000)")
   .option("--verify-resource <name>", "Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)", (val: string, prev: string[]) => [...prev, val], [] as string[])
+  .option("--deploy-retries <n>", "Retry the full harper deploy this many times on a detected flaky peer-replication failure ONLY — a normal deploy failure (auth, bad package, ...) never retries (default: 2; 0 disables)", "2")
+  .option("--ignore-replication-errors", "If peer replication is still failing once retries are exhausted, treat it as a non-fatal warning and succeed with an origin-only deploy (the peer catches up via federation sync or a later deploy)")
   .action(async (opts) => {
     const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
     const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+    const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
     const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
     const deployOpts = {
@@ -7074,6 +7077,8 @@ program
       verify: opts.verify !== false,
       verifyResources: (opts.verifyResource as string[] | undefined)?.length ? opts.verifyResource : undefined,
       verifyTimeoutMs: Number(opts.verifyTimeout ?? 300_000),
+      deployRetries: Number(opts.deployRetries ?? 2),
+      ignoreReplicationErrors: opts.ignoreReplicationErrors ?? false,
       onProgress: (msg: string) => console.log(dim(`  ${msg}`)),
     };
 
@@ -7103,7 +7108,11 @@ program
         console.log(dim(`  package root: ${result.packageRoot}`));
         return;
       }
-      console.log(`\n${green("✓")} Flair ${result.version} deployed${deployOpts.verify ? " and verified serving" : ""}`);
+      if (result.replicationWarning) {
+        console.log(`\n${yellow("⚠")} Flair ${result.version} deployed to the ORIGIN NODE ONLY — peer replication did not complete (see warning above). The peer will catch up via federation sync or a later deploy.`);
+      } else {
+        console.log(`\n${green("✓")} Flair ${result.version} deployed${deployOpts.verify ? " and verified serving" : ""}`);
+      }
       console.log(`\n  URL:     ${result.url}`);
       console.log(`  Project: ${result.project}`);
       console.log(`\nNext steps:`);
@@ -7121,6 +7130,9 @@ program
       }
       if (hint?.includes("did not settle")) {
         console.error(dim("  hint: Harper may still be restarting — check Fabric Studio, or retry with a longer --verify-timeout"));
+      }
+      if (hint?.includes("peer replication failed after")) {
+        console.error(dim("  hint: pass --ignore-replication-errors to accept an origin-only deploy, or re-run once the peer link recovers"));
       }
       process.exit(1);
     }
