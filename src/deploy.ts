@@ -29,6 +29,37 @@ export interface DeployOptions {
   verify?: boolean;
   verifyResources?: string[];
   verifyTimeoutMs?: number;
+  // ops-2i8x: flaky-peer-replication resilience. A real Fabric deploy hit
+  // "Component 'flair' was deployed on the origin node but failed to
+  // replicate to 1 of 1 peer node(s): ... (Error: Connection closed 1006)"
+  // and hard-exited 1 — a bare manual re-run cleared it with no other
+  // change. That's a flake, not a deterministic failure, so it should
+  // self-heal rather than force a human to notice and re-run (see the
+  // CLI's own "self-healing over keepalive" invariant). See
+  // REPLICATION_FAILURE_RE for how a replication failure is distinguished
+  // from any other deploy failure (auth, bad package, missing files — those
+  // must still fail fast, never retry).
+  //
+  // How many times to retry the FULL `harper deploy` (not just the peer
+  // push) after a detected replication-signature failure. Default 2, i.e.
+  // up to 3 total attempts. 0 disables retry entirely (first replication
+  // failure fails immediately, same as any other failure).
+  deployRetries?: number;
+  // Internal/testing knob: override the retry backoff schedule (ms per
+  // attempt; last value repeats if retries exceed the array length).
+  // Not exposed as a CLI flag — the default (5s, 10s) is deliberate for
+  // real deploys; tests override it to avoid real sleeps.
+  deployRetryBackoffMs?: number[];
+  // Escape hatch: pass ignore_replication_errors=true to harper's own
+  // deploy CLI (deploys to origin, treats peer-replication failure as
+  // non-fatal there). Also a JS-level fallback: if a replication-signature
+  // failure still reaches us after retries are exhausted (e.g. harper
+  // itself didn't fully suppress it), the deploy is reported as a WARNED
+  // success instead of failing — the peer catches up via normal federation
+  // sync or a later deploy. Mutually sensible with deployRetries: retry
+  // first (transient flakes usually clear on their own), fall back to
+  // "accept origin-only" only once retries are exhausted.
+  ignoreReplicationErrors?: boolean;
   // Optional progress sink so callers (the CLI) can surface what would
   // otherwise be a silent multi-minute poll. Never required — deploy() and
   // verifyDeployServing() work fine without it (e.g. fabric-upgrade.ts's
@@ -42,6 +73,10 @@ export interface DeployResult {
   version: string;
   packageRoot: string;
   dryRun: boolean;
+  // true iff the deploy only succeeded because a peer-replication failure
+  // was accepted via --ignore-replication-errors (ops-2i8x) — the origin
+  // node has the component, at least one peer does not (yet).
+  replicationWarning?: boolean;
 }
 
 // Files that must be present in a Flair package for deployment.
@@ -241,7 +276,7 @@ export function buildHarperDeployArgs(
 ): string[] {
   const deploymentTimeoutMs = opts.deploymentTimeoutMs ?? DEFAULT_DEPLOYMENT_TIMEOUT_MS;
   const installTimeoutMs = opts.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS;
-  return [
+  const args = [
     "deploy",
     `target=${url}`,
     `project=${project}`,
@@ -250,30 +285,145 @@ export function buildHarperDeployArgs(
     `deployment_timeout=${deploymentTimeoutMs}`,
     `install_timeout=${installTimeoutMs}`,
   ];
+  // ops-2i8x: --ignore-replication-errors escape hatch. Only appended when
+  // set — omitted entirely otherwise, so this is a no-op for every existing
+  // caller/test that doesn't pass it.
+  if (opts.ignoreReplicationErrors) {
+    args.push("ignore_replication_errors=true");
+  }
+  return args;
 }
 
-function spawnHarper(
+// ops-2i8x: flaky-peer-replication resilience defaults. See DeployOptions
+// for the full incident writeup this closes.
+export const DEFAULT_DEPLOY_RETRIES = 2;
+export const DEPLOY_RETRY_BACKOFF_MS = [5_000, 10_000];
+
+// The signature of a Fabric PEER-REPLICATION failure specifically — harper
+// deploys fine to the origin node, but pushing the component to a peer
+// fails, e.g.:
+//   "Component 'flair' was deployed on the origin node but failed to
+//    replicate to 1 of 1 peer node(s): ... (Error: Connection closed 1006)"
+// This is the CORRECTNESS-CRITICAL part of the fix: matching this pattern
+// (and ONLY this pattern) is what lets us retry a known flake while still
+// failing fast on a real deploy failure (bad package, auth, missing files —
+// none of which mention peer replication and must never be retried).
+// Literal regex, no interpolation.
+export const REPLICATION_FAILURE_RE =
+  /failed to replicate to \d+ (of \d+ )?peer|connection closed\s+1006|ignore_replication_errors/i;
+
+interface HarperSpawnResult {
+  code: number | null;
+  output: string;
+}
+
+// Tee-style capture: streams harper's stdout/stderr to the user in real time
+// (unchanged UX — a multi-minute deploy needs live progress, not a black
+// box) while ALSO buffering the combined text so the caller can
+// pattern-match REPLICATION_FAILURE_RE against it after exit. This replaces
+// the previous stdio:"inherit" passthrough, which gave no way to inspect
+// harper's output. stdin stays "inherit" — harper's deploy never reads
+// from it, so there's nothing to tee there.
+function spawnHarperCaptured(
   bin: string,
   args: string[],
   cwd: string,
   env: NodeJS.ProcessEnv,
-): Promise<void> {
+): Promise<HarperSpawnResult> {
   return new Promise((resolveP, rejectP) => {
     const p = spawn(process.execPath, [bin, ...args], {
       cwd,
-      stdio: "inherit",
+      stdio: ["inherit", "pipe", "pipe"],
       env,
     });
-    p.on("error", rejectP);
-    p.on("exit", (code) => {
-      if (code === 0) resolveP();
-      else rejectP(new Error(`harper deploy exited with code ${code}`));
+    const chunks: string[] = [];
+    p.stdout?.on("data", (d: Buffer) => {
+      process.stdout.write(d);
+      chunks.push(d.toString("utf8"));
     });
+    p.stderr?.on("data", (d: Buffer) => {
+      process.stderr.write(d);
+      chunks.push(d.toString("utf8"));
+    });
+    p.on("error", rejectP);
+    p.on("exit", (code) => resolveP({ code, output: chunks.join("") }));
   });
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Runs `harper deploy`, retrying ONLY on the flaky peer-replication failure
+// signature (REPLICATION_FAILURE_RE) — the real incident this closes: the
+// origin deployed fine, replication to a peer failed with a transient
+// "Connection closed 1006", and a bare manual retry cleared it with no
+// other change. This re-runs the FULL harper deploy (prepare/install/
+// replicate), not just a peer-only re-push — wasteful, but it's exactly
+// what worked by hand, and harper's CLI has no "retry replication only"
+// entry point. Any other failure (bad package, auth, missing files, ...)
+// is never retried — it fails fast, same as before this change.
+async function runHarperDeploy(
+  bin: string,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  opts: DeployOptions,
+): Promise<{ replicationWarning: boolean }> {
+  const maxRetries = opts.deployRetries ?? DEFAULT_DEPLOY_RETRIES;
+  const backoff = opts.deployRetryBackoffMs ?? DEPLOY_RETRY_BACKOFF_MS;
+  const totalAttempts = Math.max(1, maxRetries + 1);
+
+  for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+    const { code, output } = await spawnHarperCaptured(bin, args, cwd, env);
+    if (code === 0) return { replicationWarning: false };
+
+    const isReplicationFailure = REPLICATION_FAILURE_RE.test(output);
+    const isLastAttempt = attempt === totalAttempts;
+
+    if (isReplicationFailure && !isLastAttempt) {
+      const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)];
+      // Self-healing must be visible, never silent — console.warn directly
+      // (not gated behind onProgress, which some callers like
+      // fabric-upgrade.ts don't wire up) so this is loud regardless of caller.
+      console.warn(
+        `⚠ flair deploy: replication flake on attempt ${attempt}/${totalAttempts} ` +
+          `(harper deploy exited ${code}, peer-replication signature matched) — ` +
+          `retrying in ${Math.round(waitMs / 1000)}s...`,
+      );
+      opts.onProgress?.(
+        `replication flake on attempt ${attempt}/${totalAttempts} — retrying in ${Math.round(waitMs / 1000)}s...`,
+      );
+      await sleep(waitMs);
+      continue;
+    }
+
+    if (isReplicationFailure && opts.ignoreReplicationErrors) {
+      console.warn(
+        `⚠ flair deploy: peer replication still failing after ${attempt} attempt(s), ` +
+          `but --ignore-replication-errors is set — treating this as a WARNED SUCCESS ` +
+          `(deployed to the origin node only; the peer will need to catch up via normal ` +
+          `federation sync or a later deploy).`,
+      );
+      opts.onProgress?.(
+        `WARNING: proceeding origin-only — peer replication did not complete after ${attempt} attempt(s)`,
+      );
+      return { replicationWarning: true };
+    }
+
+    if (isReplicationFailure) {
+      throw new Error(
+        `harper deploy exited with code ${code}: peer replication failed after ${attempt} attempt(s) ` +
+          `(retries exhausted). Pass --ignore-replication-errors to accept an origin-only deploy, ` +
+          `or re-run once the peer link recovers.`,
+      );
+    }
+
+    throw new Error(`harper deploy exited with code ${code}`);
+  }
+
+  // Unreachable — the loop always returns or throws — but keeps TS happy.
+  throw new Error("harper deploy: exhausted retry loop without resolving");
 }
 
 // A single reachability probe against the served (REST) base URL. Harper
@@ -427,7 +577,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     CLI_TARGET_PASSWORD: opts.fabricPassword,
   };
 
-  await spawnHarper(harperBin, args, packageRoot, childEnv);
+  const { replicationWarning } = await runHarperDeploy(harperBin, args, packageRoot, childEnv, opts);
 
   // harper can print "Successfully deployed" for a component that isn't
   // actually serving anything (the incident this closes: an empty deploy,
@@ -445,5 +595,5 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     });
   }
 
-  return { url, project, version, packageRoot, dryRun: false };
+  return { url, project, version, packageRoot, dryRun: false, replicationWarning };
 }
