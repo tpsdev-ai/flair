@@ -65,6 +65,26 @@ interface PeerAnnouncement {
   endpoint?: string;
 }
 
+// ─── Per-record signature enforcement mode (federation-edge-hardening slice 3b) ──
+
+/**
+ * Whether FederationSync.post requires EVERY record to carry a valid
+ * per-record signature (§3a), skipping unsigned ones (`missing_signature`),
+ * vs. the default "verify-if-present" mode where an unsigned record still
+ * merges (relying on the batch-level signature already verified above it).
+ *
+ * Default OFF (verify-if-present) — pre-3a spokes don't sign individual
+ * records yet, and their batch is already authenticated. Turning this ON
+ * is an OPERATOR decision, never auto-flipped by this code: flip it only
+ * once every paired peer has been confirmed sending per-record signatures
+ * (e.g. by checking SyncLog for unsigned records / peer versions). Flipping
+ * it before every peer has upgraded silently starts dropping that peer's
+ * records instead of merging them.
+ */
+function requireRecordSignatures(): boolean {
+  return (process.env.FLAIR_FEDERATION_REQUIRE_RECORD_SIGNATURES ?? "").toLowerCase() === "true";
+}
+
 // ─── Conflict resolution ─────────────────────────────────────────────────────
 
 /**
@@ -385,6 +405,66 @@ export class FederationSync extends Resource {
 
         if (decision.action === "skip") {
           recordSkip(decision.reason);
+          continue;
+        }
+
+        // ── Per-record signature verification (federation-edge-hardening slice 3b) ──
+        // classifyRecord's "merge" verdict above only proves the record is
+        // STRUCTURALLY eligible (known table, self-originated OR the sender
+        // is a hub, not stale, not a no-op) — that hub bypass trusts the
+        // BATCH-level signature (verifyBodySignatureFresh above, verified
+        // against the SENDER's pinned key). It does NOT prove the record's
+        // *claimed* originator actually produced it — a hub relaying on
+        // behalf of many spokes could otherwise forge a record under any
+        // originatorInstanceId it likes, and the receiver had no way to
+        // tell. This gate closes that hole: verify the record's own
+        // signature (§3a, set at push-time by the ORIGINATOR, never by
+        // whoever relayed it) against the ORIGINATOR's pinned instance key
+        // — never the sender's key.
+        //
+        // A bad/unverifiable signature skips ONLY this record, never the
+        // batch — rejecting the whole batch on one bad record would be a
+        // DoS vector (one forged/garbled record could blackhole every other
+        // legitimate record riding along in the same POST).
+        const originator = decision.originator;
+        if (record.signature) {
+          const originatorPublicKey = originator === instanceId
+            ? peer.publicKey
+            : (await (databases as any).flair.Peer.get(originator))?.publicKey;
+
+          if (!originatorPublicKey) {
+            recordSkip("unknown_originator_key");
+            continue;
+          }
+
+          // CONTRACT — must match src/cli.ts runFederationSyncOnce's signing
+          // payload byte-for-byte: keys { v, table, id, data, updatedAt,
+          // originatorInstanceId }. canonicalize() sorts keys, so field ORDER
+          // doesn't matter, but the field SET and values do. `v: 1` versions
+          // the canonical form itself — bump it on BOTH sides together if the
+          // signed field set ever changes, so an old signature fails closed
+          // instead of silently mis-verifying under a new form.
+          const signatureValid = verifyBodySignature(
+            {
+              v: 1,
+              table: record.table,
+              id: record.id,
+              data: record.data,
+              updatedAt: record.updatedAt,
+              originatorInstanceId: originator,
+              signature: record.signature,
+            },
+            originatorPublicKey,
+          );
+          if (!signatureValid) {
+            recordSkip("invalid_signature");
+            continue;
+          }
+        } else if (requireRecordSignatures()) {
+          // require-mode: unsigned records are no longer trusted on
+          // batch-level auth alone. Default mode (verify-if-present) falls
+          // through here and merges — see requireRecordSignatures() above.
+          recordSkip("missing_signature");
           continue;
         }
 

@@ -20,7 +20,20 @@ export type SkipReason =
   | "unknown_table"
   | "non_originator"
   | "future_timestamp"
-  | "no_op_same_hash";
+  | "no_op_same_hash"
+  // ─── federation-edge-hardening slice 3b ──────────────────────────────────
+  // Emitted by FederationSync.post's per-record signature verification gate
+  // (resources/Federation.ts), NOT by classifyRecord — this function stays
+  // pure/DB-free (verifying a signature against the originator's pinned key
+  // requires a Peer table lookup). Listed here so operators can grep one
+  // SkipReason union for every reason a record can be skipped, and so
+  // SyncLog.skippedReasons stays a closed, typed vocabulary.
+  | "unknown_originator_key" // record is signed, but its claimed originator
+                              // has no pinned public key on file (unknown peer)
+  | "invalid_signature" // record is signed, but the signature doesn't verify
+                        // against the originator's pinned public key
+  | "missing_signature"; // require-mode is on (FLAIR_FEDERATION_REQUIRE_RECORD_SIGNATURES)
+                         // and the record has no signature at all
 
 export type ClassifyResult =
   | { action: "merge"; originator: string }
