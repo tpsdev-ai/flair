@@ -170,6 +170,40 @@ export function readAdminPassFileSecure(path: string): string {
   return content;
 }
 
+function defaultAdminPassPath(): string {
+  return join(homedir(), ".flair", "admin-pass");
+}
+
+/**
+ * Resolve an admin password for LOCAL-only CLI convenience (`agent add`,
+ * `principal add`) without requiring `--admin-pass` on every call (#590).
+ *
+ * Resolution order: explicit value (the `--admin-pass` flag) → `FLAIR_ADMIN_PASS`
+ * env → the secure `~/.flair/admin-pass` file `flair init` already writes with
+ * mode 0600 (read via `readAdminPassFileSecure`, which enforces that mode).
+ *
+ * When `isRemoteTarget` is true, ONLY the explicit value is honored — the env
+ * and file legs are skipped entirely. This is the security-critical guard: a
+ * `--target`/`--ops-target` deploy must never silently reuse THIS machine's
+ * local admin secret against someone else's Harper instance. Remote callers
+ * keep requiring an explicit `--admin-pass`.
+ *
+ * Throws (via readAdminPassFileSecure) if the file exists but has unsafe
+ * permissions, so a misconfigured file surfaces as an actionable chmod error
+ * instead of a generic "admin pass required" message.
+ */
+function resolveLocalAdminPass(
+  explicit: string | undefined,
+  isRemoteTarget = false,
+  adminPassPath: string = defaultAdminPassPath(),
+): string | undefined {
+  if (explicit) return explicit;
+  if (isRemoteTarget) return undefined;
+  if (process.env.FLAIR_ADMIN_PASS) return process.env.FLAIR_ADMIN_PASS;
+  if (!existsSync(adminPassPath)) return undefined;
+  return readAdminPassFileSecure(adminPassPath);
+}
+
 function defaultKeysDir(): string {
   return join(homedir(), ".flair", "keys");
 }
@@ -2284,7 +2318,6 @@ agent
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
-    const adminPass: string | undefined = opts.adminPass;
     const adminUser = DEFAULT_ADMIN_USER;
     const name: string = opts.name ?? id;
     // Where to seed the Agent record. Default is localhost (opsPort). When
@@ -2293,9 +2326,31 @@ agent
     // `flair import`: explicit --ops-target > derive from --target > localhost.
     const seedOpsTarget: number | string =
       resolveEffectiveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }) ?? opsPort;
+    const isRemoteTarget = typeof seedOpsTarget === "string";
+
+    // #590 — local convenience fallback: FLAIR_ADMIN_PASS env, then the secure
+    // ~/.flair/admin-pass file `flair init` already writes (mode 0600). Never
+    // applied for a remote target — see resolveLocalAdminPass.
+    let adminPass: string | undefined;
+    try {
+      adminPass = resolveLocalAdminPass(opts.adminPass, isRemoteTarget);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
 
     if (!adminPass) {
-      console.error("Error: --admin-pass is required for agent add (needed to insert into Agent table)");
+      if (isRemoteTarget) {
+        console.error(
+          "Error: --admin-pass is required for agent add when targeting a remote instance " +
+          "(--target/--ops-target) — the local ~/.flair/admin-pass fallback is not used for remote targets."
+        );
+      } else {
+        console.error(
+          "Error: --admin-pass is required for agent add (needed to insert into Agent table). " +
+          "Set FLAIR_ADMIN_PASS, or make sure ~/.flair/admin-pass exists (created by `flair init`)."
+        );
+      }
       process.exit(1);
     }
 
@@ -2686,7 +2741,6 @@ principal
   .action(async (id: string, opts) => {
     const opsPort = resolveOpsPort(opts);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
-    const adminPass: string | undefined = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS;
     const adminUser = DEFAULT_ADMIN_USER;
     const kind: string = opts.kind ?? "agent";
     const name: string = opts.name ?? id;
@@ -2694,8 +2748,22 @@ principal
     const trustTier: string = opts.trust ?? (isAdmin ? "endorsed" : "unverified");
     const runtime: string | undefined = opts.runtime;
 
+    // #590 — same local-only fallback as `agent add`: FLAIR_ADMIN_PASS env, then
+    // the secure ~/.flair/admin-pass file (mode 0600). `principal add` has no
+    // --target/--ops-target (always localhost), so the fallback always applies.
+    let adminPass: string | undefined;
+    try {
+      adminPass = resolveLocalAdminPass(opts.adminPass);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+
     if (!adminPass) {
-      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required");
+      console.error(
+        "Error: --admin-pass or FLAIR_ADMIN_PASS required (or ensure ~/.flair/admin-pass exists, " +
+        "created by `flair init`)"
+      );
       process.exit(1);
     }
 
@@ -9956,4 +10024,5 @@ export {
   isLikelyRealSecret,
   shouldShowInlineSecretWarning,
   parseTokenFromFile,
+  resolveLocalAdminPass,
 };
