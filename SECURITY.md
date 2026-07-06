@@ -94,8 +94,12 @@ public key in Flair, and backs up the old key as `<agentId>.key.bak`.
 
 - **Agent impersonation:** Ed25519 signatures prevent one agent from
   acting as another without possessing the private key.
-- **Cross-agent data leakage:** Collection-level scoping ensures agents
-  can only query their own data.
+- **Private-memory leakage:** memories marked `visibility: private` are
+  strictly owner-only and never returned to another agent. Non-private
+  memories are intentionally readable within the org (by design, not
+  leakage); the cross-instance boundary is the federation edge.
+- **Write forgery:** writes are attributed to the authenticated agent —
+  an agent cannot write memories as another.
 - **Replay attacks:** 30-second window + nonce deduplication.
 - **Privilege escalation via SQL:** SQL and GraphQL endpoints blocked
   for non-admin agents.
