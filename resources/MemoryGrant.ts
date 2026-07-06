@@ -25,7 +25,7 @@ export class MemoryGrant extends (databases as any).flair.MemoryGrant {
 
   /**
    * Self-authorize now that the global gate is non-rejecting (memory-soul-
-   * read-gate family fix, ops-oox7 — same pattern as Memory.ts/Soul.ts/
+   * read-gate family fix — same pattern as Memory.ts/Soul.ts/
    * WorkspaceState.ts/Relationship.ts/Integration.ts). Closes the same P0
    * leak: Harper routes `GET /MemoryGrant/<id>` to get() and the collection
    * describe (`GET /MemoryGrant`) outside search(), so neither was gated

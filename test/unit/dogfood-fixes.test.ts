@@ -32,7 +32,7 @@ function run(cmd: string, env?: Record<string, string>): string {
   }
 }
 
-describe("Dogfood fixes (ops-fqwh)", () => {
+describe("Dogfood fixes", () => {
   beforeAll(() => {
     setup();
   });

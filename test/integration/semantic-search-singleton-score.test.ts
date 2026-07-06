@@ -1,9 +1,9 @@
-// ops-syzm — SemanticSearch scores a SINGLETON semantic-search result as 0
+// SemanticSearch scores a SINGLETON semantic-search result as 0
 // ("DEGRADED") even though embeddings are loaded and the memory genuinely
 // matches its own paraphrase.
 //
 // This is the SAME Harper quirk already root-caused and fixed for the dedup
-// path (ops-ume4, resources/Memory.ts findConservativeDedupMatch /
+// path (resources/Memory.ts findConservativeDedupMatch /
 // resources/dedup.ts cosineSimilarity): a cosine-sort query's `$distance`
 // annotation comes back `undefined` when its post-filter result set contains
 // EXACTLY ONE matching record — sort ORDER is still correct, only the numeric
@@ -13,7 +13,7 @@
 // so a singleton hit fell through `?? 1` → similarity 0 → the memory reads as
 // totally dissimilar to a paraphrase of ITSELF.
 //
-// ops-2dm3 Layer 1 made this trigger easily: before, the no-grants agent scope
+// The read-scope Layer 1 change made this trigger easily: before, the no-grants agent scope
 // was ALWAYS a compound `{operator:"or", conditions:[{agentId},{visibility==
 // "office"}]}` condition; resolveReadScope() now emits a PLAIN single
 // `{agentId==X}` condition for the common (no-grants) case, so an agent with
@@ -63,11 +63,11 @@ const agent = mkAgent("syzm-singleton");
 const MEMORY_ID = "syzm-singleton-memory-1";
 // Genuinely-related content + paraphrase, worded differently enough that the
 // keyword-substring bump (`content.includes(q)`) never fires — the score we
-// assert on is semanticScore alone, exactly the quantity ops-syzm corrupts.
+// assert on is semanticScore alone, exactly the quantity this singleton-scoring bug corrupts.
 const CONTENT = "Our quarterly budget review meeting is scheduled for next Tuesday afternoon in the main conference room downtown.";
 const PARAPHRASE_QUERY = "When are we getting together to go over quarterly spending numbers?";
 
-describe("ops-syzm — SemanticSearch singleton-result scoring (real Harper, real embeddings)", () => {
+describe("SemanticSearch singleton-result scoring (real Harper, real embeddings)", () => {
   beforeAll(async () => {
     harper = await startHarper();
     const res = await adminOp(harper, {
@@ -92,7 +92,7 @@ describe("ops-syzm — SemanticSearch singleton-result scoring (real Harper, rea
 
   afterAll(async () => { if (harper) await stopHarper(harper); });
 
-  test("ops-syzm: a singleton semantic-search result scores as a real positive similarity, not 0/DEGRADED", async () => {
+  test("SemanticSearch singleton-result scoring: a singleton semantic-search result scores as a real positive similarity, not 0/DEGRADED", async () => {
     const path = "/SemanticSearch";
     const res = await fetch(`${harper.httpURL}${path}`, {
       method: "POST",
@@ -109,7 +109,7 @@ describe("ops-syzm — SemanticSearch singleton-result scoring (real Harper, rea
     expect(body.results[0].id).toBe(MEMORY_ID);
 
     const score = body.results[0]._score;
-    console.log(`[ops-syzm] singleton semantic score observed: ${score}`);
+    console.log(`[singleton-score] singleton semantic score observed: ${score}`);
     // Pre-fix this is EXACTLY 0 (distanceToSimilarity(1) via the `?? 1`
     // fallback on an undefined $distance). A real paraphrase of the memory's
     // own content must score as genuinely similar — well above 0, not just

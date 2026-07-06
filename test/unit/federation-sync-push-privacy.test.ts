@@ -3,7 +3,7 @@ import nacl from "tweetnacl";
 import { isPrivateVisibility, PRIVATE_VISIBILITY } from "../../resources/memory-visibility";
 
 /**
- * federation-edge-hardening slice 2 (ops-nzxa: one rule, one place).
+ * federation-edge-hardening slice 2 (one rule, one place).
  *
  * The federation-sync PUSH (runFederationSyncOnce in src/cli.ts) pulls every
  * changed Memory row via the admin ops API with get_attributes:["*"] and,
@@ -47,7 +47,7 @@ function res(ok: boolean, status: number, body: any) {
 const testKp = nacl.sign.keyPair();
 const SINCE = "2025-01-01T00:00:00.000Z";
 
-describe("federation sync push — private-visibility filter (ops-nzxa)", () => {
+describe("federation sync push — private-visibility filter", () => {
   let capturedCalls: Array<{ url: string; body?: any; method?: string }> = [];
 
   beforeEach(() => {

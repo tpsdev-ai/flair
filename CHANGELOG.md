@@ -22,34 +22,34 @@ Writer-controlled memory sharing (Kris flair#522/#550), a memory recall-correctn
 
 ### 🔧 Memory recall correctness
 
-- **Dedup signal on singleton results (#564, ops-ume4).** Harper omits `$distance` when a cosine-sort result set is a singleton → dedup silently scored 0. Fallback: point-lookup the candidate and compute cosine directly.
+- **Dedup signal on singleton results (#564).** Harper omits `$distance` when a cosine-sort result set is a singleton → dedup silently scored 0. Fallback: point-lookup the candidate and compute cosine directly.
 - **Superseded records no longer resurface in recall (#566 SemanticSearch/BM25, #567 bootstrap).** A server-superseded record (past `validTo`, not archived) not co-present with its successor could resurface; now excluded unconditionally in every recall path.
-- **openclaw-flair supersede: write-new-before-close-old + observable failure (#563, ops-mmh9).**
+- **openclaw-flair supersede: write-new-before-close-old + observable failure (#563).**
 
 ### 🔒 Security
 
 - **Cross-agent delete authz regression guards** for `Relationship.delete` (#569) and `Credential.delete` (#570) — both verified safe against real Harper (the target record is bound before the method runs), now guarded so a future refactor can't silently reintroduce a bypass.
-- **Consolidated 3 Ed25519 nonce caches + crypto helpers into one shared guard (#559, ops-c4op).**
+- **Consolidated 3 Ed25519 nonce caches + crypto helpers into one shared guard (#559).**
 
 ### 🧰 Tooling / CI
 
-- **`release.sh` aligns bun.lock leaf specifiers after bump** — stops the recurring `--frozen-lockfile` desync (#560, ops-i9w8).
-- **Fail-fast timeouts on the two timeout-less CI jobs** whose sfw (Socket firewall) install could hang and block merge indefinitely (#571, ops-fumh).
-- **Real-Harper dedup/supersede e2e** (#562, which found ops-ume4) + Memory.get RequestTarget routing coverage (#561).
+- **`release.sh` aligns bun.lock leaf specifiers after bump** — stops the recurring `--frozen-lockfile` desync (#560).
+- **Fail-fast timeouts on the two timeout-less CI jobs** whose sfw (Socket firewall) install could hang and block merge indefinitely (#571).
+- **Real-Harper dedup/supersede e2e** (#562, which found the singleton dedup-signal gap above) + Memory.get RequestTarget routing coverage (#561).
 
 ## [0.19.0] - 2026-07-03
 
 The read-gate security sweep: three distinct anonymous/cross-agent read exposures, all found from one Sherlock sweep RED and closed.
 
-### 🔒 SECURITY: Memory/Soul by-id reads were ungated — anonymous content leak (#556, ops-ckrr)
+### 🔒 SECURITY: Memory/Soul by-id reads were ungated — anonymous content leak (#556)
 
 Memory and Soul gated writes and `search()` but defined no `allowRead()` and no `get()` override, so Harper's direct by-id path (`GET /Memory/<id>`) and the collection-describe (`GET /Memory`) were ungated — an anonymous caller received full record content, and a verified non-admin agent could read another agent's memory by enumerable id (`search()` only guarded the query path). Fix: `allowRead()=allowVerified` on both; an owner/grant-scoped `get()` on Memory (**404 never 403**, no id enumeration) branching on `isCollection` so collection/query reads delegate to the already-scoped `search()`; `delete()` reads via `super.get()` to preserve the permanent-delete guard.
 
-### 🔒 SECURITY: admin console reachable by verified non-admin agents (#557, ops-2ty0)
+### 🔒 SECURITY: admin console reachable by verified non-admin agents (#557)
 
 **P0, live-confirmed.** The `/Admin` auth-middleware gate only 401s requests with **no** Authorization header; a validly-signed non-admin Ed25519 agent passed verification, de-elevated to `flair-agent`, and reached the seven custom `Admin*` resources — which had no `allowRead` — returning the full admin console (`/AdminMemory` all-agents memory browse + provenance, `/AdminPrincipals`, `/AdminDashboard`). Fix: `allowRead()=allowAdmin` on all seven (Basic super_user and admin agents retain access; non-admins → 403).
 
-### 🔒 SECURITY: family read-gate — WorkspaceState / Relationship / Integration / MemoryGrant (#557, ops-oox7)
+### 🔒 SECURITY: family read-gate — WorkspaceState / Relationship / Integration / MemoryGrant (#557)
 
 The same by-id/describe leak class as Memory: `search()` and writes gated, but no `allowRead()`/`get()`. Fix: `allowRead()=allowVerified` + `isCollection`-branched owner-scoped `get()` (**404 never 403**) on all four; MemoryGrant scopes `ownerId` **OR** `granteeId` (both parties to a grant); `delete()` uses `super.get()`.
 
@@ -71,7 +71,7 @@ An in-process cross-encoder re-scores query+candidate together and reorders the 
 
 ## [0.17.0] - 2026-07-02
 
-### 🔒 SECURITY: cross-agent isolation break — `getContext()` not `this.request` (#551, ops-sal4)
+### 🔒 SECURITY: cross-agent isolation break — `getContext()` not `this.request` (#551)
 
 **P0, live-confirmed.** Harper v5 never populates `this.request` on `Resource` subclasses; the #236/#487 `getContext()` sweep missed 8 handlers, so their per-agent ownership guards silently read `undefined` and became dead no-ops (fail-open). Any verified agent could read any other agent's **WorkspaceState** (`GET /WorkspaceLatest/{id}`) and **OrgEvent catch-up feed** (`GET /OrgEventCatchup/{id}`), and every approved **OAuth consent grant** was minted for the `admin` principal regardless of who approved it.
 
@@ -81,7 +81,7 @@ All 8 handlers now resolve identity via the canonical `resolveAgentAuth(getConte
 
 `BootstrapMemories` now emits a fixed-cost `## Team` section listing the other active agents in the office with a nudge to search their memories before deep-diving an unfamiliar problem — bootstrap previously only ever loaded the caller's own context, so agents never learned teammates' findings were one `memory_search` away. Agent IDs are wrapped via `wrapUntrusted` (registrant-chosen, untrusted). External contribution from @kriszyp.
 
-### 🔐 Native `/mcp` OAuth surface — Model 2 (custom `withMCPAuth`-guarded handler), default-OFF (ops-b6uk)
+### 🔐 Native `/mcp` OAuth surface — Model 2 (custom `withMCPAuth`-guarded handler), default-OFF
 
 Flair speaks MCP natively over a custom in-process `/mcp` JSON-RPC handler wrapped with `@harperfast/oauth`'s `withMCPAuth` — a per-agent OAuth identity replaces the local `flair-mcp` stdio proxy's key-holding. This is the **Model 2** path (Nathan approved 2026-07-01): a custom handler rather than Harper's native application-MCP profile, so it sidesteps the Harper native-MCP gating gaps and is curated **by construction** (the handler only implements the 9 flair tools — no raw CRUD surface).
 
@@ -98,7 +98,7 @@ Flair speaks MCP natively over a custom in-process `/mcp` JSON-RPC handler wrapp
 
 ### 🐛 `flair upgrade` — detect an installed-but-stale flair-mcp, drop openclaw noise, fix formatting (#543)
 
-The bin `--version` probe missed a globally-installed `flair-mcp` (older installs predate `--version`) → it now falls back to the lib probe (reads the installed `package.json` version, version-independent), so a stale-but-present flair-mcp is correctly detected. The `openclaw-flair` line is suppressed when openclaw isn't installed (still shown under `--all`), dropping noise on machines without openclaw. Fixed a double-space in the restart hint. Added a one-line scope note: `flair upgrade` covers the npm-global surface + openclaw plugins; `pi-flair` / `langgraph-flair` / `n8n-nodes-flair` / `hermes-flair` upgrade within their own ecosystems. Fixes ops-p42n (surfaced by Kyle's real-world use).
+The bin `--version` probe missed a globally-installed `flair-mcp` (older installs predate `--version`) → it now falls back to the lib probe (reads the installed `package.json` version, version-independent), so a stale-but-present flair-mcp is correctly detected. The `openclaw-flair` line is suppressed when openclaw isn't installed (still shown under `--all`), dropping noise on machines without openclaw. Fixed a double-space in the restart hint. Added a one-line scope note: `flair upgrade` covers the npm-global surface + openclaw plugins; `pi-flair` / `langgraph-flair` / `n8n-nodes-flair` / `hermes-flair` upgrade within their own ecosystems. Fixes the stale-flair-mcp detection gap (surfaced by Kyle's real-world use).
 
 ### 🤖 Auto-cut GitHub releases from the CHANGELOG on tag (#544)
 
@@ -106,7 +106,7 @@ Every `v*` tag now creates its GitHub release from the matching CHANGELOG sectio
 
 ## [0.16.0] - 2026-06-29
 
-### 🧪 CI clean-VM gate — exercise the REALISTIC user env so the #538 embeddings showstopper can't silently regress (ops-cd37)
+### 🧪 CI clean-VM gate — exercise the REALISTIC user env so the #538 embeddings showstopper can't silently regress
 
 The #538 fix (above) addressed a fresh `sudo npm install -g @tpsdev-ai/flair` leaving semantic search **dead** (model targeted the root-owned package dir; Harper-as-user couldn't write it). The uncomfortable part: **CI never caught it.** The existing `docker/Dockerfile.test` from-scratch job runs as **root** (no perms mismatch) *and* sets `FLAIR_MODELS_DIR=/opt/flair-models` (a writable override), so its "clean install" is not the user's environment — root + a pre-solved model path made the bug structurally invisible. The tarball smoke test (`test.yml`) also installs as root and its write/search round-trip uses a **keyword-matching** marker, so it passes even with embeddings dead.
 
@@ -116,17 +116,17 @@ This adds a gate that reproduces what a real user actually has:
 - **The assertion is genuine semantic recall, not keyword match.** The gate asserts `flair init` reports `Semantic search operational` (the #533 in-init check, which prints `DEGRADED` but does *not* exit non-zero), then runs `flair doctor` as the hard gate — `doctor` performs the same embed→**paraphrase** round-trip (`verifySemanticSearch`: query "a cat hunting a mouse in the evening" vs. content "feline predator stalked its rodent quarry at dusk", **zero keyword overlap**, real semantic score > 0.05) and `process.exit(1)` on degraded. Keyword-only fallback cannot satisfy it. Embeddings dead → the gate FAILS.
 - **Wired into `.github/workflows/docker-test.yml`** as a new `clean-vm-gate` job that runs on PRs, alongside (not replacing) the existing from-scratch job — the from-scratch coverage stays, the gate adds the realistic non-root / no-override variant. Each Docker build uses a distinct GHA cache scope. Validated locally: builds + runs green on current main (post-#538) with a real semantic score; the assertion is semantic, so it would catch a regression that the old root-+-override CI could not.
 
-### 🩺 Fix dead semantic search on a sudo/root-owned global install — model dir defaults to `~/.flair` (ops-am0v)
+### 🩺 Fix dead semantic search on a sudo/root-owned global install — model dir defaults to `~/.flair`
 
 A fresh `sudo npm install -g @tpsdev-ai/flair` left semantic search **dead**: the package landed root-owned (e.g. `/usr/lib/node_modules`), Harper runs as the *user*, so the embeddings model download hit `EACCES` and recall silently fell back to keyword-only. The `flair doctor` / `flair init` round-trip check (#533) caught it loud, but recall was still broken — this fixes the underlying cause.
 
-**Root cause (corrects the ops-9czl note).** The blocker was the **model path**, not the `node_modules/harper` symlink. Flair loads itself as a Harper component in-place (`harper run .`, cwd = the package dir), and Flair's own embeddings wrapper (`resources/embeddings-provider.ts`) hard-coded the model dir to `join(process.cwd(), "models")` — i.e. **inside the package dir**. On a root-owned install that's read-only to the user-run Harper, so the model can't download and `init()` fails. Verified end-to-end with a faithful repro (read-only `<packageDir>/models`, isolated HOME/data/free port): pre-fix → `✗ Semantic search DEGRADED`; the componentLoader's `node_modules/harper` symlink `EACCES` is caught-and-logged (componentLoader.js, no rethrow) and Flair imports nothing from `harperdb`, so it is **non-fatal** — the model path was the only real sink.
+**Root cause (corrects the "onboarding dogfood round 1" note below).** The blocker was the **model path**, not the `node_modules/harper` symlink. Flair loads itself as a Harper component in-place (`harper run .`, cwd = the package dir), and Flair's own embeddings wrapper (`resources/embeddings-provider.ts`) hard-coded the model dir to `join(process.cwd(), "models")` — i.e. **inside the package dir**. On a root-owned install that's read-only to the user-run Harper, so the model can't download and `init()` fails. Verified end-to-end with a faithful repro (read-only `<packageDir>/models`, isolated HOME/data/free port): pre-fix → `✗ Semantic search DEGRADED`; the componentLoader's `node_modules/harper` symlink `EACCES` is caught-and-logged (componentLoader.js, no rethrow) and Flair imports nothing from `harperdb`, so it is **non-fatal** — the model path was the only real sink.
 
 - **The embeddings model dir now defaults to a user-writable location, never the package dir (`resources/embeddings-provider.ts`).** New `resolveModelsDir()` resolves, in order: `FLAIR_MODELS_DIR` (explicit override) → `<ROOTPATH>/models` (Harper's data dir — Flair passes `ROOTPATH = ~/.flair/data` when it spawns Harper, so this is user-owned and writable even under a root-owned install) → `<cwd>/models` **only if a model is already cached there** (backward compat for existing writable installs — reuse, don't re-download) → `~/.flair/data/models` (last resort). Aligns with the principle that everything Flair writes lives under `~/.flair` and the package dir stays read-only. `FLAIR_MODELS_DIR` (already used by `docker/Dockerfile.test`) is now an actually-wired override on the production path, not just a dev/docker affordance. Under the read-only-install repro, embed→paraphrase-search now round-trips with a real semantic score (~0.74) and doctor's #533 check passes.
 - **Test harness reuses the pre-downloaded model via the override (`test/helpers/harper-lifecycle.ts`).** With the new `<ROOTPATH>/models` default, the integration harness (fresh temp `installDir` per `startHarper`) would otherwise re-download the ~80MB model every run (HuggingFace 429-prone, #463/#465). The harness now sets `FLAIR_MODELS_DIR` to the repo-root `models/` that CI/local pre-download into; a pre-existing parent `FLAIR_MODELS_DIR` still wins.
 - **New unit coverage (`test/unit/embeddings-models-dir.test.ts`)** asserts the resolution order, including the load-bearing invariant: a fresh install with no `ROOTPATH` and no cached model resolves to `~/.flair`, **never** the read-only package dir. Full unit suite (1155) green; HNSW / agent-journey / smoke / durability integration tests green (real-embeddings paths exercised).
 
-### 🛟 Loud Node-version preflight for `flair-mcp` — silent failure on old Node (ops-fomi)
+### 🛟 Loud Node-version preflight for `flair-mcp` — silent failure on old Node
 
 The `flair-mcp` bin (`dist/index.js`) is an ES module: top-level imports are hoisted and the whole module graph is linked + evaluated before the file body runs. flair-mcp's deps (`@modelcontextprotocol/sdk`, `@tpsdev-ai/flair-client` and its transitive deps) need a modern engine, so on an old Node the import graph crashes during linking — **before** any in-file version guard could run. Result: a user wiring `npx -y @tpsdev-ai/flair-mcp` on an unsupported Node gets zero output and a dead MCP server, with no actionable signal. This is the same exposure flair's CLI had, fixed in #524 — now mirrored for the MCP server.
 
@@ -136,7 +136,7 @@ The `flair-mcp` bin (`dist/index.js`) is an ES module: top-level imports are hoi
 - **`engines.node` bumped `>=18` → `>=22`** to match flair's CLI and the deps' real floor, so `npm install` also warns on an unsupported Node. Postinstall now `chmod +x` the shim.
 - New unit test (`test/mcp-node-preflight.test.ts`) proves: loud non-zero failure on a simulated old Node without loading the ESM server, no-op handoff to `runMcp()` on the supported Node the suite runs on, and parse-safety of the emitted shim. (packages/flair-mcp/*)
 
-### 🛟 Harper watchdog now recovers an UNLOADED launchd job + alerts on state transitions (ops-6nv7)
+### 🛟 Harper watchdog now recovers an UNLOADED launchd job + alerts on state transitions
 
 On 2026-06-27 ~04:20 prod Flair (`:9926`) was **down** — the `ai.tpsdev.flair` launchd job wasn't loaded (no Harper PID) — and it stayed down, undetected, until a memory write happened to fail. Two gaps: (1) `harper-watchdog.sh` only handled the *PID-alive-but-`/Health`-dead* zombie case (`kill -9` + `launchctl kickstart -k`); `kickstart`/`start` are **no-ops on an unloaded job**, so the job-unloaded failure mode went unrecovered. (2) There was **no alerting at all** — a Flair-down was invisible. Recovery was a manual `launchctl load ~/Library/LaunchAgents/ai.tpsdev.flair.plist`.
 
@@ -148,22 +148,22 @@ The watchdog now recovers **both** failure modes and makes the event **known**:
 
 `bash -n` clean; all three cases (health-OK silent, health-dead+job-loaded kickstart, health-dead+job-unloaded bootstrap) plus the recovered / sustained-down / self-healed / mail-fallback transitions were dry-run against a stubbed `launchctl`/`curl`/`pgrep` harness (never against live prod). The live `ai.tpsdev.flair-watchdog` picks up the new script on its next 60s run after merge — no plist change required. (scripts/harper-watchdog.sh)
 
-### 🔒 Exact-pin all runtime deps + Renovate with a supply-chain cooldown (ops-sz4n)
+### 🔒 Exact-pin all runtime deps + Renovate with a supply-chain cooldown
 
 Four root runtime deps were `^`-ranged install-defaults rather than deliberate choices — `jose` (`^6.2.2`, in the auth/JWT path), `tar` (`^7.5.13`, in packaging), `js-yaml` (`^4.1.1`), and `@types/js-yaml` (`^4.0.9`). A user's `npm install -g @tpsdev-ai/flair` resolves `^` ranges **fresh** — npm does not consume our committed `bun.lock` — so a fresh install could pull a newer, untested (or freshly-compromised) version than anything we shipped or tested. This is exactly the surface `docs/supply-chain-policy.md` §2 already mandated against ("exact-version pinning for production deps") but nothing enforced.
 
 - **All ranged production + dev deps are now exact-pinned to the lockfile-resolved versions** (pin to what we tested — no version bumps): root `jose` `6.2.2`, `tar` `7.5.13`, `js-yaml` `4.1.1`, `@types/js-yaml` `4.0.9`, plus devDeps `@playwright/test` `1.59.1`, `@types/tar` `7.0.87`; and `packages/pi-flair` devDeps `@types/node` `24.11.0`, `typescript` `5.9.3`. `peerDependencies` are intentionally left as ranges (host-provided, not installed). `bun.lock` is version-identical — the resolved `packages:` block is byte-for-byte unchanged; only package.json spec strings tightened (and a pre-existing stale `pi-flair → @tpsdev-ai/flair-client` lock entry corrected to `0.15.0`). This brings `jose`, `tar`, and `js-yaml` under the `check-dep-ages.mjs` bake-time guard, which previously **skipped them** because it only checks exact-pinned deps (the guard now covers 10 production deps, up from 8). (package.json, packages/pi-flair/package.json, bun.lock)
 - **Renovate config added (`.github/renovate.json`) for deliberate, test-gated updates with a supply-chain cooldown.** `minimumReleaseAge: "7 days"` matches the `FLAIR_DEP_MIN_AGE_DAYS` default (7) enforced by `scripts/check-dep-ages.mjs` and documented in the policy — Renovate only proposes versions past the bake-time, so a freshly-published (possibly compromised) version has to survive the detection window before it's even suggested. Updates are PRs only (`automerge: false`) — every bump flows through the full test suite + K&S review, never a surprise install. `rangeStrategy: "pin"` (pin-mode aware), grouped non-major / isolated major PRs, weekly schedule, and a keep-current allow-list (`@harperfast/harper`, `harper-fabric-embeddings`) mirroring the script's `DEFAULT_KEEP_CURRENT` so Renovate and the bake-time guard stay in lockstep. Vulnerability alerts bypass the cooldown (security fixes ship immediately). Validated against the latest `renovate-config-validator`. Policy doc §2 updated to reflect Renovate is now enabled (deliberate, cooldown-gated, never auto-merge). (.github/renovate.json, docs/supply-chain-policy.md)
 
-### ⬆️ Bump bundled Harper 5.0.21 → 5.1.14 (ops-xc0x)
+### ⬆️ Bump bundled Harper 5.0.21 → 5.1.14
 
-The bundled `@harperfast/harper` dependency moves from `5.0.21` to `5.1.14`, retiring the 5.0.21 pin that has been the source of recurring friction — the `packageComponent` empty-tarball bug under `node_modules` (#513) and the `flair upgrade --target` override dance that hard-coded a `>= 5.1.13` Harper pin to work around it. The Fabric already runs Flair on 5.1.14 (proven in production), so this brings the bundled dep to parity. This is step 0 of the native-MCP arc (ops-b6uk / #520): 5.1 unlocks Harper's native MCP support and the OAuth plugin.
+The bundled `@harperfast/harper` dependency moves from `5.0.21` to `5.1.14`, retiring the 5.0.21 pin that has been the source of recurring friction — the `packageComponent` empty-tarball bug under `node_modules` (#513) and the `flair upgrade --target` override dance that hard-coded a `>= 5.1.13` Harper pin to work around it. The Fabric already runs Flair on 5.1.14 (proven in production), so this brings the bundled dep to parity. This is step 0 of the native-MCP arc (#520): 5.1 unlocks Harper's native MCP support and the OAuth plugin.
 
 Full unit (1151) + integration (129) suites pass on 5.1.14, and `flair init` / `flair doctor` confirm embeddings load and semantic recall works (paraphrase round-trip, score ~0.74) in a writable environment. The 5.1.x dependency tree swaps the storage native bindings (`@harperfast/rocksdb-js` 1.3.0 → 2.3.0, `lmdb` 3.5.4 → 3.5.5) and pulls a new, **optional** `react-native-fs` subtree transitively via `alasql` 4.6.6 → 4.17.3 (never `require`d in a server/Node context). (package.json, bun.lock)
 
-**CI Docker image synced to match (ops-xc0x follow-up).** The E2E and smoke jobs spun up the `harperfast/harper:5.0.1` Docker image while the bundled npm dep was already 5.1.14 — validating a different Harper runtime than ships to users. Both pins (`.github/workflows/test.yml`, `.github/workflows/smoke.yml`) now use `harperfast/harper:5.1.14`. The native-spawn (integration) and `workers: 1` + retry (Playwright) HarperFast/harper#386 mitigations are **kept** — they're version-agnostic guards against the concurrent-write race; this PR's Docker E2E/smoke run is what validates whether 5.1.14 still trips it (a real finding if so, since users get 5.1.14 — not a reason to revert). Stale `5.0.1` references in CI/Playwright comments updated.
+**CI Docker image synced to match (Harper bump follow-up).** The E2E and smoke jobs spun up the `harperfast/harper:5.0.1` Docker image while the bundled npm dep was already 5.1.14 — validating a different Harper runtime than ships to users. Both pins (`.github/workflows/test.yml`, `.github/workflows/smoke.yml`) now use `harperfast/harper:5.1.14`. The native-spawn (integration) and `workers: 1` + retry (Playwright) HarperFast/harper#386 mitigations are **kept** — they're version-agnostic guards against the concurrent-write race; this PR's Docker E2E/smoke run is what validates whether 5.1.14 still trips it (a real finding if so, since users get 5.1.14 — not a reason to revert). Stale `5.0.1` references in CI/Playwright comments updated.
 
-### 🩺 Onboarding dogfood round 1 — loud failure for dead semantic search + install/UX fixes (ops-9czl)
+### 🩺 Onboarding dogfood round 1 — loud failure for dead semantic search + install/UX fixes
 
 A clean-VM dogfood (fresh Ubuntu, new Harper dev) found semantic search **dead out of the box** — a `sudo`/root-owned global install can't write the embeddings model symlink (`EACCES`), so `SemanticSearch` silently fell back to keyword-only — while `flair doctor` reported "no issues found" the entire time. This round makes that failure loud and fixes the surrounding install/UX friction.
 
@@ -179,7 +179,7 @@ The git mental model: `npm install -g @tpsdev-ai/flair`, then `flair init`. `fla
 
 - **`flair init` is now the full one-command setup.** It gained `install`'s flags — `--client <claude-code|codex|gemini|cursor|all|none>`, `--no-mcp`, `--skip-smoke` — alongside its existing instance/agent/remote/Fabric flags. With no MCP flag it detects and wires every installed client (Claude Code is auto-wired into `~/.claude.json`; others print copy-paste snippets) and runs an MCP smoke test, then degrades gracefully (warnings, never a hard failure). `--no-mcp` reduces it to the minimal instance + agent bootstrap, so existing callers like `flair init --agent-id X` keep working unchanged.
 - **Canonical agent flag is `--agent-id`** (init's existing flag, referenced in docs and callers); `--agent` (install's flag) is kept as a hidden alias so both forms work.
-- **Docs updated:** README Quick Start, `docs/integrations.md`, the cross-orchestrator demo cast, and `packages/flair-mcp/README.md` now lead with `flair init`. (ops-ogzp iteration 2.)
+- **Docs updated:** README Quick Start, `docs/integrations.md`, the cross-orchestrator demo cast, and `packages/flair-mcp/README.md` now lead with `flair init`. (second docs pass.)
 
 ### 📚 Onboarding consistency — one zero-install MCP-wiring pattern + `flair install` as the front door
 
@@ -194,8 +194,8 @@ Three contradictions in the onboarding story, fixed so the docs and the code agr
 
 Closes the two recurring papercuts from the v0.15.0 release:
 
-- **`release.sh` pushes authenticate via the gh token (ops-cb5o):** both git-push points (the Phase-1 release-branch push and the Phase-2 tag push) used plain `git push origin`, which fails auth on hosts without a working cred helper for the flair remote (rockit: `Password authentication is not supported`). They now push via the gh token embedded in the remote URL (`git push https://x-access-token:<token>@github.com/tpsdev-ai/flair.git <ref>`), the same PAT-in-URL pattern used everywhere else. The token is read once and never echoed; if no token is available the push fails loudly with recovery guidance. The `-u` upstream tracking on the branch push was dropped (it would persist the token into `.git/config`; the release flow pushes once and opens the PR via the API). The `gh pr create` → `gh api` change from #528 is untouched.
-- **Impl-term leak check runs on every PR, scanning the built package surface (ops-aksm):** the `check-impl-term-leaks` lint scans `packages/*/dist/`, but the per-PR "Doc/Code Lint" CI job didn't build the packages — so a bead-ref/internal label in a package's **source** comment (which `tsc` compiles verbatim into `dist/`) was invisible at PR time and only failed at release. This is exactly what blocked v0.15.0: a coordination-write-surface comment in `packages/flair-mcp/src/index.ts` carried an internal ref into `dist/index.js`, caught only by the release-time check (#528). The `doclint` job now builds all publishable packages before running the check, so a source leak fails CI on the PR that introduces it, not at release.
+- **`release.sh` pushes authenticate via the gh token:** both git-push points (the Phase-1 release-branch push and the Phase-2 tag push) used plain `git push origin`, which fails auth on hosts without a working cred helper for the flair remote (rockit: `Password authentication is not supported`). They now push via the gh token embedded in the remote URL (`git push https://x-access-token:<token>@github.com/tpsdev-ai/flair.git <ref>`), the same PAT-in-URL pattern used everywhere else. The token is read once and never echoed; if no token is available the push fails loudly with recovery guidance. The `-u` upstream tracking on the branch push was dropped (it would persist the token into `.git/config`; the release flow pushes once and opens the PR via the API). The `gh pr create` → `gh api` change from #528 is untouched.
+- **Impl-term leak check runs on every PR, scanning the built package surface:** the `check-impl-term-leaks` lint scans `packages/*/dist/`, but the per-PR "Doc/Code Lint" CI job didn't build the packages — so a bead-ref/internal label in a package's **source** comment (which `tsc` compiles verbatim into `dist/`) was invisible at PR time and only failed at release. This is exactly what blocked v0.15.0: a coordination-write-surface comment in `packages/flair-mcp/src/index.ts` carried an internal ref into `dist/index.js`, caught only by the release-time check (#528). The `doclint` job now builds all publishable packages before running the check, so a source leak fails CI on the PR that introduces it, not at release.
 
 ## 0.15.0 (2026-06-26)
 
@@ -207,25 +207,25 @@ Unblocks the release build and removes two recurring release-time papercuts:
 - **Gitignore disposable UI artifacts:** added `ui/_shoot*.mjs`, `ui/floor-*.png`, `ui/hero-*.png`, `ui/office-space*.html` (hero-mock screenshot scripts + pngs from prior sessions) to `.gitignore` so they stop dirtying the tree and tripping `release.sh`'s clean-tree check. None were tracked or shipped.
 - **`release.sh` PR-create via REST:** the release PR step used `gh pr create`, which 401s with the flint token (it routes through GraphQL). Switched to `gh api -X POST repos/tpsdev-ai/flair/pulls` (REST works) with the same title/body/head/base, so the PR step actually succeeds.
 
-### ✨ `flair upgrade --target <fabric>` — one-command Fabric upgrade — ops-e5bh
+### ✨ `flair upgrade --target <fabric>` — one-command Fabric upgrade
 
-Upgrading a Flair instance deployed to a Harper Fabric cluster used to require a manual deploy dance: stand up a fresh temp dir, hand-write a `package.json` that depends on `@tpsdev-ai/flair@<version>` **and** carries an `overrides` block pinning `@harperfast/harper` to a fixed version (because the published flair declares an old Harper — `@harperfast/harper@5.0.21` as of `flair@0.14.0` — whose component packager emits an empty tarball when the package root is under `node_modules`, flair#513), `npm install`, then run `flair deploy`. `flair upgrade --target <fabric-url>` now bakes that whole thing into one command: it resolves the target version (latest published `@tpsdev-ai/flair`, or `--version`), prepares a clean deployable in an isolated temp dir with the Harper pin (>= 5.1.13) applied automatically, **confirms the staged Harper is the fix version before deploying**, then **reuses `flair deploy`** to push to the Fabric and verifies the result. `--check` shows the version diff + plan without deploying; credentials mirror `flair deploy` (`--fabric-user`/`--fabric-password`, `FABRIC_USER`/`FABRIC_PASSWORD` env) and are never printed. The local-package `flair upgrade` (no `--target`) is unchanged. (ops-e5bh.)
+Upgrading a Flair instance deployed to a Harper Fabric cluster used to require a manual deploy dance: stand up a fresh temp dir, hand-write a `package.json` that depends on `@tpsdev-ai/flair@<version>` **and** carries an `overrides` block pinning `@harperfast/harper` to a fixed version (because the published flair declares an old Harper — `@harperfast/harper@5.0.21` as of `flair@0.14.0` — whose component packager emits an empty tarball when the package root is under `node_modules`, flair#513), `npm install`, then run `flair deploy`. `flair upgrade --target <fabric-url>` now bakes that whole thing into one command: it resolves the target version (latest published `@tpsdev-ai/flair`, or `--version`), prepares a clean deployable in an isolated temp dir with the Harper pin (>= 5.1.13) applied automatically, **confirms the staged Harper is the fix version before deploying**, then **reuses `flair deploy`** to push to the Fabric and verifies the result. `--check` shows the version diff + plan without deploying; credentials mirror `flair deploy` (`--fabric-user`/`--fabric-password`, `FABRIC_USER`/`FABRIC_PASSWORD` env) and are never printed. The local-package `flair upgrade` (no `--target`) is unchanged.
 
-### 🐛 Loud Node-version preflight — `flair init` was silently failing on unsupported Node — ops-3wz7
+### 🐛 Loud Node-version preflight — `flair init` was silently failing on unsupported Node
 
 `flair` (and so `flair init`) silently did nothing on an older/unsupported Node: no error, no output, no `~/.flair`. A Harper dev hit it live onboarding to a Flair office — zero output and no `~/.flair`, fixed only by upgrading Node. Every dev on an old Node hits the same silent wall.
 
 **Root cause:** the CLI bin (`dist/cli.js`) is an ES module. In ESM, every top-level `import` is hoisted and the whole module graph is linked + evaluated *before* the first statement in the file body runs. Flair's deps require a modern engine (`harper-fabric-embeddings` `>=22`, `@harperfast/harper` / `commander` `>=20`), so on an old Node the import graph crashes during linking — *before* any in-file version guard could ever run. The two pre-existing `process.version` checks lived deep inside command handlers, far past the imports, so they never executed; the failure surfaced as silence.
 
-**Fix:** the bin now points at a CommonJS preflight shim (`dist/cli-shim.cjs`, compiled from `src/cli-shim.cts`). CommonJS evaluates top-to-bottom with lazy `require()`/`import()`, so the shim's Node-version check runs and prints *before* anything tries to load the ESM CLI or any modern dependency. The check uses only ancient-safe syntax (`var`, plain functions, string ops, `console.error`, `process.exit`) so the guard itself can never become the thing that fails to parse — it is guaranteed to run and print on the oldest Node a dev could plausibly have. On an unsupported Node it prints a clear, actionable message ("Flair requires Node.js >= 22. You are running Node.js X. Please upgrade: https://nodejs.org/") and exits non-zero. On a supported Node it is a transparent no-op that hands off to the real CLI via `runCli()`. `engines.node` is unchanged at `>=22` (so `npm install` also warns). (ops-3wz7.)
+**Fix:** the bin now points at a CommonJS preflight shim (`dist/cli-shim.cjs`, compiled from `src/cli-shim.cts`). CommonJS evaluates top-to-bottom with lazy `require()`/`import()`, so the shim's Node-version check runs and prints *before* anything tries to load the ESM CLI or any modern dependency. The check uses only ancient-safe syntax (`var`, plain functions, string ops, `console.error`, `process.exit`) so the guard itself can never become the thing that fails to parse — it is guaranteed to run and print on the oldest Node a dev could plausibly have. On an unsupported Node it prints a clear, actionable message ("Flair requires Node.js >= 22. You are running Node.js X. Please upgrade: https://nodejs.org/") and exits non-zero. On a supported Node it is a transparent no-op that hands off to the real CLI via `runCli()`. `engines.node` is unchanged at `>=22` (so `npm install` also warns).
 
-### 🐛 `seedAgentViaOpsApi` seeded agents with `kind=null` / `status=null` (invisible to roster/presence) — ops-3b9i / #521
+### 🐛 `seedAgentViaOpsApi` seeded agents with `kind=null` / `status=null` (invisible to roster/presence) — #521
 
-Remote agent seeding (`flair agent add`, `flair import`, remote init) writes the `Agent` record through the Harper operations API (`operation: "insert"`), which **bypasses the `Agent` resource layer** — so `Agent.post()`'s 1.0 Principal defaults (`kind="agent"`, `status="active"`, `displayName`, `admin`, `defaultTrustTier`, `type`) never ran. The seed body only carried `{id, name, publicKey, createdAt}`, so remotely-seeded agents landed `kind=null, status=null` and were **invisible to roster / presence / Office-Space queries** that filter `status='active'` or `kind='agent'`. `seedAgentViaOpsApi` now writes those fields explicitly, mirroring `Agent.post()` exactly. (ops-3b9i / closes #521.)
+Remote agent seeding (`flair agent add`, `flair import`, remote init) writes the `Agent` record through the Harper operations API (`operation: "insert"`), which **bypasses the `Agent` resource layer** — so `Agent.post()`'s 1.0 Principal defaults (`kind="agent"`, `status="active"`, `displayName`, `admin`, `defaultTrustTier`, `type`) never ran. The seed body only carried `{id, name, publicKey, createdAt}`, so remotely-seeded agents landed `kind=null, status=null` and were **invisible to roster / presence / Office-Space queries** that filter `status='active'` or `kind='agent'`. `seedAgentViaOpsApi` now writes those fields explicitly, mirroring `Agent.post()` exactly. (closes #521.)
 
-### ✨ BM25 + union-RRF hybrid retrieval (feature-flagged) — ops-i39b
+### ✨ BM25 + union-RRF hybrid retrieval (feature-flagged)
 
-Flair semantic recall (HNSW over Q4-nomic embeddings) buries known-good **near-verbatim** memories past rank 100 — outside the HNSW candidate window — so `SemanticSearch` never returns them (confirmed by the recall-eval diagnosis, ops-ti82: 6 known-good memories missing in both raw and composite scoring; the misses are lexical exact-term cases the weak embedding cannot surface). This adds a **feature-flagged** BM25 + candidate-union Reciprocal Rank Fusion hybrid path in `resources/SemanticSearch.ts`, between the HNSW candidate fetch and the composite scoring.
+Flair semantic recall (HNSW over Q4-nomic embeddings) buries known-good **near-verbatim** memories past rank 100 — outside the HNSW candidate window — so `SemanticSearch` never returns them (confirmed by the recall-eval diagnosis: 6 known-good memories missing in both raw and composite scoring; the misses are lexical exact-term cases the weak embedding cannot surface). This adds a **feature-flagged** BM25 + candidate-union Reciprocal Rank Fusion hybrid path in `resources/SemanticSearch.ts`, between the HNSW candidate fetch and the composite scoring.
 
 - **In-memory per-query BM25** (`k1=1.2`, `b=0.75`, lowercased tokenize, trivial-stopword drop, standard +1-variant IDF) over the caller's scoped corpus — no persistent index, no schema change, no write-path coupling. Extracted to the Harper-free `resources/bm25.ts` so the scoring + fusion are unit-tested against the shipped code.
 - **Candidate-UNION RRF** (`rrf = 1/(K+rank_sem) + 1/(K+rank_bm25)`, `K=60`, absent-from-a-list = 0 contribution) over the dedup'd union of the semantic and BM25 (top-50) candidate pools → **normalized** to `[0,1]` (`rrf / max_rrf_in_union`) → fed as the `rawScore` input to the existing `compositeScore`, so durability/recency/`retrievalBoost` and the `RBOOST_RELEVANCE_FLOOR` / `minScore` thresholds all still apply. Naive whole-corpus RRF was rejected (pilot: 0/6 — the broken semantic top-50 floods the fusion and buries BM25's rank-1 hits); union-RRF is the production shape.
@@ -233,9 +233,9 @@ Flair semantic recall (HNSW over Q4-nomic embeddings) buries known-good **near-v
 - **Removes** the `+0.05` exact-substring keyword bump on the hybrid path (BM25 subsumes it). **No-embedding fallback** → BM25-only ranking (RRF degrades naturally as the semantic list is empty). `CANDIDATE_MULTIPLIER` (HNSW fetch size) unchanged; BM25 uses a fixed `SEM_LIMIT=50` candidate window.
 - **Feature flag `FLAIR_HYBRID_RETRIEVAL`** (`true` / `1` / `on`; default OFF). **Flag OFF is byte-identical to current behavior** — the legacy HNSW and no-embedding branches are untouched and only the flag-ON path runs the hybrid logic.
 
-Recall-eval (flag-ON vs flag-OFF, against the live flint corpus through the shipped modules): the NEW-8 within-cluster gate **p@3 holds 0.88** (no regression); the OLD-6 severe near-verbatim misses go from **0/6 → 4/6 into top-10** (1/6 into top-3). Sherlock-gated on the security boundary. (ops-i39b — spec `FLAIR-BM25-HYBRID-RETRIEVAL`.)
+Recall-eval (flag-ON vs flag-OFF, against the live flint corpus through the shipped modules): the NEW-8 within-cluster gate **p@3 holds 0.88** (no regression); the OLD-6 severe near-verbatim misses go from **0/6 → 4/6 into top-10** (1/6 into top-3). Sherlock-gated on the security boundary. (spec `FLAIR-BM25-HYBRID-RETRIEVAL`.)
 
-### ✨ Coordination write surface — `flair orgevent` + `flair workspace set` + MCP tools (ops-wmgx / Kris #510)
+### ✨ Coordination write surface — `flair orgevent` + `flair workspace set` + MCP tools (Kris #510)
 
 Completes the Office Space coordination layer so multi-agent coordination no longer requires hand-rolling signed HTTP (validated need from the Rivet collision dogfood). Adds two CLI commands and two MCP tools that write the coordination layer:
 
@@ -243,13 +243,13 @@ Completes the Office Space coordination layer so multi-agent coordination no lon
 - **`flair orgevent --kind <kind> --summary <text> [--detail --scope --target <agentId>…]`** → signed `POST /OrgEvent`. Publishes an org-wide event attributed to the calling agent; `--target` is repeatable for recipients.
 - MCP tools **`flair_workspace_set`** and **`flair_orgevent`** mirror the CLI, going through `FlairClient.request()` (Ed25519-signed).
 
-**Attribution is taken from the Ed25519 signature, NEVER the request body — an agent cannot forge another agent's records.** `WorkspaceState.post()` and `OrgEvent.post()` now overwrite the persisted `agentId` / `authorId` with the authenticated identity for non-admin agents (rather than 403'ing a mismatch), mirroring `Presence.post()`'s "agentId from signature, not from body" and A2A `message/send`'s "sender must match params.agentId" no-spoof guard. Anonymous writes stay rejected (401); admin agents may still write on behalf of another agent. The CLI/MCP clients deliberately omit `agentId`/`authorId` from the body. (ops-wmgx / Kris #510.)
+**Attribution is taken from the Ed25519 signature, NEVER the request body — an agent cannot forge another agent's records.** `WorkspaceState.post()` and `OrgEvent.post()` now overwrite the persisted `agentId` / `authorId` with the authenticated identity for non-admin agents (rather than 403'ing a mismatch), mirroring `Presence.post()`'s "agentId from signature, not from body" and A2A `message/send`'s "sender must match params.agentId" no-spoof guard. Anonymous writes stay rejected (401); admin agents may still write on behalf of another agent. The CLI/MCP clients deliberately omit `agentId`/`authorId` from the body. (Kris #510.)
 
-### 🐛 A2A `message/send` couldn't direct a handoff to a peer — ops-f1e3
+### 🐛 A2A `message/send` couldn't direct a handoff to a peer
 
 The A2A `message/send` handler published an OrgEvent with `targetIds = [agentId]` where `agentId` is the **sender**, so every message was a self-scoped broadcast — there was no way to hand off to a specific peer. (`OrgEventCatchup` returns events whose `targetIds` includes the requesting agent, so a recipient could never receive a message addressed to the sender.) Confirmed live in the Rivet × krais collision dogfood: rivet's `message/send` published an event targeting rivet, and krais never received it. `message/send` now accepts an additive `toAgentId` param — the recipient — and routes the OrgEvent with `scope = sender`, `targetIds = [toAgentId]`, so the recipient's catch-up picks it up. The recipient is validated to exist (`-32004` if not). The no-spoof guard is unchanged: `agentId` is still the sender and must equal the authenticated caller (or admin), so `toAgentId` only controls who *receives* a message, never who it's sent *as*. Back-compat: omit `toAgentId` and the legacy self-scoped behaviour (`targetIds = [sender]`) is preserved, so existing callers don't break. Found in the Rivet × krais collision dogfood.
 
-### 🐛 base64url Ed25519 pubkeys / signatures 401'd (cross-org interop) — ops-wjjx
+### 🐛 base64url Ed25519 pubkeys / signatures 401'd (cross-org interop)
 
 An Agent registered with a **base64url**-encoded public key (the `-` `_` alphabet, often unpadded — the JWK / `Buffer.toString('base64url')` form) failed Ed25519 signature verification with a 401. The `b64ToArrayBuffer` decoder was copy-pasted into three auth call sites (`resources/auth-middleware.ts`, `resources/agent-auth.ts`, `resources/Presence.ts`) and had drifted: at least one copy fed url-safe input straight to `atob`, which rejects `-`/`_` ("Invalid character"). The decoder now normalizes base64url → standard (`-`→`+`, `_`→`/`) **and** right-pads with `=` to a multiple of 4 before `atob`, so both standard base64 and (padded or unpadded) base64url decode correctly; standard input is unchanged. To stop the copies re-diverging, the single corrected decoder is extracted to `resources/b64.ts` and imported by all three (same "shared so it can't drift" rationale as HarperFast/harper#1466). Found in the Rivet × krais cross-org dogfood.
 
@@ -420,7 +420,7 @@ Caught 2026-05-19 after the Fabric cluster hit its 4.7G XFS quota with 5,899 Blo
 
 ### 📋 Smoke tests + supply-chain — #442 + #443
 
-- Smoke test scaffold + golden-path e2e scenario (#442) — closes ops-t0i3.
+- Smoke test scaffold + golden-path e2e scenario (#442).
 - CI wraps `bun install` with Socket Firewall (sfw) across all jobs (#443) — supply-chain defense.
 
 ### 📝 Docs
@@ -554,11 +554,11 @@ Per the pre-1.0 versioning policy, this minor bump is breaking on purpose.
 
 ### ✨ Features
 
-- **`@tpsdev-ai/openclaw-flair` now registers the `flair` context engine** for behavioral-anchor re-injection (ops-czop). On every turn, the engine reads `~/.openclaw/workspace-<agentId>/{IDENTITY,SOUL,AGENTS}.md` and returns their contents as a `systemPromptAddition` — pinning PERMANENT-tier rules at the top of the prompt so they don't drift across long sessions. Files are mtime-cached; missing files are skipped silently. Replaces the standalone `flair-context-engine` plugin (now retired) — anchor re-injection was the only feature that earned its slot per the audit; compaction-extract regex (0% retrieval), auto-ingest (dead path), and HEARTBEAT_OK filter (redundant with openclaw's built-in) were dropped.
+- **`@tpsdev-ai/openclaw-flair` now registers the `flair` context engine** for behavioral-anchor re-injection. On every turn, the engine reads `~/.openclaw/workspace-<agentId>/{IDENTITY,SOUL,AGENTS}.md` and returns their contents as a `systemPromptAddition` — pinning PERMANENT-tier rules at the top of the prompt so they don't drift across long sessions. Files are mtime-cached; missing files are skipped silently. Replaces the standalone `flair-context-engine` plugin (now retired) — anchor re-injection was the only feature that earned its slot per the audit; compaction-extract regex (0% retrieval), auto-ingest (dead path), and HEARTBEAT_OK filter (redundant with openclaw's built-in) were dropped.
 
 ### ✨ UX
 
-- **`flair init` and CLI fetches no longer require `--admin-pass` for local instances with `authorizeLocal: true`** (ops-vu31): when targeting localhost (no `--target`/`FLAIR_TARGET`), the CLI now skips Basic auth and lets Harper's `authorizeLocal` trust loopback requests. Remote targets still require `--admin-pass`. Sherlock-approved with a defense-in-depth follow-up noted on the auth-middleware locality guard.
+- **`flair init` and CLI fetches no longer require `--admin-pass` for local instances with `authorizeLocal: true`**: when targeting localhost (no `--target`/`FLAIR_TARGET`), the CLI now skips Basic auth and lets Harper's `authorizeLocal` trust loopback requests. Remote targets still require `--admin-pass`. Sherlock-approved with a defense-in-depth follow-up noted on the auth-middleware locality guard.
 
 ### ⚠️ Behavioral Change
 
@@ -586,9 +586,9 @@ Per the pre-1.0 versioning policy, this minor bump is breaking on purpose.
 
 ### 🔒 Security
 
-- **Localhost trust boundary for `flair agent list`:** IDs-only enumeration is allowed from localhost processes without per-agent Ed25519 auth. The response is filtered to public metadata (id, name, createdAt) — no secrets, no key material, no memory contents. Approved by Sherlock in ops-fqwh review.
+- **Localhost trust boundary for `flair agent list`:** IDs-only enumeration is allowed from localhost processes without per-agent Ed25519 auth. The response is filtered to public metadata (id, name, createdAt) — no secrets, no key material, no memory contents. Approved by Sherlock's security review.
 
-- **Reembed respects cross-agent isolation:** the `agentId` passed in the update payload matches the record being reembedded, not a wildcard. The 0.5.5 schema-validation gate remains intact. Approved by Sherlock in ops-fqwh review.
+- **Reembed respects cross-agent isolation:** the `agentId` passed in the update payload matches the record being reembedded, not a wildcard. The 0.5.5 schema-validation gate remains intact. Approved by Sherlock's security review.
 
 
 ### 📖 Docs

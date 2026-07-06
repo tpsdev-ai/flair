@@ -5,7 +5,7 @@ import { allowAdmin } from "./agent-auth.js";
 /**
  * GET /AdminIdp — enterprise IdP configuration management.
  *
- * allowRead()=allowAdmin (ops-oox7 defense-in-depth): see Admin.ts.
+ * allowRead()=allowAdmin (defense-in-depth): see Admin.ts.
  */
 export class AdminIdp extends Resource {
   async allowRead(): Promise<boolean> {

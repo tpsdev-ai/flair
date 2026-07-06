@@ -284,7 +284,7 @@ describe("applySnapshot — real restore", () => {
   });
 });
 
-describe("applySnapshot — post-restore verification (ops-90dq)", () => {
+describe("applySnapshot — post-restore verification (detects silent write drift)", () => {
   it("flags drift when Harper silently drops PUT rows", async () => {
     // Simulates the failure mode the verify pass is designed to catch:
     // Harper returns ok on PUT but doesn't actually persist the row

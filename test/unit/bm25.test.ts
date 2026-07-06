@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 // Exercise the SHIPPED BM25 module (resources/bm25.ts) directly — Harper-free,
-// same convention as temporal-scoring.test.ts. ops-i39b / FLAIR-BM25-HYBRID.
+// same convention as temporal-scoring.test.ts. FLAIR-BM25-HYBRID.
 import {
   tokenize,
   buildBM25,

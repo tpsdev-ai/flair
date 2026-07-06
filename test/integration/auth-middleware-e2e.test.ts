@@ -1,4 +1,4 @@
-// auth-middleware e2e — real-Harper integration tests (ops-ketv).
+// auth-middleware e2e — real-Harper integration tests.
 //
 // Replaces the simulator-based unit tests (simulateAuthMiddleware + super_user/
 // getUser mock blocks) with real HTTP requests against a live Harper instance.
@@ -84,12 +84,12 @@ async function adminOp(
 
 let harper: HarperInstance;
 const agent = mkAgent("auth-e2e-agent");
-// Second agent for the family read-gate cross-agent 404 checks (ops-oox7).
+// Second agent for the family read-gate cross-agent 404 checks.
 const agent2 = mkAgent("auth-e2e-agent-2");
 
-// ─── Family read-gate fixtures (ops-oox7) ────────────────────────────────────
+// ─── Family read-gate fixtures ────────────────────────────────────────────
 // WorkspaceState/Relationship/Integration/MemoryGrant — same P0 leak as
-// Memory.ts/Soul.ts (e1e3012, ops-ckrr): each gated write+search but had no
+// Memory.ts/Soul.ts (e1e3012): each gated write+search but had no
 // allowRead()/get() override, so anonymous GET /<Resource>/<id> and the
 // collection describe GET /<Resource> both returned 200 with full record
 // content. One record per table, owned by `agent`, seeded via direct DB
@@ -157,7 +157,7 @@ describe("auth-middleware e2e (real Harper)", () => {
     });
     expect(agentRes.status).toBe(200);
 
-    // 2b. Second agent (ops-oox7 family read-gate cross-agent checks).
+    // 2b. Second agent (family read-gate cross-agent checks).
     const agent2Res = await adminOp(harper, {
       operation: "insert",
       database: "flair",
@@ -249,14 +249,14 @@ describe("auth-middleware e2e (real Harper)", () => {
   // return resource-level errors (400 for missing body), not 401.
   // /FederationPair and /FederationSync remain excluded (public allowlist,
   // above). /Soul GET now DOES enforce auth via allowRead()=allowVerified
-  // (ops-ckrr read-gate fix) — it has its own invariant below.
+  // — it has its own invariant below.
   // ═══════════════════════════════════════════════════════════════════════════
 
   test("AUTH INVARIANT: no Authorization header on /Memory → 403 (allowRead gate denies anonymous table access, like /Agent)", async () => {
     const res = await fetch(
       `${harper.httpURL}/Memory/?agentId=${agent.id}`,
     );
-    // Post-ops-ckrr: Memory defines allowRead()=allowVerified to close the
+    // Post-fix: Memory defines allowRead()=allowVerified to close the
     // by-id / collection-describe anonymous-read leak that search()'s custom
     // 401 never covered (search() only guarded the query path). Anonymous
     // reads are now denied at Harper's allow-gate with 403 — the same
@@ -266,7 +266,7 @@ describe("auth-middleware e2e (real Harper)", () => {
 
   test("AUTH INVARIANT: no Authorization header on /Soul → 403 (allowRead gate denies anonymous table access)", async () => {
     const res = await fetch(`${harper.httpURL}/Soul`);
-    // Post-ops-ckrr: Soul defines allowRead()=allowVerified (previously GET
+    // Post-fix: Soul defines allowRead()=allowVerified (previously GET
     // enforced nothing — the anonymous-read leak Sherlock's sweep flagged).
     expect(res.status).toBe(403);
   }, 30_000);
@@ -475,7 +475,7 @@ describe("auth-middleware e2e (real Harper)", () => {
   }, 30_000);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // bd ops-c4op — shared nonce store consolidation (3 independent nonceSeen
+  // Shared nonce store consolidation (3 independent nonceSeen
   // Maps -> resources/ed25519-auth.ts, one singleton). Real HTTP replay
   // coverage for auth-middleware.ts's Ed25519 branch didn't previously exist
   // (only unit-level simulator logic did). Real-Harper is also the only place
@@ -544,9 +544,9 @@ describe("auth-middleware e2e (real Harper)", () => {
   }, 30_000);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // FAMILY READ-GATE (ops-oox7): WorkspaceState / Relationship / Integration /
+  // FAMILY READ-GATE: WorkspaceState / Relationship / Integration /
   // MemoryGrant — applying the Memory.ts/Soul.ts allowRead()+get() pattern
-  // (e1e3012, ops-ckrr) to the remaining agent-owned @table resources that had
+  // (e1e3012) to the remaining agent-owned @table resources that had
   // the identical anonymous by-id / collection-describe read leak. These are
   // REAL-Harper invariants exercising the actual RequestTarget routing
   // (isCollection branch) that a mocked unit test cannot — see get()'s doc

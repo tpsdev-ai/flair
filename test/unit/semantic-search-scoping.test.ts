@@ -201,7 +201,7 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
     expect(res.results.map((r: any) => r.id)).toEqual(["live"]);
   });
 
-  // ─── ops-syzm: singleton $distance-omission fallback ───────────────────────
+  // ─── singleton $distance-omission fallback ───────────────────────
   // This mock's Memory.search() never annotates `$distance` on returned
   // records (that's a Harper-computed sort-query field with no equivalent in
   // the in-memory mock) — so any test that takes the HNSW (qEmb-truthy)
@@ -210,7 +210,7 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
   // (see resources/SemanticSearch.ts's scoring block for the full writeup,
   // and test/integration/semantic-search-singleton-score.test.ts for the
   // real-Harper reproduction this was root-caused against).
-  it("ops-syzm: undefined $distance falls back to a point-lookup cosine computation instead of scoring 0", async () => {
+  it("undefined $distance falls back to a point-lookup cosine computation instead of scoring 0", async () => {
     reset();
     const qEmb = [1, 0, 0];
     // Orthogonal to qEmb — the pre-fix `?? 1` fallback and the fixed

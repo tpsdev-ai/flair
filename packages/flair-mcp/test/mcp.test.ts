@@ -116,11 +116,11 @@ describe("coordination write surface (flair_workspace_set / flair_orgevent)", ()
   }
 
   test("flair_workspace_set body never carries agentId (no forging — attribute from signature)", () => {
-    const body = buildWorkspaceBody("agent-alpha", { ref: "main", phase: "implement", task: "ops-wmgx" });
+    const body = buildWorkspaceBody("agent-alpha", { ref: "main", phase: "implement", task: "cp7-implement-task" });
     expect(body).not.toHaveProperty("agentId");
     expect(body.ref).toBe("main");
     expect(body.phase).toBe("implement");
-    expect(body.taskId).toBe("ops-wmgx");
+    expect(body.taskId).toBe("cp7-implement-task");
     expect(body.provider).toBe("mcp");
   });
 

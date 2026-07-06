@@ -40,10 +40,10 @@ export interface DedupMatch {
  * Cosine similarity of two equal-length embedding vectors, computed directly
  * in JS. Used as a fallback for Harper's HNSW cosine-sort query omitting a
  * computed `$distance` on its top candidate when the query's post-filter
- * result set contains exactly ONE matching record (ops-ume4, found in
+ * result set contains exactly ONE matching record (found in
  * resources/Memory.ts's findConservativeDedupMatch; the identical quirk is
  * also fixed in resources/SemanticSearch.ts's scoring loop for the same
- * reason — see ops-syzm there). A mismatched length, empty vector, or
+ * reason). A mismatched length, empty vector, or
  * zero-magnitude side yields 0 (no signal, never treated as "identical" by a
  * degenerate computation).
  */

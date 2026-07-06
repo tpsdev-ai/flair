@@ -273,7 +273,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   //    Catches silent failures: Harper schema coercion, 4xx responses the
   //    apiCall layer masked as ok, partial-DELETE leftovers. Per-ID diff,
   //    not just counts — count parity can hide simultaneous PUT+DELETE
-  //    failures that wash out numerically. See ops-90dq.
+  //    failures that wash out numerically.
   if (opts.verifyPostRestore !== false) {
     try {
       const verifyMem = asArray(await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`));

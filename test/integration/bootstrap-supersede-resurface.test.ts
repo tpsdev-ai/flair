@@ -1,8 +1,8 @@
-// ops-hesq — a server-superseded Memory record resurfaces in the DEFAULT
+// A server-superseded Memory record resurfaces in the DEFAULT
 // /BootstrapMemories recall path when its successor isn't co-present in
 // bootstrap's own candidate set.
 //
-// Root cause: identical to ops-9rc6 (PR #566), a different endpoint.
+// Root cause: identical to the fix in PR #566, a different endpoint.
 // resources/MemoryBootstrap.ts's Memory loop only ever excluded a record via
 // `expiresAt` — never via `validTo`. The server supersede path
 // (Memory.ts closeSupersededRecord, exercised via PUT /Memory/<id> with
@@ -21,11 +21,11 @@
 //
 // Fix: an unconditional per-record exclusion in the Memory loop —
 // `validTo` set AND in the past (relative to real `Date.now()`) — the SAME
-// idiom ops-9rc6 added to resources/SemanticSearch.ts / resources/bm25-filter.ts.
+// idiom PR #566 added to resources/SemanticSearch.ts / resources/bm25-filter.ts.
 // Applies regardless of co-presence. A record with no `validTo`, or a FUTURE
 // `validTo`, is unaffected — this test asserts that boundary too (controls C/D).
 //
-// Pattern: test/integration/supersede-recall-resurface.test.ts (ops-9rc6),
+// Pattern: test/integration/supersede-recall-resurface.test.ts (PR #566),
 // adapted for /BootstrapMemories — whose response has no per-record id list,
 // so assertions match on content substrings inside `body.context`.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
@@ -94,19 +94,19 @@ async function bootstrap(harper: HarperInstance, agent: TestAgent, body: Record<
 }
 
 let harper: HarperInstance;
-const agent = mkAgent(`ops-hesq-${randomUUID()}`);
+const agent = mkAgent(`bootstrap-resurface-${randomUUID()}`);
 
 const ID_A = `${agent.id}-a`; // superseded (server path), successor later deleted — must NOT resurface
 const ID_B = `${agent.id}-b`; // successor — deleted after closing A, to force genuine non-co-presence
 const ID_C = `${agent.id}-c`; // control: never superseded, no validTo — must still surface
 const ID_D = `${agent.id}-d`; // control: FUTURE validTo, never superseded — must still surface
 
-const CONTENT_A = "ops-hesq marker: the Q2 vendor contract renewal was approved at the March review.";
-const CONTENT_B = "ops-hesq marker: transient successor record, deleted immediately after closing A.";
-const CONTENT_C = "ops-hesq marker: the office lease renewal was signed off by facilities in April.";
-const CONTENT_D = "ops-hesq marker: the annual compliance audit is scheduled for next winter.";
+const CONTENT_A = "bootstrap-resurface marker: the Q2 vendor contract renewal was approved at the March review.";
+const CONTENT_B = "bootstrap-resurface marker: transient successor record, deleted immediately after closing A.";
+const CONTENT_C = "bootstrap-resurface marker: the office lease renewal was signed off by facilities in April.";
+const CONTENT_D = "bootstrap-resurface marker: the annual compliance audit is scheduled for next winter.";
 
-describe("ops-hesq — server-superseded (validTo, not archived) Memory record must not resurface in bootstrap", () => {
+describe("server-superseded (validTo, not archived) Memory record must not resurface in bootstrap", () => {
   beforeAll(async () => {
     harper = await startHarper();
     await registerAgent(harper, agent);
@@ -127,7 +127,7 @@ describe("ops-hesq — server-superseded (validTo, not archived) Memory record m
     expect(bodyB.written).toBe(true);
 
     // Confirm the server actually closed A (validTo set) — the documented
-    // ops-9rc6/ops-hesq mechanism (Memory.ts closeSupersededRecord), NOT archived.
+    // closeSupersededRecord mechanism (Memory.ts), NOT archived.
     const getA = await getMemory(harper, agent, ID_A);
     expect(getA.status).toBe(200);
     const recA: any = await getA.json();

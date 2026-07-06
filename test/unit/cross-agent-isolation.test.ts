@@ -1,5 +1,5 @@
 /**
- * cross-agent-isolation.test.ts — NECESSITY tests for the ops-sal4 P0 fix.
+ * cross-agent-isolation.test.ts — NECESSITY tests for the cross-agent read-isolation P0 fix.
  *
  * flair-agent-deelevation.test.ts (integration) only asserts SUFFICIENCY: an
  * agent CAN read its own WorkspaceLatest / OrgEventCatchup (`not.toContain([401,403])`).
@@ -123,7 +123,7 @@ beforeEach(() => {
 
 // ─── WorkspaceLatest ────────────────────────────────────────────────────────
 
-describe("WorkspaceLatest.get() — cross-agent isolation (ops-sal4)", () => {
+describe("WorkspaceLatest.get() — cross-agent isolation (fail-open cross-agent-read fix)", () => {
   it("agent requesting OWN id → allowed (reaches the query, not 403)", async () => {
     const ws = makeInstance<any>(WorkspaceLatest, agentCtx("agent-alpha"));
     const res = await ws.get("agent-alpha");
@@ -162,7 +162,7 @@ describe("WorkspaceLatest.get() — cross-agent isolation (ops-sal4)", () => {
 
 // ─── OrgEventCatchup ────────────────────────────────────────────────────────
 
-describe("OrgEventCatchup.get() — cross-agent isolation (ops-sal4)", () => {
+describe("OrgEventCatchup.get() — cross-agent isolation (fail-open cross-agent-read fix)", () => {
   const pathFor = (participantId: string) => ({
     id: participantId,
     conditions: [{ attribute: "since", value: "2020-01-01T00:00:00.000Z", comparator: "equals" }],
@@ -206,7 +206,7 @@ describe("OrgEventCatchup.get() — cross-agent isolation (ops-sal4)", () => {
 
 // ─── OAuthAuthorize — resolved principal (identity spoof fix) ──────────────
 
-describe("OAuthAuthorize.post() — resolved principal, not hardcoded admin (ops-sal4)", () => {
+describe("OAuthAuthorize.post() — resolved principal, not hardcoded admin (identity spoof fix)", () => {
   const approveBody = (extra: Record<string, any> = {}) => ({
     action: "approve",
     client_id: "cl1",

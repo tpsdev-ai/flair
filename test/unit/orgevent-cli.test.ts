@@ -1,6 +1,6 @@
 /**
  * orgevent-cli.test.ts — Unit tests for `flair orgevent` CLI command
- * (coordination write surface, ops-wmgx / Kris #510).
+ * (coordination write surface / Kris #510).
  *
  * Uses a mock HTTP server. No real Harper instance required. Mirrors
  * presence-set.test.ts. The security-critical assertion: the request carries an

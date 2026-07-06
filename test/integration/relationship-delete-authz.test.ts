@@ -1,5 +1,5 @@
 // Relationship.delete() cross-agent authorization — real-Harper integration
-// test (ops-sgjr).
+// test.
 //
 // Relationship.ts's delete() (~line 144) has a non-admin ownership guard that
 // calls `super.get()` with NO id argument before allowing the delete:
@@ -12,7 +12,7 @@
 //   }
 //   return super.delete(_);                            // _ is the real target
 //
-// INVESTIGATED (ops-sgjr): this LOOKS like an authz bypass (get() with no id
+// INVESTIGATED: this LOOKS like an authz bypass (get() with no id
 // vs. the correctly-threaded `super.get(target)` in get() at ~line 39-69),
 // but it is NOT — verified against a real Harper instance below. Harper's REST
 // layer resolves a Table resource instance to the URL's id via
@@ -101,7 +101,7 @@ async function getRelationshipAsAdmin(id: string): Promise<any> {
   return Array.isArray(body) && body.length > 0 ? body[0] : null;
 }
 
-describe("Relationship.delete() cross-agent authorization (ops-sgjr)", () => {
+describe("Relationship.delete() cross-agent authorization", () => {
   beforeAll(async () => {
     harper = await startHarper();
 
@@ -121,7 +121,7 @@ describe("Relationship.delete() cross-agent authorization (ops-sgjr)", () => {
 
   afterAll(async () => { if (harper) await stopHarper(harper); });
 
-  test("REPRO (ops-sgjr): non-admin cross-agent DELETE is rejected with 403 and the record survives", async () => {
+  test("REPRO: non-admin cross-agent DELETE is rejected with 403 and the record survives", async () => {
     const id = `repro-${randomUUID()}`;
     const putRes = await putRelationship(owner, id);
     expect([200, 204], `owner PUT returned ${putRes.status}: ${(await putRes.text()).slice(0, 200)}`).toContain(putRes.status);

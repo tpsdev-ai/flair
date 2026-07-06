@@ -43,7 +43,7 @@ function getAdminPass(): string | null {
 
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────
 // WINDOW_MS, isNonceReplay/recordNonce (the ONE shared nonce store), and
-// importEd25519Key all live in ./ed25519-auth.ts (bd ops-c4op) — the single
+// importEd25519Key all live in ./ed25519-auth.ts — the single
 // shared implementation imported by auth-middleware.ts, agent-auth.ts, and
 // Presence.ts so a nonce recorded via any one of the three call sites is
 // visible to the other two, and the crypto/decoder logic can't drift.
@@ -496,7 +496,7 @@ server.http(async (request: any, nextLayer: any) => {
         if (memId) {
           const record = await (databases as any).flair.Memory.get(memId);
           if (record && record.agentId && record.agentId !== agentId) {
-            // Centralized read-scope (ops-2dm3 Layer 1): a grant only covers
+            // Centralized read-scope (Layer 1): a grant only covers
             // the owner's SHARED memories, never their private ones. This
             // used to be a `visibility === "office"` bypass (any authenticated
             // agent, no grant needed) — that's gone; the private-exclusion is

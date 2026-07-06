@@ -20,7 +20,7 @@ const NOT_FOUND = () =>
 export class Relationship extends (databases as any).flair.Relationship {
   /**
    * Self-authorize now that the global gate is non-rejecting (memory-soul-
-   * read-gate family fix, ops-oox7 — same pattern as Memory.ts/Soul.ts/
+   * read-gate family fix — same pattern as Memory.ts/Soul.ts/
    * WorkspaceState.ts). Closes the same P0 leak: Harper routes
    * `GET /Relationship/<id>` to get() and the collection describe
    * (`GET /Relationship`) outside search(), so neither was gated before this

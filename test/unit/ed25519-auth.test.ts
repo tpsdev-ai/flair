@@ -1,6 +1,6 @@
 /**
  * ed25519-auth.test.ts — unit tests for the shared Ed25519 auth primitives
- * module (bd ops-c4op consolidation).
+ * module (shared nonce-store consolidation).
  *
  * resources/ed25519-auth.ts has ZERO dependency on @harperfast/harper (it
  * only imports resources/b64.ts, which is also dependency-free), so these

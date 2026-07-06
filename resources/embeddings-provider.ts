@@ -71,7 +71,7 @@ async function ensureInit(): Promise<void> {
     // Not initialized — init with modelsDir pointing at a USER-WRITABLE
     // location. On a sudo/root-owned global install the Flair package dir
     // (process.cwd()) is root-owned, so a model download into <cwd>/models
-    // fails with EACCES and semantic search silently dies (ops-am0v). The
+    // fails with EACCES and semantic search silently dies. The
     // model — and everything else Flair writes — must live under ~/.flair.
     //
     // NOTE: import.meta.dirname and __dirname are both undefined in Harper v5's

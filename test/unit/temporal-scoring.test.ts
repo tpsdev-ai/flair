@@ -66,7 +66,7 @@ describe("composite scoring (OPS-AYGD: relevance-floor gate)", () => {
   });
 
   test("MAGNET FIX: a low-semantic popular doc cannot outrank a high-semantic fresh doc", () => {
-    // The ops-aygd bug: pre-fix the magnet's unbounded rBoost lifted it above relevant docs.
+    // Pre-fix the magnet's unbounded rBoost lifted it above relevant docs.
     const magnet = compositeScore(0.45, { durability: "standard", createdAt: now(), retrievalCount: 1000 }); // below floor → no lift
     const relevant = compositeScore(0.6, { durability: "standard", createdAt: now(), retrievalCount: 0 });
     expect(relevant).toBeGreaterThan(magnet);

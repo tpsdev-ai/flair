@@ -378,7 +378,7 @@ describe("flair restore", () => {
   });
 });
 
-// ─── readAdminPassFileSecure — ops-smft ───────────────────────────────────────
+// ─── readAdminPassFileSecure — refuses world/group-readable admin-pass files ──
 
 describe("readAdminPassFileSecure", () => {
   let tmpDir: string;

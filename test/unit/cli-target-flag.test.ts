@@ -1,7 +1,7 @@
 /**
  * cli-target-flag.test.ts — Unit tests for --target flag / FLAIR_TARGET env var
  *
- * ops-n3ob: Add consistent --target <url> flag (env fallback: FLAIR_TARGET)
+ * Add consistent --target <url> flag (env fallback: FLAIR_TARGET)
  * to init, federation status/token/pair/sync, and status commands.
  *
  * Tests:

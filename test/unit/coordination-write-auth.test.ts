@@ -1,6 +1,6 @@
 /**
  * coordination-write-auth.test.ts — Handler-level no-forge tests for the
- * coordination write surface (ops-wmgx / Kris #510).
+ * coordination write surface (Kris #510).
  *
  * Exercises WorkspaceState.post() and OrgEvent.post() directly, mocking
  * @harperfast/harper so the resource classes load + their writes are capturable
@@ -20,7 +20,7 @@
  * signature (see auth-middleware.ts) and what resolveAgentAuth() reads.
  *
  * ── WorkspaceState.allowRead() + get() ownership scoping (memory-soul-read-
- * gate family fix, ops-oox7) ─────────────────────────────────────────────────
+ * gate family fix) ─────────────────────────────────────────────────
  * These tests are ADDED HERE (not a separate file) deliberately: this file
  * already `mock.module("@harperfast/harper", ...)` + dynamically imports
  * "../../resources/WorkspaceState.ts". bun runs every test/unit/ file in ONE
@@ -196,7 +196,7 @@ describe("OrgEvent.post() — agent-self attribution (no forging)", () => {
   });
 });
 
-// ─── WorkspaceState.allowRead + get() ownership scoping (ops-oox7) ──────────
+// ─── WorkspaceState.allowRead + get() ownership scoping (read-gate family fix) ──
 //
 // Regression guard for the family read-gate fix: WorkspaceState.ts previously
 // gated post()/put()/delete() but never defined `allowRead()` nor overrode

@@ -98,7 +98,7 @@ export class IngestEvents extends Resource {
 
   async post(body: unknown, context?: unknown) {
     // Harper v5 does not populate this.request on Resource subclasses —
-    // getContext() is the only reliable path (ops-sal4: the previous
+    // getContext() is the only reliable path (the previous
     // `(this as any).request` read was always undefined, so authHeader was
     // always undefined and every request 401'd before reaching the office
     // Ed25519 signature check below).

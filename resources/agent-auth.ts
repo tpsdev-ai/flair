@@ -28,7 +28,7 @@ export const FLAIR_AGENT_USERNAME = "flair-agent";
 
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────
 // WINDOW_MS, isNonceReplay/recordNonce (the ONE shared nonce store), and
-// importEd25519Key all live in ./ed25519-auth.ts (bd ops-c4op) — the single
+// importEd25519Key all live in ./ed25519-auth.ts — the single
 // shared implementation imported by auth-middleware.ts, agent-auth.ts, and
 // Presence.ts so a nonce recorded via any one of the three call sites is
 // visible to the other two, and the crypto/decoder logic can't drift.

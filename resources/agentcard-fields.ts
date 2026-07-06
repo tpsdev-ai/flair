@@ -9,7 +9,7 @@
 //
 // Kept free of any @harperfast/harper import so the real logic is unit-testable
 // without spinning up Harper (avoids the simulator-pattern that let the
-// description-fallback leak ship untested — ops-vz6j).
+// description-fallback leak ship untested).
 
 export type SoulLike = {
   key?: string;
@@ -30,7 +30,7 @@ export function readSoulContent(entry: SoulLike): string {
  * The public description is ONLY an explicit `kind="description"` soul.
  *
  * There is deliberately no fallback to "the first soul with any content": that
- * was the ops-vz6j leak — an agent with no description soul would publish an
+ * was the description-fallback leak — an agent with no description soul would publish an
  * arbitrary private soul on the unauthenticated card. Absent an explicit
  * description, publish nothing.
  */

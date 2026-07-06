@@ -189,7 +189,7 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     expect([401, 403], `admin /MemoryReindex returned ${res.status} (expected authorized)`).not.toContain(res.status);
   }, 30_000);
 
-  // ops-oox7: Admin* custom (non-@table) Resources previously had NO
+  // Admin* custom (non-@table) Resources previously had NO
   // resource-level read gate at all — reachability depended entirely on the
   // auth-middleware's /Admin* pathname check, which only 401s when there's NO
   // Authorization header. A validly-verified NON-admin agent (real TPS-Ed25519

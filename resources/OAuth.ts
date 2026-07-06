@@ -143,7 +143,7 @@ export class OAuthAuthorize extends Resource {
     // In 1.0, this returns a simple HTML consent page.
     // The user (Nathan) approves or denies, which POSTs back.
     // Harper v5 does not populate this.request on Resource subclasses —
-    // getContext() is the only reliable path (ops-sal4: the previous
+    // getContext() is the only reliable path (the previous
     // `(this as any).request` read was always undefined, so query params were
     // always empty).
     const ctx = (this as any).getContext?.();
@@ -232,7 +232,7 @@ ${scope.split(" ").map((s: string) => `<div class="scope">${s}</div>`).join("")}
     // this.request on Resource subclasses, so `(this as any).request?.tpsAgent`
     // was always undefined and this ALWAYS fell back to the hardcoded "admin" —
     // every approved consent grant was minted for the admin principal
-    // regardless of who actually approved it (ops-sal4 identity spoof).
+    // regardless of who actually approved it (identity spoof).
     // resolveAgentAuth(getContext()) resolves Basic super_user/admin auth to
     // { kind: "agent", agentId: username, isAdmin: true } (see agent-auth.ts).
     // We do NOT silently fall back to "admin" on an unresolved principal — if

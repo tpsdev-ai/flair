@@ -1,6 +1,6 @@
 /**
  * integration-read-gate.test.ts — regression guard for the memory-soul-
- * read-gate FAMILY fix (ops-oox7): Integration.ts previously gated
+ * read-gate FAMILY fix: Integration.ts previously gated
  * search()/post()/put()/delete() but never defined `allowRead()` nor
  * overrode `get()`. Harper routes `GET /Integration/<id>` to get() and the
  * collection-describe `GET /Integration` outside search(), so both were

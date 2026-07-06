@@ -193,7 +193,7 @@ describe("MemoryApi", () => {
     expect((result as any).written).toBe(true);
   });
 
-  test("write() forwards visibility ONLY when the caller sets it (ops-2dm3 Layer 1)", async () => {
+  test("write() forwards visibility ONLY when the caller sets it — opt-in, no forced default (Layer 1)", async () => {
     mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
     globalThis.fetch = mockFetch as any;
 

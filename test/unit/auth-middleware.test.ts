@@ -273,7 +273,7 @@ describe("auth header edge cases", () => {
   });
 });
 
-// ─── Basic auth: super_user support (ops-lzmg) ───────────────────────────────
+// ─── Basic auth: super_user support ───────────────────────────────
 // NOTE: The simulateAuthMiddleware block and super_user/getUser mock tests
 // were deleted — their real coverage now lives in the integration file
 // test/integration/auth-middleware-e2e.test.ts (real Harper, real HTTP).

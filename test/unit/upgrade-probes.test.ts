@@ -113,10 +113,10 @@ describe("probeOpenclawPluginVersion", () => {
 // The flair-mcp package entry in `flair upgrade` probes via
 //   probeBinVersion(execFileSync, "flair-mcp") ?? probeLibVersion("@tpsdev-ai/flair-mcp")
 // so an older install that's globally present but not on PATH / has no
-// `--version` (e.g. 0.10.0, ops-p42n) is still detected via the lib probe
+// `--version` (e.g. 0.10.0) is still detected via the lib probe
 // instead of falsely reporting "not detected". These tests pin that
 // bin→lib fallback composition and the resulting detected/outdated status.
-describe("flair-mcp bin→lib probe fallback (ops-p42n)", () => {
+describe("flair-mcp bin→lib probe fallback", () => {
   // Mirror the upgrade command's status mapping for the assertions below.
   const statusFor = (installed: string | null, latest: string) =>
     installed === null ? "missing" : installed === latest ? "current" : "outdated";
@@ -132,7 +132,7 @@ describe("flair-mcp bin→lib probe fallback (ops-p42n)", () => {
   });
 
   test("a globally-installed-but-binless flair-mcp is treated as outdated when < latest", () => {
-    // Real-world ops-p42n: 0.10.0 installed, bin probe null, lib probe finds it.
+    // Real-world case: 0.10.0 installed, bin probe null, lib probe finds it.
     const binNull = fake(() => { throw new Error("not on PATH"); });
     const libStub = (_pkg: string): string | null => "0.10.0"; // sibling global install
     const installed = probeBinVersion(binNull, "flair-mcp") ?? libStub("@tpsdev-ai/flair-mcp");
@@ -158,7 +158,7 @@ describe("flair-mcp bin→lib probe fallback (ops-p42n)", () => {
   });
 });
 
-// fix #2 (ops-p42n): the optional openclaw-flair line is suppressed in the
+// fix #2 (bin→lib probe fallback): the optional openclaw-flair line is suppressed in the
 // default listing on machines without openclaw, but still shown under --all.
 describe("shouldPrintUpgradeLine", () => {
   test("suppresses an optional (openclaw-absent) line by default", () => {

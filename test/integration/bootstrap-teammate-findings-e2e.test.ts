@@ -1,8 +1,8 @@
-// flair#550 (ops-q6i5, Presentation Layer) — bootstrap's "Teammate findings
+// flair#550 (Presentation Layer) — bootstrap's "Teammate findings
 // relevant to your task" section: real-Harper, real-embedding end-to-end
 // coverage of the gap this feature closes.
 //
-// Layer 1 (ops-2dm3, already merged) made a grant-visible teammate's SHARED
+// Layer 1 (the resolveReadScope no-grants simplification, already merged) made a grant-visible teammate's SHARED
 // memory reachable through bootstrap's read scope and scored it against
 // currentTask alongside the caller's own memories — but it rendered
 // identically to the caller's own memory (no attribution) and landed in the

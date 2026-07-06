@@ -1,6 +1,6 @@
 /**
  * ─── The single "is this Memory private" predicate (federation-edge-hardening
- * slice 2 / ops-nzxa: one rule, one place) ───────────────────────────────────
+ * slice 2: one rule, one place) ───────────────────────────────────
  *
  * Shared by BOTH:
  *   - resources/memory-read-scope.ts's resolveReadScope() — the cross-agent

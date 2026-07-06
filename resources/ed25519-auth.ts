@@ -11,8 +11,8 @@
  * `importEd25519Key`. Three independent replay windows meant a nonce
  * recorded as "seen" via one path was invisible to the other two — a
  * defense-in-depth gap, and a drift hazard (any future fix to one copy
- * silently didn't apply to the other two). bd ops-c4op consolidates all
- * three into this one module so there is exactly ONE replay guard and ONE
+ * silently didn't apply to the other two). Consolidating all three into
+ * this one module means there is exactly ONE replay guard and ONE
  * key-import implementation, imported by all 3 sites.
  *
  * `b64ToArrayBuffer` was already unified into resources/b64.ts in a prior

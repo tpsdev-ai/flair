@@ -1,5 +1,5 @@
 // Credential.delete() cross-agent authorization — real-Harper integration
-// test (follow-up to ops-sgjr / #569).
+// test (follow-up to the Relationship.delete() authz investigation, #569).
 //
 // Credential.ts's delete() (~line 112) has the byte-identical non-admin
 // ownership guard that Relationship.delete() had — it calls `super.get()` with
@@ -14,7 +14,7 @@
 //   }
 //   return super.delete(_);                            // _ is the real target
 //
-// INVESTIGATED: same conclusion as Relationship (ops-sgjr, #569) — this is NOT
+// INVESTIGATED: same conclusion as Relationship (#569) — this is NOT
 // a bypass, verified against a real Harper instance below. Harper's REST layer
 // resolves a Table resource instance to the URL's id via
 // getResource()->_loadRecord() (Table.ts) BEFORE calling ANY instance method
@@ -113,7 +113,7 @@ async function getCredentialAsAdmin(id: string): Promise<any> {
   return Array.isArray(body) && body.length > 0 ? body[0] : null;
 }
 
-describe("Credential.delete() cross-agent authorization (ops-sgjr follow-up)", () => {
+describe("Credential.delete() cross-agent authorization (follow-up to the Relationship.delete() authz investigation)", () => {
   beforeAll(async () => {
     harper = await startHarper();
 

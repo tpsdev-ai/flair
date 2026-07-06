@@ -1,5 +1,5 @@
 // ─── BM25 + union-RRF hybrid retrieval (Harper-free, unit-testable) ──────────
-// Per spec FLAIR-BM25-HYBRID-RETRIEVAL (Kern-approved, ops-i39b). This module is
+// Per spec FLAIR-BM25-HYBRID-RETRIEVAL (Kern-approved). This module is
 // deliberately Harper-free — same rationale as ./scoring.ts — so the BM25
 // scoring, the candidate-union RRF fusion, and the security conditions-filter
 // can be unit-tested directly against the SHIPPED code without a live Harper.

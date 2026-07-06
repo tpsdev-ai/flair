@@ -8,7 +8,7 @@ import { allowAdmin } from "./agent-auth.js";
  * they hit a 404 and assume the admin UI is broken. The dashboard is the
  * canonical landing surface; redirect there.
  *
- * allowRead()=allowAdmin (ops-oox7 defense-in-depth): the /Admin* pathname
+ * allowRead()=allowAdmin (defense-in-depth): the /Admin* pathname
  * gate in auth-middleware.ts only 401s when there's NO Authorization header
  * at all (or Basic creds don't resolve to a real user) — a validly-verified
  * TPS-Ed25519 agent that is NOT an admin, or a valid-but-non-super_user Basic

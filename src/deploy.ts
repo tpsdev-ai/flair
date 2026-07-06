@@ -29,7 +29,7 @@ export interface DeployOptions {
   verify?: boolean;
   verifyResources?: string[];
   verifyTimeoutMs?: number;
-  // ops-2i8x: flaky-peer-replication resilience. A real Fabric deploy hit
+  // Flaky-peer-replication resilience. A real Fabric deploy hit
   // "Component 'flair' was deployed on the origin node but failed to
   // replicate to 1 of 1 peer node(s): ... (Error: Connection closed 1006)"
   // and hard-exited 1 — a bare manual re-run cleared it with no other
@@ -74,7 +74,7 @@ export interface DeployResult {
   packageRoot: string;
   dryRun: boolean;
   // true iff the deploy only succeeded because a peer-replication failure
-  // was accepted via --ignore-replication-errors (ops-2i8x) — the origin
+  // was accepted via --ignore-replication-errors — the origin
   // node has the component, at least one peer does not (yet).
   replicationWarning?: boolean;
 }
@@ -285,7 +285,7 @@ export function buildHarperDeployArgs(
     `deployment_timeout=${deploymentTimeoutMs}`,
     `install_timeout=${installTimeoutMs}`,
   ];
-  // ops-2i8x: --ignore-replication-errors escape hatch. Only appended when
+  // --ignore-replication-errors escape hatch. Only appended when
   // set — omitted entirely otherwise, so this is a no-op for every existing
   // caller/test that doesn't pass it.
   if (opts.ignoreReplicationErrors) {
@@ -294,7 +294,7 @@ export function buildHarperDeployArgs(
   return args;
 }
 
-// ops-2i8x: flaky-peer-replication resilience defaults. See DeployOptions
+// Flaky-peer-replication resilience defaults. See DeployOptions
 // for the full incident writeup this closes.
 export const DEFAULT_DEPLOY_RETRIES = 2;
 export const DEPLOY_RETRY_BACKOFF_MS = [5_000, 10_000];

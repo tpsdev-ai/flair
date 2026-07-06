@@ -1,6 +1,6 @@
 /**
  * workspace-set.test.ts — Unit tests for `flair workspace set` CLI subcommand
- * (coordination write surface, ops-wmgx / Kris #510).
+ * (coordination write surface / Kris #510).
  *
  * Uses a mock HTTP server. No real Harper instance required. Mirrors
  * presence-set.test.ts. The security-critical assertion: the request carries an
@@ -127,7 +127,7 @@ describe("flair workspace set", () => {
       const parsed = JSON.parse(body);
       expect(parsed.ref).toBe("cp7-coord");
       expect(parsed.phase).toBe("implement");
-      expect(parsed.taskId).toBe("ops-wmgx");
+      expect(parsed.taskId).toBe("cp7-implement-task");
       // SECURITY: the body must NOT carry agentId — identity is attributed
       // server-side from the Ed25519 signature.
       expect(parsed.agentId).toBeUndefined();
@@ -136,7 +136,7 @@ describe("flair workspace set", () => {
 
     try {
       const { stdout, code } = await runCli(
-        ["workspace", "set", "--ref", "cp7-coord", "--phase", "implement", "--task", "ops-wmgx"],
+        ["workspace", "set", "--ref", "cp7-coord", "--phase", "implement", "--task", "cp7-implement-task"],
         { FLAIR_AGENT_ID: agentId, FLAIR_KEY_DIR: keysDir, FLAIR_URL: url },
       );
       expect(code).toBe(0);
