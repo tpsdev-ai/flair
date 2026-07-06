@@ -1,13 +1,19 @@
-// ops-2dm3 Layer 1 — private/shared visibility + centralized read-scoping.
+// within-org-read-open — private/shared visibility + centralized read-scoping.
 // Real-Harper end-to-end coverage of the security boundary: a memory written
-// `private` must NEVER cross to a non-owner, a grant only ever covers an
-// owner's SHARED memories, and a pre-existing (no-visibility-field) memory
-// must keep reading to EXACTLY whoever holds a grant today (migration-
-// equivalence — nothing retroactively private, nothing broadened). All four
+// `private` must NEVER cross to a non-owner (the ONE remaining exception);
+// every other memory (`shared`, or a pre-existing no-visibility-field record)
+// is readable by ANY verified agent on the instance — no MemoryGrant required
+// (superseding the original grant-gated read model; see resources/memory-
+// read-scope.ts's module doc for the full design, Kern-approved). All four
 // read paths the design doc calls out are exercised against a real spawned
 // Harper: Memory.get() (by-id), Memory.search() (collection), SemanticSearch,
 // and MemoryBootstrap — plus the auth-middleware.ts by-id guard, which is the
 // pre-check `GET /Memory/<id>` passes through before ever reaching Memory.get().
+//
+// The `grantee`/`insertGrant` machinery below is kept ONLY to prove a grant
+// is now IRRELEVANT to reads (the grantee sees exactly what the ungranted
+// `stranger` sees) — resolveAllowedOwners() is still exported and grants
+// still exist as a real relationship, they just no longer gate Memory reads.
 //
 // Pattern: test/integration/agent-journey.test.ts (Ed25519 signing helpers,
 // admin-op seeding) + test/integration/durability-guard.test.ts (raw `insert`
@@ -82,7 +88,7 @@ const idLegacy = "vis-owner-legacy-no-field";     // no visibility field at all 
 const idShared = "vis-owner-explicit-shared";     // visibility: "shared"
 const idPrivate = "vis-owner-explicit-private";   // visibility: "private"
 
-describe("ops-2dm3 Layer 1 — private/shared visibility + centralized read-scoping (real Harper)", () => {
+describe("within-org-read-open — private/shared visibility + centralized read-scoping (real Harper)", () => {
   beforeAll(async () => {
     harper = await startHarper();
     await seedAgent(harper, owner);
@@ -128,11 +134,13 @@ describe("ops-2dm3 Layer 1 — private/shared visibility + centralized read-scop
       expect(text).not.toContain("explicitly private note");
     }, 30_000);
 
-    test("office-leak-closed: stranger (no grant at all) cannot GET any of owner's memories, shared or not", async () => {
-      for (const id of [idLegacy, idShared, idPrivate]) {
+    test("within-org-read-open: stranger (no grant at all) CAN GET the legacy + shared memories — only the PRIVATE one is denied", async () => {
+      for (const id of [idLegacy, idShared]) {
         const res = await authFetch(harper, stranger, "GET", `/Memory/${id}`);
-        expect([403, 404], `stranger GET ${id} → ${res.status} (expected denied)`).toContain(res.status);
+        expect(res.status, `stranger GET ${id} → ${res.status} (expected 200 — no grant needed)`).toBe(200);
       }
+      const privRes = await authFetch(harper, stranger, "GET", `/Memory/${idPrivate}`);
+      expect([403, 404], `stranger GET private → ${privRes.status} (expected denied)`).toContain(privRes.status);
     }, 30_000);
   });
 
@@ -149,20 +157,20 @@ describe("ops-2dm3 Layer 1 — private/shared visibility + centralized read-scop
       expect(ids.has(idPrivate)).toBe(false);
     }, 30_000);
 
-    test("stranger's collection GET contains none of owner's memories", async () => {
+    test("within-org-read-open: stranger's collection GET includes owner's legacy + shared memories, not the private one — no grant needed", async () => {
       const res = await authFetch(harper, stranger, "GET", "/Memory/");
       expect(res.status).toBe(200);
       const body: any = await res.json();
       const rows: any[] = Array.isArray(body) ? body : (body.results ?? body);
       const ids = new Set(rows.map((r: any) => r.id));
-      expect(ids.has(idLegacy)).toBe(false);
-      expect(ids.has(idShared)).toBe(false);
+      expect(ids.has(idLegacy)).toBe(true);
+      expect(ids.has(idShared)).toBe(true);
       expect(ids.has(idPrivate)).toBe(false);
     }, 30_000);
   });
 
   // ─── Path 2: SemanticSearch ─────────────────────────────────────────────────
-  describe("POST /SemanticSearch (path 2 — office-OR leak closed)", () => {
+  describe("POST /SemanticSearch (path 2 — within-org-read-open)", () => {
     test("grantee sees the legacy + shared memories via SemanticSearch, never the private one", async () => {
       const res = await authFetch(harper, grantee, "POST", "/SemanticSearch", { agentId: grantee.id, limit: 100 });
       expect(res.status).toBe(200);
@@ -173,13 +181,13 @@ describe("ops-2dm3 Layer 1 — private/shared visibility + centralized read-scop
       expect(ids.has(idPrivate)).toBe(false);
     }, 60_000);
 
-    test("stranger's SemanticSearch never surfaces owner's SHARED memory without a grant (ops-nzxa office-OR leak closed)", async () => {
+    test("within-org-read-open: stranger's SemanticSearch surfaces owner's legacy + shared memories, never the private one — no grant needed", async () => {
       const res = await authFetch(harper, stranger, "POST", "/SemanticSearch", { agentId: stranger.id, limit: 100 });
       expect(res.status).toBe(200);
       const body: any = await res.json();
       const ids = new Set((body.results ?? []).map((r: any) => r.id));
-      expect(ids.has(idShared)).toBe(false);
-      expect(ids.has(idLegacy)).toBe(false);
+      expect(ids.has(idShared)).toBe(true);
+      expect(ids.has(idLegacy)).toBe(true);
       expect(ids.has(idPrivate)).toBe(false);
     }, 60_000);
   });
@@ -208,10 +216,13 @@ describe("ops-2dm3 Layer 1 — private/shared visibility + centralized read-scop
       expect(body.context ?? "").not.toContain("explicitly shared finding");
     }, 60_000);
 
-    test("stranger's bootstrap context contains none of owner's memories", async () => {
+    test("within-org-read-open: stranger's bootstrap READ-SCOPE also includes owner's legacy + shared findings (no grant needed) — but they still don't render without a currentTask, and the private note never leaks", async () => {
       const res = await authFetch(harper, stranger, "POST", "/BootstrapMemories", { agentId: stranger.id, maxTokens: 4000 });
       expect(res.status).toBe(200);
       const body: any = await res.json();
+      // Same read-scope as the grantee above — proving the grant was never
+      // what gated this.
+      expect(body.memoriesAvailable, `stranger read-scope should be exactly legacy+shared=2 — got ${body.memoriesAvailable}`).toBe(2);
       expect(body.context ?? "").not.toContain("pre-migration finding");
       expect(body.context ?? "").not.toContain("explicitly shared finding");
       expect(body.context ?? "").not.toContain("explicitly private note");

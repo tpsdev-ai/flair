@@ -2,7 +2,7 @@ import { databases } from "@harperfast/harper";
 import { PRIVATE_VISIBILITY, isPrivateVisibility } from "./memory-visibility.js";
 
 /**
- * ─── Centralized Memory read-scoping (ops-2dm3 Layer 1) ─────────────────────
+ * ─── Centralized Memory read-scoping (the original grant-gated read model → within-org-read-open) ─
  *
  * The SINGLE source every cross-agent Memory read path resolves its scope
  * through: Memory.search()/Memory.get() (resources/Memory.ts), SemanticSearch
@@ -11,41 +11,50 @@ import { PRIVATE_VISIBILITY, isPrivateVisibility } from "./memory-visibility.js"
  * existed, SemanticSearch had its OWN inline grant-resolution + a
  * `visibility === "office"` global OR-clause that leaked ANY authenticated
  * agent's read of ANY other agent's memories once that memory happened to
- * carry `visibility: "office"` (ops-nzxa). Scattering the scoping rule per
+ * carry `visibility: "office"` (the office-visibility read leak). Scattering the scoping rule per
  * path is exactly how that leak happened — this module exists so it can't
  * happen again: one rule, one place, every path imports it.
  *
- * This is a plain-function module (no `class X extends databases.flair.X`) —
- * deliberately, so it can be safely imported + exercised under DIFFERENT
- * `@harperfast/harper` mocks from multiple test/unit/ files in the same bun
- * process without the class-capture collision documented in
- * test/unit/memory-soul-read-gate.test.ts (that collision is specific to a
- * class whose `extends` clause evaluates `databases.flair.X` at module-eval
- * time; a plain function that reads `databases` inside its body at CALL time
- * does not have that problem).
- *
- * ── The model (private | shared) ─────────────────────────────────────────────
- * `Memory.visibility` is writer intent: "private" (owner-only) or "shared"
- * (visible to anyone holding a read/search MemoryGrant on the owner). A
- * reader's full read-scope is:
+ * ── The model (open-within-org read) ─────────────────────────────────────────
+ * Knowledge-refinement, not access-control (per the MEMORY-MODEL-REFRAME):
+ * an org/instance is one shared knowledge base. `Memory.visibility` is writer
+ * intent: "private" is the ONLY owner-only exception; anything else (`shared`,
+ * null/absent) is org-open — readable by ANY verified agent on this instance,
+ * not just owners who happen to hold a per-owner MemoryGrant. A reader's full
+ * read-scope is:
  *   - ALL of the reader's own records, any visibility, unrestricted.
- *   - A GRANTED owner's records EXCEPT that owner's `private` ones.
+ *   - EVERY other agent's non-private record on this instance.
+ * The federation edge (resources/Federation.ts's push filter / src/cli.ts's
+ * runFederationSyncOnce) is the only remaining hard access boundary — it
+ * already excludes `private` rows from ever leaving this instance. Within an
+ * instance, there is no per-owner grant gate on READS anymore: MemoryGrant is
+ * no longer consulted by this module at all (see resolveAllowedOwners's doc
+ * below for why the function itself still exists).
  *
- * ── The migration invariant (non-negotiable) ─────────────────────────────────
- * Existing memories (written before this field existed) have NO `visibility`
- * field. They must read EXACTLY as before: to whoever holds a grant today.
- * So a record with no `visibility` field is treated as "shared" — this is why
- * the exclusion condition is `visibility != 'private'` (`not_equal`, which
+ * ── The no-visibility-field invariant (non-negotiable) ───────────────────────
+ * Existing memories (written before the `visibility` field existed) have NO
+ * `visibility` field. A record with no `visibility` field is NOT private — it
+ * reads exactly like an explicit `shared` record (org-open). This is why the
+ * exclusion condition is `visibility != 'private'` (`not_equal`, which
  * INCLUDES records missing the field entirely), never `visibility == 'shared'`
- * (`equals`, which would EXCLUDE them and silently break every existing grant
- * relationship — nothing is retroactively made private, nothing broadened).
+ * (`equals`, which would EXCLUDE them and silently retroactively privatize
+ * every legacy row) — nothing is retroactively made private, nothing is
+ * excluded from the broadening that wasn't already excluded before it. There
+ * is no migration/backfill step: pure-open means every pre-existing record
+ * reads as non-private automatically, the moment this code is deployed —
+ * gating that on an operator-run step would itself be a knob the
+ * emergent-trust reframe rejects (zero knobs).
  */
 
 /**
- * Owner ids a non-admin agent may READ: itself, plus any owner who has
- * granted it a "read" or "search" scoped MemoryGrant. This is the pre-existing
- * owner-set resolution (unchanged in shape/behavior) — resolveReadScope()
- * below builds the full private-exclusion-aware scope on top of it.
+ * Owner ids a non-admin agent holds an explicit "read" or "search" scoped
+ * MemoryGrant from (plus itself). NO LONGER used by resolveReadScope() below
+ * — reads are open-within-org now, so a per-read grant lookup is dead weight
+ * on every read path. Kept exported and unchanged in shape/behavior because
+ * it is still the right tool for "who has this agent explicitly granted
+ * itself to" listings / admin tooling (grants remain a real, inspectable
+ * relationship — they just no longer gate reads). Do NOT delete this
+ * function, and do NOT reintroduce a call to it from resolveReadScope().
  */
 export async function resolveAllowedOwners(authAgentId: string): Promise<string[]> {
   const allowedOwners: string[] = [authAgentId];
@@ -70,14 +79,19 @@ export interface ScopableRecord {
 }
 
 export interface ReadScope {
-  /** Owner ids the reader may see records from (self + granted). Same value
-   *  resolveAllowedOwners() returns — kept for callers that only need the
-   *  owner set (not the private-exclusion), e.g. a "who can I see" listing. */
+  /**
+   * VESTIGIAL for read-scoping — no consumer of resolveReadScope() reads this
+   * field to bound what it can see (only `.condition`/`.isAllowed` are read-
+   * path-consumed; see this module's doc above). Always `[authAgentId]` now:
+   * reads are open-within-org, so there is no "granted owner set" to report
+   * here anymore. Kept on the interface only for shape/call-site stability —
+   * do NOT repopulate it from resolveAllowedOwners(); a caller that actually
+   * needs the grant-holder set should call resolveAllowedOwners() directly.
+   */
   allowedOwners: string[];
   /**
-   * The Harper condition object encoding the FULL read-scope, including the
-   * private-exclusion:
-   *   (agentId == reader) OR (agentId IN grantedOwners AND visibility != 'private')
+   * The Harper condition object encoding the FULL read-scope:
+   *   (agentId == reader) OR (visibility != 'private')
    * Injection-safe: this is always a SINGLE condition object meant to be
    * wrapped as the OUTERMOST element a caller ANDs with the rest of its
    * query — the same discipline Memory.search() already applies to the
@@ -95,54 +109,32 @@ export interface ReadScope {
 }
 
 /**
- * Resolve the full read-scope (owner set + condition + in-process predicate)
- * for a reader. This is the ONE function every cross-agent Memory read path
- * must call — see the module doc above.
+ * Resolve the full read-scope (condition + in-process predicate) for a
+ * reader. This is the ONE function every cross-agent Memory read path must
+ * call — see the module doc above. No longer async-dependent on a DB lookup
+ * (MemoryGrant is not consulted for reads), but stays declared `async` /
+ * Promise-returning for call-site stability — every existing caller already
+ * `await`s it.
  */
 export async function resolveReadScope(authAgentId: string): Promise<ReadScope> {
-  const allowedOwners = await resolveAllowedOwners(authAgentId);
-  const grantedOwners = allowedOwners.filter((id) => id !== authAgentId);
-
-  const selfCondition = { attribute: "agentId", comparator: "equals", value: authAgentId };
-
-  let condition: any;
-  if (grantedOwners.length === 0) {
-    // No grants held — the reader's scope is just its own records. Emitting
-    // the plain leaf condition here (rather than an `or` with a single
-    // branch) keeps the common case's query shape identical to what
-    // Memory.search() emitted before this change.
-    condition = selfCondition;
-  } else {
-    const grantedOwnerCondition = grantedOwners.length === 1
-      ? { attribute: "agentId", comparator: "equals", value: grantedOwners[0] }
-      : { operator: "or", conditions: grantedOwners.map((id) => ({ attribute: "agentId", comparator: "equals", value: id })) };
-
-    condition = {
-      operator: "or",
-      conditions: [
-        selfCondition,
-        {
-          operator: "and",
-          conditions: [
-            grantedOwnerCondition,
-            // not_equal (NOT equals 'shared') — see module doc: a record with
-            // NO visibility field must still read as shared. This is the
-            // migration-equivalence invariant, enforced in the condition
-            // itself so every path that uses it gets it for free.
-            { attribute: "visibility", comparator: "not_equal", value: PRIVATE_VISIBILITY },
-          ],
-        },
-      ],
-    };
-  }
-
-  const grantedSet = new Set(grantedOwners);
-  const isAllowed = (record: ScopableRecord | null | undefined): boolean => {
-    if (!record) return false;
-    if (record.agentId === authAgentId) return true;
-    if (!record.agentId || !grantedSet.has(record.agentId)) return false;
-    return !isPrivateVisibility(record.visibility);
+  // Open-within-org read: own records (any visibility) OR any non-private
+  // record on the instance. No grant lookup — see module doc.
+  const condition = {
+    operator: "or",
+    conditions: [
+      { attribute: "agentId", comparator: "equals", value: authAgentId },
+      // not_equal (NOT equals 'private') — see module doc: a record with NO
+      // visibility field must still read as non-private (the migration-
+      // equivalence invariant), enforced in the condition itself so every
+      // path that uses it gets it for free.
+      { attribute: "visibility", comparator: "not_equal", value: PRIVATE_VISIBILITY },
+    ],
   };
 
-  return { allowedOwners, condition, isAllowed };
+  const isAllowed = (record: ScopableRecord | null | undefined): boolean => {
+    if (!record) return false;
+    return record.agentId === authAgentId || !isPrivateVisibility(record.visibility);
+  };
+
+  return { allowedOwners: [authAgentId], condition, isAllowed };
 }

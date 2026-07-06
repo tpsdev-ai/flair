@@ -68,7 +68,7 @@ function principalIdFromRow(row: any): string | undefined {
 // the crypto helpers above (see comment there; also resources/memory-
 // visibility.ts, the canonical definition; the two must stay in sync).
 //
-// federation-edge-hardening slice 2 (ops-nzxa: one rule, one place): the
+// federation-edge-hardening slice 2 (the office-visibility read leak: one rule, one place): the
 // push side of federation sync (runFederationSyncOnce below) must exclude
 // `private` Memory rows from what gets sent to peers, using the EXACT same
 // "not private" semantics as resources/memory-read-scope.ts's resolveReadScope()
@@ -7537,7 +7537,7 @@ memory.command("add [content]").requiredOption("--agent <id>")
   .option("--summary <text>", "agent-set multi-sentence dense compression (3-tier chain: subject → summary → content; ops-wkoh)")
   .option("--subject <text>", "one-line title / entity this memory is about")
   .option("--derived-from <csv>", "Comma-separated source Memory IDs this memory was distilled/reflected from (sets Memory.derivedFrom; used by the `rem rapid` reflection loop)")
-  .option("--visibility <value>", "Writer-controlled sharing intent (sets Memory.visibility): 'private' (owner-only, never visible to a grant-holder) or 'shared' (visible to owner + any agent holding a read/search MemoryGrant). Omit to use the server's durability-keyed default: permanent/persistent -> shared, standard/ephemeral -> private (flair#509, ops-2dm3)")
+  .option("--visibility <value>", "Writer-controlled sharing intent (sets Memory.visibility): 'private' (owner-only, never visible to any other agent) or 'shared' (visible to owner + every other agent on this instance — open within the org, not gated by a MemoryGrant). Omit to use the server's durability-keyed default: permanent/persistent -> shared, standard/ephemeral -> private (flair#509)")
   .action(async (contentArg, opts) => {
     const content = contentArg ?? opts.content;
     if (!content) { console.error("error: content required (positional arg or --content)"); process.exit(1); }

@@ -154,7 +154,7 @@ Entity-to-entity triples with temporal bounds. Model structured knowledge — "A
 Subscribe to memory or soul changes via WebSocket/SSE. Useful for dashboards, cross-agent sync, or audit trails.
 
 ### Multi-Agent
-One Flair instance serves any number of agents. Each agent has its own keys, memories, and soul. Agents can't read each other's data without explicit access grants.
+One Flair instance serves any number of agents. Each agent has its own keys, memories, and soul. Reads are open within the org: any agent can read any other agent's non-private memory, no grant required — `private` is the one owner-only exception. See [DESIGN.md](DESIGN.md#access-model-open-within-the-org-closed-at-the-federation-edge) for the full model.
 
 ### OAuth 2.1 Authorization Server
 Built-in OAuth 2.1 server with PKCE, dynamic client registration, and a standards-compliant token endpoint. Agents and services can delegate auth to Flair without a separate IdP.
@@ -459,10 +459,10 @@ See [SECURITY.md](SECURITY.md) for the full security model, threat analysis, and
 
 **Key points:**
 - Ed25519 cryptographic identity — agents sign every request
-- Collection-level data isolation — agents can't read each other's memories
+- Reads are open within the org — any agent can read any other agent's non-private memory, no grant required; `private` is the one owner-only exception (see [DESIGN.md](DESIGN.md))
 - Admin password auto-generated on init, stored at `~/.flair/admin-pass` (mode 0600)
 - Key rotation via `flair agent rotate-key`
-- Cross-agent access requires explicit grants
+- Writes are always agent-scoped — an agent can only write its own records
 
 ## Development
 
@@ -481,7 +481,7 @@ Integration tests spin up a real Harper instance on a random port, run the test 
 | Category | Tests | What's covered |
 |----------|-------|----------------|
 | **Auth & Identity** | auth-middleware, auth-scoping, key-paths-and-rotation | Ed25519 signature verification, agent isolation, key rotation |
-| **Memory** | data-scoping, backup-restore, agent-remove-and-grants | Cross-agent access denied, data durability, grant lifecycle |
+| **Memory** | data-scoping, backup-restore, agent-remove-and-grants | Private-memory exclusion, open within-org read scoping, data durability, grant lifecycle |
 | **Content Safety** | content-safety | Prompt injection detection, identity hijacking, format injection, exfiltration patterns |
 | **Search** | temporal-scoring, embeddings | Temporal decay, relevance scoring, embedding generation |
 | **Rate Limiting** | rate-limiter | Per-agent rate limiting, bucket isolation |

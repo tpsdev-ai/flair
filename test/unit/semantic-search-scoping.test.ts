@@ -1,14 +1,20 @@
 /**
- * semantic-search-scoping.test.ts — ops-2dm3 Layer 1 unit coverage for
+ * semantic-search-scoping.test.ts — unit coverage for
  * resources/SemanticSearch.ts's read-scoping.
  *
- * Before this change, SemanticSearch had its OWN inline grant-resolution loop
- * PLUS a `visibility === "office"` global OR-clause: ANY authenticated agent
- * could read ANY other agent's memory once it happened to carry
- * `visibility: "office"` — no grant required at all (ops-nzxa). Both are
- * gone; SemanticSearch now resolves its scope through the ONE centralized
- * helper (resources/memory-read-scope.ts resolveReadScope()), the same one
- * Memory.search()/Memory.get() use.
+ * The original grant-gated read model (superseded by within-org-read-open,
+ * see resources/memory-read-scope.ts's module doc): SemanticSearch used to
+ * have its OWN inline grant-resolution loop PLUS a `visibility === "office"`
+ * global OR-clause: ANY authenticated agent could read ANY other agent's
+ * memory once it happened to carry `visibility: "office"` — no grant
+ * required at all (the office-visibility read leak, an unintentional LEAK).
+ * Both are gone; SemanticSearch now
+ * resolves its scope through the ONE centralized helper
+ * (resources/memory-read-scope.ts resolveReadScope()), the same one
+ * Memory.search()/Memory.get() use — which now DELIBERATELY grants that same
+ * "any non-private record, any agent" read, org-wide, as an intentional
+ * design decision (Kern-approved), not a leak. Only `visibility: "private"`
+ * remains owner-only.
  *
  * These tests exercise the SHIPPED SemanticSearch.post() directly against a
  * mocked @harperfast/harper, using the "no embedding, no q" keyword-fallback
@@ -105,7 +111,7 @@ function reset() {
   memoryGrants = [];
 }
 
-describe("SemanticSearch.post() — ops-2dm3 Layer 1 centralized read-scoping", () => {
+describe("SemanticSearch.post() — centralized read-scoping", () => {
   it("anonymous is denied (401)", async () => {
     reset();
     const s = makeSearch(anonCtx());
@@ -114,30 +120,42 @@ describe("SemanticSearch.post() — ops-2dm3 Layer 1 centralized read-scoping", 
     expect((res as Response).status).toBe(401);
   });
 
-  it("sees only its own records when no grants are held", async () => {
+  it("sees its own records PLUS every other agent's non-private records — no grant required", async () => {
     reset();
     memoryStore.set("m1", { id: "m1", agentId: "agent-1", content: "mine", visibility: "private" });
-    memoryStore.set("m2", { id: "m2", agentId: "agent-other", content: "not mine", visibility: "shared" });
+    memoryStore.set("m2", { id: "m2", agentId: "agent-other", content: "not mine, but org-open", visibility: "shared" });
+    memoryStore.set("m3", { id: "m3", agentId: "agent-other", content: "not mine, private", visibility: "private" });
     const s = makeSearch(agentCtx("agent-1"));
     const res: any = await s.post({});
     const ids = res.results.map((r: any) => r.id).sort();
-    expect(ids).toEqual(["m1"]);
+    // m1 (own, private is irrelevant for the owner) and m2 (another agent's
+    // shared record — org-open, no grant needed) both surface; m3 (another
+    // agent's PRIVATE record) is the only one excluded.
+    expect(ids).toEqual(["m1", "m2"]);
   });
 
-  it("office-OR leak CLOSED: an ungranted owner's SHARED memory is never returned (ops-nzxa)", async () => {
+  it("within-org-read-open (was: office-OR leak closed): an UNGRANTED owner's SHARED memory IS now returned — this is the intended, documented broadening, not a leak", async () => {
     reset();
-    memoryStore.set("shared-no-grant", { id: "shared-no-grant", agentId: "agent-owner", content: "shared but no grant held", visibility: "shared" });
+    memoryStore.set("shared-no-grant", { id: "shared-no-grant", agentId: "agent-owner", content: "shared, no grant held, still org-open", visibility: "shared" });
     const s = makeSearch(agentCtx("agent-stranger"));
     const res: any = await s.post({});
-    expect(res.results.map((r: any) => r.id)).not.toContain("shared-no-grant");
-    expect(res.results.length).toBe(0);
+    expect(res.results.map((r: any) => r.id)).toContain("shared-no-grant");
   });
 
-  it("a grant-holder sees the owner's SHARED memory, never the owner's PRIVATE one", async () => {
+  it("private-exclusion still holds without a grant: a stranger never sees another agent's PRIVATE memory", async () => {
+    reset();
+    memoryStore.set("private-no-grant", { id: "private-no-grant", agentId: "agent-owner", content: "private, no grant held", visibility: "private" });
+    const s = makeSearch(agentCtx("agent-stranger"));
+    const res: any = await s.post({});
+    expect(res.results.map((r: any) => r.id)).not.toContain("private-no-grant");
+  });
+
+  it("any reader sees the owner's SHARED memory, never the owner's PRIVATE one — no grant held at all", async () => {
     reset();
     memoryStore.set("shared-1", { id: "shared-1", agentId: "agent-owner", content: "shared finding", visibility: "shared" });
     memoryStore.set("private-1", { id: "private-1", agentId: "agent-owner", content: "private note", visibility: "private" });
-    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "read" });
+    // Deliberately no MemoryGrant pushed — proving the grant isn't what
+    // makes shared-1 visible.
 
     const s = makeSearch(agentCtx("agent-grantee"));
     const res: any = await s.post({});
@@ -146,10 +164,10 @@ describe("SemanticSearch.post() — ops-2dm3 Layer 1 centralized read-scoping", 
     expect(ids).not.toContain("private-1");
   });
 
-  it("migration invariant: a grant-holder sees a NO-visibility-field owner record (absent reads as shared)", async () => {
+  it("migration invariant: any reader sees a NO-visibility-field owner record (absent reads as non-private) — no grant held at all", async () => {
     reset();
     memoryStore.set("legacy-1", { id: "legacy-1", agentId: "agent-owner", content: "pre-migration finding" }); // no visibility field
-    memoryGrants.push({ granteeId: "agent-grantee", ownerId: "agent-owner", scope: "search" });
+    // Deliberately no MemoryGrant pushed.
 
     const s = makeSearch(agentCtx("agent-grantee"));
     const res: any = await s.post({});

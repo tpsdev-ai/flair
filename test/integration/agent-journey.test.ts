@@ -115,7 +115,7 @@ describe("Authenticated agent journey", () => {
         content: memoryContent(i),
         subject: SUBJECT,
         durability: "standard",
-        // ops-2dm3 Layer 1: durability:"standard" with no explicit visibility
+        // The durability-keyed default-visibility rule: durability:"standard" with no explicit visibility
         // now defaults SERVER-SIDE to "private" — which would make the grant
         // test below (bob sees alice's rows via a MemoryGrant) fail, since a
         // private memory is never returned to a grant-holder. Explicit
@@ -151,7 +151,17 @@ describe("Authenticated agent journey", () => {
     expect(flagged.length).toBeGreaterThan(0);
   }, 60_000);
 
-  test("bob's scoped search returns 0 — cross-agent isolation holds", async () => {
+  test("within-org-read-open: bob's scoped search now sees alice's 50 SHARED memories — no grant needed (supersedes the old grant-gated isolation)", async () => {
+    // resources/memory-read-scope.ts's within-org-read-open change (Kern-
+    // approved security-boundary change) means alice's explicitly `shared`
+    // memories (see the write comment above) are readable by ANY verified
+    // agent, not just a grant-holder. This is the intended, documented
+    // broadening — see the MemoryGrant test further down, which proves a
+    // grant is no longer what makes this visible. Still pins the ORIGINAL
+    // #229 regression this file guards: bob's own scoped search must return
+    // the CORRECT rows for his read-scope, not an incorrectly-empty result
+    // from a txnForContext chain bug — the correct answer just changed from
+    // 0 (old grant-gated model) to 50 (within-org-read-open).
     const res = await authFetch(harper, bob, "POST", "/SemanticSearch", {
       agentId: bob.id,
       subject: SUBJECT,
@@ -160,7 +170,36 @@ describe("Authenticated agent journey", () => {
     expect(res.status).toBe(200);
     const body: any = await res.json();
     expect(Array.isArray(body.results)).toBe(true);
-    expect(body.results.length).toBe(0);
+    expect(body.results.length).toBe(50);
+    for (const r of body.results) expect(r.agentId).toBe(alice.id);
+  }, 30_000);
+
+  test("private-exclusion still holds: bob never sees an explicitly-PRIVATE memory of alice's, even with the same subject", async () => {
+    const privateId = "alice-journey-private-1";
+    const put = await authFetch(harper, alice, "PUT", `/Memory/${privateId}`, {
+      id: privateId,
+      agentId: alice.id,
+      content: "alice's genuinely private note, long enough for the safety scan",
+      subject: SUBJECT,
+      durability: "standard",
+      visibility: "private",
+    });
+    expect(put.status).toBe(200);
+
+    try {
+      const res = await authFetch(harper, bob, "POST", "/SemanticSearch", {
+        agentId: bob.id,
+        subject: SUBJECT,
+        limit: 100,
+      });
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+      expect((body.results ?? []).map((r: any) => r.id)).not.toContain(privateId);
+    } finally {
+      // Clean up — later tests in this file assert alice's total memory
+      // count is exactly the original 50 shared rows.
+      await authFetch(harper, alice, "DELETE", `/Memory/${privateId}`);
+    }
   }, 30_000);
 
   test("bob cannot read alice's memories by passing alice's agentId in the body", async () => {
@@ -238,18 +277,30 @@ describe("Authenticated agent journey", () => {
     expect(leaked.length).toBe(0);
   }, 30_000);
 
-  test("MemoryGrant: alice grants bob scope=search → bob sees alice's 50 rows", async () => {
-    // Positive-case complement to the isolation checks above. With the 0.5.5
-    // tightening, bob cannot spoof agentId in the body — so grants are the
-    // only supported cross-agent path. This test validates that the grant
-    // expansion in SemanticSearch (conditions: granteeId == auth'd agent →
-    // add grant.ownerId to searchAgentIds) actually fires end-to-end.
-    //
-    // Also pins the MemoryGrant schema field names (ownerId/granteeId) —
-    // flair 0.5.5 had a silent CLI/schema mismatch where `flair grant` wrote
-    // fromAgentId/toAgentId and grants never took effect.
+  test("MemoryGrant is no longer load-bearing for reads: bob sees alice's 50 SHARED rows identically whether a MemoryGrant exists, or not", async () => {
+    // Originally (pre-within-org-read-open) this test proved a MemoryGrant
+    // was the ONLY supported cross-agent read path (bob: 0 rows before the
+    // grant, 50 after, 0 again after revoke). resources/memory-read-scope.ts
+    // now resolves reads without ever consulting MemoryGrant (see that
+    // module's doc) — so the count must now be 50 in EVERY one of those three
+    // states. This test still pins the MemoryGrant schema field names
+    // (ownerId/granteeId — flair 0.5.5 had a silent CLI/schema mismatch where
+    // `flair grant` wrote fromAgentId/toAgentId) and, more importantly, now
+    // pins the "no grant lookup on the read path" invariant end-to-end: a
+    // grant insert/delete must have ZERO observable effect on this endpoint.
 
-    // Grant bob search-scope access to alice's memories
+    const beforeRes = await authFetch(harper, bob, "POST", "/SemanticSearch", {
+      agentId: bob.id,
+      subject: SUBJECT,
+      limit: 100,
+    });
+    expect(beforeRes.status).toBe(200);
+    const beforeBody: any = await beforeRes.json();
+    expect(beforeBody.results.length).toBe(50);
+
+    // Insert a MemoryGrant (bob → alice, scope=search) — schema field names
+    // still matter for whatever admin/listing tooling reads them, even
+    // though Memory reads no longer consult this table.
     const grantRes = await adminOp(harper, {
       operation: "insert",
       database: "flair",
@@ -265,7 +316,6 @@ describe("Authenticated agent journey", () => {
     expect(grantRes.status).toBe(200);
 
     try {
-      // Bob queries his own scope — grant expansion should surface alice's rows
       const res = await authFetch(harper, bob, "POST", "/SemanticSearch", {
         agentId: bob.id,
         subject: SUBJECT,
@@ -278,7 +328,6 @@ describe("Authenticated agent journey", () => {
       // Every row belongs to alice (bob has 0 memories of his own)
       for (const r of body.results) expect(r.agentId).toBe(alice.id);
     } finally {
-      // Revoke so subsequent tests see clean isolation
       await adminOp(harper, {
         operation: "delete",
         database: "flair",
@@ -287,7 +336,8 @@ describe("Authenticated agent journey", () => {
       });
     }
 
-    // After revoke, bob's scope is empty again — the grant was load-bearing
+    // After revoke, bob's scope is UNCHANGED — proving the grant was never
+    // load-bearing under within-org-read-open.
     const afterRes = await authFetch(harper, bob, "POST", "/SemanticSearch", {
       agentId: bob.id,
       subject: SUBJECT,
@@ -295,7 +345,7 @@ describe("Authenticated agent journey", () => {
     });
     expect(afterRes.status).toBe(200);
     const afterBody: any = await afterRes.json();
-    expect(afterBody.results.length).toBe(0);
+    expect(afterBody.results.length).toBe(50);
   }, 60_000);
 
   test("non-admin alice cannot use the _reindex admin escape hatch", async () => {
