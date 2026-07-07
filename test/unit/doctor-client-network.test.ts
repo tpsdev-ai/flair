@@ -114,6 +114,41 @@ describe("checkAgentRegistered", () => {
     expect(res.state).toBe("unreachable");
   });
 
+  // flair#602 — an unregistered agent never actually returns 404: Flair's
+  // signed-auth middleware (resources/auth-middleware.ts) rejects the request
+  // before the /Agent/:id resource handler runs. Live-verified against a
+  // local Flair instance: a signed GET with a resolvable-but-unregistered
+  // key returns 401 with body {"error":"unknown_agent"}. Since we already
+  // have a LOCAL key that resolved (not a client-side key problem), that
+  // specific signal is treated as a reliable "not registered".
+  it("returns 'not-registered' on HTTP 401 with the server's unknown_agent signal", async () => {
+    globalThis.fetch = (async () => jsonResponse(401, { error: "unknown_agent" })) as typeof fetch;
+    const res = await checkAgentRegistered(BASE_URL, AGENT_ID, keysDir);
+    expect(res.state).toBe("not-registered");
+    expect(res.detail).toContain("401");
+  });
+
+  // Some server versions/paths may surface the same "no such agent" condition
+  // as Harper's native AccessViolation (403) instead of the custom
+  // middleware's 401 — handle both, per Sherlock's live-verification note on
+  // #599 that two reviewers saw two different codes.
+  it("returns 'not-registered' on HTTP 403 with the server's unknown_agent signal", async () => {
+    globalThis.fetch = (async () => jsonResponse(403, { error: "unknown_agent" })) as typeof fetch;
+    const res = await checkAgentRegistered(BASE_URL, AGENT_ID, keysDir);
+    expect(res.state).toBe("not-registered");
+    expect(res.detail).toContain("403");
+  });
+
+  it("returns 'unreachable' (not 'not-registered') on a bare 403 AccessViolation without the unknown_agent marker", async () => {
+    // A 403 for an agent that IS known but fails a resource-level
+    // authorization check (e.g. Harper's native AccessViolation) is a
+    // genuinely different, ambiguous case — stay conservative and don't
+    // claim not-registered just because the status code matches.
+    globalThis.fetch = (async () => new Response("Unauthorized access to resource", { status: 403 })) as typeof fetch;
+    const res = await checkAgentRegistered(BASE_URL, AGENT_ID, keysDir);
+    expect(res.state).toBe("unreachable");
+  });
+
   it("returns 'no-key' when no local key exists for the agent id", async () => {
     const emptyKeysDir = mkdtempSync(join(tmpdir(), "flair-doctor-client-empty-"));
     try {
