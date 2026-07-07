@@ -15,6 +15,15 @@
  *
  * Per the harness lesson (order-dependent CI failure): any test that mocks
  * @harperfast/harper MUST also export `Resource` in the mock object.
+ *
+ * Also hosts the #592 currentTask-content-gate tests for Presence.get()
+ * (below the nonce-replay describe blocks) — this file already owns the
+ * process-wide `resources/Presence.ts` import/mock in test/unit/, and bun
+ * runs every file in test/unit/ in ONE process, so a second file re-mocking
+ * @harperfast/harper and re-importing Presence.ts would race this one for
+ * which mock "wins" for the shared module cache (see
+ * memory-soul-read-gate.test.ts's header comment for the same footgun on
+ * Memory.ts). Safer to extend this file than add a competing one.
  */
 import { mock, describe, it, expect, beforeEach } from "bun:test";
 import nacl from "tweetnacl";
@@ -33,7 +42,13 @@ class BasePresence {
     return rec;
   }
   static search() {
-    async function* gen() {}
+    // #592 tests below seed `presenceRecords` directly and read it back via
+    // Presence.get()'s roster scan. The pre-#592 nonce-replay tests above
+    // never call .get() (only .post()), so yielding real rows here is a
+    // no-op for them.
+    async function* gen() {
+      for (const rec of Object.values(presenceRecords)) yield rec;
+    }
     return gen();
   }
 }
@@ -256,5 +271,148 @@ describe("Presence.ts post() — per-site negative paths", () => {
     expect(replay.status).toBe(401);
     const body = await replay.json();
     expect(body.error).toBe("nonce_replay_detected");
+  });
+});
+
+// ─── #592 — GET /Presence currentTask content gate ─────────────────────────
+//
+// Anonymous callers get the roster with currentTask stripped (null); only a
+// cryptographically verified in-org agent gets the actual task text. Reuses
+// this file's existing Presence.ts import/mock (test/unit/ files that
+// mock.module("@harperfast/harper") + dynamically import resources/Presence.ts
+// share bun's process-global module cache — see memory-soul-read-gate.test.ts's
+// header comment for the collision this avoids by NOT re-importing Presence.ts
+// from a second file).
+
+function reqForGet(agentId: string, ts: number, nonce: string, secretKey: Uint8Array): any {
+  const payload = `${agentId}:${ts}:${nonce}:GET:/Presence`;
+  const sig = nacl.sign.detached(new TextEncoder().encode(payload), secretKey);
+  const sigB64 = Buffer.from(sig).toString("base64");
+  const header = `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sigB64}`;
+  return {
+    headers: { get: (n: string) => (n === "authorization" ? header : undefined) },
+    url: "/Presence",
+    method: "GET",
+    // tpsAgent deliberately unset — forces resolveAgentAuth's raw-header
+    // verify fallback, not a pre-verified gate annotation.
+  };
+}
+
+describe("Presence.get() — currentTask content gate (closes #592)", () => {
+  it("anonymous reader (gate's tpsAnonymous annotation): currentTask is null, other roster fields ARE present", async () => {
+    presenceRecords["agent-anon-1"] = {
+      agentId: "agent-anon-1",
+      currentTask: "investigating preprod-db-3: replication lag",
+      activity: "coding",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    const presence = makePresenceInstance({ tpsAnonymous: true });
+    const roster: any[] = await presence.get();
+
+    const entry = roster.find((r) => r.id === "agent-anon-1");
+    expect(entry).toBeDefined();
+    expect(entry.currentTask).toBeNull();
+    // key is present-and-null, not omitted — schema-stable
+    expect("currentTask" in entry).toBe(true);
+    // roster metadata is unaffected by the gate
+    expect(entry.activity).toBe("coding");
+    expect(typeof entry.lastHeartbeatAt).toBe("number");
+  });
+
+  it("verified in-org agent (gate's tpsAgent annotation): currentTask IS present, full text", async () => {
+    presenceRecords["agent-verified-1"] = {
+      agentId: "agent-verified-1",
+      currentTask: "investigating preprod-db-3: replication lag",
+      activity: "coding",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    // The READER's identity (some-other-agent) is deliberately different from
+    // the RECORD's owner (agent-verified-1) — Presence has no per-agent
+    // ownership scoping on read (the roster is a shared view), only a
+    // verified-vs-anonymous content gate. Any verified agent sees any
+    // agent's currentTask, by design (#592's proposal).
+    const presence = makePresenceInstance({ tpsAgent: "some-other-agent", tpsAgentIsAdmin: false });
+    const roster: any[] = await presence.get();
+
+    const entry = roster.find((r) => r.id === "agent-verified-1");
+    expect(entry).toBeDefined();
+    expect(entry.currentTask).toBe("investigating preprod-db-3: replication lag");
+  });
+
+  it("verified via a REAL Ed25519 signature on the raw request (no gate annotation) also unlocks currentTask", async () => {
+    // Defense-in-depth: resolveAgentAuth's header-verify fallback (used when
+    // no middleware annotation is present) must ALSO resolve to a verified
+    // agent for a genuinely valid signature — not just the gate-annotation
+    // shortcut exercised by the test above.
+    const agentId = "agent-real-sig-1";
+    const { secretKey } = makeAgent(agentId);
+    presenceRecords[agentId] = {
+      agentId,
+      currentTask: "customer acme-corp: onboarding call notes",
+      activity: "planning",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    const ts = Date.now();
+    const nonce = "get-nonce-real-sig-1";
+    const presence = makePresenceInstance(reqForGet(agentId, ts, nonce, secretKey));
+    const roster: any[] = await presence.get();
+
+    const entry = roster.find((r) => r.id === agentId);
+    expect(entry.currentTask).toBe("customer acme-corp: onboarding call notes");
+  });
+
+  it("no bypass: a garbage/invalid Authorization header resolves to ANONYMOUS, not internal — currentTask still stripped", async () => {
+    presenceRecords["agent-badauth-1"] = {
+      agentId: "agent-badauth-1",
+      currentTask: "customer acme-corp: incident review",
+      activity: "reviewing",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    const badReq = {
+      headers: { get: (n: string) => (n === "authorization" ? "TPS-Ed25519 garbage-no-colons" : undefined) },
+      url: "/Presence",
+      method: "GET",
+    };
+    const presence = makePresenceInstance(badReq);
+    const roster: any[] = await presence.get();
+
+    const entry = roster.find((r) => r.id === "agent-badauth-1");
+    expect(entry.currentTask).toBeNull();
+  });
+
+  it("no bypass: an id-suffixed single-record GET routes through the SAME get() and is gated identically", async () => {
+    // Harper's REST layer (dist/server/REST.js) has exactly ONE call site for
+    // every GET — `resource.get(target, request)` — whether the URL carries
+    // an id or not. Presence.get() ignores `target` and always returns the
+    // full roster array, so there is no separate single-record return path
+    // that could skip the gate. Passing a target argument here proves the
+    // gate applies identically regardless of call shape.
+    presenceRecords["agent-single-1"] = {
+      agentId: "agent-single-1",
+      currentTask: "should not leak to anonymous single-record GET",
+      activity: "idle",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    const anonPresence = makePresenceInstance({ tpsAnonymous: true });
+    const anonRoster: any[] = await (anonPresence.get as any)("agent-single-1");
+    expect(anonRoster.find((r) => r.id === "agent-single-1").currentTask).toBeNull();
+
+    const verifiedPresence = makePresenceInstance({ tpsAgent: "reader-agent", tpsAgentIsAdmin: false });
+    const verifiedRoster: any[] = await (verifiedPresence.get as any)("agent-single-1");
+    expect(verifiedRoster.find((r) => r.id === "agent-single-1").currentTask).toBe(
+      "should not leak to anonymous single-record GET",
+    );
+  });
+
+  it("allowRead() is unchanged — still true for both anonymous and verified (the roster itself stays public)", async () => {
+    const anon = makePresenceInstance({ tpsAnonymous: true });
+    const verified = makePresenceInstance({ tpsAgent: "agent-x", tpsAgentIsAdmin: false });
+    expect(await anon.allowRead()).toBe(true);
+    expect(await verified.allowRead()).toBe(true);
   });
 });

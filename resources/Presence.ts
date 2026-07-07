@@ -8,6 +8,8 @@
  *
  * Auth:
  *   GET  — public (returns only allowlisted fields; safe for public renderer).
+ *          currentTask is additionally content-gated to verified agents only
+ *          (#592) — anonymous callers get the roster with currentTask=null.
  *   POST — Ed25519 agent credential (TPS-Ed25519 header). Agent writes only its
  *          own record; cross-agent writes are rejected (403).
  *
@@ -15,6 +17,14 @@
  *   - Write: per-agent Ed25519 auth. Cross-agent → 403.
  *   - Read: field-allowlisted to public-safe set. No secrets, no admin data.
  *   - currentTask is agent-authored free text → cap length, escape on render.
+ *   - currentTask CONTENT gate (#592): the roster (id/displayName/role/
+ *     runtime/activity/presenceStatus/lastHeartbeatAt) is genuinely
+ *     public-safe and stays world-readable, but currentTask is free text that
+ *     the coordination convention (`presence set --task "investigating
+ *     <host>: <symptom>"`) has put customer names and preprod hostnames in.
+ *     sanitizeCurrentTask() only trims/caps length — it does not redact
+ *     content. get() additionally gates currentTask itself to verified
+ *     in-org agents only; see get()'s inline comment.
  */
 
 import { databases } from "@harperfast/harper";
@@ -114,8 +124,27 @@ export class Presence extends (databases as any).flair.Presence {
    *
    * Joins Presence records with Agent metadata and derives presenceStatus.
    * Only allowlisted fields are returned (no secrets, no admin data).
+   *
+   * currentTask CONTENT gate (#592): Harper routes every GET — collection
+   * (`GET /Presence`) AND single-record (`GET /Presence/<id>`) — through this
+   * SAME method (REST.js: `resource.get(target, request)`, one call site for
+   * both; this override ignores `target` and always returns the full
+   * roster array), so gating once here, before the loop, covers every read
+   * path with no separate return site to miss. Reuses the SAME
+   * resolveAgentAuth() resolver Memory.ts/SemanticSearch.ts/Soul.ts/Agent.ts
+   * use to distinguish a cryptographically verified in-org agent from
+   * everyone else. Only `auth.kind === "agent"` (valid TPS-Ed25519 signature)
+   * gets currentTask; "anonymous" (no/invalid signature — the case this issue
+   * closes) AND "internal" (no request object at all) are both treated as
+   * NOT verified for this field — deliberately conservative, since a real GET
+   * /Presence always carries an HTTP request (never truly in-process).
+   * allowRead() is UNCHANGED (still `true`) — the roster itself stays public;
+   * only the free-text field is gated, per the issue's field-level option.
    */
   async get() {
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    const includeCurrentTask = auth.kind === "agent";
+
     const now = Date.now();
     const idleThreshold = idleThresholdMs();
     const offlineThreshold = offlineThresholdMs();
@@ -146,7 +175,10 @@ export class Presence extends (databases as any).flair.Presence {
             idleThreshold,
             offlineThreshold,
           ),
-          currentTask: sanitizeCurrentTask(row?.currentTask),
+          // Anonymous/unverified readers get `null` here (key stays present,
+          // schema-stable) instead of the sanitized task text — see the
+          // currentTask CONTENT gate doc above get().
+          currentTask: includeCurrentTask ? sanitizeCurrentTask(row?.currentTask) : null,
           lastHeartbeatAt: typeof row?.lastHeartbeatAt === "number"
             ? row.lastHeartbeatAt
             : Number(row?.lastHeartbeatAt ?? 0),
