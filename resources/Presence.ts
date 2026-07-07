@@ -8,6 +8,8 @@
  *
  * Auth:
  *   GET  — public (returns only allowlisted fields; safe for public renderer).
+ *          currentTask is additionally content-gated to verified agents only
+ *          (#592) — anonymous callers get the roster with currentTask=null.
  *   POST — Ed25519 agent credential (TPS-Ed25519 header). Agent writes only its
  *          own record; cross-agent writes are rejected (403).
  *
@@ -15,10 +17,18 @@
  *   - Write: per-agent Ed25519 auth. Cross-agent → 403.
  *   - Read: field-allowlisted to public-safe set. No secrets, no admin data.
  *   - currentTask is agent-authored free text → cap length, escape on render.
+ *   - currentTask CONTENT gate (#592): the roster (id/displayName/role/
+ *     runtime/activity/presenceStatus/lastHeartbeatAt) is genuinely
+ *     public-safe and stays world-readable, but currentTask is free text that
+ *     the coordination convention (`presence set --task "investigating
+ *     <host>: <symptom>"`) has put customer names and preprod hostnames in.
+ *     sanitizeCurrentTask() only trims/caps length — it does not redact
+ *     content. get() additionally gates currentTask itself to verified
+ *     in-org agents only; see get()'s inline comment.
  */
 
 import { databases } from "@harperfast/harper";
-import { resolveAgentAuth } from "./agent-auth.js";
+import { resolveAgentAuth, verifyAgentRequest } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer } from "./ed25519-auth.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -114,8 +124,48 @@ export class Presence extends (databases as any).flair.Presence {
    *
    * Joins Presence records with Agent metadata and derives presenceStatus.
    * Only allowlisted fields are returned (no secrets, no admin data).
+   *
+   * currentTask CONTENT gate (#592): Harper routes every GET — collection
+   * (`GET /Presence`) AND single-record (`GET /Presence/<id>`) — through this
+   * SAME method (REST.js: `resource.get(target, request)`, one call site for
+   * both; this override ignores `target` and always returns the full roster
+   * array), so gating once here, before the loop, covers every read path with
+   * no separate return site to miss.
+   *
+   * The gate keys off a valid TPS-Ed25519 SIGNATURE (verifyAgentRequest),
+   * NOT resolveAgentAuth()/allowVerified — and that distinction is the whole
+   * fix. /Presence is a public-passthrough in auth-middleware.ts: the
+   * middleware early-returns WITHOUT annotating tpsAgent/tpsAnonymous, so a
+   * resource-level resolver never sees a gate annotation for this path. Worse,
+   * Harper's `authorizeLocal` (config default true) auto-authorizes any
+   * *credential-less* loopback request as super_user — it injects request.user
+   * ONLY "when there is no Authorization header" (node .../server/http.js). So a
+   * bare, unauthenticated `GET /Presence` from loopback (exactly the anonymous
+   * caller the issue is about, and what the integration test exercises against
+   * a real spawned Harper) arrives with request.user = super_user and NO
+   * signature. resolveAgentAuth() would classify that as `kind:"agent"` (its
+   * super_user branch) and leak currentTask — which it did, against real
+   * Harper, even though mocked unit tests using tpsAgent annotations passed.
+   * A TPS-Ed25519 signature, by contrast, cannot be manufactured by
+   * authorizeLocal (it requires the Authorization header, which suppresses the
+   * super_user injection), so verifyAgentRequest() cleanly separates a real
+   * in-org agent from an anonymous/loopback/Basic-admin caller. Only a valid
+   * agent signature gets currentTask; everything else (anonymous, loopback
+   * super_user, Basic-admin, internal in-process) gets currentTask=null.
+   * allowRead() is UNCHANGED (still `true`) — the roster itself stays public;
+   * only the free-text field is gated, per the issue's field-level option.
    */
   async get() {
+    // Extract the raw request the same way post() does (getContext().request
+    // is populated for GET; fall back to the context itself). verifyAgentRequest
+    // returns the agent for a valid TPS-Ed25519 signature, else null — see the
+    // gate rationale above. Memoized per-request, so this is a no-op if any
+    // other path already verified the same request.
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
+    const agentAuth = request ? await verifyAgentRequest(request) : null;
+    const includeCurrentTask = agentAuth !== null;
+
     const now = Date.now();
     const idleThreshold = idleThresholdMs();
     const offlineThreshold = offlineThresholdMs();
@@ -146,7 +196,10 @@ export class Presence extends (databases as any).flair.Presence {
             idleThreshold,
             offlineThreshold,
           ),
-          currentTask: sanitizeCurrentTask(row?.currentTask),
+          // Anonymous/unverified readers get `null` here (key stays present,
+          // schema-stable) instead of the sanitized task text — see the
+          // currentTask CONTENT gate doc above get().
+          currentTask: includeCurrentTask ? sanitizeCurrentTask(row?.currentTask) : null,
           lastHeartbeatAt: typeof row?.lastHeartbeatAt === "number"
             ? row.lastHeartbeatAt
             : Number(row?.lastHeartbeatAt ?? 0),

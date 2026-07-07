@@ -15,6 +15,15 @@
  *
  * Per the harness lesson (order-dependent CI failure): any test that mocks
  * @harperfast/harper MUST also export `Resource` in the mock object.
+ *
+ * Also hosts the #592 currentTask-content-gate tests for Presence.get()
+ * (below the nonce-replay describe blocks) — this file already owns the
+ * process-wide `resources/Presence.ts` import/mock in test/unit/, and bun
+ * runs every file in test/unit/ in ONE process, so a second file re-mocking
+ * @harperfast/harper and re-importing Presence.ts would race this one for
+ * which mock "wins" for the shared module cache (see
+ * memory-soul-read-gate.test.ts's header comment for the same footgun on
+ * Memory.ts). Safer to extend this file than add a competing one.
  */
 import { mock, describe, it, expect, beforeEach } from "bun:test";
 import nacl from "tweetnacl";
@@ -33,7 +42,13 @@ class BasePresence {
     return rec;
   }
   static search() {
-    async function* gen() {}
+    // #592 tests below seed `presenceRecords` directly and read it back via
+    // Presence.get()'s roster scan. The pre-#592 nonce-replay tests above
+    // never call .get() (only .post()), so yielding real rows here is a
+    // no-op for them.
+    async function* gen() {
+      for (const rec of Object.values(presenceRecords)) yield rec;
+    }
     return gen();
   }
 }
@@ -256,5 +271,211 @@ describe("Presence.ts post() — per-site negative paths", () => {
     expect(replay.status).toBe(401);
     const body = await replay.json();
     expect(body.error).toBe("nonce_replay_detected");
+  });
+});
+
+// ─── #592 — GET /Presence currentTask content gate ─────────────────────────
+//
+// currentTask is content-gated to VERIFIED IN-ORG AGENTS: only a caller
+// presenting a valid TPS-Ed25519 signature gets the task text; everyone else
+// (anonymous, Harper `authorizeLocal` loopback super_user, Basic-admin,
+// in-process) gets currentTask=null.
+//
+// v1 of this fix keyed the gate off resolveAgentAuth().kind === "agent" and
+// used `{ tpsAgent }` / `{ tpsAnonymous }` mock contexts. That PASSED the
+// mocks but LEAKED against a real spawned Harper (integration test), because:
+//   (a) /Presence is a public-passthrough in auth-middleware.ts — the
+//       middleware early-returns and NEVER sets tpsAgent/tpsAnonymous, so those
+//       annotation shapes don't occur for this path; and
+//   (b) Harper's authorizeLocal (config default true) injects request.user =
+//       super_user for any CREDENTIAL-LESS loopback GET (node .../server/http.js:
+//       "pass the user ... Only applies when there is no Authorization header").
+// resolveAgentAuth() then classified that credential-less super_user as
+// `kind:"agent"` → currentTask leaked to an unauthenticated caller.
+//
+// The real gate keys off verifyAgentRequest() — a valid TPS-Ed25519 signature,
+// which authorizeLocal cannot manufacture (a signature requires the
+// Authorization header, whose presence suppresses the super_user injection).
+// These tests therefore drive REAL request shapes (signed header / no header /
+// super_user-without-header), NOT tpsAgent annotations. Reuses this file's
+// existing Presence.ts import/mock (test/unit/ files that
+// mock.module("@harperfast/harper") + dynamically import resources/Presence.ts
+// share bun's process-global module cache — see memory-soul-read-gate.test.ts's
+// header comment for the collision this avoids by NOT re-importing Presence.ts
+// from a second file).
+
+// A no-Authorization-header GET request (headers.get returns undefined).
+// `extra` lets us layer on Harper's authorizeLocal super_user injection.
+function unsignedGetReq(extra: Record<string, unknown> = {}): any {
+  return {
+    headers: { get: (_n: string) => undefined },
+    url: "/Presence",
+    method: "GET",
+    ...extra,
+  };
+}
+
+// A GET request carrying a real, valid TPS-Ed25519 signature for `agentId`
+// (the agent must be registered via makeAgent so its pubkey verifies).
+function signedGetReq(agentId: string, ts: number, nonce: string, secretKey: Uint8Array): any {
+  const payload = `${agentId}:${ts}:${nonce}:GET:/Presence`;
+  const sig = nacl.sign.detached(new TextEncoder().encode(payload), secretKey);
+  const sigB64 = Buffer.from(sig).toString("base64");
+  const header = `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sigB64}`;
+  return {
+    headers: { get: (n: string) => (n === "authorization" ? header : undefined) },
+    url: "/Presence",
+    method: "GET",
+  };
+}
+
+describe("Presence.get() — currentTask content gate (closes #592)", () => {
+  it("anonymous reader (no Authorization header): currentTask is null, other roster fields ARE present", async () => {
+    presenceRecords["agent-anon-1"] = {
+      agentId: "agent-anon-1",
+      currentTask: "investigating preprod-db-3: replication lag",
+      activity: "coding",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    const presence = makePresenceInstance(unsignedGetReq());
+    const roster: any[] = await presence.get();
+
+    const entry = roster.find((r) => r.id === "agent-anon-1");
+    expect(entry).toBeDefined();
+    expect(entry.currentTask).toBeNull();
+    // key is present-and-null, not omitted — schema-stable
+    expect("currentTask" in entry).toBe(true);
+    // roster metadata is unaffected by the gate
+    expect(entry.activity).toBe("coding");
+    expect(typeof entry.lastHeartbeatAt).toBe("number");
+  });
+
+  it("THE REGRESSION GUARD — authorizeLocal loopback super_user (request.user super_user, NO Authorization header) still gets currentTask=null", async () => {
+    // This is the exact real-Harper shape that leaked in v1: a credential-less
+    // loopback GET that Harper's authorizeLocal auto-authorizes as super_user.
+    // resolveAgentAuth() calls this `kind:"agent"` and WOULD leak; the
+    // signature-based gate treats it as unverified (no TPS-Ed25519 header) and
+    // strips currentTask.
+    presenceRecords["agent-loopback-1"] = {
+      agentId: "agent-loopback-1",
+      currentTask: "customer acme-corp: preprod incident detail",
+      activity: "reviewing",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    const loopbackSuperUserReq = unsignedGetReq({
+      user: { username: "admin", role: { permission: { super_user: true } } },
+    });
+    const presence = makePresenceInstance(loopbackSuperUserReq);
+    const roster: any[] = await presence.get();
+
+    const entry = roster.find((r) => r.id === "agent-loopback-1");
+    expect(entry).toBeDefined();
+    expect(entry.currentTask).toBeNull();
+    // roster itself is still served (allowRead stays public) — only the field is gated
+    expect(entry.activity).toBe("reviewing");
+  });
+
+  it("verified in-org agent (valid TPS-Ed25519 signature on the request): currentTask IS present, full text", async () => {
+    const agentId = "agent-verified-1";
+    const { secretKey } = makeAgent(agentId);
+    // The RECORD owner differs from the READER — Presence has no per-agent
+    // ownership scoping on read (the roster is a shared view), only a
+    // verified-vs-unverified content gate. Any verified agent sees any agent's
+    // currentTask, by design (#592's proposal).
+    presenceRecords["agent-owner-x"] = {
+      agentId: "agent-owner-x",
+      currentTask: "investigating preprod-db-3: replication lag",
+      activity: "coding",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    const ts = Date.now();
+    const presence = makePresenceInstance(signedGetReq(agentId, ts, "get-nonce-verified-1", secretKey));
+    const roster: any[] = await presence.get();
+
+    const entry = roster.find((r) => r.id === "agent-owner-x");
+    expect(entry).toBeDefined();
+    expect(entry.currentTask).toBe("investigating preprod-db-3: replication lag");
+  });
+
+  it("no bypass: a garbage/invalid Authorization header (not a valid signature) → currentTask still stripped", async () => {
+    presenceRecords["agent-badauth-1"] = {
+      agentId: "agent-badauth-1",
+      currentTask: "customer acme-corp: incident review",
+      activity: "reviewing",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    const badReq = {
+      headers: { get: (n: string) => (n === "authorization" ? "TPS-Ed25519 garbage-no-colons" : undefined) },
+      url: "/Presence",
+      method: "GET",
+    };
+    const presence = makePresenceInstance(badReq);
+    const roster: any[] = await presence.get();
+
+    const entry = roster.find((r) => r.id === "agent-badauth-1");
+    expect(entry.currentTask).toBeNull();
+  });
+
+  it("no bypass: a Basic-admin Authorization header (no agent signature) → currentTask still stripped", async () => {
+    // A real Basic-admin request carries `Authorization: Basic ...`, which is
+    // NOT a TPS-Ed25519 signature — verifyAgentRequest returns null → stripped.
+    // (Fails closed: even a privileged operator gets null via the public roster
+    // endpoint; the observation-center admin view sources task text elsewhere.)
+    presenceRecords["agent-basic-1"] = {
+      agentId: "agent-basic-1",
+      currentTask: "customer acme-corp: renewal risk",
+      activity: "planning",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    const basicReq = {
+      headers: { get: (n: string) => (n === "authorization" ? "Basic YWRtaW46dGVzdDEyMw==" : undefined) },
+      url: "/Presence",
+      method: "GET",
+      user: { username: "admin", role: { permission: { super_user: true } } },
+    };
+    const presence = makePresenceInstance(basicReq);
+    const roster: any[] = await presence.get();
+
+    expect(roster.find((r) => r.id === "agent-basic-1").currentTask).toBeNull();
+  });
+
+  it("no bypass: an id-suffixed single-record GET routes through the SAME get() and is gated identically", async () => {
+    // Harper's REST layer (dist/server/REST.js) has exactly ONE call site for
+    // every GET — `resource.get(target, request)` — whether the URL carries
+    // an id or not. Presence.get() ignores `target` and always returns the
+    // full roster array, so there is no separate single-record return path
+    // that could skip the gate. Passing a target argument here proves the
+    // gate applies identically regardless of call shape.
+    const agentId = "agent-reader-single";
+    const { secretKey } = makeAgent(agentId);
+    presenceRecords["agent-single-1"] = {
+      agentId: "agent-single-1",
+      currentTask: "should not leak to anonymous single-record GET",
+      activity: "idle",
+      lastHeartbeatAt: Date.now(),
+    };
+
+    const anonPresence = makePresenceInstance(unsignedGetReq());
+    const anonRoster: any[] = await (anonPresence.get as any)("agent-single-1");
+    expect(anonRoster.find((r) => r.id === "agent-single-1").currentTask).toBeNull();
+
+    const ts = Date.now();
+    const verifiedPresence = makePresenceInstance(signedGetReq(agentId, ts, "get-nonce-single-1", secretKey));
+    const verifiedRoster: any[] = await (verifiedPresence.get as any)("agent-single-1");
+    expect(verifiedRoster.find((r) => r.id === "agent-single-1").currentTask).toBe(
+      "should not leak to anonymous single-record GET",
+    );
+  });
+
+  it("allowRead() is unchanged — still true for both anonymous and verified (the roster itself stays public)", async () => {
+    const anon = makePresenceInstance(unsignedGetReq());
+    const verified = makePresenceInstance({ tpsAgent: "agent-x", tpsAgentIsAdmin: false });
+    expect(await anon.allowRead()).toBe(true);
+    expect(await verified.allowRead()).toBe(true);
   });
 });

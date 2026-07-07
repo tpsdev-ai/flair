@@ -6,6 +6,8 @@
  *   2. Cross-agent write rejected (403)
  *   3. Read returns correct derived status
  *   4. Read field-allowlist enforced (no leak of non-allowlisted fields)
+ *   4b. currentTask CONTENT gate (#592) — anonymous GET gets currentTask=null,
+ *       a verified Ed25519 GET gets the full text
  *   5. currentTask length cap
  *   6. Invalid activity rejected (400)
  *   7. Missing auth rejected (401)
@@ -245,6 +247,55 @@ describe("Presence API integration", () => {
     }
   });
 
+  // ── 4b. currentTask CONTENT gate (#592) ────────────────────────────────────
+  // /Presence is in auth-middleware.ts's early public-passthrough allowlist
+  // (both GET and POST skip the middleware entirely), so a real anonymous GET
+  // here exercises resolveAgentAuth's true "no request annotation, no valid
+  // header" → anonymous path, and a real Ed25519-signed GET exercises its
+  // raw-header-verify fallback — the actual paths a production Fabric
+  // deployment hits, not a simulated one.
+
+  test("GET /Presence WITHOUT auth: currentTask is null for every entry, other fields present", async () => {
+    const auth = buildAuthHeader(agent1.id, "POST", "/Presence", agent1.privateKey);
+    await fetch(`${harper.httpURL}/Presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ currentTask: "investigating preprod-db-3: replication lag", activity: "coding" }),
+    });
+
+    const res = await fetch(`${harper.httpURL}/Presence`);
+    expect(res.status).toBe(200);
+    const roster = await res.json();
+    expect(roster.length).toBeGreaterThanOrEqual(1);
+
+    const a1 = roster.find((r: any) => r.id === agent1.id);
+    expect(a1).toBeDefined();
+    expect(a1.currentTask).toBeNull();
+    // roster metadata is unaffected by the gate
+    expect(typeof a1.displayName).toBe("string");
+    expect(typeof a1.presenceStatus).toBe("string");
+  });
+
+  test("GET /Presence WITH valid Ed25519 auth: currentTask IS present, full text", async () => {
+    const postAuth = buildAuthHeader(agent1.id, "POST", "/Presence", agent1.privateKey);
+    await fetch(`${harper.httpURL}/Presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: postAuth },
+      body: JSON.stringify({ currentTask: "investigating preprod-db-3: replication lag", activity: "coding" }),
+    });
+
+    // A DIFFERENT verified agent reads it — Presence has no per-agent read
+    // scoping, only a verified-vs-anonymous content gate (any verified agent
+    // sees any agent's currentTask, by #592's design).
+    const getAuth = buildAuthHeader(agent2.id, "GET", "/Presence", agent2.privateKey);
+    const res = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    expect(res.status).toBe(200);
+    const roster = await res.json();
+
+    const a1 = roster.find((r: any) => r.id === agent1.id);
+    expect(a1.currentTask).toBe("investigating preprod-db-3: replication lag");
+  });
+
   // ── 5. currentTask length cap ──────────────────────────────────────────────
 
   test("POST /Presence caps currentTask at 200 chars", async () => {
@@ -256,7 +307,11 @@ describe("Presence API integration", () => {
       body: JSON.stringify({ currentTask: longTask, activity: "planning" }),
     });
 
-    const res = await fetch(`${harper.httpURL}/Presence`);
+    // Read back with valid Ed25519 auth — #592 gates currentTask to verified
+    // readers, and an anonymous GET here would see currentTask=null,
+    // defeating the point of this length-cap assertion.
+    const getAuth = buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey);
+    const res = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
     const roster = await res.json();
     const a1 = roster.find((r: any) => r.id === agent1.id);
     expect(a1.currentTask).toHaveLength(200);
