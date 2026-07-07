@@ -283,3 +283,101 @@ export function fixSessionStartHook(homeDir: string, agentId: string | undefined
     return { ok: false, path, message: `could not write ${path}: ${reason}` };
   }
 }
+
+// ── init integration: apply-or-report (flair#597) ──────────────────────────
+//
+// `flair init`'s claude-code wiring wrote the MCP server block into the
+// client config but left the other two legs manual: the CLAUDE.md bootstrap
+// line was only ever printed as a copy-paste hint, and the SessionStart hook
+// wasn't mentioned by init at all. A field incident (2026-07-02 adopter
+// retro) found real users with exactly those partial setups — MCP wired but
+// no CLAUDE.md line, or no SessionStart hook — discovered only during an
+// incident retrospective.
+//
+// These two functions are the shared "apply the fix, or (if skipped/failed)
+// report exactly what's missing" logic `flair init` (src/cli.ts) calls for
+// each leg, one call per leg, right after it wires the MCP block. Pure fs
+// logic, parameterized by cwd/homeDir so it's unit-testable the same way as
+// the rest of this module — no test ever touches the real environment.
+//
+// This mirrors init's existing MCP-block wiring shape: apply automatically
+// by default (init already writes ~/.claude.json unprompted), with a
+// --skip-<leg> flag as the opt-out — not doctor's TTY-gated confirmFix
+// prompt, which is a different, appropriately heavier flow for "you already
+// have a broken/partial setup, want me to fix it now" run after the fact.
+
+export interface ApplyOrReportResult {
+  /** True only when this call actually wrote a file (not "already present"). */
+  applied: boolean;
+  /** True when the leg ends in a good state — already present, or freshly fixed. */
+  ok: boolean;
+  /** Human-readable status line, e.g. for console.log. */
+  message: string;
+  /** Present only when skipped or the fix failed — exact copy-paste instructions. */
+  hint?: string;
+}
+
+function indentLines(s: string): string {
+  return s
+    .split("\n")
+    .map((l) => `     ${l}`)
+    .join("\n");
+}
+
+/**
+ * Apply-or-report for the CLAUDE.md bootstrap leg. Idempotent: a second call
+ * after the line is present (whether from a prior call or already there)
+ * reports ok:true, applied:false — safe to call on every `flair init`.
+ */
+export function applyOrReportClaudeMdBootstrap(cwd: string, homeDir: string, skip: boolean): ApplyOrReportResult {
+  const existing = checkClaudeMdBootstrap(cwd, homeDir);
+  if (existing.present) {
+    return { applied: false, ok: true, message: `CLAUDE.md already has the bootstrap instruction (${existing.path})` };
+  }
+
+  const hint = `Add to your CLAUDE.md:\n${indentLines(CLAUDE_MD_BOOTSTRAP_LINE)}`;
+  if (skip) {
+    return { applied: false, ok: false, message: "CLAUDE.md bootstrap instruction skipped (--skip-claude-md)", hint };
+  }
+
+  const fix = fixClaudeMdBootstrap(cwd);
+  return { applied: fix.ok, ok: fix.ok, message: fix.message, hint: fix.ok ? undefined : hint };
+}
+
+function sessionStartHookHint(agentId: string, path: string): string {
+  const snippet = {
+    hooks: {
+      SessionStart: [
+        {
+          hooks: [
+            {
+              type: "command",
+              command: `FLAIR_AGENT_ID=${agentId} npx -y @tpsdev-ai/flair-mcp flair-session-start`,
+            },
+          ],
+        },
+      ],
+    },
+  };
+  return `Add this to ${path}:\n${indentLines(JSON.stringify(snippet, null, 2))}`;
+}
+
+/**
+ * Apply-or-report for the SessionStart hook leg. Idempotent: a second call
+ * after the hook is present (whether from a prior call or already there)
+ * reports ok:true, applied:false — safe to call on every `flair init`.
+ */
+export function applyOrReportSessionStartHook(homeDir: string, agentId: string, skip: boolean): ApplyOrReportResult {
+  const existing = checkSessionStartHook(homeDir);
+  if (existing.present) {
+    return { applied: false, ok: true, message: `SessionStart hook already wired in ${existing.path}` };
+  }
+
+  const hint = sessionStartHookHint(agentId, existing.path);
+  if (skip) {
+    return { applied: false, ok: false, message: "SessionStart hook skipped (--skip-hook)", hint };
+  }
+
+  const fix = fixSessionStartHook(homeDir, agentId);
+  return { applied: fix.ok, ok: fix.ok, message: fix.message, hint: fix.ok ? undefined : hint };
+}

@@ -32,6 +32,8 @@ import {
   checkSessionStartHook,
   fixClaudeMdBootstrap,
   fixSessionStartHook,
+  applyOrReportClaudeMdBootstrap,
+  applyOrReportSessionStartHook,
 } from "./doctor-client.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
@@ -1645,6 +1647,8 @@ program
   .option("--client <client>", "MCP client(s) to wire: claude-code, codex, gemini, cursor, all, or none")
   .option("--no-mcp", "Skip MCP client wiring (instance + agent only)")
   .option("--skip-smoke", "Skip the MCP smoke test")
+  .option("--skip-claude-md", "Skip appending the Flair bootstrap line to CLAUDE.md (claude-code only)")
+  .option("--skip-hook", "Skip installing the flair-session-start SessionStart hook (claude-code only)")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--remote", "When used with --target, init as hub for remote federation")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
@@ -2190,9 +2194,6 @@ program
         console.log(`     flair soul set --agent ${agentId} --key role --value "..."`);
       }
 
-      console.log(`\n   Claude Code: Add to your CLAUDE.md:`);
-      console.log(`     At the start of every session, run mcp__flair__bootstrap before responding.`);
-
       // ── MCP client wiring ────────────────────────────────────────────────
       // The full one-command front door: detect installed MCP clients and wire
       // each to the zero-install `npx -y @tpsdev-ai/flair-mcp` server. Claude
@@ -2260,6 +2261,30 @@ program
               console.log(`   MCP config (add manually to ~/.claude.json):`);
               console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
               wiringResults.push({ client: "claude-code", message: "snippet printed" });
+            }
+
+            // ── CLAUDE.md bootstrap line (flair#597) ──────────────────────────
+            // The MCP block alone isn't a working setup — Claude Code also needs
+            // the bootstrap instruction in CLAUDE.md, or it never calls
+            // mcp__flair__bootstrap and memory silently does nothing. Applied
+            // automatically here (same "just do it" shape as the MCP block
+            // above); --skip-claude-md opts out and prints the exact line to
+            // add by hand instead.
+            const claudeMdResult = applyOrReportClaudeMdBootstrap(process.cwd(), homedir(), !!opts.skipClaudeMd);
+            console.log(`   ${claudeMdResult.ok ? "✓" : "•"} ${claudeMdResult.message}`);
+            if (claudeMdResult.hint) {
+              for (const line of claudeMdResult.hint.split("\n")) console.log(`   ${line}`);
+            }
+
+            // ── SessionStart hook (flair#597) ─────────────────────────────────
+            // Auto-recall on session start needs this hook wired into
+            // ~/.claude/settings.json — without it, mcp__flair__bootstrap only
+            // ever runs if the agent remembers to call it itself.
+            // --skip-hook opts out and prints the exact JSON to add by hand.
+            const hookResult = applyOrReportSessionStartHook(homedir(), agentId, !!opts.skipHook);
+            console.log(`   ${hookResult.ok ? "✓" : "•"} ${hookResult.message}`);
+            if (hookResult.hint) {
+              for (const line of hookResult.hint.split("\n")) console.log(`   ${line}`);
             }
           } else {
             let result: { ok: boolean; message: string };
