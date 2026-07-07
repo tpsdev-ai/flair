@@ -28,7 +28,7 @@
  */
 
 import { databases } from "@harperfast/harper";
-import { resolveAgentAuth } from "./agent-auth.js";
+import { resolveAgentAuth, verifyAgentRequest } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer } from "./ed25519-auth.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -128,22 +128,43 @@ export class Presence extends (databases as any).flair.Presence {
    * currentTask CONTENT gate (#592): Harper routes every GET — collection
    * (`GET /Presence`) AND single-record (`GET /Presence/<id>`) — through this
    * SAME method (REST.js: `resource.get(target, request)`, one call site for
-   * both; this override ignores `target` and always returns the full
-   * roster array), so gating once here, before the loop, covers every read
-   * path with no separate return site to miss. Reuses the SAME
-   * resolveAgentAuth() resolver Memory.ts/SemanticSearch.ts/Soul.ts/Agent.ts
-   * use to distinguish a cryptographically verified in-org agent from
-   * everyone else. Only `auth.kind === "agent"` (valid TPS-Ed25519 signature)
-   * gets currentTask; "anonymous" (no/invalid signature — the case this issue
-   * closes) AND "internal" (no request object at all) are both treated as
-   * NOT verified for this field — deliberately conservative, since a real GET
-   * /Presence always carries an HTTP request (never truly in-process).
+   * both; this override ignores `target` and always returns the full roster
+   * array), so gating once here, before the loop, covers every read path with
+   * no separate return site to miss.
+   *
+   * The gate keys off a valid TPS-Ed25519 SIGNATURE (verifyAgentRequest),
+   * NOT resolveAgentAuth()/allowVerified — and that distinction is the whole
+   * fix. /Presence is a public-passthrough in auth-middleware.ts: the
+   * middleware early-returns WITHOUT annotating tpsAgent/tpsAnonymous, so a
+   * resource-level resolver never sees a gate annotation for this path. Worse,
+   * Harper's `authorizeLocal` (config default true) auto-authorizes any
+   * *credential-less* loopback request as super_user — it injects request.user
+   * ONLY "when there is no Authorization header" (node .../server/http.js). So a
+   * bare, unauthenticated `GET /Presence` from loopback (exactly the anonymous
+   * caller the issue is about, and what the integration test exercises against
+   * a real spawned Harper) arrives with request.user = super_user and NO
+   * signature. resolveAgentAuth() would classify that as `kind:"agent"` (its
+   * super_user branch) and leak currentTask — which it did, against real
+   * Harper, even though mocked unit tests using tpsAgent annotations passed.
+   * A TPS-Ed25519 signature, by contrast, cannot be manufactured by
+   * authorizeLocal (it requires the Authorization header, which suppresses the
+   * super_user injection), so verifyAgentRequest() cleanly separates a real
+   * in-org agent from an anonymous/loopback/Basic-admin caller. Only a valid
+   * agent signature gets currentTask; everything else (anonymous, loopback
+   * super_user, Basic-admin, internal in-process) gets currentTask=null.
    * allowRead() is UNCHANGED (still `true`) — the roster itself stays public;
    * only the free-text field is gated, per the issue's field-level option.
    */
   async get() {
-    const auth = await resolveAgentAuth((this as any).getContext?.());
-    const includeCurrentTask = auth.kind === "agent";
+    // Extract the raw request the same way post() does (getContext().request
+    // is populated for GET; fall back to the context itself). verifyAgentRequest
+    // returns the agent for a valid TPS-Ed25519 signature, else null — see the
+    // gate rationale above. Memoized per-request, so this is a no-op if any
+    // other path already verified the same request.
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
+    const agentAuth = request ? await verifyAgentRequest(request) : null;
+    const includeCurrentTask = agentAuth !== null;
 
     const now = Date.now();
     const idleThreshold = idleThresholdMs();
