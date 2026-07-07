@@ -218,8 +218,23 @@ describe("OAuthAuthorize.post() — resolved principal, not hardcoded admin (ide
     ...extra,
   });
 
+  // #604: OAuthAuthorize.post() now additionally requires a real
+  // Authorization header be present before it trusts resolveAgentAuth's
+  // verdict — Harper's `authorizeLocal` can populate `context.user` with a
+  // forged super_user for a credential-less loopback request with NO
+  // header at all, and /OAuthAuthorize permanently bypasses the auth
+  // middleware (public early-return, any method) so tpsAgent/tpsAnonymous
+  // is never annotated either. Every "genuinely authenticated" fixture
+  // below carries a mock header for that reason — it isn't cryptographically
+  // verified here (that's what the real-Harper integration test in
+  // test/integration/oauth-authorize-authz.test.ts proves), it's just the
+  // minimum realistic shape: a real request that resolves to an
+  // authenticated principal HAS a header; the forged-loopback case (last
+  // test below) does not.
+  const mockAuthHeader = { get: (name: string) => (name === "authorization" ? "Basic bW9ja2Vk" : undefined) };
+
   it("approving principal is the authenticated agent (from the gate annotation, not a hardcoded 'admin')", async () => {
-    const oa = makeInstance<any>(OAuthAuthorize, agentCtx("agent-alpha", false));
+    const oa = makeInstance<any>(OAuthAuthorize, { ...agentCtx("agent-alpha", false), headers: mockAuthHeader });
     const res = await oa.post(approveBody());
     expect(res).toBeInstanceOf(Response);
     expect((res as Response).status).toBe(302);
@@ -229,7 +244,10 @@ describe("OAuthAuthorize.post() — resolved principal, not hardcoded admin (ide
 
   it("Basic super_user resolves via resolveAgentAuth to agentId=username (not the hardcoded literal)", async () => {
     const oa: any = new (OAuthAuthorize as any)();
-    oa.getContext = () => ({ user: { username: "admin", role: { permission: { super_user: true } } } });
+    oa.getContext = () => ({
+      user: { username: "admin", role: { permission: { super_user: true } } },
+      headers: mockAuthHeader,
+    });
     const res = await oa.post(approveBody());
     expect(res).toBeInstanceOf(Response);
     expect((res as Response).status).toBe(302);
@@ -241,13 +259,29 @@ describe("OAuthAuthorize.post() — resolved principal, not hardcoded admin (ide
 
   it("a different super_user username is preserved (proves it's not a hardcoded literal)", async () => {
     const oa: any = new (OAuthAuthorize as any)();
-    oa.getContext = () => ({ user: { username: "nathan-basic", role: { permission: { super_user: true } } } });
+    oa.getContext = () => ({
+      user: { username: "nathan-basic", role: { permission: { super_user: true } } },
+      headers: mockAuthHeader,
+    });
     await oa.post(approveBody());
     expect(authCodePut?.principalId).toBe("nathan-basic");
   });
 
   it("no resolvable principal (anonymous) → 401, no auth code minted (fail closed, not admin grant)", async () => {
     const oa = makeInstance<any>(OAuthAuthorize, anonCtx());
+    const res = await oa.post(approveBody());
+    expect(res).toBeInstanceOf(Response);
+    expect((res as Response).status).toBe(401);
+    expect(authCodePut).toBeNull();
+  });
+
+  it("#604: credential-less loopback (super_user context.user, but NO Authorization header at all) → 401, no auth code minted", async () => {
+    // The exact shape authorizeLocal forges: Harper's core has already
+    // populated context.user as super_user (ambient loopback elevation),
+    // but there is no header on the request at all — the tell that this is
+    // authorizeLocal's ambient injection, not a genuine credential.
+    const oa: any = new (OAuthAuthorize as any)();
+    oa.getContext = () => ({ user: { username: "admin", role: { permission: { super_user: true } } } });
     const res = await oa.post(approveBody());
     expect(res).toBeInstanceOf(Response);
     expect((res as Response).status).toBe(401);
