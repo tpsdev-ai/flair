@@ -193,6 +193,25 @@ function codexConfigPath(): string {
   return join(resolveHome(), ".codex", "config.toml");
 }
 
+/**
+ * Single dispatcher for "where does this client's MCP config live" — used by
+ * `flair doctor`'s client-integration checks (flair#588) to read the config
+ * without duplicating the per-client path logic that already lives here.
+ * Additive only: does not change existing wire/detect behavior.
+ */
+export function clientConfigPath(id: ClientId): string {
+  switch (id) {
+    case "claude-code":
+      return join(resolveHome(), ".claude.json");
+    case "codex":
+      return codexConfigPath();
+    case "gemini":
+      return geminiConfigPath();
+    case "cursor":
+      return cursorConfigPath();
+  }
+}
+
 // ---- Internal wiring functions --------------------------------------------------
 //
 // Claude Code wiring lives inline in src/cli.ts (it writes ~/.claude.json, the
