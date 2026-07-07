@@ -30,7 +30,7 @@ flair agent add my-project
 flair status
 ```
 
-Flair runs as a local server at `http://127.0.0.1:9926` by default. The MCP server connects to it on demand via Ed25519-signed requests; nothing leaves your machine unless you explicitly route to a remote Flair instance.
+Flair runs as a local server at `http://127.0.0.1:19926` by default. The MCP server connects to it on demand via Ed25519-signed requests; nothing leaves your machine unless you explicitly route to a remote Flair instance.
 
 ---
 
@@ -184,7 +184,7 @@ Seven tools, kept deliberately small:
 | `soul_set` | Set a personality/project/standards entry — included in every bootstrap |
 | `soul_get` | Get a soul entry |
 
-All scoped per-agent (your `FLAIR_AGENT_ID`). Cross-agent reads are refused by Flair's server, not by client convention — different agents on the same Flair instance can't see each other's memories.
+Writes are scoped per-agent (your `FLAIR_AGENT_ID`) and enforced by Flair's server, not by client convention — you can't write as another agent. Reads are more open by design: any agent on the same Flair instance can read any other agent's non-private memories (open-within-org read; see [SECURITY.md](../SECURITY.md)). Mark a memory `visibility: private` to keep it owner-only.
 
 ---
 
@@ -193,7 +193,7 @@ All scoped per-agent (your `FLAIR_AGENT_ID`). Cross-agent reads are refused by F
 | Env var | Default | Notes |
 |---|---|---|
 | `FLAIR_AGENT_ID` | (none — required) | Must match `flair agent add <id>` |
-| `FLAIR_URL` | `http://127.0.0.1:9926` | Override for remote Flair instances |
+| `FLAIR_URL` | `http://127.0.0.1:19926` | Override for remote Flair instances |
 | `FLAIR_KEY_PATH` | `~/.flair/keys/<agent>.key` | Ed25519 PKCS8 key — created by `flair agent add` |
 
 The MCP server has no client-side flags beyond these env vars; everything else (timeouts, dedup thresholds, error classification) is opinionated defaults from the underlying [`@tpsdev-ai/flair-client`](../packages/flair-client) package.
@@ -212,7 +212,7 @@ Future MCP-capable agent CLIs (and there are more landing every month) will work
 
 **"FLAIR_AGENT_ID is required" on startup.** Set it in the MCP server's `env` block (per snippets above). The CLI's own env doesn't propagate to the spawned MCP subprocess unless declared.
 
-**"connection_error: could not reach Flair at http://127.0.0.1:9926".** The Flair server isn't running. Run `flair status` to check; `flair start` to bring it up.
+**"connection_error: could not reach Flair at http://127.0.0.1:19926".** The Flair server isn't running. Run `flair status` to check; `flair start` to bring it up.
 
 **"auth_error: …" on every call.** The agent identity doesn't match a registered key. Re-run `flair agent add <id>` (idempotent on re-add — won't lose existing memories).
 

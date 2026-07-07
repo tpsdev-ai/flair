@@ -41,7 +41,7 @@ flair restart
 Default port is `19926`. Override during init:
 
 ```bash
-flair init --port 9926
+flair init --port 8000
 ```
 
 Or edit `~/.flair/config.yaml` and restart.

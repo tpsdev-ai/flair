@@ -155,7 +155,7 @@ Walkthrough including a worked example flow: [`docs/n8n.md`](n8n.md).
 hermes plugins install path:/path/to/flair/packages/hermes-flair
 ```
 
-Auth: TPS-Ed25519 with per-agent isolation enforced server-side (the same model the rest of Flair uses).
+Auth: TPS-Ed25519 (the same model the rest of Flair uses) — writes are isolated per agent identity server-side; reads are open within the org for non-private memories, with `visibility: private` staying owner-only. See [SECURITY.md](../SECURITY.md).
 
 ---
 

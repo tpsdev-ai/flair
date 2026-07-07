@@ -22,7 +22,7 @@ Full setup walkthrough, subject/sessionId patterns, and security guidance are in
 
 ## Credential setup
 
-1. **Base URL** — your Flair instance, e.g. `http://localhost:9926`
+1. **Base URL** — your Flair instance, e.g. `http://localhost:19926`
 2. **Agent ID** — the logical identity that will own memories written from this n8n workspace. Workflows that share an Agent ID share memory ownership.
 3. **Admin Password** — your Flair (Harper) admin password. **This grants read/write access to the entire instance.** For production with untrusted workflow inputs, wait for Ed25519 per-agent auth (planned).
 

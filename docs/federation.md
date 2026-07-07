@@ -76,7 +76,7 @@ flair federation token --admin-pass <hub-admin-password> > /tmp/pair-triple.json
 scp hub-host:/tmp/pair-triple.json ./pair-triple.json
 
 # 3. Spoke admin pairs using the Fabric URL
-flair federation pair https://<fabric-node>:9926/<instance-name> --token-from ./pair-triple.json
+flair federation pair https://<fabric-node>:19926/<instance-name> --token-from ./pair-triple.json
 ```
 
 Replace `<fabric-node>`, `<instance-name>`, and `<hub-admin-password>` with your actual values.

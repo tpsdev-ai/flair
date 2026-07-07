@@ -54,7 +54,7 @@ Notes on each step:
 
 2. **Configure the Flair credential**:
    - Settings → Credentials → New → Flair API
-   - Base URL: `http://127.0.0.1:9926` (or your Flair host)
+   - Base URL: `http://127.0.0.1:19926` (or your Flair host)
    - Agent ID: any agent who should *own* the imported memories (e.g., `flint`, `pulse`, `archive`)
    - Admin Password: contents of `~/.flair/admin-pass`
 
@@ -68,11 +68,11 @@ Notes on each step:
 5. **Verify in Flair**:
    ```sh
    # search by tag
-   FLAIR_URL=http://127.0.0.1:9926 flair memory search "" \
+   FLAIR_URL=http://127.0.0.1:19926 flair memory search "" \
      --agent flint --tags kind:review --limit 5
 
    # search by PR
-   FLAIR_URL=http://127.0.0.1:9926 flair memory search "" \
+   FLAIR_URL=http://127.0.0.1:19926 flair memory search "" \
      --subject pr-380 --limit 10
    ```
 

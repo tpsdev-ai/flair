@@ -94,7 +94,7 @@ An agent that can't remember what it learned yesterday, can't prove who it is to
 
 Flair fixes that with three primitives:
 
-- **Identity** — Ed25519 key pairs. Agents sign every request. No passwords, no API keys, no shared secrets. Cross-agent reads are refused at the server, not by client convention.
+- **Identity** — Ed25519 key pairs. Agents sign every request. No passwords, no API keys, no shared secrets. Write isolation (no agent can write as another) is enforced at the server, not by client convention; reads are open within the org for non-private memories by design (see [SECURITY.md](SECURITY.md)).
 - **Memory** — Persistent knowledge with semantic search (in-process [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF), 768-dim, no API calls). Tiered durability (`permanent` / `persistent` / `standard` / `ephemeral`). Temporal validity. Decay-and-retrieval-aware composite scoring.
 - **Soul** — Personality, values, procedures. The stuff that makes an agent *that agent*. Re-injected every turn via the context-engine plugin so it doesn't drift across long sessions.
 
@@ -409,9 +409,9 @@ Auth is Ed25519 — sign `agentId:timestamp:nonce:METHOD:/path` with your privat
 
 ### Auth across surfaces
 
-The default, secure path everywhere is **Ed25519 per-agent**: each agent holds its own key (`~/.flair/keys/<agent>.key`), signs every request, and the server refuses cross-agent reads. The CLI, the `flair-mcp` server, and the OpenClaw / pi / Hermes plugins all use it.
+The default, secure path everywhere is **Ed25519 per-agent**: each agent holds its own key (`~/.flair/keys/<agent>.key`) and signs every request. That guarantees write isolation (no agent can write as another) and identity-verified reads — it does **not** mean cross-agent reads are refused: within one Flair instance, any verified agent can read any other agent's non-private memory by design (open-within-org read; the hard boundary is the federation edge, not intra-instance reads — see [SECURITY.md](SECURITY.md)). The CLI, the `flair-mcp` server, and the OpenClaw / pi / Hermes plugins all use this model.
 
-One exception: the **`n8n-nodes-flair`** community node authenticates with the Harper **admin password** (Basic auth), which grants **whole-instance read/write** access — not per-agent isolation. That's acceptable only on a single-tenant, operator-controlled n8n with trusted workflow inputs; otherwise prefer the CLI/SDK Ed25519 path. Full breakdown in **[docs/auth.md](docs/auth.md#auth-across-surfaces-read-this-first)**.
+One exception: the **`n8n-nodes-flair`** community node authenticates with the Harper **admin password** (Basic auth), which bypasses agent scoping entirely — including read of other agents' `visibility: private` memories and write-as-anyone, not just the org-wide non-private reads an Ed25519 identity already gets. That's acceptable only on a single-tenant, operator-controlled n8n with trusted workflow inputs; otherwise prefer the CLI/SDK Ed25519 path. Full breakdown in **[docs/auth.md](docs/auth.md#auth-across-surfaces-read-this-first)**.
 
 ## Architecture
 

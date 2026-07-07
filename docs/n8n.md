@@ -26,7 +26,7 @@ npm install -g @tpsdev-ai/flair
 flair init
 ```
 
-This starts a local Flair server on `http://localhost:9926`. For shared/team setups, see [Deployment](./deployment.md).
+This starts a local Flair server on `http://localhost:19926`. For shared/team setups, see [Deployment](./deployment.md).
 
 ### 2. Install the n8n community node
 
@@ -38,7 +38,7 @@ In n8n: **Credentials → New → Flair API**. Fill in:
 
 | Field | Value |
 |---|---|
-| **Base URL** | `http://localhost:9926` (or your team's Flair URL) |
+| **Base URL** | `http://localhost:19926` (or your team's Flair URL) |
 | **Agent ID** | Logical identity that will own memories from this n8n workspace. Workflows that share an Agent ID share memory ownership. Use distinct IDs when isolation matters. |
 | **Admin Password** | Your Flair admin password (in `~/.flair/admin-pass` for local installs). **Sensitive** — see [Security](#security). |
 
