@@ -139,6 +139,50 @@ describe("coordination write surface (flair_workspace_set / flair_orgevent)", ()
   });
 });
 
+describe("auto-presence (flair#598) — bootstrap wiring in index.ts", () => {
+  // index.ts's `bootstrap` tool handler does two things before calling
+  // flair.bootstrap(): `if (currentTask) lastKnownTask = currentTask;` then
+  // `heartbeat(deriveActivity({ channel, surface }))`. runMcp() has
+  // module-level side effects (FLAIR_AGENT_ID check, process.exit, stdio
+  // connect) so it isn't imported directly here — same reason the rest of
+  // this file tests logic snippets rather than the wired server. This pins
+  // the lastKnownTask truthy-check specifically (presence.ts's own unit
+  // tests, packages/flair-mcp/test/presence.test.ts, cover deriveActivity/
+  // shouldSendHeartbeat/postPresenceSafe directly against the real module).
+
+  test("lastKnownTask is set when bootstrap is called with a currentTask", () => {
+    let lastKnownTask: string | undefined;
+    function onBootstrapCall(currentTask?: string) {
+      if (currentTask) lastKnownTask = currentTask;
+    }
+    onBootstrapCall("flair#598");
+    expect(lastKnownTask).toBe("flair#598");
+  });
+
+  test("a LATER bootstrap call with no currentTask does not clear a previously-known task", () => {
+    let lastKnownTask: string | undefined = "flair#598";
+    function onBootstrapCall(currentTask?: string) {
+      if (currentTask) lastKnownTask = currentTask;
+    }
+    onBootstrapCall(undefined);
+    expect(lastKnownTask).toBe("flair#598");
+  });
+
+  test("an empty-string currentTask does not overwrite a previously-known task (truthy check, not undefined check)", () => {
+    let lastKnownTask: string | undefined = "flair#598";
+    function onBootstrapCall(currentTask?: string) {
+      if (currentTask) lastKnownTask = currentTask;
+    }
+    onBootstrapCall("");
+    expect(lastKnownTask).toBe("flair#598");
+  });
+
+  test("lastKnownTask starts undefined — no task is invented before bootstrap ever supplies one", () => {
+    let lastKnownTask: string | undefined;
+    expect(lastKnownTask).toBeUndefined();
+  });
+});
+
 describe("temporal intent patterns", () => {
   // These patterns should be recognized by SemanticSearch
   const temporalPatterns = [
