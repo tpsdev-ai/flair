@@ -25,7 +25,14 @@ import { keystore } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
 import { checkVersion, formatVersionNudge } from "./version-check.js";
-import { detectClients, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
+import { detectClients, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
+import {
+  readClientMcpBlock,
+  checkClaudeMdBootstrap,
+  checkSessionStartHook,
+  fixClaudeMdBootstrap,
+  fixSessionStartHook,
+} from "./doctor-client.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
 // src/ into resources/, which don't survive npm packaging (see also
@@ -673,6 +680,68 @@ export async function verifySemanticSearch(
         await authFetch(baseUrl, agentId, keyPath, "DELETE", `/Memory/${id}`);
       } catch { /* leave the ephemeral row; it'll age out */ }
     }
+  }
+}
+
+// ─── Doctor: client-integration network checks (flair#588) ────────────────────
+//
+// The pure filesystem checks (MCP block parsing, CLAUDE.md, SessionStart hook)
+// live in src/doctor-client.ts. These two are network-dependent and live here
+// because they reuse authFetch/resolveKeyPath, which are private to this file.
+
+/**
+ * Quick, offline-tolerant reachability probe for a Flair instance's HTTP
+ * endpoint — GETs /Health with a short timeout. Never hangs, never throws:
+ * any failure (timeout, DNS, connection refused, bad URL) is "unreachable".
+ * Mirrors the doctor action's own probePort helper (3000ms AbortSignal.timeout
+ * style), but takes a full URL since client configs point at arbitrary hosts.
+ */
+export async function probeFlairReachable(url: string, timeoutMs = 2000): Promise<boolean> {
+  try {
+    const res = await fetch(`${url.replace(/\/+$/, "")}/Health`, { signal: AbortSignal.timeout(timeoutMs) });
+    return res.status > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Is `agentId` actually registered on the Flair instance at `baseUrl`? Signs
+ * GET /Agent/:id with the agent's own key (same pattern as the `flair init`
+ * verification at line ~2043 and `flair agent rotate` at line ~2596) —
+ * reuses authFetch/resolveKeyPath rather than duplicating the signing logic.
+ *
+ *   200            -> "registered"
+ *   404             -> "not-registered" (a clear, unambiguous "no such agent")
+ *   any other status, or a network error/timeout -> "unreachable" (could not
+ *     verify one way or the other — e.g. a 401/500 doesn't tell us whether
+ *     the agent exists, so we don't claim NOT registered on those)
+ *   no local key found for agentId (checked resolveKeyPath, then keysDir) -> "no-key"
+ *     (can't sign the request at all — distinct from "unreachable" so the
+ *     caller can print an accurate reason)
+ */
+export async function checkAgentRegistered(
+  baseUrl: string,
+  agentId: string,
+  keysDir: string,
+): Promise<{ state: "registered" | "not-registered" | "unreachable" | "no-key"; detail?: string }> {
+  let keyPath = resolveKeyPath(agentId);
+  if (!keyPath) {
+    const candidate = join(keysDir, `${agentId}.key`);
+    if (existsSync(candidate)) keyPath = candidate;
+  }
+  if (!keyPath) {
+    return { state: "no-key", detail: `no local key for agent '${agentId}' to sign the check` };
+  }
+  try {
+    const res = await authFetch(baseUrl, agentId, keyPath, "GET", `/Agent/${agentId}`);
+    if (res.ok) return { state: "registered" };
+    if (res.status === 404) return { state: "not-registered" };
+    const text = await res.text().catch(() => "");
+    return { state: "unreachable", detail: `HTTP ${res.status} ${text.slice(0, 80)}` };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { state: "unreachable", detail: `instance unreachable: ${message.slice(0, 100)}` };
   }
 }
 
@@ -7466,6 +7535,145 @@ program
         console.log(`  ${render.icons.error} No data directory found`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
         issues++;
+      }
+    }
+
+    // 7. Client integration (flair#588) — the first 6 checks diagnose the
+    // SERVER side. This diagnoses whether Flair is actually wired to a real
+    // MCP client (Claude Code, Codex, Gemini, Cursor): the MCP block present
+    // + reachable + the configured agent genuinely registered (every detected
+    // client), plus CLAUDE.md + the SessionStart hook (Claude Code only,
+    // since only Claude Code has those mechanisms). Reuses detectClients()
+    // rather than reimplementing client detection.
+    console.log(`\n  ${render.wrap(render.c.bold, "Client integration")}`);
+
+    // Prompt y/N before a content-editing fix, but only when interactive —
+    // in a non-TTY context (CI, scripts) --fix itself is the consent signal,
+    // matching how doctor's other --fix branches already behave unprompted.
+    // Mirrors the confirm pattern at `flair fabric upgrade` (~line 6258).
+    async function confirmFix(question: string): Promise<boolean> {
+      if (!process.stdin.isTTY) return true;
+      const { createInterface } = await import("node:readline");
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const answer: string = await new Promise((res) =>
+        rl.question(question, (a) => { rl.close(); res(a); }),
+      );
+      return /^y(es)?$/i.test(answer.trim());
+    }
+
+    const detectedClients = detectClients().filter((c) => c.detected);
+    if (detectedClients.length === 0) {
+      console.log(`  ${render.icons.info} No MCP client detected — skipping client-integration checks`);
+    } else {
+      let claudeCodeAgentId: string | undefined;
+      let anyKnownAgentId: string | undefined;
+
+      for (const client of detectedClients) {
+        const block = readClientMcpBlock(client.id, homedir());
+        if (client.id === "claude-code" && block.agentId) claudeCodeAgentId = block.agentId;
+        if (block.agentId) anyKnownAgentId = anyKnownAgentId ?? block.agentId;
+
+        if (!block.present) {
+          console.log(`  ${render.icons.error} ${client.label}: no Flair MCP server configured in ${render.wrap(render.c.dim, block.configPath)}`);
+          if (autoFix) {
+            if (dryRun) {
+              console.log(`     ${render.wrap(render.c.dim, "Would wire")} ${client.label} (writes ${block.configPath})`);
+            } else {
+              const proceed = await confirmFix(`  Wire ${client.label} now? [y/N] `);
+              if (!proceed) {
+                console.log(`     Skipped.`);
+              } else {
+                const fixAgentId = opts.agent || process.env.FLAIR_AGENT_ID || anyKnownAgentId;
+                if (!fixAgentId) {
+                  console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: no agent id known — pass --agent <id>`);
+                } else {
+                  const wireEnv = { FLAIR_AGENT_ID: fixAgentId, FLAIR_URL: block.flairUrl || baseUrl };
+                  const wireResult =
+                    client.id === "claude-code" ? wireClaudeCode(wireEnv) :
+                    client.id === "codex" ? wireCodex(wireEnv) :
+                    client.id === "gemini" ? wireGemini(wireEnv) :
+                    wireCursor(wireEnv);
+                  console.log(`     ${wireResult.ok ? render.icons.ok : render.icons.warn} ${wireResult.message}`);
+                }
+              }
+            }
+          } else {
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, `(wires ${client.label} automatically)`)}`);
+          }
+          issues++;
+          continue;
+        }
+
+        console.log(`  ${render.icons.ok} ${client.label}: MCP server configured (${render.wrap(render.c.dim, block.configPath)})`);
+
+        const reachable = await probeFlairReachable(block.flairUrl!);
+        if (!reachable) {
+          console.log(`     ${render.icons.warn} FLAIR_URL ${render.wrap(render.c.dim, block.flairUrl!)} not reachable — cannot verify agent registration`);
+          continue;
+        }
+        console.log(`     ${render.icons.ok} FLAIR_URL ${render.wrap(render.c.dim, block.flairUrl!)} reachable`);
+
+        const reg = await checkAgentRegistered(block.flairUrl!, block.agentId!, defaultKeysDir());
+        if (reg.state === "registered") {
+          console.log(`     ${render.icons.ok} agent '${block.agentId}' registered`);
+        } else if (reg.state === "not-registered") {
+          console.log(`     ${render.icons.error} agent '${block.agentId}' is NOT registered on this Flair instance`);
+          console.log(`        ${render.wrap(render.c.dim, "Fix:")} flair agent add ${block.agentId}`);
+          issues++;
+        } else {
+          console.log(`     ${render.icons.warn} could not verify agent registration ${render.wrap(render.c.dim, `(${reg.detail})`)}`);
+        }
+      }
+
+      // Claude-Code-specific: CLAUDE.md + SessionStart hook. Only Claude Code
+      // has these mechanisms, so only run them when claude-code was detected.
+      if (detectedClients.some((c) => c.id === "claude-code")) {
+        const claudeMd = checkClaudeMdBootstrap(process.cwd(), homedir());
+        if (claudeMd.present) {
+          console.log(`  ${render.icons.ok} CLAUDE.md: bootstrap instruction present (${render.wrap(render.c.dim, claudeMd.path!)})`);
+        } else {
+          console.log(`  ${render.icons.error} CLAUDE.md: bootstrap instruction not found (checked ${render.wrap(render.c.dim, join(process.cwd(), "CLAUDE.md"))} and ${render.wrap(render.c.dim, join(homedir(), ".claude", "CLAUDE.md"))})`);
+          if (autoFix) {
+            if (dryRun) {
+              console.log(`     ${render.wrap(render.c.dim, "Would append bootstrap instruction to")} ${join(process.cwd(), "CLAUDE.md")}`);
+            } else {
+              const proceed = await confirmFix(`  Add the Flair bootstrap line to ./CLAUDE.md? [y/N] `);
+              if (!proceed) {
+                console.log(`     Skipped.`);
+              } else {
+                const fixRes = fixClaudeMdBootstrap(process.cwd());
+                console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
+              }
+            }
+          } else {
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(adds the mcp__flair__bootstrap line to ./CLAUDE.md)")}`);
+          }
+          issues++;
+        }
+
+        const hook = checkSessionStartHook(homedir());
+        if (hook.present) {
+          console.log(`  ${render.icons.ok} SessionStart hook: flair-session-start wired in ${render.wrap(render.c.dim, hook.path)}`);
+        } else {
+          console.log(`  ${render.icons.error} SessionStart hook: not found in ${render.wrap(render.c.dim, hook.path)}`);
+          if (autoFix) {
+            if (dryRun) {
+              console.log(`     ${render.wrap(render.c.dim, "Would add SessionStart hook to")} ${hook.path}`);
+            } else {
+              const proceed = await confirmFix(`  Add the flair-session-start SessionStart hook to ${hook.path}? [y/N] `);
+              if (!proceed) {
+                console.log(`     Skipped.`);
+              } else {
+                const fixAgentId = claudeCodeAgentId || opts.agent || process.env.FLAIR_AGENT_ID;
+                const fixRes = fixSessionStartHook(homedir(), fixAgentId);
+                console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
+              }
+            }
+          } else {
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(adds the flair-session-start SessionStart hook)")}`);
+          }
+          issues++;
+        }
       }
     }
 
