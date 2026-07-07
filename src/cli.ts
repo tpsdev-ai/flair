@@ -714,13 +714,34 @@ export async function probeFlairReachable(url: string, timeoutMs = 2000): Promis
  * reuses authFetch/resolveKeyPath rather than duplicating the signing logic.
  *
  *   200            -> "registered"
- *   404             -> "not-registered" (a clear, unambiguous "no such agent")
+ *   401/403 carrying the server's "unknown_agent" signal -> "not-registered"
+ *     (see below — this is the actual live behavior for a missing agent, NOT
+ *     404)
  *   any other status, or a network error/timeout -> "unreachable" (could not
- *     verify one way or the other — e.g. a 401/500 doesn't tell us whether
- *     the agent exists, so we don't claim NOT registered on those)
+ *     verify one way or the other — e.g. a bare 401/403/500 doesn't tell us
+ *     whether the agent exists, so we don't claim NOT registered on those)
  *   no local key found for agentId (checked resolveKeyPath, then keysDir) -> "no-key"
  *     (can't sign the request at all — distinct from "unreachable" so the
  *     caller can print an accurate reason)
+ *
+ * Why not 404: an unregistered agent never actually reaches the /Agent/:id
+ * resource handler (which is where a 404 would come from) — Flair's own
+ * signed-auth middleware (resources/auth-middleware.ts) rejects the request
+ * first, once it can't find an Agent record matching the signing identity.
+ * On current main that's an explicit `401 {"error":"unknown_agent"}` — Live-
+ * verified 2026-07-07 against a local Flair instance with a resolvable-but-
+ * unregistered signing key: `401 Unauthorized`, body `{"error":"unknown_agent"}`.
+ * Some server versions/paths may instead surface Harper's native
+ * AccessViolation as a 403 for the same condition, so both codes are checked
+ * — but ONLY when the response also carries the unknown-agent marker; a bare
+ * 401/403 without it (e.g. a real AccessViolation for an agent that exists
+ * but fails a resource-level authorization check) stays "unreachable", since
+ * the server can't always distinguish "agent doesn't exist" from "signing key
+ * doesn't match a known agent" and we don't want to falsely claim
+ * not-registered on that ambiguity. We only make the not-registered call
+ * because we ALREADY have a local signing key that resolved for this
+ * agentId (checked above) — so this isn't a client-side key problem, and the
+ * server naming the agent unknown is a reliable, actionable signal.
  */
 export async function checkAgentRegistered(
   baseUrl: string,
@@ -740,6 +761,9 @@ export async function checkAgentRegistered(
     if (res.ok) return { state: "registered" };
     if (res.status === 404) return { state: "not-registered" };
     const text = await res.text().catch(() => "");
+    if ((res.status === 401 || res.status === 403) && /unknown_agent/i.test(text)) {
+      return { state: "not-registered", detail: `HTTP ${res.status} ${text.slice(0, 80)}` };
+    }
     return { state: "unreachable", detail: `HTTP ${res.status} ${text.slice(0, 80)}` };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
