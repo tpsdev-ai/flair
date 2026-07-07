@@ -15,7 +15,7 @@ If you're trying to run your own multi-agent team using Flair as the memory laye
 | **Pulse** | EA / intel scanning / coordination | OpenClaw | Claude API | cloud VM |
 | **Nathan** | Founder / product owner / human-in-the-loop | (human) | (human) | wherever |
 
-Every agent has its own Ed25519 identity in Flair. They sign every memory write and every read. **Cross-agent reads are refused at the Flair API layer**, not by client convention — Sherlock can't accidentally read Pulse's memories even on a shared Flair instance, because the signature won't verify.
+Every agent has its own Ed25519 identity in Flair. They sign every memory write and every read. **Writes are isolated at the Flair API layer** — Sherlock can't accidentally (or maliciously) write into Pulse's memory, because the signature won't verify for anyone but Pulse. Reads are a different story: within one Flair instance, any verified agent can read any other agent's **non-private** memory — that's the shipped model (open-within-org read, no grant needed), not a gap. An agent keeps something genuinely sensitive owner-only by writing it with `visibility: private`. The hard access boundary is the **federation edge** (a separate Flair instance), not reads within one.
 
 ## How memory flows
 
@@ -23,7 +23,8 @@ Every agent has its own Ed25519 identity in Flair. They sign every memory write 
                                 ┌────────────────────────┐                  
                                 │  Flair (self-hosted)   │                  
                                 │                        │                  
-                                │  Per-agent isolation   │                  
+                                │  Write isolation +     │                  
+                                │  open-within-org read, │                  
                                 │  enforced server-side  │                  
                                 │  via Ed25519 signing   │                  
                                 └─────────▲──────────────┘                  
@@ -33,18 +34,19 @@ Every agent has its own Ed25519 identity in Flair. They sign every memory write 
    Flint               Anvil           Kern          Sherlock           Pulse
    (local)           (cloud VM)    (inference box) (inference box)    (cloud VM)
         │                 │               │              │                 │
-   reads/writes      reads/writes    reads/writes   reads/writes      reads/writes
-   own memories      own memories    own memories   own memories      own memories
+   writes own          writes own      writes own     writes own       writes own
+   memories only        memories only   memories only  memories only   memories only
         │                 │               │              │                 │
         └─────────────────┴────────┬──────┴──────────────┴─────────────────┘
                                    │
-                            (no cross-agent reads
-                             without explicit grant)
+                       (every agent can read every other
+                        agent's non-private memories —
+                        `visibility: private` stays owner-only)
 ```
 
-Each agent's memory is independent. When Flint commits a piece of strategy, only Flint sees it on `memory_search`. When Sherlock writes a security finding, only Sherlock sees it. **By design.** Memory leaks between agents are how multi-agent teams break — different roles need different perspectives, and a security reviewer that's been told all of marketing's speculative ideas is no longer a credible reviewer.
+No agent can write into another agent's memory — that's enforced server-side by signature verification, no exceptions. Reads are intentionally open within the org: when Flint commits a piece of strategy, any agent can find it on `memory_search` unless Flint marked it `private`. **By design** — the goal is relevance and findability across the team, not secrecy between roles. An agent that genuinely needs something to stay owner-only (a draft not ready for the team, a sensitive finding pre-disclosure) marks it `visibility: private`; everything else is fair game for any teammate to search.
 
-When agents need to *coordinate*, they don't share memory — they pass **explicit messages** through TPS mail (a separate signed delivery channel; see [tpsdev-ai/cli](https://github.com/tpsdev-ai/cli)). The handoff is intentional and traceable. Memory is private; messages are interpersonal.
+When agents need to *coordinate* — a direct, targeted handoff rather than ambient searchable memory — they pass **explicit messages** through TPS mail (a separate signed delivery channel; see [tpsdev-ai/cli](https://github.com/tpsdev-ai/cli)). That's a different concern from memory visibility: TPS mail is for "I need you, specifically, to see this now"; Flair memory is the shared, searchable record everyone (except where `private`) can draw on later.
 
 ## Why these splits
 
@@ -100,19 +102,19 @@ Flair is the connective tissue:
 - **Soul:** each agent has a permanent personality block — role, voice, constraints. Loaded on every bootstrap so the agent stays *themselves* across sessions.
 - **Bridges:** when an agent needs context from a foreign system (e.g., Anvil needs to import lessons from another repo), bridges import them into Flair without a custom integration per source.
 
-The MCP server (`@tpsdev-ai/flair-mcp`) is what makes this orchestrator-agnostic — Flint's Claude Code, Anvil/Kern/Sherlock/Pulse's OpenClaw all hit the same Flair server with the same per-agent isolation guarantees.
+The MCP server (`@tpsdev-ai/flair-mcp`) is what makes this orchestrator-agnostic — Flint's Claude Code, Anvil/Kern/Sherlock/Pulse's OpenClaw all hit the same Flair server with the same write-isolation-plus-open-read guarantees.
 
 ## What we deliberately don't do
 
-- **No shared "team memory."** Agents pass explicit messages via TPS mail. Memory is private by default. Sharing requires an intentional grant.
+- **No shared write identity.** Every memory is written and owned by exactly one agent's Ed25519 key — there's no merged "team" identity that can write on another agent's behalf. Reads are a separate story: within the org, any agent can search any other's non-private memory by default (see [SECURITY.md](../SECURITY.md)) — that's intentional, not a leak. TPS mail is still how agents route a message to a *specific* teammate; it's for targeted delivery, not for gating ambient visibility.
 - **No silent LLM-driven memory extraction.** Each agent decides what it remembers. No background "summarize and persist" on every turn — that's how memory drifts away from intent.
-- **No multiple agents on one identity.** "Anvil" and "Anvil-2" would be two separate agentIds with two separate keys. Same workload, different identities, isolated memories.
+- **No multiple agents on one identity.** "Anvil" and "Anvil-2" would be two separate agentIds with two separate keys. Same workload, different identities, separately-owned memories.
 - **No replay-safe-but-otherwise-unsigned reads.** Every Flair request is Ed25519-signed and verified, including reads. Even on a private network we don't trust the network.
 - **No password-based access to memory.** A leaked Flair admin password lets you read the database via Harper directly, but doesn't let you impersonate an agent — you can't write under their identity without their key. We treat that as the right asymmetric defense.
 
 ## What we're still figuring out
 
-- **Cross-agent visibility for collaborative work.** Sometimes Flint needs Sherlock's recent security findings to write a spec. Today Flint asks via TPS mail; Sherlock answers. We're considering an explicit `flair memory share` mechanism with audit trails. Not in 1.0.
+- **Trust-weighting the open read pool.** Open-within-org read (#578, shipped in 0.21.0) means Flint no longer has to round-trip TPS mail to see Sherlock's recent security findings — `memory_search` already surfaces them directly. What's still unbuilt is any consolidation or trust-discounting of that shared pool: today it's a bigger unfiltered pile, not a ranked or corroborated one. That's the next arc (org-identity, emergent trust from provenance/corroboration/supersession) — it needs a founder-engaged design pass before we build it, not a solo build.
 - **Rhythm agent v1.** Today's v0 is a shell-cron polling for state changes and posting to Discord. v1 moves to a dedicated low-power device, uses a small local model to summarize, and escalates only when truly stuck. Post-1.0 polish.
 
 ## Try this with your own team
@@ -122,6 +124,6 @@ Pick a starting point that matches your scale:
 - **Solo, want continuity across sessions:** install Flair, give Claude Code an MCP-wired identity (see [`docs/mcp-clients.md`](mcp-clients.md)). One agent. Done.
 - **Pair, want explicit handoffs without losing context:** add a second agent identity, each with their own MCP config + Flair agentId. Pass work via TPS mail or your own coordination channel.
 - **Small team, want to see this rig work end-to-end:** clone our setup. Use our Beads issue tracker, our TPS mail, our agent role-splits. Replace Nathan with whoever's playing founder/product-owner.
-- **Bigger team:** federate Flair instances (per [`docs/federation.md`](federation.md)). Each office has its own Flair, signed cross-instance memory sharing. Same per-agent isolation guarantees scale across nodes.
+- **Bigger team:** federate Flair instances (per [`docs/federation.md`](federation.md)). Each office has its own Flair — that org boundary (the federation edge) is what stays hard across nodes; reads are already open within each office's own instance.
 
 Read the rest of the docs from there.

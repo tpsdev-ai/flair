@@ -137,7 +137,7 @@ flair agent list
 **Possible causes:**
 1. **Hash-fallback embeddings:** Check `flair status` — if embeddings are in hash mode, semantic search won't work properly. Fix with `flair reembed`.
 2. **Content safety flags:** The memory might have been flagged. Search for it directly: `flair memory list --agent <id>`.
-3. **Agent isolation:** Memories are scoped to the agent that wrote them. Ensure you're searching with the correct agent ID.
+3. **`visibility: private`:** Reads are open within the org by default — any agent can find any other agent's non-private memories. If the memory was written with `visibility: private`, only its author can find it; search as that agent instead.
 4. **Dedup threshold:** If the content is very similar to an existing memory, it may have been deduplicated. Check with `flair memory list`.
 
 ### High memory usage

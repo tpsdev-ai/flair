@@ -115,7 +115,7 @@ Instead of passing `--agent` every time, set environment variables:
 ```bash
 # In your shell profile or .envrc
 export FLAIR_AGENT_ID=my-project
-export FLAIR_URL=http://localhost:9926  # default, only needed if custom
+export FLAIR_URL=http://localhost:19926  # default, only needed if custom
 ```
 
 Then the CLAUDE.md simplifies to:
@@ -157,7 +157,7 @@ flair agent add my-project
 
 # On client machines
 npm install -g @tpsdev-ai/flair  # for the CLI
-export FLAIR_URL=http://your-server:9926
+export FLAIR_URL=http://your-server:19926
 export FLAIR_AGENT_ID=my-project
 # Copy the key from the server:
 scp server:~/.flair/keys/my-project.key ~/.flair/keys/
@@ -166,8 +166,8 @@ scp server:~/.flair/keys/my-project.key ~/.flair/keys/
 Or use an SSH tunnel:
 
 ```bash
-ssh -f -N -L 9926:localhost:9926 your-server
-# Now FLAIR_URL=http://localhost:9926 works
+ssh -f -N -L 19926:localhost:19926 your-server
+# Now FLAIR_URL=http://localhost:19926 works
 ```
 
 ## Programmatic Access

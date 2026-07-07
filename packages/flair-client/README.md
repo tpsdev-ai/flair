@@ -16,7 +16,7 @@ npm install @tpsdev-ai/flair-client
 import { FlairClient } from '@tpsdev-ai/flair-client'
 
 const flair = new FlairClient({
-  url: 'http://localhost:9926',   // or remote: https://flair.example.com
+  url: 'http://localhost:19926',   // or remote: https://flair.example.com
   agentId: 'my-agent',
   // keyPath auto-resolved from ~/.flair/keys/my-agent.key
 })
@@ -108,7 +108,7 @@ Or use the Flair CLI directly:
 
 | Option | Env | Default | Description |
 |--------|-----|---------|-------------|
-| `url` | `FLAIR_URL` | `http://localhost:9926` | Flair server URL |
+| `url` | `FLAIR_URL` | `http://localhost:19926` | Flair server URL |
 | `agentId` | `FLAIR_AGENT_ID` | — | Agent identifier |
 | `keyPath` | `FLAIR_KEY_DIR` | auto-resolved | Private key path |
 | `timeoutMs` | — | `10000` | Request timeout |

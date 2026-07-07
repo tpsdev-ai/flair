@@ -67,10 +67,10 @@ The admin password is passed via env (`FLAIR_ADMIN_PASS` / `HDB_ADMIN_PASSWORD`)
 
 ### 3c. Custom port
 
-Default is **9926** for REST / **9925** for ops. If you need to override (port conflict, multiple instances):
+Default is **19926** for REST / **19925** for ops. If you need to override (port conflict, multiple instances):
 
 ```bash
-flair init --agent-id <id> --port 19926
+flair init --agent-id <id> --port 8000
 ```
 
 Port is persisted to `~/.flair/config.yaml`. The ops port is always REST port − 1 (derived automatically).
@@ -247,35 +247,35 @@ rm -rf /data/flair
 flair init --data-dir /data/flair --agent-id <id>
 ```
 
-### 🔸 CLI config port 9926 vs 19926 drift
+### 🔸 Legacy hub on the old default (9926) vs a fresh spoke (19926)
 
-The CLI's `DEFAULT_PORT` constant is `19926`, but the real Harper instance listens on **9926** (with ops on **9925**). The port-resolution chain resolves this at runtime (`FLAIR_URL` env → `~/.flair/config.yaml` → default 9926), but if neither env nor config is set, the CLI falls through to `19926` and gets ECONNREFUSED.
+Flair's default REST port changed from 9926 to 19926 (ops: 9925 → 19925) to avoid Harper port collisions (see CHANGELOG.md). `flair init` today always resolves and persists the CLI's real `DEFAULT_PORT` — **19926** — to `~/.flair/config.yaml`, and that's what a fresh spoke gets. But a hub that was provisioned before that bump may still be running on the old 9926/9925 pair — nothing auto-migrates an existing instance's config. Don't assume the hub is on the current default; confirm its actual port with the hub admin, or check `~/.flair/config.yaml` on the hub host.
 
-**Fix:** Always set `FLAIR_URL` or write port to `~/.flair/config.yaml`. `flair init` writes `port: 9926` to config automatically. If you ran `flair init --port 19926`, the config gets 19926 and everything aligns — the mismatch only bites when init uses one port and subsequent commands expect the other without config.
+**Fix:** Pass the hub's actual URL (with its real port) to `flair federation pair` — never assume 19926. On the spoke side, confirm your own config matches what `flair init` actually wrote:
 
 ```bash
-# Verify config has the right port:
+# Verify the spoke's own config:
 grep port ~/.flair/config.yaml
-# → port: 9926
+# → port: 19926   (fresh install, or whatever you passed via --port)
 
-# Or set explicitly:
+# Or set explicitly if pairing to a hub still on the legacy default:
 export FLAIR_URL=http://127.0.0.1:9926
 ```
 
-### 🔸 rockit serves REST on 9926, ops on 9925
+### 🔸 Fabric hosts split REST and ops ports
 
-Fabric/rockit deployments split the REST API (port 9926) and the Harper operations API (port 9925). The derivation rule is **ops = REST − 1**. When pointing a CLI at a remote Fabric instance, pass `--target` for REST and the ops URL is derived automatically:
+Fabric deployments split the REST API and the Harper operations API onto adjacent ports. The derivation rule is **ops = REST − 1**. When pointing a CLI at a remote Fabric instance, pass the REST URL and the ops URL is derived automatically — substitute the hub's actual REST port (19926 for a fresh deployment, or whatever it was provisioned with):
 
 ```bash
-flair federation pair https://fabric-node.example.com:9926/<instance> --token-from triple.json
+flair federation pair https://fabric-node.example.com:19926/<instance> --token-from triple.json
 ```
 
 For explicit ops control:
 
 ```bash
-flair federation pair https://fabric-node.example.com:9926/<instance> \
+flair federation pair https://fabric-node.example.com:19926/<instance> \
   --token-from triple.json \
-  --ops-target https://fabric-node.example.com:9925
+  --ops-target https://fabric-node.example.com:19925
 ```
 
 ---

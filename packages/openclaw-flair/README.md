@@ -64,7 +64,7 @@ In your OpenClaw config (`openclaw.json`):
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `url` | string | `http://127.0.0.1:9926` | Flair server URL |
+| `url` | string | `http://127.0.0.1:19926` | Flair server URL |
 | `agentId` | string | *required* | Agent ID for memory namespacing. Use `"auto"` for multi-agent gateways. |
 | `keyPath` | string | auto-resolved | Path to Ed25519 private key |
 | `autoCapture` | boolean | `true` | Auto-capture important info from conversations |

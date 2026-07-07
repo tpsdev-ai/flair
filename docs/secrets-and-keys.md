@@ -153,16 +153,18 @@ If you find yourself wanting one anyway, your agent can call `security find-gene
 
 | Asset | Owned by | If compromised → |
 |---|---|---|
-| Flair agent private key (`~/.flair/keys/<agent>.key`) | Flair (you, on the host) | Attacker can read/write that agent's memories until you rotate. Use `flair agent rotate <id>`. Other agents unaffected. |
+| Flair agent private key (`~/.flair/keys/<agent>.key`) | Flair (you, on the host) | Attacker can **write** memories under that agent's identity and read that agent's **`private`**-marked memories until you rotate. Use `flair agent rotate <id>`. Other agents' write identity is unaffected — they can't be impersonated with this key. |
 | LLM provider API keys (Anthropic, OpenAI, etc.) | OS keyring / 1Password | Standard provider revocation: rotate the key in the provider's console, update keyring entry. |
 | Cross-host secrets (1Password vault, age-sops) | The secret manager itself | Trust falls back to that manager's MFA / key handling. Document recovery in your team's ops runbook. |
-| Memory contents | Flair (server-side) | Read access via signed request → see "Per-agent isolation" below. |
+| Memory contents | Flair (server-side) | Write access requires the owning agent's key → see "Per-agent write isolation, org-wide non-private read" below. |
 
-### Per-agent isolation
+### Per-agent write isolation, org-wide non-private read
 
-Memories are scoped per `agentId` and isolation is enforced **server-side** by Ed25519 signature verification — not by client convention. An attacker with another agent's key cannot read your agent's memories even on the same Flair instance. Cross-agent sharing requires an explicit grant.
+Writes are scoped per `agentId` and isolation is enforced **server-side** by Ed25519 signature verification — not by client convention. An attacker with another agent's key can write memories as that agent, but cannot forge writes under *your* agent's identity without *your* key.
 
-This is a different threat model from password-based or API-key-based memory services where a leaked key gives access to the full namespace.
+Reads are a different, and intentionally more open, story: within one Flair instance (one org), **any** verified agent — not just an attacker with a stolen key — can already read **any other agent's non-private memory**. That's the shipped access model (open-within-org read; see [SECURITY.md](../SECURITY.md)), not a consequence of key compromise. A key leak's actual *incremental* exposure is narrower than "read your agent's memories": it's (1) the ability to write under that agent's identity, and (2) the ability to read that agent's `visibility: private` memories, which stay owner-only under normal operation. Non-private memories were already org-readable before the leak.
+
+The hard boundary in this model is the **federation edge** — a separate Flair instance / org. That's a different threat model from password-based or API-key-based memory services where a leaked key gives access to the full namespace across every trust boundary, not just one org.
 
 ## See also
 
