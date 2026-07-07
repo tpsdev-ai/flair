@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-07
+
+Federation edge-hardening, open-within-org memory read, an adopter-adoptability sweep (now including automatic MCP presence), and a security closure on Presence/OAuthAuthorize auth-bypass gaps — on harper 5.1.15.
+
+### 🧠 Open-within-org memory read (#578)
+
+Cross-agent read opens up within an org: a verified in-org agent can read another agent's non-private memories (`resolveReadScope` returns non-private OR own), while `private` stays owner-only on every path. Replaces the prior grant-gated model — knowledge is org-readable by default, access-gated only at the federation edge. Live + verified on both rockit and Fabric.
+
+- **Bootstrap teammate-findings aligned to the open model (#606, completes #550)** — the "teammate findings" surfacing already rode on `resolveReadScope()` (never its own `MemoryGrant` traversal), so it picked up #578's behavior with zero code changes needed. Corrected stale comments/nudge copy that still described the retired grant-gated model, and added the missing test proving a `MemoryGrant` is NOT required to see a teammate's memory — every prior test seeded one as harmless leftover from pre-#578 authoring, masking the gap.
+
+### 🔒 Federation edge-hardening (slices 1–4)
+
+Hardens what crosses the federation boundary:
+- **Server-stamped verified provenance on writes (#575)** — provenance captured server-side (verified identity + timestamp), not client-claimed.
+- **Write-time originator tagging (#576)** — synced tables carry an `originatorInstanceId` stamped at write.
+- **Push-side private-visibility filter (#577)** — private memories are filtered before they leave the instance.
+- **Per-record signing + verification (#580)** — each synced record is signed over its canonical form and verified on receipt, closing a hub-forgery hole where a relay could forge records for another originator.
+- **Persistent anti-replay nonce store (#581)** — the nonce store survives restarts, so replay protection holds across process boundaries.
+
+### 🧰 Adopter adoptability
+
+Making Flair actually work for a fresh adopter instead of silently half-working:
+- **`flair doctor` verifies client integration (#599)** — a new "Client integration" section answers "is Flair working for my agent?": per detected MCP client, the MCP block + `FLAIR_URL` reachability + agent registration; for Claude Code, the CLAUDE.md bootstrap line + `SessionStart` hook. `--fix` wires missing pieces (idempotent, merge-safe).
+- **`flair doctor` reports not-registered on 401/403, not just 404 (#603, closes #602)** — the auth middleware rejects an unregistered agent's *signed* request before the resource handler runs (401 `unknown_agent`), so the 404-only branch was dead code and a missing agent showed "⚠ couldn't-verify" instead of "✗ not-registered." Now 401/403 with the `unknown_agent` marker and a resolved local key correctly reports not-registered, with the fix hint.
+- **`flair init` wires all three legs (#600)** — init now installs the `SessionStart` hook + CLAUDE.md line alongside the MCP block, instead of leaving them manual (silent partial setups). `--skip-hook` / `--skip-claude-md` opt-outs; prints the exact missing snippet when skipped.
+- **`flair-mcp` auto-sets presence on session-start + rate-limited heartbeat (#608, closes #598)** — the session-start hook and bootstrap seed `activity`/`currentTask`; every other MCP tool call refreshes `lastHeartbeatAt` (rate-limited, 3min default). Fire-and-forget + fail-open — never blocks a tool call or startup. Complements #601's read-side gating below.
+- **Version-behind nudge (#594)** — `flair status` / `doctor` surface when the installed version is behind the published latest (cached, offline-tolerant, never blocks).
+- **`agent add` / `principal add` admin-pass fallback (#593)** — fall back to the local `~/.flair/admin-pass` file instead of hard-requiring `--admin-pass`.
+
+### 🔒 Security
+
+- **OAuthAuthorize consent required real auth; Presence PUT/DELETE scoped correctly (#609, closes #604)** — closes the `authorizeLocal` escalation class: a credential-less loopback POST (which Harper's `authorizeLocal` forges as `super_user`) could mint an admin OAuth code without a real `Authorization` header. Loopback-only, HIGH severity — verified **not** remotely exploitable (Fabric rejects the unauthed remote request with 401). Also scopes the `/Presence` early-return to GET-only so PUT/DELETE correctly transit the auth middleware, and fixes a pre-existing bug where `Response.redirect`'s immutable Headers 500'd every `POST /OAuthAuthorize` on main.
+- **`Presence.currentTask` gated to verified readers (#601, closes #592)** — anonymous `GET /Presence` returned agents' freeform `currentTask` (which can hold customer/host/incident strings) verbatim on a public endpoint. Now gated behind a verified Ed25519 signature (not just `resolveAgentAuth`, which Harper's `authorizeLocal` can spoof for a loopback caller) — anonymous, loopback, and Basic-admin callers get the low-risk roster with `currentTask` nulled; the rest of the roster stays public.
+
+### 📦 Dependencies
+
+- **harper 5.1.14 → 5.1.15 (#595)** — pins the models extension API (`registerBackend`, unblocks sovereign local embeddings), replication/deploy reliability fixes, and the MCP row-level RBAC fix. Also fixes the Fabric deploy abort.
+
+### 🧹 Tooling / CI / hygiene
+
+- **Wire `flair-mcp` package tests into the merge gate (#605, closes #491)** — the 34 `packages/flair-mcp/test/*` tests weren't gated by CI (root `test.yml` only ran `test/unit/`); now builds `flair-client` first (flair-mcp imports its built `dist/`), then runs the package's own suite.
+- **Self-healing CI/deploy**: timeout+retry the flaky sfw (Socket-firewall) install (#583), retry peer-replication with `--ignore-replication-errors` on deploy (#582), de-flake the E2E CLI smoke test (#584).
+- **Strip internal ops-* tracker refs from shipping comments/tests (#586)** — consumer-facing code references public flair# issues only.
+- **DESIGN.md in-repo (#579)** — design invariants documented adopter-facing.
+
 ## [0.20.1] - 2026-07-05
 
 ### 🛠 Self-verifying `flair deploy` (#573)
