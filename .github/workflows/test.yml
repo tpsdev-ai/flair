@@ -71,6 +71,33 @@ jobs:
         run: cd packages/flair-client && bun run build
       - name: "flair-mcp package tests"
         run: cd packages/flair-mcp && bun test
+      # The other 5 packages (flair-client, langgraph-flair, n8n-nodes-flair,
+      # openclaw-flair, pi-flair) also have real test suites CI only typechecked
+      # (#619, generalizing #605/#491's fix for flair-mcp). flair-client's own
+      # tests import its source directly, so the build above isn't required for
+      # it — but langgraph-flair, n8n-nodes-flair, openclaw-flair, and pi-flair
+      # all depend on the WORKSPACE package @tpsdev-ai/flair-client, which
+      # resolves via its package.json main → dist/index.js (bun workspace
+      # symlinks point at source, not emitted JS): confirmed by temporarily
+      # unbuilding flair-client, which broke openclaw-flair's test with
+      # "Cannot find module '@tpsdev-ai/flair-client'". The build step above
+      # already covers all four. All five suites are hermetic (pure-logic
+      # assertions / mocked fetch, no live Flair daemon or network I/O) and
+      # were verified green on main before wiring here.
+      - name: "flair-client package tests"
+        run: cd packages/flair-client && bun test
+      - name: "Remaining workspace package tests (flair-client dep already built above)"
+        run: |
+          FAIL=0
+          for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair; do
+            echo "::group::test $pkg"
+            (cd "packages/$pkg" && bun test) || FAIL=1
+            echo "::endgroup::"
+          done
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::One or more workspace packages have failing tests"
+            exit 1
+          fi
 
   test-integration:
     name: Integration Tests
