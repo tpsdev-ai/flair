@@ -8700,6 +8700,7 @@ memory.command("search [query]")
     console.log(JSON.stringify(res, null, 2));
   });
 memory.command("list")
+  .description("List an agent's memories (optionally filtered by --tag or embedding-backfill triage)")
   .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--tag <tag>")
   .option("--hash-fallback", "Only memories with missing or hash-fallback embeddings (for backfill triage)")
