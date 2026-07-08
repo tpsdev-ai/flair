@@ -62,43 +62,95 @@ actually running:
   instead of retrying in a loop — see [Downgrade](#downgrade) for the
   restore procedure.
 
-### Pre-upgrade snapshot
+### Pre-upgrade snapshot (opt-in)
 
-As of flair#637, `flair upgrade` snapshots `~/.flair/data` **before** touching any
-package, whenever `@tpsdev-ai/flair` itself is one of the packages being upgraded
-(an `flair-mcp`-only or `openclaw-flair`-only upgrade never runs different code
-against your data, so nothing is snapshotted for those):
+flair#637 added a **physical**, byte-exact snapshot of `~/.flair/data` — the whole
+directory (RocksDB files, keys, config, `admin-pass`), not just the logical records a
+`flair backup` JSON export covers. As of 2026-07-08 this is **opt-in**: pass
+`--snapshot` to `flair upgrade` to take one before the package swap. It's off by
+default — matching how Harper's own upgrade CLI behaves (it recommends a backup before
+proceeding, but never auto-tars your data directory for you) — because the
+tested-downgrade guarantee below already covers the failure mode a snapshot exists
+for, and the old opt-out default meant every upgrade paid the cost (the data dir can
+be 800MB+; keep-last-3 retention meant up to ~2.5GB of snapshots sitting around)
+whether or not you wanted it.
+
+```bash
+flair upgrade --snapshot
+```
 
 ```
 Snapshotting data before upgrade...
 ✅ Snapshot: ~/.flair/upgrade-snapshots/flair-data-2026-07-08T14-32-01-118Z.tar.gz (842.3 MB)
-   Restore: flair stop && rm -rf "~/.flair/data" && mkdir -p "~/.flair/data" && tar -xzf "<snapshot>" -C "~/.flair/data" && flair start
+   Restore: flair snapshot restore "~/.flair/upgrade-snapshots/flair-data-2026-07-08T14-32-01-118Z.tar.gz"
    Pruned 1 older snapshot (keeping last 3)
+```
+
+If you omit `--snapshot` (the default) and a data directory exists, `flair upgrade`
+prints a non-blocking recommendation instead of silently skipping it — it never
+prompts or blocks, so scripted/non-interactive upgrades are unaffected:
+
+```
+No pre-upgrade snapshot will be taken.
+To capture one first: `flair snapshot create` (physical) or `flair backup` (logical export), or re-run with --snapshot.
 ```
 
 - **Location:** `~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz` — owner-only
   (`0600`), with every file inside it at its **original** mode (so a `0600` key or
   `admin-pass` file stays `0600` after a restore, not whatever tar's default would be).
 - **Retention:** keeps the newest 3 snapshots, prunes older ones automatically after
-  each successful snapshot.
-- **Consistency:** Flair is briefly stopped, snapshotted, and immediately restarted on
-  the OLD version before the package swap even begins — a plain file copy of a
-  *running* Harper's data directory isn't guaranteed point-in-time consistent (Harper
-  5.x stores tables in RocksDB — an LSM engine whose WAL, MANIFEST, and SST files can
-  be mid-write/mid-compaction), so the snapshot always happens against a quiesced
-  directory. This means a short stop/start blip happens even with `--no-restart` — the
-  snapshot's correctness doesn't depend on whether you want a restart *after* the
-  upgrade, those are separate questions. (A native Harper backup operation,
-  `get_backup`, was evaluated and rejected here — see the code comment above
-  `createDataSnapshot` in `src/cli.ts` for why: it backs up one table/schema at a time
-  over the running HTTP API, not the whole data directory, and would be strictly less
-  complete than a plain file copy.)
-- **Failure is a hard stop by default:** if the snapshot itself fails (disk full,
-  permissions, etc.), the upgrade aborts before any package changes — no packages are
-  swapped, Flair is restarted on the version it was already running. Pass
-  `--no-snapshot` to skip the snapshot entirely on hosts that can't spare the time or
-  disk for it (not recommended — it's the only thing standing between you and an
-  untested downgrade).
+  each successful snapshot — whether taken via `--snapshot` or `flair snapshot create`
+  (below); both draw from the same `~/.flair/upgrade-snapshots/` pool.
+- **Consistency:** when a snapshot is taken (`--snapshot`, or `flair snapshot create`),
+  Flair is briefly stopped, snapshotted, and immediately restarted on the same version
+  before anything else happens — a plain file copy of a *running* Harper's data
+  directory isn't guaranteed point-in-time consistent (Harper 5.x stores tables in
+  RocksDB — an LSM engine whose WAL, MANIFEST, and SST files can be
+  mid-write/mid-compaction), so the snapshot always happens against a quiesced
+  directory. During an upgrade this means a short stop/start blip even with
+  `--no-restart` — the snapshot's correctness doesn't depend on whether you want a
+  restart *after* the upgrade, those are separate questions. (A native Harper backup
+  operation, `get_backup`, was evaluated and rejected here — see the code comment
+  above `createDataSnapshot` in `src/cli.ts` for why: it backs up one table/schema at a
+  time over the running HTTP API, not the whole data directory, and would be strictly
+  less complete than a plain file copy.)
+- **Failure is a hard stop when requested:** if you passed `--snapshot` and the
+  snapshot itself fails (disk full, permissions, etc.), the upgrade aborts before any
+  package changes — no packages are swapped, Flair is restarted on the version it was
+  already running.
+
+#### `flair snapshot` — the standalone command
+
+The same mechanism is available on its own, independent of upgrading:
+
+```bash
+flair snapshot create              # take one now (default: ~/.flair/data)
+flair snapshot create --data-dir <path>
+flair snapshot list                # list what's under ~/.flair/upgrade-snapshots/
+flair snapshot list --json
+flair snapshot restore <path>      # stop Flair, replace the data dir, restart
+flair snapshot restore <path> --yes   # skip the confirmation prompt
+```
+
+`flair snapshot restore` is destructive — it deletes the current data directory and
+replaces it with the snapshot's contents — so it asks for confirmation unless `--yes`
+is passed, and refuses outright in a non-interactive shell without `--yes` (it will
+never silently destroy data on an unattended run). Symlinks and file modes extract
+exactly as the snapshot recorded them; nothing outside the original data directory is
+ever touched.
+
+**`flair snapshot` (physical) vs `flair backup`/`flair restore` (logical) — not the
+same thing:**
+
+| | `flair snapshot` | `flair backup` / `flair restore` |
+|---|---|---|
+| What | Byte-exact tar.gz of `~/.flair/data` | JSON export of Agent/Memory/Soul records |
+| Scope | Everything — RocksDB files, keys, config, `admin-pass` | Just the records, over the HTTP API |
+| Portability | Same host, same Flair/Harper version | Portable across hosts and versions |
+| Use for | Undoing an upgrade that wrote data the old version can't read | Migrating data, or a lightweight logical restore |
+
+Use whichever (or both) fits — they're complementary, not redundant, which is why they
+live under separate command namespaces instead of overloading `restore`.
 
 If you'd rather upgrade by hand instead of `flair upgrade`:
 
@@ -255,28 +307,28 @@ flair#637 pre-upgrade snapshot exists for.
 ### Procedure
 
 ```bash
-# 1. Stop Flair
-flair stop
+# 1. Find the snapshot (the exact path/command `flair upgrade --snapshot` printed
+#    when it ran, or list them yourself):
+flair snapshot list
 
-# 2. Restore the pre-upgrade snapshot (see the exact path/command flair upgrade
-#    printed when it ran — or list them yourself):
-ls -la ~/.flair/upgrade-snapshots/
-rm -rf ~/.flair/data
-mkdir -p ~/.flair/data
-tar -xzf ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz -C ~/.flair/data
+# 2. Restore it — this stops Flair, replaces ~/.flair/data, and restarts:
+flair snapshot restore ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz
 
 # 3. Install the previous version
 npm install -g @tpsdev-ai/flair@<previous-version>
+flair restart
 
-# 4. Start it back up
-flair start
-
-# 5. Verify
+# 4. Verify
 flair status
 flair doctor
 ```
 
-If you don't have a snapshot (upgraded with `--no-snapshot`, or on a version from
+`flair snapshot restore` does the stop/replace/restart in one step (confirming before
+the destructive replace unless you pass `--yes`); the equivalent by hand is `flair
+stop && rm -rf ~/.flair/data && mkdir -p ~/.flair/data && tar -xzf
+<snapshot> -C ~/.flair/data && flair start`, in case you'd rather not use the command.
+
+If you don't have a snapshot (upgraded without `--snapshot`, or on a version from
 before flair#637 shipped it), there is no tested way back short of restoring from a
 `flair backup` JSON export on the older version — do not assume an untested downgrade
 boot will work.
