@@ -57,10 +57,26 @@ Pick the template that matches how you'll use this agent. You can edit or replac
 flair status
 ```
 
-You should see something like:
+A bare `flair status` (no agent, no admin credentials) only shows the public health
+summary:
 
 ```
-Flair v0.8.3 — 🟢 running (PID 12345, uptime 1m)
+Flair vX.Y.Z — 🟢 running (PID 12345, uptime 1m)
+  URL:        http://127.0.0.1:19926
+
+  ✓ all checks passing
+```
+
+The **🟢** icon means everything is healthy. A **🟡** would mean there's something worth looking at — usually surfaced with a recommended command inline. See [docs/troubleshooting.md](troubleshooting.md) if you see **🔴 unreachable**.
+
+For the full picture — Memory, Agents, and Soul detail — pass the agent you just created:
+
+```bash
+flair status --agent local
+```
+
+```
+Flair vX.Y.Z — 🟢 running (PID 12345, uptime 1m)
   URL:        http://127.0.0.1:19926
 
 Memory:
@@ -73,10 +89,8 @@ Agents:
 Soul:
   3 entries — 0 critical / 0 high / 3 standard / 0 low
 
-  Health:     ✅ all checks passing
+  ✓ all checks passing
 ```
-
-The **🟢** icon means everything is healthy. A **🟡** would mean there's something worth looking at — usually surfaced with a recommended command inline. See [docs/troubleshooting.md](troubleshooting.md) if you see **🔴 unreachable**.
 
 ## 4. Write your first memory
 

@@ -34,8 +34,12 @@ built-in HTTP Basic auth:
 Authorization: Basic <base64(admin:password)>
 ```
 
-The admin password is set via `HDB_ADMIN_PASSWORD` environment variable
-at Harper startup. **It is never stored on the filesystem by Flair.**
+The admin password is generated on `flair init` and stored at
+`~/.flair/admin-pass` (mode `0600`, owner-only) — it can also be set
+explicitly via `--admin-pass-file`, `FLAIR_ADMIN_PASS`, or
+`HDB_ADMIN_PASSWORD`. It is never printed to the console. See
+[docs/secrets-and-keys.md](docs/secrets-and-keys.md) for the full
+precedence and rotation model.
 
 ## Data Scoping
 

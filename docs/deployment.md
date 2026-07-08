@@ -112,6 +112,12 @@ Note: embeddings run on CPU in Docker (no Metal acceleration). Performance is ac
 
 ---
 
+## Harper Fabric
+
+Deploying to a Harper Fabric cluster is a different mechanism from the installs above — `flair deploy` pushes Flair as a cluster component instead of `npm install -g`. To upgrade an already-deployed Fabric instance in place, use `flair upgrade --target <fabric-url> --fabric-user <admin> --fabric-password <pass>`, not the local upgrade path. See [`docs/upgrade.md` — Upgrading a Fabric-deployed instance](upgrade.md#upgrading-a-fabric-deployed-instance) for the full walkthrough, including the automatic post-deploy fleet-convergence sweep.
+
+---
+
 ## Remote Access
 
 ### SSH tunnel (simplest)
