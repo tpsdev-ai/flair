@@ -120,9 +120,9 @@ export function validateOptions(opts: DeployOptions): string[] {
   const hasBearer = !!opts.fabricToken;
   if (!hasBasic && !hasBearer) {
     errors.push(
-      "credentials required: pass --fabric-user + --fabric-password " +
-        "(or FABRIC_USER / FABRIC_PASSWORD env), or --fabric-token " +
-        "(FABRIC_TOKEN env)",
+      "credentials required: set FABRIC_USER + FABRIC_PASSWORD env (safest), or pass " +
+        "--fabric-user + --fabric-password-file <path>, or --fabric-token (FABRIC_TOKEN env); " +
+        "inline --fabric-user/--fabric-password also work but leak to shell history",
     );
   }
   return errors;
