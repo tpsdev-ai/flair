@@ -6591,7 +6591,9 @@ function upgradeSnapshotFileName(): string {
  *
  * Consistency: the caller is expected to have stopped Flair first (a
  * running Harper's data dir can be mid-write, and a plain file copy of a
- * live LMDB environment isn't guaranteed point-in-time consistent) — this
+ * live database directory isn't guaranteed point-in-time consistent —
+ * Harper 5.x's engine is RocksDB, verified from the .sst/WAL/MANIFEST
+ * layout under database/*, and a torn WAL/SST set won't open) — this
  * function itself doesn't stop anything, it just archives whatever is on
  * disk right now.
  *
@@ -6908,8 +6910,9 @@ program
       } else {
         console.log("\nSnapshotting data before upgrade...");
         // Consistency: a running Harper's data dir can be mid-write, and a
-        // plain file copy of a live LMDB environment isn't guaranteed
-        // point-in-time consistent. Stopping first — then immediately
+        // plain file copy of a live database directory isn't guaranteed
+        // point-in-time consistent (Harper 5.x = RocksDB: WAL/SST/MANIFEST
+        // can tear under a live copy). Stopping first — then immediately
         // restarting the OLD version, before any package changes — gives a
         // quiesced, safe-to-copy directory with only a brief blip, even for
         // --no-restart (the snapshot's correctness doesn't depend on
