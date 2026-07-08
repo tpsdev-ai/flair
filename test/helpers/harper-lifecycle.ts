@@ -42,6 +42,14 @@ export interface HarperInstance {
   process: ChildProcess | null;
   admin: { username: string; password: string };
   external: boolean;
+  /**
+   * True when `startHarper` created `installDir` itself (mkdtemp), false
+   * when the caller supplied it via `StartHarperOptions.installDir`.
+   * `stopHarper` only ever removes a directory it created — a caller-owned
+   * dir (e.g. one shared across two `startHarper()` calls for a downgrade
+   * test) is the caller's to clean up.
+   */
+  ownsInstallDir: boolean;
 }
 
 interface HarperExit { code: number | null; signal: NodeJS.Signals | null }
@@ -198,6 +206,27 @@ export interface StartHarperOptions {
    * install root here separately.
    */
   harperBinDir?: string;
+  /**
+   * Reuse this existing directory as ROOTPATH/HOME instead of `mkdtemp`-ing a
+   * fresh one. Used by the downgrade-compat test (flair#637) to boot a
+   * DIFFERENT Harper build against data a PRIOR `startHarper()` call already
+   * wrote — i.e. "does N-1 boot against data touched by N" — without this
+   * function silently handing back an empty temp dir instead.
+   *
+   * The `install` step still runs but is expected to no-op: Harper's own
+   * installer (utility/install/installer.ts) checks for an existing
+   * harperdb-config.yaml/hdb boot file in ROOTPATH and exits 0 immediately
+   * if found, without touching anything — exactly what a real downgrade
+   * does (start the old binary against existing data, no re-init). This
+   * mirrors production; do not add a `skipInstall` escape hatch that a real
+   * downgrade wouldn't have.
+   *
+   * When set, `startHarper` does NOT take ownership of the directory —
+   * `stopHarper` will never remove it (see `HarperInstance.ownsInstallDir`).
+   * The caller created it (directly or via a prior `startHarper()`) and is
+   * responsible for cleaning it up.
+   */
+  installDir?: string;
 }
 
 export async function startHarper(opts: StartHarperOptions = {}): Promise<HarperInstance> {
@@ -218,11 +247,13 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
       process: null,
       admin: { username: HARPER_ADMIN_USER, password: HARPER_ADMIN_PASS },
       external: true,
+      ownsInstallDir: false,
     };
   }
 
   // ── Local mode: spawn Harper from node_modules ────────────────────────────
-  const installDir = await mkdtemp(join(tmpdir(), "flair-test-"));
+  const ownsInstallDir = !opts.installDir;
+  const installDir = opts.installDir ?? await mkdtemp(join(tmpdir(), "flair-test-"));
 
   // Deny-list: strip CI secrets from the inherited env so Harper's child
   // process (and any log dump on failure) doesn't leak them onto a public
@@ -294,7 +325,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
         waitForHealth(httpURL, 60_000, () => exited, () => log),
         waitForHealth(opsURL, 60_000, () => exited, () => log),
       ]);
-      return { httpURL, opsURL, installDir, process: proc, admin: { username: "admin", password: "test123" }, external: false };
+      return { httpURL, opsURL, installDir, process: proc, admin: { username: "admin", password: "test123" }, external: false, ownsInstallDir };
     } catch (err) {
       await killProcess(proc);
       lastErr = err as Error;
@@ -308,11 +339,24 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   throw lastErr ?? new Error("Harper failed to start");
 }
 
-export async function stopHarper(inst: HarperInstance): Promise<void> {
+export interface StopHarperOptions {
+  /**
+   * Kill the process but leave `installDir` on disk even if this instance
+   * owns it. Used by the downgrade-compat test (flair#637) to stop the
+   * CURRENT-build instance while preserving its data dir for a SECOND
+   * `startHarper({ installDir })` call against a different build.
+   */
+  keepInstallDir?: boolean;
+}
+
+export async function stopHarper(inst: HarperInstance, opts: StopHarperOptions = {}): Promise<void> {
   if (inst.external) return;
 
   if (inst.process) await killProcess(inst.process);
-  if (inst.installDir) {
+  // Never remove a directory this instance didn't create (ownsInstallDir
+  // false — the caller supplied it and owns its lifecycle), and never remove
+  // one the caller explicitly asked to keep.
+  if (inst.installDir && inst.ownsInstallDir && !opts.keepInstallDir) {
     await rm(inst.installDir, { recursive: true, force: true, maxRetries: 4 });
   }
 }
