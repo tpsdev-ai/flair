@@ -8729,7 +8729,21 @@ program
                 : "";
               const icon = row.stale ? render.icons.warn : render.icons.ok;
               const statusSuffix = row.presenceStatus ? ` (${row.presenceStatus})` : "";
-              console.log(`  ${icon} ${row.id} — ${versionLabel} — last seen ${lastSeen}${statusSuffix}${staleNote}`);
+              // Natural-presence: same staleness principle as the version
+              // column — a live activity is shown as current, a decayed one as
+              // "last-known". `activityFresh === false` (server verdict) plus a
+              // known lastActivity → "(was: X)"; a fresh, non-idle activity →
+              // "(X)". Skip entirely when there's nothing informative to say
+              // (no signal, or idle) so the line stays quiet for the common case.
+              const lastActivity = row.lastActivity ?? row.activity;
+              const activityNote = row.activityFresh === false
+                ? (lastActivity && lastActivity !== "idle"
+                    ? " " + render.wrap(render.c.dim, `(was: ${lastActivity})`)
+                    : "")
+                : (row.activity && row.activity !== "idle"
+                    ? " " + render.wrap(render.c.dim, `(${row.activity})`)
+                    : "");
+              console.log(`  ${icon} ${row.id} — ${versionLabel} — last seen ${lastSeen}${statusSuffix}${activityNote}${staleNote}`);
             }
             if (!canSign) {
               console.log(`     ${render.wrap(render.c.dim, "Pass --agent <id> (with a matching key in ~/.flair/keys) to reveal versions — flairVersion/harperVersion require a verified signature, same as currentTask.")}`);

@@ -235,6 +235,10 @@ describe("Presence API integration", () => {
       "role",
       "runtime",
       "activity",
+      "lastActivity",
+      "activityUpdatedAt",
+      "activityAgeMs",
+      "activityFresh",
       "presenceStatus",
       "currentTask",
       "lastHeartbeatAt",
@@ -378,6 +382,184 @@ describe("Presence API integration", () => {
     // The rest of the row is served normally — tolerance doesn't break the
     // entry, it just leaves the two new fields null.
     expect(typeof legacy.presenceStatus).toBe("string");
+  });
+
+  // ── 4d. Natural presence: activity/currentTask decay with liveness ─────────
+  // Presence is a liveness beacon, not a sticky status board. A fresh heartbeat
+  // presents activity/currentTask as CURRENT; a stale record must NOT — it
+  // presents the last-known label under lastActivity, nulls the current
+  // activity to "idle" and currentTask to null, and flags activityFresh=false.
+  // Staleness is simulated by inserting a Presence row directly via the ops API
+  // with old timestamps (same technique as the legacy-record test above) — the
+  // only way to produce a stale row without waiting out the real threshold.
+
+  const STALE_MS = 13 * 24 * 60 * 60 * 1000; // 13 days — the real-world frozen-"debugging" case
+
+  test("fresh heartbeat: activity is presented as CURRENT (activityFresh=true, stamp set)", async () => {
+    const auth = buildAuthHeader(agent1.id, "POST", "/Presence", agent1.privateKey);
+    await fetch(`${harper.httpURL}/Presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ currentTask: "shipping natural presence", activity: "reviewing" }),
+    });
+
+    const getAuth = buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey);
+    const res = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    const roster = await res.json();
+    const a1 = roster.find((r: any) => r.id === agent1.id);
+    expect(a1.activityFresh).toBe(true);
+    expect(a1.activity).toBe("reviewing");
+    expect(a1.lastActivity).toBe("reviewing");
+    expect(a1.currentTask).toBe("shipping natural presence");
+    expect(typeof a1.activityUpdatedAt).toBe("number");
+    expect(a1.activityAgeMs).toBeGreaterThanOrEqual(0);
+    expect(a1.activityAgeMs).toBeLessThan(60_000); // just set
+  });
+
+  test("stale record: activity decays to 'idle', currentTask nulls, lastActivity keeps the last-known label", async () => {
+    const staleId = "presence-natural-stale";
+    const staleAt = Date.now() - STALE_MS;
+    await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+      body: JSON.stringify({
+        operation: "insert",
+        database: "flair",
+        table: "Presence",
+        records: [{
+          agentId: staleId,
+          lastHeartbeatAt: staleAt,
+          activityUpdatedAt: staleAt,
+          activity: "debugging",
+          currentTask: "on-call investigation complete — preprod-db-3",
+        }],
+      }),
+    });
+
+    // Read as a VERIFIED agent — proves the decay is not merely the anon gate:
+    // even a verified reader does NOT get a stale record's currentTask, because
+    // it isn't CURRENT.
+    const getAuth = buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey);
+    const res = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    const roster = await res.json();
+    const stale = roster.find((r: any) => r.id === staleId);
+    expect(stale).toBeDefined();
+    expect(stale.presenceStatus).toBe("offline");
+    expect(stale.activityFresh).toBe(false);
+    // Current activity is NOT the frozen "debugging" label.
+    expect(stale.activity).toBe("idle");
+    // Last-known label is preserved for "was: debugging" rendering.
+    expect(stale.lastActivity).toBe("debugging");
+    // A verified reader still gets null — the task is not current.
+    expect(stale.currentTask).toBeNull();
+    // Age reflects how long ago it lapsed.
+    expect(stale.activityAgeMs).toBeGreaterThan(STALE_MS - 60_000);
+  });
+
+  test("independent decay: fresh heartbeat but stale activity stamp → online yet activity decayed", async () => {
+    const id = "presence-natural-independent";
+    const now = Date.now();
+    await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+      body: JSON.stringify({
+        operation: "insert",
+        database: "flair",
+        table: "Presence",
+        records: [{
+          agentId: id,
+          lastHeartbeatAt: now,               // fresh liveness
+          activityUpdatedAt: now - 700_000,   // 11.6min — past the 10min offline threshold
+          activity: "coding",
+          currentTask: "started this a while ago",
+        }],
+      }),
+    });
+
+    const getAuth = buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey);
+    const res = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    const roster = await res.json();
+    const row = roster.find((r: any) => r.id === id);
+    expect(row).toBeDefined();
+    // Liveness is fresh → still active/idle, NOT offline.
+    expect(row.presenceStatus).not.toBe("offline");
+    // But activity lapsed on its own — this is the independent decay.
+    expect(row.activityFresh).toBe(false);
+    expect(row.activity).toBe("idle");
+    expect(row.lastActivity).toBe("coding");
+    expect(row.currentTask).toBeNull();
+  });
+
+  test("old record (no activityUpdatedAt) + stale heartbeat: falls back to lastHeartbeatAt, decays, no throw", async () => {
+    const id = "presence-natural-legacy-stale";
+    const staleAt = Date.now() - STALE_MS;
+    await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+      body: JSON.stringify({
+        operation: "insert",
+        database: "flair",
+        table: "Presence",
+        // NO activityUpdatedAt — a record written before natural-presence.
+        records: [{ agentId: id, lastHeartbeatAt: staleAt, activity: "planning" }],
+      }),
+    });
+
+    const getAuth = buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey);
+    const res = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    expect(res.status).toBe(200);
+    const roster = await res.json();
+    const row = roster.find((r: any) => r.id === id);
+    expect(row).toBeDefined();
+    // Freshness falls back to lastHeartbeatAt → stale → decayed, no crash.
+    expect(row.activityFresh).toBe(false);
+    expect(row.activity).toBe("idle");
+    expect(row.lastActivity).toBe("planning");
+    expect(typeof row.activityUpdatedAt).toBe("number"); // resolved to lastHeartbeatAt
+  });
+
+  test("old record (no activityUpdatedAt) + FRESH heartbeat: activity is as fresh as the beat", async () => {
+    const id = "presence-natural-legacy-fresh";
+    await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+      body: JSON.stringify({
+        operation: "insert",
+        database: "flair",
+        table: "Presence",
+        records: [{ agentId: id, lastHeartbeatAt: Date.now(), activity: "reviewing" }],
+      }),
+    });
+
+    const getAuth = buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey);
+    const res = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    const roster = await res.json();
+    const row = roster.find((r: any) => r.id === id);
+    expect(row.activityFresh).toBe(true);
+    expect(row.activity).toBe("reviewing");
+  });
+
+  test("stale record: anonymous reader also gets currentTask=null, and lastActivity stays public", async () => {
+    const id = "presence-natural-stale-anon";
+    const staleAt = Date.now() - STALE_MS;
+    await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+      body: JSON.stringify({
+        operation: "insert",
+        database: "flair",
+        table: "Presence",
+        records: [{ agentId: id, lastHeartbeatAt: staleAt, activityUpdatedAt: staleAt, activity: "coding", currentTask: "secret preprod host" }],
+      }),
+    });
+
+    const res = await fetch(`${harper.httpURL}/Presence`); // anonymous
+    const roster = await res.json();
+    const row = roster.find((r: any) => r.id === id);
+    expect(row.currentTask).toBeNull();     // gated AND stale
+    expect(row.lastActivity).toBe("coding"); // public-safe label survives
+    expect(row.activity).toBe("idle");
+    expect(row.activityFresh).toBe(false);
   });
 
   // ── 5. currentTask length cap ──────────────────────────────────────────────
@@ -556,10 +738,17 @@ describe("Presence API integration", () => {
   test("genuine Ed25519-signed PUT /Presence/<id> (own record) still succeeds", async () => {
     const path = `/Presence/${agent1.id}`;
     const auth = buildAuthHeader(agent1.id, "PUT", path, agent1.privateKey);
+    // PUT is a full record replace (super.put()), NOT the heartbeat merge — so
+    // it must carry its own liveness (lastHeartbeatAt) and activity freshness
+    // (activityUpdatedAt) for the record to read as CURRENT. Natural-presence
+    // gates currentTask on freshness: a record with no/stale heartbeat is
+    // offline and its task is (correctly) not current. This writes a fresh
+    // record so we assert the signed PUT landed AND reads back as current.
+    const now = Date.now();
     const res = await fetch(`${harper.httpURL}${path}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: auth },
-      body: JSON.stringify({ agentId: agent1.id, currentTask: "signed PUT still works", activity: "coding" }),
+      body: JSON.stringify({ agentId: agent1.id, currentTask: "signed PUT still works", activity: "coding", lastHeartbeatAt: now, activityUpdatedAt: now }),
     });
     expect([200, 204]).toContain(res.status);
 
@@ -568,6 +757,7 @@ describe("Presence API integration", () => {
     const roster = await check.json();
     const a1 = roster.find((r: any) => r.id === agent1.id);
     expect(a1.currentTask).toBe("signed PUT still works");
+    expect(a1.activityFresh).toBe(true);
   }, 30_000);
 
   test("genuine Ed25519-signed PUT /Presence for ANOTHER agent's record → 403", async () => {

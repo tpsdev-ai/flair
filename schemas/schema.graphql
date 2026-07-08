@@ -3,9 +3,10 @@
 
 type Presence @table(database: "flair") @export {
   agentId: ID @primaryKey
-  lastHeartbeatAt: BigInt        # unix ms timestamp
+  lastHeartbeatAt: BigInt        # unix ms timestamp — pure liveness beacon; every heartbeat refreshes it
   currentTask: String            # short human string, e.g. "Reviewing flair#467"
   activity: String @indexed      # "coding" | "reviewing" | "planning" | "idle"
+  activityUpdatedAt: BigInt      # unix ms — when activity/currentTask were last ASSERTED (natural-presence); nullable/additive, absent on records written before this feature (readers fall back to lastHeartbeatAt)
   flairVersion: String           # @tpsdev-ai/flair version serving this heartbeat (flair#639); absent on pre-#639 records
   harperVersion: String          # @harperfast/harper version serving this heartbeat (flair#639); absent on pre-#639 records
 }

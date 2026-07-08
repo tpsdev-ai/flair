@@ -124,14 +124,24 @@ export function buildPresenceRecord(
   currentTask: unknown,
   activity: string | undefined,
   existingActivity: string | undefined,
+  existingActivityUpdatedAt: number | null | undefined,
   flairVersion: string,
   harperVersion: string | null,
 ): Record<string, unknown> {
+  // A heartbeat "asserts" what the agent is doing when it carries an activity
+  // and/or a (non-empty) currentTask. Only such a beat re-stamps
+  // activityUpdatedAt to `now`; a pure liveness beat (neither field) refreshes
+  // lastHeartbeatAt but PRESERVES the prior stamp — so activity ages on its own
+  // and lapses to last-known once the agent stops asserting it, with no manual
+  // clear (natural-presence). Backward compatible: today every real heartbeat
+  // carries activity, so this simply keeps activity fresh while an agent works.
+  const asserted = activity !== undefined || sanitizeCurrentTask(currentTask) !== null;
   return {
     agentId,
     lastHeartbeatAt: now,
     currentTask: sanitizeCurrentTask(currentTask),
     activity: activity ?? (existingActivity ?? "idle"),
+    activityUpdatedAt: asserted ? now : (existingActivityUpdatedAt ?? null),
     flairVersion,
     harperVersion,
   };
@@ -164,6 +174,60 @@ export function derivePresenceStatus(
   return "offline";
 }
 
+// ─── Activity decay (natural-presence) ─────────────────────────────────────────
+//
+// Presence is a LIVENESS BEACON, not a sticky status board: an offline agent
+// has, by definition, no *current* activity, so returning its last `activity`
+// / `currentTask` as if live is a lie (an agent offline 13 days still read as
+// `activity: "debugging"`; another showed a finished-task `currentTask` 20h
+// after going dark). These two pure functions decide "is this record's
+// activity still CURRENT, or has it lapsed into last-known?" — same offline
+// threshold, and the SAME graceful-degradation-on-old-records discipline, as
+// derivePresenceStatus() above and flair#639's version staleness.
+
+/**
+ * Resolve the timestamp used to judge activity freshness. Prefer the per-field
+ * `activityUpdatedAt` stamp (additive/nullable, mirrors flair#639); fall back
+ * to `lastHeartbeatAt` for records written before this feature existed — so an
+ * old row degrades to "activity is exactly as fresh as its heartbeat" (never
+ * claiming activity is FRESHER than the beat that carried it) rather than
+ * reading as permanently stale or throwing. Returns null only when NEITHER is
+ * a finite number (nothing to judge against → treated as stale by callers).
+ */
+export function activityFreshnessAt(
+  activityUpdatedAt: number | null | undefined,
+  lastHeartbeatAt: number | null | undefined,
+): number | null {
+  if (typeof activityUpdatedAt === "number" && Number.isFinite(activityUpdatedAt)) return activityUpdatedAt;
+  if (typeof lastHeartbeatAt === "number" && Number.isFinite(lastHeartbeatAt)) return lastHeartbeatAt;
+  return null;
+}
+
+/**
+ * Pure decay rule: is a record's activity/currentTask still CURRENT? Activity
+ * is fresh while its freshness stamp is younger than the SAME offline
+ * threshold that flips presenceStatus to "offline" — so an offline agent can
+ * never present a live-looking activity label. Because the stamp only moves
+ * forward when a heartbeat actually carries activity (see buildPresenceRecord),
+ * activity also lapses INDEPENDENTLY of raw liveness: an agent that keeps
+ * heartbeating liveness but stops asserting what it's doing decays to
+ * last-known on its own, no manual "clear" call needed. Clock skew (a stamp in
+ * the future) is treated as fresh, matching derivePresenceStatus().
+ */
+export function isActivityFresh(
+  now: number,
+  activityUpdatedAt: number | null | undefined,
+  lastHeartbeatAt: number | null | undefined,
+  offlineMs?: number,
+): boolean {
+  const offline = offlineMs ?? offlineThresholdMs();
+  const at = activityFreshnessAt(activityUpdatedAt, lastHeartbeatAt);
+  if (at == null) return false;
+  const elapsed = now - at;
+  if (elapsed < 0) return true;
+  return elapsed < offline;
+}
+
 // ─── Public-safe field allowlist ──────────────────────────────────────────────
 
 // flairVersion/harperVersion (flair#639) are content-gated the SAME way as
@@ -172,12 +236,22 @@ export function derivePresenceStatus(
 // endpoint (resources/health.ts): version info is deliberately withheld from
 // anonymous callers to avoid fingerprinting a publicly exposed instance for
 // known-CVE targeting. Anonymous readers get null for both, same as currentTask.
+// activity/lastActivity/activityUpdatedAt/activityAgeMs/activityFresh
+// (natural-presence) are all public-safe: `activity` and `lastActivity` are a
+// fixed vocabulary label (coding|reviewing|planning|idle), the two timestamps
+// and the boolean are liveness metadata of the same class as the already-public
+// lastHeartbeatAt. Only `currentTask` (free text) stays content-gated to
+// verified readers — see get()'s includeVerifiedFields.
 const ROSTER_ALLOWLIST = new Set([
   "id",
   "displayName",
   "role",
   "runtime",
   "activity",
+  "lastActivity",
+  "activityUpdatedAt",
+  "activityAgeMs",
+  "activityFresh",
   "presenceStatus",
   "currentTask",
   "lastHeartbeatAt",
@@ -285,27 +359,59 @@ export class Presence extends (databases as any).flair.Presence {
           agent = await (databases as any).flair.Agent.get(agentId);
         } catch { /* agent may not exist or be deactivated */ }
 
+        const lastHeartbeatAt = typeof row?.lastHeartbeatAt === "number"
+          ? row.lastHeartbeatAt
+          : Number(row?.lastHeartbeatAt ?? 0);
+        // activityUpdatedAt is BigInt in the schema (Harper may hand it back as
+        // number|string|bigint) and absent on pre-feature records — normalize
+        // to a finite number or null so activityFreshnessAt() can fall back.
+        const activityUpdatedAt = row?.activityUpdatedAt == null
+          ? null
+          : (typeof row.activityUpdatedAt === "number" ? row.activityUpdatedAt : Number(row.activityUpdatedAt));
+
+        // NATURAL PRESENCE: bind activity/currentTask to freshness. A stale
+        // record has no *current* activity — present the last-known label under
+        // dedicated fields, never as the live `activity`. `activity` is the
+        // CURRENT truth (falls to "idle" — the "nothing right now" vocabulary
+        // value — once stale); `lastActivity` preserves the raw last-known
+        // label so a reader can render "offline (was: coding)".
+        const rawActivity = (typeof row?.activity === "string" && row.activity.length > 0)
+          ? row.activity
+          : "idle";
+        const activityFresh = isActivityFresh(now, activityUpdatedAt, lastHeartbeatAt, offlineThreshold);
+        const freshnessAt = activityFreshnessAt(activityUpdatedAt, lastHeartbeatAt);
+
         const entry: Record<string, unknown> = {
           id: agentId,
           displayName: agent?.displayName ?? agent?.name ?? agentId,
           role: agent?.role ?? "agent",
           runtime: agent?.runtime ?? null,
-          activity: row?.activity ?? "idle",
+          // Current activity — only truthful while fresh; "idle" once decayed.
+          activity: activityFresh ? rawActivity : "idle",
+          // Last-known activity label regardless of freshness (public-safe, same
+          // vocabulary as activity) → enables "was: <activity>" rendering.
+          lastActivity: rawActivity,
+          // When activity was last asserted (resolved; falls back to
+          // lastHeartbeatAt for pre-feature records — see activityFreshnessAt).
+          activityUpdatedAt: freshnessAt,
+          // How stale that assertion is, so a reader can show "was active Xh
+          // ago" without needing the server's clock or the threshold.
+          activityAgeMs: freshnessAt != null ? Math.max(0, now - freshnessAt) : null,
+          // The server's verdict — makes staleness impossible to misread.
+          activityFresh,
           presenceStatus: derivePresenceStatus(
             now,
-            typeof row?.lastHeartbeatAt === "number"
-              ? row.lastHeartbeatAt
-              : Number(row?.lastHeartbeatAt ?? 0),
+            lastHeartbeatAt,
             idleThreshold,
             offlineThreshold,
           ),
-          // Anonymous/unverified readers get `null` here (key stays present,
-          // schema-stable) instead of the sanitized task text — see the
-          // currentTask CONTENT gate doc above get().
-          currentTask: includeVerifiedFields ? sanitizeCurrentTask(row?.currentTask) : null,
-          lastHeartbeatAt: typeof row?.lastHeartbeatAt === "number"
-            ? row.lastHeartbeatAt
-            : Number(row?.lastHeartbeatAt ?? 0),
+          // currentTask is current only when the reader is verified AND the
+          // record is fresh. A stale record's task (a finished-task string it
+          // never cleared) is NOT current → null, same as the anonymous case.
+          // Anonymous/unverified readers always get null (key stays present,
+          // schema-stable) — see the currentTask CONTENT gate doc above get().
+          currentTask: (includeVerifiedFields && activityFresh) ? sanitizeCurrentTask(row?.currentTask) : null,
+          lastHeartbeatAt,
           // flair#639: absent on records written before this feature (older
           // instance, never re-heartbeated since upgrading) — `row?.field ??
           // null` tolerates that directly, same as every other optional field
@@ -449,6 +555,10 @@ export class Presence extends (databases as any).flair.Presence {
         currentTask,
         activity,
         existing?.activity,
+        // Preserve the prior activity-freshness stamp when THIS beat asserts no
+        // activity/task (pure liveness) — normalize the BigInt-ish stored value
+        // to a number so buildPresenceRecord's `?? null` fallback behaves.
+        existing?.activityUpdatedAt == null ? null : Number(existing.activityUpdatedAt),
         resolveVersion(),
         resolveHarperVersion(),
       );

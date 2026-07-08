@@ -166,4 +166,41 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(currentIdx).toBeGreaterThan(-1);
     expect(oldIdx).toBeLessThan(currentIdx);
   }, 40_000);
+
+  test("natural-presence: a stale-activity instance renders 'offline' with its last-known activity, not a live label", async () => {
+    // Seed a row with a CURRENT version (not version-stale) but a long-stale
+    // heartbeat + activity stamp, so the only signal is activity decay — the
+    // fleet section must read it as offline + last-known, same staleness
+    // principle as the version column.
+    const STALE_ACT_ID = "fleet-doctor-agent-stale-activity";
+    const staleAt = Date.now() - 13 * 24 * 60 * 60 * 1000;
+    const auth = "Basic " + Buffer.from(`admin:${ADMIN_PASS}`).toString("base64");
+    const seedRes = await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({
+        operation: "insert",
+        database: "flair",
+        table: "Presence",
+        records: [{
+          agentId: STALE_ACT_ID,
+          lastHeartbeatAt: staleAt,
+          activityUpdatedAt: staleAt,
+          activity: "debugging",
+          currentTask: "on-call investigation complete",
+          flairVersion: REAL_FLAIR_VERSION,
+          harperVersion: "5.1.17",
+        }],
+      }),
+    });
+    expect(seedRes.ok).toBe(true);
+
+    const doctor = await runCli(["doctor", "--port", httpPort(), "--agent", AGENT_A]);
+    const out = `${doctor.stdout}${doctor.stderr}`;
+    const sectionStart = out.indexOf("Fleet presence");
+    const line = out.slice(sectionStart).split("\n").find((l) => l.includes(STALE_ACT_ID)) ?? "";
+    expect(line).toContain("offline");
+    // Last-known activity is shown as "(was: debugging)", never a live label.
+    expect(line).toContain("was: debugging");
+  }, 40_000);
 });
