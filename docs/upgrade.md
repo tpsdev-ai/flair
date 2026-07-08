@@ -83,8 +83,9 @@ Snapshotting data before upgrade...
   each successful snapshot.
 - **Consistency:** Flair is briefly stopped, snapshotted, and immediately restarted on
   the OLD version before the package swap even begins — a plain file copy of a
-  *running* Harper's data directory isn't guaranteed point-in-time consistent (LMDB
-  writes can be mid-flight), so the snapshot always happens against a quiesced
+  *running* Harper's data directory isn't guaranteed point-in-time consistent (Harper
+  5.x stores tables in RocksDB — an LSM engine whose WAL, MANIFEST, and SST files can
+  be mid-write/mid-compaction), so the snapshot always happens against a quiesced
   directory. This means a short stop/start blip happens even with `--no-restart` — the
   snapshot's correctness doesn't depend on whether you want a restart *after* the
   upgrade, those are separate questions. (A native Harper backup operation,
