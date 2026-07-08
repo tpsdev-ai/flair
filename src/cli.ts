@@ -15,6 +15,8 @@ import {
   mkdtempSync,
   readdirSync,
   statSync,
+  lstatSync,
+  realpathSync,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname } from "node:path";
@@ -6551,6 +6553,159 @@ async function runFabricUpgrade(opts: any): Promise<void> {
   }
 }
 
+// ─── Pre-upgrade data snapshot (flair#637) ─────────────────────────────────
+// `flair upgrade` used to swap @tpsdev-ai/flair's own package with no backup
+// of ~/.flair/data — if an upgrade broke something past the package level
+// (schema/data, not just code), there was no tested way back. This is cheap
+// insurance: a timestamped tar.gz of the whole data directory taken right
+// before the package swap, with a keep-last-3 retention policy.
+//
+// Native-backup alternative considered and rejected: Harper ships a
+// `get_backup` operation (@harperfast/harper's dataLayer/getBackup.ts,
+// wired in server/serverHelpers/serverUtilities.ts, documented in
+// components/mcp/tools/schemas/operationDescriptions.ts) that streams a
+// live backup over the running HTTP operations API. It's available in this
+// OSS tier (no license/tier gate found in operation_authorization.ts — just
+// `requires_su`), but it backs up ONE database/table at a time
+// (GetBackupObject requires `schema`/`table`, or defaults to a single "data"
+// database) — not the whole `~/.flair/data` tree: no config, no
+// users/roles, no keys, no other schemas. Using it here would mean
+// enumerating every schema/table and making N authenticated HTTP calls
+// against a server this same command is about to take down — for a LESS
+// complete result than a plain recursive file copy, and one that can't run
+// at all once the server is stopped (it's an operations-API call, not a
+// standalone filesystem utility). Rejected in favor of the file-level
+// snapshot below. See docs/upgrade.md for the restore procedure this
+// produces.
+const UPGRADE_SNAPSHOT_ROOT = resolve(homedir(), ".flair", "upgrade-snapshots");
+const UPGRADE_SNAPSHOT_RETAIN = 3;
+
+function upgradeSnapshotFileName(): string {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  return `flair-data-${ts}.tar.gz`;
+}
+
+/**
+ * Snapshot `dataDir` (normally ~/.flair/data) into a timestamped tar.gz
+ * under ~/.flair/upgrade-snapshots/.
+ *
+ * Consistency: the caller is expected to have stopped Flair first (a
+ * running Harper's data dir can be mid-write, and a plain file copy of a
+ * live LMDB environment isn't guaranteed point-in-time consistent) — this
+ * function itself doesn't stop anything, it just archives whatever is on
+ * disk right now.
+ *
+ * Preserves file modes exactly — deliberately NOT using tar's `portable`
+ * option (used elsewhere in this file for the deploy tarball and session
+ * snapshots), which flattens every entry's mode to a umask-based "reasonable
+ * default" and would turn 0600 key/admin-pass files into whatever that
+ * default is. Never follows symlinks out of `dataDir`: node-tar already
+ * archives symlinks as symlinks by default (no `follow` option set here),
+ * and the filter below additionally skips any symlink whose resolved target
+ * falls outside `dataDir`, plus any non-regular file (sockets, FIFOs, device
+ * nodes — e.g. a stale `operations-server` domain socket left behind by a
+ * prior run) that tar can't meaningfully archive anyway.
+ *
+ * Throws on any failure — `flair upgrade` treats a snapshot failure as
+ * abort-the-upgrade by default (safe default; --no-snapshot is the opt-out
+ * for hosts that can't spare the time/disk).
+ *
+ * `snapshotRoot` defaults to UPGRADE_SNAPSHOT_ROOT (~/.flair/upgrade-snapshots)
+ * but is an explicit parameter — not read from homedir() internally — so
+ * unit tests can point it at a throwaway temp dir instead of this machine's
+ * real ~/.flair (test/unit/upgrade-data-snapshot.test.ts).
+ */
+export async function createDataSnapshot(
+  dataDir: string,
+  snapshotRoot: string = UPGRADE_SNAPSHOT_ROOT,
+): Promise<{ path: string; bytes: number }> {
+  mkdirSync(snapshotRoot, { recursive: true, mode: 0o700 });
+  const snapshotPath = join(snapshotRoot, upgradeSnapshotFileName());
+  // realpath, not just resolve() — on macOS (and some Linux distros) the
+  // system temp dir itself sits behind a symlink (/tmp -> /private/tmp), so
+  // a plain lexical resolve() of `dataDir` would never equal the realpath()
+  // of a symlink target genuinely INSIDE it, misclassifying every in-bounds
+  // symlink as an escape.
+  const resolvedDataDir = realpathSync(resolve(dataDir));
+
+  const filter = (entryPath: string): boolean => {
+    // entryPath is relative to `cwd` (dataDir) per tar's create() contract.
+    const abs = resolve(resolvedDataDir, entryPath);
+    let st;
+    try {
+      st = lstatSync(abs);
+    } catch {
+      return false; // vanished between readdir and stat — skip, don't crash the snapshot
+    }
+    if (st.isSocket() || st.isFIFO() || st.isCharacterDevice() || st.isBlockDevice()) {
+      console.error(`  (skipping non-regular file in snapshot: ${entryPath})`);
+      return false;
+    }
+    if (st.isSymbolicLink()) {
+      let real: string;
+      try {
+        real = realpathSync(abs);
+      } catch {
+        console.error(`  (skipping broken symlink in snapshot: ${entryPath})`);
+        return false;
+      }
+      const withinDataDir = real === resolvedDataDir || real.startsWith(resolvedDataDir + sep);
+      if (!withinDataDir) {
+        console.error(`  (skipping symlink pointing outside the data dir: ${entryPath})`);
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // preservePaths: true — WITHOUT it, node-tar strips the leading `/` off
+  // any absolute symlink target it archives (found the hard way: an
+  // in-bounds symlink pointing at an absolute path under `dataDir` came
+  // back on extraction as a nonsense RELATIVE path, silently broken). Every
+  // entry path here is already relative (fileList is `["."]`, cwd is
+  // `dataDir`) — this only affects symlink target text, restoring it
+  // verbatim, which is exactly what a same-host restore into the original
+  // ~/.flair/data path needs.
+  await tarCreate({ gzip: true, cwd: resolvedDataDir, file: snapshotPath, filter, preservePaths: true }, ["."]);
+  // Owner-only — the archive can contain 0600 key/admin-pass material.
+  chmodSync(snapshotPath, 0o600);
+  return { path: snapshotPath, bytes: statSync(snapshotPath).size };
+}
+
+/**
+ * Keep only the newest `retain` upgrade snapshots, deleting older ones.
+ * Best-effort: a pruning failure is logged, not thrown — it must never
+ * un-succeed an upgrade whose snapshot already landed safely on disk.
+ * Returns the paths removed.
+ *
+ * `snapshotRoot` is explicit for the same testability reason as
+ * `createDataSnapshot` above.
+ */
+export function pruneOldSnapshots(
+  retain: number = UPGRADE_SNAPSHOT_RETAIN,
+  snapshotRoot: string = UPGRADE_SNAPSHOT_ROOT,
+): string[] {
+  if (!existsSync(snapshotRoot)) return [];
+  const removed: string[] = [];
+  try {
+    const files = readdirSync(snapshotRoot)
+      .filter((f) => f.startsWith("flair-data-") && f.endsWith(".tar.gz"))
+      .map((f) => join(snapshotRoot, f))
+      .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+    for (const stale of files.slice(retain)) {
+      try {
+        rmSync(stale, { force: true });
+        removed.push(stale);
+      } catch (err: any) {
+        console.error(`  (could not prune old snapshot ${stale}: ${err.message})`);
+      }
+    }
+  } catch (err: any) {
+    console.error(`  (snapshot retention check failed: ${err.message})`);
+  }
+  return removed;
+}
+
 // ─── flair upgrade ────────────────────────────────────────────────────────────
 
 program
@@ -6560,6 +6715,7 @@ program
   .option("--restart", "[deprecated] no-op — restart now happens automatically after upgrade; use --no-restart to opt out")
   .option("--no-restart", "Skip the restart after upgrade (stage new packages now, restart later)")
   .option("--no-verify", "Skip post-restart health/version/auth verification (default: verify — so a broken upgrade can't report success; see flair#635)")
+  .option("--no-snapshot", "Skip the pre-upgrade ~/.flair/data snapshot (default: snapshot before the package swap, keep-last-3 retention; see flair#637)")
   .option("--all", "Show transitive packages (e.g. flair-client) in the listing — verbose mode for debugging dep versions")
   // ── Fabric upgrade (--target) ────────────────────────────────────────────
   // When --target is passed, upgrade the Flair component DEPLOYED to that
@@ -6728,6 +6884,72 @@ program
       return;
     }
 
+    // Hoisted here (was previously computed after install/restart) — the
+    // pre-upgrade snapshot below needs to know the target port AND whether a
+    // restart is coming, before any package is touched. Pure function of
+    // `opts` — safe to call this early.
+    const { restart: shouldRestart, verify: shouldVerify, deprecatedRestartFlagUsed } =
+      resolveUpgradeRestartVerify(opts);
+    const upgradePort = resolveHttpPort({});
+
+    // ── Pre-upgrade data snapshot (flair#637) ───────────────────────────────
+    // Only an @tpsdev-ai/flair package swap touches the code that reads/
+    // writes ~/.flair/data — an flair-mcp-only or openclaw-plugin-only
+    // upgrade never runs different Harper/Flair code against the data, so
+    // there's nothing at risk and nothing to snapshot.
+    const flairIsUpgrading = npmUpgrades.some((u) => u.pkg === "@tpsdev-ai/flair");
+    let snapshotPath: string | null = null;
+    if (flairIsUpgrading && opts.snapshot === false) {
+      console.log("\n⚠️  --no-snapshot: skipping the pre-upgrade data snapshot. If this upgrade breaks something past the package level, there is no tested way back.");
+    } else if (flairIsUpgrading) {
+      const snapshotDataDir = defaultDataDir();
+      if (!existsSync(snapshotDataDir)) {
+        console.log(`\n(no data directory at ${snapshotDataDir} yet — nothing to snapshot)`);
+      } else {
+        console.log("\nSnapshotting data before upgrade...");
+        // Consistency: a running Harper's data dir can be mid-write, and a
+        // plain file copy of a live LMDB environment isn't guaranteed
+        // point-in-time consistent. Stopping first — then immediately
+        // restarting the OLD version, before any package changes — gives a
+        // quiesced, safe-to-copy directory with only a brief blip, even for
+        // --no-restart (the snapshot's correctness doesn't depend on
+        // whether the caller wants a restart AFTER the upgrade — those are
+        // orthogonal). --no-snapshot is the escape hatch for hosts that
+        // can't tolerate even this blip. See docs/upgrade.md for the
+        // native-backup alternative considered and rejected (Harper's
+        // `get_backup` op backs up one table/schema at a time over the
+        // running HTTP API — not the whole data dir — and rejecting it here
+        // means this path never depends on the server being up).
+        let stoppedForSnapshot = false;
+        try {
+          await stopFlairProcess(upgradePort);
+          stoppedForSnapshot = true;
+          const snapshot = await createDataSnapshot(snapshotDataDir);
+          snapshotPath = snapshot.path;
+          const removed = pruneOldSnapshots();
+          console.log(`✅ Snapshot: ${snapshotPath} (${humanBytes(snapshot.bytes)})`);
+          console.log(`   Restore: flair stop && rm -rf "${snapshotDataDir}" && mkdir -p "${snapshotDataDir}" && tar -xzf "${snapshotPath}" -C "${snapshotDataDir}" && flair start`);
+          if (removed.length > 0) {
+            console.log(`   Pruned ${removed.length} older snapshot${removed.length > 1 ? "s" : ""} (keeping last ${UPGRADE_SNAPSHOT_RETAIN})`);
+          }
+        } catch (err: any) {
+          console.error(`❌ snapshot failed: ${err.message}`);
+          console.error("   Aborting upgrade — no packages were changed. Use --no-snapshot to skip (not recommended).");
+          if (stoppedForSnapshot) {
+            try { await startFlairProcess(upgradePort); } catch { /* best effort — surface the original snapshot error, not this */ }
+          }
+          process.exit(1);
+        }
+        try {
+          await startFlairProcess(upgradePort);
+        } catch (err: any) {
+          console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
+          console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
+          process.exit(1);
+        }
+      }
+    }
+
     // Perform upgrade. `latest` comes from the npm registry's HTTP
     // response, so CodeQL (correctly) treats it as untrusted input.
     // Use execFileSync with argv — the spec `<name>@<version>` becomes a
@@ -6782,8 +7004,9 @@ program
         ? flairFinding.latest
         : flairFinding?.installed ?? null;
 
-    const { restart: shouldRestart, verify: shouldVerify, deprecatedRestartFlagUsed } =
-      resolveUpgradeRestartVerify(opts);
+    // shouldRestart/shouldVerify/deprecatedRestartFlagUsed were hoisted above
+    // the pre-upgrade snapshot block — it needs to know these before any
+    // package is touched.
     if (deprecatedRestartFlagUsed) {
       console.error("warning: --restart is deprecated and is now a no-op — flair upgrade restarts by default. Use --no-restart to skip it.");
     }
@@ -6794,7 +7017,7 @@ program
     }
 
     console.log("\nRestarting Flair...");
-    const port = resolveHttpPort({});
+    const port = upgradePort;
     const baseUrl = `http://127.0.0.1:${port}`;
     try {
       await restartFlair(port);
@@ -6864,7 +7087,15 @@ program
 
     console.error(`❌❌ ROLLBACK ALSO FAILED VERIFICATION: ${rollbackVerdict.reason}`);
     console.error("   Instance state is UNKNOWN — do not assume data integrity.");
-    console.error("   This double-failure isn't auto-recoverable yet — see flair#637 (data-snapshot) before touching data.");
+    // This double-failure isn't auto-recoverable yet (flair#637) — but if a
+    // pre-upgrade snapshot landed, point at the CONCRETE path instead of
+    // just the issue number, so recovery doesn't start with a GitHub search.
+    if (snapshotPath) {
+      console.error(`   A pre-upgrade snapshot is available: ${snapshotPath}`);
+      console.error(`   Restore procedure: docs/upgrade.md#downgrade — stop Flair, restore the snapshot, reinstall the previous version, start, verify.`);
+    } else {
+      console.error("   No pre-upgrade snapshot was taken for this run (--no-snapshot was used, or ~/.flair/data didn't exist yet) — do not touch data without one. See docs/upgrade.md#downgrade.");
+    }
     process.exit(1);
   });
 
@@ -6995,17 +7226,18 @@ program
 // ─── flair restart ────────────────────────────────────────────────────────────
 
 /**
- * The ONE restart mechanism for a local Flair install — launchd stop/start
- * on darwin when a plist is present (falling back on failure), otherwise a
- * manual SIGTERM + respawn. Shared by `flair restart` and `flair upgrade`'s
- * post-install restart step (flair#635) so the two never drift into two
- * different ways to bounce the same process.
+ * Stop the local Flair (Harper) process — launchd `stop` on darwin when a
+ * plist is present (falling back on failure), otherwise a manual SIGTERM by
+ * port. Split out of the old monolithic `restartFlair` (flair#637) so the
+ * pre-upgrade snapshot can quiesce the data directory between a stop and a
+ * start without duplicating this logic — `restartFlair` is now just
+ * `stopFlairProcess` followed by `startFlairProcess`.
  *
- * Throws on failure instead of calling process.exit — callers decide how to
- * react (`flair restart` exits 1; `flair upgrade` treats a failed restart as
- * an upgrade failure and may attempt a rollback).
+ * Idempotent-ish: stopping an already-stopped instance is a harmless no-op
+ * on both paths (launchctl stop on an unloaded/idle service, or an empty
+ * `lsof` match).
  */
-async function restartFlair(port: number): Promise<void> {
+async function stopFlairProcess(port: number): Promise<void> {
   if (process.platform === "darwin") {
     const label = "ai.tpsdev.flair";
     const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
@@ -7014,21 +7246,21 @@ async function restartFlair(port: number): Promise<void> {
         const { execSync } = await import("node:child_process");
         // Ensure the service is loaded (init writes the plist but doesn't load it)
         try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
-        // Capture the current PID *before* stopping so we can verify exit. Without
-        // this, waitForHealth can race against the still-shutting-down old process
-        // and return success before KeepAlive brings the new one up.
+        // Capture the current PID *before* stopping so callers that
+        // immediately restart can verify exit. Without this, waitForHealth
+        // can race against the still-shutting-down old process and return
+        // success before KeepAlive brings the new one up.
         const oldPid = readHarperPid(defaultDataDir());
         try { execSync(`launchctl stop ${label}`, { stdio: "pipe" }); } catch {}
         if (oldPid) await waitForProcessExit(oldPid, STARTUP_TIMEOUT_MS);
-        await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
         return;
       } catch (err: any) {
-        console.error(`launchd restart failed, falling back to port restart: ${err.message}`);
+        console.error(`launchd stop failed, falling back to port-based stop: ${err.message}`);
       }
     }
   }
 
-  // Port-based restart (Linux, or macOS fallback when no launchd plist)
+  // Port-based stop (Linux, or macOS fallback when no launchd plist)
   console.log("Stopping...");
   try {
     const { execSync } = await import("node:child_process");
@@ -7041,6 +7273,29 @@ async function restartFlair(port: number): Promise<void> {
       await new Promise(r => setTimeout(r, 2000));
     }
   } catch { /* not running */ }
+}
+
+/**
+ * Start the local Flair (Harper) process — launchd `start` on darwin when a
+ * plist is present (falling back on failure), otherwise a direct spawn.
+ * Counterpart to `stopFlairProcess`; see that function's doc comment.
+ */
+async function startFlairProcess(port: number): Promise<void> {
+  if (process.platform === "darwin") {
+    const label = "ai.tpsdev.flair";
+    const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+    if (existsSync(plistPath)) {
+      try {
+        const { execSync } = await import("node:child_process");
+        try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
+        try { execSync(`launchctl start ${label}`, { stdio: "pipe" }); } catch {}
+        await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+        return;
+      } catch (err: any) {
+        console.error(`launchd start failed, falling back to direct start: ${err.message}`);
+      }
+    }
+  }
 
   console.log("Starting...");
   const bin = harperBin();
@@ -7072,6 +7327,23 @@ async function restartFlair(port: number): Promise<void> {
   proc.unref();
 
   await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
+}
+
+/**
+ * The ONE restart mechanism for a local Flair install. Shared by `flair
+ * restart` and `flair upgrade`'s post-install restart step (flair#635) so
+ * the two never drift into two different ways to bounce the same process.
+ * Composed of `stopFlairProcess` + `startFlairProcess` (flair#637) — the
+ * pre-upgrade snapshot step calls those two directly with a snapshot taken
+ * in between, instead of going through this wrapper.
+ *
+ * Throws on failure instead of calling process.exit — callers decide how to
+ * react (`flair restart` exits 1; `flair upgrade` treats a failed restart as
+ * an upgrade failure and may attempt a rollback).
+ */
+async function restartFlair(port: number): Promise<void> {
+  await stopFlairProcess(port);
+  await startFlairProcess(port);
 }
 
 program

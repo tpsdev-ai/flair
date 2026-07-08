@@ -15,6 +15,12 @@
 # a re-run of the whole integration suite. No embedding model predownload —
 # the round-trip check reads back via the ops API rather than semantic
 # search, so it doesn't depend on embeddings being loaded.
+#
+# Also runs test/compat/downgrade-boot.test.ts (flair#637) — a second, related
+# but distinct compat check that joined this same `bun test test/compat/`
+# scope rather than getting its own workflow: does the last npm-published
+# `@tpsdev-ai/flair` boot against a data directory the CURRENT build already
+# wrote to? Backs the downgrade compatibility claim in docs/upgrade.md.
 name: Federation Mixed-Version Compat
 
 on:
@@ -46,8 +52,11 @@ on:
       - "src/cli.ts"
       # Ed25519 instance-identity keystore federation pair/sync sign with.
       - "src/keystore.ts"
-      # The compat suite itself + this workflow (standard self-trigger).
+      # The compat suites themselves, the shared Harper spawn/reuse harness
+      # both of them build on (test/helpers/harper-lifecycle.ts), and this
+      # workflow (standard self-trigger).
       - "test/compat/**"
+      - "test/helpers/**"
       - ".github/workflows/federation-compat.yml"
   workflow_dispatch:
 
@@ -98,5 +107,5 @@ jobs:
       - name: Build Flair resources and CLI
         run: bun run build && bun run build:cli
 
-      - name: Run mixed-version federation compat suite
+      - name: Run compat suite (federation mixed-version + downgrade boot)
         run: bun test test/compat/
