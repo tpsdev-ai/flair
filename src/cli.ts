@@ -6940,7 +6940,13 @@ program
           }
           process.exit(1);
         }
-        await startFlairProcess(upgradePort);
+        try {
+          await startFlairProcess(upgradePort);
+        } catch (err: any) {
+          console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
+          console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
+          process.exit(1);
+        }
       }
     }
 
