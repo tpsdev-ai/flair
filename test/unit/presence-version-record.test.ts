@@ -39,14 +39,17 @@ function buildPresenceRecord(
   currentTask: unknown,
   activity: string | undefined,
   existingActivity: string | undefined,
+  existingActivityUpdatedAt: number | null | undefined,
   flairVersion: string,
   harperVersion: string | null,
 ): Record<string, unknown> {
+  const asserted = activity !== undefined || sanitizeCurrentTask(currentTask) !== null;
   return {
     agentId,
     lastHeartbeatAt: now,
     currentTask: sanitizeCurrentTask(currentTask),
     activity: activity ?? (existingActivity ?? "idle"),
+    activityUpdatedAt: asserted ? now : (existingActivityUpdatedAt ?? null),
     flairVersion,
     harperVersion,
   };
@@ -58,13 +61,13 @@ const NOW = 1_700_000_000_000;
 
 describe("buildPresenceRecord", () => {
   test("stamps both flairVersion and harperVersion onto the record", () => {
-    const record = buildPresenceRecord("agent-1", NOW, "reviewing flair#639", "coding", undefined, "0.21.0", "5.1.17");
+    const record = buildPresenceRecord("agent-1", NOW, "reviewing flair#639", "coding", undefined, undefined, "0.21.0", "5.1.17");
     expect(record.flairVersion).toBe("0.21.0");
     expect(record.harperVersion).toBe("5.1.17");
   });
 
   test("harperVersion null passthrough when resolution failed", () => {
-    const record = buildPresenceRecord("agent-1", NOW, undefined, "idle", undefined, "0.21.0", null);
+    const record = buildPresenceRecord("agent-1", NOW, undefined, "idle", undefined, undefined, "0.21.0", null);
     expect(record.harperVersion).toBeNull();
     // flairVersion always resolves to a real string (falls back to "dev"),
     // never null — the two are intentionally different types.
@@ -72,46 +75,83 @@ describe("buildPresenceRecord", () => {
   });
 
   test("core fields (agentId, lastHeartbeatAt) always present", () => {
-    const record = buildPresenceRecord("agent-2", NOW, undefined, "idle", undefined, "0.1.0", null);
+    const record = buildPresenceRecord("agent-2", NOW, undefined, "idle", undefined, undefined, "0.1.0", null);
     expect(record.agentId).toBe("agent-2");
     expect(record.lastHeartbeatAt).toBe(NOW);
   });
 
   test("activity falls back to existingActivity when not provided", () => {
-    const record = buildPresenceRecord("a", NOW, undefined, undefined, "reviewing", "0.1.0", "5.0.0");
+    const record = buildPresenceRecord("a", NOW, undefined, undefined, "reviewing", undefined, "0.1.0", "5.0.0");
     expect(record.activity).toBe("reviewing");
   });
 
   test("activity falls back to 'idle' when neither activity nor existingActivity is set", () => {
-    const record = buildPresenceRecord("a", NOW, undefined, undefined, undefined, "0.1.0", "5.0.0");
+    const record = buildPresenceRecord("a", NOW, undefined, undefined, undefined, undefined, "0.1.0", "5.0.0");
     expect(record.activity).toBe("idle");
   });
 
   test("explicit activity wins over existingActivity", () => {
-    const record = buildPresenceRecord("a", NOW, undefined, "planning", "coding", "0.1.0", "5.0.0");
+    const record = buildPresenceRecord("a", NOW, undefined, "planning", "coding", undefined, "0.1.0", "5.0.0");
     expect(record.activity).toBe("planning");
   });
 
   test("currentTask is sanitized (trimmed) the same as before flair#639", () => {
-    const record = buildPresenceRecord("a", NOW, "  investigating flair#639  ", "coding", undefined, "0.1.0", "5.0.0");
+    const record = buildPresenceRecord("a", NOW, "  investigating flair#639  ", "coding", undefined, undefined, "0.1.0", "5.0.0");
     expect(record.currentTask).toBe("investigating flair#639");
   });
 
   test("currentTask capped at 200 chars", () => {
     const long = "x".repeat(500);
-    const record = buildPresenceRecord("a", NOW, long, "coding", undefined, "0.1.0", "5.0.0");
+    const record = buildPresenceRecord("a", NOW, long, "coding", undefined, undefined, "0.1.0", "5.0.0");
     expect((record.currentTask as string).length).toBe(200);
   });
 
   test("absent currentTask → null (explicit clear, unchanged from pre-#639 behavior)", () => {
-    const record = buildPresenceRecord("a", NOW, undefined, "coding", undefined, "0.1.0", "5.0.0");
+    const record = buildPresenceRecord("a", NOW, undefined, "coding", undefined, undefined, "0.1.0", "5.0.0");
     expect(record.currentTask).toBeNull();
   });
 
   test("record has exactly the expected key set (no accidental extra fields)", () => {
-    const record = buildPresenceRecord("a", NOW, "task", "coding", undefined, "0.1.0", "5.0.0");
+    const record = buildPresenceRecord("a", NOW, "task", "coding", undefined, undefined, "0.1.0", "5.0.0");
     expect(Object.keys(record).sort()).toEqual(
-      ["activity", "agentId", "currentTask", "flairVersion", "harperVersion", "lastHeartbeatAt"].sort(),
+      ["activity", "activityUpdatedAt", "agentId", "currentTask", "flairVersion", "harperVersion", "lastHeartbeatAt"].sort(),
     );
+  });
+});
+
+describe("buildPresenceRecord — activityUpdatedAt stamping (natural-presence)", () => {
+  const PRIOR = NOW - 5 * 60 * 1000; // 5 minutes before NOW
+
+  test("a beat that carries activity stamps activityUpdatedAt = now", () => {
+    const record = buildPresenceRecord("a", NOW, undefined, "coding", undefined, PRIOR, "0.1.0", null);
+    expect(record.activityUpdatedAt).toBe(NOW);
+  });
+
+  test("a beat that carries only currentTask (no activity) still stamps now", () => {
+    const record = buildPresenceRecord("a", NOW, "shipping the fix", undefined, "coding", PRIOR, "0.1.0", null);
+    expect(record.activityUpdatedAt).toBe(NOW);
+  });
+
+  test("a pure liveness beat (no activity, no task) PRESERVES the prior stamp", () => {
+    const record = buildPresenceRecord("a", NOW, undefined, undefined, "coding", PRIOR, "0.1.0", null);
+    // lastHeartbeatAt refreshes (liveness), but activityUpdatedAt does NOT —
+    // activity ages independently and lapses to last-known on its own.
+    expect(record.lastHeartbeatAt).toBe(NOW);
+    expect(record.activityUpdatedAt).toBe(PRIOR);
+  });
+
+  test("a liveness beat with a blank/whitespace task does NOT count as asserting (still preserves)", () => {
+    const record = buildPresenceRecord("a", NOW, "   ", undefined, "coding", PRIOR, "0.1.0", null);
+    expect(record.activityUpdatedAt).toBe(PRIOR);
+  });
+
+  test("first-ever beat with activity but no prior stamp → now", () => {
+    const record = buildPresenceRecord("a", NOW, undefined, "planning", undefined, undefined, "0.1.0", null);
+    expect(record.activityUpdatedAt).toBe(NOW);
+  });
+
+  test("first-ever pure liveness beat (no prior stamp) → null (nothing asserted yet)", () => {
+    const record = buildPresenceRecord("a", NOW, undefined, undefined, undefined, undefined, "0.1.0", null);
+    expect(record.activityUpdatedAt).toBeNull();
   });
 });

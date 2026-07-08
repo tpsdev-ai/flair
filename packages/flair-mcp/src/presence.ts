@@ -139,6 +139,14 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  * omitted (not sent as null/empty) when absent, so callers that don't know a
  * task can still heartbeat without explicitly clearing one that was set
  * earlier — see postPresenceSafe()'s doc comment for why that matters.
+ *
+ * Natural-presence: this body always carries `activity`, and the server stamps
+ * `activityUpdatedAt` (resources/Presence.ts, buildPresenceRecord) on any beat
+ * that asserts activity/task — so a working agent keeps activity fresh, and one
+ * that stops lets it decay to last-known automatically (no manual clear). A
+ * future liveness-only beat (this body without `activity`) would refresh
+ * lastHeartbeatAt without re-stamping activity — the server treats the two
+ * independently.
  */
 export function buildPresenceBody(activity: PresenceActivity, currentTask?: string): Record<string, unknown> {
   const body: Record<string, unknown> = { activity };

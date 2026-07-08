@@ -37,6 +37,13 @@ export interface FleetPresenceRow {
   harperVersion?: string | null;
   lastHeartbeatAt?: number | null;
   presenceStatus?: string;
+  // Natural-presence activity fields (roster GET). `activity` is the CURRENT
+  // activity ("idle" once decayed); `lastActivity` is the raw last-known label;
+  // `activityFresh` is the server's freshness verdict. All optional — a
+  // pre-feature roster omits them, and the doctor renderer tolerates absence.
+  activity?: string | null;
+  lastActivity?: string | null;
+  activityFresh?: boolean;
 }
 
 export interface FleetInstanceRow extends FleetPresenceRow {
