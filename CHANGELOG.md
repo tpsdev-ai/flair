@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+The upgrade path becomes one tested transaction — install, restart, verify, and roll back automatically on failure — backed by a pre-upgrade data snapshot, a nightly-checked downgrade path, and a post-deploy fleet-convergence sweep. Also closes out the remaining `authorizeLocal`-class security gaps from the 0.21.0 state review.
+
+### 🔁 `flair upgrade` restarts by default, verifies, and rolls back (#635, #641)
+
+Upgrade is now one transaction: install → restart → verify → rollback-on-failure, instead of leaving the OLD process serving while the version on disk lied about what was actually running. Restart-after-install is the new default (`--no-restart` opts out; the old `--restart` flag is a deprecated no-op). After restart, `probeInstance` confirms `/Health`, an authenticated round-trip, and that the reported running version matches what was just installed (`--no-verify` to skip). On verification failure, `flair upgrade` reinstalls the previously-running version, restarts, and re-verifies — and if that rollback also fails to verify, it points at the pre-upgrade snapshot instead of looping.
+
+### 📸 Pre-upgrade data snapshot + tested downgrade path (#637, #647)
+
+`flair upgrade` now snapshots `~/.flair/data` to `~/.flair/upgrade-snapshots/` (timestamped tar.gz, exact file modes preserved, keep-last-3 retention) before touching any package — quiescing Flair first, since a live RocksDB directory mid-compaction isn't safe to copy. A snapshot failure aborts the upgrade before any package changes. `docs/upgrade.md` gains a full [Downgrade](docs/upgrade.md#downgrade) procedure, and a nightly compat test (`test/compat/downgrade-boot.test.ts`) actually boots the last npm-published release against newer data and confirms it reads back cleanly — replacing the old "not a tested path" language with an honest, continuously-checked claim.
+
+### 🚦 `flair fleet verify` — post-deploy convergence sweep (#636, #642)
+
+Fabric deploys tolerate replication errors by design (origin-first), but nothing previously confirmed peers actually converged — the 0.21.0 deploy shipped with a peer still throwing 1006s while the CLI reported success. New standalone `flair fleet verify --target <url>` sweeps the origin + every known Flair federation peer, prints a per-node table, and exits 0 (all verified) / 1 (origin failed) / 2 (peer version skew) / 3 (peer unreachable/unverifiable). Wired automatically into `flair deploy` and `flair upgrade --target` post-success (`--no-fleet-verify` to skip). Explicitly scoped to Flair's own federation peers, not Harper's own cluster-replication nodes (`cluster_status` is harper-pro-only and unavailable to this build).
+
+### 🔑 CLI sends real local credentials instead of riding `authorizeLocal` (#634, #640)
+
+`api()` previously sent no `Authorization` header for local targets, relying on Harper's `authorizeLocal` to forge a `super_user` for credential-less loopback requests — a gap the #632 security fix below closed, which meant credential-less local calls like `flair federation status` started getting a real 403. Fixed: local targets now resolve real credentials in precedence order `FLAIR_TOKEN` > `FLAIR_ADMIN_PASS`/`HDB_ADMIN_PASSWORD` > agent Ed25519 key > the `~/.flair/admin-pass` file `flair init` writes. A 403 with no credentials now throws a clear, actionable message instead of a raw "forbidden" body.
+
+### 🛰️ Version-stamped presence + fleet staleness in `doctor` (#639, #645)
+
+`POST /Presence` now stamps the serving instance's running `flairVersion` + `harperVersion` on every heartbeat, gated behind the same verified-agent read as `currentTask`. `flair doctor` gets a new "Fleet presence" section listing known instances oldest-version-first and flagging any behind the newest version seen across the roster (org-relative, not npm-latest). Note: Presence doesn't currently participate in federation sync, so on a hub+spokes deployment this only reports the querying instance's own directly-heartbeating agents.
+
+### 🧪 Mixed-version federation compat CI (#638, #644)
+
+A nightly + PR-triggered suite spawns the last published `@tpsdev-ai/flair` alongside the current build as two independent Harper instances, pairs them reciprocally, and drives a real federation round-trip through each side's own CLI. Surfaced two orthogonal version-skew findings along the way (documented inline, not fixed there): the published baseline predates #634's local-credential fix and predates the `authorizeLocal`-forged-`super_user` hardening on `/FederationInstance`.
+
+### 🔒 Security
+
+- **Gate `FederationInstance`/`FederationPeers`/`HealthDetail`/`SkillScan` — `authorizeLocal` class (#632, closes #631)** — the #614/#630 CI backstop surfaced four resources with no explicit allow-decision, falling through to Harper's default `super_user` check, satisfiable by `authorizeLocal`'s forged loopback super_user. `FederationInstance`/`FederationPeers` now require admin; `HealthDetail` requires a verified caller (and fixes a backwards `isAdmin` default that treated an unresolved caller as admin); `SkillScan` requires a verified caller.
+
+### 🧹 Tooling / CI / hygiene
+
+- **Assert every Resource declares an explicit allow-decision (#630, closes #614)** — a repo-wide backstop that enumerates every `resources/*.ts` and fails when a new one ships with no allow-decision; found the four gaps closed by #632 above.
+- **Wire the remaining 5 packages' tests into CI (#633, closes #619)** — `flair-client`, `langgraph-flair`, `n8n-nodes-flair`, `openclaw-flair`, `pi-flair` had real test suites CI only typechecked, never ran.
+- **Fix port drift + stale security-model docs + `upgrade.md` (#629)** — standardized docs on the real `19926` default, corrected security-model docs still describing the retired grant-gated read model, unfroze `upgrade.md` from a pinned old version.
+- **Name the real storage engine — Harper 5.x is RocksDB, not LMDB (#648)** — corrects the #647 snapshot-consistency rationale, which cited the wrong engine (LMDB is what Harper ≤4 used, and remains in the dependency tree, which is where the mislabel came from). The quiesce-before-snapshot design itself is unchanged.
+- **Bump `@harperfast/harper` 5.1.15 → 5.1.17 (#607)** — patch bump: replication 503-vs-404 reliability, Docker entrypoint fix, npm-shrinkwrap packaging, MQTT shared-port. No Flair code change needed.
+
 ## [0.21.0] - 2026-07-07
 
 Federation edge-hardening, open-within-org memory read, an adopter-adoptability sweep (now including automatic MCP presence), and a security closure on Presence/OAuthAuthorize auth-bypass gaps — on harper 5.1.15.
