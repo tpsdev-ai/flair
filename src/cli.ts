@@ -9580,6 +9580,7 @@ program
 
 const soul = program.command("soul").description("Manage agent soul entries");
 soul.command("set")
+  .description("Set (upsert) a soul entry for an agent by key")
   .requiredOption("--agent <id>")
   .requiredOption("--key <key>")
   .requiredOption("--value <value>")
@@ -9611,6 +9612,7 @@ soul.command("set")
   });
 
 soul.command("get")
+  .description("Fetch a single soul entry by id (agent:key)")
   .argument("<id>")
   .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (id, opts) => {
@@ -9637,6 +9639,7 @@ soul.command("get")
   });
 
 soul.command("list")
+  .description("List all soul entries for an agent")
   .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
