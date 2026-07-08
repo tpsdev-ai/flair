@@ -28,6 +28,10 @@
  */
 
 import { databases } from "@harperfast/harper";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { resolveAgentAuth, verifyAgentRequest } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer } from "./ed25519-auth.js";
 
@@ -44,6 +48,93 @@ function idleThresholdMs(): number {
 function offlineThresholdMs(): number {
   const env = process.env.PRESENCE_OFFLINE_THRESHOLD_MS;
   return env ? Number(env) || 600_000 : 600_000;
+}
+
+// ─── Version stamping (flair#639) ──────────────────────────────────────────────
+//
+// Auto-presence (packages/flair-mcp/src/presence.ts, flair#608) gives agents a
+// heartbeat, but the record never said which Flair *instance* served it —
+// fleet skew across hosts was only discoverable by probing each one by hand.
+// Every heartbeat now stamps the RUNNING server's own flair + harper versions,
+// so `flair doctor`'s fleet-presence section (src/cli.ts + src/fleet-presence.ts)
+// can flag stale instances org-relatively, no per-host probing required.
+
+/**
+ * Resolve the running @tpsdev-ai/flair version from package.json (duplicated
+ * from resources/health.ts / admin-layout.ts / AdminInstance.ts — same "keep
+ * in sync" idiom noted in those files: each resource module keeps its own
+ * copy for dependency isolation rather than importing a shared helper).
+ * `process.env.npm_package_version` is only populated inside `npm run`, so
+ * reading package.json relative to THIS running module is the only way to
+ * report the version of the code that's actually executing.
+ */
+function resolveVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      join(here, "..", "..", "package.json"),
+      join(here, "..", "package.json"),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        const pkg = JSON.parse(readFileSync(p, "utf-8"));
+        if (pkg.version) return pkg.version;
+      }
+    }
+  } catch { /* fall through */ }
+  return process.env.npm_package_version ?? "dev";
+}
+
+/**
+ * Resolve the running @harperfast/harper version. Unlike flair's own
+ * package.json (readable via a plain relative path above), Harper's package
+ * only exports "." → dist/index.js — there's no "./package.json" subpath, so
+ * requiring it directly throws (Node's exports-map enforcement). Resolve the
+ * main entry via createRequire instead, then walk up from dist/index.js to
+ * the package root's package.json. Returns null (not a placeholder string)
+ * on failure so callers/readers can tell "genuinely unknown" apart from a
+ * real version — same tri-state as fabric-upgrade.ts's last-resort Harper
+ * version lookup.
+ */
+function resolveHarperVersion(): string | null {
+  try {
+    const req = createRequire(import.meta.url);
+    const mainPath = req.resolve("@harperfast/harper");
+    const pkgPath = join(dirname(mainPath), "..", "package.json");
+    if (existsSync(pkgPath)) {
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+      if (typeof pkg.version === "string") return pkg.version;
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
+/**
+ * Build the record to persist for a presence heartbeat. Pure — no Harper
+ * calls, no version resolution of its own — so the record SHAPE (and post()'s
+ * merge-vs-insert plumbing around it) can be unit-tested without a live
+ * Harper or the real filesystem. Callers pass already-resolved versions
+ * (resolveVersion()/resolveHarperVersion() above), so tests can pin them
+ * directly. Mirrors buildPresenceBody() in packages/flair-mcp/src/presence.ts
+ * — same "exported pure builder, exported for tests" idiom, server side.
+ */
+export function buildPresenceRecord(
+  agentId: string,
+  now: number,
+  currentTask: unknown,
+  activity: string | undefined,
+  existingActivity: string | undefined,
+  flairVersion: string,
+  harperVersion: string | null,
+): Record<string, unknown> {
+  return {
+    agentId,
+    lastHeartbeatAt: now,
+    currentTask: sanitizeCurrentTask(currentTask),
+    activity: activity ?? (existingActivity ?? "idle"),
+    flairVersion,
+    harperVersion,
+  };
 }
 
 // ─── Nonce replay + crypto helpers ─────────────────────────────────────────────
@@ -75,6 +166,12 @@ export function derivePresenceStatus(
 
 // ─── Public-safe field allowlist ──────────────────────────────────────────────
 
+// flairVersion/harperVersion (flair#639) are content-gated the SAME way as
+// currentTask (see get()'s includeVerifiedFields) even though version
+// numbers aren't free text — precedent is HealthDetail vs the public /Health
+// endpoint (resources/health.ts): version info is deliberately withheld from
+// anonymous callers to avoid fingerprinting a publicly exposed instance for
+// known-CVE targeting. Anonymous readers get null for both, same as currentTask.
 const ROSTER_ALLOWLIST = new Set([
   "id",
   "displayName",
@@ -84,6 +181,8 @@ const ROSTER_ALLOWLIST = new Set([
   "presenceStatus",
   "currentTask",
   "lastHeartbeatAt",
+  "flairVersion",
+  "harperVersion",
 ]);
 
 function sanitizeCurrentTask(task: unknown): string | null {
@@ -154,6 +253,10 @@ export class Presence extends (databases as any).flair.Presence {
    * super_user, Basic-admin, internal in-process) gets currentTask=null.
    * allowRead() is UNCHANGED (still `true`) — the roster itself stays public;
    * only the free-text field is gated, per the issue's field-level option.
+   *
+   * flairVersion/harperVersion (flair#639) ride the SAME gate, renamed to
+   * includeVerifiedFields since it now covers more than currentTask — see the
+   * ROSTER_ALLOWLIST comment above for why version numbers are gated too.
    */
   async get() {
     // Extract the raw request the same way post() does (getContext().request
@@ -164,7 +267,7 @@ export class Presence extends (databases as any).flair.Presence {
     const ctx = (this as any).getContext?.();
     const request = ctx?.request ?? ctx;
     const agentAuth = request ? await verifyAgentRequest(request) : null;
-    const includeCurrentTask = agentAuth !== null;
+    const includeVerifiedFields = agentAuth !== null;
 
     const now = Date.now();
     const idleThreshold = idleThresholdMs();
@@ -199,10 +302,16 @@ export class Presence extends (databases as any).flair.Presence {
           // Anonymous/unverified readers get `null` here (key stays present,
           // schema-stable) instead of the sanitized task text — see the
           // currentTask CONTENT gate doc above get().
-          currentTask: includeCurrentTask ? sanitizeCurrentTask(row?.currentTask) : null,
+          currentTask: includeVerifiedFields ? sanitizeCurrentTask(row?.currentTask) : null,
           lastHeartbeatAt: typeof row?.lastHeartbeatAt === "number"
             ? row.lastHeartbeatAt
             : Number(row?.lastHeartbeatAt ?? 0),
+          // flair#639: absent on records written before this feature (older
+          // instance, never re-heartbeated since upgrading) — `row?.field ??
+          // null` tolerates that directly, same as every other optional field
+          // here. Gated to verified readers; see ROSTER_ALLOWLIST comment.
+          flairVersion: includeVerifiedFields ? (row?.flairVersion ?? null) : null,
+          harperVersion: includeVerifiedFields ? (row?.harperVersion ?? null) : null,
         };
 
         results.push(pickAllowlisted(entry));
@@ -331,12 +440,18 @@ export class Presence extends (databases as any).flair.Presence {
         existing = await (databases as any).flair.Presence.get(agentId);
       } catch { /* first heartbeat */ }
 
-      const record: Record<string, unknown> = {
+      // flair#639: stamp THIS server's own running versions on every
+      // heartbeat — an upgrade takes effect on the instance's very next
+      // heartbeat, no separate migration needed.
+      const record = buildPresenceRecord(
         agentId,
-        lastHeartbeatAt: now,
-        currentTask: sanitizeCurrentTask(currentTask),
-        activity: activity ?? (existing?.activity ?? "idle"),
-      };
+        now,
+        currentTask,
+        activity,
+        existing?.activity,
+        resolveVersion(),
+        resolveHarperVersion(),
+      );
 
       if (existing) {
         const merged = { ...existing, ...record };
