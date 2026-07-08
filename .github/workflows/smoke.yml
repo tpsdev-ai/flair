@@ -56,6 +56,21 @@ jobs:
             -o models/nomic-embed-text-v1.5.Q4_K_M.gguf
           echo "Model downloaded ($(du -sh models/*.gguf | cut -f1))"
 
+      # Single source of truth (#625): derive the Harper Docker image tag from the
+      # @harperfast/harper version declared in package.json, so the Docker-based
+      # validation can never drift behind the Harper that ships to npm users (the
+      # skew that bit v0.14.0: 5.0.1 image vs 5.1.14 dep).
+      - name: Resolve Harper image tag from package.json
+        id: harper-image
+        run: |
+          TAG=$(node -p "require('./package.json').dependencies['@harperfast/harper']")
+          case "$TAG" in
+            [0-9]*) : ;; # exact pin — usable directly as a Docker image tag
+            *) echo "::error::@harperfast/harper is '$TAG' in package.json — not an exact version pin, cannot derive a Docker image tag"; exit 1 ;;
+          esac
+          echo "Harper Docker image tracks the npm dep: harperfast/harper:$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Start Flair (ephemeral Harper + Flair components)
         run: |
           docker run -d \
@@ -69,7 +84,7 @@ jobs:
             -e OPERATIONSAPI_NETWORK_PORT=9925 \
             -e HTTP_PORT=9926 \
             --entrypoint /bin/sh \
-            harperfast/harper:5.1.14 \
+            harperfast/harper:${{ steps.harper-image.outputs.tag }} \
             -c "harper install && harper dev /flair"
 
           # Wait for Harper to be healthy

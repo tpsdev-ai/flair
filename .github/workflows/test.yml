@@ -115,8 +115,10 @@ jobs:
       # race that doesn't reproduce on native Node 22 spawns. The Harper
       # server code is byte-identical across artifacts — only the runtime
       # environment differs. The native-spawn choice is a version-agnostic
-      # mitigation; the E2E/smoke jobs run the Docker image (now 5.1.14, matching
-      # the bundled npm dep) and are where the race, if still present, surfaces.
+      # mitigation; the E2E/smoke jobs run the Docker image (its tag is derived
+      # from the @harperfast/harper npm dep at CI time — see the resolve step
+      # below, #625 — so it can't drift) and are where the race, if still
+      # present, surfaces.
       # Tracked upstream: https://github.com/HarperFast/harper/issues/386
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -147,7 +149,7 @@ jobs:
           echo "Model downloaded ($(du -sh models/*.gguf | cut -f1))"
       - name: Run integration tests (native Harper spawn)
         # No HARPER_HTTP_URL — harper-lifecycle spawns Harper from node_modules
-        # per the npm-installed @harperfast/harper (5.1.14). Avoids the Docker
+        # per the npm-installed @harperfast/harper. Avoids the Docker
         # runtime environment that has triggered HarperFast/harper#386.
         #
         # integration_repeats (workflow_dispatch input, default 1) runs the
@@ -167,6 +169,21 @@ jobs:
             bun test test/integration/
             echo "::endgroup::"
           done
+      # Single source of truth (#625): derive the Harper Docker image tag from the
+      # @harperfast/harper version declared in package.json, so the Docker-based
+      # E2E/Playwright validation can never drift behind the Harper that ships to
+      # npm users (the skew that bit v0.14.0: 5.0.1 image vs 5.1.14 dep).
+      - name: Resolve Harper image tag from package.json
+        id: harper-image
+        run: |
+          TAG=$(node -p "require('./package.json').dependencies['@harperfast/harper']")
+          case "$TAG" in
+            [0-9]*) : ;; # exact pin — usable directly as a Docker image tag
+            *) echo "::error::@harperfast/harper is '$TAG' in package.json — not an exact version pin, cannot derive a Docker image tag"; exit 1 ;;
+          esac
+          echo "Harper Docker image tracks the npm dep: harperfast/harper:$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Start Harper with Flair component (for E2E / Playwright)
         run: |
           docker run -d \
@@ -180,7 +197,7 @@ jobs:
             -e OPERATIONSAPI_NETWORK_PORT=9925 \
             -e HTTP_PORT=9926 \
             --entrypoint /bin/sh \
-            harperfast/harper:5.1.14 \
+            harperfast/harper:${{ steps.harper-image.outputs.tag }} \
             -c "harper install && harper dev /flair"
           # Wait for Harper to be healthy (Basic auth required by Harper's authorizeLocal)
           for i in $(seq 1 60); do
