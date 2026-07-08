@@ -6863,7 +6863,7 @@ const snapshotCmd = program
 
 snapshotCmd
   .command("create")
-  .description("Take a physical snapshot of the Flair data directory now (reuses the flair#637 mechanism)")
+  .description("Take a physical snapshot of the Flair data directory now (briefly stops Flair for a consistent copy — use `flair backup` for a no-downtime logical export)")
   .option("--data-dir <path>", "Data directory to snapshot (default: ~/.flair/data)")
   .option("--port <port>", "Harper HTTP port (used to quiesce Flair around the snapshot)")
   .action(async (opts) => {
@@ -6875,6 +6875,7 @@ snapshotCmd
     }
 
     console.log(`Snapshotting ${dataDir}...`);
+    console.log("(Flair will be briefly stopped for a point-in-time-consistent copy, then restarted.)");
     // Same consistency requirement as the upgrade path's snapshot step: a
     // live RocksDB directory (WAL/MANIFEST/SST) isn't safe to copy while
     // Flair is running, so this stops Flair, snapshots, and restarts it —
