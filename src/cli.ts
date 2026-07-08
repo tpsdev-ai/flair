@@ -8569,7 +8569,9 @@ sessionSnapshot
 // ─── Memory and Soul commands ────────────────────────────────────────────────
 
 const memory = program.command("memory").description("Manage agent memories");
-memory.command("add [content]").requiredOption("--agent <id>")
+memory.command("add [content]")
+  .description("Write a new memory row for an agent (content via positional arg or --content)")
+  .requiredOption("--agent <id>")
   .option("--content <text>", "memory content (alias for positional arg)")
   .option("--durability <d>", "standard").option("--tags <csv>")
   .option("--summary <text>", "agent-set multi-sentence dense compression (3-tier chain: subject → summary → content)")
@@ -8675,6 +8677,7 @@ memory.command("write-task-summary")
   });
 
 memory.command("search [query]")
+  .description("Semantic search over an agent's memories (query via positional arg or --q)")
   .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
   .option("--q <query>", "search query (alias for positional arg)")
   .option("--limit <n>", "Max results", "5")
