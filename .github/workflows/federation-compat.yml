@@ -1,0 +1,102 @@
+# Mixed-version federation compatibility (flair#638).
+#
+# Every rollout puts the fleet in a temporarily mixed-version state (origin
+# upgraded before peers, or one host ahead of the cluster) — federation
+# between adjacent versions has never had a dedicated gate. This job spawns
+# the previously-published `@tpsdev-ai/flair` (npm dist-tag `latest` at run
+# time) alongside the current build, pairs them reciprocally, and drives a
+# real federation round-trip (pairing + bidirectional memory sync) through
+# each side's OWN CLI binary. See test/compat/federation-mixed-version.test.ts
+# for the full design rationale, including why "presence" isn't part of the
+# round-trip (it isn't federated in this codebase today) and why pairing is
+# reciprocal (federation sync is push-only, one direction per call).
+#
+# Scoped narrowly on purpose (per the issue): just this one compat suite, not
+# a re-run of the whole integration suite. No embedding model predownload —
+# the round-trip check reads back via the ops API rather than semantic
+# search, so it doesn't depend on embeddings being loaded.
+name: Federation Mixed-Version Compat
+
+on:
+  schedule:
+    # Nightly, independent of any PR activity — catches drift between
+    # npm-latest and `main` even on days with no federation-path changes.
+    - cron: "17 7 * * *"
+  pull_request:
+    branches: [main]
+    paths:
+      # Federation resource + supporting crypto/classify/cleanup/nonce modules.
+      - "resources/Federation.ts"
+      - "resources/federation-classify.ts"
+      - "resources/federation-cleanup.ts"
+      - "resources/federation-crypto.ts"
+      - "resources/federation-nonce-store.ts"
+      # Auth gates federation-adjacent resources call into (allowAdmin/
+      # allowVerified/resolveAgentAuth, and the Ed25519 verify primitives
+      # those build on).
+      - "resources/agent-auth.ts"
+      - "resources/ed25519-auth.ts"
+      # Federation tables (Instance/PairingToken/Peer/Nonce/SyncLog).
+      - "schemas/federation.graphql"
+      # The CLI's own federation pair/token/sync/watch commands and
+      # runFederationSyncOnce/ensureFlairPairInitiatorRole — "sync code" per
+      # the issue. Coarse-grained (src/cli.ts covers the whole CLI surface,
+      # not just federation), but there's no isolated federation-CLI module
+      # to filter on more tightly today.
+      - "src/cli.ts"
+      # Ed25519 instance-identity keystore federation pair/sync sign with.
+      - "src/keystore.ts"
+      # The compat suite itself + this workflow (standard self-trigger).
+      - "test/compat/**"
+      - ".github/workflows/federation-compat.yml"
+  workflow_dispatch:
+
+jobs:
+  federation-compat:
+    name: Mixed-Version Federation Pairing + Sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+
+      # Node 22+ is required by flair's engines, and harper-lifecycle.ts
+      # spawns Harper under node (not bun) — see its own comment on
+      # uv_ip6_addr. Also the runtime the npm-installed baseline's own
+      # dist/cli.js is spawned under.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+
+      - name: Install (sfw — retry on intermittent Socket-firewall hang, ops-fumh)
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::sfw bun install (attempt $attempt/3)"
+            if timeout 300 sfw bun install --frozen-lockfile; then echo "::endgroup::"; exit 0; fi
+            echo "::endgroup::"
+            echo "sfw install attempt $attempt failed or timed out (5m) — the sfw hang is intermittent; retrying in 10s"
+            sleep 10
+          done
+          echo "sfw bun install failed after 3 attempts"; exit 1
+
+      # Harper's bundled embeddings component resolves its native binary at
+      # component-load time regardless of whether a model file is present —
+      # every other integration-test CI job installs this before spawning
+      # Harper on Linux (see test.yml's "Integration Tests" job) to avoid a
+      # startup crash. The compat test installs the same for the
+      # npm-installed baseline's own temp directory itself (platform-gated).
+      - name: Install linux-x64 native binary for embeddings (HEAD build)
+        run: bun add --no-save @node-llama-cpp/linux-x64@3
+
+      - name: Build Flair resources and CLI
+        run: bun run build && bun run build:cli
+
+      - name: Run mixed-version federation compat suite
+        run: bun test test/compat/
