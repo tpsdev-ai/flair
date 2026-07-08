@@ -7994,8 +7994,9 @@ fleet
   .command("verify")
   .description("Sweep a Fabric origin + its known federation peers for version/health convergence")
   .requiredOption("--target <url>", "Fabric URL to verify (the origin node)")
-  .option("--fabric-user <user>", "Fabric admin username (env: FABRIC_USER)")
-  .option("--fabric-password <pass>", "Fabric admin password (env: FABRIC_PASSWORD)")
+  .option("--fabric-user <user>", "Fabric admin username (env: FABRIC_USER — preferred; inline leaks to ps/shell history)")
+  .option("--fabric-password <pass>", "Fabric admin password (prefer FABRIC_PASSWORD env or --fabric-password-file; inline leaks to shell history)")
+  .option("--fabric-password-file <path>", "Read the Fabric admin password from a mode-0600 file (keeps it out of argv and env)")
   .option("--expect-version <semver>", "Version every node must report (default: the origin's own reported version — a self-consistency check)")
   .option("--timeout <ms>", "Per-node /Health poll timeout in ms", "60000")
   .option("--json", "Emit JSON (also: pipe + FLAIR_OUTPUT=json)")
@@ -8014,17 +8015,15 @@ a harper-pro-only operation). A Fabric replica that was never
 federation-paired (\`flair federation pair\`) is invisible to this sweep —
 see src/fleet-verify.ts's file header for the full caveat.`)
   .action(async (opts) => {
-    const fabricUser = opts.fabricUser ?? process.env.FABRIC_USER;
-    const fabricPassword = opts.fabricPassword ?? process.env.FABRIC_PASSWORD;
+    // Single source of truth for cred resolution + shell-history warnings,
+    // shared with `flair upgrade --target` and `flair deploy`.
+    const { fabricUser, fabricPassword, warnings } = resolveFabricCredentials(opts);
+    for (const w of warnings) console.error(render.wrap(render.c.dim, w));
 
     if (!fabricUser || !fabricPassword) {
       console.error(render.wrap(render.c.red, "flair fleet verify: credentials required"));
-      console.error("  pass --fabric-user + --fabric-password (or FABRIC_USER / FABRIC_PASSWORD env)");
+      console.error("  set FABRIC_USER + FABRIC_PASSWORD env, or --fabric-password-file, or (discouraged) --fabric-user/--fabric-password inline");
       process.exit(1);
-    }
-    // Warn on password-via-flag (leaks to shell history). Env is preferred.
-    if (opts.fabricPassword && !process.env.FABRIC_PASSWORD) {
-      console.error(render.wrap(render.c.dim, "warning: --fabric-password leaks to shell history. Prefer FABRIC_PASSWORD env."));
     }
 
     const result: FleetSweepResult = await sweepFleet({
