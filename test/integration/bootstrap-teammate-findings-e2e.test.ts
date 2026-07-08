@@ -2,21 +2,32 @@
 // relevant to your task" section: real-Harper, real-embedding end-to-end
 // coverage of the gap this feature closes.
 //
-// Layer 1 (the resolveReadScope no-grants simplification, already merged) made a grant-visible teammate's SHARED
-// memory reachable through bootstrap's read scope and scored it against
-// currentTask alongside the caller's own memories — but it rendered
-// identically to the caller's own memory (no attribution) and landed in the
-// SAME "Relevant Knowledge" section (not surfaced distinctly). This test
-// proves the fix: a grant-visible teammate's task-relevant SHARED memory now
-// appears attributed ("[via <ownerId>]") in its OWN "Teammate findings
-// relevant to your task" section — never mixed into "Relevant Knowledge",
-// which stays the caller's own findings only — while the SAME owner's
-// PRIVATE memory (equally task-relevant by content) never surfaces at all,
-// proving Layer 1's read-exclusion still holds under this presentation-only
-// split (this test does NOT touch, and is not testing, resolveReadScope()
-// itself — see test/integration/memory-visibility-scoping-e2e.test.ts for
-// that boundary's own dedicated coverage; the private-exclusion assertion
-// here is a guard against a regression in the NEW scored-path split code).
+// resolveReadScope() (resources/memory-read-scope.ts) made any other in-org
+// agent's non-private memory reachable through bootstrap's read scope and
+// scored it against currentTask alongside the caller's own memories — but it
+// rendered identically to the caller's own memory (no attribution) and
+// landed in the SAME "Relevant Knowledge" section (not surfaced distinctly).
+// This test proves the presentation fix: a task-relevant non-private
+// cross-agent memory now appears attributed ("[via <ownerId>]") in its OWN
+// "Teammate findings relevant to your task" section — never mixed into
+// "Relevant Knowledge", which stays the caller's own findings only — while
+// that same owner's PRIVATE memory (equally task-relevant by content) never
+// surfaces at all, proving resolveReadScope()'s read-exclusion still holds
+// under this presentation-only split (this test does NOT touch, and is not
+// testing, resolveReadScope() itself — see test/integration/memory-
+// visibility-scoping-e2e.test.ts for that boundary's own dedicated coverage;
+// the private-exclusion assertion here is a guard against a regression in
+// the scored-path split code).
+//
+// Two fixtures probe this: `owner`, who DOES hold a MemoryGrant with
+// `grantee` (kept from this test's original pre-#578 authoring — see the
+// `owner` tests), and `stranger`, who has NO grant relationship with
+// `grantee` whatsoever (see the `stranger` doc comment below and the
+// dedicated "open-within-org" test). Both must behave identically — a
+// grant's presence or absence must not change whether a non-private record
+// surfaces or a private one stays hidden. That equivalence, not the grant
+// itself, is what open-within-org read means, and the `stranger` fixture is
+// the direct completion of flair#550 against the model that shipped in #578.
 //
 // Pattern: test/integration/memory-visibility-scoping-e2e.test.ts (Ed25519
 // signing, grant seeding via adminOp) + test/integration/semantic-search-
@@ -119,6 +130,15 @@ function extractSection(context: string, header: string): string {
 let harper: HarperInstance;
 const owner = mkAgent(`t550-owner-${randomUUID()}`);
 const grantee = mkAgent(`t550-grantee-${randomUUID()}`);
+// A THIRD agent with NO MemoryGrant relationship to grantee at all (no
+// insertGrant call for this agent anywhere in beforeAll below) — the
+// load-bearing proof that teammate-findings surfacing is open-within-org,
+// not grant-gated. Under the pre-#578 grant-gated model this agent's records
+// would never have entered grantee's read-scope; under open-within-org its
+// non-private record must surface exactly like the grant-holding owner's
+// does, and its private record must never surface, regardless of the
+// absent grant.
+const stranger = mkAgent(`t550-stranger-${randomUUID()}`);
 
 const ID_SHARED = `${owner.id}-shared`;
 const ID_PRIVATE = `${owner.id}-private`;
@@ -146,6 +166,13 @@ const ID_SHARED_PERM = `${owner.id}-shared-perm`;
 const CONTENT_OWN_PERM = "flair-550 marker: standing rule — I always double-check indemnification caps before signing any vendor agreement.";
 const CONTENT_SHARED_PERM = "flair-550 marker: standing rule — the procurement team requires two competing quotes on file before any renewal above fifty thousand dollars.";
 
+// stranger's records — NO grant to grantee exists for these at all (see the
+// `stranger` doc comment above).
+const ID_STRANGER_SHARED = `${stranger.id}-shared`;
+const ID_STRANGER_PRIVATE = `${stranger.id}-private`;
+const CONTENT_STRANGER_SHARED = "flair-550 marker: for the Acme Corp vendor contract renegotiation, procurement flagged that Acme's incumbent competitor already undercut list price by 8 percent last cycle.";
+const CONTENT_STRANGER_PRIVATE = "flair-550 marker: for the Acme Corp vendor contract renegotiation, our CFO's absolute hard floor (never shared outside finance) is a 22 percent minimum margin.";
+
 const BACKDATED = new Date(Date.now() - 40 * 24 * 3600_000).toISOString();
 
 describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task' (real Harper, real embeddings)", () => {
@@ -153,7 +180,10 @@ describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task
     harper = await startHarper();
     await registerAgent(harper, owner);
     await registerAgent(harper, grantee);
+    await registerAgent(harper, stranger);
     await insertGrant(harper, owner.id, grantee.id, "read");
+    // Deliberately NO insertGrant call involving `stranger` — grantee and
+    // stranger have never had any grant relationship whatsoever.
 
     await putMemory(harper, owner, ID_SHARED, {
       agentId: owner.id, content: CONTENT_SHARED, durability: "standard", visibility: "shared", createdAt: BACKDATED,
@@ -171,6 +201,13 @@ describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task
     await putMemory(harper, owner, ID_SHARED_PERM, {
       agentId: owner.id, content: CONTENT_SHARED_PERM, durability: "permanent", visibility: "shared", createdAt: BACKDATED,
     });
+    // Ungranted stranger's pair — the open-within-org proof.
+    await putMemory(harper, stranger, ID_STRANGER_SHARED, {
+      agentId: stranger.id, content: CONTENT_STRANGER_SHARED, durability: "standard", visibility: "shared", createdAt: BACKDATED,
+    });
+    await putMemory(harper, stranger, ID_STRANGER_PRIVATE, {
+      agentId: stranger.id, content: CONTENT_STRANGER_PRIVATE, durability: "standard", visibility: "private", createdAt: BACKDATED,
+    });
   }, 180_000);
 
   afterAll(async () => { if (harper) await stopHarper(harper); });
@@ -187,10 +224,12 @@ describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task
     // Section-count structure: exactly one own task-relevant finding
     // (CONTENT_OWN — the own PERMANENT memory is excluded from the scored path
     // via includedIds, so it can't inflate this), and at least one teammate
-    // task-relevant finding. `teammate` is `>= 1` rather than exactly 1 because
-    // the seed's teammate PERMANENT rule (CONTENT_SHARED_PERM, about vendor
-    // renewals) is legitimately task-relevant too and correctly lands here —
-    // proving the split by ORIGIN, not that only one teammate memory can show.
+    // task-relevant finding. `teammate` is `>= 1` rather than an exact count
+    // because several other seeded records (owner's CONTENT_SHARED_PERM,
+    // stranger's CONTENT_STRANGER_SHARED — see the dedicated open-within-org
+    // test below) are also legitimately task-relevant and correctly land
+    // here — proving the split by ORIGIN, not that only one teammate memory
+    // can show.
     expect(body.sections?.relevant, `sections.relevant — full response: ${JSON.stringify(body.sections)}`).toBe(1);
     expect(body.sections?.teammate, `sections.teammate — full response: ${JSON.stringify(body.sections)}`).toBeGreaterThanOrEqual(1);
 
@@ -207,6 +246,22 @@ describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task
     expect(relevantSection, `"Relevant Knowledge" section missing or empty — full context:\n${context}`).toContain(CONTENT_OWN);
     expect(relevantSection).not.toContain("[via");
     expect(relevantSection).not.toContain(CONTENT_SHARED);
+  }, 60_000);
+
+  test("open-within-org, the flair#550 gap this PR closes: a NON-GRANTED stranger's non-private finding surfaces attributed in 'Teammate findings'; the same stranger's PRIVATE finding never surfaces", async () => {
+    // `stranger` has no MemoryGrant with `grantee` at all (see beforeAll) —
+    // this is the load-bearing real-Harper proof that teammate-findings
+    // surfacing no longer depends on MemoryGrant, only on visibility.
+    const body = await bootstrap(harper, grantee, { agentId: grantee.id, maxTokens: 8000, currentTask: CURRENT_TASK });
+    const context: string = body.context ?? "";
+
+    // Security invariant first: the stranger's PRIVATE finding — equally
+    // task-relevant by content — must never appear anywhere, grant or no grant.
+    expect(context, "ungranted stranger's PRIVATE memory must never appear in grantee's bootstrap").not.toContain(CONTENT_STRANGER_PRIVATE);
+
+    const teammateSection = extractSection(context, "Teammate findings relevant to your task");
+    expect(teammateSection, `"Teammate findings" section missing or empty — full context:\n${context}`).toContain(CONTENT_STRANGER_SHARED);
+    expect(teammateSection).toContain(`[via ${stranger.id}]`);
   }, 60_000);
 
   test("no currentTask → no 'Teammate findings' section, AND a grant-visible teammate PERMANENT memory does NOT bleed into the reader's own Core Principles", async () => {

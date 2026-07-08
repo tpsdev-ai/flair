@@ -60,6 +60,17 @@ jobs:
           mode: firewall-free
       - run: sfw bun install --frozen-lockfile
       - run: bun test test/unit/
+      # packages/flair-mcp/test/*.test.ts (mcp.test.ts, mcp-node-preflight.test.ts,
+      # session-start-hook.test.ts) weren't gated by CI — `bun test test/unit/`
+      # above only covers the repo root (closes #491, follow-up to #490 per Kern's
+      # review). All three files are hermetic: pure-logic assertions, an injected
+      # mock bootstrap client, and a local `node` spawn against the built shim —
+      # no live Flair daemon or network I/O, so they belong in this job rather
+      # than test-integration.
+      - name: "Build flair-client (workspace dep flair-mcp imports by its built dist/)"
+        run: cd packages/flair-client && bun run build
+      - name: "flair-mcp package tests"
+        run: cd packages/flair-mcp && bun test
 
   test-integration:
     name: Integration Tests
@@ -301,8 +312,8 @@ jobs:
       - name: Install npm-stable, seed data, upgrade, verify
         run: |
           set -euo pipefail
-          TMPDIR=$(mktemp -d)
-          cd "$TMPDIR"
+          BASE_DIR=$(mktemp -d)
+          cd "$BASE_DIR"
           npm init -y > /dev/null
 
           # 1. Install current npm-stable
@@ -321,25 +332,61 @@ jobs:
             exit 0
           fi
 
-          FLAIR="node $(pwd)/node_modules/@tpsdev-ai/flair/dist/cli.js"
+          BASE_FLAIR="node $BASE_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
           PORT=19998
           export FLAIR_ADMIN_PASS=upgrade-smoke-admin
           export FLAIR_URL=http://127.0.0.1:$PORT
 
           # 2. Init at baseline + write marker memory
-          $FLAIR init --agent-id upgrade --port $PORT --admin-pass "$FLAIR_ADMIN_PASS" --skip-soul
-          $FLAIR memory add --agent upgrade --content "upgrade-smoke-pre-marker"
+          $BASE_FLAIR init --agent-id upgrade --port $PORT --admin-pass "$FLAIR_ADMIN_PASS" --skip-soul
+          $BASE_FLAIR memory add --agent upgrade --content "upgrade-smoke-pre-marker"
 
-          PRE=$($FLAIR memory search --agent upgrade --q "upgrade-smoke-pre-marker")
+          PRE=$($BASE_FLAIR memory search --agent upgrade --q "upgrade-smoke-pre-marker")
           echo "$PRE" | grep -q "upgrade-smoke-pre-marker" || {
             echo "FAIL: baseline write/search didn't work — setup broken, not an upgrade regression"
             exit 1
           }
 
-          # 3. Stop baseline, overinstall HEAD tarball
-          $FLAIR stop --port $PORT || true
+          # 3. Stop baseline. Install HEAD into a FRESH project dir rather than
+          # reifying the tarball on top of baseline's node_modules in place.
+          #
+          # `flair stop` (cli.ts) sends SIGTERM and returns immediately — it
+          # does not wait for the Harper child process to actually exit. The
+          # very next command used to be `npm install <tarball>` run in the
+          # SAME directory the just-killed process was serving out of, which
+          # overwrites an existing registry-resolved @tpsdev-ai/flair with a
+          # same-named local-tarball-resolved one. That combination (possible
+          # file contention from the not-yet-exited process, plus npm's
+          # arborist reifying a same-name registry→tarball swap in place) can
+          # throw during reify's commit phase. npm's own rollback path for a
+          # failed reify has a long-standing upstream bug (npm/cli#4907:
+          # `rollbackMoveBackRetiredUnchanged` in @npmcli/arborist) that
+          # itself crashes with `ERR_INVALID_ARG_TYPE: The "from" argument
+          # must be of type string` — masking whatever the real error was.
+          # This hit flair#611 deterministically across two separate CI runs
+          # (2026-07-07): baseline install, HEAD tarball install, Ed25519
+          # auth, and semantic search all verified clean beforehand, so this
+          # was never a 0.21.0 content regression — it's an npm-internals /
+          # process-teardown race in the test's own in-place-overwrite
+          # choreography, exercised for the first time here because prior
+          # release PRs were same-version (BASELINE == HEAD) no-ops.
+          #
+          # Fix: install HEAD fresh, in its own directory, instead of
+          # overwriting baseline's tree. Flair's data lives in ~/.flair
+          # (home-dir scoped, independent of node_modules location), so this
+          # still exercises the real invariant under test — HEAD starting
+          # against baseline's on-disk data — without ever asking npm to
+          # reconcile/rename an existing differently-sourced package or race
+          # a still-terminating daemon.
+          $BASE_FLAIR stop --port $PORT || true
+
+          HEAD_DIR=$(mktemp -d)
+          cd "$HEAD_DIR"
+          npm init -y > /dev/null
           npm install "${{ steps.pack.outputs.TGZ_PATH }}"
           npm install --no-save @node-llama-cpp/linux-x64@3
+
+          FLAIR="node $HEAD_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
 
           NEW=$(node -p "require('@tpsdev-ai/flair/package.json').version")
           [ "$NEW" = "$HEAD_VERSION" ] || { echo "FAIL: expected $HEAD_VERSION in node_modules, got $NEW"; exit 1; }

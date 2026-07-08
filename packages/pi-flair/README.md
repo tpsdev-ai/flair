@@ -56,7 +56,7 @@ Or use environment variables:
 
 ```bash
 export FLAIR_AGENT_ID=my-agent
-export FLAIR_URL=http://127.0.0.1:9926
+export FLAIR_URL=http://127.0.0.1:19926
 pi
 ```
 
@@ -73,7 +73,7 @@ pi
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FLAIR_AGENT_ID` | *(required)* | Agent identity for memory scoping |
-| `FLAIR_URL` | `http://127.0.0.1:9926` | Flair server URL |
+| `FLAIR_URL` | `http://127.0.0.1:19926` | Flair server URL |
 | `FLAIR_KEY_PATH` | auto-resolved | Path to Ed25519 private key |
 | `FLAIR_MAX_RECALL_RESULTS` | `5` | Max results for memory_search |
 | `FLAIR_MAX_BOOTSTRAP_TOKENS` | `4000` | Max tokens in bootstrap output |

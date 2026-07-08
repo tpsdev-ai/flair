@@ -382,4 +382,119 @@ describe("Presence API integration", () => {
     // This should fail with unknown_agent
     expect([401, 403]).toContain(res.status);
   });
+
+  // ── 8. authorizeLocal escalation (#604) — bare PUT /Presence ───────────────
+  // The auth-middleware's public early-return used to match /Presence on
+  // ANY method (exact path, no method guard), so a bare `PUT /Presence`
+  // (collection-level, no id — Harper routes it to the same .put() as
+  // by-id PUT) skipped the middleware entirely. A credential-less loopback
+  // PUT then reached Presence.put()'s resolveAgentAuth() call with no
+  // tpsAnonymous/tpsAgent annotation, which fell through to Harper's raw
+  // `context.user` — populated by `authorizeLocal` (config.yaml: true) for
+  // ANY credential-less loopback request, with no signature and no
+  // password — so the ownership check saw an "admin" caller (isAdmin=true)
+  // and let it PAST the ownership guard unauthenticated (`super.put()` would
+  // then separately 400 on the missing primary key for a bare collection PUT
+  // — but the auth bypass itself, reaching super.put() as forged-admin with
+  // zero credentials, is the hole being closed; a by-id PUT, the real write
+  // path, has no such structural block and WOULD have written). Fixed by
+  // scoping the early-return to GET only, so PUT now always transits the
+  // general middleware path, which marks a genuinely headerless request
+  // tpsAnonymous BEFORE Harper's ambient elevation lands.
+
+  test("#604: credential-less loopback PUT /Presence (no id, no auth) → rejected before reaching the write path", async () => {
+    const victimId = "presence-604-victim";
+    // Seed a baseline record via a real signed write so we can prove the
+    // unauthenticated PUT below did not alter it.
+    const victimKp = makeKeypair();
+    await seedAgent(harper.opsURL, adminAuth(), victimId, victimKp.publicKey, "Victim Agent");
+    const seedAuth = buildAuthHeader(victimId, "POST", "/Presence", victimKp.privateKey);
+    await fetch(`${harper.httpURL}/Presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: seedAuth },
+      body: JSON.stringify({ currentTask: "baseline before 604 PUT attempt", activity: "coding" }),
+    });
+
+    // The escalation attempt: bare, unauthenticated, collection-level PUT.
+    const res = await fetch(`${harper.httpURL}/Presence`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: victimId, currentTask: "PWNED — authorizeLocal escalation", activity: "coding" }),
+    });
+    // Must NOT be a successful write. resolveAgentAuth's anonymous verdict
+    // → Presence.put() returns 401; Harper's own table gate could also
+    // intervene first with 403 depending on routing — either is an
+    // acceptable "not authorized," 200 is the only unacceptable outcome.
+    expect(res.status).not.toBe(200);
+    expect([401, 403]).toContain(res.status);
+
+    // Confirm the victim's record was NOT overwritten.
+    const getAuth = buildAuthHeader(victimId, "GET", "/Presence", victimKp.privateKey);
+    const check = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    const roster = await check.json();
+    const victim = roster.find((r: any) => r.id === victimId);
+    expect(victim).toBeDefined();
+    expect(victim.currentTask).toBe("baseline before 604 PUT attempt");
+  }, 30_000);
+
+  test("credential-less loopback PUT /Presence/<id> (the real write path) → also rejected, does NOT write", async () => {
+    // By-id PUT was never on the early-return allowlist (exact-path match
+    // only), so this was already safe pre-fix — this is a regression guard
+    // proving the ACTUAL exploitable write path (super.put() with a real
+    // primary key) stays protected, not just the structurally-inert bare
+    // collection PUT above.
+    const victimId = "presence-604-victim-byid";
+    const victimKp = makeKeypair();
+    await seedAgent(harper.opsURL, adminAuth(), victimId, victimKp.publicKey, "Victim Agent 2");
+    const seedAuth = buildAuthHeader(victimId, "POST", "/Presence", victimKp.privateKey);
+    await fetch(`${harper.httpURL}/Presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: seedAuth },
+      body: JSON.stringify({ currentTask: "baseline before 604 by-id PUT attempt", activity: "coding" }),
+    });
+
+    const res = await fetch(`${harper.httpURL}/Presence/${victimId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: victimId, currentTask: "PWNED via by-id PUT", activity: "coding" }),
+    });
+    expect(res.status).not.toBe(200);
+    expect([401, 403]).toContain(res.status);
+
+    const getAuth = buildAuthHeader(victimId, "GET", "/Presence", victimKp.privateKey);
+    const check = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    const roster = await check.json();
+    const victim = roster.find((r: any) => r.id === victimId);
+    expect(victim).toBeDefined();
+    expect(victim.currentTask).toBe("baseline before 604 by-id PUT attempt");
+  }, 30_000);
+
+  test("genuine Ed25519-signed PUT /Presence/<id> (own record) still succeeds", async () => {
+    const path = `/Presence/${agent1.id}`;
+    const auth = buildAuthHeader(agent1.id, "PUT", path, agent1.privateKey);
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ agentId: agent1.id, currentTask: "signed PUT still works", activity: "coding" }),
+    });
+    expect([200, 204]).toContain(res.status);
+
+    const getAuth = buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey);
+    const check = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    const roster = await check.json();
+    const a1 = roster.find((r: any) => r.id === agent1.id);
+    expect(a1.currentTask).toBe("signed PUT still works");
+  }, 30_000);
+
+  test("genuine Ed25519-signed PUT /Presence for ANOTHER agent's record → 403", async () => {
+    const path = "/Presence";
+    // agent2 signs the request but targets agent1's record in the body.
+    const auth = buildAuthHeader(agent2.id, "PUT", path, agent2.privateKey);
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ agentId: agent1.id, currentTask: "cross-agent PUT attempt", activity: "coding" }),
+    });
+    expect(res.status).toBe(403);
+  }, 30_000);
 });

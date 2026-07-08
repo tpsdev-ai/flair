@@ -42,6 +42,28 @@ function futureISO(ms: number): string {
   return new Date(Date.now() + ms).toISOString();
 }
 
+/**
+ * 302 redirect — deliberately NOT `Response.redirect()`.
+ *
+ * FOUND while writing the real-Harper integration test for #604 (this exact
+ * gap is why the coverage doc above calls OAuthAuthorize.post() untestable
+ * without a running Harper instance — no test had ever hit this path over
+ * real HTTP before). Pre-existing on main, unrelated to the #604 auth fix:
+ * per the Fetch spec, `Response.redirect(url, status)` constructs a Response
+ * whose Headers guard is set to "immutable". Harper's own HTTP response
+ * pipeline mutates the handler's returned Response's headers afterward (e.g.
+ * CORS/instrumentation headers) — against an immutable-guarded Headers this
+ * throws `TypeError: immutable`, turning EVERY real POST /OAuthAuthorize
+ * (both "deny" and "approve") into a 500, verified via curl against a built
+ * origin/main with no other changes. A manually-constructed Response with
+ * the same status/Location header has the default (mutable) "response"
+ * guard, so Harper's later mutation succeeds — identical bytes on the wire,
+ * no behavior change, just a mutable Headers object underneath.
+ */
+function redirectTo(url: string, status: 302 | 303 = 302): Response {
+  return new Response(null, { status, headers: { Location: url } });
+}
+
 // ─── Discovery metadata ──────────────────────────────────────────────────────
 
 export class OAuthMetadata extends Resource {
@@ -225,7 +247,7 @@ ${scope.split(" ").map((s: string) => `<div class="scope">${s}</div>`).join("")}
 
     if (action === "deny") {
       const params = new URLSearchParams({ error: "access_denied", state });
-      return Response.redirect(`${redirectUri}?${params}`, 302);
+      return redirectTo(`${redirectUri}?${params}`);
     }
 
     // Determine authenticated principal. Harper v5 does not populate
@@ -244,6 +266,44 @@ ${scope.split(" ").map((s: string) => `<div class="scope">${s}</div>`).join("")}
     // admin, or should any verified (non-admin) agent be able to approve its
     // own consent grant? The previous code always resolved to "admin" for
     // every caller, so this is a genuine policy decision, not just a bug fix.
+    //
+    // SECURITY FIX (#604 — authorizeLocal escalation): resolveAgentAuth's
+    // `context.user` fallback (agent-auth.ts, the super_user / username
+    // branches) ALSO matches Harper's `authorizeLocal` (config true) ambient
+    // super_user injection for ANY credential-less LOOPBACK request.
+    // /OAuthAuthorize sits on auth-middleware.ts's public early-return
+    // passthrough (any method), so a bare local POST never gets OUR
+    // middleware's tpsAgent/tpsAnonymous annotation either — resolveAgentAuth
+    // falls straight through to Harper's raw `context.user`, which
+    // authorizeLocal can forge with NO signature and NO password. A
+    // credential-less loopback POST therefore resolved to
+    // { kind: "agent", agentId: "admin", isAdmin: true } and minted a REAL
+    // admin authorization code, exchangeable at OAuthToken for a Bearer
+    // token — full local privilege escalation with zero credentials.
+    // authorizeLocal injects request.user=super_user ONLY when there is NO
+    // Authorization header present (see Presence.ts's get() doc for the
+    // fuller writeup of this exact mechanism) — a genuinely
+    // password-verified Basic admin/super_user, or a genuinely
+    // Ed25519-signed agent request, both carry a real header. Requiring one
+    // be present before trusting resolveAgentAuth's verdict closes the
+    // forged-approver path without touching resolveAgentAuth itself (the
+    // root-cause fix is a separate, larger follow-up — see #604): a
+    // credential-less local caller now gets 401 and no code is minted; a
+    // genuinely-authenticated approver (real Basic password, or a real
+    // TPS-Ed25519 signature verified by resolveAgentAuth's own fallback) is
+    // unaffected.
+    const ctx = (this as any).getContext?.();
+    const request = ctx?.request ?? ctx;
+    const authHeader: string =
+      request?.headers?.get?.("authorization") ??
+      request?.headers?.asObject?.authorization ??
+      "";
+    if (!authHeader) {
+      return new Response(JSON.stringify({ error: "authentication required" }), {
+        status: 401, headers: { "content-type": "application/json" },
+      });
+    }
+
     const auth = await resolveAgentAuth((this as any).getContext?.());
     if (auth.kind !== "agent") {
       return new Response(JSON.stringify({ error: "authentication required" }), {
@@ -270,7 +330,7 @@ ${scope.split(" ").map((s: string) => `<div class="scope">${s}</div>`).join("")}
     });
 
     const params = new URLSearchParams({ code, state });
-    return Response.redirect(`${redirectUri}?${params}`, 302);
+    return redirectTo(`${redirectUri}?${params}`);
   }
 }
 

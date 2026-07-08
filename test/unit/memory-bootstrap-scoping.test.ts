@@ -216,14 +216,24 @@ describe("MemoryBootstrap.post() — centralized read-scoping", () => {
 
 // ─── flair#550 — teammate findings attribution + "Teammate findings" section ─
 //
-// The read-scoping above already made grant-visible teammate SHARED memories
-// reachable through bootstrap's read scope; these tests cover the
-// PRESENTATION gap: (1) formatMemory() attributes a cross-agent record with
-// "[via <ownerId>]" and composes with the safety wrap, and (2) the
-// currentTask-scored path splits by origin into sections.relevant (own) vs
-// the new sections.teammate (grant-visible teammate), never mixing them, and
-// never letting a teammate's PRIVATE memory reach the scored path at all
-// (that exclusion, re-asserted here as a guard on the NEW split code).
+// The read-scoping above already made any other in-org agent's non-private
+// memory reachable through bootstrap's read scope (open-within-org — no
+// MemoryGrant required); these tests cover the PRESENTATION gap: (1)
+// formatMemory() attributes a cross-agent record with "[via <ownerId>]" and
+// composes with the safety wrap, and (2) the currentTask-scored path splits
+// by origin into sections.relevant (own) vs the new sections.teammate (any
+// other in-org agent's non-private record), never mixing them, and never
+// letting a teammate's PRIVATE memory reach the scored path at all (that
+// exclusion, re-asserted here as a guard on the NEW split code).
+//
+// Most tests below still seed a MemoryGrant alongside the memories — that's
+// incidental (this file was written before #578 moved reads from grant-gated
+// to open-within-org) and no longer load-bearing: resolveReadScope() never
+// consults MemoryGrant for reads anymore. The dedicated "no grant at all"
+// tests further down (search for "NO MemoryGrant") are the ones that actually
+// prove the open-within-org model — a grant's presence or absence must not
+// change whether a non-private record surfaces, or whether a private one
+// stays hidden.
 //
 // All records below carry embedding: FAKE_EMBEDDING so they clear the
 // `score > 0.3` deterministic-cosine-1.0 threshold against any currentTask
@@ -367,6 +377,56 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     expect(res.context).not.toContain("TEAMMATE-PRIVATE-TASK-FINDING");
     expect(res.context).not.toContain("## Teammate findings relevant to your task");
     expect(res.sections.teammate).toBe(0);
+  });
+
+  // ─── Open-within-org: the actual flair#550 gap this PR closes ─────────────
+  // The tests above all seed a MemoryGrant alongside the memories, which is
+  // incidental (pre-#578 authoring) — resolveReadScope() never consults
+  // MemoryGrant for reads anymore. These two tests are the load-bearing
+  // proof: a non-private teammate finding surfaces with ZERO grant records
+  // in the store at all (`memoryGrants` stays empty — `reset()` sets it to
+  // `[]` and nothing here pushes to it), and a private one still never does.
+
+  it("a non-private teammate memory surfaces in 'Teammate findings' when task-relevant — NO MemoryGrant exists at all (open-within-org, the flair#550 gap)", async () => {
+    reset();
+    // No memoryGrants.push() anywhere in this test — agent-owner and
+    // agent-grantee have never had any grant relationship. Under the old
+    // grant-gated model this record would never have entered read-scope;
+    // under open-within-org it's non-private, so it's readable by any
+    // verified in-org agent regardless.
+    memoryStore.set("ungranted-shared-task", {
+      id: "ungranted-shared-task", agentId: "agent-owner", content: "UNGRANTED-TEAMMATE-TASK-FINDING",
+      visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+    });
+
+    const b = makeBootstrap(agentCtx("agent-grantee"));
+    const res: any = await b.post({
+      agentId: "agent-grantee", includeSoul: false, currentTask: "investigate the thing",
+    });
+    expect(res.context).toContain("## Teammate findings relevant to your task");
+    expect(res.context).toContain("[via agent-owner] UNGRANTED-TEAMMATE-TASK-FINDING");
+    expect(res.sections.teammate).toBe(1);
+  });
+
+  it("a teammate's PRIVATE memory NEVER surfaces even with NO MemoryGrant and no relationship at all (the security invariant: private stays owner-only, unconditionally)", async () => {
+    reset();
+    // Same "no grant ever existed" setup as above, but this record is
+    // private — the ONE exception open-within-org carves out. This is the
+    // explicit security-invariant test: a caller must never see a private
+    // memory that isn't theirs, regardless of any grant history.
+    memoryStore.set("ungranted-private-task", {
+      id: "ungranted-private-task", agentId: "agent-owner", content: "UNGRANTED-TEAMMATE-PRIVATE-FINDING",
+      visibility: "private", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
+    });
+
+    const b = makeBootstrap(agentCtx("agent-grantee"));
+    const res: any = await b.post({
+      agentId: "agent-grantee", includeSoul: false, currentTask: "investigate the thing",
+    });
+    expect(res.context).not.toContain("UNGRANTED-TEAMMATE-PRIVATE-FINDING");
+    expect(res.context).not.toContain("## Teammate findings relevant to your task");
+    expect(res.sections.teammate).toBe(0);
+    expect(res.memoriesAvailable).toBe(0);
   });
 
   it("no currentTask, no teammate matches → the 'Teammate findings' header never renders (empty section renders nothing)", async () => {

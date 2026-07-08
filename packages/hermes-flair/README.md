@@ -6,7 +6,7 @@
 
 Hermes already ships great built-in memory (MEMORY.md / USER.md). Flair extends it with:
 
-- **Per-agent isolation enforced server-side.** Each Hermes agent identity gets its own Ed25519 keypair; cross-agent reads are refused at the API layer, not by client convention.
+- **Per-agent write isolation enforced server-side.** Each Hermes agent identity gets its own Ed25519 keypair; no agent can write memories as another, verified at the API layer, not by client convention. Reads are open within the org for non-private memories by design (see [SECURITY.md](https://github.com/tpsdev-ai/flair/blob/main/SECURITY.md)) — mark something `visibility: private` to keep it owner-only.
 - **Agent-authored, no LLM-extraction-on-every-turn.** The agent decides what's worth remembering via the `flair_store` tool. No silent server-side fact extraction, no surprise persistence.
 - **Self-hosted, no SaaS dependency.** Runs on a Mac Mini, a Raspberry Pi, or a cloud VM. Single Harper-backed binary.
 - **Same backend for memory + identity.** Soul (who I am), agent registry (who else exists), and memories all live in one place — so the plugin can answer "who am I and what do I know" from a single source.
@@ -33,7 +33,7 @@ Provide via environment variables, or `$HERMES_HOME/flair.json`:
 
 | Setting          | Env var          | Default                             | Notes                                           |
 |------------------|------------------|-------------------------------------|-------------------------------------------------|
-| Server URL       | `FLAIR_URL`      | `http://127.0.0.1:9926`              | Override for remote Flair deployments           |
+| Server URL       | `FLAIR_URL`      | `http://127.0.0.1:19926`             | Override for remote Flair deployments           |
 | Agent ID         | `FLAIR_AGENT_ID` | `hermes`                            | Must match `flair agent add <id>`               |
 | Private key path | `FLAIR_KEY_PATH` | `~/.flair/keys/<agent>.key`         | PKCS8 base64 Ed25519 key created above          |
 
@@ -41,7 +41,7 @@ Example `flair.json`:
 
 ```json
 {
-  "url": "http://127.0.0.1:9926",
+  "url": "http://127.0.0.1:19926",
   "agent_id": "hermes",
   "bootstrap_limit": 10,
   "recall_limit": 5

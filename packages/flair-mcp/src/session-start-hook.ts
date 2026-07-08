@@ -27,12 +27,23 @@
  * A hard timeout (FLAIR_HOOK_TIMEOUT_MS, default 8s) wraps the bootstrap call
  * so a stalled Flair daemon can't hang session startup; on timeout we no-op.
  *
+ * AUTO-PRESENCE (flair#598)
+ * -------------------------
+ * A session starting is the clearest "this agent is alive" signal flair-mcp
+ * gets, so this hook also fires a best-effort `POST /Presence` heartbeat
+ * alongside bootstrap — see ./presence.ts. It runs CONCURRENTLY with the
+ * bootstrap call (not serially after it), reuses the SAME signed request
+ * path (Ed25519, no new auth mechanism), and is bounded by its own short
+ * timeout so it can never add meaningful latency or turn a working bootstrap
+ * into a no-op. Manual `flair presence set` keeps working unchanged.
+ *
  * CONFIG (env, read identically to the MCP server)
  * ------------------------------------------------
  *   FLAIR_AGENT_ID   (required — absent → no-op)  agent identity
  *   FLAIR_URL        (default http://localhost:19926 via flair-client)
  *   FLAIR_KEY_PATH   (default ~/.flair/keys/<agent>.key via flair-client)
  *   FLAIR_HOOK_TIMEOUT_MS (default 8000; clamped 500..30000)
+ *   FLAIR_PRESENCE_TIMEOUT_MS (default 3000; clamped 500..10000 — see ./presence.ts)
  *
  * USAGE — register in ~/.claude/settings.json:
  *   {
@@ -47,6 +58,7 @@
 
 import { FlairClient } from "@tpsdev-ai/flair-client";
 import { basename } from "node:path";
+import { deriveActivity, postPresenceSafe, resolvePresenceTimeoutMs, type PresencePoster } from "./presence.js";
 
 /** Claude Code SessionStart additionalContext hard limit (chars). */
 const MAX_CHARS = 10_000;
@@ -70,8 +82,13 @@ interface SessionStartInput {
   [key: string]: unknown;
 }
 
-/** Minimal surface of FlairClient this hook depends on (eases testing). */
-interface BootstrapClient {
+/** Minimal surface of FlairClient this hook depends on (eases testing).
+ *  `request` is optional and structurally matches PresencePoster (presence.ts)
+ *  — the real FlairClient always has it. When present, this hook also fires a
+ *  best-effort presence heartbeat (flair#598) alongside bootstrap; when
+ *  absent (e.g. a lightweight test stub that only implements bootstrap()),
+ *  the heartbeat is silently skipped — no behavior change for those tests. */
+interface BootstrapClient extends Partial<PresencePoster> {
   bootstrap(opts: {
     maxTokens?: number;
     channel?: string;
@@ -155,9 +172,31 @@ export async function runHook(
   const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
   const project = basename(cwd) || undefined;
 
+  const client = makeClient(agentId);
+
+  // Auto-presence (flair#598): a session starting is the clearest "this
+  // agent is alive" signal available. Fired CONCURRENTLY with the bootstrap
+  // call below (not serially after it) and bounded by its own short timeout
+  // (resolvePresenceTimeoutMs(), default 3s) — postPresenceSafe() never
+  // throws (see presence.ts's fail-open contract), so this can never turn a
+  // working bootstrap into a no-op, and awaiting `presenceDone` below can
+  // never add meaningful latency beyond what bootstrap already budgets
+  // (resolveTimeoutMs(), default 8s). No currentTask here: the SessionStart
+  // payload doesn't carry a task description (unlike the MCP `bootstrap`
+  // tool call — see index.ts), so this only ever sets `activity`, leaving
+  // currentTask exactly whatever it already was.
+  const presenceDone: Promise<void> =
+    typeof client.request === "function"
+      ? postPresenceSafe(
+          client as PresencePoster,
+          deriveActivity({ channel: "claude-code" }),
+          undefined,
+          resolvePresenceTimeoutMs(),
+        )
+      : Promise.resolve();
+
   let context = "";
   try {
-    const client = makeClient(agentId);
     const res = await withTimeout(
       Promise.resolve(
         client.bootstrap({
@@ -170,8 +209,11 @@ export async function runHook(
     );
     context = res && res.context ? String(res.context) : "";
   } catch {
+    await presenceDone;
     return NOOP_OUTPUT; // flair unreachable / auth error / timeout → no-op
   }
+
+  await presenceDone;
 
   if (!context.trim()) return NOOP_OUTPUT;
   if (context.length > MAX_CHARS) context = context.slice(0, MAX_CHARS);

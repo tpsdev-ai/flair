@@ -38,6 +38,6 @@ export function formatTeamLine(teammateIds: string[]): string | null {
   return (
     `${teammateIds.length} other ${plural} this Flair office (${wrapUntrusted(teammateIds.join(", "))}). ` +
     `Before deep-diving an unfamiliar problem, search their memories for related work — ` +
-    `\`memory_search\` covers any agent you hold a search grant from.`
+    `\`memory_search\` covers any agent's non-private memories on this instance (open-within-org read; no grant required).`
   );
 }

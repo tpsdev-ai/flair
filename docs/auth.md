@@ -8,20 +8,20 @@ Different surfaces authenticate differently. The model in one place:
 
 | Surface | Auth | Scope | Notes |
 |---------|------|-------|-------|
-| **CLI / SDK clients** (`flair`, `flair-client`) | **Ed25519 per-agent** | This agent only | Default, recommended. Signs every request; cross-agent reads refused server-side. |
-| **MCP server** (`@tpsdev-ai/flair-mcp`) | **Ed25519 per-agent** | This agent only | Same per-agent identity as the CLI — key auto-resolved from `~/.flair/keys/<agent>.key`. |
-| **OpenClaw / pi / Hermes plugins** | **Ed25519 per-agent** | This agent only | Same secure path; auto-detect agent identity. |
-| **`n8n-nodes-flair`** | **Harper admin-password Basic auth** | ⚠️ **Whole instance, read + write** | The admin credential grants every workflow read/write to the *entire* memory store, not just the configured Agent ID. |
+| **CLI / SDK clients** (`flair`, `flair-client`) | **Ed25519 per-agent** | Own writes; org-wide non-private reads | Default, recommended. Signs every request; an agent can never write as another, and reads are scoped to its own memories (any visibility) plus every other agent's **non-private** memories on the instance. |
+| **MCP server** (`@tpsdev-ai/flair-mcp`) | **Ed25519 per-agent** | Own writes; org-wide non-private reads | Same per-agent identity as the CLI — key auto-resolved from `~/.flair/keys/<agent>.key`. |
+| **OpenClaw / pi / Hermes plugins** | **Ed25519 per-agent** | Own writes; org-wide non-private reads | Same secure path; auto-detect agent identity. |
+| **`n8n-nodes-flair`** | **Harper admin-password Basic auth** | ⚠️ **Whole instance, read + write, including `private`** | The admin credential bypasses agent scoping entirely — every workflow gets read/write on the *entire* memory store, including other agents' `private`-marked memories, not just the org-wide non-private pool an Ed25519 identity would see. |
 
-**The default, secure path is Ed25519 per-agent** (see below): each agent holds its own key, signs every request, and the server refuses cross-agent reads. Use this everywhere you can.
+**The default, secure path is Ed25519 per-agent** (see below): each agent holds its own key and signs every request. That guarantees **write isolation** — no agent can write as another — and identity-verified reads. It does **not** mean cross-agent reads are refused: within one Flair instance (one org), any verified agent can read any other agent's memory unless that memory is explicitly marked `visibility: private` (owner-only). The hard access boundary is the **federation edge** (a separate Flair instance / org), not reads within an instance. See [SECURITY.md](../SECURITY.md) for the full model. Use Ed25519 per-agent everywhere you can regardless — it's still what makes writes and identity trustworthy.
 
 ### Known limitation — n8n uses admin-password Basic auth
 
-The `n8n-nodes-flair` community node authenticates with the Harper **admin password** (Basic auth), which grants **whole-instance read/write access**, not per-agent isolation. The blast radius is the entire memory store. This is acceptable only when **all** of the following hold:
+The `n8n-nodes-flair` community node authenticates with the Harper **admin password** (Basic auth), which bypasses agent scoping entirely — not just the org-wide non-private reads an Ed25519 identity already gets. Concretely, an n8n workflow using the admin credential can write memories under *any* agent's identity (no per-agent write isolation) and can read *every* memory including ones marked `visibility: private` (which stay owner-only under normal Ed25519 auth). This is acceptable only when **all** of the following hold:
 
 - The n8n instance is single-tenant and operator-controlled.
 - Workflow inputs are trusted (your own CRM, your own webhook source).
-- Memory leakage between agents is acceptable for the use case.
+- Write-forgery and full read access (including `private` memories) are acceptable for the use case.
 
 If any of those don't hold, use Flair's CLI / SDK clients (which support per-agent Ed25519 today) and wait for the n8n credential to gain Ed25519 per-agent auth (planned). Full guidance in [docs/n8n.md](n8n.md#security).
 

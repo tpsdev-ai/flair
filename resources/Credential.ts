@@ -1,5 +1,5 @@
 import { databases } from "@harperfast/harper";
-import { resolveAgentAuth } from "./agent-auth.js";
+import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 
 /**
@@ -14,6 +14,16 @@ import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
  * are never returned in responses).
  */
 export class Credential extends (databases as any).flair.Credential {
+  /**
+   * Self-authorize (mirrors Soul.ts/Relationship.ts/WorkspaceState.ts). Harper
+   * routes some request shapes (e.g. collection-describe `GET /Credential`)
+   * OUTSIDE get()/search() entirely, so those in-method checks alone don't
+   * cover every path — Credential was the one sibling in this sensitive class
+   * missing this gate (#556/#557 swept the others). Deny anonymous/unverified
+   * here; get()/search() below still enforce per-agent ownership scoping on
+   * top of this for the paths they do see.
+   */
+  allowRead() { return allowVerified((this as any).getContext?.()); }
 
   async search(query?: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());

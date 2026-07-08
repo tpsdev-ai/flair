@@ -15,6 +15,13 @@
  *   - flair_workspace_set — write own WorkspaceState (Office Space coordination)
  *   - flair_orgevent      — publish an OrgEvent attributed to self (no forging)
  *
+ * Auto-presence (flair#598): every tool call above triggers a fire-and-forget,
+ * rate-limited `POST /Presence` heartbeat for the calling agent (see
+ * ./presence.ts + the `heartbeat()` closure in runMcp()) — presence is now a
+ * side effect of normal activity instead of the manual `flair presence set`
+ * CLI command nobody ran. `bootstrap` additionally seeds the activity/task
+ * from its own arguments (session start signal).
+ *
  * Usage:
  *   npx -y @tpsdev-ai/flair-mcp
  *
@@ -36,6 +43,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { FlairClient, FlairError } from "@tpsdev-ai/flair-client";
 import { z } from "zod";
+import {
+  deriveActivity,
+  postPresenceSafe,
+  resolveHeartbeatIntervalMs,
+  resolvePresenceTimeoutMs,
+  shouldSendHeartbeat,
+  type PresenceActivity,
+} from "./presence.js";
 
 // ─── Error helpers ──────────────────────────────────────────────────────────
 
@@ -146,6 +161,58 @@ export async function runMcp(): Promise<void> {
     keyPath: process.env.FLAIR_KEY_PATH,
   });
 
+  // ─── Auto-presence (flair#598) ────────────────────────────────────────────────
+  //
+  // Presence used to be manual-only (`flair presence set`, which in practice
+  // nobody runs) — so the roster was permanently stale and the collision-
+  // detection it exists for never worked. This makes presence a SIDE EFFECT of
+  // normal agent activity instead: `bootstrap` (session start) always attempts
+  // a heartbeat, and every other tool call attempts one too, both routed
+  // through the SAME rate-limited, fire-and-forget `heartbeat()` below so
+  // repeated bootstrap calls in a short window don't spam any more than
+  // repeated tool calls would.
+  //
+  // A SEPARATE FlairClient instance, not the main `flair` above — its own
+  // short `timeoutMs` (resolvePresenceTimeoutMs(), default 3s vs the main
+  // client's general-purpose 30s default) means a dead/slow daemon can never
+  // make a presence write outlive the tool call it rode in on, independent of
+  // whatever timeout the main client is configured with.
+  const presenceFlair = new FlairClient({
+    agentId,
+    url: process.env.FLAIR_URL,
+    keyPath: process.env.FLAIR_KEY_PATH,
+    timeoutMs: resolvePresenceTimeoutMs(),
+  });
+
+  // Rate-limit clock + last-known task, in-process only (no persistence —
+  // resets on restart, which is fine; the next tool call re-establishes it).
+  // Owned here, not in presence.ts, so the pure rate-limit/body-building logic
+  // stays testable without any shared mutable state.
+  let lastPresenceSentAt: number | null = null;
+  // currentTask is the caller's responsibility to preserve (see
+  // postPresenceSafe's doc comment): Presence.post() treats an ABSENT
+  // currentTask as an explicit clear, so a heartbeat that doesn't know about
+  // an in-flight task must keep resending the last one bootstrap() told us
+  // about, or it would silently erase it every ~3 minutes.
+  let lastKnownTask: string | undefined;
+
+  /**
+   * Fire-and-forget, rate-limited presence heartbeat. Safe to call from every
+   * tool handler unconditionally — the rate limit + postPresenceSafe's
+   * internal catch-everything mean this NEVER throws, NEVER awaits network
+   * I/O in the caller's path, and NEVER delays the tool response. The
+   * `.catch(() => {})` below is belt-and-suspenders (postPresenceSafe already
+   * never rejects) purely so a future change to that function can't
+   * accidentally reintroduce an unhandled rejection here.
+   */
+  function heartbeat(activity: PresenceActivity = "coding"): void {
+    const now = Date.now();
+    if (!shouldSendHeartbeat(now, lastPresenceSentAt, resolveHeartbeatIntervalMs())) return;
+    lastPresenceSentAt = now; // set synchronously, before the async write, so a burst of
+    // tool calls in the same tick can't all slip past the rate limit together
+    postPresenceSafe(presenceFlair, activity, lastKnownTask, resolvePresenceTimeoutMs()).catch(() => {});
+  }
+
   // ─── MCP Server ──────────────────────────────────────────────────────────────
 
   const server = new McpServer({
@@ -163,6 +230,7 @@ export async function runMcp(): Promise<void> {
     limit: z.coerce.number().optional().default(5).describe("Max results (default 5)"),
   },
   async ({ query, limit }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
       const results = await flair.memory.search(query, { limit });
       if (results.length === 0) {
@@ -205,6 +273,7 @@ server.tool(
     ),
   },
   async ({ content, type, durability, tags, visibility }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
       const result = await flair.memory.write(content, {
         type: type as any,
@@ -265,6 +334,7 @@ server.tool(
       .describe("Write a new supersedes-linked version instead of overwriting in place (default false)"),
   },
   async ({ id, content, preserveHistory }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
       const result = await flair.memory.update(id, content, { preserveHistory });
       const text = preserveHistory
@@ -287,6 +357,7 @@ server.tool(
     id: z.string().describe("Memory ID"),
   },
   async ({ id }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
       const mem = await flair.memory.get(id);
       if (!mem) return { content: [{ type: "text", text: `Memory ${id} not found.` }] };
@@ -304,6 +375,7 @@ server.tool(
     id: z.string().describe("Memory ID to delete"),
   },
   async ({ id }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
       await flair.memory.delete(id);
       return { content: [{ type: "text", text: `Memory ${id} deleted.` }] };
@@ -324,6 +396,15 @@ server.tool(
     subjects: z.array(z.string()).optional().describe("Entity names to preload context for (e.g., ['flair', 'auth'])"),
   },
   async ({ maxTokens, currentTask, channel, surface, subjects }) => {
+    // auto-presence (flair#598) — SESSION START. bootstrap() already receives
+    // exactly the payload Presence wants: currentTask is what the agent is
+    // about to work on, channel/surface are what deriveActivity() uses to
+    // pick something more specific than the "coding" default. Routed through
+    // the SAME rate-limited heartbeat() as every other tool, so calling
+    // bootstrap twice in quick succession (session resume/compact) doesn't
+    // double-send — it's still "sets presence once" per session in practice.
+    if (currentTask) lastKnownTask = currentTask;
+    heartbeat(deriveActivity({ channel, surface }));
     try {
       const result = await flair.bootstrap({ maxTokens, currentTask, channel, surface, subjects });
       if (!result.context) {
@@ -344,6 +425,7 @@ server.tool(
     value: z.string().describe("Entry value — personality trait, project context, coding standards, etc."),
   },
   async ({ key, value }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
       await flair.soul.set(key, value);
       return { content: [{ type: "text", text: `Soul entry '${key}' set.` }] };
@@ -360,6 +442,7 @@ server.tool(
     key: z.string().describe("Entry key"),
   },
   async ({ key }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
       const entry = await flair.soul.get(key);
       if (!entry) return { content: [{ type: "text", text: `No soul entry for '${key}'.` }] };
@@ -392,6 +475,7 @@ server.tool(
     summary: z.string().optional().describe("Short summary of current workspace state"),
   },
   async ({ ref, label, provider, task, phase, summary }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
       // No agentId in body — the server attributes from the signed identity.
       const body: Record<string, unknown> = {
@@ -423,6 +507,7 @@ server.tool(
     targets: z.array(z.string()).optional().describe("Recipient agent ids"),
   },
   async ({ kind, summary, detail, scope, targets }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
       // No authorId in body — the server attributes from the signed identity.
       const body: Record<string, unknown> = { kind, summary };

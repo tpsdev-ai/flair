@@ -15,17 +15,19 @@ import { resolveReadScope } from "./memory-read-scope.js";
  *   3. Recent memories (adaptive window)
  *   4. Task-relevant memories (semantic search if currentTask provided)
  *   4b. Teammate findings relevant to your task (flair#550 — the SAME scored
- *      task-relevant set as #4, split by origin: a grant-visible teammate's
- *      SHARED memory that scores against currentTask lands here instead of
- *      #4, attributed via "[via <agentId>]". Presentation only — what's
- *      readable is entirely Layer 1's resolveReadScope(); this only
- *      changes how an already-read cross-agent record is formatted/sectioned)
+ *      task-relevant set as #4, split by origin: any other in-org agent's
+ *      NON-PRIVATE memory that scores against currentTask lands here instead
+ *      of #4, attributed via "[via <agentId>]" — no MemoryGrant required
+ *      (open-within-org read, per #578). Presentation only — what's readable
+ *      is entirely resolveReadScope()'s job; this only changes how an
+ *      already-read cross-agent record is formatted/sectioned)
  *   5. Relationship context (active relationships for mentioned entities)
  *   6. Predicted context (based on channel/surface/subject hints)
  *   7. Team roster (other active agents in this office + a search-first nudge —
- *      bootstrap loads the caller's own memories plus any granted owner's
- *      SHARED memories (Layer 1, never their private ones), so this
- *      section nudges toward memory_search for anything beyond that window)
+ *      bootstrap loads the caller's own memories plus every other in-org
+ *      agent's non-private memories (open-within-org read, never anyone's
+ *      private ones), so this section nudges toward memory_search for
+ *      anything beyond that window)
  *
  * Prediction: when context signals (channel, surface, subjects) are provided,
  * the bootstrap loads more aggressively — Flair is fast enough that the
@@ -220,9 +222,10 @@ export class BootstrapMemories extends Resource {
 
     // --- 1c. Team roster + cross-agent search nudge ---
     // Soul is still caller-own-only (unaffected here). Memory loading below
-    // (step 2) now also includes granted owners' SHARED memories (Layer 1)
-    // — but this section stays: memory_search/SemanticSearch remains
-    // the deliberate, query-driven way to find a teammate's finding, vs.
+    // (step 2) now also includes every other in-org agent's non-private
+    // memories (open-within-org read, no MemoryGrant needed — #578) — but
+    // this section stays: memory_search/SemanticSearch remains the
+    // deliberate, query-driven way to find a teammate's finding, vs.
     // bootstrap's fixed recent/permanent window. This section is fixed-cost
     // (no query text to format per agent) so it's cheap enough to always
     // include, not budgeted.
@@ -244,14 +247,18 @@ export class BootstrapMemories extends Resource {
     }
 
     // --- 2. Permanent memories (always included, highest priority) ---
-    // Read-scope: own (any visibility) + granted owners' SHARED memories only
-    // (Layer 1 — never a granted owner's private ones). Centralized
-    // in resolveReadScope(): the condition is pushed into the Harper query
-    // (so the table itself never returns an out-of-scope row), and
-    // `scope.isAllowed` re-checks in-process as defense-in-depth (same
-    // belt-and-suspenders discipline as SemanticSearch's BM25 pre-fusion
-    // filter) — this is the #550 foundation: bootstrap can now safely expand
-    // beyond own-only without a parallel scoping rule.
+    // Read-scope: own (any visibility) + every OTHER in-org agent's
+    // non-private memory — open-within-org read (#578), no MemoryGrant
+    // consulted at all. Centralized in resolveReadScope(): the condition is
+    // pushed into the Harper query (so the table itself never returns an
+    // out-of-scope row), and `scope.isAllowed` re-checks in-process as
+    // defense-in-depth (same belt-and-suspenders discipline as
+    // SemanticSearch's BM25 pre-fusion filter) — this is the #550 foundation:
+    // bootstrap can now safely expand beyond own-only without a parallel
+    // scoping rule, and that rule tracks resolveReadScope()'s model
+    // automatically (grant-gated when #568 first built this, open-within-org
+    // now that #578 has landed — this file never re-implements the rule, so
+    // it never has to change when the rule does).
     const scope = await resolveReadScope(agentId);
     const allMemories: any[] = [];
     for await (const record of (databases as any).flair.Memory.search({ conditions: [scope.condition] })) {
@@ -267,8 +274,8 @@ export class BootstrapMemories extends Resource {
       // supersededIds filter further down only catches co-presence). A
       // record with no validTo, or a future validTo, is unaffected.
       if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
-      // Attribution for cross-agent (granted-owner) records — same convention
-      // SemanticSearch.ts already uses: formatMemory() below only USES this
+      // Attribution for cross-agent (any other in-org agent's) records — same
+      // convention SemanticSearch.ts already uses: formatMemory() below only USES this
       // when the record also carries _safetyFlags (labels the untrusted-data
       // wrapper with whose memory it is), it never forces wrapping on its own.
       // Real Harper's search() results are non-extensible objects — mutating
@@ -286,11 +293,12 @@ export class BootstrapMemories extends Resource {
     const activeMemories = allMemories.filter((m) => !supersededIds.has(m.id));
 
     // #550 design boundary: the permanent / recent / predicted sections are the
-    // agent's OWN working context — own-only, always. Post-Layer-1
-    // `activeMemories` also carries grant-visible teammate records (`_source`
-    // set), but grant-visibility exists to feed the task-relevant "Teammate
-    // findings" surfacing (#550) below, NOT to blend a teammate's memories into
-    // the reader's recent/permanent/predicted view. So these three sections
+    // agent's OWN working context — own-only, always. `activeMemories` also
+    // carries every other in-org agent's non-private records (`_source` set,
+    // open-within-org read — no grant involved), but that cross-agent
+    // visibility exists to feed the task-relevant "Teammate findings"
+    // surfacing (#550) below, NOT to blend a teammate's memories into the
+    // reader's recent/permanent/predicted view. So these three sections
     // filter to own (`!m._source`); team knowledge surfaces only when
     // task-relevant (the teammate section) or via an explicit memory_search.
     const ownMemories = activeMemories.filter((m) => !m._source);
@@ -444,13 +452,14 @@ export class BootstrapMemories extends Resource {
           .sort((a, b) => b.score - a.score);
 
         // #550: split the scored, task-relevant set by origin. Own findings
-        // go to `relevant` as before; a teammate's (grant-visible, already
-        // read-scoped by Layer 1 — `m._source` is only ever set for a
-        // cross-agent record, see the allMemories loop above) go to the new
-        // `teammate` section so the agent can tell it apart at a glance.
-        // Both draw from the SAME `tokenBudget` in one score-ordered pass —
-        // highest-relevance memories win the remaining budget regardless of
-        // which section they land in, so neither section double-spends.
+        // go to `relevant` as before; any other in-org agent's non-private
+        // record — already read-scoped by resolveReadScope(), no grant
+        // required (`m._source` is only ever set for a cross-agent record,
+        // see the allMemories loop above) — goes to the new `teammate`
+        // section so the agent can tell it apart at a glance. Both draw from
+        // the SAME `tokenBudget` in one score-ordered pass — highest-relevance
+        // memories win the remaining budget regardless of which section they
+        // land in, so neither section double-spends.
         for (const { memory: m } of scored) {
           const line = formatMemory(m, agentId);
           const cost = estimateTokens(line);
@@ -523,7 +532,7 @@ export class BootstrapMemories extends Resource {
     }
     // #550: teammate findings relevant to the current task — right after the
     // agent's own task-relevant knowledge. Empty section renders nothing
-    // (no header) so a bootstrap with no grant-visible teammate findings for
+    // (no header) so a bootstrap with no task-relevant teammate findings for
     // this task looks exactly as it did before this feature.
     if (sections.teammate.length > 0) {
       parts.push("## Teammate findings relevant to your task\n" + sections.teammate.join("\n"));

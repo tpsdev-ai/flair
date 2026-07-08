@@ -1,43 +1,87 @@
 # Upgrade Guide
 
-## Upgrading to 0.6.0 (from 0.5.x)
+This page covers the mechanics of upgrading Flair — the general path, valid across
+versions. For **what changed in a specific release** (behavior changes, new surfaces,
+breaking changes), see [`CHANGELOG.md`](../CHANGELOG.md) — each version has its own
+`## [X.Y.Z]` section. Check the CHANGELOG entries between your current version and the
+target version before upgrading anything you depend on in production.
 
-### Behavior changes to know about
+There are two things you might be upgrading:
 
-- **`flair init --skip-soul` and non-TTY init no longer seed placeholder soul entries.** Pre-0.6.0 those paths inserted generic `role` / `personality` / `constraints` strings (e.g. `"AI assistant [default — customize with 'flair soul set']"`). Those entries leaked into `flair bootstrap` output and confused users, so 0.6.0 leaves the soul empty for non-interactive installs. `flair doctor` and `flair soul set` are the nudge/workflow for populating real entries. **If you're upgrading an existing agent**: your previously-seeded placeholder entries are still there and won't be auto-removed. Run `flair soul list --agent <id>` to check; `flair soul delete` if you want them gone.
+1. **A local npm install** — the common case: `flair` running on your own machine or a
+   VPS, installed via `npm install -g @tpsdev-ai/flair`.
+2. **A Flair component deployed to a Harper Fabric cluster** — a different mechanism
+   (`flair deploy` / `flair upgrade --target`), covered separately below.
 
-- **`flair status` header now tiers health.** 🟢 means healthy; 🟡 means the process is running but something's worth looking at (e.g. >10% of your memories are hash-fallback); 🔴 still means unreachable. The state word stays `"running"` for 🟢 and 🟡 — only the icon changes. Any `grep -q "running"` scripts you have against `flair status` output continue to work; scripts that checked for 🟢 specifically should switch to `grep -q "🟢"` or treat 🟡 as also healthy.
-
-### New surfaces in 0.6.0
-
-- **`flair status`** now shows an `Embeddings:` line breaking down memories by embedding model — useful for catching mixed vector spaces after an upstream model change.
-- **`flair memory list --hash-fallback`** lists memories that lack a real embedding. Feeds a cleaner triage workflow when paired with `flair reembed --stale-only`.
-- **Per-agent columns in `flair status`** — new `hash_fb` and `24h` columns show which agents are carrying the embedding-coverage burden and which are actively writing.
-- **`flair bridge list` / `flair bridge scaffold`** — slice 1 of the memory-bridges plugin system. Runtime (`import`/`export`/`test`) lands in the next release. See [bridges.md](bridges.md).
-- **Revamped `flair init` first-run wizard** — template picker with (1) Solo developer / (2) Team agent / (3) Research assistant / (4) Draft from Claude / (5) Custom / (s) Skip. Only affects fresh installs.
-
-## Standard Upgrade
+## Standard upgrade (local install)
 
 ```bash
-# 1. Backup (always)
+# 1. Back up first, always
 flair backup > ~/flair-backup-$(date +%Y%m%d).json
 
-# 2. Upgrade the package
-npm install -g @tpsdev-ai/flair@latest
+# 2. Check what's outdated (doesn't install anything)
+flair upgrade --check
 
-# 3. Restart
-flair restart
+# 3. Upgrade
+flair upgrade
+# — or, to upgrade and restart in one step:
+flair upgrade --restart
 
 # 4. Verify
 flair status
 flair doctor
 ```
 
-`flair doctor` will flag any issues that need attention after an upgrade (stale embeddings, schema changes, etc.).
+`flair upgrade` checks and upgrades the npm-global packages (`@tpsdev-ai/flair`,
+`@tpsdev-ai/flair-mcp`) and, if present, the `openclaw-flair` plugin (via
+`openclaw plugins install --force --pin`, not `npm install -g` — it needs OpenClaw's
+own plugin loader). Pass `--all` to also see `flair-client` (normally hidden as a
+transitive dependency). **Other integrations upgrade in their own ecosystem, not via
+`flair upgrade`:** `pi-flair` (pi's plugin manager), `langgraph-flair` / `hermes-flair`
+(pip / your Python package manager), `n8n-nodes-flair` (n8n's Community Nodes UI).
 
-## Re-embedding
+If you'd rather upgrade by hand instead of `flair upgrade`:
 
-If the embedding model changes between versions, old memories may use a different embedding dimension. `flair doctor` will detect this:
+```bash
+npm install -g @tpsdev-ai/flair@latest
+npm install -g @tpsdev-ai/flair-mcp@latest   # if installed
+flair restart
+```
+
+`flair doctor` flags issues after an upgrade (stale embeddings, hash-fallback rows,
+connectivity problems) and can auto-remediate some of them with `flair doctor --fix`
+(`--dry-run` to preview first).
+
+## Upgrading a Fabric-deployed instance
+
+A Flair instance deployed to a Harper Fabric cluster isn't a local npm package — it's a
+component pushed via `flair deploy`. Upgrade it in place with:
+
+```bash
+flair upgrade --target https://<fabric-node>/<instance-name> \
+  --fabric-user <admin> --fabric-password <pass>
+```
+
+This resolves the target version (latest published `@tpsdev-ai/flair`, or pin one with
+`--version`), stages a clean deployable with the required `@harperfast/harper` version
+pin applied (`--harper-version` to override), confirms the staged Harper build before
+deploying, then reuses `flair deploy` to push it and verifies the result. `--check`
+shows the version diff and plan without deploying anything; `--yes` skips the
+confirmation prompt for scripted use. Credentials can come from `FABRIC_USER` /
+`FABRIC_PASSWORD` env vars instead of flags.
+
+## Re-embedding after an upgrade
+
+Two situations require a re-embed pass, and `flair doctor` will flag both:
+
+- **The embedding model changed** between versions — old memories carry vectors from
+  the previous model and won't compare correctly against new ones.
+- **Harper's internal vector storage changed across a version bump** (this has
+  happened between Harper point releases, e.g. HNSW-index-internal changes) — even
+  with the same embedding model, stored vectors may need to be regenerated to match
+  what the new Harper build expects.
+
+`flair doctor` reports the counts:
 
 ```
 ⚠️  49 memories have hash-fallback embeddings (512-dim)
@@ -48,40 +92,52 @@ If the embedding model changes between versions, old memories may use a differen
 Fix with:
 
 ```bash
-flair reembed
+flair reembed                 # all agents, all stale rows
+flair reembed --stale-only    # only mismatched-model-tag rows
+flair reembed --agent <id>    # scope to one agent
+flair reembed --dry-run       # show the count without writing
 ```
 
-This re-generates embeddings for all memories using the current model. Runs in the background — the server stays available during re-embedding.
+This runs in the background — the server stays available while it re-embeds. This is
+also the step CI's `upgrade-smoke` job exercises directly: it upgrades a running
+instance from the latest published version to the candidate build, then runs
+`flair reembed` before asserting old memories are still searchable and new writes
+round-trip. See the `upgrade-smoke` job in
+[`.github/workflows/test.yml`](../.github/workflows/test.yml) for the exact sequence
+if you want to see it scripted end-to-end.
 
-## Version Compatibility
+## Version compatibility
 
-- **Data format:** Flair stores data in Harper's native format. Harper v5 beta releases maintain backward compatibility within the v5 line.
-- **Keys:** Ed25519 keypairs are version-independent. No key migration needed between Flair versions.
-- **Config:** `~/.flair/config.yaml` format is stable. New options use defaults if not present.
-
-## MCP Server Upgrade
-
-The recommended wiring runs the MCP server via `npx -y @tpsdev-ai/flair-mcp`, which fetches the latest published version on demand. To pick up a new release, just **restart your MCP client** (Claude Code, Cursor, etc.) — `npx` will resolve the newest version on next launch (clear the npx cache with `npx clear-npx-cache` if it pins an old one). No config changes needed — the MCP server reads `FLAIR_URL` and `FLAIR_AGENT_ID` from environment.
-
-If you pinned a version (e.g. `["-y", "@tpsdev-ai/flair-mcp@0.6.0"]`) or installed globally, bump it explicitly:
-
-```bash
-npm install -g @tpsdev-ai/flair-mcp@latest   # only if you opted into a global install
-```
+- **Data format:** Flair stores data in Harper's native format; Harper maintains
+  backward compatibility within a major line. Cross-Harper-version data compatibility
+  is exactly what `upgrade-smoke` exists to catch regressions in — check the CHANGELOG
+  for any called-out breaking change before a major jump.
+- **Keys:** Ed25519 keypairs are version-independent. No key migration is ever needed
+  between Flair versions.
+- **Config:** `~/.flair/config.yaml` format is additive — new options fall back to
+  defaults when absent, old options aren't removed out from under you.
 
 ## Rollback
 
-If an upgrade causes issues:
+If an upgrade causes problems:
 
 ```bash
 # Install a specific previous version (substitute your last known-good)
-npm install -g @tpsdev-ai/flair@0.5.6
-
-# Restart
+npm install -g @tpsdev-ai/flair@<previous-version>
 flair restart
 
-# If data is corrupted, restore from backup
-flair restore < ~/flair-backup-20260405.json
+# If data looks wrong, restore from your pre-upgrade backup
+flair restore < ~/flair-backup-<date>.json
 ```
 
-Data written by a newer Flair is readable by the immediate predecessor — there are no schema breaks within the 0.5.x → 0.6.x window. Downgrading further back than one minor version is unsupported; use the backup path instead.
+Downgrading more than a minor version back is not a supported, tested path — restoring
+from backup on the older version is the reliable route if you need to go back further.
+
+## See also
+
+- [`CHANGELOG.md`](../CHANGELOG.md) — what actually changed, version by version.
+- [`docs/releasing.md`](releasing.md) — how a release gets published in the first
+  place (staged npm publish with 2FA approval), if you're curious why a new version
+  shows up when it does.
+- [`docs/deployment.md`](deployment.md) — initial install / deployment, as opposed to
+  upgrading an existing one.
