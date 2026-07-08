@@ -22,8 +22,11 @@ const BIND_ERROR_RE = /Unable to bind to port/i;
 
 // Use @harperfast/harper from node_modules — spawned under node (not bun)
 // because bun 1.3.x doesn't support uv_ip6_addr which Harper's NAPI modules need.
-const HARPER_BIN = join(process.cwd(), "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js");
 const NODE_BIN = process.env.NODE_BIN ?? "node";
+
+function harperBinPath(harperBinDir: string): string {
+  return join(harperBinDir, "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js");
+}
 
 // External service mode: set HARPER_HTTP_URL (and optionally HARPER_OPS_URL) to
 // skip the local spawn and connect to an already-running Harper instance (e.g. Docker).
@@ -173,7 +176,35 @@ function awaitStartup(proc: ChildProcess, getLog: () => string, getExited: () =>
   });
 }
 
-export async function startHarper(): Promise<HarperInstance> {
+export interface StartHarperOptions {
+  /**
+   * Directory `harper dev "."` treats as its component root (i.e. the spawn's
+   * `cwd` — the "." argument resolves relative to it). Defaults to
+   * `process.cwd()`, matching every existing call site (a bare Flair
+   * checkout loading itself as the component).
+   *
+   * Set this to point Harper at a DIFFERENT component tree — e.g. an
+   * npm-installed `@tpsdev-ai/flair` package directory — to spawn that
+   * version's code instead of the current worktree's. See
+   * test/compat/federation-mixed-version.test.ts.
+   */
+  cwd?: string;
+  /**
+   * Directory whose `node_modules/@harperfast/harper` provides the Harper
+   * binary. Defaults to `cwd`. Split out from `cwd` because npm hoists
+   * `@harperfast/harper` to the INSTALL ROOT, not into the nested
+   * `node_modules/@tpsdev-ai/flair` component directory — so a caller
+   * pointing `cwd` at an installed package's directory must pass the
+   * install root here separately.
+   */
+  harperBinDir?: string;
+}
+
+export async function startHarper(opts: StartHarperOptions = {}): Promise<HarperInstance> {
+  const cwd = opts.cwd ?? process.cwd();
+  const harperBinDir = opts.harperBinDir ?? cwd;
+  const HARPER_BIN = harperBinPath(harperBinDir);
+
   // ── External mode: connect to Docker service ─────────────────────────────
   if (HARPER_HTTP_URL) {
     const httpURL = HARPER_HTTP_URL;
@@ -218,7 +249,7 @@ export async function startHarper(): Promise<HarperInstance> {
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
   };
 
-  const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd: process.cwd(), env: baseEnv });
+  const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd, env: baseEnv });
   await new Promise<void>((resolve, reject) => {
     let output = "";
     install.stdout?.on("data", (d: Buffer) => output += d.toString());
@@ -243,7 +274,7 @@ export async function startHarper(): Promise<HarperInstance> {
     const httpURL = `http://127.0.0.1:${httpPort}`;
     const opsURL = `http://127.0.0.1:${opsPort}`;
 
-    const proc = spawn(NODE_BIN, [HARPER_BIN, "dev", "."], { cwd: process.cwd(), env });
+    const proc = spawn(NODE_BIN, [HARPER_BIN, "dev", "."], { cwd, env });
 
     // Capture Harper's output for the WHOLE lifetime of the process — not just
     // until the startup banner — so a crash that happens after "listening on"
