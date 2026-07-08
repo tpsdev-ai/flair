@@ -130,6 +130,46 @@ shows the version diff and plan without deploying anything; `--yes` skips the
 confirmation prompt for scripted use. Credentials can come from `FABRIC_USER` /
 `FABRIC_PASSWORD` env vars instead of flags.
 
+### Post-deploy fleet verify
+
+As of flair#636, both `flair deploy` and `flair upgrade --target` automatically run a
+fleet convergence sweep after a successful deploy — Harper's own "Successfully
+deployed" (and the served-API verify above) only confirm the *origin* node; nothing
+previously checked that peers actually converged, which is exactly the gap that let
+the 0.21.0 deploy report success while a peer was still throwing replication errors.
+
+The sweep hits the origin plus every Flair federation peer on file (`GET
+/FederationPeers`) and checks health, auth, and version. Skip it with
+`--no-fleet-verify`, or run it standalone against any already-deployed instance:
+
+```bash
+flair fleet verify --target https://<fabric-node>/<instance-name> \
+  --fabric-user <admin> --fabric-password <pass>
+```
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | All nodes verified: healthy, authenticated, and version-matched |
+| 1 | Origin failed (unreachable, unauthenticated, or wrong version) |
+| 2 | Origin OK, but a reachable peer is running a different version (skew) |
+| 3 | Origin OK, no skew among reachable peers, but a peer couldn't be verified at all (unreachable, auth rejected, or no endpoint on file) |
+
+**What "peer" means here — read before trusting a green sweep:** this checks
+*Flair's own* federation peer table, not Harper Fabric's own cluster-replication
+nodes. Harper's `cluster_status` operation (the one that would answer "what nodes are
+in this cluster and are they in sync") is harper-pro-only and unavailable in the OSS
+`@harperfast/harper` build this CLI ships — there is no way for this CLI to enumerate
+Fabric's own replication topology, on the origin or anywhere else. A Fabric replica
+that was never separately paired as a Flair federation peer (`flair federation pair`)
+is invisible to this sweep: `0 peers known` means "0 peers on file," never "0 peers
+exist." A peer with no usable endpoint is reported `unverifiable` — never silently
+dropped, never shown green. The sweep also needs Basic-auth credentials
+(`--fabric-user`/`--fabric-password` or `FABRIC_USER`/`FABRIC_PASSWORD`) to
+authenticate each peer probe; a token-only (`--fabric-token`) deploy skips it with a
+note instead of a silent no-op.
+
 ## Re-embedding after an upgrade
 
 Two situations require a re-embed pass, and `flair doctor` will flag both:
