@@ -57,9 +57,47 @@ actually running:
 - **On verification failure**, `flair upgrade` automatically reinstalls the
   previously-running `@tpsdev-ai/flair` version, restarts again, and
   re-verifies — then exits nonzero with a clear report of what failed. If the
-  rollback itself fails verification, it says so loudly instead of retrying
-  in a loop; see the data-snapshot guidance tracked in flair#637 before
-  touching data in that state.
+  rollback itself fails verification, it says so loudly and points at the
+  concrete pre-upgrade snapshot path (see "Pre-upgrade snapshot" below)
+  instead of retrying in a loop — see [Downgrade](#downgrade) for the
+  restore procedure.
+
+### Pre-upgrade snapshot
+
+As of flair#637, `flair upgrade` snapshots `~/.flair/data` **before** touching any
+package, whenever `@tpsdev-ai/flair` itself is one of the packages being upgraded
+(an `flair-mcp`-only or `openclaw-flair`-only upgrade never runs different code
+against your data, so nothing is snapshotted for those):
+
+```
+Snapshotting data before upgrade...
+✅ Snapshot: ~/.flair/upgrade-snapshots/flair-data-2026-07-08T14-32-01-118Z.tar.gz (842.3 MB)
+   Restore: flair stop && rm -rf "~/.flair/data" && mkdir -p "~/.flair/data" && tar -xzf "<snapshot>" -C "~/.flair/data" && flair start
+   Pruned 1 older snapshot (keeping last 3)
+```
+
+- **Location:** `~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz` — owner-only
+  (`0600`), with every file inside it at its **original** mode (so a `0600` key or
+  `admin-pass` file stays `0600` after a restore, not whatever tar's default would be).
+- **Retention:** keeps the newest 3 snapshots, prunes older ones automatically after
+  each successful snapshot.
+- **Consistency:** Flair is briefly stopped, snapshotted, and immediately restarted on
+  the OLD version before the package swap even begins — a plain file copy of a
+  *running* Harper's data directory isn't guaranteed point-in-time consistent (LMDB
+  writes can be mid-flight), so the snapshot always happens against a quiesced
+  directory. This means a short stop/start blip happens even with `--no-restart` — the
+  snapshot's correctness doesn't depend on whether you want a restart *after* the
+  upgrade, those are separate questions. (A native Harper backup operation,
+  `get_backup`, was evaluated and rejected here — see the code comment above
+  `createDataSnapshot` in `src/cli.ts` for why: it backs up one table/schema at a time
+  over the running HTTP API, not the whole data directory, and would be strictly less
+  complete than a plain file copy.)
+- **Failure is a hard stop by default:** if the snapshot itself fails (disk full,
+  permissions, etc.), the upgrade aborts before any package changes — no packages are
+  swapped, Flair is restarted on the version it was already running. Pass
+  `--no-snapshot` to skip the snapshot entirely on hosts that can't spare the time or
+  disk for it (not recommended — it's the only thing standing between you and an
+  untested downgrade).
 
 If you'd rather upgrade by hand instead of `flair upgrade`:
 
@@ -140,7 +178,7 @@ if you want to see it scripted end-to-end.
 
 ## Rollback
 
-If an upgrade causes problems:
+If an upgrade causes problems immediately after upgrading (code-level, not data):
 
 ```bash
 # Install a specific previous version (substitute your last known-good)
@@ -151,8 +189,70 @@ flair restart
 flair restore < ~/flair-backup-<date>.json
 ```
 
-Downgrading more than a minor version back is not a supported, tested path — restoring
-from backup on the older version is the reliable route if you need to go back further.
+`flair upgrade` does this automatically on a failed post-restart verification — see
+"Upgrade is a transaction" above. This section is for doing it by hand, e.g. after
+`--no-verify`, or after problems surface later than the automatic check catches.
+
+## Downgrade
+
+Rolling back the **package** (above) assumes the data on disk is fine — only the new
+code was the problem. If the new version actually **wrote data in a way the old
+version can't read**, package rollback alone isn't enough. This is what the
+flair#637 pre-upgrade snapshot exists for.
+
+### Procedure
+
+```bash
+# 1. Stop Flair
+flair stop
+
+# 2. Restore the pre-upgrade snapshot (see the exact path/command flair upgrade
+#    printed when it ran — or list them yourself):
+ls -la ~/.flair/upgrade-snapshots/
+rm -rf ~/.flair/data
+mkdir -p ~/.flair/data
+tar -xzf ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz -C ~/.flair/data
+
+# 3. Install the previous version
+npm install -g @tpsdev-ai/flair@<previous-version>
+
+# 4. Start it back up
+flair start
+
+# 5. Verify
+flair status
+flair doctor
+```
+
+If you don't have a snapshot (upgraded with `--no-snapshot`, or on a version from
+before flair#637 shipped it), there is no tested way back short of restoring from a
+`flair backup` JSON export on the older version — do not assume an untested downgrade
+boot will work.
+
+### Does the previous version actually boot against newer data? (tested, not assumed)
+
+This used to be aspirational — nobody had actually checked. `test/compat/downgrade-boot.test.ts`
+now checks it for real, nightly, alongside the mixed-version federation suite (both run
+from `.github/workflows/federation-compat.yml`'s `bun test test/compat/`): it boots the
+current build, writes a memory and a presence row, stops it *without* wiping the data
+directory, then boots the last **npm-published** `@tpsdev-ai/flair` against that exact
+same directory and confirms it comes up healthy and can read both rows back.
+
+**As observed when this suite was added (2026-07-08):** the npm-published baseline
+(0.21.0) boots cleanly against data written by a HEAD build roughly 14 commits ahead of
+it (several security-hardening and CLI-behavior changes, no Flair schema migration, and
+only a patch-level `@harperfast/harper` bump, 5.1.15 → 5.1.17) — both the memory and
+presence rows written by the newer build were readable through the older build's own
+HTTP surface after the downgrade boot. **No downgrade break has been found across that
+gap.**
+
+This is *not* a blanket "downgrade is always safe" guarantee for every future release —
+it's a live, continuously-checked claim. If `test/compat/downgrade-boot.test.ts` starts
+failing (a real schema-incompatible change landing without a documented break), this
+section and the test's own assertions get updated together to say so explicitly, the
+same way this paragraph does today. Check the suite's latest nightly run (or the
+CHANGELOG for an explicit "no downgrade past X" note) before relying on this for a jump
+you haven't personally tested.
 
 ## See also
 
