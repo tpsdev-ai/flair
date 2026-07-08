@@ -1,4 +1,5 @@
 import { Resource } from "@harperfast/harper";
+import { allowVerified } from "./agent-auth.js";
 import { scanSkillContent } from "./scan/skill-scanner.js";
 
 /**
@@ -32,6 +33,21 @@ import { scanSkillContent } from "./scan/skill-scanner.js";
  */
 
 export class SkillScan extends Resource {
+  /**
+   * allowCreate()=allowVerified (authorizeLocal-escalation-class follow-up to
+   * #601/#604/#609/#612 — flair#614's backstop found this resource had NO
+   * allow* at all). The docstring above already says "Auth: any authenticated
+   * agent" — this was never actually enforced; Harper's own default
+   * (`user?.role.permission.super_user`, satisfiable only by a genuine admin
+   * OR authorizeLocal's forged loopback super_user) silently stood in
+   * instead. allowVerified matches the documented intent: any verified agent
+   * (not admin-only — this is a stateless text scanner, no agent/memory data
+   * touched), anonymous denied.
+   */
+  async allowCreate(): Promise<boolean> {
+    return allowVerified((this as any).getContext?.());
+  }
+
   async post(data: any, _context?: any) {
     const { content } = data || {};
 
