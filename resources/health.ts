@@ -1,7 +1,8 @@
 import { Resource, databases } from "@harperfast/harper";
-import { promises as fsp } from "node:fs";
+import { promises as fsp, existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getRerankStatus } from "./rerank-provider.js";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 
@@ -15,6 +16,34 @@ const redactHome = (p: string): string => {
 const exists = async (path: string): Promise<boolean> => {
   try { await fsp.stat(path); return true; } catch { return false; }
 };
+
+/**
+ * Resolve the runtime package version from package.json (duplicated from
+ * admin-layout.ts / AdminInstance.ts — same "keep in sync" idiom as the
+ * federation-crypto helpers in src/cli.ts; see those two files' comments for
+ * why it's inlined rather than imported). `process.env.npm_package_version`
+ * is only populated inside `npm run`, so reading package.json relative to
+ * THIS running module is the only way to report the version of the code
+ * that's actually executing — which is exactly what `flair upgrade`'s
+ * post-restart verification (flair#635) needs: proof the NEW package is
+ * what's serving, not just what landed on disk before a restart.
+ */
+function resolveVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      join(here, "..", "..", "package.json"),
+      join(here, "..", "package.json"),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        const pkg = JSON.parse(readFileSync(p, "utf-8"));
+        if (pkg.version) return pkg.version;
+      }
+    }
+  } catch { /* fall through */ }
+  return process.env.npm_package_version ?? "dev";
+}
 
 /**
  * Health endpoint — truly public, returns only { ok: true }.
@@ -489,6 +518,10 @@ export class HealthDetail extends Resource {
     stats.warnings = warnings;
 
     // ── Process info ──
+    // version: the RUNNING process's own package.json — used by `flair
+    // upgrade`'s post-restart verification (flair#635) to prove the new
+    // code is actually serving, not just installed on disk.
+    stats.version = resolveVersion();
     stats.pid = process.pid;
     stats.uptimeSeconds = Math.floor(process.uptime());
 
