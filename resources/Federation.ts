@@ -1,6 +1,7 @@
 import { Resource, databases, server } from "@harperfast/harper";
 import { createHash, randomBytes } from "node:crypto";
 import nacl from "tweetnacl";
+import { allowAdmin } from "./agent-auth.js";
 import {
   canonicalize,
   signBody,
@@ -120,8 +121,22 @@ function mergeRecord(local: Record<string, any> | null, remote: SyncRecord): Rec
 /**
  * GET /FederationInstance — return this instance's identity.
  * Used by peers during pairing and by the admin UI.
+ *
+ * allowRead()=allowAdmin (defense-in-depth, authorizeLocal-escalation-class
+ * follow-up to #601/#604/#609/#612 — flair#614's backstop found this one had
+ * NO allow* at all, so Harper's own default — `user?.role.permission.
+ * super_user`, satisfiable only by a genuine admin OR authorizeLocal's forged
+ * loopback super_user — was silently standing in). Same idiom as
+ * AdminInstance.ts/AdminDashboard.ts: this is an admin-view endpoint (peers
+ * never call it during pairing — FederationPair.post() reads the Instance
+ * table directly server-side to hand a peer our identity; this HTTP GET is
+ * ObservationCenter/CLI tooling only).
  */
 export class FederationInstance extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
   async get() {
     // Find or create instance identity
     let instance: any = null;
@@ -560,8 +575,20 @@ export class FederationSync extends Resource {
 
 /**
  * GET /FederationPeers — list known peers (admin view).
+ *
+ * allowRead()=allowAdmin (defense-in-depth, authorizeLocal-escalation-class
+ * follow-up to #601/#604/#609/#612 — flair#614's backstop found this one had
+ * NO allow* at all). The docstring already called this "(admin view)" and
+ * ObservationCenter's own JS already prompts for admin-pass before hitting
+ * this endpoint (see auth-middleware.ts's ObservationCenter comment) — this
+ * closes the gap between the documented/intended access model and what was
+ * actually enforced (nothing).
  */
 export class FederationPeers extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
   async get() {
     const peers: any[] = [];
     try {

@@ -61,25 +61,24 @@ const SRC = (f: string) => readFileSync(join(RESOURCES_DIR, f), "utf8");
  * NO allow* override of their own anywhere in the prototype chain — i.e.
  * fall through to Harper's default `user?.role.permission.super_user`.
  *
- * IMPORTANT — these are NOT a "these are fine, ship it" sign-off. Building
- * this test (2026-07-07) surfaced four resources with zero allow-decision
- * that were NOT in the previously-known list of 7 patched instances. Under
- * Harper's default, each is reachable by the authorizeLocal-forged loopback
- * super_user (same mechanism as #601/#604/#609/#612) but NOT by a genuine
- * remote unauthenticated caller (Harper's default denies non-super_user).
- * They are listed here — a conscious, cited entry — SPECIFICALLY so this
- * test passes today without silently blessing the gap, and so the next
- * person reads this comment instead of rediscovering the bug a 5th time.
- * Flagged to Flint in the flair#614 PR for a follow-up security fix; do not
- * add to this list without the same treatment (a citation + a plan to close
- * it), and remove an entry the moment its resource gets a real allow* gate.
+ * IMPORTANT — these are NOT a "these are fine, ship it" sign-off. Under
+ * Harper's default, each entry here is reachable by the authorizeLocal-forged
+ * loopback super_user (same mechanism as #601/#604/#609/#612) but NOT by a
+ * genuine remote unauthenticated caller (Harper's default denies
+ * non-super_user). Entries require a conscious, cited addition (a citation +
+ * a plan to close it) — SPECIFICALLY so the next person reads this comment
+ * instead of rediscovering the bug again — and must be removed the moment
+ * the resource gets a real allow* gate.
+ *
+ * 2026-07-07: the four resources first found here (FederationInstance,
+ * FederationPeers, HealthDetail, SkillScan) were gated (allowAdmin /
+ * allowVerified as fit each resource's sensitivity — see Federation.ts,
+ * health.ts, SkillScan.ts) and removed from this list; see the flair#614
+ * backstop follow-up PR. This list is currently empty — kept as a named,
+ * empty Record (rather than deleted) so the mechanism has an obvious home
+ * if a future resource genuinely needs this treatment.
  */
-const NEEDS_HUMAN_REVIEW: Record<string, string> = {
-  "FederationInstance": "Federation.ts — GET returns {id, publicKey, role, status}, no allow* at all. Low-sensitivity (peer-discovery identity, same shape as AgentCard) but not verified as a deliberate public decision anywhere in the code — just an absent gate. Loopback-forgery reachable.",
-  "FederationPeers": "Federation.ts — GET returns full peer list (id, role, status, endpoint, lastSyncAt, lastMergeAt, relayOnly, pairedAt), no allow* at all, and the docstring literally calls it '(admin view)' — reads like an intended admin gate that was never added. Loopback-forgery reachable.",
-  "HealthDetail": "health.ts — no allow* at all. get() computes `isAdmin = request?.tpsAgentIsAdmin === true || !callerAgent` — the `|| !callerAgent` means an UNRESOLVED caller (not just an authenticated non-admin) defaults to isAdmin=true internally. Harper's default allowRead still denies a genuine unauthenticated remote caller (no super_user), so this is loopback-forgery-reachable, not remotely exploitable — but the isAdmin fallback direction (missing-caller -> true) is backwards from every other resource's pattern in this codebase and deserves its own look.",
-  "SkillScan": "SkillScan.ts — POST content-safety scanner, no allow* at all. Doesn't touch agent/memory data (stateless text scan), so the blast radius of the same loopback-forgery gap is low, but it's still an unguarded default rather than a decision.",
-};
+const NEEDS_HUMAN_REVIEW: Record<string, string> = {};
 
 /**
  * True public-by-design resources go here ONLY if they do NOT already

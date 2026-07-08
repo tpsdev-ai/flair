@@ -3,6 +3,7 @@ import { promises as fsp } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { getRerankStatus } from "./rerank-provider.js";
+import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 
 const db = databases as any;
 
@@ -51,19 +52,45 @@ export class Health extends Resource {
  * Authenticated health detail — returns memory/agent/soul stats + process info.
  * Requires Ed25519 agent auth or admin basic auth.
  *
+ * allowRead()=allowVerified (authorizeLocal-escalation-class follow-up to
+ * #601/#604/#609/#612 — flair#614's backstop found this resource had NO
+ * allow* at all, despite this docstring's stated intent). Harper's own
+ * default (`user?.role.permission.super_user`, satisfiable only by a genuine
+ * admin OR authorizeLocal's forged loopback super_user) was silently
+ * standing in instead. Any verified agent may read — get() below still
+ * filters sensitive fields (peer/OAuth-client lists, absolute paths, full
+ * agent roster) down to admin-only.
+ *
  * Every optional-subsystem lookup is wrapped so a missing table or absent
  * schema downgrades to "not configured" rather than failing the whole call.
  */
 export class HealthDetail extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowVerified((this as any).getContext?.());
+  }
+
   async get() {
     const stats: Record<string, any> = { ok: true };
     const nowMs = Date.now();
     const warnings: Array<{ level: "warn" | "info"; message: string }> = [];
 
     const ctx = (this as any).getContext?.();
-    const request = ctx?.request ?? ctx;
-    const callerAgent: string | undefined = request?.tpsAgent;
-    const isAdmin: boolean = request?.tpsAgentIsAdmin === true || !callerAgent;
+    // #614 fix: resolve identity via the shared three-way verdict
+    // (internal/agent/anonymous — agent-auth.ts) instead of reading
+    // tpsAgent/tpsAgentIsAdmin off the raw request directly. The OLD
+    // computation was `request?.tpsAgentIsAdmin === true || !callerAgent` —
+    // the `|| !callerAgent` half meant an UNRESOLVED caller (no tpsAgent at
+    // all — i.e. anonymous) defaulted to isAdmin=TRUE, backwards from every
+    // other resource in this codebase and the opposite of fail-safe.
+    // allowRead() above already denies a genuine anonymous HTTP caller
+    // before get() ever runs; this fixes the internal computation to match
+    // (defense-in-depth, and correct semantics if get() is ever reached
+    // another way). Only a true "internal" verdict (no HTTP request at all —
+    // a programmatic/in-process call) or a verified admin agent is isAdmin;
+    // an unresolved/anonymous HTTP caller is never treated as admin.
+    const auth = await resolveAgentAuth(ctx);
+    const callerAgent: string | undefined = auth.kind === "agent" ? auth.agentId : undefined;
+    const isAdmin: boolean = auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin);
     stats.caller = { agentId: callerAgent ?? null, isAdmin };
 
     let memoriesList: any[] = [];
