@@ -26,6 +26,12 @@ import { deploy as deployToFabric, validateOptions as validateDeployOptions, bui
 import { fabricUpgrade } from "./fabric-upgrade.js";
 import { checkVersion, formatVersionNudge } from "./version-check.js";
 import { probeInstance, type ProbeResult } from "./probe.js";
+import {
+  sweepFleet,
+  renderFleetSweepTable,
+  FLEET_EXIT_OK,
+  type FleetSweepResult,
+} from "./fleet-verify.js";
 import { detectClients, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
 import {
   readClientMcpBlock,
@@ -1537,6 +1543,17 @@ export function resolveUpgradeRestartVerify(opts: { restart?: boolean; verify?: 
     verify: opts.verify !== false,
     deprecatedRestartFlagUsed: opts.restart === true,
   };
+}
+
+/**
+ * Whether `flair deploy` / `flair upgrade --target` should run the
+ * post-deploy fleet convergence sweep (flair#636). Registering
+ * `--no-fleet-verify` via commander leaves `opts.fleetVerify` undefined when
+ * unset, `false` when the flag is passed — mirrors resolveUpgradeRestartVerify's
+ * `!== false` default-true idiom above.
+ */
+export function shouldRunFleetVerify(opts: { fleetVerify?: boolean }): boolean {
+  return opts.fleetVerify !== false;
 }
 
 /**
@@ -6500,6 +6517,29 @@ async function runFabricUpgrade(opts: any): Promise<void> {
       return;
     }
     console.log(`\n${green("✓")} Fabric upgrade complete.`);
+
+    // ── Post-upgrade fleet sweep (flair#636) ────────────────────────────────
+    // "deploy complete" from harper's own CLI means "origin took it" — this
+    // confirms every known federation peer actually converged on the version
+    // we just deployed, instead of trusting a single boolean. Skippable with
+    // --no-fleet-verify. fabricUser/fabricPassword are guaranteed set here —
+    // the !check branch above already required both.
+    if (!shouldRunFleetVerify(opts)) {
+      console.log(dim("(--no-fleet-verify: skipping post-upgrade fleet sweep)"));
+    } else {
+      console.log(`\n${green("→")} Fleet verify`);
+      const sweep = await sweepFleet({
+        target: upgradeOpts.target,
+        fabricUser: fabricUser as string,
+        fabricPassword: fabricPassword as string,
+        expectVersion: result.plan.targetVersion,
+      });
+      console.log(renderFleetSweepTable(sweep));
+      if (sweep.exitCode !== FLEET_EXIT_OK) {
+        console.error(red(`\n✗ fleet verify failed (exit ${sweep.exitCode}) — upgrade is NOT fully converged.`));
+        process.exit(sweep.exitCode);
+      }
+    }
   } catch (err: any) {
     console.error(red(`\n✗ fabric upgrade failed: ${err.message}`));
     const hint = err.message?.toLowerCase() ?? "";
@@ -6532,6 +6572,7 @@ program
   .option("--project <name>", "Fabric component name for --target", "flair")
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
   .option("--yes", "Skip the confirmation prompt for --target")
+  .option("--no-fleet-verify", "Skip the automatic post-upgrade fleet convergence sweep for --target (default: sweep runs — see flair#636)")
   .action(async (opts) => {
     // ── Fabric-upgrade branch ───────────────────────────────────────────────
     if (opts.target) {
@@ -7453,6 +7494,7 @@ program
   .option("--verify-resource <name>", "Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)", (val: string, prev: string[]) => [...prev, val], [] as string[])
   .option("--deploy-retries <n>", "Retry the full harper deploy this many times on a detected flaky peer-replication failure ONLY — a normal deploy failure (auth, bad package, ...) never retries (default: 2; 0 disables)", "2")
   .option("--ignore-replication-errors", "If peer replication is still failing once retries are exhausted, treat it as a non-fatal warning and succeed with an origin-only deploy (the peer catches up via federation sync or a later deploy)")
+  .option("--no-fleet-verify", "Skip the automatic post-deploy fleet convergence sweep (default: sweep runs — see flair#636)")
   .action(async (opts) => {
     const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
     const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
@@ -7515,6 +7557,35 @@ program
       }
       console.log(`\n  URL:     ${result.url}`);
       console.log(`  Project: ${result.project}`);
+
+      // ── Post-deploy fleet sweep (flair#636) ─────────────────────────────
+      // Harper's own "Successfully deployed" (and the served-API verify
+      // above) only confirm the ORIGIN. This sweeps the origin + every known
+      // federation peer for actual version/health convergence — the gap that
+      // let the 0.21.0 deploy report success while a peer was still throwing
+      // 1006s. Skippable with --no-fleet-verify. Needs Basic-auth creds
+      // (fabricUser+fabricPassword) — a --fabric-token-only deploy has no way
+      // to authenticate the sweep, so it's skipped with a note instead of a
+      // silent no-op.
+      if (!shouldRunFleetVerify(opts)) {
+        console.log(dim("\n(--no-fleet-verify: skipping post-deploy fleet sweep)"));
+      } else if (!deployOpts.fabricUser || !deployOpts.fabricPassword) {
+        console.log(dim("\n(skipping fleet verify — no --fabric-user/--fabric-password to authenticate the sweep; only --fabric-token was provided)"));
+      } else {
+        console.log(`\n${green("→")} Fleet verify`);
+        const sweep = await sweepFleet({
+          target: result.url,
+          fabricUser: deployOpts.fabricUser,
+          fabricPassword: deployOpts.fabricPassword,
+          expectVersion: result.version,
+        });
+        console.log(renderFleetSweepTable(sweep));
+        if (sweep.exitCode !== FLEET_EXIT_OK) {
+          console.error(red(`\n✗ fleet verify failed (exit ${sweep.exitCode}) — deploy is NOT fully converged.`));
+          process.exit(sweep.exitCode);
+        }
+      }
+
       console.log(`\nNext steps:`);
       console.log(dim(`  1. Set an admin password in Fabric Studio (Cluster Settings → Admin)`));
       console.log(dim(`  2. Seed your first agent:`));
@@ -7536,6 +7607,71 @@ program
       }
       process.exit(1);
     }
+  });
+
+// ─── flair fleet ──────────────────────────────────────────────────────────────
+//
+// Fabric fleet operations (flair#636). `flair deploy` / `flair upgrade
+// --target` already run this sweep automatically post-deploy (skippable
+// with --no-fleet-verify) — this is the standalone entry point for running
+// it independently, e.g. as a periodic health check or before a rolling
+// restart step (see the flair#636 decision comment: this sweep is the gate
+// between peers during a rolling restart, not the restart mechanism itself).
+const fleet = program.command("fleet").description("Fabric fleet operations (post-deploy convergence verification)");
+
+fleet
+  .command("verify")
+  .description("Sweep a Fabric origin + its known federation peers for version/health convergence")
+  .requiredOption("--target <url>", "Fabric URL to verify (the origin node)")
+  .option("--fabric-user <user>", "Fabric admin username (env: FABRIC_USER)")
+  .option("--fabric-password <pass>", "Fabric admin password (env: FABRIC_PASSWORD)")
+  .option("--expect-version <semver>", "Version every node must report (default: the origin's own reported version — a self-consistency check)")
+  .option("--timeout <ms>", "Per-node /Health poll timeout in ms", "60000")
+  .option("--json", "Emit JSON (also: pipe + FLAIR_OUTPUT=json)")
+  .addHelpText("after", `
+Exit codes:
+  0  all nodes verified: healthy, authenticated, and version-matched
+  1  origin failed (unreachable, unauthenticated, or wrong version)
+  2  origin OK, but a reachable peer is running a DIFFERENT version (skew)
+  3  origin OK, no skew among reachable peers, but a peer could not be
+     verified at all (unreachable, auth rejected, or no endpoint on file)
+
+"peer" here means a Flair federation peer (GET /FederationPeers on the
+origin) — NOT Harper's own cluster-replication nodes, which the OSS
+@harperfast/harper build this CLI ships does not expose (cluster_status is
+a harper-pro-only operation). A Fabric replica that was never
+federation-paired (\`flair federation pair\`) is invisible to this sweep —
+see src/fleet-verify.ts's file header for the full caveat.`)
+  .action(async (opts) => {
+    const fabricUser = opts.fabricUser ?? process.env.FABRIC_USER;
+    const fabricPassword = opts.fabricPassword ?? process.env.FABRIC_PASSWORD;
+
+    if (!fabricUser || !fabricPassword) {
+      console.error(render.wrap(render.c.red, "flair fleet verify: credentials required"));
+      console.error("  pass --fabric-user + --fabric-password (or FABRIC_USER / FABRIC_PASSWORD env)");
+      process.exit(1);
+    }
+    // Warn on password-via-flag (leaks to shell history). Env is preferred.
+    if (opts.fabricPassword && !process.env.FABRIC_PASSWORD) {
+      console.error(render.wrap(render.c.dim, "warning: --fabric-password leaks to shell history. Prefer FABRIC_PASSWORD env."));
+    }
+
+    const result: FleetSweepResult = await sweepFleet({
+      target: opts.target,
+      fabricUser,
+      fabricPassword,
+      expectVersion: opts.expectVersion,
+      timeoutMs: Number(opts.timeout ?? 60_000),
+    });
+
+    const mode = render.resolveOutputMode(opts);
+    if (mode === "json") {
+      console.log(render.asJSON(result));
+    } else {
+      console.log(render.wrap(render.c.bold, `Fleet verify — ${result.target}`));
+      console.log(renderFleetSweepTable(result));
+    }
+    process.exit(result.exitCode);
   });
 
 // ─── flair doctor ─────────────────────────────────────────────────────────────
