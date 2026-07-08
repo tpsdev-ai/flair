@@ -594,3 +594,28 @@ jobs:
             echo "::endgroup::"
           done
       - run: chmod +x ./scripts/check-impl-term-leaks.sh && ./scripts/check-impl-term-leaks.sh
+
+  docs-freshness:
+    name: "Doc/Code Lint: docs-freshness gate"
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 pulls full history + tags so the CHANGELOG check can count
+      # feat/fix commits since the last v* tag. The other checks are file-only.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - run: sfw bun install --frozen-lockfile
+      # Build the CLI so the command-description check can introspect the real
+      # command tree from dist/cli.js (the exported `program`), not a source regex.
+      - name: Build CLI
+        run: bun run build:cli
+      - run: node scripts/docs-freshness-check.mjs
