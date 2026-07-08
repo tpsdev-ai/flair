@@ -153,6 +153,56 @@ export type AgentAuthVerdict =
  *   5. nothing at all → trusted internal call
  */
 /**
+ * Header names that can carry a CLIENT-PRESENTED credential. Today only the
+ * standard `authorization` header — it carries Basic, Bearer, AND our custom
+ * `TPS-Ed25519 …` scheme (all three ride the Authorization header; see
+ * doVerify() above and auth-middleware.ts, both of which read exactly this
+ * header to authenticate a caller). Kept as a LIST, read via every header-object
+ * shape below, so a future signed-header auth scheme is a one-line addition here
+ * — not a scatter of ad-hoc `req.headers.authorization` truthiness checks that
+ * would each have to be rediscovered and updated (Kern's review point).
+ *
+ * DELIBERATELY EXCLUDES the server-set trust markers `x-tps-agent` /
+ * `x-tps-anonymous`: auth-middleware.ts STAMPS those AFTER it has verified a
+ * caller — they are never presented by the client. Counting them as "credential
+ * evidence" would let an unauthenticated caller forge one and defeat this gate.
+ */
+const CREDENTIAL_HEADERS = ["authorization"] as const;
+
+/**
+ * Read a header off either header-object shape Harper hands us: the Web
+ * Headers-like `.get(name)` (populated for GET/search requests) or the plain
+ * `.asObject` bag (PUT/POST). Mirrors doVerify()'s own read exactly, so the
+ * evidence check can't miss a shape the verifier would have seen.
+ */
+function readRequestHeader(reqLike: any, name: string): string {
+  return (
+    reqLike?.headers?.get?.(name) ??
+    reqLike?.headers?.asObject?.[name] ??
+    ""
+  );
+}
+
+/**
+ * True iff the request carries ANY client-presented credential (CREDENTIAL_HEADERS).
+ *
+ * WHY THIS EXISTS (flair#610): Harper's `authorizeLocal: true` forges
+ * `request.user = super_user` (and can populate `.username`) for a credential-
+ * LESS loopback request — one with NO Authorization header at all. A genuine
+ * Basic/Bearer/TPS-Ed25519 header SUPPRESSES that forgery. So "is a credential
+ * present?" is precisely what separates a genuinely-authenticated caller from
+ * Harper's ambient forgery — the gate resolveAgentAuth applies before trusting a
+ * `context.user` identity. Handles BOTH context shapes (`getContext().request`
+ * for GET/search, context-only for PUT/POST) by resolving `request ?? self`
+ * first, then reads both header-object shapes.
+ */
+export function hasCredentialEvidence(context: any): boolean {
+  const reqLike = context?.request ?? context;
+  if (!reqLike) return false;
+  return CREDENTIAL_HEADERS.some((h) => readRequestHeader(reqLike, h) !== "");
+}
+
+/**
  * allow* for AGENT-FACING resources: permit verified agents, admins/super_user,
  * and trusted internal calls; deny anonymous HTTP. Pass getContext(). Per-record
  * scoping/ownership is still enforced in the handler. Replaces the
@@ -182,11 +232,23 @@ export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> 
     return { kind: "agent", agentId: String(c.tpsAgent), isAdmin: c.tpsAgentIsAdmin === true };
   }
 
+  // flair#610 — CREDENTIAL-EVIDENCE GATE. Harper's `authorizeLocal: true` forges
+  // `context.user = super_user` (and can populate `.username`) for a credential-
+  // LESS loopback request. Trusting that ambient identity was the forgery
+  // vector: a bare local caller resolved to admin with no signature and no
+  // password. Only trust a `context.user` identity when the request actually
+  // carries a credential (real Basic/Bearer/TPS-Ed25519 header) — the one thing
+  // authorizeLocal's forgery cannot manufacture. Without evidence, FALL THROUGH
+  // to the verifyAgentRequest fallback below: a genuine signed request still
+  // authenticates; a credential-less HTTP request lands on `anonymous` (it has a
+  // headers object but no valid agent), and a true in-process call with no
+  // request object at all lands on `internal`.
+  const credentialed = hasCredentialEvidence(c);
   const user = context?.user ?? c.user;
-  if (user?.role?.permission?.super_user === true) {
+  if (credentialed && user?.role?.permission?.super_user === true) {
     return { kind: "agent", agentId: String(user.username ?? "admin"), isAdmin: true };
   }
-  if (user?.username && user.username !== FLAIR_AGENT_USERNAME) {
+  if (credentialed && user?.username && user.username !== FLAIR_AGENT_USERNAME) {
     return { kind: "agent", agentId: String(user.username), isAdmin: false };
   }
 

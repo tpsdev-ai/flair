@@ -457,9 +457,13 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
   //
   // NOTE: this function is for the Harper HTTP/REST API only. The Harper
   // operations API (used by seedAgentViaOpsApi / seedFederationInstanceViaOpsApi)
-  // does NOT honor authorizeLocal — it always requires Basic admin auth, and
-  // those helpers send it unconditionally. authorizeLocal=true affects this
-  // path; it does not affect ops-API calls.
+  // ALSO honors authorizeLocal: a header-less loopback request to the ops port
+  // is auto-authorized as super_user (verified by live probe — flair#610). Those
+  // helpers nonetheless send Basic admin auth UNCONDITIONALLY, so they never
+  // depend on that ambient elevation and behave identically against a remote or
+  // hardened instance. Hardening the ops-API loopback posture itself (bind scope
+  // / disabling authorizeLocal there) is tracked separately in flair#654 and is
+  // out of scope for this HTTP/REST auth path.
   let authHeader: string | undefined;
   const token = process.env.FLAIR_TOKEN;
   if (token) {

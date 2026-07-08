@@ -245,7 +245,14 @@ ${scope.split(" ").map((s: string) => `<div class="scope">${s}</div>`).join("")}
       });
     }
 
-    if (action === "deny") {
+    // flair#610 — mint an authorization code ONLY on an explicit approve. The
+    // consent form rendered by get() submits action=approve|deny and nothing
+    // else, so treating every non-"approve" value (deny, missing, empty, or
+    // garbage) as a denial is safe — and it closes the previous loose
+    // `action !== "deny"` check, which minted a code for a malformed or absent
+    // action. redirect_uri was already validated above, so this access_denied
+    // redirect can only target the allowed URI.
+    if (action !== "approve") {
       const params = new URLSearchParams({ error: "access_denied", state });
       return redirectTo(`${redirectUri}?${params}`);
     }
