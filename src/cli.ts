@@ -186,6 +186,9 @@ function defaultAdminPassPath(): string {
 /**
  * Resolve an admin password for LOCAL-only CLI convenience (`agent add`,
  * `principal add`) without requiring `--admin-pass` on every call (#590).
+ * Also reused by `api()`'s local-target auth fallback (flair#634) — called
+ * there as `resolveLocalAdminPass(undefined, !isLocal)`, so only its file leg
+ * ever fires (the env leg is already handled by `api()` itself first).
  *
  * Resolution order: explicit value (the `--admin-pass` flag) → `FLAIR_ADMIN_PASS`
  * env → the secure `~/.flair/admin-pass` file `flair init` already writes with
@@ -416,12 +419,22 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
   const base = options?.baseUrl ?? (process.env.FLAIR_URL || defaultUrl);
   const isLocal = isLocalBase(base);
 
-  // Auth resolution order:
+  // Auth resolution order (flair#634 — local targets used to send NO auth at
+  // all here and ride Harper's authorizeLocal forged super_user; #632 gated
+  // FederationInstance/FederationPeers behind allowAdmin, so credential-less
+  // local calls to those now 403 instead of silently passing):
   // 1. FLAIR_TOKEN env → Bearer token (backward compat)
-  // 2. FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD env → Basic admin auth (remote targets only).
-  //    For local targets with authorizeLocal=true, skip Basic auth and let Harper handle it.
+  // 2. FLAIR_ADMIN_PASS / HDB_ADMIN_PASSWORD env → Basic admin auth. Applies to
+  //    BOTH local and remote targets — an explicit env var always wins, local
+  //    included, so a caller that sets it never depends on authorizeLocal.
   // 3. FLAIR_AGENT_ID env + key file → Ed25519 signature (standard)
-  // 4. No auth (Harper authorizeLocal handles local; remote will 401)
+  // 4. LOCAL TARGETS ONLY: the secure ~/.flair/admin-pass file `flair init`
+  //    writes (#593) → Basic admin auth, via the same resolveLocalAdminPass
+  //    convenience `agent add`/`principal add` already use (#590). Guarded to
+  //    isLocal so a --target/FLAIR_URL request aimed elsewhere never rides
+  //    this machine's local admin secret.
+  // 5. No auth (remote will 401/403; local now also gets a real 403 from
+  //    #632-gated resources instead of the old forged-admin passthrough)
   //
   // NOTE: this function is for the Harper HTTP/REST API only. The Harper
   // operations API (used by seedAgentViaOpsApi / seedFederationInstanceViaOpsApi)
@@ -432,7 +445,7 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
   const token = process.env.FLAIR_TOKEN;
   if (token) {
     authHeader = `Bearer ${token}`;
-  } else if (!isLocal && (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD)) {
+  } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
     // Admin Basic auth — used by federation, backup, and other admin CLI commands
     const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD!;
     authHeader = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
@@ -457,6 +470,25 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
         }
       }
     }
+
+    // Local-only fallback (flair#634): no explicit env, no usable agent key.
+    // FLAIR_ADMIN_PASS/HDB_ADMIN_PASSWORD are already ruled out by this point
+    // (handled above), so resolveLocalAdminPass's env leg is a no-op here and
+    // this only ever resolves the ~/.flair/admin-pass file — isRemoteTarget
+    // is `!isLocal` so it's skipped entirely for --target/FLAIR_URL requests.
+    if (!authHeader) {
+      try {
+        const filePass = resolveLocalAdminPass(undefined, !isLocal);
+        if (filePass) {
+          authHeader = `Basic ${Buffer.from(`admin:${filePass}`).toString("base64")}`;
+        }
+      } catch (err: unknown) {
+        // File exists but has unsafe permissions — warn (never the secret
+        // itself) and fall through to no-auth.
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`Warning: ~/.flair/admin-pass unusable: ${message}`);
+      }
+    }
   }
 
   const res = await fetch(`${base}${path}`, {
@@ -473,7 +505,19 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     return { ok: true };
   }
   const text = await res.text();
-  if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+  if (!res.ok) {
+    // 403 with no credentials sent at all is the flair#634 case: a gated
+    // resource (e.g. #632's FederationInstance/FederationPeers) rejected a
+    // credential-less call. Name the fix instead of surfacing the raw
+    // "forbidden" body — never a stack trace.
+    if (res.status === 403 && !authHeader) {
+      const hint = isLocal
+        ? "Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass."
+        : "Set FLAIR_ADMIN_PASS (remote targets have no local admin-pass fallback).";
+      throw new Error(`HTTP 403: no credentials sent. ${hint}`);
+    }
+    throw new Error(text || `HTTP ${res.status}`);
+  }
   if (!text) return { ok: true };
   return JSON.parse(text);
 }
