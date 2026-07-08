@@ -25,6 +25,7 @@ import { keystore } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
 import { checkVersion, formatVersionNudge } from "./version-check.js";
+import { probeInstance, type ProbeResult } from "./probe.js";
 import { detectClients, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
 import {
   readClientMcpBlock,
@@ -1510,6 +1511,60 @@ export type UpgradeStatus = "current" | "outdated" | "missing" | "optional";
 export function shouldPrintUpgradeLine(status: UpgradeStatus, showAll: boolean): boolean {
   if (status === "optional" && !showAll) return false;
   return true;
+}
+
+/**
+ * Pure flag resolution for `flair upgrade`'s restart/verify defaults
+ * (flair#635 decision: restart is now the default; `--no-restart` opts
+ * out). `--restart` is a deprecated no-op accepted for backward compat —
+ * `deprecatedRestartFlagUsed` tells the caller to print a one-time notice
+ * without re-deriving the raw Commander value itself.
+ *
+ * Commander quirk this relies on: registering both `--restart` (plain
+ * boolean) and `--no-restart` (negatable) on the same command means
+ * `opts.restart` is `undefined` when neither flag is passed, `true` when
+ * `--restart` is passed, and `false` when `--no-restart` is passed — so
+ * `!== false` is the correct "should restart" default-true test, and
+ * `=== true` isolates "the user explicitly typed the deprecated flag".
+ */
+export function resolveUpgradeRestartVerify(opts: { restart?: boolean; verify?: boolean }): {
+  restart: boolean;
+  verify: boolean;
+  deprecatedRestartFlagUsed: boolean;
+} {
+  return {
+    restart: opts.restart !== false,
+    verify: opts.verify !== false,
+    deprecatedRestartFlagUsed: opts.restart === true,
+  };
+}
+
+/**
+ * Decide what to do after post-restart verification (flair#635). Pure —
+ * takes the ProbeResult and the previously-installed @tpsdev-ai/flair
+ * version (known from the pre-upgrade probe findings), returns the action
+ * without performing any I/O.
+ */
+export type UpgradeVerifyAction =
+  | { kind: "ok" }
+  | { kind: "rollback"; reason: string; toVersion: string }
+  | { kind: "cannot-rollback"; reason: string };
+
+export function decideAfterVerify(result: ProbeResult, previousVersion: string | null): UpgradeVerifyAction {
+  if (result.ok) return { kind: "ok" };
+  const reason = result.error ?? "post-restart verification failed";
+  if (!previousVersion) return { kind: "cannot-rollback", reason };
+  return { kind: "rollback", reason, toVersion: previousVersion };
+}
+
+/** Decide the final outcome after re-verifying a rollback (flair#635). Pure. */
+export type RollbackVerifyAction =
+  | { kind: "rolled-back" }
+  | { kind: "rollback-failed"; reason: string };
+
+export function decideAfterRollbackVerify(result: ProbeResult): RollbackVerifyAction {
+  if (result.ok) return { kind: "rolled-back" };
+  return { kind: "rollback-failed", reason: result.error ?? "rollback verification failed" };
 }
 
 /**
@@ -6461,7 +6516,9 @@ program
   .command("upgrade")
   .description("Upgrade Flair — local packages by default, or a deployed Fabric with --target")
   .option("--check", "Only check for updates / show the plan, don't install or deploy")
-  .option("--restart", "Restart Flair after upgrade")
+  .option("--restart", "[deprecated] no-op — restart now happens automatically after upgrade; use --no-restart to opt out")
+  .option("--no-restart", "Skip the restart after upgrade (stage new packages now, restart later)")
+  .option("--no-verify", "Skip post-restart health/version/auth verification (default: verify — so a broken upgrade can't report success; see flair#635)")
   .option("--all", "Show transitive packages (e.g. flair-client) in the listing — verbose mode for debugging dep versions")
   // ── Fabric upgrade (--target) ────────────────────────────────────────────
   // When --target is passed, upgrade the Flair component DEPLOYED to that
@@ -6482,7 +6539,7 @@ program
       return;
     }
 
-    const { execSync, execFileSync } = await import("node:child_process");
+    const { execFileSync } = await import("node:child_process");
     const checkOnly = opts.check ?? false;
     const showAll = opts.all ?? false;
 
@@ -6634,6 +6691,11 @@ program
     // Use execFileSync with argv — the spec `<name>@<version>` becomes a
     // single argument to the upgrade command, no shell to inject into.
     console.log(`\nUpgrading ${totalUpgrades} package${totalUpgrades > 1 ? "s" : ""}...\n`);
+    // Tracked separately (rather than inferred from findings alone) because the
+    // post-restart verify/rollback step below needs to know whether @tpsdev-ai/flair's
+    // OWN install actually succeeded — if it failed, the running version is still the
+    // OLD one and verification should expect that, not the target we failed to reach.
+    let flairInstallFailed = false;
     for (const { pkg, latest } of npmUpgrades) {
       try {
         console.log(`  Installing ${pkg}@${latest}...`);
@@ -6641,6 +6703,7 @@ program
         console.log(`  ✅ ${pkg}@${latest} installed`);
       } catch (err: any) {
         console.error(`  ❌ ${pkg} upgrade failed: ${err.message}`);
+        if (pkg === "@tpsdev-ai/flair") flairInstallFailed = true;
       }
     }
     for (const { pkg, latest } of openclawUpgrades) {
@@ -6662,25 +6725,105 @@ program
       }
     }
 
-    if (opts.restart) {
-      console.log("\nRestarting Flair...");
-      try {
-        const port = resolveHttpPort({});
-        const label = "ai.tpsdev.flair";
-        const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
-        if (process.platform === "darwin" && existsSync(plistPath)) {
-          try { execSync(`launchctl stop ${label}`, { stdio: "pipe" }); } catch {}
-          await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
-          console.log("✅ Flair restarted with new version");
-        } else {
-          console.log("Run: flair restart");
-        }
-      } catch {
-        console.log("Run: flair restart");
-      }
-    } else {
-      console.log("\nRun: flair restart to use the new version");
+    // ── Restart + verify + rollback (flair#635) ─────────────────────────────
+    // Decision (2026-07-08): restart is now the default post-upgrade step —
+    // installing new code without restarting leaves the OLD process serving
+    // while the version on disk lies about what's actually running.
+    // --no-restart opts back out for the "stage now, bounce later" case.
+    // --restart is kept as a deprecated no-op for old muscle memory.
+    // Upgrade = install → restart → verify → (rollback on failure), one
+    // transaction — never report success on a broken restart.
+    const flairFinding = findings.find((f) => f.name === "@tpsdev-ai/flair");
+    const previousFlairVersion = flairFinding?.installed ?? null;
+    const expectedFlairVersion =
+      flairFinding?.status === "outdated" && !flairInstallFailed
+        ? flairFinding.latest
+        : flairFinding?.installed ?? null;
+
+    const { restart: shouldRestart, verify: shouldVerify, deprecatedRestartFlagUsed } =
+      resolveUpgradeRestartVerify(opts);
+    if (deprecatedRestartFlagUsed) {
+      console.error("warning: --restart is deprecated and is now a no-op — flair upgrade restarts by default. Use --no-restart to skip it.");
     }
+
+    if (!shouldRestart) {
+      console.log("\nRun: flair restart to use the new version");
+      return;
+    }
+
+    console.log("\nRestarting Flair...");
+    const port = resolveHttpPort({});
+    const baseUrl = `http://127.0.0.1:${port}`;
+    try {
+      await restartFlair(port);
+    } catch (err: any) {
+      console.error(`❌ restart failed: ${err.message}`);
+      console.error("   Flair may be partially down. Check: flair doctor");
+      process.exit(1);
+    }
+    console.log("✅ Flair restarted");
+
+    if (!shouldVerify) {
+      console.log("  (--no-verify: skipping post-restart verification)");
+      return;
+    }
+
+    console.log("\nVerifying...");
+    // The authenticated leg dogfoods api()'s local-credential resolution
+    // (flair#640: env > agent key > ~/.flair/admin-pass file) — probeInstance
+    // itself never resolves credentials, it just calls whatever's handed to it.
+    const verify = await probeInstance(baseUrl, {
+      expectVersion: expectedFlairVersion ?? undefined,
+      timeoutMs: STARTUP_TIMEOUT_MS,
+      authedGet: (path) => api("GET", path, undefined, { baseUrl }),
+    });
+
+    const verdict = decideAfterVerify(verify, previousFlairVersion);
+    if (verdict.kind === "ok") {
+      console.log(`✅ verified: healthy, authenticated${verify.version ? `, running ${verify.version}` : ""}`);
+      return;
+    }
+
+    console.error(`❌ post-restart verification failed: ${verdict.reason}`);
+
+    if (verdict.kind === "cannot-rollback") {
+      console.error("   Cannot roll back automatically: the previously-installed @tpsdev-ai/flair version is unknown.");
+      console.error("   Check the instance now: flair doctor");
+      process.exit(1);
+    }
+
+    console.log(`\nRolling back @tpsdev-ai/flair to ${verdict.toVersion}...`);
+    try {
+      execFileSync("npm", ["install", "-g", `@tpsdev-ai/flair@${verdict.toVersion}`], { stdio: "pipe" });
+    } catch (err: any) {
+      console.error(`❌ rollback install failed: ${err.message}`);
+      console.error(`   Flair is currently running the FAILED version (${expectedFlairVersion ?? "unknown"}). Manual intervention required.`);
+      process.exit(1);
+    }
+    try {
+      await restartFlair(port);
+    } catch (err: any) {
+      console.error(`❌ rollback restart failed: ${err.message}`);
+      console.error("   Instance state is UNKNOWN — it may be down entirely. Check: flair doctor");
+      process.exit(1);
+    }
+
+    const rollbackVerify = await probeInstance(baseUrl, {
+      expectVersion: verdict.toVersion,
+      timeoutMs: STARTUP_TIMEOUT_MS,
+      authedGet: (path) => api("GET", path, undefined, { baseUrl }),
+    });
+    const rollbackVerdict = decideAfterRollbackVerify(rollbackVerify);
+    if (rollbackVerdict.kind === "rolled-back") {
+      console.error(`❌ upgrade failed verification and was rolled back to @tpsdev-ai/flair@${verdict.toVersion}.`);
+      console.error(`   Original failure: ${verdict.reason}`);
+      process.exit(1);
+    }
+
+    console.error(`❌❌ ROLLBACK ALSO FAILED VERIFICATION: ${rollbackVerdict.reason}`);
+    console.error("   Instance state is UNKNOWN — do not assume data integrity.");
+    console.error("   This double-failure isn't auto-recoverable yet — see flair#637 (data-snapshot) before touching data.");
+    process.exit(1);
   });
 
 // ─── flair stop ───────────────────────────────────────────────────────────────
@@ -6809,88 +6952,98 @@ program
 
 // ─── flair restart ────────────────────────────────────────────────────────────
 
+/**
+ * The ONE restart mechanism for a local Flair install — launchd stop/start
+ * on darwin when a plist is present (falling back on failure), otherwise a
+ * manual SIGTERM + respawn. Shared by `flair restart` and `flair upgrade`'s
+ * post-install restart step (flair#635) so the two never drift into two
+ * different ways to bounce the same process.
+ *
+ * Throws on failure instead of calling process.exit — callers decide how to
+ * react (`flair restart` exits 1; `flair upgrade` treats a failed restart as
+ * an upgrade failure and may attempt a rollback).
+ */
+async function restartFlair(port: number): Promise<void> {
+  if (process.platform === "darwin") {
+    const label = "ai.tpsdev.flair";
+    const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+    if (existsSync(plistPath)) {
+      try {
+        const { execSync } = await import("node:child_process");
+        // Ensure the service is loaded (init writes the plist but doesn't load it)
+        try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
+        // Capture the current PID *before* stopping so we can verify exit. Without
+        // this, waitForHealth can race against the still-shutting-down old process
+        // and return success before KeepAlive brings the new one up.
+        const oldPid = readHarperPid(defaultDataDir());
+        try { execSync(`launchctl stop ${label}`, { stdio: "pipe" }); } catch {}
+        if (oldPid) await waitForProcessExit(oldPid, STARTUP_TIMEOUT_MS);
+        await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+        return;
+      } catch (err: any) {
+        console.error(`launchd restart failed, falling back to port restart: ${err.message}`);
+      }
+    }
+  }
+
+  // Port-based restart (Linux, or macOS fallback when no launchd plist)
+  console.log("Stopping...");
+  try {
+    const { execSync } = await import("node:child_process");
+    const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+    if (lsof) {
+      for (const pid of lsof.split("\n")) {
+        try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
+      }
+      // Wait briefly for shutdown
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  } catch { /* not running */ }
+
+  console.log("Starting...");
+  const bin = harperBin();
+  if (!bin) {
+    throw new Error("Harper binary not found. Run 'flair init' first.");
+  }
+
+  const dataDir = defaultDataDir();
+  // Match `flair start`: accept either HDB_ADMIN_PASSWORD or FLAIR_ADMIN_PASS.
+  // Without this, `flair init --admin-pass X` (which only exports HDB_*
+  // to the initial Harper spawn) followed by `flair restart` would silently
+  // drop admin credentials — any subsequent auth'd call returns 401.
+  const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    ROOTPATH: dataDir,
+    DEFAULTS_MODE: "dev",
+    HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
+    HTTP_PORT: String(port),
+    LOCAL_STUDIO: "false",
+  };
+  if (adminPass) {
+    env.HDB_ADMIN_PASSWORD = adminPass;
+  }
+
+  const proc = spawn(process.execPath, [bin, "run", "."], {
+    cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
+  });
+  proc.unref();
+
+  await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
+}
+
 program
   .command("restart")
   .description("Restart the Flair (Harper) instance")
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
     const port = resolveHttpPort(opts);
-    const platform = process.platform;
-
-    if (platform === "darwin") {
-      const label = "ai.tpsdev.flair";
-      const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
-      if (existsSync(plistPath)) {
-        try {
-          const { execSync } = await import("node:child_process");
-          // Ensure the service is loaded (init writes the plist but doesn't load it)
-          try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
-          // Capture the current PID *before* stopping so we can verify exit. Without
-          // this, waitForHealth can race against the still-shutting-down old process
-          // and return success before KeepAlive brings the new one up.
-          const oldPid = readHarperPid(defaultDataDir());
-          try { execSync(`launchctl stop ${label}`, { stdio: "pipe" }); } catch {}
-          if (oldPid) await waitForProcessExit(oldPid, STARTUP_TIMEOUT_MS);
-          await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
-          console.log("✅ Flair restarted");
-          return;
-        } catch (err: any) {
-          console.error(`launchd restart failed, falling back to port restart: ${err.message}`);
-        }
-      }
-    }
-    {
-      // Port-based restart (Linux, or macOS fallback)
-      console.log("Stopping...");
-      try {
-        const { execSync } = await import("node:child_process");
-        const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
-        if (lsof) {
-          for (const pid of lsof.split("\n")) {
-            try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
-          }
-          // Wait briefly for shutdown
-          await new Promise(r => setTimeout(r, 2000));
-        }
-      } catch { /* not running */ }
-
-      console.log("Starting...");
-      const bin = harperBin();
-      if (!bin) {
-        console.error("❌ Harper binary not found. Run 'flair init' first.");
-        process.exit(1);
-      }
-
-      const dataDir = defaultDataDir();
-      // Match `flair start`: accept either HDB_ADMIN_PASSWORD or FLAIR_ADMIN_PASS.
-      // Without this, `flair init --admin-pass X` (which only exports HDB_*
-      // to the initial Harper spawn) followed by `flair restart` would silently
-      // drop admin credentials — any subsequent auth'd call returns 401.
-      const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
-      const env: Record<string, string> = {
-        ...(process.env as Record<string, string>),
-        ROOTPATH: dataDir,
-        DEFAULTS_MODE: "dev",
-        HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
-        HTTP_PORT: String(port),
-        LOCAL_STUDIO: "false",
-      };
-      if (adminPass) {
-        env.HDB_ADMIN_PASSWORD = adminPass;
-      }
-
-      const proc = spawn(process.execPath, [bin, "run", "."], {
-        cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
-      });
-      proc.unref();
-
-      try {
-        await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
-        console.log("✅ Flair restarted");
-      } catch {
-        console.error("❌ Flair failed to restart within timeout");
-        process.exit(1);
-      }
+    try {
+      await restartFlair(port);
+      console.log("✅ Flair restarted");
+    } catch (err: any) {
+      console.error(`❌ Flair failed to restart: ${err?.message ?? err}`);
+      process.exit(1);
     }
   });
 

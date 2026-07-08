@@ -22,10 +22,9 @@ flair backup > ~/flair-backup-$(date +%Y%m%d).json
 # 2. Check what's outdated (doesn't install anything)
 flair upgrade --check
 
-# 3. Upgrade
+# 3. Upgrade — installs, restarts, and verifies the new version is actually
+#    serving, all in one step (see "Upgrade is a transaction" below)
 flair upgrade
-# — or, to upgrade and restart in one step:
-flair upgrade --restart
 
 # 4. Verify
 flair status
@@ -39,6 +38,28 @@ own plugin loader). Pass `--all` to also see `flair-client` (normally hidden as 
 transitive dependency). **Other integrations upgrade in their own ecosystem, not via
 `flair upgrade`:** `pi-flair` (pi's plugin manager), `langgraph-flair` / `hermes-flair`
 (pip / your Python package manager), `n8n-nodes-flair` (n8n's Community Nodes UI).
+
+### Upgrade is a transaction
+
+As of flair#635, `flair upgrade` is install → restart → verify →
+rollback-on-failure, in one step — installing new code without restarting used
+to leave the OLD process serving while the version on disk lied about what was
+actually running:
+
+- **Restart happens automatically** after install. Pass `--no-restart` to
+  stage the new packages without bouncing the process yet (the old
+  opt-in `--restart` flag still parses but is now a no-op — restart is the
+  default).
+- **Post-restart verification** (skip with `--no-verify`) confirms the
+  restarted instance answers `/Health`, that an authenticated request
+  round-trips, and that the reported running version matches what was just
+  installed.
+- **On verification failure**, `flair upgrade` automatically reinstalls the
+  previously-running `@tpsdev-ai/flair` version, restarts again, and
+  re-verifies — then exits nonzero with a clear report of what failed. If the
+  rollback itself fails verification, it says so loudly instead of retrying
+  in a loop; see the data-snapshot guidance tracked in flair#637 before
+  touching data in that state.
 
 If you'd rather upgrade by hand instead of `flair upgrade`:
 
