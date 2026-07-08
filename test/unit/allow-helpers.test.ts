@@ -1,9 +1,14 @@
 import { mock, describe, it, expect } from "bun:test";
 
 // agent-auth.ts imports `databases` from @harperfast/harper (throws outside a
-// Harper runtime). Mock it — the annotation/internal/anonymous paths exercised
-// here never reach databases (they return before any Agent.get).
-mock.module("@harperfast/harper", () => ({ databases: {}, Resource: class {} }));
+// Harper runtime). Mock it. A thin flair.Agent (get→null) keeps the shared,
+// process-global module registry safe if this file's mock is the one bound when
+// another test's well-formed-TPS path reaches verifyAgentRequest — Agent.get
+// returns null rather than throwing on `databases.flair` being undefined.
+mock.module("@harperfast/harper", () => ({
+  databases: { flair: { Agent: { get: async () => null, search: async function* () {} } } },
+  Resource: class {},
+}));
 
 const { allowVerified, allowAdmin } = await import("../../resources/agent-auth.ts");
 
@@ -14,6 +19,11 @@ const { allowVerified, allowAdmin } = await import("../../resources/agent-auth.t
 // non-admin agent (privilege-escalation guard) and that BOTH deny anonymous.
 
 const reqNoAuth = { headers: { get: () => undefined } };
+// A Basic Authorization header — the credential evidence a genuine Basic
+// super_user / de-elevated user always carries (flair#610). The `user` contexts
+// below pair it with the user object because a REAL such request has BOTH; the
+// authorizeLocal forgery (no header) is exercised separately in FORGED below.
+const withBasic = (user: any) => ({ user, headers: { get: (n: string) => (n === "authorization" ? "Basic dXNlcjpwYXNz" : undefined) } });
 
 const CONTEXTS = {
   internal:          undefined,                                              // no request → trusted in-process
@@ -21,8 +31,12 @@ const CONTEXTS = {
   anonymousNoAuth:   reqNoAuth,                                              // raw request, no valid agent
   agentNonAdmin:     { tpsAgent: "agent-x", tpsAgentIsAdmin: false },        // verified non-admin agent
   agentAdmin:        { tpsAgent: "admin-x", tpsAgentIsAdmin: true },         // verified admin agent
-  superUser:         { user: { username: "admin", role: { permission: { super_user: true } } } }, // Basic super_user
-  perAgentUser:      { user: { username: "agent-y", role: { permission: {} } } }, // de-elevated per-agent user
+  superUser:         withBasic({ username: "admin", role: { permission: { super_user: true } } }), // Basic super_user (real header)
+  perAgentUser:      withBasic({ username: "agent-y", role: { permission: {} } }), // de-elevated per-agent user (real header)
+  // flair#610 forgeries: an ambient super_user / username on context.user with
+  // NO Authorization header — Harper's authorizeLocal shape. Must NOT be trusted.
+  forgedSuperUser:   { user: { username: "admin", role: { permission: { super_user: true } } }, headers: { get: () => undefined } },
+  forgedPerAgent:    { user: { username: "agent-y", role: { permission: {} } }, headers: { get: () => undefined } },
 } as const;
 
 describe("allowVerified — agent-facing gate (deny anonymous, permit verified/admin/internal)", () => {
@@ -47,6 +61,12 @@ describe("allowVerified — agent-facing gate (deny anonymous, permit verified/a
   it("permits a de-elevated per-agent user", async () => {
     expect(await allowVerified(CONTEXTS.perAgentUser)).toBe(true);
   });
+  it("DENIES a FORGED super_user (authorizeLocal shape: super_user context.user, NO Authorization header)", async () => {
+    expect(await allowVerified(CONTEXTS.forgedSuperUser)).toBe(false);
+  });
+  it("DENIES a FORGED per-agent username (context.user set, NO Authorization header)", async () => {
+    expect(await allowVerified(CONTEXTS.forgedPerAgent)).toBe(false);
+  });
 });
 
 describe("allowAdmin — admin-only gate (deny anonymous AND non-admin agents)", () => {
@@ -70,5 +90,8 @@ describe("allowAdmin — admin-only gate (deny anonymous AND non-admin agents)",
   });
   it("permits Basic super_user", async () => {
     expect(await allowAdmin(CONTEXTS.superUser)).toBe(true);
+  });
+  it("DENIES a FORGED super_user (no Authorization header) — the authorizeLocal escalation must not reach admin-only resources", async () => {
+    expect(await allowAdmin(CONTEXTS.forgedSuperUser)).toBe(false);
   });
 });

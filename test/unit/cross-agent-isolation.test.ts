@@ -287,4 +287,31 @@ describe("OAuthAuthorize.post() — resolved principal, not hardcoded admin (ide
     expect((res as Response).status).toBe(401);
     expect(authCodePut).toBeNull();
   });
+
+  // ── flair#610: mint ONLY on an explicit action="approve" ──────────────────
+  // Previously the code minted for anything `!== "deny"`, so a malformed or
+  // absent action produced a real authorization code. A genuinely-authenticated
+  // approver (super_user + real header) is used for every case so the ONLY
+  // variable is `action`.
+  const superUserApprover = () => {
+    const oa: any = new (OAuthAuthorize as any)();
+    oa.getContext = () => ({ user: { username: "admin", role: { permission: { super_user: true } } }, headers: mockAuthHeader });
+    return oa;
+  };
+
+  it('action="approve" (authenticated) → 302 with a minted code', async () => {
+    const res = await superUserApprover().post(approveBody({ action: "approve" }));
+    expect((res as Response).status).toBe(302);
+    expect((res as Response).headers.get("location")).toContain("code=");
+    expect(authCodePut?.principalId).toBe("admin");
+  });
+
+  for (const badAction of [undefined, "", "deny", "garbage", "APPROVE", "approve "] as const) {
+    it(`action=${JSON.stringify(badAction)} (authenticated) → 302 access_denied, NO code minted`, async () => {
+      const res = await superUserApprover().post(approveBody({ action: badAction }));
+      expect((res as Response).status).toBe(302);
+      expect((res as Response).headers.get("location")).toContain("error=access_denied");
+      expect(authCodePut).toBeNull();
+    });
+  }
 });

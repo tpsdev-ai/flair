@@ -127,12 +127,27 @@ server.http(async (request: any, nextLayer: any) => {
     (request.method === "GET" && url.pathname === "/Presence")
   ) return nextLayer(request);
 
+  // Read the Authorization header ONCE, up front — the super_user branch below
+  // needs it too (hoisted from its former position just after the branch as part
+  // of the flair#610 belt-and-suspenders check).
+  const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
+
   // If Harper has already authorized this request (e.g. Basic admin, or
   // authorizeLocal=true on localhost), trust Harper's auth decision and pass
   // through. Annotate the admin identity so resources' resolveAgentAuth recognizes
   // this as an ADMIN caller (not anonymous) — otherwise a Basic-admin request,
   // which carries no TPS-Ed25519 header, gets classified anonymous and denied.
-  if (request.user?.role?.permission?.super_user === true) {
+  //
+  // flair#610 BELT-AND-SUSPENDERS: require an Authorization header to be present
+  // before trusting a super_user `request.user`. Harper's `authorizeLocal: true`
+  // forges request.user=super_user for a credential-LESS loopback request; a
+  // genuine Basic/super_user caller always carries a header. This is defense-in-
+  // depth — the general middleware path below already marks a headerless request
+  // tpsAnonymous BEFORE Harper's ambient elevation lands, so this branch isn't a
+  // live vector today — but it keeps the trust decision from ever hinging on
+  // ambient elevation alone. (The root-cause gate lives in resolveAgentAuth; see
+  // agent-auth.ts hasCredentialEvidence.)
+  if (header && request.user?.role?.permission?.super_user === true) {
     request.tpsAgent = request.user.username ?? "admin";
     request.tpsAgentIsAdmin = true;
     try {
@@ -144,8 +159,6 @@ server.http(async (request: any, nextLayer: any) => {
 
   // Skip re-entry: if we already swapped auth to Basic, pass through
   if ((request as any)._tpsAuthVerified) return nextLayer(request);
-
-  const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
 
   // ── Basic admin / super_user auth ──────────────────────────────────────────
   // Allow Basic auth for CLI operations (backup, etc.). Two paths:
