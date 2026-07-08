@@ -6,6 +6,8 @@ type Presence @table(database: "flair") @export {
   lastHeartbeatAt: BigInt        # unix ms timestamp
   currentTask: String            # short human string, e.g. "Reviewing flair#467"
   activity: String @indexed      # "coding" | "reviewing" | "planning" | "idle"
+  flairVersion: String           # @tpsdev-ai/flair version serving this heartbeat (flair#639); absent on pre-#639 records
+  harperVersion: String          # @harperfast/harper version serving this heartbeat (flair#639); absent on pre-#639 records
 }
 
 # ─── Observatory tables ───────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ import {
   FLEET_EXIT_OK,
   type FleetSweepResult,
 } from "./fleet-verify.js";
+import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
 import { detectClients, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
 import {
   readClientMcpBlock,
@@ -8056,6 +8057,76 @@ program
           }
           issues++;
         }
+      }
+    }
+
+    // 8. Fleet presence (flair#639) — known instances via /Presence heartbeats.
+    //
+    // "Instance" here means each AGENT's heartbeat row — Presence is keyed by
+    // agentId (schemas/schema.graphql), not by Flair server — so several rows
+    // can (and typically will) share one flairVersion/harperVersion whenever
+    // several agents heartbeat through the same Flair. That's still the
+    // useful fleet signal: an outlier version on one row means THAT agent's
+    // serving instance is behind the rest.
+    //
+    // SCOPE, verified against runFederationSyncOnce's own table list a few
+    // hundred lines up (`const tables = ["Memory", "Soul", "Agent",
+    // "Relationship"]`): Presence is NOT one of the tables federation sync
+    // replicates. So this section reports only what THIS instance's own
+    // Presence table has recorded — every agent whose FLAIR_URL points
+    // directly at the Flair `doctor` is talking to. On a hub+spokes
+    // deployment where each spoke runs its own separate Flair database, a
+    // spoke's locally-recorded heartbeats are invisible from the hub's
+    // `doctor` unless those agents also heartbeat straight to the hub. Not
+    // fixed here — flair#639's fix list is version-stamping + a doctor
+    // listing, not widening federation sync scope.
+    if (harperResponding) {
+      console.log(`\n  ${render.wrap(render.c.bold, "Fleet presence")}`);
+      try {
+        // flairVersion/harperVersion are gated to verified readers on the
+        // server (resources/Presence.ts, same boundary as currentTask) — sign
+        // the GET when we have an agent + key so the fields aren't silently
+        // nulled out from under us.
+        const fleetAgentId: string | undefined = opts.agent || process.env.FLAIR_AGENT_ID;
+        const fleetKeyPath = fleetAgentId ? join(defaultKeysDir(), `${fleetAgentId}.key`) : undefined;
+        const canSign = !!(fleetAgentId && fleetKeyPath && existsSync(fleetKeyPath));
+        const headers: Record<string, string> = canSign
+          ? { Authorization: buildEd25519Auth(fleetAgentId!, "GET", "/Presence", fleetKeyPath!) }
+          : {};
+
+        const presRes = await fetch(`${baseUrl}/Presence`, { headers, signal: AbortSignal.timeout(5000) });
+        if (!presRes.ok) {
+          console.log(`  ${render.icons.warn} Could not fetch presence roster (HTTP ${presRes.status})`);
+        } else {
+          const roster = (await presRes.json()) as FleetPresenceRow[];
+          if (!Array.isArray(roster) || roster.length === 0) {
+            console.log(`  ${render.icons.info} No known instances yet — no /Presence heartbeats recorded on this instance`);
+          } else {
+            const rows = sortOldestVersionFirst(markStale(roster));
+            for (const row of rows) {
+              const lastSeen = typeof row.lastHeartbeatAt === "number"
+                ? render.relativeTime(new Date(row.lastHeartbeatAt).toISOString())
+                : "—";
+              const versionLabel = !canSign
+                ? render.wrap(render.c.dim, "hidden")
+                : row.flairVersion
+                  ? `v${row.flairVersion}`
+                  : render.wrap(render.c.dim, "no version reported");
+              const staleNote = row.stale && row.newestVersion
+                ? " " + render.wrap(render.c.yellow, `(stale — fleet newest is v${row.newestVersion})`)
+                : "";
+              const icon = row.stale ? render.icons.warn : render.icons.ok;
+              const statusSuffix = row.presenceStatus ? ` (${row.presenceStatus})` : "";
+              console.log(`  ${icon} ${row.id} — ${versionLabel} — last seen ${lastSeen}${statusSuffix}${staleNote}`);
+            }
+            if (!canSign) {
+              console.log(`     ${render.wrap(render.c.dim, "Pass --agent <id> (with a matching key in ~/.flair/keys) to reveal versions — flairVersion/harperVersion require a verified signature, same as currentTask.")}`);
+            }
+            console.log(`     ${render.wrap(render.c.dim, "Staleness above is fleet-relative (newest version seen among these instances) — comparing against the latest PUBLISHED flair is the version check at the top of this report, not this section.")}`);
+          }
+        }
+      } catch (err: any) {
+        console.log(`  ${render.icons.warn} Fleet presence check failed: ${err?.message ?? err}`);
       }
     }
 

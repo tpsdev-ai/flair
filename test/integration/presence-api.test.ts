@@ -17,7 +17,7 @@
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
-import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:os";
 import { randomBytes } from "node:crypto";
 import nacl from "tweetnacl";
@@ -238,6 +238,8 @@ describe("Presence API integration", () => {
       "presenceStatus",
       "currentTask",
       "lastHeartbeatAt",
+      "flairVersion",
+      "harperVersion",
     ]);
 
     for (const entry of roster) {
@@ -294,6 +296,88 @@ describe("Presence API integration", () => {
 
     const a1 = roster.find((r: any) => r.id === agent1.id);
     expect(a1.currentTask).toBe("investigating preprod-db-3: replication lag");
+  });
+
+  // ── 4c. flair#639: version stamping ────────────────────────────────────────
+  // Every heartbeat stamps the SERVING instance's own flair + harper versions
+  // (resources/Presence.ts, buildPresenceRecord()/resolveVersion()/
+  // resolveHarperVersion()). Rides the SAME content gate as currentTask
+  // (#592) — verified readers only, anonymous gets null for both.
+  //
+  // Expected values are read directly from THIS repo's own package.json /
+  // node_modules — the exact files resolveVersion()/resolveHarperVersion()
+  // read at runtime, since harper-lifecycle.ts spawns Harper with
+  // cwd: process.cwd(), i.e. this worktree root.
+
+  const expectedFlairVersion: string = JSON.parse(
+    readFileSync(`${process.cwd()}/package.json`, "utf-8"),
+  ).version;
+  const expectedHarperVersion: string = JSON.parse(
+    readFileSync(`${process.cwd()}/node_modules/@harperfast/harper/package.json`, "utf-8"),
+  ).version;
+
+  test("POST /Presence stamps the real running flairVersion + harperVersion", async () => {
+    const auth = buildAuthHeader(agent1.id, "POST", "/Presence", agent1.privateKey);
+    await fetch(`${harper.httpURL}/Presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ activity: "coding" }),
+    });
+
+    const getAuth = buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey);
+    const res = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    expect(res.status).toBe(200);
+    const roster = await res.json();
+    const a1 = roster.find((r: any) => r.id === agent1.id);
+    expect(a1.flairVersion).toBe(expectedFlairVersion);
+    expect(a1.harperVersion).toBe(expectedHarperVersion);
+  });
+
+  test("GET /Presence WITHOUT auth: flairVersion/harperVersion are null (same gate as currentTask)", async () => {
+    const auth = buildAuthHeader(agent1.id, "POST", "/Presence", agent1.privateKey);
+    await fetch(`${harper.httpURL}/Presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ activity: "coding" }),
+    });
+
+    const res = await fetch(`${harper.httpURL}/Presence`);
+    expect(res.status).toBe(200);
+    const roster = await res.json();
+    const a1 = roster.find((r: any) => r.id === agent1.id);
+    expect(a1.flairVersion).toBeNull();
+    expect(a1.harperVersion).toBeNull();
+    // roster metadata is unaffected by the gate, same as the currentTask case
+    expect(typeof a1.presenceStatus).toBe("string");
+  });
+
+  test("reader tolerance: a legacy presence record with no flairVersion/harperVersion doesn't crash GET", async () => {
+    // Simulate a pre-flair#639 instance's record: insert directly via the ops
+    // API (bypassing POST /Presence, which always stamps versions now) — same
+    // technique seedAgent() uses for Agent rows.
+    const legacyId = "presence-639-legacy-instance";
+    await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+      body: JSON.stringify({
+        operation: "insert",
+        database: "flair",
+        table: "Presence",
+        records: [{ agentId: legacyId, lastHeartbeatAt: Date.now(), activity: "idle" }],
+      }),
+    });
+
+    const auth = buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey);
+    const res = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: auth } });
+    expect(res.status).toBe(200);
+    const roster = await res.json();
+    const legacy = roster.find((r: any) => r.id === legacyId);
+    expect(legacy).toBeDefined();
+    expect(legacy.flairVersion).toBeNull();
+    expect(legacy.harperVersion).toBeNull();
+    // The rest of the row is served normally — tolerance doesn't break the
+    // entry, it just leaves the two new fields null.
+    expect(typeof legacy.presenceStatus).toBe("string");
   });
 
   // ── 5. currentTask length cap ──────────────────────────────────────────────
