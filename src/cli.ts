@@ -6795,6 +6795,224 @@ export function pruneOldSnapshots(
   return removed;
 }
 
+/**
+ * Decide what `flair upgrade`'s pre-upgrade snapshot step should do (opt-in
+ * rewrite, 2026-07-08). Pure — takes the three booleans the action already
+ * computes and returns the branch to take, without performing any I/O. Pulled
+ * out of the action itself so the gating logic (default = no snapshot, no
+ * abort; --snapshot = same abort-on-failure mechanism as before) is directly
+ * unit-testable instead of only reachable via a full `flair upgrade` run
+ * (test/unit/upgrade-data-snapshot.test.ts).
+ *
+ *   - "not-upgrading": @tpsdev-ai/flair isn't one of the packages being
+ *     upgraded (or --snapshot wasn't requested and there's no data dir to
+ *     nudge about) — nothing to do, no output.
+ *   - "nudge": --snapshot wasn't passed (the default) and a data dir exists —
+ *     print the non-blocking recommendation, do NOT snapshot, do NOT abort.
+ *   - "no-data": --snapshot was passed but there's no data dir yet — nothing
+ *     to snapshot.
+ *   - "snapshot": --snapshot was passed and there's data — run the real
+ *     stop/snapshot/prune/restart flow, aborting the upgrade on failure.
+ */
+export type UpgradeSnapshotDecision = "not-upgrading" | "nudge" | "no-data" | "snapshot";
+
+export function decideUpgradeSnapshotAction(
+  flairIsUpgrading: boolean,
+  snapshotRequested: boolean,
+  hasDataDir: boolean,
+): UpgradeSnapshotDecision {
+  if (!flairIsUpgrading) return "not-upgrading";
+  if (!snapshotRequested) return hasDataDir ? "nudge" : "not-upgrading";
+  return hasDataDir ? "snapshot" : "no-data";
+}
+
+/**
+ * The exact non-blocking recommendation nudge printed when `flair upgrade`
+ * runs without --snapshot (the default) and a data dir exists to snapshot.
+ * Exported as a constant — not inlined in two places — so the CLI output and
+ * its unit test assertion can't drift apart. Modeled on Harper's own
+ * upgrade prompt ("if you have not created a backup of your data, we
+ * recommend you cancel and back up before proceeding") but informational,
+ * never blocking: this must stay safe for non-interactive/scripted upgrades.
+ */
+export const UPGRADE_SNAPSHOT_NUDGE_LINES: readonly string[] = [
+  "No pre-upgrade snapshot will be taken.",
+  "To capture one first: `flair snapshot create` (physical) or `flair backup` (logical export), or re-run with --snapshot.",
+];
+
+// ─── flair snapshot ─────────────────────────────────────────────────────────
+// Explicit, first-class surface for the physical data-dir snapshot mechanism
+// above (createDataSnapshot / pruneOldSnapshots / UPGRADE_SNAPSHOT_ROOT).
+// Added alongside the opt-in rewrite of `flair upgrade`'s snapshot trigger
+// (2026-07-08) so taking one is a real command, not just a side effect of
+// upgrading with --snapshot.
+//
+// Deliberately NOT named/shaped like `flair backup` / `flair restore`
+// (further below) — those are a LOGICAL export/import of Agent/Memory/Soul
+// records as JSON over the HTTP API, portable across hosts and versions.
+// `flair snapshot` is a PHYSICAL, byte-exact tar.gz of the whole
+// ~/.flair/data directory (RocksDB files, keys, config, admin-pass — every
+// byte, same host, same version) taken with Flair stopped for consistency.
+// Different mechanism, different restore procedure, different failure
+// modes — hence its own namespace (`snapshot create|list|restore`) instead
+// of overloading the JSON one. Mirrors the `rem snapshot` / `session
+// snapshot` subcommand idiom used elsewhere in this file.
+const snapshotCmd = program
+  .command("snapshot")
+  .description("Physical ~/.flair/data snapshots (byte-exact tar.gz, local-only — see `flair backup`/`flair restore` for the logical JSON export/import)");
+
+snapshotCmd
+  .command("create")
+  .description("Take a physical snapshot of the Flair data directory now (briefly stops Flair for a consistent copy — use `flair backup` for a no-downtime logical export)")
+  .option("--data-dir <path>", "Data directory to snapshot (default: ~/.flair/data)")
+  .option("--port <port>", "Harper HTTP port (used to quiesce Flair around the snapshot)")
+  .action(async (opts) => {
+    const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir();
+    const port = resolveHttpPort(opts);
+    if (!existsSync(dataDir)) {
+      console.error(`Error: data directory does not exist: ${dataDir}`);
+      process.exit(1);
+    }
+
+    console.log(`Snapshotting ${dataDir}...`);
+    console.log("(Flair will be briefly stopped for a point-in-time-consistent copy, then restarted.)");
+    // Same consistency requirement as the upgrade path's snapshot step: a
+    // live RocksDB directory (WAL/MANIFEST/SST) isn't safe to copy while
+    // Flair is running, so this stops Flair, snapshots, and restarts it —
+    // same stop/start helpers `flair upgrade`'s snapshot step uses, so a
+    // standalone `flair snapshot create` gives the exact same
+    // point-in-time-consistent guarantee, not a weaker one.
+    let stoppedForSnapshot = false;
+    try {
+      await stopFlairProcess(port);
+      stoppedForSnapshot = true;
+      const snapshot = await createDataSnapshot(dataDir);
+      const removed = pruneOldSnapshots();
+      console.log(`✅ Snapshot: ${snapshot.path} (${humanBytes(snapshot.bytes)})`);
+      if (removed.length > 0) {
+        console.log(`   Pruned ${removed.length} older snapshot${removed.length > 1 ? "s" : ""} (keeping last ${UPGRADE_SNAPSHOT_RETAIN})`);
+      }
+    } catch (err: any) {
+      console.error(`❌ snapshot failed: ${err.message}`);
+      if (stoppedForSnapshot) {
+        try { await startFlairProcess(port); } catch { /* best effort — surface the original snapshot error, not this */ }
+      }
+      process.exit(1);
+    }
+    try {
+      await startFlairProcess(port);
+    } catch (err: any) {
+      console.error(`❌ the snapshot succeeded but Flair failed to restart: ${err.message}`);
+      console.error("   Check: flair doctor");
+      process.exit(1);
+    }
+  });
+
+snapshotCmd
+  .command("list")
+  .description("List physical data snapshots under ~/.flair/upgrade-snapshots/")
+  .option("--json", "Output as JSON")
+  .action((opts) => {
+    if (!existsSync(UPGRADE_SNAPSHOT_ROOT)) {
+      if (opts.json) { console.log("[]"); return; }
+      console.log(`(no snapshots — ${UPGRADE_SNAPSHOT_ROOT} does not exist yet)`);
+      console.log("Run `flair snapshot create` to make one, or `flair upgrade --snapshot` to take one automatically before an upgrade.");
+      return;
+    }
+    const rows = readdirSync(UPGRADE_SNAPSHOT_ROOT)
+      .filter((f) => f.startsWith("flair-data-") && f.endsWith(".tar.gz"))
+      .map((f) => {
+        const p = join(UPGRADE_SNAPSHOT_ROOT, f);
+        const s = statSync(p);
+        return { file: f, path: p, size: s.size, mtime: s.mtime.toISOString() };
+      })
+      .sort((a, b) => b.mtime.localeCompare(a.mtime));
+
+    if (opts.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+    if (rows.length === 0) {
+      console.log("(no snapshots)");
+      return;
+    }
+    const fileW = Math.max(20, ...rows.map((r) => r.file.length));
+    console.log(`  ${"file".padEnd(fileW)}  size      age`);
+    for (const r of rows) {
+      console.log(`  ${r.file.padEnd(fileW)}  ${humanBytes(r.size).padEnd(8)}  ${relativeTime(r.mtime)}`);
+    }
+    console.log(`\n${rows.length} snapshot${rows.length > 1 ? "s" : ""}.`);
+  });
+
+snapshotCmd
+  .command("restore <path>")
+  .description("Restore a physical snapshot: stops Flair, replaces the data directory, restarts")
+  .option("--data-dir <path>", "Data directory to replace (default: ~/.flair/data)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--yes", "Skip the confirmation prompt (this destroys the current data directory)")
+  .action(async (snapshotArg: string, opts) => {
+    const snapshotPath = resolve(snapshotArg);
+    if (!existsSync(snapshotPath)) {
+      console.error(`Error: snapshot does not exist: ${snapshotPath}`);
+      process.exit(1);
+    }
+    const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir();
+    const port = resolveHttpPort(opts);
+
+    console.log("This will STOP Flair, DELETE the current data directory, and replace it with:");
+    console.log(`  snapshot: ${snapshotPath}`);
+    console.log(`  target:   ${dataDir}`);
+
+    if (!opts.yes) {
+      if (!process.stdin.isTTY) {
+        console.error("\nError: refusing to destroy the data directory in a non-interactive shell without --yes.");
+        process.exit(1);
+      }
+      const { createInterface } = await import("node:readline");
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const answer: string = await new Promise((res) =>
+        rl.question(`\nDestroy ${dataDir} and restore from this snapshot? [y/N] `, (a) => { rl.close(); res(a); }),
+      );
+      if (!/^y(es)?$/i.test(answer.trim())) {
+        console.log("Aborted.");
+        return;
+      }
+    }
+
+    try {
+      await stopFlairProcess(port);
+    } catch (err: any) {
+      console.error(`❌ failed to stop Flair: ${err.message}`);
+      process.exit(1);
+    }
+
+    try {
+      rmSync(dataDir, { recursive: true, force: true });
+      mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+      // preservePaths mirrors createDataSnapshot's own preservePaths: true —
+      // restores absolute symlink targets verbatim instead of node-tar's
+      // default of stripping the leading "/" on extraction. No `follow`
+      // option, so symlinks extract as symlinks (never their targets'
+      // contents), and file modes extract exactly as stored — the archive
+      // itself already only contains what createDataSnapshot's filter chose
+      // to include (in-bounds symlinks, regular files/dirs only), so restore
+      // needs no re-filtering of its own.
+      await tarExtract({ file: snapshotPath, cwd: dataDir, preservePaths: true });
+    } catch (err: any) {
+      console.error(`❌ restore failed: ${err.message}`);
+      console.error(`   ${dataDir} may be partially restored or empty — do not start Flair until this is resolved.`);
+      process.exit(1);
+    }
+
+    try {
+      await startFlairProcess(port);
+    } catch (err: any) {
+      console.error(`❌ restore succeeded but Flair failed to restart: ${err.message}`);
+      console.error("   Check: flair doctor");
+      process.exit(1);
+    }
+
+    console.log(`✅ Restored ${dataDir} from ${snapshotPath}`);
+    console.log("   Flair restarted. Verify: flair status && flair doctor");
+  });
+
 // ─── flair upgrade ────────────────────────────────────────────────────────────
 
 program
@@ -6804,7 +7022,7 @@ program
   .option("--restart", "[deprecated] no-op — restart now happens automatically after upgrade; use --no-restart to opt out")
   .option("--no-restart", "Skip the restart after upgrade (stage new packages now, restart later)")
   .option("--no-verify", "Skip post-restart health/version/auth verification (default: verify — so a broken upgrade can't report success; see flair#635)")
-  .option("--no-snapshot", "Skip the pre-upgrade ~/.flair/data snapshot (default: snapshot before the package swap, keep-last-3 retention; see flair#637)")
+  .option("--snapshot", "Take a pre-upgrade ~/.flair/data snapshot before the package swap, keep-last-3 retention (default: off — see `flair snapshot create` to take one by hand, or `flair backup` for a logical export; flair#637)")
   .option("--all", "Show transitive packages (e.g. flair-client) in the listing — verbose mode for debugging dep versions")
   // ── Fabric upgrade (--target) ────────────────────────────────────────────
   // When --target is passed, upgrade the Flair component DEPLOYED to that
@@ -6982,62 +7200,86 @@ program
       resolveUpgradeRestartVerify(opts);
     const upgradePort = resolveHttpPort({});
 
-    // ── Pre-upgrade data snapshot (flair#637) ───────────────────────────────
+    // ── Pre-upgrade data snapshot (flair#637, opt-in as of the 2026-07-08 rewire) ──
     // Only an @tpsdev-ai/flair package swap touches the code that reads/
     // writes ~/.flair/data — an flair-mcp-only or openclaw-plugin-only
     // upgrade never runs different Harper/Flair code against the data, so
     // there's nothing at risk and nothing to snapshot.
+    //
+    // Decision (Nathan, 2026-07-08): the physical snapshot used to run
+    // automatically on every local upgrade (opt-out via --no-snapshot). That
+    // defaulted every upgrade into tarring the entire data dir (can be
+    // 800MB+, keep-last-3 retention ~2.5GB) for a failure mode the
+    // tested-downgrade guarantee (docs/upgrade.md, test/compat/downgrade-
+    // boot.test.ts) already covers — and it diverged from Harper's own
+    // upgrade CLI, which recommends a backup before proceeding but never
+    // auto-tars the data directory itself. `--snapshot` is now opt-in, off
+    // by default; opting out gets a non-blocking recommendation nudge
+    // instead of a silent skip. The underlying mechanism (createDataSnapshot
+    // / pruneOldSnapshots, the stop-snapshot-restart quiesce dance, and
+    // abort-the-upgrade-on-snapshot-failure) is unchanged — only the trigger
+    // moved from opt-out to opt-in. `flair snapshot create` (below) exposes
+    // the exact same mechanism as a standalone command for anyone who wants
+    // one without wrapping it around an upgrade.
     const flairIsUpgrading = npmUpgrades.some((u) => u.pkg === "@tpsdev-ai/flair");
+    const snapshotDataDir = defaultDataDir();
+    const snapshotDecision = decideUpgradeSnapshotAction(
+      flairIsUpgrading,
+      !!opts.snapshot,
+      existsSync(snapshotDataDir),
+    );
     let snapshotPath: string | null = null;
-    if (flairIsUpgrading && opts.snapshot === false) {
-      console.log("\n⚠️  --no-snapshot: skipping the pre-upgrade data snapshot. If this upgrade breaks something past the package level, there is no tested way back.");
-    } else if (flairIsUpgrading) {
-      const snapshotDataDir = defaultDataDir();
-      if (!existsSync(snapshotDataDir)) {
-        console.log(`\n(no data directory at ${snapshotDataDir} yet — nothing to snapshot)`);
-      } else {
-        console.log("\nSnapshotting data before upgrade...");
-        // Consistency: a running Harper's data dir can be mid-write, and a
-        // plain file copy of a live database directory isn't guaranteed
-        // point-in-time consistent (Harper 5.x = RocksDB: WAL/SST/MANIFEST
-        // can tear under a live copy). Stopping first — then immediately
-        // restarting the OLD version, before any package changes — gives a
-        // quiesced, safe-to-copy directory with only a brief blip, even for
-        // --no-restart (the snapshot's correctness doesn't depend on
-        // whether the caller wants a restart AFTER the upgrade — those are
-        // orthogonal). --no-snapshot is the escape hatch for hosts that
-        // can't tolerate even this blip. See docs/upgrade.md for the
-        // native-backup alternative considered and rejected (Harper's
-        // `get_backup` op backs up one table/schema at a time over the
-        // running HTTP API — not the whole data dir — and rejecting it here
-        // means this path never depends on the server being up).
-        let stoppedForSnapshot = false;
-        try {
-          await stopFlairProcess(upgradePort);
-          stoppedForSnapshot = true;
-          const snapshot = await createDataSnapshot(snapshotDataDir);
-          snapshotPath = snapshot.path;
-          const removed = pruneOldSnapshots();
-          console.log(`✅ Snapshot: ${snapshotPath} (${humanBytes(snapshot.bytes)})`);
-          console.log(`   Restore: flair stop && rm -rf "${snapshotDataDir}" && mkdir -p "${snapshotDataDir}" && tar -xzf "${snapshotPath}" -C "${snapshotDataDir}" && flair start`);
-          if (removed.length > 0) {
-            console.log(`   Pruned ${removed.length} older snapshot${removed.length > 1 ? "s" : ""} (keeping last ${UPGRADE_SNAPSHOT_RETAIN})`);
-          }
-        } catch (err: any) {
-          console.error(`❌ snapshot failed: ${err.message}`);
-          console.error("   Aborting upgrade — no packages were changed. Use --no-snapshot to skip (not recommended).");
-          if (stoppedForSnapshot) {
-            try { await startFlairProcess(upgradePort); } catch { /* best effort — surface the original snapshot error, not this */ }
-          }
-          process.exit(1);
+    if (snapshotDecision === "nudge") {
+      // Non-blocking nudge only — never prompt/block here, this must stay
+      // safe for non-interactive/scripted upgrades. Modeled on Harper's own
+      // upgrade prompt ("if you have not created a backup ... we recommend
+      // you cancel and back up before proceeding") but informational, not a
+      // gate.
+      console.log("");
+      for (const line of UPGRADE_SNAPSHOT_NUDGE_LINES) console.log(render.wrap(render.c.dim, line));
+    } else if (snapshotDecision === "no-data") {
+      console.log(`\n(no data directory at ${snapshotDataDir} yet — nothing to snapshot)`);
+    } else if (snapshotDecision === "snapshot") {
+      console.log("\nSnapshotting data before upgrade...");
+      // Consistency: a running Harper's data dir can be mid-write, and a
+      // plain file copy of a live database directory isn't guaranteed
+      // point-in-time consistent (Harper 5.x = RocksDB: WAL/SST/MANIFEST
+      // can tear under a live copy). Stopping first — then immediately
+      // restarting the OLD version, before any package changes — gives a
+      // quiesced, safe-to-copy directory with only a brief blip, even for
+      // --no-restart (the snapshot's correctness doesn't depend on
+      // whether the caller wants a restart AFTER the upgrade — those are
+      // orthogonal). See docs/upgrade.md for the native-backup alternative
+      // considered and rejected (Harper's `get_backup` op backs up one
+      // table/schema at a time over the running HTTP API — not the whole
+      // data dir — and rejecting it here means this path never depends on
+      // the server being up).
+      let stoppedForSnapshot = false;
+      try {
+        await stopFlairProcess(upgradePort);
+        stoppedForSnapshot = true;
+        const snapshot = await createDataSnapshot(snapshotDataDir);
+        snapshotPath = snapshot.path;
+        const removed = pruneOldSnapshots();
+        console.log(`✅ Snapshot: ${snapshotPath} (${humanBytes(snapshot.bytes)})`);
+        console.log(`   Restore: flair snapshot restore "${snapshotPath}"`);
+        if (removed.length > 0) {
+          console.log(`   Pruned ${removed.length} older snapshot${removed.length > 1 ? "s" : ""} (keeping last ${UPGRADE_SNAPSHOT_RETAIN})`);
         }
-        try {
-          await startFlairProcess(upgradePort);
-        } catch (err: any) {
-          console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
-          console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
-          process.exit(1);
+      } catch (err: any) {
+        console.error(`❌ snapshot failed: ${err.message}`);
+        console.error("   Aborting upgrade — no packages were changed. Omit --snapshot to proceed without one (not recommended).");
+        if (stoppedForSnapshot) {
+          try { await startFlairProcess(upgradePort); } catch { /* best effort — surface the original snapshot error, not this */ }
         }
+        process.exit(1);
+      }
+      try {
+        await startFlairProcess(upgradePort);
+      } catch (err: any) {
+        console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
+        console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
+        process.exit(1);
       }
     }
 
@@ -7183,9 +7425,10 @@ program
     // just the issue number, so recovery doesn't start with a GitHub search.
     if (snapshotPath) {
       console.error(`   A pre-upgrade snapshot is available: ${snapshotPath}`);
-      console.error(`   Restore procedure: docs/upgrade.md#downgrade — stop Flair, restore the snapshot, reinstall the previous version, start, verify.`);
+      console.error(`   Restore: flair snapshot restore "${snapshotPath}" (or see docs/upgrade.md#downgrade).`);
     } else {
-      console.error("   No pre-upgrade snapshot was taken for this run (--no-snapshot was used, or ~/.flair/data didn't exist yet) — do not touch data without one. See docs/upgrade.md#downgrade.");
+      console.error("   No pre-upgrade snapshot was taken for this run (snapshot is opt-in — pass --snapshot next time, or ~/.flair/data didn't exist yet).");
+      console.error("   Check `flair snapshot list` for a manual one, or restore from a `flair backup` JSON export. See docs/upgrade.md#downgrade.");
     }
     process.exit(1);
   });
