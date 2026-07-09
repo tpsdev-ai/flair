@@ -13,23 +13,28 @@ import {
   SEM_LIMIT,
 } from "../../resources/bm25.ts";
 
-describe("feature flag — FLAIR_HYBRID_RETRIEVAL (default OFF = unchanged behavior)", () => {
+describe("feature flag — FLAIR_HYBRID_RETRIEVAL (ACTIVATED 2026-07-08: default ON)", () => {
   const orig = process.env.FLAIR_HYBRID_RETRIEVAL;
   const restore = () => {
     if (orig === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL;
     else process.env.FLAIR_HYBRID_RETRIEVAL = orig;
   };
 
-  test("unset → OFF (legacy path, byte-identical behavior)", () => {
+  test("unset → ON (hybrid is now the default retrieval path)", () => {
     delete process.env.FLAIR_HYBRID_RETRIEVAL;
-    expect(hybridEnabled()).toBe(false);
+    expect(hybridEnabled()).toBe(true);
     restore();
   });
-  test("'false' / 'off' / '0' / '' → OFF", () => {
-    for (const v of ["false", "off", "0", "", "FALSE", "no"]) {
+  test("'false' / 'off' / '0' → OFF (the revert lever: legacy HNSW path, byte-identical to pre-hybrid behavior)", () => {
+    for (const v of ["false", "off", "0", "FALSE", "no"]) {
       process.env.FLAIR_HYBRID_RETRIEVAL = v;
       expect(hybridEnabled()).toBe(false);
     }
+    restore();
+  });
+  test("'' (explicitly set to empty string) → OFF — `??` only falls back on null/undefined, not '', so an explicit empty value does NOT inherit the ON default", () => {
+    process.env.FLAIR_HYBRID_RETRIEVAL = "";
+    expect(hybridEnabled()).toBe(false);
     restore();
   });
   test("'true' / '1' / 'on' (any case) → ON", () => {
