@@ -275,10 +275,14 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
 
     const s = makeSearch(agentCtx("agent-1"));
 
-    // Sanity check: scoring="composite" still reproduces the known bug
-    // (available as an explicit opt-in) — the weaker match wins.
+    // flair#623 follow-up (2026-07-08): compositeScore's durability/recency
+    // multiplier is now bounded + relevance-gated (resources/scoring.ts,
+    // COMPOSITE_DISCOUNT_FLOOR), so scoring="composite" no longer reproduces
+    // the bug either — the objectively-best match wins under BOTH modes now.
+    // raw remains the default (below); composite is merely no longer
+    // catastrophic for anyone who opts in.
     const composite: any = await s.post({ agentId: "agent-1", q: "widget", scoring: "composite", limit: 10 });
-    expect(composite.results[0]?.id).toBe("m-weak-raw-match-permanent");
+    expect(composite.results[0]?.id).toBe("m-best-raw-match");
 
     // scoring="raw" ranks by actual relevance — the strong match wins.
     const raw: any = await s.post({ agentId: "agent-1", q: "widget", scoring: "raw", limit: 10 });

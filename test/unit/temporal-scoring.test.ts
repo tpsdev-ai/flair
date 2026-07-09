@@ -3,7 +3,7 @@ import { describe, test, expect } from "bun:test";
 // previously re-declared them ("they're not exported, so we test the logic
 // independently") — a simulator that could not catch changes to the real module.
 // The functions are now exported so these tests exercise the shipped code.
-import { recencyFactor, retrievalBoost, compositeScore } from "../../resources/scoring.ts";
+import { recencyFactor, retrievalBoost, compositeScore, getCompositeDiscountFloor } from "../../resources/scoring.ts";
 
 const now = () => new Date().toISOString();
 
@@ -90,5 +90,42 @@ describe("composite scoring (OPS-AYGD: relevance-floor gate)", () => {
     const score = compositeScore(0.8, { createdAt: now() });
     const explicit = compositeScore(0.8, { durability: "standard", createdAt: now() });
     expect(Math.abs(score - explicit)).toBeLessThan(0.01);
+  });
+});
+
+describe("composite scoring (flair#623 follow-up: bounded + relevance-gated dWeight/rFactor)", () => {
+  // recall-harness's stress-pair shape (test/bench/recall-harness/corpus.ts):
+  // a `standard`/weeks-old CORRECT match vs a `permanent`/2-day-old, adjacent
+  // -but-wrong DISTRACTOR, both clearing the relevance floor. This is the
+  // exact mechanism that collapsed composite p@3 to 0.067 pre-fix.
+  test("REGRESSION GUARD: a high-relevance stale/standard match still outranks a lower-relevance permanent/fresh distractor", () => {
+    const oldStandardDaysAgo = new Date(Date.now() - 75 * 24 * 3600_000).toISOString();
+    const freshPermanent = new Date(Date.now() - 2 * 24 * 3600_000).toISOString();
+    const correct = compositeScore(0.984, { durability: "standard", createdAt: oldStandardDaysAgo });
+    const distractor = compositeScore(0.871, { durability: "permanent", createdAt: freshPermanent });
+    expect(correct).toBeGreaterThan(distractor);
+  });
+
+  test("the durability/recency discount is bounded — it can never exceed (1 - discountFloor) of rawScore", () => {
+    const floor = getCompositeDiscountFloor();
+    // Worst case: ephemeral (lowest dWeight) and maximally decayed (rFactor -> 0).
+    const ancient = new Date(Date.now() - 10_000 * 24 * 3600_000).toISOString();
+    const worstCase = compositeScore(0.9, { durability: "ephemeral", createdAt: ancient });
+    expect(worstCase).toBeGreaterThanOrEqual(0.9 * floor - 1e-9);
+  });
+
+  test("durability/recency remains a monotonic (if bounded) signal among relevant candidates", () => {
+    const n = now();
+    const perm = compositeScore(0.8, { durability: "permanent", createdAt: n });
+    const std = compositeScore(0.8, { durability: "standard", createdAt: n });
+    const eph = compositeScore(0.8, { durability: "ephemeral", createdAt: n });
+    expect(perm).toBeGreaterThanOrEqual(std);
+    expect(std).toBeGreaterThanOrEqual(eph);
+  });
+
+  test("below the relevance floor, the durability/recency multiplier is fully neutral (no discount at all)", () => {
+    const oldEphemeral = new Date(Date.now() - 1000 * 24 * 3600_000).toISOString();
+    const belowFloor = compositeScore(0.2, { durability: "ephemeral", createdAt: oldEphemeral });
+    expect(belowFloor).toBeCloseTo(0.2, 5); // multiplier === 1.0, unlike a naive floor-less discount
   });
 });
