@@ -9360,7 +9360,7 @@ program
   .option("--since <iso-or-relative>", "Only memories created after this point (ISO 8601 or '7d'/'24h'/'30m')")
   .option("--as-of <iso>", "Temporal validity: only memories valid at this point (ISO 8601)")
   .option("--include-superseded", "Include memories that have been superseded")
-  .option("--scoring <mode>", "Scoring mode: composite (default) re-ranks by durability/recency/retrieval; raw uses cosine similarity only", "composite")
+  .option("--scoring <mode>", "Scoring mode: raw (default) uses cosine similarity/BM25 only; composite re-ranks by durability/recency/retrieval (measurably hurts precision as of flair#623 — opt-in only)", "raw")
   .option("--min-score <n>", "Drop results below this score (0..1)", "0")
   // Client-side filters (applied after server response)
   .option("--durability <level>", "Filter to permanent|persistent|standard|ephemeral (client-side)")
@@ -9387,7 +9387,7 @@ program
         agentId,
         q: query,
         limit: Number.parseInt(opts.limit, 10) || 5,
-        scoring: opts.scoring === "raw" ? "raw" : "composite",
+        scoring: opts.scoring === "composite" ? "composite" : "raw",
       };
       if (opts.tag) payload.tag = opts.tag;
       if (opts.subject) payload.subject = opts.subject;

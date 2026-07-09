@@ -243,4 +243,54 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
       else process.env.FLAIR_HYBRID_RETRIEVAL = prevHybrid;
     }
   });
+
+  // ─── default scoring = "raw" (flair#623) ──────────────────────────────────
+  // Measured 2026-07-08 via recall-eval.mjs against the live corpus: the
+  // PREVIOUS default (`scoring: "composite"`) was net-HARMFUL — Δp@3 -0.38 to
+  // -0.50 vs raw across repeated runs. Root cause, reproduced deterministically
+  // here: compositeScore's durability-weight × recency-decay multiplier
+  // (resources/scoring.ts) applies UNCONDITIONALLY (no relevance gate, unlike
+  // retrievalBoost's RBOOST_RELEVANCE_FLOOR), and candidate-union RRF fusion
+  // (resources/bm25.ts fuseRrfNormalized) only encodes RANK, not magnitude — a
+  // rank-2 doc normalizes to ~0.984 regardless of how much weaker its actual
+  // BM25 match was. So a ~40% durability/recency penalty easily swamps a ~1.6%
+  // rank-based gap, sinking the objectively-best match below a `permanent`/
+  // fresh but weaker one. This test builds exactly that pair and asserts the
+  // now-default (scoring omitted) ranks by RAW relevance, not composite.
+  it("scoring omitted defaults to raw (composite is opt-in only, flair#623)", async () => {
+    reset();
+    const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 3600_000).toISOString();
+    // The objectively best BM25 match for q="widget" (term appears 3x) — but
+    // `persistent` durability + 60 days old, so composite decays it hard.
+    memoryStore.set("m-best-raw-match", {
+      id: "m-best-raw-match", agentId: "agent-1", content: "widget widget widget",
+      durability: "persistent", createdAt: sixtyDaysAgo, retrievalCount: 0,
+    });
+    // A much weaker BM25 match (term appears once among 3 tokens) — but
+    // `permanent` durability + created "now", so composite never decays it.
+    memoryStore.set("m-weak-raw-match-permanent", {
+      id: "m-weak-raw-match-permanent", agentId: "agent-1", content: "gadget widget sprocket",
+      durability: "permanent", createdAt: new Date().toISOString(), retrievalCount: 0,
+    });
+
+    const s = makeSearch(agentCtx("agent-1"));
+
+    // Sanity check: scoring="composite" still reproduces the known bug
+    // (available as an explicit opt-in) — the weaker match wins.
+    const composite: any = await s.post({ agentId: "agent-1", q: "widget", scoring: "composite", limit: 10 });
+    expect(composite.results[0]?.id).toBe("m-weak-raw-match-permanent");
+
+    // scoring="raw" ranks by actual relevance — the strong match wins.
+    const raw: any = await s.post({ agentId: "agent-1", q: "widget", scoring: "raw", limit: 10 });
+    expect(raw.results[0]?.id).toBe("m-best-raw-match");
+
+    // THE REGRESSION TEST: scoring omitted entirely must match "raw", not
+    // "composite" — this is the default this PR flips.
+    const defaulted: any = await s.post({ agentId: "agent-1", q: "widget", limit: 10 });
+    expect(defaulted.results[0]?.id).toBe("m-best-raw-match");
+    // _rawScore is only populated when scoring !== "raw" (see SemanticSearch.ts) —
+    // undefined here confirms the default actually took the "raw" branch rather
+    // than coincidentally landing in the same order.
+    expect(defaulted.results[0]?._rawScore).toBeUndefined();
+  });
 });

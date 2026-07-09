@@ -44,6 +44,15 @@ export function retrievalBoost(retrievalCount: number): number {
   return Math.min(1.0 + 0.1 * Math.log2(retrievalCount), RBOOST_CAP); // gentle, capped
 }
 
+// flair#623 (2026-07-08): SemanticSearch.ts's `scoring` param now DEFAULTS to
+// "raw" — compositeScore measurably HURTS recall-eval precision on the live
+// corpus (Δp@3 -0.38 to -0.50 vs raw). Unlike rBoost above, dWeight and rFactor
+// apply UNCONDITIONALLY — no relevance-floor gate — so they can (and do) sink a
+// clearly-best semantic/BM25 match below a `permanent`/fresh but weaker match.
+// compositeScore itself is UNCHANGED here; it's still opt-in via scoring:
+// "composite" for callers who want durability/recency-aware re-ranking. If this
+// formula ever gets a relevance-gated dWeight/rFactor (the rBoost-style fix),
+// re-run recall-eval.mjs before reconsidering the default.
 export function compositeScore(
   semanticScore: number,
   record: { durability?: string; createdAt?: string; retrievalCount?: number; supersedes?: string },
