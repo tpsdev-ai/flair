@@ -37,6 +37,16 @@ import {
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
 import { detectClients, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
 import {
+  resolveAgentKeyPath,
+  loadEd25519PrivateKeyFromFile,
+  signClientAssertion,
+  buildTokenRequestForm,
+  defaultMcpClientId,
+  defaultMcpTokenEndpoint,
+  defaultMcpResource,
+  MAX_ASSERTION_LIFETIME_SECONDS,
+} from "./mcp-client-assertion.js";
+import {
   readClientMcpBlock,
   checkClaudeMdBootstrap,
   checkSessionStartHook,
@@ -2968,6 +2978,107 @@ agent
     }
 
     console.log(`\n✅ Agent '${id}' removed successfully`);
+  });
+
+// ─── flair mcp ───────────────────────────────────────────────────────────────
+// Headless agent-auth to a Harper MCP `/mcp` endpoint: RFC 7523
+// client_credentials + private_key_jwt, using the agent's EXISTING Ed25519
+// identity key (no new key material, no browser, no human). See
+// ~/ops/FLAIR-AGENT-AUTH-CONSUMER-SPEC.md. The plugin side
+// (HarperFast/oauth) provides assertion verification (#165, merged) and
+// Client ID Metadata Document resolution (#167, merged); the token-endpoint
+// grant that consumes an assertion is tracked as issue #162 (not yet a PR —
+// contract not final). `flair mcp token` therefore signs + prints the
+// assertion but does NOT POST it anywhere; see src/mcp-client-assertion.ts.
+
+const mcp = program.command("mcp").description("MCP client-credentials agent-auth (RFC 7523 private_key_jwt)");
+
+mcp
+  .command("token")
+  .description(
+    "Build + sign an RFC 7523 client_assertion for MCP client_credentials auth. " +
+      "Prints the assertion only — does NOT call the token endpoint " +
+      "(pending HarperFast/oauth#162, the grant issue isn't a PR yet).",
+  )
+  .requiredOption("--agent-id <id>", "Agent id — becomes the client_id (iss/sub claims)")
+  .option(
+    "--client-id <url>",
+    "Client ID Metadata Document URL for this agent (defaults to this instance's " +
+      "MCPClientMetadata URL, derived from FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)",
+  )
+  .option(
+    "--token-endpoint <url>",
+    "Token-endpoint URL — becomes the `aud` claim (defaults to this instance's " +
+      "own oauth token endpoint, same env vars)",
+  )
+  .option(
+    "--resource <url>",
+    "RFC 8707 resource indicator for the eventual token request — NOT sent yet " +
+      "(defaults to this instance's canonical /mcp URI)",
+  )
+  .option("--keys-dir <dir>", "Directory to look for <agentId>.key (else FLAIR_KEY_DIR, ~/.flair/keys, ~/.tps/secrets/flair)")
+  .option("--expires-in <seconds>", `Assertion exp - iat window, seconds (default + hard cap: ${MAX_ASSERTION_LIFETIME_SECONDS})`)
+  .option("--json", "Print machine-readable JSON instead of a human summary")
+  .action(async (opts) => {
+    const agentId: string = opts.agentId;
+    const keyPath = resolveAgentKeyPath(agentId, opts.keysDir);
+    if (!keyPath) {
+      console.error(
+        `Error: no private key found for agent '${agentId}'. Checked --keys-dir, FLAIR_KEY_DIR, ` +
+          `~/.flair/keys, and ~/.tps/secrets/flair.`,
+      );
+      process.exit(1);
+    }
+
+    const clientId: string | undefined = opts.clientId ?? defaultMcpClientId(agentId);
+    if (!clientId) {
+      console.error(
+        "Error: --client-id is required (or set FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL to derive it from " +
+          "this instance's MCPClientMetadata URL).",
+      );
+      process.exit(1);
+    }
+
+    const tokenEndpoint: string | undefined = opts.tokenEndpoint ?? defaultMcpTokenEndpoint();
+    if (!tokenEndpoint) {
+      console.error(
+        "Error: --token-endpoint is required (or set FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL to derive " +
+          "this instance's own oauth token endpoint).",
+      );
+      process.exit(1);
+    }
+
+    const resource: string | undefined = opts.resource ?? defaultMcpResource();
+    const expiresIn = opts.expiresIn ? Number(opts.expiresIn) : undefined;
+
+    let privateKey;
+    try {
+      privateKey = loadEd25519PrivateKeyFromFile(keyPath);
+    } catch (err: any) {
+      console.error(`Error: failed to load private key at ${keyPath}: ${err?.message ?? err}`);
+      process.exit(1);
+    }
+
+    const { assertion, claims } = signClientAssertion({
+      clientId,
+      tokenEndpoint,
+      privateKey,
+      expiresInSeconds: expiresIn,
+    });
+    const form = buildTokenRequestForm({ clientId, assertion, resource });
+
+    if (opts.json) {
+      console.log(JSON.stringify({ assertion, claims, wouldSendForm: form, tokenEndpoint }, null, 2));
+      return;
+    }
+
+    console.log(`client_assertion (RFC 7523, EdDSA):\n\n${assertion}\n`);
+    console.log(`claims: iss=sub=${claims.iss}  aud=${claims.aud}  exp-iat=${claims.exp - claims.iat}s  jti=${claims.jti}`);
+    console.log(
+      `\nNOT SENT — pending HarperFast/oauth#162 (token-endpoint grant isn't merged yet). ` +
+        `Once it lands, this assertion is the client_assertion value for:\n` +
+        `  POST ${tokenEndpoint}\n  ${JSON.stringify(form, null, 2).split("\n").join("\n  ")}`,
+    );
   });
 
 // ─── flair principal ─────────────────────────────────────────────────────────
