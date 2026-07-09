@@ -85,7 +85,7 @@ const NEEDS_HUMAN_REVIEW: Record<string, string> = {};
  * self-declare (none currently do — every resource Flint's spec named as
  * "legitimately public" — Health, A2AAdapter (GET), AgentCard,
  * FederationSync, FederationPair, the OAuth public endpoints,
- * ObservationCenter, Presence — already has its own `allowRead()`/
+ * Presence — already has its own `allowRead()`/
  * `allowCreate() { return true }`, so the check below passes them without
  * needing an allowlist entry). Kept as an empty, named list (rather than
  * omitted) so the NEXT deliberately-public resource has an obvious place to
@@ -227,7 +227,6 @@ const EARLY_RETURN_ENDPOINTS: Array<{ path: string; file: string; className: str
   { path: "/OAuthToken", file: "OAuth.ts", className: "OAuthToken", note: "authenticates via PKCE verifier / client_secret in the body, not agent identity" },
   { path: "/OAuthRevoke", file: "OAuth.ts", className: "OAuthRevoke", note: "OAuth 2.1 revocation — token itself is the credential" },
   { path: "/.well-known/oauth-authorization-server, /OAuthMetadata", file: "OAuth.ts", className: "OAuthMetadata", note: "static, non-secret discovery document" },
-  { path: "/ObservationCenter", file: "ObservationCenter.ts", className: "ObservationCenter", note: "static HTML shell only; its own JS authenticates each subsequent API call" },
   { path: "GET /Presence", file: "Presence.ts", className: "Presence", note: "#592 fix: get()'s currentTask field gates on verifyAgentRequest (a real Ed25519 signature), NOT resolveAgentAuth/context.user — authorizeLocal can forge the latter but not the former" },
 ];
 
@@ -300,12 +299,6 @@ describe("auth-middleware's public early-return allowlist doesn't read raw conte
     // of this reopens the forged-admin-approval hole.
     expect(/authHeader/.test(body)).toBe(true);
     expect(body.includes("resolveAgentAuth(")).toBe(true);
-  });
-
-  it("ObservationCenter serves static HTML only (no db/user lookups in get())", () => {
-    const body = stripComments(SRC("ObservationCenter.ts"));
-    expect(body.includes("readFileSync") || body.includes("HTML")).toBe(true);
-    expect(/databases/.test(body)).toBe(false);
   });
 
   it("Presence.get() gates currentTask on verifyAgentRequest, not resolveAgentAuth (#592 regression guard)", () => {

@@ -84,7 +84,6 @@ export interface DeployResult {
 export const REQUIRED_PACKAGE_FILES = [
   "dist",
   "schemas",
-  "ui",
   "config.yaml",
 ] as const;
 
