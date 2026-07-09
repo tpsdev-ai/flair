@@ -31,7 +31,6 @@
     "dist/",
     "schemas/",
     "templates/",
-    "ui/",
     "config.yaml",
     "LICENSE",
     "README.md",
