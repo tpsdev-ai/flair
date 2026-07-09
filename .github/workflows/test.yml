@@ -368,12 +368,25 @@ jobs:
           HEAD_VERSION=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
           echo "Baseline: $BASELINE — HEAD: $HEAD_VERSION"
 
-          # Same-version runs (e.g. a PR that hasn't bumped) are a no-op test;
-          # we still assert the install worked, but skip the upgrade assertion
-          # because there's no "previous" to upgrade from.
+          # flair#620: this used to skip the entire upgrade-verify path whenever
+          # $BASELINE == $HEAD_VERSION (true on every ordinary feature PR that
+          # hasn't bumped package.json — the vast majority of PRs), so the real
+          # cross-version data-survival path only ever ran at release-bump PRs.
+          # That's backwards: the code under test on a feature PR differs from
+          # published-latest regardless of whether the *semver string* moved —
+          # a feature PR can still change the daemon start/stop sequence, the
+          # reembed migration, storage schema, etc. The invariant we care about
+          # (HEAD's binary must start cleanly against baseline's on-disk data
+          # and not lose or corrupt memories) has nothing to do with whether
+          # someone remembered to bump the version. So: no early exit — always
+          # install published-latest as baseline, pack+install HEAD's actual
+          # built tarball as the upgrade target, and run the full sequence.
+          # The one no-op case left (baseline tag == this exact HEAD commit,
+          # e.g. a re-run against an unchanged tree) still exercises install +
+          # start + reembed + round-trip; it just isn't testing a *content*
+          # diff, and that's an acceptable, rare edge rather than the default.
           if [ "$BASELINE" = "$HEAD_VERSION" ]; then
-            echo "Baseline == HEAD; nothing to upgrade. Passing trivially."
-            exit 0
+            echo "Note: BASELINE version string ($BASELINE) == HEAD package.json version. This PR hasn't bumped semver, but HEAD's packed tarball is still this PR's actual code — running the full upgrade-verify path against it, not skipping."
           fi
 
           BASE_FLAIR="node $BASE_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
@@ -497,6 +510,14 @@ jobs:
       # so harper's raw .ts internals don't pollute the output)
       - name: Type check root (resources)
         run: npx tsc --noEmit -p tsconfig.check.json
+      # Root src/ (CLI, probe, fleet-verify, deploy, bridges, etc. — everything
+      # under src/ EXCEPT cli.ts, which stays on tsconfig.cli.json's strict:false
+      # until #622 splits the monolith). Closes #643: src/** previously had zero
+      # strict coverage — tsconfig.check.json only ever covered resources/**, so a
+      # module like src/probe.ts or src/fleet-verify.ts could regress without CI
+      # noticing. Verified strict-clean with zero errors before wiring this in.
+      - name: Type check root src (strict, excl. cli.ts — #622)
+        run: npx tsc --noEmit -p tsconfig.check.src.json
       # Root CLI entry point (tsconfig.cli.json — strict: false, matches build:cli)
       - name: Type check root CLI
         run: npx tsc --noEmit -p tsconfig.cli.json

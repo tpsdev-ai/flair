@@ -866,10 +866,13 @@ function readHarperPid(dataDir: string): number | null {
  * Seed an agent record via the Harper operations API.
  * Accepts either a port number (localhost) or a full URL string (--target).
  *
- * `adminPass` is typed as optional but in practice the Harper operations API
- * always requires Basic admin auth — every existing call site passes one.
- * The optional signature leaves headroom for a future Harper that honors
- * `authorizeLocal` on its ops endpoint; until then, callers must pass it.
+ * `adminPass` is optional: a local caller may omit it and ride Harper's
+ * `authorizeLocal`, which auto-authorizes a header-less loopback request to
+ * the ops port as super_user (current behavior, verified by live probe —
+ * flair#610). When passed, the helper sends Basic admin auth so it never
+ * depends on that ambient elevation and behaves identically against a remote
+ * or hardened instance. Hardening the ops-API loopback posture is tracked in
+ * flair#654.
  */
 export async function seedAgentViaOpsApi(
   opsPortOrUrl: number | string,
@@ -933,10 +936,12 @@ export async function seedAgentViaOpsApi(
 // admin:admin-pass), not the REST API (which needs server-side HDB_ADMIN_PASSWORD
 // — unavailable on Fabric).  Same pattern as seedAgentViaOpsApi above.
 //
-// `adminPass` is optional in the signature for symmetry with seedAgentViaOpsApi
-// and to keep the door open for a future Harper that honors authorizeLocal on
-// its ops endpoint. Today the Harper operations API always requires Basic admin
-// auth; every current caller passes it.
+// `adminPass` is optional (symmetry with seedAgentViaOpsApi): a local caller may
+// omit it and ride authorizeLocal, which the Harper ops API honors today — a
+// header-less loopback request is auto-authorized as super_user (flair#610).
+// When passed, the helper sends Basic admin auth so it never depends on that
+// ambient elevation and behaves identically against a remote or hardened
+// instance. Hardening that posture is tracked in flair#654.
 
 export async function seedFederationInstanceViaOpsApi(
   opsPortOrUrl: number | string,
@@ -11046,7 +11051,7 @@ program
 
 // ─── flair presence ─────────────────────────────────────────────────────────
 
-const VALID_PRESENCE_ACTIVITIES = ["coding", "reviewing", "planning", "idle"] as const;
+const VALID_PRESENCE_ACTIVITIES = ["coding", "reviewing", "planning", "debugging", "idle"] as const;
 const MAX_TASK_LENGTH = 120;
 
 const presence = program.command("presence").description("Manage agent presence (The Office Space)");
