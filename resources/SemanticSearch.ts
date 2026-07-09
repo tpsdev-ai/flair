@@ -53,7 +53,24 @@ export class SemanticSearch extends Resource {
   }
 
   async post(data: any) {
-    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "composite", minScore = 0, since, asOf } = data || {};
+    // Default scoring is "raw", not "composite" (flair#623 follow-up, measured
+    // 2026-07-08). recall-eval on the live corpus with BM25 hybrid retrieval
+    // active (default since eb26890) showed composite is net-HARMFUL: Δp@3
+    // (composite − raw) = -0.38 to -0.50 across repeated runs, MRR 0.44→0.06-0.44.
+    // Root cause: compositeScore's durability-weight × recency-decay multiplier
+    // applies UNCONDITIONALLY (no relevance gate, unlike retrievalBoost's
+    // RBOOST_RELEVANCE_FLOOR — see ./scoring.ts), so a `permanent`-durability or
+    // freshly-created LOW-relevance record routinely outranks the objectively
+    // best-matching `persistent`/older record. This used to be a smaller effect
+    // when raw scores were more spread out; now that BM25+RRF fusion normalizes
+    // rawScore into a tight [0,1] band, the ±10-30% durability/recency multiplier
+    // is often bigger than the actual relevance gap between candidates, so it
+    // dominates the final ranking instead of nudging it. `scoring: "composite"`
+    // is still available (durability/recency/retrieval-aware re-ranking) for
+    // callers who explicitly opt in — it is no longer the default because it
+    // measurably hurts precision today. Re-run `recall-eval.mjs` before
+    // reconsidering this default if the compositeScore formula changes.
+    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf } = data || {};
 
     // Authenticated identity lives on the Harper Resource context (getContext().request).
     // `this.request` is NOT populated on Harper v5 Resources — prior reads here
