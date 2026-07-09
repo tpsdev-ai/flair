@@ -58,15 +58,33 @@ describe("deriveActivity", () => {
     expect(deriveActivity({ surface: "design-doc" })).toBe("planning");
   });
 
+  // flair#613 — the flagship collision-detection use case (a live incident
+  // investigation) had no matching bucket and fell through to "coding" (or
+  // misleadingly "reviewing" if the surface also mentioned review).
+  test("surface containing 'debug'/'investigat'/'incident' -> debugging", () => {
+    expect(deriveActivity({ surface: "debug-session" })).toBe("debugging");
+    expect(deriveActivity({ surface: "investigation" })).toBe("debugging");
+    expect(deriveActivity({ surface: "incident-response" })).toBe("debugging");
+  });
+
   test("'review' takes precedence over 'plan'/'spec'/'design' when both match", () => {
     // deriveActivity checks "review" first — see its doc comment (two narrow
     // overrides, "review" wins ties since a review surface is unambiguous).
     expect(deriveActivity({ surface: "spec-review-x" })).toBe("reviewing");
   });
 
+  test("'debug'/'investigat'/'incident' takes precedence over 'review'/'plan' when both match", () => {
+    // deriveActivity checks debugging first — see its doc comment (an
+    // incident investigation is the most unambiguous, highest-signal surface
+    // name available, so it wins ties against the other two overrides).
+    expect(deriveActivity({ surface: "incident-review" })).toBe("debugging");
+    expect(deriveActivity({ surface: "investigate-the-plan" })).toBe("debugging");
+  });
+
   test("is case-insensitive", () => {
     expect(deriveActivity({ surface: "TPS-REVIEW" })).toBe("reviewing");
     expect(deriveActivity({ surface: "Design-Doc" })).toBe("planning");
+    expect(deriveActivity({ surface: "INCIDENT" })).toBe("debugging");
   });
 });
 
@@ -96,6 +114,10 @@ describe("buildPresenceBody", () => {
 
   test("includes currentTask when present and non-empty", () => {
     expect(buildPresenceBody("coding", "flair#598")).toEqual({ activity: "coding", currentTask: "flair#598" });
+  });
+
+  test("accepts 'debugging' (flair#613)", () => {
+    expect(buildPresenceBody("debugging", "flair#613")).toEqual({ activity: "debugging", currentTask: "flair#613" });
   });
 
   test("omits currentTask when undefined (does not send null / clear it)", () => {

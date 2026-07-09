@@ -22,20 +22,28 @@
 // ─── Activity derivation ────────────────────────────────────────────────────
 
 /** Mirrors VALID_ACTIVITIES in resources/Presence.ts — keep in sync. */
-export type PresenceActivity = "coding" | "reviewing" | "planning" | "idle";
+export type PresenceActivity = "coding" | "reviewing" | "planning" | "debugging" | "idle";
 
 /**
  * Derive a presence `activity` from the SAME context signals the `bootstrap`
  * tool and the SessionStart hook already receive (channel/surface) — no new
- * inputs, no separate classifier call. Two narrow, name-based overrides for
+ * inputs, no separate classifier call. Three narrow, name-based overrides for
  * the surfaces that are unambiguous on their own; everything else (including
  * no surface at all, e.g. the session-start hook) falls through to "coding",
  * since an MCP tool call is, definitionally, an agent doing something — never
  * "idle" (idle/offline are purely functions of elapsed time since the last
  * heartbeat; see derivePresenceStatus() in resources/Presence.ts).
+ *
+ * "debug"/"investigat"/"incident" is checked FIRST, ahead of "review" and
+ * "plan" — an active incident investigation (flair#613: the flagship
+ * collision-detection use case) is the most unambiguous and highest-signal
+ * surface name an agent can report, and previously had no matching bucket at
+ * all, silently falling into "coding" (or "reviewing" if the surface also
+ * happened to contain that substring — e.g. "incident-review").
  */
 export function deriveActivity(ctx: { surface?: string; channel?: string } = {}): PresenceActivity {
   const surface = (ctx.surface ?? "").toLowerCase();
+  if (surface.includes("debug") || surface.includes("investigat") || surface.includes("incident")) return "debugging";
   if (surface.includes("review")) return "reviewing";
   if (surface.includes("plan") || surface.includes("spec") || surface.includes("design")) return "planning";
   return "coding";
