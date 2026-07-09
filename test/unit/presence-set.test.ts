@@ -312,7 +312,7 @@ describe("flair presence set", () => {
     });
 
     try {
-      for (const activity of ["coding", "reviewing", "planning", "idle"]) {
+      for (const activity of ["coding", "reviewing", "planning", "debugging", "idle"]) {
         const { code, stdout } = await runCli(
           ["presence", "set", "--activity", activity],
           { FLAIR_AGENT_ID: agentId, FLAIR_KEY_DIR: keysDir, FLAIR_URL: url },

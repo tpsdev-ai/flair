@@ -38,7 +38,7 @@ import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuff
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const CURRENT_TASK_MAX_LENGTH = 200;
-const VALID_ACTIVITIES = new Set(["coding", "reviewing", "planning", "idle"]);
+const VALID_ACTIVITIES = new Set(["coding", "reviewing", "planning", "debugging", "idle"]);
 
 function idleThresholdMs(): number {
   const env = process.env.PRESENCE_IDLE_THRESHOLD_MS;
@@ -238,7 +238,7 @@ export function isActivityFresh(
 // known-CVE targeting. Anonymous readers get null for both, same as currentTask.
 // activity/lastActivity/activityUpdatedAt/activityAgeMs/activityFresh
 // (natural-presence) are all public-safe: `activity` and `lastActivity` are a
-// fixed vocabulary label (coding|reviewing|planning|idle), the two timestamps
+// fixed vocabulary label (coding|reviewing|planning|debugging|idle), the two timestamps
 // and the boolean are liveness metadata of the same class as the already-public
 // lastHeartbeatAt. Only `currentTask` (free text) stays content-gated to
 // verified readers — see get()'s includeVerifiedFields.

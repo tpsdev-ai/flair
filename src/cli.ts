@@ -11053,7 +11053,7 @@ program
 
 // ─── flair presence ─────────────────────────────────────────────────────────
 
-const VALID_PRESENCE_ACTIVITIES = ["coding", "reviewing", "planning", "idle"] as const;
+const VALID_PRESENCE_ACTIVITIES = ["coding", "reviewing", "planning", "debugging", "idle"] as const;
 const MAX_TASK_LENGTH = 120;
 
 const presence = program.command("presence").description("Manage agent presence (The Office Space)");
