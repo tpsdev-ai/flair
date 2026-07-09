@@ -40,8 +40,7 @@ function shouldBypassAuth(method: string, pathname: string): boolean {
     pathname === "/OAuthToken" ||
     pathname === "/OAuthRevoke" ||
     pathname === "/.well-known/oauth-authorization-server" ||
-    pathname === "/OAuthMetadata" ||
-    pathname === "/ObservationCenter"
+    pathname === "/OAuthMetadata"
   );
 }
 

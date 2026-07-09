@@ -1275,9 +1275,6 @@ export async function ensureFlairPairInitiatorRole(
 //      WorkspaceState, OAuthClient — NOT the logical Memory/Event/Workspace/OAuth
 //      shorthand the flair_pair_initiator spec used, which was harmless only
 //      because every grant there is false).
-//   3. Obs* writes: if the presence-emitter writes ObsAgentSnapshot AS the agent
-//      it needs insert/update — currently read-only here; confirm the writer's
-//      identity (system vs agent) and widen only if it's the agent.
 
 // Harper 5.0.21 add_role requires an `attribute_permissions` array on EVERY table
 // grant (empty = no attribute-level restriction, so the table-level CRUD applies);
@@ -1310,10 +1307,6 @@ const FLAIR_AGENT_PERMISSION = {
       Agent:           grant(true,  false, true,  false),
       // Read-only reference data.
       Instance:        grant(true,  false, false, false),
-      // Observatory read-models — public reads; writes are system-driven (gate 3).
-      ObsOffice:        grant(true, false, false, false),
-      ObsAgentSnapshot: grant(true, false, false, false),
-      ObsEventFeed:     grant(true, false, false, false),
       // Federation / OAuth / IdP / internal — system + admin only; agents get none.
       Peer:          grant(false, false, false, false),
       PairingToken:  grant(false, false, false, false),

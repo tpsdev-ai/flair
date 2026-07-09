@@ -130,7 +130,7 @@ function mergeRecord(local: Record<string, any> | null, remote: SyncRecord): Rec
  * AdminInstance.ts/AdminDashboard.ts: this is an admin-view endpoint (peers
  * never call it during pairing — FederationPair.post() reads the Instance
  * table directly server-side to hand a peer our identity; this HTTP GET is
- * ObservationCenter/CLI tooling only).
+ * CLI tooling only).
  */
 export class FederationInstance extends Resource {
   async allowRead(): Promise<boolean> {
@@ -578,9 +578,7 @@ export class FederationSync extends Resource {
  *
  * allowRead()=allowAdmin (defense-in-depth, authorizeLocal-escalation-class
  * follow-up to #601/#604/#609/#612 — flair#614's backstop found this one had
- * NO allow* at all). The docstring already called this "(admin view)" and
- * ObservationCenter's own JS already prompts for admin-pass before hitting
- * this endpoint (see auth-middleware.ts's ObservationCenter comment) — this
+ * NO allow* at all). The docstring already called this "(admin view)" — this
  * closes the gap between the documented/intended access model and what was
  * actually enforced (nothing).
  */
