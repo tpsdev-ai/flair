@@ -212,21 +212,35 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
   // real-Harper reproduction this was root-caused against).
   it("undefined $distance falls back to a point-lookup cosine computation instead of scoring 0", async () => {
     reset();
-    const qEmb = [1, 0, 0];
-    // Orthogonal to qEmb — the pre-fix `?? 1` fallback and the fixed
-    // point-lookup cosine computation would BOTH read as "not similar" here,
-    // so this record is a control: it must never be mistaken for a match.
-    memoryStore.set("m-orthogonal", { id: "m-orthogonal", agentId: "agent-1", content: "unrelated", visibility: "private", embedding: [0, 1, 0] });
-    // Identical to qEmb — cosineSimilarity == 1 exactly. Pre-fix this record
-    // would score 0 (distanceToSimilarity(undefined ?? 1) === 0); post-fix it
-    // must score a real positive similarity via the embedding point-lookup.
-    memoryStore.set("m-identical", { id: "m-identical", agentId: "agent-1", content: "matches the query", visibility: "private", embedding: [1, 0, 0] });
+    // This is a LEGACY (hybrid-flag-OFF) path-specific regression test — the
+    // undefined-$distance fallback (distanceToSimilarity / point-lookup cosine)
+    // lives only in resources/SemanticSearch.ts's `else if (qEmb)` branch, not
+    // in the hybrid path's RRF-fusion scoring. Since FLAIR_HYBRID_RETRIEVAL now
+    // defaults ON (BM25 hybrid activation, 2026-07-08), pin it OFF explicitly
+    // so this test keeps exercising the exact branch it documents, regardless
+    // of the global default.
+    const prevHybrid = process.env.FLAIR_HYBRID_RETRIEVAL;
+    process.env.FLAIR_HYBRID_RETRIEVAL = "false";
+    try {
+      const qEmb = [1, 0, 0];
+      // Orthogonal to qEmb — the pre-fix `?? 1` fallback and the fixed
+      // point-lookup cosine computation would BOTH read as "not similar" here,
+      // so this record is a control: it must never be mistaken for a match.
+      memoryStore.set("m-orthogonal", { id: "m-orthogonal", agentId: "agent-1", content: "unrelated", visibility: "private", embedding: [0, 1, 0] });
+      // Identical to qEmb — cosineSimilarity == 1 exactly. Pre-fix this record
+      // would score 0 (distanceToSimilarity(undefined ?? 1) === 0); post-fix it
+      // must score a real positive similarity via the embedding point-lookup.
+      memoryStore.set("m-identical", { id: "m-identical", agentId: "agent-1", content: "matches the query", visibility: "private", embedding: [1, 0, 0] });
 
-    const s = makeSearch(agentCtx("agent-1"));
-    const res: any = await s.post({ queryEmbedding: qEmb, scoring: "raw", limit: 10 });
+      const s = makeSearch(agentCtx("agent-1"));
+      const res: any = await s.post({ queryEmbedding: qEmb, scoring: "raw", limit: 10 });
 
-    const byId = new Map(res.results.map((r: any) => [r.id, r]));
-    expect(byId.get("m-identical")?._score).toBe(1);
-    expect(byId.get("m-orthogonal")?._score).toBe(0);
+      const byId = new Map(res.results.map((r: any) => [r.id, r]));
+      expect(byId.get("m-identical")?._score).toBe(1);
+      expect(byId.get("m-orthogonal")?._score).toBe(0);
+    } finally {
+      if (prevHybrid === undefined) delete (process.env as any).FLAIR_HYBRID_RETRIEVAL;
+      else process.env.FLAIR_HYBRID_RETRIEVAL = prevHybrid;
+    }
   });
 });

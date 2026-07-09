@@ -10,13 +10,19 @@
 // no regression on the within-cluster gate (p@3 holds 0.88).
 
 // ─── Feature flag: BM25 + union-RRF hybrid retrieval ────────────────────────
-// Flag OFF (default) → SemanticSearch behavior is byte-identical to the
-// pre-hybrid path (HNSW + the +0.05 exact-substring keyword bump). Flag ON → the
-// hybrid path. Toggle with FLAIR_HYBRID_RETRIEVAL=true (also "1" / "on"). Read
-// per-call so it can be flipped without a rebuild and set per-case in tests.
-// Lives here (Harper-free) so it's unit-testable.
+// ACTIVATED 2026-07-08 (ops-i39b activation follow-up to #519): default is now
+// ON. Recall-eval validated at build time (CHANGELOG 0.20.x): NEW-8
+// within-cluster gate p@3 holds 0.88 (no regression), OLD-6 severe
+// near-verbatim misses recover 0/6 → 4/6 into top-10. A fresh isolated-Harper
+// measurement at activation time (no prod contact) confirmed zero regression
+// on both severe- and within-cluster-style synthetic queries and a small
+// (~+4ms/query) latency delta. Set FLAIR_HYBRID_RETRIEVAL=false (also "0" /
+// "off") to REVERT to the pre-hybrid legacy path — byte-identical to the
+// original default-OFF behavior, no code rollback needed. Read per-call so it
+// can be flipped without a rebuild and set per-case in tests. Lives here
+// (Harper-free) so it's unit-testable.
 export function hybridEnabled(): boolean {
-  const v = (process.env.FLAIR_HYBRID_RETRIEVAL ?? "").toLowerCase();
+  const v = (process.env.FLAIR_HYBRID_RETRIEVAL ?? "true").toLowerCase();
   return v === "true" || v === "1" || v === "on";
 }
 

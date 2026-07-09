@@ -7,11 +7,18 @@
 // resources/dedup.ts cosineSimilarity): a cosine-sort query's `$distance`
 // annotation comes back `undefined` when its post-filter result set contains
 // EXACTLY ONE matching record — sort ORDER is still correct, only the numeric
-// distance is missing. resources/SemanticSearch.ts's legacy HNSW path (hybrid
-// flag OFF, the default) computed
+// distance is missing. resources/SemanticSearch.ts's legacy HNSW path
+// computed
 //   distanceToSimilarity(record.$distance ?? 1)
 // so a singleton hit fell through `?? 1` → similarity 0 → the memory reads as
 // totally dissimilar to a paraphrase of ITSELF.
+//
+// This is a LEGACY-path-specific regression test: the hybrid path (default ON
+// since the 2026-07-08 BM25 hybrid activation) doesn't compute
+// distanceToSimilarity/$distance at all — it derives rawScore from
+// union-RRF rank fusion instead. This file pins FLAIR_HYBRID_RETRIEVAL=false
+// before spawning Harper so it keeps exercising the exact branch it
+// documents, regardless of the global default.
 //
 // The read-scope Layer 1 change made this trigger easily: before, the no-grants agent scope
 // was ALWAYS a compound `{operator:"or", conditions:[{agentId},{visibility==
@@ -69,7 +76,16 @@ const PARAPHRASE_QUERY = "When are we getting together to go over quarterly spen
 
 describe("SemanticSearch singleton-result scoring (real Harper, real embeddings)", () => {
   beforeAll(async () => {
-    harper = await startHarper();
+    // Pin the legacy path: startHarper() inherits process.env at spawn time,
+    // so this must be set before the call, not just before the request.
+    const prevHybrid = process.env.FLAIR_HYBRID_RETRIEVAL;
+    process.env.FLAIR_HYBRID_RETRIEVAL = "false";
+    try {
+      harper = await startHarper();
+    } finally {
+      if (prevHybrid === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL;
+      else process.env.FLAIR_HYBRID_RETRIEVAL = prevHybrid;
+    }
     const res = await adminOp(harper, {
       operation: "insert", database: "flair", table: "Agent",
       records: [{ id: agent.id, name: agent.id, role: "agent", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],

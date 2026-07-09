@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 🔎 BM25 + union-RRF hybrid retrieval — ACTIVATED (ops-i39b, follow-up to #519)
+
+`FLAIR_HYBRID_RETRIEVAL` now defaults **ON** (was default-OFF since #519 shipped the feature). Recall-eval at build time validated the intended gain: the NEW-8 within-cluster gate held p@3=0.88 (no regression); the OLD-6 severe near-verbatim misses recovered 0/6 → 4/6 into top-10 (1/6 into top-3). A fresh isolated-Harper measurement at activation time (ephemeral spawned instance, zero production contact) confirmed zero regression on a synthetic severe-miss/within-cluster-gate corpus and a small latency delta (~+4ms/query, ~27ms absolute at n≈90 records). Revert lever unchanged: set `FLAIR_HYBRID_RETRIEVAL=false` (also `"0"`/`"off"`) to fall back to the byte-identical legacy HNSW + keyword-bump path — no code rollback needed.
+
+- **Fixed a blocking regression found during activation testing:** the hybrid path's candidate-union RRF fusion silently returned **zero results** for a `SemanticSearch` call with neither `q` nor `queryEmbedding` — the "list everything in my scope" shape (`agentId`/`tag`/`subject`-only calls; see `test/integration/memory-visibility-scoping-e2e.test.ts`), which the legacy path answers with a full scoped listing. `resources/SemanticSearch.ts`'s hybrid branch now falls back to emitting the already-security-filtered `allowedById` candidate set directly at `rawScore 0` when neither retrieval signal is present, matching the legacy contract exactly. Regression-guarded by `test/integration/bm25-hybrid-noquery-listing.test.ts`.
+
 The upgrade path becomes one tested transaction — install, restart, verify, and roll back automatically on failure — backed by a pre-upgrade data snapshot, a nightly-checked downgrade path, and a post-deploy fleet-convergence sweep. Also closes out the remaining `authorizeLocal`-class security gaps from the 0.21.0 state review.
 
 ### 🔁 `flair upgrade` restarts by default, verifies, and rolls back (#635, #641)

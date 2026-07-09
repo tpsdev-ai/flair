@@ -35,8 +35,10 @@ function distanceToSimilarity(distance: number): number {
 const CANDIDATE_MULTIPLIER = 5;
 
 // The BM25 + union-RRF hybrid path is feature-flagged via hybridEnabled()
-// (imported from ./bm25 — Harper-free so it's unit-testable). Flag OFF (default)
-// → byte-identical to the pre-hybrid HNSW + +0.05 keyword-bump behavior.
+// (imported from ./bm25 — Harper-free so it's unit-testable). Default is ON as
+// of 2026-07-08 (see ./bm25.ts's hybridEnabled() doc); set
+// FLAIR_HYBRID_RETRIEVAL=false to revert to the legacy HNSW + +0.05
+// keyword-bump path, byte-identical to the original pre-hybrid behavior.
 
 export class SemanticSearch extends Resource {
   // Self-authorize via the Ed25519 agent verify instead of relying on the auth
@@ -278,26 +280,60 @@ export class SemanticSearch extends Resource {
         bm25Ids = ranked.filter(r => r.score > 0).slice(0, SEM_LIMIT).map(r => r.id);
       }
 
-      // ── (d) Candidate-union RRF → normalized [0,1] rawScore ──────────────
-      // Union dedupes semantic ∪ bm25 ids; absent-from-a-list = 0 contribution.
-      const fused = fuseRrfNormalized(semIds, bm25Ids);
+      // ── (d) No retrieval signal at all → full scoped listing ────────────
+      // Neither `q` nor `qEmb`: semIds and bm25Ids are BOTH necessarily empty
+      // (semIds is only populated `if (qEmb)`; bm25Ids only `if (q)`), so
+      // fuseRrfNormalized([], []) returns an empty map and the union-RRF loop
+      // below would silently emit ZERO results — unlike the legacy path's
+      // final no-embedding branch, which full-scans and returns every
+      // scope-matching record (rawScore 0 when there's no keyword hit,
+      // included because `if (q && rawScore === 0) continue` only fires when
+      // `q` is truthy). This is the "list everything in my scope" call
+      // real callers rely on (e.g. SemanticSearch with only `agentId`/`tag`/
+      // `subject` — see test/integration/memory-visibility-scoping-e2e.test.ts),
+      // and it must behave identically whether the hybrid flag is on or off.
+      // `allowedById` already holds exactly the right candidate set (built
+      // from the SAME conditions[] + isAllowedBm25Candidate temporal/security
+      // filters as the BM25 pass), so emit it directly at rawScore 0 instead
+      // of routing through the (necessarily-empty) RRF fusion.
+      if (!q && !qEmb) {
+        for (const record of allowedById.values()) {
+          const rawScore = 0;
+          let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
+          if (temporalBoost > 1.0) finalScore *= temporalBoost;
 
-      for (const [id, rrfRaw] of fused) {
-        const record = allowedById.get(id);
-        if (!record) continue; // should not happen — union ⊆ allowed
-        const rawScore = rrfRaw; // already normalized to [0,1]
-        let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
-        if (temporalBoost > 1.0) finalScore *= temporalBoost;
+          const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
+          const source = record.agentId !== agentId ? record.agentId : undefined;
+          results.push({
+            ...record,
+            content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
+            _score: Math.round(finalScore * 1000) / 1000,
+            _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
+            _source: source,
+          });
+        }
+      } else {
+        // ── Candidate-union RRF → normalized [0,1] rawScore ────────────────
+        // Union dedupes semantic ∪ bm25 ids; absent-from-a-list = 0 contribution.
+        const fused = fuseRrfNormalized(semIds, bm25Ids);
 
-        const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
-        const source = record.agentId !== agentId ? record.agentId : undefined;
-        results.push({
-          ...record,
-          content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
-          _score: Math.round(finalScore * 1000) / 1000,
-          _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
-          _source: source,
-        });
+        for (const [id, rrfRaw] of fused) {
+          const record = allowedById.get(id);
+          if (!record) continue; // should not happen — union ⊆ allowed
+          const rawScore = rrfRaw; // already normalized to [0,1]
+          let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
+          if (temporalBoost > 1.0) finalScore *= temporalBoost;
+
+          const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
+          const source = record.agentId !== agentId ? record.agentId : undefined;
+          results.push({
+            ...record,
+            content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
+            _score: Math.round(finalScore * 1000) / 1000,
+            _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
+            _source: source,
+          });
+        }
       }
     } else if (qEmb) {
       // ─── HNSW vector search path (legacy, hybrid flag OFF) ────────────────
