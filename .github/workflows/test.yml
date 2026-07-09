@@ -510,6 +510,14 @@ jobs:
       # so harper's raw .ts internals don't pollute the output)
       - name: Type check root (resources)
         run: npx tsc --noEmit -p tsconfig.check.json
+      # Root src/ (CLI, probe, fleet-verify, deploy, bridges, etc. — everything
+      # under src/ EXCEPT cli.ts, which stays on tsconfig.cli.json's strict:false
+      # until #622 splits the monolith). Closes #643: src/** previously had zero
+      # strict coverage — tsconfig.check.json only ever covered resources/**, so a
+      # module like src/probe.ts or src/fleet-verify.ts could regress without CI
+      # noticing. Verified strict-clean with zero errors before wiring this in.
+      - name: Type check root src (strict, excl. cli.ts — #622)
+        run: npx tsc --noEmit -p tsconfig.check.src.json
       # Root CLI entry point (tsconfig.cli.json — strict: false, matches build:cli)
       - name: Type check root CLI
         run: npx tsc --noEmit -p tsconfig.cli.json
