@@ -55,21 +55,31 @@ export class SemanticSearch extends Resource {
   async post(data: any) {
     // Default scoring is "raw", not "composite" (flair#623 follow-up, measured
     // 2026-07-08). recall-eval on the live corpus with BM25 hybrid retrieval
-    // active (default since eb26890) showed composite is net-HARMFUL: Δp@3
-    // (composite − raw) = -0.38 to -0.50 across repeated runs, MRR 0.44→0.06-0.44.
-    // Root cause: compositeScore's durability-weight × recency-decay multiplier
-    // applies UNCONDITIONALLY (no relevance gate, unlike retrievalBoost's
-    // RBOOST_RELEVANCE_FLOOR — see ./scoring.ts), so a `permanent`-durability or
-    // freshly-created LOW-relevance record routinely outranks the objectively
-    // best-matching `persistent`/older record. This used to be a smaller effect
-    // when raw scores were more spread out; now that BM25+RRF fusion normalizes
-    // rawScore into a tight [0,1] band, the ±10-30% durability/recency multiplier
-    // is often bigger than the actual relevance gap between candidates, so it
-    // dominates the final ranking instead of nudging it. `scoring: "composite"`
-    // is still available (durability/recency/retrieval-aware re-ranking) for
-    // callers who explicitly opt in — it is no longer the default because it
-    // measurably hurts precision today. Re-run `recall-eval.mjs` before
-    // reconsidering this default if the compositeScore formula changes.
+    // active (default since eb26890) showed composite was net-HARMFUL at the
+    // time: Δp@3 (composite − raw) = -0.38 to -0.50 across repeated runs, MRR
+    // 0.44→0.06-0.44. Root cause: compositeScore's durability-weight ×
+    // recency-decay multiplier applied UNCONDITIONALLY (no relevance gate,
+    // unlike retrievalBoost's RBOOST_RELEVANCE_FLOOR), so a `permanent`
+    // -durability or freshly-created LOW-relevance record could outrank the
+    // objectively best-matching `persistent`/older record. Now that BM25+RRF
+    // fusion normalizes rawScore into a tight [0,1] band, an unbounded
+    // durability/recency multiplier is often bigger than the actual relevance
+    // gap between candidates.
+    //
+    // FIXED (flair#623 follow-up, 2026-07-08, see ./scoring.ts's
+    // COMPOSITE_DISCOUNT_FLOOR / COMPOSITE_RELEVANCE_FLOOR): compositeScore's
+    // durability/recency multiplier is now bounded to a small (~2%) nudge and
+    // relevance-gated, the same way RBOOST_CAP/RBOOST_RELEVANCE_FLOOR already
+    // bound the retrieval-popularity boost — `scoring: "composite"` no longer
+    // reproduces the magnet/inversion bug (recall-harness: p@3 and MRR both
+    // now match raw exactly on its 87-record corpus). The default REMAINS
+    // "raw" anyway: on that same corpus, a relevance-gated composite only
+    // MATCHES raw's precision, it doesn't beat it, so there is no measured
+    // upside to switching the default, only the (now-closed) downside risk
+    // for anyone who explicitly opts into "composite". Re-run
+    // recall-harness (test/bench/recall-harness/run.ts) and `recall-eval.mjs`
+    // before reconsidering this default if the compositeScore formula or
+    // corpus changes.
     const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf } = data || {};
 
     // Authenticated identity lives on the Harper Resource context (getContext().request).

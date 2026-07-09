@@ -46,13 +46,74 @@ export function retrievalBoost(retrievalCount: number): number {
 
 // flair#623 (2026-07-08): SemanticSearch.ts's `scoring` param now DEFAULTS to
 // "raw" — compositeScore measurably HURTS recall-eval precision on the live
-// corpus (Δp@3 -0.38 to -0.50 vs raw). Unlike rBoost above, dWeight and rFactor
-// apply UNCONDITIONALLY — no relevance-floor gate — so they can (and do) sink a
-// clearly-best semantic/BM25 match below a `permanent`/fresh but weaker match.
-// compositeScore itself is UNCHANGED here; it's still opt-in via scoring:
-// "composite" for callers who want durability/recency-aware re-ranking. If this
-// formula ever gets a relevance-gated dWeight/rFactor (the rBoost-style fix),
-// re-run recall-eval.mjs before reconsidering the default.
+// corpus (Δp@3 -0.38 to -0.50 vs raw). recall-harness's harder 87-record
+// corpus (test/bench/recall-harness) reproduced this in isolation at Δp@3
+// -0.900: dWeight and rFactor applied UNCONDITIONALLY — no relevance-floor
+// gate, unlike rBoost above — so an unrelated-but-`permanent`/fresh record
+// (dWeight=1.0 × rFactor=1.0, no discount at all) routinely outranked the
+// objectively best match once its `standard`/`persistent`, weeks-old
+// durability/recency discount cut 30-95% off its score.
+//
+// FIRST ATTEMPT (kept here as a documented dead end — do not re-introduce):
+// gate dWeight×rFactor by ramping it from neutral-at-floor to
+// full-strength-at-rawScore=1.0, mirroring rBoost's floor gate. Measured
+// WORSE than the original bug (p@3 0.033 vs 0.067) on recall-harness. Root
+// cause: the records compositeScore actually needs to protect are the
+// GENUINELY relevant ones, and a genuine match has a HIGH rawScore (0.9+ on
+// this corpus, not near the 0.5 floor) — so ramping the gate open as
+// rawScore rises means the *correct* answer gets the discount at nearly full
+// strength (gate≈1), while the discount was already a no-op for the
+// magnet distractors (permanent/fresh ⇒ dWeight×rFactor=1.0 regardless of any
+// gate). Ramping-by-relevance is backwards for a DISCOUNT-only multiplier: it
+// protects weak/borderline matches that were never the problem, and does
+// nothing for the strong matches that were.
+//
+// THE ACTUAL FIX: treat dWeight×rFactor the same way RBOOST_CAP treats
+// retrievalBoost — bound it to a small band around 1.0 (a gentle nudge, not
+// an override) via COMPOSITE_DISCOUNT_FLOOR, so durability/recency can never
+// cost a record more than a fixed, small percentage regardless of how stale
+// or low-durability it is. The RBOOST_RELEVANCE_FLOOR-style gate is layered
+// on top per its original intent (no adjustment at all for records that
+// don't even clear a basic relevance bar) but the CAP is what actually stops
+// the magnet: even a `standard`/95-day-old correct answer now loses at most
+// (1 - COMPOSITE_DISCOUNT_FLOOR) of its score, never the 30-95% the
+// unconditional formula could take.
+//
+// COMPOSITE_DISCOUNT_FLOOR (env: FLAIR_COMPOSITE_DISCOUNT_FLOOR) and
+// COMPOSITE_RELEVANCE_FLOOR (env: FLAIR_COMPOSITE_RELEVANCE_FLOOR, default
+// 0.5, same value as RBOOST_RELEVANCE_FLOOR): below the relevance floor the
+// durability/recency multiplier is fully neutral (1.0); at/above it, the
+// multiplier is dWeight×rFactor linearly remapped from its native [0,1] range
+// into [COMPOSITE_DISCOUNT_FLOOR, 1.0] — so a `permanent`+fresh record still
+// scores strictly higher than a `standard`+stale one among relevant
+// candidates (durability/recency remains a real, monotonic signal), but
+// never by more than the bounded amount.
+//
+// DISCOUNT_FLOOR_DEFAULT = 0.98 (max -2%) was tuned empirically against
+// recall-harness's 87-record corpus (test/bench/recall-harness/run.ts,
+// hybrid=true, 3 runs, deterministic/±0.000 SE on this corpus): 0.9 (max
+// -10%, symmetric with RBOOST_CAP's +10%) recovered p@3 to match raw exactly
+// (0.967) but MRR still trailed raw by -0.150 (0.742 vs 0.892) — the bounded
+// discount was still large enough to occasionally reorder within the top-3,
+// just not enough to push the right answer OUT of it. 0.95 narrowed the MRR
+// gap to -0.078. 0.98 closed it to +0.000 on both metrics across all 3 runs
+// — this corpus's RRF-normalized rawScore band is tight enough that even a
+// 5-10% durability/recency swing is bigger than the real relevance gap
+// between candidates. Re-run recall-harness (and recall-eval.mjs on the live
+// corpus) before changing this default or reconsidering scoring defaults.
+export const COMPOSITE_RELEVANCE_FLOOR_DEFAULT = 0.5;
+export const COMPOSITE_DISCOUNT_FLOOR_DEFAULT = 0.98; // max -2% — tuned to fully close the gap to raw on recall-harness
+
+export function getCompositeRelevanceFloor(): number {
+  const v = Number(process.env.FLAIR_COMPOSITE_RELEVANCE_FLOOR);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : COMPOSITE_RELEVANCE_FLOOR_DEFAULT;
+}
+
+export function getCompositeDiscountFloor(): number {
+  const v = Number(process.env.FLAIR_COMPOSITE_DISCOUNT_FLOOR);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : COMPOSITE_DISCOUNT_FLOOR_DEFAULT;
+}
+
 export function compositeScore(
   semanticScore: number,
   record: { durability?: string; createdAt?: string; retrievalCount?: number; supersedes?: string },
@@ -64,5 +125,15 @@ export function compositeScore(
   // this query (semanticScore clears the floor). Below the floor, a popular doc gets
   // no lift — kills the cross-query magnet while preserving boosts for relevant docs.
   const rBoost = semanticScore >= RBOOST_RELEVANCE_FLOOR ? retrievalBoost(record.retrievalCount ?? 0) : 1.0;
-  return semanticScore * dWeight * rFactor * rBoost;
+
+  // Bound dWeight×rFactor into [discountFloor, 1.0] (a gentle nudge, mirroring
+  // RBOOST_CAP), then relevance-gate it (mirroring RBOOST_RELEVANCE_FLOOR): no
+  // adjustment at all below the floor, the bounded nudge at/above it.
+  const discountFloor = getCompositeDiscountFloor();
+  const dWeightRecency = dWeight * rFactor; // native range ~[0, 1]
+  const boundedDWeightRecency = discountFloor + (1 - discountFloor) * dWeightRecency; // remapped to [discountFloor, 1]
+  const relevanceFloor = getCompositeRelevanceFloor();
+  const gatedDWeightRecency = semanticScore >= relevanceFloor ? boundedDWeightRecency : 1.0;
+
+  return semanticScore * gatedDWeightRecency * rBoost;
 }
