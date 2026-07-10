@@ -10,6 +10,7 @@
 
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { invalidEntitiesResponse } from "./entity-vocab.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -129,6 +130,12 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
     content.createdAt = new Date().toISOString();
     content.timestamp ||= content.createdAt;
 
+    // attention-plane vocabulary gate (flair#675): `entities`, if present,
+    // must be well-formed vocabulary strings — see resources/entity-vocab.ts.
+    // Field is additive/optional; absent entities is not an error.
+    const entitiesError = invalidEntitiesResponse(content.entities);
+    if (entitiesError) return entitiesError;
+
     return super.post(content);
   }
 
@@ -138,6 +145,10 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
     if (auth.kind === "agent" && !auth.isAdmin && content.agentId !== auth.agentId) {
       return FORBIDDEN("forbidden: cannot write workspace state for another agent");
     }
+
+    // attention-plane vocabulary gate (flair#675) — same as post() above.
+    const entitiesError = invalidEntitiesResponse(content.entities);
+    if (entitiesError) return entitiesError;
 
     return super.put(content);
   }
