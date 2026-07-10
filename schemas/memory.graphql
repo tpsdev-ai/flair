@@ -41,11 +41,26 @@ type Memory @table(database: "flair") {
                                # stamped by the ORIGINATING instance itself and preserved (never re-stamped) as the record flows through
                                # sync merges. @indexed for the later sync push-query filter (per-record signature verification and the
                                # classifier org-gate are separate, later slices — not built here).
+  entities: [String] @indexed  # attention-plane vocabulary strings (flair#675). Added in v1 (not v2) per K&S
+                               # verdict on FLAIR-ATTENTION-PLANE.md — gives the future attention query
+                               # uniform index pushdown across Memory/WorkspaceState/OrgEvent instead of a
+                               # partial one. Optional/derivable-on-write (no automatic tagging built here —
+                               # that producer is a follow-up); additive/nullable, existing rows carry no
+                               # entities, readers tolerate absent (same pattern as Presence.activityUpdatedAt).
+                               # See docs/entity-vocabulary.md.
 }
 
 # Explicit entity-to-entity relationships with temporal validity.
 # Enables queries like "who was team lead in Q1?" or "what changed about X on date Y?"
 # Inspired by knowledge graph triples with time-bounded validity windows.
+#
+# attention-plane vocabulary note (flair#675): Relationship gets NO `entities`
+# field. `subject`/`object` already hold free-form entity-reference strings
+# and are already @indexed — they're the vocabulary carrier for this table.
+# (Today they're lowercased on write in resources/Relationship.ts's put() but
+# not yet validated against resources/entity-vocab.ts — wiring that
+# validation, so `subject`/`object` are enforced attention-plane vocabulary
+# strings, is a follow-up, not this foundation slice.)
 type Relationship @table(database: "flair") {
   id: ID @primaryKey
   agentId: String! @indexed        # who created this relationship

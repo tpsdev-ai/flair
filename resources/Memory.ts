@@ -4,6 +4,7 @@ import { isAdmin, resolveAgentAuth, allowVerified, type AgentAuthVerdict } from 
 import { localInstanceId } from "./instance-identity.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
+import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners, resolveReadScope } from "./memory-read-scope.js";
 import {
@@ -618,6 +619,13 @@ export class Memory extends (databases as any).flair.Memory {
       content.validFrom = content.createdAt;
     }
 
+    // attention-plane vocabulary gate (flair#675): `entities`, if present,
+    // must be well-formed vocabulary strings — see resources/entity-vocab.ts.
+    // Field is additive/optional (v1 schema-only; no auto-derivation here —
+    // that producer is a follow-up); absent entities is not an error.
+    const entitiesError = invalidEntitiesResponse(content.entities);
+    if (entitiesError) return entitiesError;
+
     if (content.durability === "ephemeral" && !content.expiresAt) {
       const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
       content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
@@ -759,6 +767,10 @@ export class Memory extends (databases as any).flair.Memory {
     if (content.supersedes && !content.validFrom) {
       content.validFrom = content.createdAt;
     }
+
+    // attention-plane vocabulary gate (flair#675) — see post()'s comment above.
+    const entitiesError = invalidEntitiesResponse(content.entities);
+    if (entitiesError) return entitiesError;
 
     // Content safety scan on updated content + summary.
     if (content.content || content.summary) {
