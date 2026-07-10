@@ -287,6 +287,65 @@ jobs:
           STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
           echo "$STATUS" | grep -q "running" || { echo "FAIL: not running after init"; exit 1; }
 
+          # ── flair#654 HARD GATE: authorizeLocal now defaults to false ──────────
+          # Proves the bootstrap-ordering invariant K&S required: the admin
+          # credential (~/.flair/admin-pass / --admin-pass / FLAIR_ADMIN_PASS) is
+          # established BEFORE any ops-API seed call fires, so seeding never rode
+          # (and post-flip, never needs) Harper's authorizeLocal loopback forgery.
+          OPS_PORT=$((PORT - 1))
+
+          # 1. NEGATIVE: a credential-less loopback ops-API call must now be
+          #    REJECTED, not auto-authorized as super_user. This is the actual
+          #    hole #654 closes — proves the toggle really is off (not silently
+          #    overridden by a stale config path) rather than just asserting the
+          #    seed above happened to succeed for the wrong reason.
+          UNAUTH_STATUS=$(curl -s -o /tmp/flair654-unauth.json -w "%{http_code}" -X POST "http://127.0.0.1:${OPS_PORT}/" \
+            -H "Content-Type: application/json" -d '{"operation":"system_information"}')
+          echo "Unauthenticated loopback ops-API call → HTTP $UNAUTH_STATUS ($(cat /tmp/flair654-unauth.json))"
+          if [ "$UNAUTH_STATUS" = "200" ]; then
+            echo "FAIL: unauthenticated loopback ops-API call returned 200 — authorizeLocal is still forging super_user (flair#654 regression)"
+            exit 1
+          fi
+
+          # 2. POSITIVE: the same ops API accepts genuine Basic admin auth. The
+          #    agent seed inside `flair init` above already proved this
+          #    implicitly (it would have failed otherwise); assert it directly.
+          AUTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:${OPS_PORT}/" \
+            -u "admin:${FLAIR_ADMIN_PASS}" -H "Content-Type: application/json" -d '{"operation":"system_information"}')
+          echo "Basic-authed loopback ops-API call → HTTP $AUTH_STATUS"
+          [ "$AUTH_STATUS" = "200" ] || { echo "FAIL: Basic-authed ops-API call did not succeed ($AUTH_STATUS)"; exit 1; }
+
+          # 3. FEDERATION SEED: seedFederationInstanceViaOpsApi is only exercised
+          #    by --remote/hub init, never by the plain local init above — so the
+          #    agent seed alone doesn't cover it. Point a second, --remote init AT
+          #    THIS SAME already-running instance (self-federation-style; no real
+          #    Fabric needed) to exercise both seedAgentViaOpsApi (a second agent)
+          #    and seedFederationInstanceViaOpsApi (a FederationInstance row) via
+          #    genuine Basic admin auth against the live, already-credentialed
+          #    daemon from the init above.
+          INIT_REMOTE_OUT=$($FLAIR init --target "http://127.0.0.1:$PORT" --remote --force \
+            --admin-pass "$FLAIR_ADMIN_PASS" --agent-id smoke-hub-agent 2>&1)
+          echo "$INIT_REMOTE_OUT"
+          echo "$INIT_REMOTE_OUT" | grep -q "registered on remote instance" || {
+            echo "FAIL: federation-seed init did not report the agent seed succeeding"
+            exit 1
+          }
+          echo "$INIT_REMOTE_OUT" | grep -q "Federation Instance created" || {
+            echo "FAIL: federation-seed init did not report the FederationInstance seed succeeding"
+            exit 1
+          }
+
+          # Confirm the FederationInstance row actually landed (not just a 0 exit
+          # code) — a genuine Basic-authed read-back, independent of the init
+          # command's own success message.
+          FEDERATION_CHECK=$(curl -s -o /dev/null -w "%{http_code}" \
+            -u "admin:${FLAIR_ADMIN_PASS}" "http://127.0.0.1:${PORT}/FederationInstance")
+          [ "$FEDERATION_CHECK" = "200" ] || {
+            echo "FAIL: /FederationInstance not reachable with Basic admin auth after federation seed ($FEDERATION_CHECK)"
+            exit 1
+          }
+          # ── end flair#654 hard gate ─────────────────────────────────────────────
+
           # Restart race guard (0.5.4 regression): `flair restart` must block until
           # Harper is actually reachable, so an immediately following `flair status`
           # must not report unreachable.

@@ -2106,13 +2106,17 @@ program
         const alreadyInstalled = existsSync(join(dataDir, "harper-config.yaml"));
 
         const opsSocket = join(dataDir, "operations-server");
+        // authorizeLocal: false (flair#654) — a credential-less loopback ops-API
+        // request is no longer auto-authorized as super_user. Every ops-API
+        // seed call below (seedAgentViaOpsApi et al.) already passes a real
+        // adminPass via Basic auth, so this does not change local-init behavior.
         const harperSetConfig = JSON.stringify({
           rootPath: dataDir,
           http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
           operationsApi: { network: { port: opsPort, cors: true }, domainSocket: opsSocket },
           mqtt: { network: { port: null }, webSocket: false },
           localStudio: { enabled: false },
-          authentication: { authorizeLocal: true, enableSessions: true },
+          authentication: { authorizeLocal: false, enableSessions: true },
         });
 
         const env: Record<string, string> = {
@@ -2186,13 +2190,15 @@ program
           mkdirSync(plistDir, { recursive: true });
           const plistPath = join(plistDir, `${label}.plist`);
           const opsSocket = join(dataDir, "operations-server");
+          // authorizeLocal: false (flair#654) — same posture as the initial spawn
+          // above; the launchd-managed process must not diverge from it.
           const setConfig = JSON.stringify({
             rootPath: dataDir,
             http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
             operationsApi: { network: { port: opsPort, cors: true }, domainSocket: opsSocket },
             mqtt: { network: { port: null }, webSocket: false },
             localStudio: { enabled: false },
-            authentication: { authorizeLocal: true, enableSessions: true },
+            authentication: { authorizeLocal: false, enableSessions: true },
           });
           const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
