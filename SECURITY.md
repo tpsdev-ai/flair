@@ -41,6 +41,17 @@ explicitly via `--admin-pass-file`, `FLAIR_ADMIN_PASS`, or
 [docs/secrets-and-keys.md](docs/secrets-and-keys.md) for the full
 precedence and rotation model.
 
+The Harper **operations API** is the admin/management surface. Network
+requests to it require admin Basic auth: Flair ships with
+`authorizeLocal: false`, so an unauthenticated loopback request is
+rejected (`401`) instead of being auto-elevated to super_user. The same
+API is also reachable over a Unix **domain socket**
+(`~/.flair/data/operations-server`, owner-write-only), which Harper
+treats as an inherent local-admin channel — a request over the socket is
+authorized as super_user **without** credentials. This is by design (the
+admin-password rotation flow relies on it) and is constrained to the box
+owner; see Threats NOT Mitigated below.
+
 ## Data Scoping
 
 ### Memory Read/Write Model
@@ -119,6 +130,13 @@ public key in Flair, and backs up the old key as `<agentId>.key.bak`.
   process could extract them.
 - **Network sniffing:** Flair uses HTTP by default. Use HTTPS in
   production or restrict to localhost.
+- **Same-OS-user ops-API socket access:** the operations-API domain
+  socket (`operations-server`, owner-write-only) is an unauthenticated
+  super_user channel by Harper design — any process running as the box
+  owner can perform admin operations through it (the admin-password
+  rotation flow uses this path). Owner-write permissions keep it
+  unreachable by other OS users, co-tenants, and the network; isolate
+  untrusted workloads to separate OS users.
 
 ## Recommendations
 
