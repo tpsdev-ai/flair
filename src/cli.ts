@@ -2984,12 +2984,14 @@ agent
 // Headless agent-auth to a Harper MCP `/mcp` endpoint: RFC 7523
 // client_credentials + private_key_jwt, using the agent's EXISTING Ed25519
 // identity key (no new key material, no browser, no human). See
-// ~/ops/FLAIR-AGENT-AUTH-CONSUMER-SPEC.md. The plugin side
-// (HarperFast/oauth) provides assertion verification (#165, merged) and
-// Client ID Metadata Document resolution (#167, merged); the token-endpoint
-// grant that consumes an assertion is tracked as issue #162 (not yet a PR —
-// contract not final). `flair mcp token` therefore signs + prints the
-// assertion but does NOT POST it anywhere; see src/mcp-client-assertion.ts.
+// ~/ops/FLAIR-AGENT-AUTH-CONSUMER-SPEC.md. The plugin side (HarperFast/oauth,
+// parent issue #159) provides assertion verification (#160/PR #165, MERGED);
+// #161 (open) formalizes the CIMD shape for private_key_jwt/client_credentials
+// clients; #167 (open DRAFT PR — not merged) implements the CIMD resolution
+// machinery #161 builds on; the token-endpoint grant that consumes an
+// assertion is tracked as issue #162 (open ISSUE, not yet a PR — depends on
+// #161/#167, contract not final). `flair mcp token` therefore signs + prints
+// the assertion but does NOT POST it anywhere; see src/mcp-client-assertion.ts.
 
 const mcp = program.command("mcp").description("MCP client-credentials agent-auth (RFC 7523 private_key_jwt)");
 

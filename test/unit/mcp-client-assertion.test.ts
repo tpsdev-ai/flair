@@ -4,13 +4,21 @@
  * `/mcp` endpoint).
  *
  * The central claim under test: an assertion `signClientAssertion` produces
- * is one HarperFast/oauth PR #165's `verifyClientAssertion` (commit
- * d48c3b2, `src/lib/mcp/clientAssertion.ts`) would accept. #165 is not an
- * installable dependency here (it's an open, unmerged PR in a different
- * repo), so `mirrorVerifyClientAssertion` below re-implements its
- * verification contract faithfully enough to exercise that claim —
- * production verification lives entirely in the plugin; this is a
- * round-trip check, not a reimplementation we ship.
+ * is one HarperFast/oauth PR #165's `verifyClientAssertion` (**merged** @
+ * commit d48c3b2, `src/lib/mcp/clientAssertion.ts`) would accept.
+ * `mirrorVerifyClientAssertion` below re-implements its verification
+ * contract faithfully enough to exercise that claim — production
+ * verification lives entirely in the plugin; this is a round-trip check,
+ * not a reimplementation we ship.
+ *
+ * A second claim, covered further down: the token-request form
+ * (`buildTokenRequestForm`) matches what HarperFast/oauth **issue #162**
+ * ("client_credentials (3/4): token-endpoint grant") specifies for the
+ * request side — `client_assertion_type`/`client_assertion`/`client_id`
+ * present, `client_id` equal to the assertion's `iss`/`sub`, and an
+ * optional RFC 8707 `resource` pass-through. #162 is an open issue (not yet
+ * a PR), so this is shape coverage against its written scope, not a
+ * round-trip against shipped verification code (there is none yet).
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { generateKeyPairSync, createPublicKey, verify as verifySignature, type KeyObject } from "node:crypto";
@@ -281,7 +289,7 @@ describe("resolveAgentKeyPath", () => {
 });
 
 describe("buildTokenRequestForm", () => {
-  test("shape matches RFC 7523 client_credentials + RFC 8707 resource", () => {
+  test("shape matches RFC 7523 client_credentials + RFC 8707 resource (oauth#162's request-side scope)", () => {
     const form = buildTokenRequestForm({
       clientId: CLIENT_ID,
       assertion: "header.payload.signature",
@@ -294,12 +302,23 @@ describe("buildTokenRequestForm", () => {
       client_id: CLIENT_ID,
       resource: "https://flair.example.com/mcp",
     });
+    expect(form.client_assertion_type).toBe("urn:ietf:params:oauth:client-assertion-type:jwt-bearer");
   });
 
-  test("resource is omitted when not provided", () => {
+  test("resource is omitted when not provided (oauth#162: pass-through only, this module never invents a default)", () => {
     const form = buildTokenRequestForm({ clientId: CLIENT_ID, assertion: "a.b.c" });
     expect(form.resource).toBeUndefined();
     expect("resource" in form).toBe(false);
+  });
+
+  test("oauth#162: client_id in the form equals the assertion's iss/sub when built from the same signClientAssertion call", () => {
+    const { privateKey } = makeKeyPair();
+    const { assertion, claims } = signClientAssertion({ clientId: CLIENT_ID, tokenEndpoint: TOKEN_ENDPOINT, privateKey });
+    const form = buildTokenRequestForm({ clientId: CLIENT_ID, assertion, resource: "https://flair.example.com/mcp" });
+
+    expect(form.client_id).toBe(claims.iss);
+    expect(form.client_id).toBe(claims.sub);
+    expect(form.client_assertion).toBe(assertion);
   });
 });
 

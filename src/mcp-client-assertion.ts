@@ -18,15 +18,35 @@
  * See test/unit/mcp-client-assertion.test.ts for a mirror of that
  * verification, run against assertions this module produces.
  *
- * ── pending oauth#162 ───────────────────────────────────────────────────────
+ * ── pending oauth#161/#162 ───────────────────────────────────────────────────
  * The token-endpoint grant that CONSUMES this assertion
  * (`grant_type=client_credentials`) is tracked as HarperFast/oauth issue
- * #162 — an ISSUE, not yet a PR, so its exact request/response contract
- * (error shapes, whether `resource` is required vs defaulted, discovery
- * advertisement) is not final. This module fully builds + signs the
- * assertion (that contract IS final, per #165) but stops short of POSTing
- * it anywhere: `requestMcpAccessToken` always throws, clearly marked
- * `pending #162`. See docs/notes/mcp-agent-auth-consumer.md.
+ * #162 ("client_credentials (3/4): token-endpoint grant — resource binding,
+ * per-grant TTL, discovery") — an ISSUE, not yet a PR, and it depends on
+ * #161 (client resolution/validation) and #167 (CIMD resolution layer,
+ * still an open draft). #162's scope, confirmed against this module:
+ *   - `client_assertion_type` = `urn:ietf:params:oauth:client-assertion-
+ *     type:jwt-bearer`; `client_assertion` = the signed JWT; `client_id`
+ *     required in the form body and MUST equal the assertion's `iss`/`sub`
+ *     — already true here by construction (`buildTokenRequestForm`'s
+ *     `clientId` param is always the same value callers pass as
+ *     `signClientAssertion`'s `clientId`, which becomes both `iss` and
+ *     `sub`).
+ *   - RFC 8707 `resource` parameter: accepted, exact-match, fail-closed,
+ *     defaulting to the configured canonical resource — `buildTokenRequestForm`
+ *     already carries an optional `resource` pass-through (see below), and
+ *     `defaultMcpResource()` supplies the configured canonical default
+ *     (mirrors `resources/mcp-oauth-flag.ts`'s `mcpResource()` — the same
+ *     `<issuer>/mcp` value the AS will exact-match against).
+ *   - Issued token `sub` = `client_id`; access-token TTL default 300s; no
+ *     `refresh_token` — nothing to change here, this module never touches
+ *     the token response (see the stub below).
+ * The exact request/response contract (error shapes, discovery
+ * advertisement) is still not final since #162 isn't merged. This module
+ * fully builds + signs the assertion (that contract IS final, per #165) and
+ * fully shapes the token-request form (per #162's scope above) but stops
+ * short of POSTing it anywhere: `requestMcpAccessToken` always throws,
+ * clearly marked `pending #162`. See docs/notes/mcp-agent-auth-consumer.md.
  */
 
 import { createPrivateKey, createPublicKey, randomUUID, sign, type KeyObject } from "node:crypto";
@@ -200,19 +220,31 @@ export interface TokenRequestForm {
   grant_type: "client_credentials";
   client_assertion_type: typeof CLIENT_ASSERTION_TYPE_JWT_BEARER;
   client_assertion: string;
+  /** MUST equal the assertion's `iss`/`sub` claims — oauth#162 requirement. */
   client_id: string;
-  /** RFC 8707 resource indicator — the canonical /mcp URI being requested. */
+  /**
+   * RFC 8707 resource indicator — the canonical `/mcp` URI being requested.
+   * oauth#162 accepts this, exact-match/fail-closed, defaulting to the
+   * configured canonical resource when the caller omits it (see
+   * `defaultMcpResource()` below, and the CLI wiring in `flair mcp token`,
+   * which passes `opts.resource ?? defaultMcpResource()`).
+   */
   resource?: string;
 }
 
 /**
- * The form-body this assertion would be sent in, per the design docs (RFC
- * 7523 grant + RFC 8707 `resource`). Pure/testable; NOT sent anywhere by
- * this module — see requestMcpAccessToken.
+ * The form-body this assertion would be sent in, per oauth#162's scope (RFC
+ * 7523 `client_credentials` grant + RFC 8707 `resource`). Pure/testable;
+ * NOT sent anywhere by this module — see requestMcpAccessToken. Callers are
+ * responsible for passing the SAME `clientId` used to sign the assertion
+ * (`signClientAssertion`'s `iss`/`sub`) — every call site in this repo
+ * (`flair mcp token` in src/cli.ts) already does this from a single shared
+ * local.
  */
 export function buildTokenRequestForm(params: {
   clientId: string;
   assertion: string;
+  /** Defaults are the CALLER's responsibility (e.g. `defaultMcpResource()`) — this function is a pure pass-through and never invents a value. */
   resource?: string;
 }): TokenRequestForm {
   const form: TokenRequestForm = {

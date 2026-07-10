@@ -1,8 +1,10 @@
 # Headless agent-auth to MCP — the Flair/consumer half
 
 > **Status:** partial. Assertion signing (§1) and CIMD publish (§2) are built
-> and tested. The live token round-trip (§3) is intentionally stubbed —
-> pending HarperFast/oauth issue #162 (not yet a PR; contract not final).
+> and tested, including RFC 8707 `resource` pass-through in the token-request
+> form builder. The live token round-trip (§3) is intentionally stubbed —
+> pending HarperFast/oauth issue #162 (open issue, not yet a PR; itself
+> depends on #161 and #167, both still open).
 
 This is the Flair-side consumer for RFC 7523 `client_credentials` +
 `private_key_jwt` agent-auth: a headless Flair agent authenticating *as
@@ -12,6 +14,20 @@ existing Ed25519 identity key. Design docs:
 `~/ops/FLAIR-CLOUD-AGENT-BETA-ALIGNMENT.md`. Plugin side:
 [HarperFast/oauth#159](https://github.com/HarperFast/oauth/issues/159)
 (parent issue, decomposed into 4 parts).
+
+## Current oauth-side state (as of 2026-07-09)
+
+| # | What | State |
+|---|------|-------|
+| #160 / PR #165 | client-assertion primitives (strict EdDSA verify + `jti` replay store) | **MERGED** |
+| #161 | CIMD-first client resolution & validation for `private_key_jwt` agents — the formal CIMD shape spec | **OPEN** (re-scoped 2026-07-09 to CIMD-first; DCR demoted to optional back-compat) |
+| #162 | token-endpoint grant — wires the assertion + resolved client + resource binding together | **OPEN ISSUE**, not yet a PR; depends on #161 and #167 |
+| #167 | CIMD resolution layer (URL-shape detection, SSRF-guarded fetch, validation, cache, consent interstitial) | **OPEN DRAFT PR** — not merged |
+
+A previous revision of this doc (and of the code comments in
+`resources/mcp-client-metadata-fields.ts`) claimed "#167 merged @ commit
+f0da8a1." That was inaccurate — #167 is an open draft. Corrected everywhere
+2026-07-09.
 
 ## 1. Assertion signing — `flair mcp token` (built + tested)
 
@@ -23,8 +39,8 @@ the plugin's own approach and this repo's existing `flair-client.mjs` /
 `buildEd25519Auth` signing style).
 
 This claim shape is pinned to what HarperFast/oauth PR #165
-(`src/lib/mcp/clientAssertion.ts`, merged @ commit `d48c3b2`) verifies — read
-directly from the PR diff, not guessed. `test/unit/mcp-client-assertion.test.ts`
+(`src/lib/mcp/clientAssertion.ts`, **merged** @ commit `d48c3b2`) verifies —
+read directly from the PR diff, not guessed. `test/unit/mcp-client-assertion.test.ts`
 includes a **mirror** of #165's verification contract (alg pinning, iss/sub/aud
 exact match, exp/iat window, jti presence, Ed25519 signature check) and proves
 assertions this module signs pass it, including negative cases (tampered
@@ -46,6 +62,20 @@ Flair instance's own oauth surface (derived from `FLAIR_MCP_ISSUER` /
 agent can authenticate to a **different** Harper MCP server (identity is
 portable; see the consumer spec's "Wiring / usage").
 
+### RFC 8707 `resource` — already wired
+
+`buildTokenRequestForm` (in `src/mcp-client-assertion.ts`) carries an
+optional `resource` field, pass-through only (it never invents a value).
+The CLI (`flair mcp token` in `src/cli.ts`) supplies the default:
+`opts.resource ?? defaultMcpResource()`, where `defaultMcpResource()`
+derives `${FLAIR_MCP_ISSUER}/mcp` — the same canonical resource identifier
+`resources/mcp-oauth-flag.ts`'s `mcpResource()` uses for this instance's own
+`/mcp` audience binding. This matches oauth#162's requirement: "accept the
+RFC 8707 `resource` parameter, defaulting to the configured canonical
+resource; exact-match, fail-closed." Tested in
+`test/unit/mcp-client-assertion.test.ts` (`buildTokenRequestForm` describe
+block + the `default*()` env-driven helpers block).
+
 ## 2. CIMD publish — `resources/MCPClientMetadata.ts` (built + tested)
 
 Each agent's Client ID Metadata Document is **served**, not just generated:
@@ -63,65 +93,125 @@ single source of truth instead of introducing a second, externally-hosted
 copy that could drift.
 
 Field logic lives in `resources/mcp-client-metadata-fields.ts` (Harper-free,
-mirrors `agentcard-fields.ts`'s pattern), tested against a mirror of
-HarperFast/oauth PR #167's `validateCimdDocument` (`src/lib/mcp/cimd.ts`,
-merged @ commit `f0da8a1`) in
+mirrors `agentcard-fields.ts`'s pattern), shape-pinned to HarperFast/oauth
+**issue #161** — the formal CIMD spec for `private_key_jwt` /
+`client_credentials` agents — and tested against a mirror of #167's
+(still-open-draft) `validateCimdDocument` (`src/lib/mcp/cimd.ts`) in
 `test/unit/mcp-client-metadata-fields.test.ts`.
 
-### Pending #162 — the document we publish is the TARGET shape, not what #167 accepts today
+### Our document matches #161 exactly
 
-Our document sets `grant_types: ["client_credentials"]` and
-`token_endpoint_auth_method: "private_key_jwt"`, and omits `redirect_uris`.
-Read directly against #167's merged code (not guessed):
+- `grant_types: ["client_credentials"]`; `token_endpoint_auth_method:
+  "private_key_jwt"` — exactly what #161 specifies.
+- `jwks` = a JWK Set containing exactly one PUBLIC OKP/Ed25519 key.
+  `buildCimdDocument` rejects: non-OKP/non-Ed25519 keys, a missing/malformed
+  `x`, and — belt-and-suspenders — any JWK carrying a private `d` component
+  (defensive; the TS type has no `d` field, but the function still checks
+  at runtime since the input crosses a boundary from disk/network in some
+  callers). An empty `jwks` set is structurally impossible through this
+  API (it only ever accepts one already-validated key).
+- `redirect_uris` and `response_types` are BOTH omitted — neither field is
+  declared on the `CimdDocument` TypeScript type, so neither can leak back
+  in via the object literal. This is exactly the conditional shape #161
+  calls for: "client_credentials-only clients: no `redirect_uris`, no
+  `response_types`."
+
+### Still rejected by TODAY's #167 draft — expected, not a bug
+
+Read directly against #167's current (unmerged) code:
 
 1. `clientValidator.ts`'s `SUPPORTED_GRANT_TYPES` is `{authorization_code,
    refresh_token}` — `client_credentials` is rejected today.
 2. `cimd.ts` hardcodes CIMD clients to `token_endpoint_auth_method ===
    'none'` — its own comment says `private_key_jwt` activates with #159.
-3. `redirect_uris` is required + non-empty (inherited from the DCR-shaped
-   validator) — meaningless for a pure client_credentials agent that never
-   does a redirect flow. We deliberately did **not** invent a placeholder
-   redirect URI (that could get silently accepted onto an unintended
-   surface if a future validator loosens without also dropping this
-   requirement) — we omit the field and fail closed instead.
+3. `redirect_uris` is required + non-empty in today's validator (inherited
+   from the DCR-shaped checks) — #161 will drop this requirement for
+   client_credentials-only clients once it lands.
 
 Fetching our document against **today's** deployed AS 400s (missing/invalid
 field) rather than silently downgrading to a weaker auth method. That's the
-correct interim failure mode.
+correct interim failure mode, and it resolves itself with no code change on
+our side once #161 (and the machinery it builds on, #167) merge.
 
-### Open questions for #162 (or a small follow-up PR to cimd.ts/clientValidator.ts)
+## Open questions — RESOLVED by #161
 
-- Will `SUPPORTED_GRANT_TYPES` gain `client_credentials`, and will CIMD's
-  `token_endpoint_auth_method` check accept `private_key_jwt`, as part of
-  #162 itself, or a separate follow-up?
-- Will `redirect_uris` become optional for CIMD clients registered with
-  `token_endpoint_auth_method: "private_key_jwt"` + `grant_types:
-  ["client_credentials"]` (no redirect flow is ever possible for them), or
-  is there a different expected answer (e.g. a client is expected to
-  register a redirect URI anyway even if unused)?
-- Client registration shape: does `register-mcp-client` (consumer spec §1)
-  need anything beyond "the CIMD document is served at a stable URL" once
-  the two gaps above close, or does #162 also expect an explicit
-  admin-gated registration step (a `Credential`/allowlist row) separate from
-  CIMD resolution? The consumer spec flags this as an open dependency; #162
-  landing should resolve it.
+The previous revision of this doc posed these as open questions against
+#167's merged code. #161's issue text (re-scoped 2026-07-09) now answers
+them formally:
+
+- **Will `SUPPORTED_GRANT_TYPES` gain `client_credentials`, and will CIMD's
+  `token_endpoint_auth_method` check accept `private_key_jwt`?** — Yes, both
+  are explicitly in #161's scope ("Accept CIMD documents describing
+  headless agents: `grant_types: ["client_credentials"]`,
+  `token_endpoint_auth_method: "private_key_jwt"`").
+- **Will `redirect_uris` become optional for CIMD clients registered with
+  `private_key_jwt` + `client_credentials`?** — Yes. #161 explicitly blesses
+  the conditional shape: "client_credentials-only clients: no
+  `redirect_uris`, no `response_types`." This is now a documented,
+  upstream-endorsed deviation from the CIMD draft's general required-fields
+  list — not a guess we're hoping gets accepted.
+- **Does client registration need an explicit admin-gated step beyond
+  serving the CIMD document at a stable URL?** — No separate
+  `Credential`/allowlist row is required. #161 replaces the DCR-shaped
+  `initialAccessToken` gate with a **server-side host allowlist**:
+  `clientIdMetadataDocuments.allowedHosts` must be configured on the AS, and
+  our CIMD document's `client_id` URL host must be on it. Merely hosting a
+  reachable document is explicitly NOT sufficient to mint tokens — the gate
+  is AS-side config, not anything this repo publishes or asserts about
+  itself. `flair agent register-mcp-client` (consumer spec §1) is therefore
+  **not needed** for the CIMD path; it may still be worth building for the
+  DCR back-compat path if that's kept, but that's optional per #161's scope
+  ("DCR back-compat... may drop from v1").
+
+### Deployment coordination note
+
+Once #161/#162 land and this flows into a real deployment: whoever owns the
+AS-side `@harperfast/oauth` config for a given Harper instance MUST add this
+Flair instance's `MCPClientMetadata` host to
+`clientIdMetadataDocuments.allowedHosts`. That host is derived from
+`FLAIR_MCP_ISSUER` (or `FLAIR_PUBLIC_URL` as fallback) — the same env var
+`mcpIssuer()` in `resources/mcp-oauth-flag.ts` and `defaultMcpClientId()` in
+`src/mcp-client-assertion.ts` both read. If the allowlist isn't updated,
+`/mcp` client_credentials auth for this agent fails closed (by design —
+#161's gate is fail-closed, not fail-open) even once all the code above is
+correct and deployed. This is an operational step, not a code change; flag
+it explicitly when coordinating a rollout.
 
 ## 3. Token round-trip — stubbed, pending #162
 
 `requestMcpAccessToken` in `src/mcp-client-assertion.ts` always throws,
 clearly marked `pending #162`. `buildTokenRequestForm` (pure, tested) shows
-the request shape the design docs call for
-(`grant_type=client_credentials`, `client_assertion_type=...jwt-bearer`,
-`client_assertion`, `client_id`, RFC 8707 `resource`) — that's the contract
-to wire up once #162 merges and its exact request/response shape (error
-bodies, whether `resource` is required vs defaulted, discovery
-advertisement) is final. Wiring a live POST against a moving-target issue
-now would mean re-doing it; the stub keeps the seam explicit instead.
+the request shape the design docs — and now #162's own scope text — call
+for: `grant_type=client_credentials`,
+`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`,
+`client_assertion`, `client_id` (must equal the assertion's `iss`/`sub`, and
+already does by construction here), and RFC 8707 `resource` (already
+wired, see §1). That's the full contract to wire up once #162 merges and
+its exact request/response shape (error bodies, discovery advertisement) is
+final. Wiring a live POST against a moving-target issue now would mean
+re-doing it; the stub keeps the seam explicit instead.
+
+### What genuinely still needs #162 to land
+
+- The actual HTTP round-trip (`requestMcpAccessToken`'s real
+  implementation) — needs #162's real endpoint, error-response shapes, and
+  discovery metadata to exist before there's anything to call.
+- End-to-end / negative-path tests against a real spawned Harper running
+  the merged plugin (replay rejection over real storage, wrong-resource
+  rejection, TTL knob, audit hook firing) — needs #161, #162, and #167 all
+  merged and wired together; a unit-level mirror can't substitute for this.
+- Confirming the AS's discovery document actually advertises
+  `grant_types_supported += client_credentials`,
+  `token_endpoint_auth_methods_supported += private_key_jwt`, and
+  `token_endpoint_auth_signing_alg_values_supported: ["EdDSA"]` as #162
+  specifies — nothing to check against until it's deployed.
+- `flair agent register-mcp-client` (consumer spec §1) — per the resolved
+  open question above, this is likely NOT needed for the CIMD path at all;
+  revisit once #161 merges and the `allowedHosts` gate is live in practice.
 
 ## What's NOT in this slice
 
-- `flair agent register-mcp-client` (consumer spec §1's admin-gated
-  Credential-writing command) — deferred until the open questions above
-  resolve (registration shape depends on #162).
+- `flair agent register-mcp-client` — see above; deferred, likely
+  unnecessary for the CIMD-first path once #161 lands.
 - The end-to-end loop + negative-path tests against a real spawned Harper
   (consumer spec's test plan) — needs the live grant to exist first.
