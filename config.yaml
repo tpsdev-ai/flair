@@ -17,6 +17,13 @@ jsResource:
   modelName: nomic-embed-text
 
 authentication:
-  # Default secure. Set to false for local development only.
-  authorizeLocal: true
+  # Default secure (flair#654): a credential-less loopback request to the
+  # Harper ops API (:9925) is no longer auto-authorized as super_user. Local
+  # admin operations now require a real credential — ~/.flair/admin-pass
+  # (written by `flair init`), --admin-pass, or FLAIR_ADMIN_PASS. flair's own
+  # application-layer resources were already immune to this forgery (#655's
+  # credential-evidence gate); this closes the remaining gap below it, in the
+  # raw Harper ops API itself. Set true only for local development, at your
+  # own risk.
+  authorizeLocal: false
   enableSessions: true
