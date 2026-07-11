@@ -1,9 +1,19 @@
 import { Resource, databases } from "@harperfast/harper";
-import { allowVerified } from "./agent-auth.js";
+import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { wrapUntrusted } from "./content-safety.js";
 import { isTeammate, formatTeamLine } from "./memory-bootstrap-lib.js";
 import { resolveReadScope } from "./memory-read-scope.js";
+import { isValidEntity } from "./entity-vocab.js";
+import { withDetachedTxn } from "./table-helpers.js";
+import { getPresenceRoster } from "./presence-internal.js";
+import {
+  buildCollisionEntries,
+  buildEntityMatchCondition,
+  freshPresenceByAgent,
+  type EntityMatchInput,
+  type SemanticMatchInput,
+} from "./collision-lib.js";
 
 /**
  * POST /MemoryBootstrap
@@ -28,6 +38,18 @@ import { resolveReadScope } from "./memory-read-scope.js";
  *      agent's non-private memories (open-within-org read, never anyone's
  *      private ones), so this section nudges toward memory_search for
  *      anything beyond that window)
+ *   8. Others in the room (flair#681, the attention-plane flagship —
+ *      collision surfacing): joins two independently-scoped surfaces —
+ *      WorkspaceState/OrgEvent entity overlap (exact vocabulary-string
+ *      match against the caller's OWN declared `entities`, read via the
+ *      SAME internal server-side path #678's AttentionQuery established —
+ *      never broadening WorkspaceState's per-agent read model) and the
+ *      semantic teammate-Memory matches #550 (above, 4b) ALREADY computed
+ *      (no new embedding code — Memory is the semantic surface, WorkspaceState/
+ *      OrgEvent are the entity surface, per the K&S verdict). Gated on
+ *      freshness (Presence, via the SAME internal roster path, never the raw
+ *      table) and #550's existing relevance floor. See resources/
+ *      collision-lib.ts for the pure join/rank/format logic.
  *
  * Prediction: when context signals (channel, surface, subjects) are provided,
  * the bootstrap loads more aggressively — Flair is fast enough that the
@@ -35,11 +57,21 @@ import { resolveReadScope } from "./memory-read-scope.js";
  *
  * Request:
  *   { agentId, currentTask?, maxTokens?, includeSoul?, since?,
- *     channel?, surface?, subjects? }
+ *     channel?, surface?, subjects?, entities? }
+ *   `entities` (flair#681): the caller's own declared attention-plane
+ *   vocabulary strings (see resources/entity-vocab.ts) for collision
+ *   surfacing's entity-overlap join. Invalid entries are silently dropped
+ *   (never a 400 — this is an optional awareness hint, not a write path).
+ *   When omitted, falls back to the caller's own most-recent WorkspaceState
+ *   row's `entities`.
  *
  * Response:
  *   { context, sections, tokenEstimate, memoriesIncluded, memoriesAvailable }
  */
+
+// Collision surfacing (flair#681) tunables.
+const COLLISION_WINDOW_DAYS = 7;
+const MAX_COLLISION_ENTRIES = 10;
 
 // Rough token estimate: ~4 chars per token for English text
 function estimateTokens(text: string): number {
@@ -130,6 +162,7 @@ export class BootstrapMemories extends Resource {
       relationships: [],
       relevant: [],
       teammate: [],
+      collision: [],
       events: [],
     };
     let tokenBudget = maxTokens;
@@ -426,6 +459,15 @@ export class BootstrapMemories extends Resource {
       }
     }
 
+    // Collision surfacing's semantic-match candidates (flair#681) — the
+    // BEST (highest-scoring) cross-agent memory per teammate from #550's
+    // `scored` list below, captured here (before that list's tokens get
+    // spent on the relevant/teammate sections) so the collision block can
+    // reuse the IDENTICAL scored+floor-gated set without recomputing or
+    // re-embedding anything. Stays empty when there's no currentTask (no
+    // `scored` list is ever built) or no cross-agent hits.
+    const semanticTeammateMatches: SemanticMatchInput[] = [];
+
     // --- 4. Task-relevant memories (semantic search) ---
     if (currentTask && tokenBudget > 200) {
       let queryEmbedding: number[] | null = null;
@@ -451,6 +493,18 @@ export class BootstrapMemories extends Resource {
           .filter((s) => s.score > 0.3)
           .sort((a, b) => b.score - a.score);
 
+        // flair#681: the collision block's semantic surface — one candidate
+        // per teammate (the highest-scoring hit; `scored` is already sorted
+        // desc, so the first occurrence of a given `_source` IS the best
+        // one). `m._source` is only ever set for a cross-agent record (see
+        // the allMemories loop above) — an own memory never contributes here.
+        const seenCollisionAgents = new Set<string>();
+        for (const { memory: m, score } of scored) {
+          if (!m._source || seenCollisionAgents.has(m._source)) continue;
+          seenCollisionAgents.add(m._source);
+          semanticTeammateMatches.push({ agentId: m._source, score, content: m.summary || m.content || "" });
+        }
+
         // #550: split the scored, task-relevant set by origin. Own findings
         // go to `relevant` as before; any other in-org agent's non-private
         // record — already read-scoped by resolveReadScope(), no grant
@@ -473,6 +527,132 @@ export class BootstrapMemories extends Resource {
           memoriesIncluded++;
         }
       }
+    }
+
+    // --- 4c. Collision surfacing (flair#681 — "others in the room") ---
+    // Joins two independently-scoped surfaces into a single ranked list:
+    //   - Entity overlap (WorkspaceState + OrgEvent): exact vocabulary-string
+    //     match, high-precision, no separate relevance score needed.
+    //   - Semantic match (Memory, via #550/4 above): `semanticTeammateMatches`,
+    //     already floor-gated (score > 0.3) — reused as-is, no new scoring.
+    // Gated on freshness (Presence, via the internal roster path) — a
+    // teammate absent from the roster, or whose presenceStatus is "offline",
+    // never surfaces regardless of how strong the entity/semantic match is.
+    // Best-effort: any failure here (WorkspaceState/OrgEvent/Presence briefly
+    // unavailable) must never break bootstrap's core memory context.
+    try {
+      // The caller's own declared entities: an explicit `entities` field on
+      // the request (validated against the SAME closed vocabulary every
+      // write path gates writes on — resources/entity-vocab.ts; invalid
+      // entries are silently dropped, not a 400, since this is an optional
+      // awareness hint), falling back to the caller's own most-recent
+      // WorkspaceState row's `entities` when not declared. Reading the
+      // caller's OWN WorkspaceState rows is not a scoping concern (an agent
+      // always has read access to its own data) — this raw read exists
+      // purely because MemoryBootstrap.ts already reads every other table
+      // (Soul/Agent/Memory/Relationship/OrgEvent) directly, the same idiom.
+      let callerEntities: string[] = Array.isArray(data?.entities)
+        ? data.entities.filter((e: unknown) => isValidEntity(e))
+        : [];
+
+      if (callerEntities.length === 0) {
+        const ownRows = withDetachedTxn(ctx, () => (databases as any).flair.WorkspaceState.search({
+          conditions: [{ attribute: "agentId", comparator: "equals", value: agentId }],
+          select: ["entities", "timestamp"],
+        }));
+        let latestEntities: string[] = [];
+        let latestTs = "";
+        for await (const row of ownRows as AsyncIterable<any>) {
+          if (!Array.isArray(row.entities) || row.entities.length === 0) continue;
+          if ((row.timestamp || "") > latestTs) {
+            latestTs = row.timestamp || "";
+            latestEntities = row.entities;
+          }
+        }
+        callerEntities = latestEntities;
+      }
+
+      const entityMatches: EntityMatchInput[] = [];
+
+      if (callerEntities.length > 0) {
+        const sinceIso = new Date(Date.now() - COLLISION_WINDOW_DAYS * 24 * 3600_000).toISOString();
+        // buildEntityMatchCondition, NOT a hand-rolled OR wrapper: Harper's
+        // query engine throws ("An 'or' operator requires at least two
+        // conditions") for a single-entity OR condition — see collision-lib.ts's
+        // doc. A single declared entity is the common case, so this matters.
+        const entityCondition = buildEntityMatchCondition(callerEntities);
+        const byAgent = new Map<string, EntityMatchInput>();
+
+        // WorkspaceState — the INTERNAL server-side path (Sherlock Option 1,
+        // binding per the K&S verdict): the RAW generated table object,
+        // never the exported `WorkspaceState` resource class — that class's
+        // search() re-applies strict per-agent scoping keyed off THIS
+        // caller's own identity, which would just filter every teammate's
+        // row back out. This does NOT broaden WorkspaceState's general
+        // (still per-agent, still 403) read model — see resources/
+        // AttentionQuery.ts's module doc for the full rationale (the exact
+        // pattern this reuses).
+        const wsRows = withDetachedTxn(ctx, () => (databases as any).flair.WorkspaceState.search({
+          conditions: [entityCondition, { attribute: "timestamp", comparator: "greater_than_equal", value: sinceIso }],
+          select: ["agentId", "entities", "summary", "taskId", "timestamp"],
+        }));
+        for await (const row of wsRows as AsyncIterable<any>) {
+          if (row.agentId === agentId) continue; // exclude self
+          const overlap = (Array.isArray(row.entities) ? row.entities : []).filter((e: string) => callerEntities.includes(e));
+          if (overlap.length === 0) continue;
+          const candidate: EntityMatchInput = {
+            agentId: row.agentId, entities: overlap, summary: row.summary ?? null,
+            taskId: row.taskId ?? null, timestamp: row.timestamp, source: "workspace",
+          };
+          const existing = byAgent.get(row.agentId);
+          if (!existing || existing.timestamp < candidate.timestamp) byAgent.set(row.agentId, candidate);
+        }
+
+        // OrgEvent — org-open read model, no per-agent scoping to respect
+        // (mirrors resources/AttentionQuery.ts's queryOrgEvent).
+        const evRows = withDetachedTxn(ctx, () => (databases as any).flair.OrgEvent.search({
+          conditions: [entityCondition, { attribute: "createdAt", comparator: "greater_than_equal", value: sinceIso }],
+          select: ["authorId", "entities", "summary", "createdAt", "expiresAt"],
+        }));
+        const now = Date.now();
+        for await (const row of evRows as AsyncIterable<any>) {
+          if (row.authorId === agentId) continue; // exclude self
+          if (row.expiresAt && new Date(row.expiresAt).getTime() < now) continue;
+          const overlap = (Array.isArray(row.entities) ? row.entities : []).filter((e: string) => callerEntities.includes(e));
+          if (overlap.length === 0) continue;
+          const candidate: EntityMatchInput = {
+            agentId: row.authorId, entities: overlap, summary: row.summary ?? null,
+            taskId: null, timestamp: row.createdAt, source: "event",
+          };
+          const existing = byAgent.get(row.authorId);
+          if (!existing || existing.timestamp < candidate.timestamp) byAgent.set(row.authorId, candidate);
+        }
+
+        entityMatches.push(...byAgent.values());
+      }
+
+      // Freshness gate: the SAME internal Presence roster path #678
+      // established (never the raw table) — see resources/
+      // presence-internal.ts. `resolveAgentAuth` is called independently
+      // here (not reusing the manual agentId-scoping derivation above,
+      // which is deliberately narrow per its own bug-fix comment) purely to
+      // build the delegation verdict this internal read needs.
+      const collisionAuth = await resolveAgentAuth(ctx);
+      const roster = await getPresenceRoster(collisionAuth);
+      const freshByAgent = freshPresenceByAgent(roster);
+
+      const collisionEntries = buildCollisionEntries(entityMatches, semanticTeammateMatches, freshByAgent, agentId);
+      for (const entry of collisionEntries.slice(0, MAX_COLLISION_ENTRIES)) {
+        const line = `- ${entry.line}`;
+        const cost = estimateTokens(line);
+        if (cost > tokenBudget) continue;
+        sections.collision.push(line);
+        tokenBudget -= cost;
+      }
+    } catch {
+      // Collision surfacing is best-effort awareness, never a hard
+      // dependency — WorkspaceState/OrgEvent/Presence being briefly
+      // unavailable must not break bootstrap's core memory context.
     }
 
     // --- 5. Recent OrgEvents for this agent ---
@@ -537,6 +717,13 @@ export class BootstrapMemories extends Resource {
     if (sections.teammate.length > 0) {
       parts.push("## Teammate findings relevant to your task\n" + sections.teammate.join("\n"));
     }
+    // flair#681: the attention-plane flagship — "the office moment". Empty
+    // section renders nothing (no header), same convention as every other
+    // optional section here: no entity/semantic overlap with a fresh
+    // teammate looks exactly like bootstrap did before this feature.
+    if (sections.collision.length > 0) {
+      parts.push("## Others in the room\n" + sections.collision.join("\n"));
+    }
     if (sections.events.length > 0) {
       parts.push("## Recent Org Events\n" + sections.events.join("\n"));
     }
@@ -557,6 +744,7 @@ export class BootstrapMemories extends Resource {
         relationships: sections.relationships.length,
         relevant: sections.relevant.length,
         teammate: sections.teammate.length,
+        collision: sections.collision.length,
         events: sections.events.length,
       },
       tokenEstimate: soulTokens + memoryTokens,
