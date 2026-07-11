@@ -3,9 +3,20 @@
  * (coordination write surface / Kris #510).
  *
  * Uses a mock HTTP server. No real Harper instance required. Mirrors
- * presence-set.test.ts. The security-critical assertion: the request carries an
- * Ed25519 Authorization header and does NOT put authorId in the body — the event
- * is attributed server-side from the signature (no forging another agent's events).
+ * presence-set.test.ts. The security-critical assertion: the request carries
+ * an Ed25519 Authorization header, and DOES include authorId in the body —
+ * but that's a self-declaration the server (OrgEvent.put()) verifies 1:1
+ * against the signature and 403s on mismatch, not a trusted claim (no forging
+ * another agent's events).
+ *
+ * flair#679: `orgevent` writes via PUT /OrgEvent/{id} (id in the URL), NOT a
+ * bare POST — a real spawned Harper 405s a collection POST to a table-backed
+ * resource (see resources/Memory.ts's documented restriction, and
+ * test/integration/attention-query-e2e.test.ts, which measured this exact
+ * 405 against real Harper). This mock-server suite only proves the CLI's OWN
+ * request shape; it cannot catch a 405 (the mock accepts anything) — that's
+ * why this bug shipped past unit tests. The real-Harper coverage is
+ * test/integration/workspace-orgevent-cli-e2e.test.ts.
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "bun:test";
@@ -119,21 +130,28 @@ describe("flair orgevent", () => {
     expect(stderr).toContain("agent ID required");
   });
 
-  it("POSTs to /OrgEvent with kind/summary/targets and NO authorId in body (no forging)", async () => {
+  it("PUTs to /OrgEvent/{id} with kind/summary/targets/authorId/id/createdAt (#679)", async () => {
     const agentId = "test-agent-oe";
     writeAgentKey(keysDir, agentId);
 
     const { server, url } = await startMockServer((req, body, res) => {
-      expect(req.method).toBe("POST");
-      expect(req.url).toBe("/OrgEvent");
+      expect(req.method).toBe("PUT");
       const parsed = JSON.parse(body);
+      // id is CLI-generated (`${agentId}-${randomUUID()}`) and must appear in
+      // both the URL and the body.
+      expect(req.url).toBe(`/OrgEvent/${parsed.id}`);
+      expect(parsed.id).toMatch(new RegExp(`^${agentId}-[0-9a-f-]+$`));
       expect(parsed.kind).toBe("coord.claim");
       expect(parsed.summary).toBe("claiming resources/Rivet.ts");
       expect(parsed.targetIds).toEqual(["anvil", "ember"]);
-      // SECURITY: the body must NOT carry authorId — attribution is from the
-      // Ed25519 signature, so an agent cannot forge another agent's events.
-      expect(parsed.authorId).toBeUndefined();
-      jsonRes(res, 200, { id: `${agentId}-2026-06-24T00:00:00.000Z`, authorId: agentId });
+      // authorId + createdAt are now required in the body: OrgEvent.put()
+      // (unlike post()) does not auto-attribute or default these — it 403s a
+      // mismatched authorId rather than overwriting it. Self-declaration, not
+      // forging: the server rejects (never accepts) a value that doesn't
+      // match the Ed25519 signature's agentId.
+      expect(parsed.authorId).toBe(agentId);
+      expect(typeof parsed.createdAt).toBe("string");
+      jsonRes(res, 200, { id: parsed.id, authorId: agentId });
     });
 
     try {
@@ -187,7 +205,9 @@ describe("flair orgevent", () => {
         { FLAIR_AGENT_ID: agentId, FLAIR_KEY_DIR: keysDir, FLAIR_URL: url },
       );
       expect(code).toBe(1);
-      expect(stderr).toContain("POST /OrgEvent failed");
+      // id is randomly generated per-invocation — assert the stable parts.
+      expect(stderr).toContain(`PUT /OrgEvent/${agentId}-`);
+      expect(stderr).toContain("failed (500)");
     } finally {
       await stopServer(server);
     }
