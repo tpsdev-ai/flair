@@ -4,7 +4,7 @@
  * These are the auth-critical assertions the integration harness can't make at
  * the unit level:
  *
- *   - tools/list returns EXACTLY the 11 curated tools (no raw CRUD, no extras).
+ *   - tools/list returns EXACTLY the 12 curated tools (no raw CRUD, no extras).
  *   - sub → Agent resolution: an existing Credential(kind:"idp", idpSubject=sub)
  *     maps to its principalId; an unknown sub with JIT OFF is DENIED (not run as
  *     anonymous/admin); an unknown sub with JIT ON provisions a NON-admin agent.
@@ -107,6 +107,7 @@ const restoreHandlers = __setHandlers({
   WorkspaceState: makeHandlerMock("WorkspaceState.post", "post"),
   OrgEvent: makeHandlerMock("OrgEvent.post", "post"),
   AttentionQuery: makeHandlerMock("AttentionQuery.post", "post"),
+  RecordUsage: makeHandlerMock("RecordUsage.post", "post"),
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -136,8 +137,8 @@ afterAll(() => {
 });
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
-describe("tools/list — exactly the 11 curated tools", () => {
-  it("returns exactly 11, matching the flair-mcp surface plus attention (flair#677), no raw CRUD mutators", async () => {
+describe("tools/list — exactly the 12 curated tools", () => {
+  it("returns exactly 12, matching the flair-mcp surface plus attention (flair#677) + record_usage (flair#683), no raw CRUD mutators", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);
     const names = body.result.tools.map((t: any) => t.name).sort();
@@ -151,6 +152,7 @@ describe("tools/list — exactly the 11 curated tools", () => {
       "memory_search",
       "memory_store",
       "memory_update",
+      "record_usage",
       "soul_get",
       "soul_set",
     ]);
@@ -325,6 +327,25 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
     expect(lastCall?.resource).toBe("AttentionQuery.post");
     expect(lastCall?.args).toEqual({ entity: "repo:tpsdev-ai/flair", days: 14 });
     expect(lastCall?.ctx.request.tpsAgent).toBe("agt_bob");
+  });
+
+  it("record_usage (flair#683) delegates to RecordUsage.post with the resolved agent's identity, forwarding memoryIds + attribution — never a forged agentId", async () => {
+    await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "record_usage", arguments: { memoryIds: ["mem-a", "mem-b"], attribution: "grounded the CP-4 spec" } } },
+      { sub: "sub-bob" },
+    ));
+    expect(lastCall?.resource).toBe("RecordUsage.post");
+    expect(lastCall?.args).toEqual({ memoryIds: ["mem-a", "mem-b"], attribution: "grounded the CP-4 spec" });
+    expect(lastCall?.ctx.request.tpsAgent).toBe("agt_bob");
+  });
+
+  it("record_usage accepts the singular memoryId convenience alias", async () => {
+    await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "record_usage", arguments: { memoryId: "mem-solo" } } },
+      { sub: "sub-bob" },
+    ));
+    expect(lastCall?.resource).toBe("RecordUsage.post");
+    expect(lastCall?.args).toEqual({ memoryIds: ["mem-solo"], attribution: undefined });
   });
 });
 
