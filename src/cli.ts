@@ -11133,10 +11133,21 @@ presence
 // ─── flair workspace ─────────────────────────────────────────────────────────
 //
 // Coordination write surface (Kris #510). `workspace set` writes the
-// agent's OWN WorkspaceState via a signed POST /WorkspaceState. Identity comes
-// from the Ed25519 signature — the body carries NO agentId, so an agent can only
-// write as itself (the WorkspaceState.post() handler overwrites agentId from the
-// signature regardless of body content). Mirrors `presence set`'s signed-POST shape.
+// agent's OWN WorkspaceState via a signed PUT /WorkspaceState/{id}. Identity
+// is asserted by including agentId in the body — the server never trusts it
+// blindly, it 403s any mismatch against the Ed25519 signature's agentId
+// (WorkspaceState.put(), resources/WorkspaceState.ts), so this is a
+// self-declaration the server verifies 1:1, not attribution-from-body.
+//
+// (flair#679, measured against a real spawned Harper): table-backed resources
+// only accept writes via PUT /<Table>/<id> — a bare POST /WorkspaceState 405s
+// ("does not have a post method implemented to handle HTTP method POST"),
+// same restriction documented in resources/Memory.ts and already fixed for
+// `soul set` (#498). WorkspaceState.ts DOES define a post() method, but
+// Harper's REST layer never routes a real HTTP POST to it — post() is only
+// reachable via in-process resource instantiation, never the wire. put(),
+// unlike post(), does NOT default createdAt/timestamp/agentId — the CLI
+// supplies them all explicitly below.
 
 const MAX_WORKSPACE_FIELD_LENGTH = 2000;
 
@@ -11144,7 +11155,7 @@ const workspace = program.command("workspace").description("Manage agent workspa
 
 workspace
   .command("set")
-  .description("Set your agent's current workspace state (POST /WorkspaceState)")
+  .description("Set your agent's current workspace state (PUT /WorkspaceState/{id})")
   .requiredOption("--ref <ref>", "Workspace ref (branch, worktree, or task ref)")
   .option("--label <text>", "Human-readable label for this workspace")
   .option("--provider <name>", "Provider/runtime (e.g. claude-code, openclaw)", "cli")
@@ -11176,31 +11187,39 @@ workspace
     }
 
     const baseUrl = resolveBaseUrl(opts).replace(/\/$/, "");
-    const auth = buildEd25519Auth(agentId, "POST", "/WorkspaceState", keyPath);
+    // Deterministic id (agentId:ref) — re-running `workspace set` for the same
+    // ref overwrites the same record, which is intentional (one row per
+    // agent+ref, not an append log).
+    const id = `${agentId}:${opts.ref}`;
+    const auth = buildEd25519Auth(agentId, "PUT", `/WorkspaceState/${id}`, keyPath);
 
-    // NOTE: agentId is intentionally NOT included in the body — the handler
-    // attributes the record from the Ed25519 signature (no forging).
+    // agentId IS included in the body now — WorkspaceState.put() (unlike
+    // post()) does not auto-attribute from the signature, it 403s any
+    // mismatch. This is a self-declaration the server verifies against the
+    // signature, not a forgeable claim.
     const now = new Date().toISOString();
     const body: Record<string, unknown> = {
-      id: `${agentId}:${opts.ref}`,
+      id,
+      agentId,
       ref: opts.ref,
       provider: opts.provider ?? "cli",
       timestamp: now,
+      createdAt: now,
     };
     if (opts.label) body.label = opts.label;
     if (opts.task) body.taskId = opts.task;
     if (opts.phase) body.phase = opts.phase;
     if (opts.summary) body.summary = opts.summary;
 
-    const res = await fetch(`${baseUrl}/WorkspaceState`, {
-      method: "POST",
+    const res = await fetch(`${baseUrl}/WorkspaceState/${id}`, {
+      method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify(body),
     });
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.error(`Error: POST /WorkspaceState failed (${res.status}): ${text}`);
+      console.error(`Error: PUT /WorkspaceState/${id} failed (${res.status}): ${text}`);
       process.exit(1);
     }
 
@@ -11210,17 +11229,30 @@ workspace
 // ─── flair orgevent ──────────────────────────────────────────────────────────
 //
 // Coordination write surface (Kris #510). `orgevent` publishes an
-// OrgEvent ATTRIBUTED to the authenticated agent via a signed POST /OrgEvent.
-// The event's authorId comes from the Ed25519 signature — the body carries NO
-// authorId, so an agent CANNOT forge another agent's events (the OrgEvent.post()
-// handler overwrites authorId from the signature). Mirrors `presence set`'s shape.
+// OrgEvent ATTRIBUTED to the authenticated agent via a signed PUT
+// /OrgEvent/{id}. authorId is asserted in the body but self-verified server
+// side: OrgEvent.put() (resources/OrgEvent.ts) 403s any authorId that doesn't
+// match the Ed25519 signature's agentId, so an agent still cannot forge
+// another agent's events — the difference from post() is that put() checks-
+// and-rejects a mismatch rather than silently overwriting it.
+//
+// (flair#679, measured against a real spawned Harper): table-backed resources
+// only accept writes via PUT /<Table>/<id> — a bare POST /OrgEvent 405s
+// ("does not have a post method implemented to handle HTTP method POST"),
+// same restriction documented in resources/Memory.ts and already fixed for
+// `soul set` (#498). OrgEvent.ts DOES define a post() method that
+// auto-generates id/createdAt, but Harper's REST layer never routes a real
+// HTTP POST to it — post() is only reachable via in-process resource
+// instantiation, never the wire. put() does NOT default id/createdAt, so the
+// CLI generates and supplies them itself (id convention mirrors flair-client's
+// Memory.write(): `${agentId}-${randomUUID()}`).
 
 const MAX_ORGEVENT_SUMMARY_LENGTH = 500;
 const MAX_ORGEVENT_DETAIL_LENGTH = 8000;
 
 program
   .command("orgevent")
-  .description("Publish an org-wide coordination event attributed to your agent (POST /OrgEvent)")
+  .description("Publish an org-wide coordination event attributed to your agent (PUT /OrgEvent/{id})")
   .requiredOption("--kind <kind>", "Event kind (e.g. coord.claim, coord.release, status)")
   .requiredOption("--summary <text>", "Short summary of the event")
   .option("--detail <text>", "Longer detail payload")
@@ -11254,34 +11286,44 @@ program
     // orgevent reuses --target for recipients, so the remote-URL override is
     // --target-url here (env FLAIR_TARGET still honored via resolveBaseUrl).
     const baseUrl = resolveBaseUrl({ target: opts.targetUrl, port: opts.port }).replace(/\/$/, "");
-    const auth = buildEd25519Auth(agentId, "POST", "/OrgEvent", keyPath);
+    // id generation mirrors flair-client's Memory.write() convention
+    // (`${agentId}-${randomUUID()}`) — unique per publish, unlike OrgEvent's
+    // own (HTTP-unreachable) post() default of `${authorId}-${isoTimestamp}`,
+    // which can collide within the same millisecond.
+    const id = `${agentId}-${randomUUID()}`;
+    const auth = buildEd25519Auth(agentId, "PUT", `/OrgEvent/${id}`, keyPath);
 
-    // NOTE: authorId is intentionally NOT included in the body — the handler
-    // attributes the event from the Ed25519 signature (no forging).
+    // authorId IS included in the body now — OrgEvent.put() (unlike post())
+    // does not auto-attribute from the signature, it 403s any mismatch. This
+    // is a self-declaration the server verifies against the signature, not a
+    // forgeable claim.
     const body: Record<string, unknown> = {
+      id,
+      authorId: agentId,
       kind: opts.kind,
       summary: opts.summary,
+      createdAt: new Date().toISOString(),
     };
     if (opts.detail) body.detail = opts.detail;
     if (opts.scope) body.scope = opts.scope;
     if (Array.isArray(opts.target) && opts.target.length > 0) body.targetIds = opts.target;
 
-    const res = await fetch(`${baseUrl}/OrgEvent`, {
-      method: "POST",
+    const res = await fetch(`${baseUrl}/OrgEvent/${id}`, {
+      method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify(body),
     });
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.error(`Error: POST /OrgEvent failed (${res.status}): ${text}`);
+      console.error(`Error: PUT /OrgEvent/${id} failed (${res.status}): ${text}`);
       process.exit(1);
     }
 
     const data = await res.json().catch(() => null);
     const targets = Array.isArray(opts.target) && opts.target.length > 0 ? ` → ${opts.target.join(", ")}` : "";
     console.log(`✓ OrgEvent published as '${agentId}': kind=${opts.kind}${targets}`);
-    if (data?.id) console.log(`  id: ${data.id}`);
+    console.log(`  id: ${data?.id ?? id}`);
   });
 
 // ─── flair attention ─────────────────────────────────────────────────────────
