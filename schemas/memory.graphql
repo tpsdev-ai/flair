@@ -13,6 +13,18 @@ type Memory @table(database: "flair") {
   expiresAt: String @indexed
   retrievalCount: Int
   lastRetrieved: String
+  usageCount: Int              # flair#683: verified-USE signal, distinct from retrievalCount (a
+                               # search HIT). Additive/nullable — absent reads as 0, existing rows
+                               # unaffected. NEVER auto-incremented on search/retrieval; the ONLY
+                               # writer is the dedicated usage-feedback endpoint (resources/
+                               # MemoryUsage.ts), which does a targeted patchRecord increment on
+                               # this field alone (never through Memory.put() — see that
+                               # resource's module doc for why: usage-feedback writes to ANOTHER
+                               # agent's memory, and Memory's ownership check would 403 every
+                               # legit call). Drives usageBoost in resources/scoring.ts, which
+                               # replaces retrievalBoost in compositeScore (retrievalCount was the
+                               # contaminated "retrieval counted as usage" signal root-caused in
+                               # flair#623).
   promotionStatus: String   # null | "pending" | "approved" | "rejected"
   promotedAt: String
   promotedBy: String        # authenticated agentId who approved
@@ -100,6 +112,28 @@ type MemoryGrant @table(database: "flair") @export {
   scope: String!
   filter: String
   createdAt: String
+}
+
+# MemoryUsage — the dedup ledger for the usage-feedback signal (flair#683).
+# One row per (agentId, memoryId) contribution: `id` is the deterministic
+# composite key `${agentId}:${memoryId}`, so "has this agent already
+# contributed to this memory's usageCount" is a single point-lookup, not a
+# query. This is what makes the anti-gaming dedup rule ("each (agent, memory)
+# pair contributes at most 1 to usageCount" — Sherlock) enforceable: the
+# dedicated endpoint (resources/MemoryUsage.ts) only bumps Memory.usageCount
+# when a NEW row is created here; a repeat call from the same agent for the
+# same memory is a no-op against a row that already exists.
+#
+# `attribution` is OPAQUE — never parsed, never fed to an LLM, never rendered
+# — a free-text "what used this" hint the caller supplies, sanitized
+# (control-character-stripped, length-capped) and stored as-is for
+# analytics/audit only. Never trust it as anything more than a label.
+type MemoryUsage @table(database: "flair") {
+  id: ID @primaryKey           # `${agentId}:${memoryId}` — the dedup key itself
+  agentId: String! @indexed    # the contributing (verified) agent — never client-forgeable
+  memoryId: String! @indexed   # the memory this contribution counted toward
+  attribution: String          # opaque/sanitized free-text hint (optional)
+  createdAt: String!
 }
 
 # MemoryCandidate — staged distillations from the FLAIR-NIGHTLY-REM cycle.

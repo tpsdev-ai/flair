@@ -1308,6 +1308,16 @@ const FLAIR_AGENT_PERMISSION = {
       Integration:     grant(true,  true,  true,  true),
       Credential:      grant(true,  true,  true,  true),
       Presence:        grant(true,  true,  true,  false),
+      // MemoryUsage (flair#683): the usage-feedback dedup ledger. Read (own
+      // contributions, scoped in resources/MemoryUsage.ts) + insert (a fresh
+      // contribution row) only — NO update/delete. This is load-bearing, not
+      // just least-privilege tidiness: the dedup rule ("(agent, memory)
+      // contributes ≤ 1") is enforced by requiring a NEW ledger row before
+      // any usageCount bump; if an agent could delete its own row, it could
+      // re-trigger the /RecordUsage endpoint for the same memory indefinitely
+      // (create → count → delete → count again → repeat), defeating the cap
+      // entirely. See resources/MemoryUsage.ts's module doc.
+      MemoryUsage:     grant(true,  true,  false, false),
       // Agent: read for discovery, update own card; creation/removal is admin.
       Agent:           grant(true,  false, true,  false),
       // Read-only reference data.

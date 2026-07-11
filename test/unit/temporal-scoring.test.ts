@@ -3,7 +3,7 @@ import { describe, test, expect } from "bun:test";
 // previously re-declared them ("they're not exported, so we test the logic
 // independently") — a simulator that could not catch changes to the real module.
 // The functions are now exported so these tests exercise the shipped code.
-import { recencyFactor, retrievalBoost, compositeScore, getCompositeDiscountFloor } from "../../resources/scoring.ts";
+import { recencyFactor, retrievalBoost, usageBoost, compositeScore, getCompositeDiscountFloor } from "../../resources/scoring.ts";
 
 const now = () => new Date().toISOString();
 
@@ -50,31 +50,60 @@ describe("retrieval boost (OPS-AYGD: bounded to a gentle nudge)", () => {
   });
 });
 
-describe("composite scoring (OPS-AYGD: relevance-floor gate)", () => {
-  test("below the relevance floor, a popular doc gets NO retrieval boost", () => {
-    // semanticScore 0.3 < 0.5 floor → boost must not apply despite huge retrievalCount
-    const popular = compositeScore(0.3, { durability: "standard", createdAt: now(), retrievalCount: 1000 });
-    const cold = compositeScore(0.3, { durability: "standard", createdAt: now(), retrievalCount: 0 });
+// flair#683: usageBoost is the SAME shape as retrievalBoost by design (K&S
+// verdict — the only variable in the harness rematch should be signal
+// QUALITY, not magnitude). Mirrors the block above exactly.
+describe("usage boost (flair#683: same gentle-nudge shape as retrievalBoost)", () => {
+  test("zero usage = no boost", () => {
+    expect(usageBoost(0)).toBe(1.0);
+  });
+
+  test("a single usage report is not yet boosted", () => {
+    expect(usageBoost(1)).toBe(1.0);
+  });
+
+  test("boost is capped at 1.1 — a tie-breaker, never an override", () => {
+    expect(usageBoost(10)).toBe(1.1);
+    expect(usageBoost(100)).toBe(1.1);
+    expect(usageBoost(1_000_000)).toBe(1.1);
+  });
+});
+
+describe("composite scoring (flair#683: usageBoost REPLACES retrievalBoost)", () => {
+  test("retrievalCount alone (no usageCount) no longer affects compositeScore — the contamination is actually gone", () => {
+    // THE regression this PR must prove: a huge retrievalCount used to lift
+    // compositeScore via retrievalBoost (OPS-AYGD's magnet bug). Kern's Q1
+    // verdict was to drop retrievalBoost from compositeScore OUTRIGHT, not
+    // just outweigh it — so a record with retrievalCount=1000 and NO
+    // usageCount must score IDENTICALLY to one with retrievalCount=0.
+    const popularByRetrieval = compositeScore(0.7, { durability: "standard", createdAt: now(), retrievalCount: 1000 });
+    const cold = compositeScore(0.7, { durability: "standard", createdAt: now() });
+    expect(popularByRetrieval).toBeCloseTo(cold, 10);
+  });
+
+  test("below the relevance floor, a heavily-used doc gets NO usage boost", () => {
+    // semanticScore 0.3 < 0.5 floor → boost must not apply despite huge usageCount
+    const popular = compositeScore(0.3, { durability: "standard", createdAt: now(), usageCount: 1000 });
+    const cold = compositeScore(0.3, { durability: "standard", createdAt: now(), usageCount: 0 });
     expect(popular).toBeCloseTo(cold, 5);
   });
 
-  test("above the relevance floor, the (capped) boost applies", () => {
-    const boosted = compositeScore(0.7, { durability: "standard", createdAt: now(), retrievalCount: 1000 });
-    const cold = compositeScore(0.7, { durability: "standard", createdAt: now(), retrievalCount: 0 });
+  test("above the relevance floor, the (capped) usage boost applies", () => {
+    const boosted = compositeScore(0.7, { durability: "standard", createdAt: now(), usageCount: 1000 });
+    const cold = compositeScore(0.7, { durability: "standard", createdAt: now(), usageCount: 0 });
     expect(boosted).toBeGreaterThan(cold);
     expect(boosted / cold).toBeCloseTo(1.1, 2); // capped at +10%
   });
 
-  test("MAGNET FIX: a low-semantic popular doc cannot outrank a high-semantic fresh doc", () => {
-    // Pre-fix the magnet's unbounded rBoost lifted it above relevant docs.
-    const magnet = compositeScore(0.45, { durability: "standard", createdAt: now(), retrievalCount: 1000 }); // below floor → no lift
-    const relevant = compositeScore(0.6, { durability: "standard", createdAt: now(), retrievalCount: 0 });
+  test("MAGNET GUARD: a low-semantic heavily-used doc cannot outrank a high-semantic unused doc", () => {
+    const magnet = compositeScore(0.45, { durability: "standard", createdAt: now(), usageCount: 1000 }); // below floor → no lift
+    const relevant = compositeScore(0.6, { durability: "standard", createdAt: now(), usageCount: 0 });
     expect(relevant).toBeGreaterThan(magnet);
   });
 
-  test("permanent + fresh + high semantic = a high score", () => {
+  test("permanent + fresh + high semantic + real usage = a high score", () => {
     // 0.9 sem * 1.0 (permanent) * ~1.0 (fresh) * 1.1 (capped boost) ≈ 0.99
-    expect(compositeScore(0.9, { durability: "permanent", createdAt: now(), retrievalCount: 5 })).toBeGreaterThan(0.95);
+    expect(compositeScore(0.9, { durability: "permanent", createdAt: now(), usageCount: 5 })).toBeGreaterThan(0.95);
   });
 
   test("standard + fresh is between permanent and ephemeral", () => {

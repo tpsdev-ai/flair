@@ -44,6 +44,33 @@ export function retrievalBoost(retrievalCount: number): number {
   return Math.min(1.0 + 0.1 * Math.log2(retrievalCount), RBOOST_CAP); // gentle, capped
 }
 
+// ─── usageBoost — the verified-USE signal (flair#683) ───────────────────────
+// retrievalCount/retrievalBoost above count a search HIT as "used" — a
+// rich-get-richer loop root-caused in #623 (a doc that surfaces once gets
+// boosted, surfaces more, boosts more, independent of whether it was ever
+// actually useful). usageCount is a STRONGER, distinct signal: it is only
+// ever incremented by the dedicated usage-feedback endpoint (resources/
+// MemoryUsage.ts) when a caller explicitly reports that a memory was
+// cited/used to ground an answer or decision — never auto-incremented on
+// search (schemas/memory.graphql's usageCount field doc). Dedup'd
+// (agent, memory) ≤ 1 contribution and rate-limited there, so this function
+// only ever sees a bounded, deliberately-reported count.
+//
+// SAME shape as retrievalBoost — a gentle, capped nudge (a tie-breaker, never
+// an override), floor-gated so a popular-but-irrelevant doc gets no lift.
+// K&S verdict (FLAIR-USAGE-FEEDBACK-SIGNAL.md, 2026-07-11): keep the
+// constants/shape identical to retrievalBoost's so the ONLY variable in the
+// harness rematch (test/bench/recall-harness) is signal QUALITY (what gets
+// counted), not magnitude/shape — that isolation is what makes the
+// positive/negative/noise comparison meaningful.
+export const USAGE_BOOST_CAP = 1.1; // max +10% — a tie-breaker, not an override
+export const USAGE_RELEVANCE_FLOOR = 0.5; // no boost at all for clearly-irrelevant docs
+
+export function usageBoost(usageCount: number): number {
+  if (!usageCount || usageCount <= 0) return 1.0;
+  return Math.min(1.0 + 0.1 * Math.log2(usageCount), USAGE_BOOST_CAP); // gentle, capped
+}
+
 // flair#623 (2026-07-08): SemanticSearch.ts's `scoring` param now DEFAULTS to
 // "raw" — compositeScore measurably HURTS recall-eval precision on the live
 // corpus (Δp@3 -0.38 to -0.50 vs raw). recall-harness's harder 87-record
@@ -114,17 +141,35 @@ export function getCompositeDiscountFloor(): number {
   return Number.isFinite(v) && v >= 0 && v <= 1 ? v : COMPOSITE_DISCOUNT_FLOOR_DEFAULT;
 }
 
+// flair#683 (2026-07-11, K&S-approved FLAIR-USAGE-FEEDBACK-SIGNAL.md): usage
+// REPLACES retrieval as compositeScore's reinforcement term. Kern's Q1
+// verdict: replace `retrievalBoost` OUTRIGHT rather than weight usage above
+// it — retrievalCount is the CONTAMINATED signal (a search hit counted as
+// "used"); keeping it in the formula at any weight keeps the contamination,
+// because the problem is signal QUALITY, not magnitude. usageCount is
+// strictly more informative (usage implies retrieval happened; retrieval
+// never implies usage). Clean degeneration: on a record with no reported
+// usage yet (the overwhelming majority of the corpus until usage accrues),
+// usageCount=0 → usageBoost=1.0 → compositeScore collapses to
+// semantic × durability/recency, with NO retrieval-popularity pollution at
+// all — a strictly cleaner default state than the pre-#683 formula ever had.
+// retrievalCount/retrievalBoost remain exported above (unused here) —
+// keeping retrievalCount as a fallback "weak prior" for not-yet-used records
+// is an explicitly-deferred v2 idea (FLAIR-USAGE-FEEDBACK-SIGNAL.md's K&S
+// verdict), not built in this slice.
 export function compositeScore(
   semanticScore: number,
-  record: { durability?: string; createdAt?: string; retrievalCount?: number; supersedes?: string },
+  record: { durability?: string; createdAt?: string; usageCount?: number; supersedes?: string },
 ): number {
   const durability = record.durability ?? "standard";
   const dWeight = DURABILITY_WEIGHTS[durability] ?? 0.7;
   const rFactor = record.createdAt ? recencyFactor(record.createdAt, durability) : 1.0;
-  // OPS-AYGD: only apply the retrieval boost when the record is genuinely relevant to
-  // this query (semanticScore clears the floor). Below the floor, a popular doc gets
-  // no lift — kills the cross-query magnet while preserving boosts for relevant docs.
-  const rBoost = semanticScore >= RBOOST_RELEVANCE_FLOOR ? retrievalBoost(record.retrievalCount ?? 0) : 1.0;
+  // Only apply the usage boost when the record is genuinely relevant to this
+  // query (semanticScore clears the floor) — same relevance-gate rationale
+  // OPS-AYGD established for retrievalBoost: below the floor, a heavily-used
+  // doc gets no lift, so a used-but-irrelevant-to-THIS-query record can't
+  // magnet its way into an unrelated result set.
+  const uBoost = semanticScore >= USAGE_RELEVANCE_FLOOR ? usageBoost(record.usageCount ?? 0) : 1.0;
 
   // Bound dWeight×rFactor into [discountFloor, 1.0] (a gentle nudge, mirroring
   // RBOOST_CAP), then relevance-gate it (mirroring RBOOST_RELEVANCE_FLOOR): no
@@ -135,5 +180,5 @@ export function compositeScore(
   const relevanceFloor = getCompositeRelevanceFloor();
   const gatedDWeightRecency = semanticScore >= relevanceFloor ? boundedDWeightRecency : 1.0;
 
-  return semanticScore * gatedDWeightRecency * rBoost;
+  return semanticScore * gatedDWeightRecency * uBoost;
 }

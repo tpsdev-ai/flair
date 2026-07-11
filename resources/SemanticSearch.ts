@@ -15,8 +15,10 @@ import {
 } from "./rerank-provider.js";
 
 // Temporal decay + relevance scoring (incl. the OPS-AYGD retrievalBoost cap +
-// relevance floor) lives in ./scoring.ts — a Harper-free module so it can be
-// unit-tested directly (see test/unit/temporal-scoring.test.ts).
+// relevance floor, and flair#683's usageBoost — which REPLACES retrievalBoost
+// as compositeScore's reinforcement term, see that function's own doc) lives
+// in ./scoring.ts — a Harper-free module so it can be unit-tested directly
+// (see test/unit/temporal-scoring.test.ts).
 import { compositeScore } from "./scoring.js";
 
 // BM25 + union-RRF hybrid retrieval (FLAIR-BM25-HYBRID-RETRIEVAL).
@@ -235,7 +237,7 @@ export class SemanticSearch extends Resource {
         const semQuery: any = {
           sort: { attribute: "embedding", target: qEmb, distance: "cosine" },
           select: ["id", "agentId", "content", "contentHash", "visibility", "tags", "durability",
-            "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "lastRetrieved",
+            "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "usageCount", "lastRetrieved",
             "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
             "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject",
             "validFrom", "validTo", "_safetyFlags", "$distance"],
@@ -268,7 +270,7 @@ export class SemanticSearch extends Resource {
       // so the large embedding vector is never fetched into the BM25 corpus and
       // never spread into a result payload.
       const corpusSelect = ["id", "agentId", "content", "contentHash", "visibility", "tags", "durability",
-        "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "lastRetrieved",
+        "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "usageCount", "lastRetrieved",
         "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
         "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject",
         "validFrom", "validTo", "_safetyFlags"];
@@ -370,7 +372,7 @@ export class SemanticSearch extends Resource {
       const query: any = {
         sort: { attribute: "embedding", target: qEmb, distance: "cosine" },
         select: ["id", "agentId", "content", "contentHash", "visibility", "tags", "durability",
-          "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "lastRetrieved",
+          "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "usageCount", "lastRetrieved",
           "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
           "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject",
           "validFrom", "validTo", "_safetyFlags", "$distance"],

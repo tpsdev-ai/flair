@@ -1,20 +1,20 @@
 /**
- * mcp-tools.ts — the 11 curated flair tools for the Model-2 custom /mcp handler.
+ * mcp-tools.ts — the 12 curated flair tools for the Model-2 custom /mcp handler.
  *
  * Curated BY CONSTRUCTION: this module implements a fixed set of tools, each a
  * thin wrapper over the existing flair Resource handler. No business logic is
  * re-implemented — the wrapped handlers (Memory / SemanticSearch /
- * BootstrapMemories / Soul / WorkspaceState / OrgEvent / AttentionQuery)
- * enforce per-agent scoping/ownership via `resolveAgentAuth(getContext())` (or,
- * for `attention`, AttentionQuery's own per-source scoping — see
- * resources/AttentionQuery.ts's module doc), so the MCP surface inherits the
- * SAME security model as the signed-REST path. There is no raw CRUD surface —
- * the only way to reach the datastore through /mcp is via one of these 11
- * semantic tools.
+ * BootstrapMemories / Soul / WorkspaceState / OrgEvent / AttentionQuery /
+ * RecordUsage) enforce per-agent scoping/ownership via
+ * `resolveAgentAuth(getContext())` (or, for `attention`, AttentionQuery's own
+ * per-source scoping — see resources/AttentionQuery.ts's module doc), so the
+ * MCP surface inherits the SAME security model as the signed-REST path. There
+ * is no raw CRUD surface — the only way to reach the datastore through /mcp is
+ * via one of these 12 semantic tools.
  *
  *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
  *   bootstrap · soul_set · soul_get · flair_workspace_set · flair_orgevent ·
- *   attention
+ *   attention · record_usage
  *
  * ── The scoping seam ────────────────────────────────────────────────────────
  * The /mcp handler resolves the OAuth token's `sub` → a flair `Agent` id, then
@@ -51,7 +51,7 @@
  *
  * Prod: first tool call loads the real classes against a fully-real Harper.
  */
-type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery";
+type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};
 
 const LOADERS: Record<HandlerKey, () => Promise<any>> = {
@@ -62,6 +62,7 @@ const LOADERS: Record<HandlerKey, () => Promise<any>> = {
   WorkspaceState: async () => (await import("./WorkspaceState.js")).WorkspaceState,
   OrgEvent: async () => (await import("./OrgEvent.js")).OrgEvent,
   AttentionQuery: async () => (await import("./AttentionQuery.js")).AttentionQuery,
+  RecordUsage: async () => (await import("./RecordUsage.js")).RecordUsage,
 };
 
 /** Resolve a handler class — from the test override if set, else lazy-load + cache. */
@@ -311,6 +312,24 @@ async function attention(agent: ResolvedAgent, args: any) {
   return unwrap(await h.post({ entity: args?.entity, days: args?.days }));
 }
 
+/**
+ * record_usage (flair#683) — report that memory(ies) were actually used
+ * (cited/grounded an answer or decision), driving the usage-feedback signal
+ * (Memory.usageCount → usageBoost → compositeScore). Distinct from search:
+ * calling memory_search does NOT count as usage — this tool is the explicit,
+ * verified-use report resources/RecordUsage.ts's module doc describes.
+ * Identity is the RESOLVED agent (delegationContext), never forgeable via
+ * args — same no-forge contract as every other write tool here.
+ */
+async function recordUsage(agent: ResolvedAgent, args: any) {
+  const Cls = await handler("RecordUsage");
+  const h = new Cls(undefined, delegationContext(agent));
+  const memoryIds = Array.isArray(args?.memoryIds)
+    ? args.memoryIds
+    : typeof args?.memoryId === "string" ? [args.memoryId] : undefined;
+  return unwrap(await h.post({ memoryIds, attribution: args?.attribution }));
+}
+
 type ToolImpl = (agent: ResolvedAgent, args: any) => Promise<any>;
 
 /**
@@ -515,6 +534,24 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: attention,
+  },
+  record_usage: {
+    def: {
+      name: "record_usage",
+      description:
+        "Report that one or more memories were actually USED — cited or relied on to ground an answer or decision. " +
+        "Distinct from search (surfacing a memory is not usage). Drives the recall-quality usage signal; dedup'd " +
+        "(you can only count once per memory) and rate-limited.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          memoryIds: { type: "array", items: { type: "string" }, description: "IDs of the memories that were used (max 20 per call)" },
+          memoryId: { type: "string", description: "Convenience alias for a single memory id (use memoryIds for multiple)" },
+          attribution: { type: "string", description: "Optional free-text note on what used it (opaque — stored for audit only, max 500 chars)" },
+        },
+      },
+    },
+    impl: recordUsage,
   },
 };
 
