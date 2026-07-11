@@ -588,7 +588,9 @@ export class BootstrapMemories extends Resource {
     if (currentTask && tokenBudget > 200) {
       let queryEmbedding: number[] | null = null;
       try {
-        queryEmbedding = await getEmbedding(currentTask);
+        // flair#504 Phase 2: 'query' — currentTask is the bootstrap's
+        // task-relevance search query, not stored content.
+        queryEmbedding = await getEmbedding(currentTask, "query");
       } catch {}
 
       if (queryEmbedding) {

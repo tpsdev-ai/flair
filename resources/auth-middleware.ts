@@ -53,7 +53,9 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     const record = await (databases as any).flair.Memory.get(memoryId);
     if (!record?.content) return;
     if (record.embedding?.length > 100) return;
-    const embedding = await getEmbedding(record.content);
+    // flair#504 Phase 2: 'document' — a backfilled embedding IS a stored
+    // document vector, same as the three Memory.ts sites; must match.
+    const embedding = await getEmbedding(record.content, "document");
     if (!embedding) return;
     await patchRecord((databases as any).flair.Memory, memoryId, { embedding });
     console.log(`[auto-embed] ${memoryId}: ${embedding.length}d`);

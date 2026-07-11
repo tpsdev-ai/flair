@@ -133,7 +133,8 @@ export class SemanticSearch extends Resource {
     if (!qEmb && q) {
       // Always attempt embedding generation — getEmbedding() handles init internally.
       // Don't gate on getMode() which may return "none" before init completes in worker threads.
-      try { qEmb = await getEmbedding(String(q).slice(0, 8000)); } catch {}
+      // flair#504 Phase 2: 'query' — this is a search query, not stored content.
+      try { qEmb = await getEmbedding(String(q).slice(0, 8000), "query"); } catch {}
     }
 
     // ─── Temporal intent detection ────────────────────────────────────────────

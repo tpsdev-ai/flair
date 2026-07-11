@@ -7930,7 +7930,21 @@ program
     const batchSize = Number(opts.batchSize);
     const delayMs = Number(opts.delayMs);
 
-    const currentModel = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
+    // flair#504 Phase 2: MUST match resources/embeddings-provider.ts's
+    // getModelId() (base model id + '+' + EMBEDDING_VARIANT). Duplicated as a
+    // literal, not imported, because src/cli.ts and resources/**.ts are
+    // separate build targets — tsconfig.cli.json's rootDir is "src" and only
+    // includes src/cli.ts + src/cli-shim.cts, and the published CLI package
+    // ships only dist/ built from that config (package.json's "files"), so
+    // resources/ isn't reachable from (or bundled into) the CLI binary. If
+    // EMBEDDING_VARIANT ever changes in embeddings-provider.ts, update this
+    // literal too — a drift here silently breaks `--stale-only`: it would
+    // compare every row's embeddingModel against the WRONG current-model
+    // string, so pre-Phase-2 unprefixed rows would read as already "current"
+    // and get skipped instead of re-embedded (the exact failure mode Phase
+    // 2's stamp-bump exists to prevent).
+    const EMBEDDING_VARIANT = "searchprefix";
+    const currentModel = `${process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M"}+${EMBEDDING_VARIANT}`;
 
     if (agentId) {
       console.log(`Re-embedding memories for agent: ${agentId}`);

@@ -93,6 +93,8 @@ export FLAIR_MODELS_DIR=/path/to/an/existing/flair/checkout/models
 | `--runs N`        | `3`     | Independent seed→measure→teardown cycles per config, aggregated as mean ± standard error. |
 | `--hybrid on\|off\|both` | `both` | Which `FLAIR_HYBRID_RETRIEVAL` value(s) to spawn instances for. |
 | `--rerank`        | off     | Additionally spawn one `hybrid=true, rerank=true` config. Opt-in — see "On the rerank knob" below. |
+| `--prefixes on\|off\|both` | `both` | flair#504 Phase 2: which nomic search-prefix state(s) to spawn instances for. `on` = real `inputType='document'`/`'query'` on every `getEmbedding()` call site (the shipped Phase 2 code path); `off` = the harness-only `FLAIR_RECALL_HARNESS_NO_PREFIX` escape hatch (simulates Phase 1 against the SAME dist build — see `resources/embeddings-provider.ts`'s `harnessForceNoPrefix()`). |
+| `--canary`        | off     | Run the mixed-space canary instead of the main sweep (see "MIXED-SPACE CANARY" in run.ts) — quantifies flair#504 Phase 2 stage-2 prod-re-embed transient-degradation risk in isolation. |
 | `--verbose`       | off     | Print every query's rank (hit/miss, kind, marker) under `--runs`. |
 | `--keep-on-fail`  | off     | On a fatal error, print a reminder to inspect (the ephemeral installDir itself is NOT preserved automatically — see caveat below). |
 
@@ -190,6 +192,70 @@ flair#623's root cause than the single-pair unit test shows, and it holds
 **identically under `hybrid=false`** (the legacy path) — so the effect is
 not specific to BM25/RRF score-banding as the commit's narrative framed it;
 it's `compositeScore`'s unconditional multiplier, full stop.
+
+## Phase 2 prefix A/B — measured results (2026-07-11, isolated)
+
+`--runs 3 --hybrid both --prefixes both`, scoring=raw (the production
+default; `PHASE1_BASELINE` in run.ts was measured under this same config).
+Variance was ±0.000 across all 3 runs in every arm — deterministic on this
+corpus/HNSW-build, not a fluke of one run:
+
+```
+── hybrid=true ──
+  prefixes=off (Phase 1 sim)  p@3=0.967 ± 0.000   MRR=0.892 ± 0.000
+  prefixes=on  (Phase 2)      p@3=0.933 ± 0.000   MRR=0.856 ± 0.000
+  Δ (on − off)   p@3=-0.033   MRR=-0.036
+  by kind (on − off, MRR): stress=+0.000  trap=-0.167  hard=-0.097  clean=+0.000
+
+── hybrid=false ──
+  prefixes=off (Phase 1 sim)  p@3=0.967 ± 0.000   MRR=0.892 ± 0.000
+  prefixes=on  (Phase 2)      p@3=0.933 ± 0.000   MRR=0.856 ± 0.000
+  Δ (on − off)   p@3=-0.033   MRR=-0.036
+  by kind (on − off, MRR): stress=+0.000  trap=-0.167  hard=-0.097  clean=+0.000
+```
+
+**Prefixes REGRESS on this corpus, in both hybrid modes** — this contradicts
+the design hypothesis (prefixes ≥ baseline) and fails the stage-1 merge gate
+as originally written (flair#504 spec, checklist item 6: "harness shows a
+bump, or at minimum no regression"). The `off` arm reproduces the frozen
+`PHASE1_BASELINE` (p@3=0.967/MRR=0.892) exactly, confirming the harness-only
+no-prefix escape hatch is faithful — this is a real measured effect of
+`inputType`, not a harness artifact.
+
+The regression concentrates in `trap` (queries engineered to share strong
+surface vocabulary with a same-corpus decoy cluster — MRR Δ=-0.167, the
+single largest hit) and `hard` (near-duplicate-cluster disambiguation, Δ=
+-0.097); `stress` (durability/recency) and `clean` (unambiguous) are exactly
+flat. One plausible read: nomic's `search_document`/`search_query` prefixes
+are trained to improve topical/semantic alignment on large, heterogeneous
+corpora, but this harness's `trap`/`hard` categories are deliberately
+adversarial on fine *lexical* grounds within a small (87-record), densely
+hand-crafted corpus — a regime the prefix training wasn't optimized for and
+may not generalize to. That's a hypothesis, not a conclusion: the spec's own
+validation tiers include a **live gate** (`recall-eval.mjs` against the real,
+large, diverse production corpus) specifically because an isolated
+synthetic-corpus result — in either direction — isn't the final word. See
+the PR for flair#504 Phase 2 for how this was resolved.
+
+**Mixed-space canary** (`--canary`, hybrid=true, scoring=raw; 44 records
+seeded unprefixed then 43 more seeded prefixed after a same-installDir
+Harper restart, queries always `'query'`-prefixed — simulates a stage-2
+prod re-embed mid-pass):
+
+```
+MIXED-SPACE   p@3=0.967   MRR=0.842
+  by kind: stress MRR=0.738 (n=7)  trap MRR=0.833 (n=3)  hard MRR=0.833 (n=6)  clean MRR=0.899 (n=14)
+```
+
+vs. this session's fully-consistent `prefixes=on hybrid=true`
+(p@3=0.933/MRR=0.856) and fully-consistent `prefixes=off`
+(p@3=0.967/MRR=0.892, = frozen baseline): the mixed state's p@3 matches the
+unprefixed baseline (top-3 hit-rate holds), but MRR is the WORST of all
+three conditions (0.842) — ranking quality *within* the top-3 degrades
+during the transition window even though the record usually still clears
+top-3. Quantifies the stage-2 transient risk at roughly -0.05 MRR
+(mixed vs. fully-consistent-off) — bounded to the pass's wall-clock and
+self-healing once it completes, consistent with the spec's prediction.
 
 ## Caveats
 

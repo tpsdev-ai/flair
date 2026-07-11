@@ -56,6 +56,7 @@
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../../helpers/harper-lifecycle";
@@ -93,8 +94,28 @@ const SEARCH_LIMIT = 20; // candidateLimit = limit*5 = 100 > CORPUS.length(87) �
 // flair#683: run ONLY the usage-injection rematch (see "USAGE-FEEDBACK
 // REMATCH" section below) instead of the base composite-vs-raw sweep above.
 const USAGE_REMATCH = process.argv.includes("--usage-rematch");
+// flair#504 Phase 2 (nomic search prefixes): "on" = docs 'document' + queries
+// 'query' (real Phase 2 code path); "off" = no inputType (Phase-1 behavior,
+// simulated via the harness-only FLAIR_RECALL_HARNESS_NO_PREFIX escape hatch
+// in resources/embeddings-provider.ts — see that file's header for why a
+// real env toggle in PRODUCTION code was rejected but this harness-only one
+// is fine: the call sites never read it, only getEmbedding() itself does).
+const PREFIXES_ARG = argVal("--prefixes", "both"); // "both" | "on" | "off"
+// Run ONLY the mixed-space canary (see "MIXED-SPACE CANARY" section below)
+// instead of the main sweep.
+const RUN_CANARY = process.argv.includes("--canary");
 
 const hybridValues: boolean[] = HYBRID_ARG === "on" ? [true] : HYBRID_ARG === "off" ? [false] : [true, false];
+const prefixValues: boolean[] = PREFIXES_ARG === "on" ? [true] : PREFIXES_ARG === "off" ? [false] : [true, false];
+
+// Frozen reference point (test/bench/recall-harness/README.md "Measured
+// results", 2026-07-08): Phase-1 (no inputType at all — byte-identical wash)
+// scoring=raw, hybrid=true. This PR's prefix-on numbers are compared against
+// this AND against a live prefix-off measurement from the same session (see
+// the report section) — the live comparison is the more rigorous one (same
+// corpus/HNSW-build session), this frozen number is context for "did the
+// Phase-1 baseline itself hold steady."
+const PHASE1_BASELINE = { p3: 0.967, mrr: 0.892 };
 
 // ─── Ed25519 TPS-signed fetch (same pattern as test/integration's own suite) ─
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
@@ -149,11 +170,12 @@ async function seedRecord(harper: HarperInstance, agent: TestAgent, rec: CorpusR
 }
 
 // Batched concurrency — enough to cut wall time without hammering a
-// THREADS_COUNT=1 ephemeral instance.
-async function seedCorpus(harper: HarperInstance, agent: TestAgent): Promise<void> {
+// THREADS_COUNT=1 ephemeral instance. `records` defaults to the full CORPUS;
+// the mixed-space canary passes a subset (see below).
+async function seedCorpus(harper: HarperInstance, agent: TestAgent, records: CorpusRecord[] = CORPUS): Promise<void> {
   const BATCH = 6;
-  for (let i = 0; i < CORPUS.length; i += BATCH) {
-    await Promise.all(CORPUS.slice(i, i + BATCH).map(rec => seedRecord(harper, agent, rec)));
+  for (let i = 0; i < records.length; i += BATCH) {
+    await Promise.all(records.slice(i, i + BATCH).map(rec => seedRecord(harper, agent, rec)));
   }
 }
 
@@ -203,13 +225,20 @@ async function runQueries(harper: HarperInstance, agent: TestAgent, scoring: "ra
 }
 
 // One independent (spawn → register → seed → wait → measure[raw,composite] →
-// teardown) cycle for a given (hybrid, rerank) config.
-async function runOnce(hybrid: boolean, rerank: boolean, runIdx: number, totalRuns: number): Promise<{ raw: ScoringResult; composite: ScoringResult }> {
-  const label = `[hybrid=${hybrid} rerank=${rerank} run ${runIdx}/${totalRuns}]`;
+// teardown) cycle for a given (hybrid, rerank, prefixesOn) config.
+// prefixesOn=false forces the harness-only no-prefix escape hatch (see
+// resources/embeddings-provider.ts's `harnessForceNoPrefix` doc) so this
+// arm's writes/queries measure "as if Phase 1" against the SAME Phase-2 dist
+// build the on-arm uses — isolating the prefix effect from every other
+// variable (corpus, HNSW build, embedding-engine warmup).
+async function runOnce(hybrid: boolean, rerank: boolean, prefixesOn: boolean, runIdx: number, totalRuns: number): Promise<{ raw: ScoringResult; composite: ScoringResult }> {
+  const label = `[hybrid=${hybrid} rerank=${rerank} prefixes=${prefixesOn ? "on" : "off"} run ${runIdx}/${totalRuns}]`;
   const prevHybrid = process.env.FLAIR_HYBRID_RETRIEVAL;
   const prevRerank = process.env.FLAIR_RERANK_ENABLED;
+  const prevPrefix = process.env.FLAIR_RECALL_HARNESS_NO_PREFIX;
   process.env.FLAIR_HYBRID_RETRIEVAL = hybrid ? "true" : "false";
   if (rerank) process.env.FLAIR_RERANK_ENABLED = "true"; else delete process.env.FLAIR_RERANK_ENABLED;
+  if (!prefixesOn) process.env.FLAIR_RECALL_HARNESS_NO_PREFIX = "true"; else delete process.env.FLAIR_RECALL_HARNESS_NO_PREFIX;
 
   let harper: HarperInstance | undefined;
   try {
@@ -238,6 +267,7 @@ async function runOnce(hybrid: boolean, rerank: boolean, runIdx: number, totalRu
     if (harper) await stopHarper(harper, { keepInstallDir: false });
     if (prevHybrid === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL; else process.env.FLAIR_HYBRID_RETRIEVAL = prevHybrid;
     if (prevRerank === undefined) delete process.env.FLAIR_RERANK_ENABLED; else process.env.FLAIR_RERANK_ENABLED = prevRerank;
+    if (prevPrefix === undefined) delete process.env.FLAIR_RECALL_HARNESS_NO_PREFIX; else process.env.FLAIR_RECALL_HARNESS_NO_PREFIX = prevPrefix;
   }
 }
 
@@ -254,26 +284,31 @@ const fmtAgg = (a: { mean: number; se: number | null }, d = 3) => a.se != null ?
 async function main() {
   assertBuilt();
   console.log(`recall-harness — ISOLATED recall eval (corpus=${CORPUS.length} records, queries=${QUERIES.length})`);
-  console.log(`config: runs=${RUNS} hybrid=${hybridValues.join(",")} rerank=${WITH_RERANK ? "on(hybrid=true only)+off" : "off"}\n`);
+  console.log(`config: runs=${RUNS} hybrid=${hybridValues.join(",")} prefixes=${prefixValues.map(p => p ? "on" : "off").join(",")} rerank=${WITH_RERANK ? "on(hybrid=true,prefixes=true only)+off" : "off"}\n`);
   if (process.env.FLAIR_MODELS_DIR) console.log(`FLAIR_MODELS_DIR=${process.env.FLAIR_MODELS_DIR} (reusing pre-downloaded models)\n`);
 
-  // Build the (hybrid, rerank) config list. rerank is opt-in and only ever
-  // tested alongside hybrid=true (the production-default combination) — a
-  // full 2×2×2 sweep triples runtime for a knob this PR's validation doesn't
-  // depend on; see README for how to run a fuller sweep manually.
-  const configs: { hybrid: boolean; rerank: boolean }[] = hybridValues.map(h => ({ hybrid: h, rerank: false }));
-  if (WITH_RERANK && hybridValues.includes(true)) configs.push({ hybrid: true, rerank: true });
+  // Build the (hybrid, rerank, prefixesOn) config list. rerank is opt-in and
+  // only ever tested alongside hybrid=true, prefixes=true (the
+  // production-default combination) — a full sweep including rerank
+  // multiplies runtime for a knob this PR's validation doesn't depend on;
+  // see README for how to run a fuller sweep manually.
+  const configs: { hybrid: boolean; rerank: boolean; prefixesOn: boolean }[] = [];
+  for (const h of hybridValues) for (const p of prefixValues) configs.push({ hybrid: h, rerank: false, prefixesOn: p });
+  if (WITH_RERANK && hybridValues.includes(true) && prefixValues.includes(true)) configs.push({ hybrid: true, rerank: true, prefixesOn: true });
 
   type Agg = { p3: number[]; mrr: number[]; byKind: Record<QueryKind, { p3: number[]; mrr: number[] }> };
   const emptyAgg = (): Agg => ({ p3: [], mrr: [], byKind: { stress: { p3: [], mrr: [] }, trap: { p3: [], mrr: [] }, hard: { p3: [], mrr: [] }, clean: { p3: [], mrr: [] } } });
 
+  const keyFor = (cfg: { hybrid: boolean; rerank: boolean; prefixesOn: boolean }) =>
+    `hybrid=${cfg.hybrid} rerank=${cfg.rerank} prefixes=${cfg.prefixesOn ? "on" : "off"}`;
+
   const results: Record<string, { raw: Agg; composite: Agg }> = {};
 
   for (const cfg of configs) {
-    const key = `hybrid=${cfg.hybrid} rerank=${cfg.rerank}`;
+    const key = keyFor(cfg);
     results[key] = { raw: emptyAgg(), composite: emptyAgg() };
     for (let i = 1; i <= RUNS; i++) {
-      const { raw, composite } = await runOnce(cfg.hybrid, cfg.rerank, i, RUNS);
+      const { raw, composite } = await runOnce(cfg.hybrid, cfg.rerank, cfg.prefixesOn, i, RUNS);
       for (const [scoring, res] of [["raw", raw], ["composite", composite]] as const) {
         const agg = results[key][scoring];
         agg.p3.push(res.p3); agg.mrr.push(res.mrr);
@@ -295,7 +330,7 @@ async function main() {
   // ── Report ──────────────────────────────────────────────────────────────
   console.log(`\n══ AGGREGATE (mean ± SE over ${RUNS} run${RUNS > 1 ? "s" : ""}) ══\n`);
   for (const cfg of configs) {
-    const key = `hybrid=${cfg.hybrid} rerank=${cfg.rerank}`;
+    const key = keyFor(cfg);
     console.log(`── ${key} ──`);
     for (const scoring of ["raw", "composite"] as const) {
       const agg = results[key][scoring];
@@ -314,16 +349,58 @@ async function main() {
     console.log();
   }
 
-  // ── Headline discrimination check (the ask this PR validates) ───────────
-  const primaryKey = `hybrid=true rerank=false`;
+  // ── Headline discrimination check (composite vs raw, flair#623) ─────────
+  const primaryKey = keyFor({ hybrid: true, rerank: false, prefixesOn: true });
   if (results[primaryKey]) {
     const rawP3 = aggStats(results[primaryKey].raw.p3).mean, compP3 = aggStats(results[primaryKey].composite.p3).mean;
     const rawMrr = aggStats(results[primaryKey].raw.mrr).mean, compMrr = aggStats(results[primaryKey].composite.mrr).mean;
     const discriminates = compP3 < rawP3 || compMrr < rawMrr;
-    console.log(`HEADLINE (hybrid=true, the production default): composite p@3=${fmt(compP3)} vs raw p@3=${fmt(rawP3)}; composite MRR=${fmt(compMrr)} vs raw MRR=${fmt(rawMrr)}.`);
+    console.log(`HEADLINE (hybrid=true prefixes=on, the production default): composite p@3=${fmt(compP3)} vs raw p@3=${fmt(rawP3)}; composite MRR=${fmt(compMrr)} vs raw MRR=${fmt(rawMrr)}.`);
     console.log(discriminates
       ? "  → Corpus DISCRIMINATES: composite measurably underperforms raw, reproducing flair#623 in isolation."
       : "  → Corpus did NOT discriminate this run — see README's 'if it doesn't discriminate' notes before trusting this config as safe.");
+  }
+
+  // ── PREFIX A/B (flair#504 Phase 2 — the ask THIS harness change validates) ─
+  // scoring=raw only (the production default, and what PHASE1_BASELINE was
+  // measured under) — composite is a separate, already-settled question
+  // (flair#623 above). For each hybrid mode this sweep covers, compares the
+  // LIVE prefixes=on vs prefixes=off measurement (same session, same corpus/
+  // HNSW-build conditions — the rigorous comparison) and, where prefixes=on
+  // is present, the delta vs the frozen Phase-1 PHASE1_BASELINE (context:
+  // did the historical baseline itself hold steady).
+  if (prefixValues.length === 2) {
+    console.log(`\n══ PREFIX A/B (flair#504 Phase 2 — scoring=raw only) ══\n`);
+    for (const h of hybridValues) {
+      const onKey = keyFor({ hybrid: h, rerank: false, prefixesOn: true });
+      const offKey = keyFor({ hybrid: h, rerank: false, prefixesOn: false });
+      if (!results[onKey] || !results[offKey]) continue;
+      const onP3 = aggStats(results[onKey].raw.p3), offP3 = aggStats(results[offKey].raw.p3);
+      const onMrr = aggStats(results[onKey].raw.mrr), offMrr = aggStats(results[offKey].raw.mrr);
+      const dP3 = onP3.mean - offP3.mean, dMrr = onMrr.mean - offMrr.mean;
+      console.log(`── hybrid=${h} ──`);
+      console.log(`  prefixes=off (Phase 1 sim)  p@3=${fmtAgg(offP3)}   MRR=${fmtAgg(offMrr)}`);
+      console.log(`  prefixes=on  (Phase 2)      p@3=${fmtAgg(onP3)}   MRR=${fmtAgg(onMrr)}`);
+      console.log(`  Δ (on − off, live, same session)   p@3=${dP3 >= 0 ? "+" : ""}${fmt(dP3)}   MRR=${dMrr >= 0 ? "+" : ""}${fmt(dMrr)}`);
+      console.log(`  Δ (on − frozen Phase-1 baseline p@3=${PHASE1_BASELINE.p3} MRR=${PHASE1_BASELINE.mrr})   p@3=${(onP3.mean - PHASE1_BASELINE.p3) >= 0 ? "+" : ""}${fmt(onP3.mean - PHASE1_BASELINE.p3)}   MRR=${(onMrr.mean - PHASE1_BASELINE.mrr) >= 0 ? "+" : ""}${fmt(onMrr.mean - PHASE1_BASELINE.mrr)}`);
+      console.log(`  by kind (on − off, MRR):`);
+      for (const k of ["stress", "trap", "hard", "clean"] as QueryKind[]) {
+        const r = aggStats(results[offKey].raw.byKind[k].mrr), c = aggStats(results[onKey].raw.byKind[k].mrr);
+        console.log(`    ${k.padEnd(6)} off=${fmt(r.mean)}  on=${fmt(c.mean)}  Δ=${(c.mean - r.mean) >= 0 ? "+" : ""}${fmt(c.mean - r.mean)}`);
+      }
+      console.log();
+    }
+    const primaryOnKey = keyFor({ hybrid: true, rerank: false, prefixesOn: true });
+    const primaryOffKey = keyFor({ hybrid: true, rerank: false, prefixesOn: false });
+    if (results[primaryOnKey] && results[primaryOffKey]) {
+      const onP3 = aggStats(results[primaryOnKey].raw.p3).mean, offP3 = aggStats(results[primaryOffKey].raw.p3).mean;
+      const onMrr = aggStats(results[primaryOnKey].raw.mrr).mean, offMrr = aggStats(results[primaryOffKey].raw.mrr).mean;
+      const bump = onP3 >= offP3 && onMrr >= offMrr;
+      console.log(`PREFIX HEADLINE (hybrid=true, the production default): prefixes=on p@3=${fmt(onP3)} MRR=${fmt(onMrr)} vs prefixes=off p@3=${fmt(offP3)} MRR=${fmt(offMrr)}.`);
+      console.log(bump
+        ? "  → Prefixes HELP (or at minimum don't regress) — the merge-gate condition holds."
+        : "  → Prefixes REGRESS p@3 or MRR on this corpus — do NOT merge on this measurement; re-check corpus/methodology before trusting a live-corpus re-embed.");
+    }
   }
 }
 
@@ -565,8 +642,113 @@ async function runUsageRematch(): Promise<void> {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MIXED-SPACE CANARY (flair#504 Phase 2) — quantifies the stage-2 prod
+// re-embed's transient risk. Does NOT touch prod; ephemeral Harper only.
+//
+// Stage 1 (this PR) never re-embeds the live corpus — only NEW writes get
+// the nomic prefix from here on. The eventual stage-2 `flair reembed
+// --stale-only` pass against the LIVE rockit corpus is a separate,
+// deliberate ops step (surfaced to Nathan, not this PR) that will
+// transiently hold BOTH prefixed and unprefixed document vectors in the
+// SAME corpus while it runs (batched, ~100ms apart) — a `search_query:`
+// -prefixed query is then cross-space against whichever documents haven't
+// been touched by the pass yet.
+//
+// This canary reproduces that mixed state in isolation: CORPUS is split by
+// ALTERNATING index (not a contiguous first/second half — that would
+// confound the measurement if a whole topic cluster or query kind happened
+// to land in only one half; alternating approximates a re-embed pass that
+// proceeds in id/insertion order, uncorrelated with topic). The even-index
+// half is written FIRST with the harness-only no-prefix escape hatch active
+// (simulating not-yet-re-embedded rows); Harper is then STOPPED but its
+// installDir is KEPT (mirrors flair#637's downgrade-boot restart pattern —
+// test/compat/downgrade-boot.test.ts — the on-disk Memory table + HNSW index
+// persist across the restart) and RESTARTED against the SAME installDir with
+// the escape hatch OFF (the real, unconditional Phase 2 state), which writes
+// the odd-index half WITH the prefix. Queries run against this final
+// instance, so they always get the real 'query' prefix — only the STORED
+// document vectors are mixed.
+//
+// Reports the mixed-corpus p@3/MRR; compare against this same invocation's
+// (or a prior `--hybrid on --prefixes on` run's) fully-consistent prefix-on
+// numbers — the delta IS the quantified transient-degradation risk.
+// ═══════════════════════════════════════════════════════════════════════════
+async function runMixedSpaceCanary(): Promise<void> {
+  assertBuilt();
+  const unprefixedHalf = CORPUS.filter((_, i) => i % 2 === 0);
+  const prefixedHalf = CORPUS.filter((_, i) => i % 2 === 1);
+  console.log(`recall-harness — MIXED-SPACE CANARY (flair#504 Phase 2 stage-2 prod-re-embed risk)`);
+  console.log(`corpus=${CORPUS.length} records split by alternating index: ${unprefixedHalf.length} written UNPREFIXED first (simulating not-yet-re-embedded rows), ${prefixedHalf.length} written PREFIXED after a same-installDir Harper restart (simulating freshly re-embedded rows). Queries always use the real 'query' prefix. hybrid=true (production default), scoring=raw.\n`);
+  if (process.env.FLAIR_MODELS_DIR) console.log(`FLAIR_MODELS_DIR=${process.env.FLAIR_MODELS_DIR} (reusing pre-downloaded models)\n`);
+
+  const prevHybrid = process.env.FLAIR_HYBRID_RETRIEVAL;
+  const prevPrefix = process.env.FLAIR_RECALL_HARNESS_NO_PREFIX;
+  process.env.FLAIR_HYBRID_RETRIEVAL = "true";
+
+  let inst1: HarperInstance | undefined;
+  let inst2: HarperInstance | undefined;
+  let installDir: string | undefined;
+  try {
+    // ── Phase A: unprefixed half, simulating pre-re-embed rows ────────────
+    process.env.FLAIR_RECALL_HARNESS_NO_PREFIX = "true";
+    console.log(`[canary] spawning ephemeral Harper (phase A: prefix OFF)...`);
+    inst1 = await startHarper({ cwd: REPO_ROOT, harperBinDir: REPO_ROOT });
+    installDir = inst1.installDir;
+    console.log(`[canary] up at ${inst1.httpURL} (installDir=${installDir})`);
+    const agent = mkAgent(AGENT_ID);
+    await registerAgent(inst1, agent);
+    console.log(`[canary] seeding ${unprefixedHalf.length} unprefixed records...`);
+    await seedCorpus(inst1, agent, unprefixedHalf);
+    // No waitSearchable() here — the canary marker query's expected record
+    // may land in EITHER half depending on which alternating slot its marker
+    // fell in, so a phase-A-only searchability poll isn't a valid gate (it's
+    // done once, properly, against the FULL mixed corpus in phase B below).
+    // Memory.put() awaits embedding generation before responding (seedRecord
+    // already awaits each PUT), so the vectors themselves are computed and
+    // persisted by the time we move on — but HNSW index visibility has a
+    // documented async lag independent of the write response (see
+    // waitSearchable's own comment above), so give it a beat before killing
+    // the process, rather than risk stopping mid-index-build.
+    await new Promise((r) => setTimeout(r, 3000));
+    console.log(`[canary] stopping (keeping installDir for phase B restart)...`);
+    await stopHarper(inst1, { keepInstallDir: true });
+    inst1 = undefined;
+
+    // ── Phase B: SAME installDir, prefix back ON — the real Phase 2 state ──
+    delete process.env.FLAIR_RECALL_HARNESS_NO_PREFIX;
+    console.log(`[canary] restarting SAME installDir (phase B: prefix ON, real Phase 2 state)...`);
+    inst2 = await startHarper({ cwd: REPO_ROOT, harperBinDir: REPO_ROOT, installDir });
+    console.log(`[canary] up at ${inst2.httpURL}`);
+    console.log(`[canary] seeding ${prefixedHalf.length} prefixed records...`);
+    await seedCorpus(inst2, agent, prefixedHalf);
+    await waitSearchable(inst2, agent);
+    console.log(`[canary] mixed corpus ready (${unprefixedHalf.length} unprefixed + ${prefixedHalf.length} prefixed) — measuring ${QUERIES.length} queries...`);
+    const mixed = await runQueries(inst2, agent, "raw");
+    console.log(`\n══ MIXED-SPACE CANARY RESULT ══\n`);
+    console.log(`  MIXED-SPACE (hybrid=true, scoring=raw)   p@3=${fmt(mixed.p3)}   MRR=${fmt(mixed.mrr)}`);
+    console.log(`  by kind:`);
+    for (const k of ["stress", "trap", "hard", "clean"] as QueryKind[]) {
+      console.log(`    ${k.padEnd(6)} p@3=${fmt(mixed.byKind[k].p3)}  MRR=${fmt(mixed.byKind[k].mrr)}  (n=${mixed.byKind[k].n})`);
+    }
+    console.log(`\n  Compare against a fully-consistent prefixes=on hybrid=true run (this PR's PREFIX A/B section above, or \`--hybrid on --prefixes on\`) — the gap IS the quantified stage-2 transient-degradation risk. Frozen Phase-1 reference: p@3=${PHASE1_BASELINE.p3} MRR=${PHASE1_BASELINE.mrr}.`);
+  } finally {
+    if (inst2) await stopHarper(inst2, { keepInstallDir: false }); // ownsInstallDir=false (installDir passed explicitly) — never removes it
+    else if (inst1) await stopHarper(inst1, { keepInstallDir: false });
+    if (installDir) await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
+    if (prevHybrid === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL; else process.env.FLAIR_HYBRID_RETRIEVAL = prevHybrid;
+    if (prevPrefix === undefined) delete process.env.FLAIR_RECALL_HARNESS_NO_PREFIX; else process.env.FLAIR_RECALL_HARNESS_NO_PREFIX = prevPrefix;
+  }
+}
+
 if (USAGE_REMATCH) {
   runUsageRematch().catch(e => {
+    console.error("FATAL:", e?.stack || e?.message || e);
+    if (!KEEP_ON_FAIL) console.error("(pass --keep-on-fail to leave a failed run's Harper installDir on disk for inspection)");
+    process.exit(1);
+  });
+} else if (RUN_CANARY) {
+  runMixedSpaceCanary().catch(e => {
     console.error("FATAL:", e?.stack || e?.message || e);
     if (!KEEP_ON_FAIL) console.error("(pass --keep-on-fail to leave a failed run's Harper installDir on disk for inspection)");
     process.exit(1);
