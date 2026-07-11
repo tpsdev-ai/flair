@@ -21,17 +21,18 @@ jsResource:
 # (components/componentLoader.ts), so a `models:` block in THIS file is
 # silently never read (verified: bootstrapModels is gated on `isRoot`, and
 # RUN_HDB_APP — what `.` becomes — always loads isRoot:false). The real
-# registration lives in src/cli.ts's `harperSetConfig` (HARPER_SET_CONFIG env
-# var — Harper's own force-override mechanism, applied on every install AND
-# every subsequent run; verified omitting it on a later run corrupts the
-# persisted `models:` section) and test/helpers/harper-lifecycle.ts for
-# tests. This ALSO replaces the prior `package:`-style sub-component entry
-# that used to sit here (`'harper-fabric-embeddings': { package: ... }`,
-# which drove `handleApplication`) — keeping both would double-init the
-# engine (two separate EmbeddingEngine instances: one unused, one backing
-# models.embed), since `register` (the models-backend path) and
-# `handleApplication` (the old sub-component path) are independent code
-# paths in harper-fabric-embeddings, not the same init.
+# registration is delivered via the HARPER_CONFIG env var (Harper's merge-layer
+# config mechanism — reasserts only the keys it names, yields to Fabric-managed
+# HARPER_SET_CONFIG, no force-override or drift-lock) from src/cli.ts
+# (buildEmbeddingsHarperConfigEnv, on every Harper spawn) and
+# test/helpers/harper-lifecycle.ts for tests. This ALSO replaces the prior
+# `package:`-style sub-component entry that used to sit here
+# (`'harper-fabric-embeddings': { package: ... }`, which drove
+# `handleApplication`) — keeping both would double-init the engine (two
+# separate EmbeddingEngine instances: one unused, one backing models.embed),
+# since `register` (the models-backend path) and `handleApplication` (the old
+# sub-component path) are independent code paths in harper-fabric-embeddings,
+# not the same init.
 
 authentication:
   # Default secure (flair#654): a credential-less loopback request to the

@@ -305,19 +305,17 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
   };
 
-  // models (flair#504 Phase 1): registers harper-fabric-embeddings as
-  // Harper's `embedding`/`default` backend via HARPER_SET_CONFIG — Harper's
-  // bootstrapModels() only reads `models:` from the INSTANCE-ROOT config
-  // (isRoot:true), never a per-application config.yaml, so this can't live in
-  // flair's own config.yaml (see that file's comment). Safe to set
-  // unconditionally here (unlike flair's own CLI restart paths): `installDir`
-  // is a fresh mkdtemp every `startHarper()` call, so there's no prior
-  // HARPER_SET_CONFIG-tracked state HARPER_SET_CONFIG's drift-lock could
-  // revert by omission — this is present on both the install spawn below AND
-  // the dev spawn (env = {...baseEnv, ...}), so there's no cross-spawn gap.
+  // models (flair#504 Phase 1): registers harper-fabric-embeddings as Harper's
+  // `embedding`/`default` backend via HARPER_CONFIG (the merge-layer mechanism
+  // flair's CLI uses in production — buildEmbeddingsHarperConfigEnv), NOT
+  // HARPER_SET_CONFIG. Harper's bootstrapModels() only reads `models:` from the
+  // INSTANCE-ROOT config (isRoot:true), never a per-application config.yaml, so
+  // this can't live in flair's own config.yaml (see that file's comment).
+  // Present on both the install spawn below AND the dev spawn (env =
+  // {...baseEnv, ...}), so there's no cross-spawn gap.
   const embeddingBackend = resolveEmbeddingBackendModule(cwd);
   if (embeddingBackend) {
-    baseEnv.HARPER_SET_CONFIG = JSON.stringify({
+    baseEnv.HARPER_CONFIG = JSON.stringify({
       models: {
         embedding: {
           default: { backend: embeddingBackend, modelName: "nomic-embed-text", modelsDir: baseEnv.FLAIR_MODELS_DIR },
