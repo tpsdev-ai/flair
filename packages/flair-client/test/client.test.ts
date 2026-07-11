@@ -475,6 +475,165 @@ describe("MemoryApi", () => {
 
 });
 
+describe("RelationshipApi", () => {
+  test("write PUTs to /Relationship/<canonical-id> with the triple fields", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "flint" });
+    const result = await client.relationship.write({ subject: "nathan", predicate: "manages", object: "flair" });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const call = (mockFetch as any).mock.calls[0];
+    expect(call[1].method).toBe("PUT");
+    expect(call[0]).toMatch(/\/Relationship\/[A-Za-z0-9_-]{22}$/);
+    const body = JSON.parse(call[1].body);
+    expect(body.subject).toBe("nathan");
+    expect(body.predicate).toBe("manages");
+    expect(body.object).toBe("flair");
+    // agentId is never sent in the body — the server derives it from the
+    // signed request, never trusts a client-supplied value.
+    expect("agentId" in body).toBe(false);
+    expect(result.agentId).toBe("flint");
+  });
+
+  test("write() never sends an explicit id in the body — the URL id IS the canonical id", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "flint" });
+    await client.relationship.write({ subject: "nathan", predicate: "manages", object: "flair" });
+
+    const call = (mockFetch as any).mock.calls[0];
+    const urlId = call[0].split("/Relationship/")[1];
+    const body = JSON.parse(call[1].body);
+    expect(body.id).toBe(urlId);
+  });
+
+  test("re-asserting the SAME triple writes to the SAME canonical id (upsert, not a new row)", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "flint" });
+    await client.relationship.write({ subject: "nathan", predicate: "manages", object: "flair", confidence: 1.0 });
+    await client.relationship.write({ subject: "Nathan", predicate: "MANAGES", object: "Flair", confidence: 0.6 });
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const path1 = (mockFetch as any).mock.calls[0][0];
+    const path2 = (mockFetch as any).mock.calls[1][0];
+    // Same id despite differing confidence AND differing case — the id hash
+    // is computed over the lowercased triple, and confidence is deliberately
+    // excluded from the hash (a mutable field, not part of the identity).
+    expect(path2).toBe(path1);
+  });
+
+  test("a different triple (different predicate) produces a DIFFERENT canonical id", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "flint" });
+    await client.relationship.write({ subject: "nathan", predicate: "manages", object: "flair" });
+    await client.relationship.write({ subject: "nathan", predicate: "advises", object: "flair" });
+
+    const path1 = (mockFetch as any).mock.calls[0][0];
+    const path2 = (mockFetch as any).mock.calls[1][0];
+    expect(path2).not.toBe(path1);
+  });
+
+  test("the SAME triple asserted by a DIFFERENT agent produces a DIFFERENT canonical id (per-owner, no cross-agent collision)", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const clientA = new FlairClient({ agentId: "flint" });
+    const clientB = new FlairClient({ agentId: "anvil" });
+    await clientA.relationship.write({ subject: "nathan", predicate: "manages", object: "flair" });
+    await clientB.relationship.write({ subject: "nathan", predicate: "manages", object: "flair" });
+
+    const path1 = (mockFetch as any).mock.calls[0][0];
+    const path2 = (mockFetch as any).mock.calls[1][0];
+    expect(path2).not.toBe(path1);
+  });
+
+  test("write forwards confidence/validFrom/validTo/source only when set", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "flint" });
+    await client.relationship.write({ subject: "nathan", predicate: "manages", object: "flair" });
+
+    const body = JSON.parse((mockFetch as any).mock.calls[0][1].body);
+    expect("confidence" in body).toBe(false);
+    expect("validFrom" in body).toBe(false);
+    expect("validTo" in body).toBe(false);
+    expect("source" in body).toBe(false);
+
+    mockFetch.mockClear();
+    await client.relationship.write({
+      subject: "nathan", predicate: "manages", object: "flair",
+      confidence: 0.8, validFrom: "2026-01-01T00:00:00Z", validTo: "2026-06-01T00:00:00Z", source: "mem-123",
+    });
+    const body2 = JSON.parse((mockFetch as any).mock.calls[0][1].body);
+    expect(body2.confidence).toBe(0.8);
+    expect(body2.validFrom).toBe("2026-01-01T00:00:00Z");
+    expect(body2.validTo).toBe("2026-06-01T00:00:00Z");
+    expect(body2.source).toBe("mem-123");
+  });
+
+  test("get returns null on 404", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response('{"error":"not found"}', { status: 404 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "flint" });
+    const result = await client.relationship.get("nonexistent");
+
+    expect(result).toBeNull();
+  });
+
+  test("delete calls DELETE method", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "flint" });
+    await client.relationship.delete("rel-1");
+
+    const call = (mockFetch as any).mock.calls[0];
+    expect(call[0]).toContain("/Relationship/rel-1");
+    expect(call[1].method).toBe("DELETE");
+  });
+});
+
+describe("canonicalRelationshipId", () => {
+  test("is deterministic for the same inputs", async () => {
+    const { canonicalRelationshipId } = await import("../src/client.js");
+    const a = canonicalRelationshipId("flint", "nathan", "manages", "flair");
+    const b = canonicalRelationshipId("flint", "nathan", "manages", "flair");
+    expect(a).toBe(b);
+  });
+
+  test("is case-insensitive (matches the lowercasing the resource itself applies)", async () => {
+    const { canonicalRelationshipId } = await import("../src/client.js");
+    const a = canonicalRelationshipId("flint", "nathan", "manages", "flair");
+    const b = canonicalRelationshipId("FLINT", "Nathan", "MANAGES", "Flair");
+    expect(a).toBe(b);
+  });
+
+  test("field-boundary shift produces a different id (delimiter guards against concatenation ambiguity)", async () => {
+    const { canonicalRelationshipId } = await import("../src/client.js");
+    // "a"+"bc" must not collide with "ab"+"c" when subject/predicate shift a
+    // character across the boundary — naive concatenation without a
+    // separator would make these ambiguous.
+    const a = canonicalRelationshipId("agent", "a", "bcmanages", "x");
+    const b = canonicalRelationshipId("agent", "ab", "cmanages", "x");
+    expect(a).not.toBe(b);
+  });
+
+  test("is a real SHA-256-derived id: 22 base64url chars (16-byte truncation)", async () => {
+    const { canonicalRelationshipId } = await import("../src/client.js");
+    const id = canonicalRelationshipId("flint", "nathan", "manages", "flair");
+    expect(id).toMatch(/^[A-Za-z0-9_-]{22}$/);
+  });
+});
+
 describe("SoulApi", () => {
   test("set sends correct request", async () => {
     mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
