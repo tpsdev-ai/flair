@@ -1,17 +1,20 @@
 /**
- * mcp-tools.ts — the 10 curated flair tools for the Model-2 custom /mcp handler.
+ * mcp-tools.ts — the 11 curated flair tools for the Model-2 custom /mcp handler.
  *
- * Curated BY CONSTRUCTION: this module implements exactly the 10 tools that the
- * `@tpsdev-ai/flair-mcp` stdio proxy exposes, each a thin wrapper over the
- * existing flair Resource handler. No business logic is re-implemented — the
- * wrapped handlers (Memory / SemanticSearch / BootstrapMemories / Soul /
- * WorkspaceState / OrgEvent) enforce per-agent scoping/ownership via
- * `resolveAgentAuth(getContext())`, so the MCP surface inherits the SAME security
- * model as the signed-REST path. There is no raw CRUD surface — the only way to
- * reach the datastore through /mcp is via one of these 10 semantic tools.
+ * Curated BY CONSTRUCTION: this module implements a fixed set of tools, each a
+ * thin wrapper over the existing flair Resource handler. No business logic is
+ * re-implemented — the wrapped handlers (Memory / SemanticSearch /
+ * BootstrapMemories / Soul / WorkspaceState / OrgEvent / AttentionQuery)
+ * enforce per-agent scoping/ownership via `resolveAgentAuth(getContext())` (or,
+ * for `attention`, AttentionQuery's own per-source scoping — see
+ * resources/AttentionQuery.ts's module doc), so the MCP surface inherits the
+ * SAME security model as the signed-REST path. There is no raw CRUD surface —
+ * the only way to reach the datastore through /mcp is via one of these 11
+ * semantic tools.
  *
  *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
- *   bootstrap · soul_set · soul_get · flair_workspace_set · flair_orgevent
+ *   bootstrap · soul_set · soul_get · flair_workspace_set · flair_orgevent ·
+ *   attention
  *
  * ── The scoping seam ────────────────────────────────────────────────────────
  * The /mcp handler resolves the OAuth token's `sub` → a flair `Agent` id, then
@@ -21,6 +24,16 @@
  * agent exactly as an Ed25519-signed REST call would. Identity ALWAYS comes from
  * the resolved agent, never from the tool arguments — an agent can only act as
  * itself (no forging of agentId / authorId in the body).
+ *
+ * NOTE (flair#677 scope call): the legacy `@tpsdev-ai/flair-mcp` stdio proxy
+ * (packages/flair-mcp) is a SEPARATE, independently-published package that
+ * talks to flair over HTTP via `FlairClient` — it is not wired through this
+ * registry at all (its own tool list is hardcoded in packages/flair-mcp/src/
+ * index.ts). Per the zero-install north star (retiring flair-mcp in favor of
+ * this native /mcp handler), `attention` is added HERE only, not mirrored into
+ * the legacy stdio proxy — adding it there would mean a separate package
+ * version bump + a new FlairClient method, out of scope for this query-only
+ * slice.
  */
 
 /**
@@ -38,7 +51,7 @@
  *
  * Prod: first tool call loads the real classes against a fully-real Harper.
  */
-type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent";
+type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery";
 const H: Partial<Record<HandlerKey, any>> = {};
 
 const LOADERS: Record<HandlerKey, () => Promise<any>> = {
@@ -48,6 +61,7 @@ const LOADERS: Record<HandlerKey, () => Promise<any>> = {
   Soul: async () => (await import("./Soul.js")).Soul,
   WorkspaceState: async () => (await import("./WorkspaceState.js")).WorkspaceState,
   OrgEvent: async () => (await import("./OrgEvent.js")).OrgEvent,
+  AttentionQuery: async () => (await import("./AttentionQuery.js")).AttentionQuery,
 };
 
 /** Resolve a handler class — from the test override if set, else lazy-load + cache. */
@@ -290,6 +304,12 @@ async function orgEvent(agent: ResolvedAgent, args: any) {
   return unwrap(await h.post(body));
 }
 
+async function attention(agent: ResolvedAgent, args: any) {
+  const Cls = await handler("AttentionQuery");
+  const h = new Cls(undefined, delegationContext(agent));
+  return unwrap(await h.post({ entity: args?.entity, days: args?.days }));
+}
+
 type ToolImpl = (agent: ResolvedAgent, args: any) => Promise<any>;
 
 /**
@@ -469,6 +489,25 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: orgEvent,
+  },
+  attention: {
+    def: {
+      name: "attention",
+      description:
+        "What's touching entity E in the last N days? A unified, grouped-by-source view across memories, " +
+        "relationships, active work (WorkspaceState), teammate presence, and org events. Entity must be a " +
+        "vocabulary string (e.g. 'repo:owner/name', 'issue:owner/repo#123', 'subsystem:embeddings').",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          entity: { type: "string", description: "Vocabulary string, exact match (type:value — e.g. 'repo:tpsdev-ai/flair')" },
+          days: { type: "number", description: "Window size in days (default 7)" },
+        },
+        required: ["entity"],
+      },
+    },
+    impl: attention,
   },
 };
 

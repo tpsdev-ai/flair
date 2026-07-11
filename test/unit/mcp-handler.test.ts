@@ -4,7 +4,7 @@
  * These are the auth-critical assertions the integration harness can't make at
  * the unit level:
  *
- *   - tools/list returns EXACTLY the 10 curated tools (no raw CRUD, no extras).
+ *   - tools/list returns EXACTLY the 11 curated tools (no raw CRUD, no extras).
  *   - sub → Agent resolution: an existing Credential(kind:"idp", idpSubject=sub)
  *     maps to its principalId; an unknown sub with JIT OFF is DENIED (not run as
  *     anonymous/admin); an unknown sub with JIT ON provisions a NON-admin agent.
@@ -14,7 +14,7 @@
  *   - a tools/call whose token has no sub, or an unresolvable sub, is denied.
  *   - unknown tool / bad JSON-RPC → proper errors.
  *
- * We mock @harperfast/harper (databases: Credential/Agent) AND the 6 delegated
+ * We mock @harperfast/harper (databases: Credential/Agent) AND the 7 delegated
  * handler modules, so each tool's invocation is capturable and we can assert the
  * exact agent context + args it forwards.
  */
@@ -88,6 +88,9 @@ const databasesMock = {
     MemoryGrant: { search: async function* () {} },
   },
 };
+// AttentionQuery.ts `extends Resource` (not a table subclass), so it needs no
+// databasesMock.flair entry of its own — only __setHandlers below, same as
+// SemanticSearch/BootstrapMemories.
 mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {} } }));
 
 const { mcpHandler, resolveAgentFromSub } = await import("../../resources/mcp-handler.ts");
@@ -103,6 +106,7 @@ const restoreHandlers = __setHandlers({
   Soul: SoulMock,
   WorkspaceState: makeHandlerMock("WorkspaceState.post", "post"),
   OrgEvent: makeHandlerMock("OrgEvent.post", "post"),
+  AttentionQuery: makeHandlerMock("AttentionQuery.post", "post"),
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -132,12 +136,13 @@ afterAll(() => {
 });
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
-describe("tools/list — exactly the 10 curated tools", () => {
-  it("returns exactly 10, matching the flair-mcp surface, no raw CRUD mutators", async () => {
+describe("tools/list — exactly the 11 curated tools", () => {
+  it("returns exactly 11, matching the flair-mcp surface plus attention (flair#677), no raw CRUD mutators", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);
     const names = body.result.tools.map((t: any) => t.name).sort();
     expect(names).toEqual([
+      "attention",
       "bootstrap",
       "flair_orgevent",
       "flair_workspace_set",
@@ -310,6 +315,16 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
     expect(lastCall?.args).not.toHaveProperty("agentId");
     expect(lastCall?.args.ref).toBe("main");
     expect(lastCall?.args.id).toBe("agt_bob:main");
+  });
+
+  it("attention (flair#677) delegates to AttentionQuery.post with the resolved agent's identity, forwarding entity + days only", async () => {
+    await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "attention", arguments: { entity: "repo:tpsdev-ai/flair", days: 14 } } },
+      { sub: "sub-bob" },
+    ));
+    expect(lastCall?.resource).toBe("AttentionQuery.post");
+    expect(lastCall?.args).toEqual({ entity: "repo:tpsdev-ai/flair", days: 14 });
+    expect(lastCall?.ctx.request.tpsAgent).toBe("agt_bob");
   });
 });
 
