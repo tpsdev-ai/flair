@@ -12,8 +12,10 @@
  * config's `models.embedding.default` block — NOT this package's own
  * config.yaml, which is loaded as a non-root application and never reaches
  * bootstrapModels; see config.yaml's own comment, and src/cli.ts's
- * `harperSetConfig` / `buildModelsConfig`, which write that root-config block
- * via HARPER_SET_CONFIG). No `inputType` is passed here, so no
+ * `buildEmbeddingsHarperConfigEnv` / `buildModelsConfig`, which write that
+ * root-config block via HARPER_CONFIG — Harper's merge-layer env that reasserts
+ * only the keys it names and yields to Fabric-managed config, never
+ * HARPER_SET_CONFIG's force-override). No `inputType` is passed here, so no
  * `search_document:`/`search_query:` prefix is applied —
  * output is byte-identical to the pre-migration direct-import path. That's
  * what makes this swap a dead-flat wash: same model, same weights, same
@@ -54,7 +56,18 @@ type HarperModelsApi = typeof import("@harperfast/harper")["models"];
 
 let _modelsApi: HarperModelsApi | undefined;
 
-/** Resolve (and cache) Harper's `models` facade via a deferred import — see file header. */
+/**
+ * Resolve (and cache) Harper's `models` facade via a deferred import — see file header.
+ *
+ * NOTE for anyone using this as a reference: `models` (the `@harperfast/harper`
+ * package export) and a component's `scope.models` are the SAME boot-time
+ * singleton — Harper's jsLoader hands components `scope.models = <the global
+ * models>` (two accessors, one object; the model registry lives on that singleton).
+ * A Harper *component* (one with a `handleApplication(scope)` hook) reaches it
+ * idiomatically as `scope.models`; this file is a Resource *helper* with no
+ * `scope`, so it imports the global export. Same registry, same backends — the
+ * global import here is the correct accessor for this context, not a workaround.
+ */
 async function getModelsApi(): Promise<HarperModelsApi> {
   if (_modelsApi) return _modelsApi;
   const harper = await import("@harperfast/harper");
@@ -82,7 +95,7 @@ async function getModelsApi(): Promise<HarperModelsApi> {
  * Not called by this file anymore (Phase 1 moved model-directory resolution
  * to src/cli.ts, which computes the SAME <ROOTPATH>/models default and bakes
  * it directly into the `models.embedding.default.modelsDir` value it writes
- * via HARPER_SET_CONFIG — a plain env-var default, not this function, since
+ * via HARPER_CONFIG — a plain env-var default, not this function, since
  * cli.ts runs in a separate process from the one that would import this
  * file). Kept — and still exported and tested
  * (test/unit/embeddings-models-dir.test.ts) — as the single documented
