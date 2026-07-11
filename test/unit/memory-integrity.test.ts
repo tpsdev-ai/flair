@@ -33,8 +33,18 @@ delete (process.env as any).FLAIR_PUBLIC;
 
 const FAKE_EMBEDDING = [1, 0, 0, 0];
 
+// flair#504 Phase 2 (nomic search prefixes): records every inputType this
+// mock's getEmbedding() receives, so a later assertion can pin that
+// Memory.ts's dedup gate / post() / put() call sites all pass 'document' —
+// the classification K&S's review made non-negotiable (all three MUST move
+// together; the dedup-gate embedding IS the stored vector).
+let embedInputTypeCalls: (string | undefined)[] = [];
+
 mock.module("../../resources/embeddings-provider.ts", () => ({
-  getEmbedding: async (_text: string) => FAKE_EMBEDDING,
+  getEmbedding: async (_text: string, inputType?: string) => {
+    embedInputTypeCalls.push(inputType);
+    return FAKE_EMBEDDING;
+  },
   getModelId: () => "mock-embedding-model",
   // getMode is unused by this file's own tests, but MUST still be exported —
   // `bun test test/unit` runs every file in one process, and another file's
@@ -220,6 +230,7 @@ beforeEach(() => {
   idCounter = 0;
   forceUndefinedDistance = false;
   instanceRow = null;
+  embedInputTypeCalls = [];
   _resetLocalInstanceIdCacheForTests();
 });
 
@@ -377,6 +388,40 @@ describe("Memory.post — server-side dedup gate never suppresses a write", () =
     expect(res instanceof Response).toBe(true);
     expect((res as Response).status).toBe(401);
     expect(memoryStore.size).toBe(0);
+  });
+});
+
+// ─── flair#504 Phase 2: Memory.ts's document-write call sites pass 'document' ─
+// K&S's non-negotiable: the dedup gate (runDedupGate), post()'s "generate
+// embedding if missing" step, and put()'s regen branch all classify as
+// DOCUMENT writes and must all pass inputType='document' — the dedup gate's
+// embedding IS the stored vector, so a split prefix would break dedup via a
+// mixed-space cosine compare. This pins that classification at the call-site
+// level (not just embeddings-provider.ts's own unit test for the value
+// itself — see embeddings-provider-input-type.test.ts).
+describe("flair#504 Phase 2 — Memory.ts document call sites pass inputType='document'", () => {
+  it("post() on a fresh (no dedup match) write calls getEmbedding with 'document'", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    await m.post({ agentId: "agent-1", content: FINDING_A });
+    expect(embedInputTypeCalls.length).toBeGreaterThan(0);
+    expect(embedInputTypeCalls.every((t) => t === "document")).toBe(true);
+  });
+
+  it("put() create (fresh id, no pre-existing record) calls getEmbedding with 'document'", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    await m.put({ id: "agent-1-p2-put-create", agentId: "agent-1", content: FINDING_B_DISTINCT });
+    expect(embedInputTypeCalls.length).toBeGreaterThan(0);
+    expect(embedInputTypeCalls.every((t) => t === "document")).toBe(true);
+  });
+
+  it("put() regen branch (content changed on an existing record) calls getEmbedding with 'document'", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const created = await m.post({ agentId: "agent-1", content: "Original content for the regen-branch test, long enough for the gate." });
+    embedInputTypeCalls = []; // isolate the regen call from post()'s own embed call above
+    const mUpdate = makeMemory(agentCtx("agent-1"));
+    await mUpdate.put({ id: created.id, agentId: "agent-1", content: "Changed content for the regen-branch test, long enough for the gate and distinct from the original." });
+    expect(embedInputTypeCalls.length).toBeGreaterThan(0);
+    expect(embedInputTypeCalls.every((t) => t === "document")).toBe(true);
   });
 });
 

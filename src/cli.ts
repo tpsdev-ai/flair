@@ -7930,7 +7930,27 @@ program
     const batchSize = Number(opts.batchSize);
     const delayMs = Number(opts.delayMs);
 
-    const currentModel = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
+    // flair#504 Phase 2: MUST match resources/embeddings-provider.ts's
+    // getModelId() — including THE GATE (EMBEDDING_PREFIXES_ENABLED), not
+    // just the suffix. Duplicated as literals, not imported, because
+    // src/cli.ts and resources/**.ts are separate build targets —
+    // tsconfig.cli.json's rootDir is "src" and only includes src/cli.ts +
+    // src/cli-shim.cts, and the published CLI package ships only dist/ built
+    // from that config (package.json's "files"), so resources/ isn't
+    // reachable from (or bundled into) the CLI binary. THE GATE is currently
+    // OFF (parked on v2 A/B evidence — see embeddings-provider.ts's file
+    // header and PR #689), so `currentModel` here is the bare base id, no
+    // suffix — matching getModelId()'s gate-off return exactly. If
+    // EMBEDDING_PREFIXES_ENABLED or EMBEDDING_VARIANT ever changes in
+    // embeddings-provider.ts, update this block too — a drift here silently
+    // breaks `--stale-only`: it would compare every row's embeddingModel
+    // against the WRONG current-model string, so rows would read as already
+    // "current" (or as needing re-embed) out of sync with what getModelId()
+    // is actually stamping new writes with.
+    const EMBEDDING_PREFIXES_ENABLED = false; // MUST mirror resources/embeddings-provider.ts's gate
+    const EMBEDDING_VARIANT = "searchprefix";
+    const baseModel = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
+    const currentModel = EMBEDDING_PREFIXES_ENABLED ? `${baseModel}+${EMBEDDING_VARIANT}` : baseModel;
 
     if (agentId) {
       console.log(`Re-embedding memories for agent: ${agentId}`);

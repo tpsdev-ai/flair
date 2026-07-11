@@ -197,10 +197,29 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
     return null;
   }
 
+  // flair#504 Phase 2: 'document' — this embedding IS the stored vector (the
+  // "generate embedding if missing" step in post()/put() below reuses
+  // whatever this computes), so it MUST use the same inputType as every
+  // other document-write site or dedup's cosine compare would cross prefixed
+  // and unprefixed spaces. All three Memory doc sites (here, post(), put())
+  // move together in one commit for exactly that reason — see
+  // embeddings-provider.ts's file header for why the VALUE must be the
+  // literal 'document', never the prefix string.
+  //
+  // Dedup-during-transition transient (documented per Kern's review, not a
+  // bug to fix here): mid stage-2 re-embed, a NEW write embeds 'document'
+  // (prefixed) but may compare against an OLDER stored vector that hasn't
+  // been re-embedded yet (unprefixed) — cross-space cosine, so dedup can
+  // miss a near-duplicate during that window. Bounded (the re-embed pass is
+  // batched and finishes in minutes), self-healing once the pass completes,
+  // and a missed dedup is a duplicate row, not data loss — quality, not
+  // correctness. Stage 1 (this PR) doesn't trigger this at all: no re-embed
+  // runs, so there's no mixed-space window until stage 2's separate,
+  // deliberate ops step.
   let embedding: number[] | null = Array.isArray(content.embedding) ? content.embedding : null;
   if (!embedding) {
     try {
-      embedding = await getEmbedding(content.content);
+      embedding = await getEmbedding(content.content, "document");
     } catch {
       embedding = null;
     }
@@ -621,9 +640,11 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     // Generate embedding from content text (no-op if the dedup gate above
-    // already computed one for this content).
+    // already computed one for this content). flair#504 Phase 2: 'document'
+    // — see runDedupGate's comment above for why all three Memory doc sites
+    // must move together.
     if (content.content && !content.embedding) {
-      const vec = await getEmbedding(content.content);
+      const vec = await getEmbedding(content.content, "document");
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
@@ -775,9 +796,12 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     // Re-generate embedding if content changed (no-op if the dedup gate above
-    // already computed one for this content).
+    // already computed one for this content). flair#504 Phase 2: 'document'
+    // — this is also the regen branch `flair reembed` triggers (clears
+    // embedding/embeddingModel then hits this put()), so it's what actually
+    // re-embeds a stale row WITH the prefix once stage 2 runs.
     if (content.content && !content.embedding) {
-      const vec = await getEmbedding(content.content);
+      const vec = await getEmbedding(content.content, "document");
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 

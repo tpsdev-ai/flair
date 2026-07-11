@@ -39,8 +39,16 @@ delete (process.env as any).FLAIR_PUBLIC;
 // values against anything) — length differing between the two files' mocks
 // doesn't matter to either.
 const FAKE_EMBEDDING = [1, ...Array(127).fill(0)];
+// flair#504 Phase 2: records the inputType every getEmbedding() call
+// receives, so a dedicated test can pin that MemoryBootstrap.ts's
+// task-relevance query embed passes 'query' (currentTask is a search query
+// against stored memories, never stored content itself).
+let embedInputTypeCalls: (string | undefined)[] = [];
 mock.module("../../resources/embeddings-provider.ts", () => ({
-  getEmbedding: async (_text: string) => FAKE_EMBEDDING,
+  getEmbedding: async (_text: string, inputType?: string) => {
+    embedInputTypeCalls.push(inputType);
+    return FAKE_EMBEDDING;
+  },
   getModelId: () => "mock-embedding-model",
   getMode: () => "local",
 }));
@@ -122,6 +130,7 @@ const agentCtx = (agentId: string, isAdmin = false) => ({ tpsAgent: agentId, tps
 function reset() {
   memoryStore = new Map();
   memoryGrants = [];
+  embedInputTypeCalls = [];
 }
 
 // formatMemory() (resources/MemoryBootstrap.ts) renders each memory's content
@@ -297,6 +306,12 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
       agentId: "agent-grantee", includeSoul: false, currentTask: "investigate the thing",
     });
     expect(res.context).toContain("[via agent-owner] TEAMMATE-ATTR-FINDING");
+
+    // flair#504 Phase 2: currentTask is a search QUERY against stored
+    // memories, never stored content — MemoryBootstrap.ts's task-relevance
+    // embed call site must pass 'query'.
+    expect(embedInputTypeCalls.length).toBeGreaterThan(0);
+    expect(embedInputTypeCalls.every((t) => t === "query")).toBe(true);
   });
 
   it("the caller's own memory renders WITHOUT any [via ...] attribution (unchanged)", async () => {
