@@ -6,6 +6,17 @@ declare module "@harperfast/harper" {
   };
   export const tables: Record<string, any>;
   export const databases: Record<string, any>;
+  /**
+   * Process-wide model-call facade (#1325). Only the `embed()` shape flair
+   * currently consumes (resources/embeddings-provider.ts) is stubbed here —
+   * mirrors @harperfast/harper's resources/models/types.ts EmbedOpts.
+   */
+  export const models: {
+    embed: (
+      input: string | string[],
+      opts?: { model?: string; requires?: string[]; inputType?: "document" | "query"; signal?: AbortSignal }
+    ) => Promise<Float32Array[]>;
+  };
   export class Resource {
     static search?(query: any): AsyncIterable<any>;
     getContext(): any;

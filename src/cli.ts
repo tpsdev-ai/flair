@@ -411,6 +411,105 @@ function harperBin(): string | null {
   return null;
 }
 
+/**
+ * Resolve harper-fabric-embeddings' entry file as an ABSOLUTE path, for use as
+ * Harper's `models.embedding.default.backend` value (flair#504 Phase 1).
+ *
+ * Harper's non-built-in `backend:` resolution (bootstrap.ts's
+ * resolveBackendSpecifier) treats a BARE package name as resolvable from the
+ * Harper INSTANCE ROOT's node_modules (ROOTPATH — "where the operator installs
+ * the backend", per that file's own doc comment) — NOT from flair's own
+ * package directory. Flair's ROOTPATH (~/.flair/data by default) is a data
+ * dir, not an npm install root, so a bare `backend: 'harper-fabric-embeddings'`
+ * fails with "Cannot find module" (verified). An absolute path specifier
+ * sidesteps that resolution entirely — resolveBackendSpecifier() passes it
+ * straight to `import()`.
+ *
+ * `createRequire(import.meta.url)` anchors resolution to THIS file's own
+ * location (dist/cli.js, inside flair's package dir) — the same directory
+ * harper-fabric-embeddings is actually installed into as a flair dependency —
+ * and respects its package.json `exports`/`main`, so this doesn't hardcode an
+ * internal `dist/index.js` path that could drift.
+ */
+function resolveEmbeddingBackendModule(): string | null {
+  try {
+    const { createRequire } = require("node:module") as typeof import("node:module");
+    const req = createRequire(import.meta.url);
+    return req.resolve("harper-fabric-embeddings");
+  } catch {
+    return null; // harper-fabric-embeddings not installed — models.embedding.default is simply omitted below
+  }
+}
+
+/**
+ * Build the `models.embedding.default` config block (flair#504 Phase 1) for
+ * HARPER_SET_CONFIG, or `undefined` if harper-fabric-embeddings can't be
+ * resolved (degrades to Harper's keyword-only fallback, matching the
+ * pre-migration behavior when the embeddings engine was unavailable).
+ */
+function buildModelsConfig(modelsDir: string): Record<string, unknown> | undefined {
+  const backend = resolveEmbeddingBackendModule();
+  if (!backend) return undefined;
+  return {
+    embedding: {
+      default: { backend, modelName: "nomic-embed-text", modelsDir },
+    },
+  };
+}
+
+/**
+ * Read back the persisted `<ROOTPATH>/harper-config.yaml` (best-effort — null
+ * on any read/parse failure, e.g. a not-yet-installed instance).
+ *
+ * HARPER_SET_CONFIG is force-override + drift-lock (Harper's own env-var
+ * config docs, config/harperConfigEnvVars.ts): a key it set on one boot gets
+ * REVERTED when a LATER boot's HARPER_SET_CONFIG omits it — even if that
+ * later boot supplies a DIFFERENT HARPER_SET_CONFIG with unrelated keys
+ * present (verified empirically: installing with
+ * `{http, authentication, models}` then restarting with only `{models}`
+ * reverted `authentication.authorizeLocal` from false back to Harper's
+ * default `true`). `flair start`'s no-launchd-plist fallback and
+ * `startFlairProcess()` only ever set a handful of individual env vars, never
+ * HARPER_SET_CONFIG — safe before flair#504, since nothing was tracked as
+ * HARPER_SET_CONFIG-sourced. Adding `models` there now (see call sites below)
+ * means those paths supply SOME HARPER_SET_CONFIG going forward, so they must
+ * also re-assert whatever `authentication`/`http`/`operationsApi` the
+ * INSTALL-time HARPER_SET_CONFIG previously set — this reads those back from
+ * the file (rather than reconstructing/guessing them, which could drift from
+ * what's actually persisted) so the merge is exact.
+ */
+function readPersistedHarperConfig(dataDir: string): Record<string, any> | null {
+  try {
+    const p = join(dataDir, "harper-config.yaml");
+    if (!existsSync(p)) return null;
+    const doc = parseYaml(readFileSync(p, "utf-8"));
+    return doc && typeof doc === "object" ? (doc as Record<string, any>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a HARPER_SET_CONFIG payload that re-asserts the persisted
+ * authentication/port config (see readPersistedHarperConfig's doc) alongside
+ * the models.embedding.default block — for spawn sites that don't own the
+ * full install-time config (flair#504 Phase 1). Returns `undefined` if
+ * there's nothing to assert (no persisted config AND no models block),
+ * matching pre-existing behavior (no HARPER_SET_CONFIG at all) exactly.
+ */
+function buildRestartHarperSetConfig(dataDir: string, modelsDir: string): string | undefined {
+  const persisted = readPersistedHarperConfig(dataDir);
+  const modelsConfig = buildModelsConfig(modelsDir);
+  const setConfigObj: Record<string, unknown> = {};
+  if (persisted?.authentication) setConfigObj.authentication = persisted.authentication;
+  if (typeof persisted?.http?.port === "number") setConfigObj.http = { port: persisted.http.port };
+  if (typeof persisted?.operationsApi?.network?.port === "number") {
+    setConfigObj.operationsApi = { network: { port: persisted.operationsApi.network.port } };
+  }
+  if (modelsConfig) setConfigObj.models = modelsConfig;
+  return Object.keys(setConfigObj).length > 0 ? JSON.stringify(setConfigObj) : undefined;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function b64(bytes: Uint8Array): string {
@@ -2085,6 +2184,13 @@ program
 
     let alreadyRunning = false;
 
+    // <ROOTPATH>/models — resources/embeddings-provider.ts's resolveModelsDir()
+    // tier 2 default; an operator override already in the environment wins
+    // (tier 1). Scoped above the alreadyRunning branch below (not just inside
+    // the fresh-start path) since the launchd plist step needs it too, even
+    // when Harper was already running and the fresh-spawn branch was skipped.
+    const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
+
     if (!opts.skipStart) {
       // Check if already running
       try {
@@ -2110,6 +2216,18 @@ program
         // request is no longer auto-authorized as super_user. Every ops-API
         // seed call below (seedAgentViaOpsApi et al.) already passes a real
         // adminPass via Basic auth, so this does not change local-init behavior.
+        //
+        // models (flair#504 Phase 1): registers harper-fabric-embeddings as
+        // Harper's `embedding`/`default` backend. This lives in HARPER_SET_CONFIG,
+        // NOT config.yaml — Harper's bootstrapModels() only reads the `models:`
+        // block from the INSTANCE-ROOT config (isRoot:true, this JSON), never a
+        // per-application config.yaml (verified; see config.yaml's own comment).
+        // HARPER_SET_CONFIG must be present on EVERY spawn, not just install —
+        // omitting it on a later run was observed to corrupt (strip) the
+        // persisted `models:` section via Harper's own env-var-removal cleanup,
+        // since this is a net-new config section with no HARPER_DEFAULT_CONFIG
+        // baseline to fall back to.
+        const modelsConfig = buildModelsConfig(modelsDir);
         const harperSetConfig = JSON.stringify({
           rootPath: dataDir,
           http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
@@ -2117,11 +2235,13 @@ program
           mqtt: { network: { port: null }, webSocket: false },
           localStudio: { enabled: false },
           authentication: { authorizeLocal: false, enableSessions: true },
+          ...(modelsConfig ? { models: modelsConfig } : {}),
         });
 
         const env: Record<string, string> = {
           ...(process.env as Record<string, string>),
           ROOTPATH: dataDir,
+          FLAIR_MODELS_DIR: modelsDir,
           HARPER_SET_CONFIG: harperSetConfig,
           DEFAULTS_MODE: "dev",
           HDB_ADMIN_USERNAME: adminUser,
@@ -2192,6 +2312,10 @@ program
           const opsSocket = join(dataDir, "operations-server");
           // authorizeLocal: false (flair#654) — same posture as the initial spawn
           // above; the launchd-managed process must not diverge from it.
+          // models (flair#504 Phase 1) — see the initial spawn's comment above;
+          // launchd's persistent plist must carry the same HARPER_SET_CONFIG on
+          // every restart, not just the original `flair init`.
+          const plistModelsConfig = buildModelsConfig(modelsDir);
           const setConfig = JSON.stringify({
             rootPath: dataDir,
             http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
@@ -2199,6 +2323,7 @@ program
             mqtt: { network: { port: null }, webSocket: false },
             localStudio: { enabled: false },
             authentication: { authorizeLocal: false, enableSessions: true },
+            ...(plistModelsConfig ? { models: plistModelsConfig } : {}),
           });
           const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -2216,6 +2341,7 @@ program
   <key>EnvironmentVariables</key>
   <dict>
     <key>ROOTPATH</key><string>${dataDir}</string>
+    <key>FLAIR_MODELS_DIR</key><string>${modelsDir}</string>
     <key>HARPER_SET_CONFIG</key><string>${setConfig.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;")}</string>
     <key>DEFAULTS_MODE</key><string>dev</string>
     <key>HDB_ADMIN_USERNAME</key><string>${adminUser}</string>
@@ -7536,9 +7662,12 @@ program
 
     const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
     const opsPort = resolveOpsPort(opts);
+    const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       ROOTPATH: dataDir,
+      // See the matching comment at the install-time spawn site above.
+      FLAIR_MODELS_DIR: modelsDir,
       DEFAULTS_MODE: "dev",
       HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
       HTTP_PORT: String(port),
@@ -7550,6 +7679,13 @@ program
     if (adminPass) {
       env.HDB_ADMIN_PASSWORD = adminPass;
     }
+    // models (flair#504 Phase 1) — see buildRestartHarperSetConfig's doc:
+    // this no-launchd-plist fallback never set HARPER_SET_CONFIG before;
+    // registering the embedding backend here now means it must also
+    // re-assert the persisted authentication/port config, or HARPER_SET_CONFIG's
+    // drift-lock reverts them (verified).
+    const restartSetConfig = buildRestartHarperSetConfig(dataDir, modelsDir);
+    if (restartSetConfig) env.HARPER_SET_CONFIG = restartSetConfig;
 
     const proc = spawn(process.execPath, [bin, "run", "."], {
       cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
@@ -7651,9 +7787,12 @@ async function startFlairProcess(port: number): Promise<void> {
   // to the initial Harper spawn) followed by `flair restart` would silently
   // drop admin credentials — any subsequent auth'd call returns 401.
   const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
+  const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     ROOTPATH: dataDir,
+    // See the matching comment at the install-time spawn site above.
+    FLAIR_MODELS_DIR: modelsDir,
     DEFAULTS_MODE: "dev",
     HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
     HTTP_PORT: String(port),
@@ -7662,6 +7801,13 @@ async function startFlairProcess(port: number): Promise<void> {
   if (adminPass) {
     env.HDB_ADMIN_PASSWORD = adminPass;
   }
+  // models (flair#504 Phase 1) — see buildRestartHarperSetConfig's doc: this
+  // fallback (no launchd plist) never set HARPER_SET_CONFIG before;
+  // registering the embedding backend here now means it must also re-assert
+  // the persisted authentication/port config, or HARPER_SET_CONFIG's
+  // drift-lock reverts them (verified).
+  const restartSetConfig = buildRestartHarperSetConfig(dataDir, modelsDir);
+  if (restartSetConfig) env.HARPER_SET_CONFIG = restartSetConfig;
 
   const proc = spawn(process.execPath, [bin, "run", "."], {
     cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
