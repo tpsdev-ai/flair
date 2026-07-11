@@ -1,4 +1,4 @@
-export { FlairClient, FlairError } from "./client.js";
+export { FlairClient, FlairError, canonicalRelationshipId } from "./client.js";
 export { loadPrivateKey, resolveKeyPath, signRequest } from "./auth.js";
 export type {
   FlairClientConfig,
@@ -9,4 +9,5 @@ export type {
   SoulEntry,
   SearchResult,
   BootstrapResult,
+  Relationship,
 } from "./types.js";

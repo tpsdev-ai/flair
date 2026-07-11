@@ -211,3 +211,171 @@ describe("federation-edge-hardening slice 1 — Relationship.put() write-time or
     expect(res.originatorInstanceId).not.toBe("flair_local_test");
   });
 });
+
+// ─── relationship-write-path: auth reconcile (put/delete → resolveAgentAuth) ──
+//
+// Both K&S caught that Relationship.put() AND delete() used the OLDER
+// `request.tpsAgent`-direct pattern (no internal/admin verdict handling,
+// anonymous and true-internal calls indistinguishable). This is the SAME
+// mock+import file that owns Relationship.ts's dynamic import (see the header
+// doc comment above) — these tests exercise the REAL class's put()/delete()
+// against resolveAgentAuth's three-way verdict, mirroring the style already
+// used for allowRead()/get() above.
+describe("relationship-write-path — Relationship.put() auth reconcile (resolveAgentAuth)", () => {
+  it("anonymous is denied with 401, nothing written", async () => {
+    const r = makeRelationship(anonCtx());
+    const res: any = await r.put({ id: "rel-anon", subject: "a", predicate: "b", object: "c" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(401);
+    expect(relationshipStore.has("rel-anon")).toBe(false);
+  });
+
+  it("a verified non-admin agent's write is stamped with agentId from the verdict, even when the body omits it", async () => {
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-1", subject: "nathan", predicate: "manages", object: "flint" });
+    expect(res instanceof Response).toBe(false);
+    expect(res.agentId).toBe("agent-1");
+  });
+
+  it("a non-admin agent CANNOT write a relationship claiming another agent's id in the body — 403, not silently rewritten", async () => {
+    const r = makeRelationship(agentCtx("agent-attacker"));
+    const res: any = await r.put({ id: "rel-2", agentId: "agent-victim", subject: "a", predicate: "b", object: "c" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(403);
+    expect(relationshipStore.has("rel-2")).toBe(false);
+  });
+
+  it("a non-admin agent's body agentId is ALWAYS overwritten from the verdict, even when it already matches (never trust the body)", async () => {
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-3", agentId: "agent-1", subject: "a", predicate: "b", object: "c" });
+    expect(res instanceof Response).toBe(false);
+    expect(res.agentId).toBe("agent-1");
+  });
+
+  it("an admin agent may write on behalf of another agentId — unfiltered, matches the get()/search()/delete() admin-bypass idiom", async () => {
+    const r = makeRelationship(agentCtx("agent-admin", true));
+    const res: any = await r.put({ id: "rel-4", agentId: "agent-other", subject: "a", predicate: "b", object: "c" });
+    expect(res instanceof Response).toBe(false);
+    expect(res.agentId).toBe("agent-other");
+  });
+
+  it("an internal call (no request context) passes agentId through unchanged — trusted, forward-looking parity with Memory.post()/put()", async () => {
+    const r: any = new (Relationship as any)();
+    r.getContext = () => undefined;
+    const res: any = await r.put({ id: "rel-5", agentId: "agent-internal-caller", subject: "a", predicate: "b", object: "c" });
+    expect(res instanceof Response).toBe(false);
+    expect(res.agentId).toBe("agent-internal-caller");
+  });
+
+  it("an admin/internal write missing agentId entirely is rejected 400 (schema requires it) rather than writing a null-owner row", async () => {
+    const r = makeRelationship(agentCtx("agent-admin", true));
+    const res: any = await r.put({ id: "rel-6", subject: "a", predicate: "b", object: "c" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("relationship-write-path — Relationship.delete() auth reconcile (resolveAgentAuth)", () => {
+  it("anonymous is denied with 401", async () => {
+    relationshipStore.set("rel-del-1", { id: "rel-del-1", agentId: "owner", subject: "a", predicate: "b", object: "c" });
+    const r = makeRelationship(anonCtx());
+    const res: any = await r.delete("rel-del-1");
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(401);
+    expect(relationshipStore.has("rel-del-1")).toBe(true);
+  });
+
+  it("an internal call (no request context) is trusted and can delete", async () => {
+    relationshipStore.set("rel-del-2", { id: "rel-del-2", agentId: "owner", subject: "a", predicate: "b", object: "c" });
+    const r: any = new (Relationship as any)();
+    r.getContext = () => undefined;
+    await r.delete("rel-del-2");
+    expect(relationshipStore.has("rel-del-2")).toBe(false);
+  });
+
+  it("an admin agent is trusted and can delete", async () => {
+    relationshipStore.set("rel-del-3", { id: "rel-del-3", agentId: "owner", subject: "a", predicate: "b", object: "c" });
+    const r = makeRelationship(agentCtx("agent-admin", true));
+    await r.delete("rel-del-3");
+    expect(relationshipStore.has("rel-del-3")).toBe(false);
+  });
+
+  // Cross-agent ownership denial (non-admin) is a Harper Table-resource
+  // binding invariant this in-memory mock cannot faithfully reproduce (the
+  // real `super.get()` with no target resolves to the URL-bound record — see
+  // test/integration/relationship-delete-authz.test.ts's header doc, which
+  // is the permanent regression guard for that exact behavior against a
+  // REAL Harper instance). This test only confirms the auth-verdict dispatch
+  // reaches the ownership-check branch without throwing for a non-admin.
+  it("a non-admin agent's delete of its own relationship id does not throw", async () => {
+    relationshipStore.set("rel-del-4", { id: "rel-del-4", agentId: "agent-1", subject: "a", predicate: "b", object: "c" });
+    const r = makeRelationship(agentCtx("agent-1"));
+    await expect(r.delete("rel-del-4")).resolves.toBeDefined();
+  });
+});
+
+// ─── relationship-write-path: provenance stamp (reuses Memory's buildProvenance) ──
+describe("relationship-write-path — Relationship.put() write-time provenance stamp", () => {
+  it("stamps verified.agentId from the resolved auth verdict for a verified agent", async () => {
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-prov-1", subject: "nathan", predicate: "manages", object: "flint" });
+    expect(typeof res.provenance).toBe("string");
+    const prov = JSON.parse(res.provenance);
+    expect(prov.v).toBe(1);
+    expect(prov.verified.agentId).toBe("agent-1");
+    expect(typeof prov.verified.timestamp).toBe("string");
+  });
+
+  it("stamps verified.agentId=null for an internal (in-process, no per-agent identity) call", async () => {
+    const r: any = new (Relationship as any)();
+    r.getContext = () => undefined;
+    const res: any = await r.put({ id: "rel-prov-2", agentId: "some-agent", subject: "nathan", predicate: "manages", object: "flint" });
+    const prov = JSON.parse(res.provenance);
+    expect(prov.verified.agentId).toBeNull();
+  });
+
+  it("uses the SAME shape as Memory's provenance — {v, verified:{agentId,timestamp}} — no Relationship-specific format", async () => {
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-prov-3", subject: "nathan", predicate: "manages", object: "flint" });
+    const prov = JSON.parse(res.provenance);
+    expect(Object.keys(prov).sort()).toEqual(["v", "verified"]);
+    expect(Object.keys(prov.verified).sort()).toEqual(["agentId", "timestamp"]);
+  });
+
+  // ─── migration-equivalence (same discipline as flair#684's usageCount) ──────
+  it("a pre-provenance relationship row (no provenance field at all) still reads back fine via get() — additive/nullable, not required", async () => {
+    relationshipStore.set("legacy-no-prov", {
+      id: "legacy-no-prov", agentId: "agent-owner", subject: "nathan", predicate: "manages", object: "flint",
+    });
+    const r = makeRelationship(agentCtx("agent-owner"));
+    const res: any = await r.get("legacy-no-prov");
+    expect(res instanceof Response).toBe(false);
+    expect(res.subject).toBe("nathan");
+    expect(res.provenance).toBeUndefined();
+  });
+
+  it("updating a legacy (no-provenance) relationship via put() adds provenance additively without disturbing other fields", async () => {
+    relationshipStore.set("legacy-update", {
+      id: "legacy-update", agentId: "agent-owner", subject: "nathan", predicate: "manages", object: "flint", confidence: 1.0,
+    });
+    const existing = relationshipStore.get("legacy-update");
+    expect(existing.provenance).toBeUndefined();
+
+    const r = makeRelationship(agentCtx("agent-owner"));
+    const res: any = await r.put({ ...existing, confidence: 0.5 });
+    expect(typeof res.provenance).toBe("string");
+    expect(res.subject).toBe("nathan");
+    expect(res.confidence).toBe(0.5);
+  });
+
+  it("search() over a mix of legacy (no provenance) and new (stamped) relationships returns both, unaffected by the new field", async () => {
+    relationshipStore.set("legacy-no-prov-2", { id: "legacy-no-prov-2", agentId: "agent-1", subject: "a", predicate: "b", object: "c" });
+    const r = makeRelationship(agentCtx("agent-1"));
+    await r.put({ id: "new-with-prov", subject: "d", predicate: "e", object: "f" });
+
+    const results: any[] = [];
+    for await (const rec of await r.search()) results.push(rec);
+    const ids = results.map((rec) => rec.id).sort();
+    expect(ids).toEqual(["legacy-no-prov-2", "new-with-prov"].sort());
+  });
+});

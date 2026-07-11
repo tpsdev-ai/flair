@@ -9,7 +9,7 @@
  */
 
 import type { KeyObject } from "node:crypto";
-import { createPrivateKey } from "node:crypto";
+import { createHash, createPrivateKey } from "node:crypto";
 import { loadPrivateKey, resolveKeyPath, signRequest } from "./auth.js";
 import type {
   FlairClientConfig,
@@ -20,6 +20,7 @@ import type {
   SoulEntry,
   SearchResult,
   BootstrapResult,
+  Relationship,
 } from "./types.js";
 
 const DEFAULT_URL = "http://localhost:19926";
@@ -29,6 +30,7 @@ export class FlairClient {
   readonly url: string;
   readonly agentId: string;
   readonly memory: MemoryApi;
+  readonly relationship: RelationshipApi;
   readonly soul: SoulApi;
 
   private privateKey: KeyObject | null = null;
@@ -53,6 +55,7 @@ export class FlairClient {
       this.basicAuth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
     }
     this.memory = new MemoryApi(this);
+    this.relationship = new RelationshipApi(this);
     this.soul = new SoulApi(this);
   }
 
@@ -346,6 +349,124 @@ class MemoryApi {
   /** Delete a memory. */
   async delete(id: string): Promise<void> {
     await this.client.request("DELETE", `/Memory/${id}`);
+  }
+}
+
+// ─── Relationship API ───────────────────────────────────────────────────────
+
+/**
+ * Canonical, per-owner, deterministic Relationship id (relationship-write-path,
+ * K&S-approved refinement) — `base64url(SHA-256(lowercased agentId+subject+
+ * predicate+object))`, truncated to the first 16 bytes (22 base64url chars,
+ * 128-bit collision resistance). A REAL cryptographic hash on purpose
+ * (`crypto.createHash('sha256')`, NOT `Bun.hash` or any weak/platform-specific
+ * hash) — Sherlock: blocks intentional collision attacks; Kern: portable if
+ * flair ever runs on another runtime.
+ *
+ * Hashes ONLY the triple-identity fields (agentId + subject + predicate +
+ * object) — deliberately EXCLUDES confidence/validFrom/validTo/source, so
+ * re-asserting the SAME triple with different mutable fields always maps to
+ * the SAME id. Because Relationship.put() is a PUT-by-primary-key (Harper
+ * table semantics — see resources/Relationship.ts), writing to that same id
+ * again is a natural upsert: mutable fields update, the id stays stable, no
+ * pre-insert query and no race. Fields are joined with a NUL separator before
+ * hashing (not naive string concatenation) so e.g. agentId="a"+subject="bc"
+ * can never hash identically to agentId="ab"+subject="c" — free-text
+ * subject/predicate/object have no natural delimiter of their own.
+ *
+ * `agentId` is folded into the hash so the canonical id is PER-OWNER — two
+ * different agents asserting the identical (subject, predicate, object)
+ * triple get two different ids, never a cross-agent collision/overwrite (the
+ * write path also stamps `agentId` from the server-verified auth verdict,
+ * never the body — see resources/Relationship.ts's put() — so even a
+ * maliciously-crafted URL id can't make a foreign agent's row visible to the
+ * wrong owner; it can only self-collide with the calling agent's own rows).
+ *
+ * Exported (not just used internally by RelationshipApi.write()) so the CLI's
+ * mirrored implementation (src/cli.ts's `relationship add` command, which
+ * cannot import this workspace package into the published `@tpsdev-ai/flair`
+ * CLI bundle — same reasoning as its Memory-id-generation mirroring) can be
+ * cross-checked against this one in tests, and so any other integration
+ * package can compute the same id a relationship will land at without a
+ * round-trip.
+ */
+export function canonicalRelationshipId(agentId: string, subject: string, predicate: string, object: string): string {
+  const material = [agentId, subject, predicate, object].join("\u0000").toLowerCase();
+  return createHash("sha256").update(material, "utf8").digest().subarray(0, 16).toString("base64url");
+}
+
+class RelationshipApi {
+  constructor(private client: FlairClient) {}
+
+  /**
+   * Assert (write) a relationship triple: "record that <subject> <predicate>
+   * <object>". Always writes to the canonical id (canonicalRelationshipId
+   * above), so:
+   *
+   *   (a) Re-asserting the SAME triple (same subject/predicate/object, same
+   *       agentId) UPSERTS the existing row — mutable fields (confidence,
+   *       validFrom/validTo, source) update, the id and createdAt-derived
+   *       identity stay stable. No duplicate rows from re-assertion.
+   *   (b) A CONTRADICTING triple with the same subject/predicate/object but a
+   *       different `validTo` OVERWRITES the prior row's validTo too (the
+   *       old value is lost) — acceptable: the graph wants the CURRENT state
+   *       of a relationship, not a full history chain (Memory's
+   *       supersedes-chain is overkill here).
+   *   (c) A DIFFERENT predicate (e.g. "nathan manages flair" superseded by
+   *       "nathan advises flair") hashes to a DIFFERENT id — a NEW row, and
+   *       the OLD triple is NOT auto-closed. To contradict a prior
+   *       relationship under a different predicate, set its `validTo` (via a
+   *       second write with the OLD subject/predicate/object) or delete it,
+   *       THEN write the new one.
+   *
+   * Never suppresses the write (same invariant as MemoryApi.write() — see
+   * flair#526's history for why "found something similar, don't write" is
+   * the wrong default): dedup here is pure upsert-by-canonical-id, not a
+   * near-duplicate signal.
+   */
+  async write(input: {
+    subject: string;
+    predicate: string;
+    object: string;
+    /** 0.0–1.0, how certain (1.0 = explicitly stated). Server default: 1.0. */
+    confidence?: number;
+    /** ISO timestamp — when this relationship became true. Server default: now. */
+    validFrom?: string;
+    /** ISO timestamp — when it ended. Leave unset for an active relationship;
+     *  set it on a prior write to close out a relationship you're contradicting. */
+    validTo?: string;
+    /** Where this was learned (memory ID, conversation, etc.). */
+    source?: string;
+  }): Promise<Relationship> {
+    const id = canonicalRelationshipId(this.client.agentId, input.subject, input.predicate, input.object);
+    const record: Record<string, unknown> = {
+      id,
+      subject: input.subject,
+      predicate: input.predicate,
+      object: input.object,
+    };
+    if (input.confidence !== undefined) record.confidence = input.confidence;
+    if (input.validFrom !== undefined) record.validFrom = input.validFrom;
+    if (input.validTo !== undefined) record.validTo = input.validTo;
+    if (input.source !== undefined) record.source = input.source;
+
+    const response = await this.client.request<Record<string, unknown>>("PUT", `/Relationship/${id}`, record);
+    return { ...record, id, agentId: this.client.agentId, ...(response ?? {}) } as unknown as Relationship;
+  }
+
+  /** Get a relationship by canonical id (or any id, e.g. one openclaw wrote
+   *  under its own convention). Returns null on 404 (not found / not yours). */
+  async get(id: string): Promise<Relationship | null> {
+    try { return await this.client.request("GET", `/Relationship/${id}`); }
+    catch (e) {
+      if (e instanceof FlairError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  /** Delete a relationship by id. */
+  async delete(id: string): Promise<void> {
+    await this.client.request("DELETE", `/Relationship/${id}`);
   }
 }
 

@@ -57,6 +57,37 @@ export interface Memory {
   deduped?: boolean;
 }
 
+/**
+ * An entity-to-entity relationship triple (subject/predicate/object), with
+ * temporal validity and per-owner canonical dedup (see RelationshipApi.write()
+ * in client.ts for the canonical-id scheme). Free-text, lowercased on write —
+ * NOT the attention-plane `type:value` entity vocabulary, NOT memory-id FKs.
+ */
+export interface Relationship {
+  id: string;
+  agentId: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  /** ISO timestamp — when this relationship became true. */
+  validFrom?: string;
+  /** ISO timestamp — when it ended (absent/null = still active). */
+  validTo?: string;
+  /** 0.0–1.0, how certain (1.0 = explicitly stated). Defaults server-side to 1.0. */
+  confidence?: number;
+  /** Where this was learned (memory ID, conversation, etc.). */
+  source?: string;
+  createdAt: string;
+  updatedAt?: string;
+  /** JSON blob, same shape as Memory.provenance — { v, verified: { agentId,
+   *  timestamp }, claimed?: { model } }. Absent on rows written before this
+   *  field existed (migration-equivalence: additive/nullable). */
+  provenance?: string;
+  /** Always true after a successful write() — the server never suppresses a
+   *  relationship write. */
+  written?: boolean;
+}
+
 /** A soul entry (persistent personality/values). */
 export interface SoulEntry {
   id: string;

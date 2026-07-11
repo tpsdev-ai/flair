@@ -88,6 +88,13 @@ type Relationship @table(database: "flair") {
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1 — see Memory.originatorInstanceId's doc above
                                     # for the full contract (write-time stamp, nullable, preserved across sync merges).
                                     # Stamped server-side in resources/Relationship.ts's put().
+  provenance: String                # JSON blob (relationship-write-path, folded K&S refinement): SAME shape as
+                                    # Memory.provenance above — { v, verified: { agentId, timestamp }, claimed?: { model } }
+                                    # — via the shared resources/provenance.ts buildProvenance(), never a
+                                    # Relationship-specific format. Nullable by design — pre-existing rows read back
+                                    # provenance = null, unchanged behavior (migration-equivalence gate, same
+                                    # discipline as Memory.usageCount/flair#684). Stamped server-side in
+                                    # resources/Relationship.ts's put(); never client-writable.
 }
 
 type Soul @table(database: "flair") {

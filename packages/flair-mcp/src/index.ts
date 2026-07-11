@@ -9,6 +9,7 @@
  *   - memory_update  — update an existing memory by ID (dedup-bypassed)
  *   - memory_get     — retrieve a specific memory by ID
  *   - memory_delete  — delete a memory
+ *   - relationship_store — assert a subject/predicate/object relationship triple
  *   - bootstrap      — cold-start context (soul + recent memories)
  *   - soul_set       — set a personality/context entry
  *   - soul_get       — get a personality/context entry
@@ -379,6 +380,50 @@ server.tool(
     try {
       await flair.memory.delete(id);
       return { content: [{ type: "text", text: `Memory ${id} deleted.` }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
+  },
+);
+
+server.tool(
+  "relationship_store",
+  "Record that <subject> <predicate> <object> — an explicit entity-to-entity relationship triple " +
+    "(e.g. 'nathan manages flair', 'flint reviews cli'), distinct from a free-text memory. " +
+    "ASSERT/UPSERT semantics: writing the SAME triple again (same subject/predicate/object) updates the " +
+    "existing row in place (confidence/validTo/source refresh) rather than creating a duplicate — safe to " +
+    "re-assert. Predicate is free text (no fixed enum) but prefer a small, consistent vocabulary so the graph " +
+    "stays queryable: manages, works_on, reviews, depends_on, replaces, owns, reports_to, advises. " +
+    "TO CONTRADICT a prior relationship: (a) re-asserting the identical triple just updates it — fine. " +
+    "(b) changing validTo on the SAME subject/predicate/object overwrites the old validTo (the graph tracks " +
+    "current state, not full history). (c) changing the PREDICATE (e.g. 'nathan manages flair' -> 'nathan " +
+    "advises flair') creates a SEPARATE relationship — it does NOT automatically close the old one. Close it " +
+    "yourself first: re-assert the OLD triple with a validTo set to now (or call relationship's delete), THEN " +
+    "store the new one.",
+  {
+    subject: z.string().describe("Source entity — a person, project, or service (e.g. 'nathan')"),
+    predicate: z.string().describe(
+      "Relationship type, free text. Recommended vocabulary: manages, works_on, reviews, depends_on, " +
+      "replaces, owns, reports_to, advises — consistency helps recall, but any short verb phrase works.",
+    ),
+    object: z.string().describe("Target entity — a person, project, or service (e.g. 'flair')"),
+    confidence: z.coerce.number().optional().describe("0.0-1.0, how certain (default 1.0 = explicitly stated)"),
+    validFrom: z.string().optional().describe("ISO timestamp this relationship became true (default: now)"),
+    validTo: z.string().optional().describe(
+      "ISO timestamp this relationship ended. Leave unset for an active relationship; set it (via a re-assert " +
+      "of this SAME subject/predicate/object) to close out a relationship you're contradicting with a new predicate.",
+    ),
+    source: z.string().optional().describe("Where this was learned from (a memory ID, conversation, etc.)"),
+  },
+  async ({ subject, predicate, object, confidence, validFrom, validTo, source }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
+    try {
+      const result = await flair.relationship.write({ subject, predicate, object, confidence, validFrom, validTo, source });
+      const confStr = confidence !== undefined ? ` (confidence: ${confidence})` : "";
+      return {
+        content: [{ type: "text", text: `Relationship recorded: ${subject} → ${predicate} → ${object}${confStr} (id: ${result.id})` }],
+        structuredContent: { id: result.id, subject, predicate, object, written: true },
+      };
     } catch (err) {
       return errorResult(err, flair.url);
     }

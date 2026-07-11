@@ -16,6 +16,7 @@ import {
   isConservativeMatch,
   type DedupMatch,
 } from "./dedup.js";
+import { buildProvenance } from "./provenance.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -344,59 +345,17 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
 /**
  * ─── Write-time provenance stamp (memory-provenance slice 1) ────────────────
  *
- * Foundational capture for an emergent-trust model: every Memory write gets a
- * structured, versioned `provenance` JSON blob recording what the server can
- * actually VERIFY about the write, plus (optionally) what the caller merely
- * CLAIMS. Deliberately minimal — verified fields only:
- *
- *   { v: 1,
- *     verified: { agentId: <string|null>, timestamp: <ISO string> },
- *     claimed?: { model: <string> } }
- *
- * - `verified.agentId` comes from the ALREADY-RESOLVED auth verdict
- *   (resolveAgentAuth) — never from anything the caller can forge on the
- *   request body. `kind: "agent"` → the Ed25519-verified agentId. Any other
- *   verdict (in practice only `kind: "internal"` — a trusted in-process call
- *   with no per-agent identity to attribute) stamps `null` rather than
- *   throwing; `kind: "anonymous"` never reaches here — both post()/put()
- *   already 401 it before this point.
- * - `verified.timestamp` reuses the server-clock `createdAt` the caller has
- *   already computed by this point (never client-suppliable) — the same
- *   "stamp a dynamic attribute the server controls" mechanism as the existing
- *   `embeddingModel = getModelId()` stamp elsewhere in this file. NOTE: the
- *   *signed* Ed25519 request timestamp is also available (it's verified in
- *   auth-middleware) but currently discarded there rather than threaded
- *   through to resource methods — a future slice can carry it alongside (or
- *   instead of) this server-clock timestamp without changing this shape's
- *   `v: 1` contract. Not done here to keep auth-middleware untouched.
- * - `claimed.model` is an OPTIONAL, UNVERIFIED passthrough: included only
- *   when the incoming write payload itself already carries a non-empty
- *   string `model` field. No client/CLI sets one today — this just means the
- *   server won't discard it if/when a future write path does. Never
- *   invented, never defaulted, and the `claimed` key is omitted entirely
- *   (not stamped as `{}`) when absent.
- *
- * Deliberately NOT implemented in this slice: a context-fingerprint field —
- * bootstrap doesn't return the IDs a fingerprint would need, so it requires
- * client cooperation that's out of scope here.
+ * `buildProvenance` itself now lives in ./provenance.ts (imported above) —
+ * extracted so resources/Relationship.ts's write path can reuse the EXACT
+ * same `{v, verified, claimed?}` shape (the relationship-write-path spec's
+ * "reuse buildProvenance as-is" contract) instead of a hand-copied format
+ * that could drift. See that module for the full field-by-field rationale
+ * (verified.agentId from the auth verdict never the body, verified.timestamp
+ * = the server-computed createdAt, optional unverified claimed.model
+ * passthrough). Deliberately NOT implemented in this slice: a
+ * context-fingerprint field — bootstrap doesn't return the IDs a fingerprint
+ * would need, so it requires client cooperation that's out of scope here.
  */
-function buildProvenance(auth: AgentAuthVerdict, createdAt: string, content: any): string {
-  const provenance: {
-    v: 1;
-    verified: { agentId: string | null; timestamp: string };
-    claimed?: { model: string };
-  } = {
-    v: 1,
-    verified: {
-      agentId: auth.kind === "agent" ? auth.agentId : null,
-      timestamp: createdAt,
-    },
-  };
-  if (typeof content?.model === "string" && content.model.length > 0) {
-    provenance.claimed = { model: content.model };
-  }
-  return JSON.stringify(provenance);
-}
 
 /**
  * ─── Write-time originatorInstanceId stamp (federation-edge-hardening slice 1) ──
