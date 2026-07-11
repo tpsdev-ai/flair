@@ -9,10 +9,14 @@
  *   - entity-overlap candidates from WorkspaceState (internal server-side
  *     path, Sherlock Option 1 — the #678 AttentionQuery pattern) and OrgEvent
  *     (org-open read model, no per-agent scoping to respect),
- *   - semantic-match candidates from the SAME scored Memory list #550's
- *     existing code already computes during bootstrap (dot-product against
- *     the caller's embedded currentTask, `score > 0.3` relevance floor — no
- *     new embedding code here or anywhere in this feature),
+ *   - semantic-match candidates from the SAME scored candidate pool #550's
+ *     existing code already computes during bootstrap (HNSW cosine
+ *     similarity against the caller's embedded currentTask, via the bounded
+ *     retrieveCandidates() core — flair-bootstrap-scale-fix replaced the
+ *     original full-corpus JS dot-product scan with this bounded pushdown;
+ *     same `score > 0.3` relevance floor, same "no new embedding code"
+ *     property — see resources/MemoryBootstrap.ts and resources/
+ *     semantic-retrieval-core.ts),
  *   - the freshness gate from the Presence roster (resources/
  *     presence-internal.ts's getPresenceRoster(), the SAME internal path
  *     #678 established — never the raw table),
@@ -42,7 +46,7 @@ export interface EntityMatchInput {
 
 export interface SemanticMatchInput {
   agentId: string;
-  /** #550's existing dot-product score — already > 0.3 (the relevance floor) by construction. */
+  /** #550's existing candidate score (HNSW cosine similarity, flair-bootstrap-scale-fix) — already > 0.3 (the relevance floor) by construction. */
   score: number;
   /** Short display text for the matching memory (summary, falling back to content). */
   content: string;

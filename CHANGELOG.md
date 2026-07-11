@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### ⚡ Bootstrap scale fix — bounded queries replace the org-wide memory scan
+
+`MemoryBootstrap.post()` loaded the entire org's non-private Memory corpus into RAM on every bootstrap call (an unbounded `Memory.search()` — no `limit`/`select`, every row's full 768-float embedding vector included) then ran a hand-rolled O(N·d) JS dot-product scan over all of it. Both scaled with the size of the whole org's memory corpus, not the caller's own — a liability on a hot, every-session path that got worse as collision surfacing (flair#681) and open-within-org reads (flair#578) widened the scanned set.
+
+- **Extracted a pure retrieval core** (`resources/semantic-retrieval-core.ts`, `retrieveCandidates()`) from `SemanticSearch.post()` — the HNSW/BM25 retrieval + all post-retrieval filtering (temporal/expiry/supersede exclusion, the `scope.isAllowed()` defense-in-depth re-check), taking primitives only, never a Resource instance. Auth, rate-limiting, the reranker, and the `retrievalCount`/`lastRetrieved` hit-tracking side effects stay in `SemanticSearch.post()`'s wrapper, so bootstrap's internal call never trips them. `SemanticSearch`'s own behavior is unchanged (full unit-test suite green; the isolated recall-harness returns byte-identical p@3/MRR before and after).
+- **Own-scoped pushdowns** for the permanent/recent/predicted lifecycle slices: `Memory.search` calls conditioned on `agentId==self` (+ durability/createdAt, all `@indexed`), explicit `select` (no raw embedding) — replacing the post-load JS filter over the full org corpus.
+- **Bounded HNSW candidate pool** for task-relevant/teammate/collision surfaces via the same `retrieveCandidates()` core — HNSW-leg pushdown only (no BM25 fusion, no reranker; a different, likely-worse cost profile for a one-shot session load — opt-in follow-on), sized `K = max(3 × expected fill, 5 × teammate count, 50)`, capped at 100.
+- Per-set supersede exclusion (own slices independently, candidate pool independently) — the unconditional past-`validTo` guard (the primary supersede defense) is preserved verbatim.
+- `memoriesAvailable` is now an own-scoped count (`agentId==self`, a cheap indexed seek) instead of the org-wide exact figure — computing that exactly was itself the scan being removed.
+
+No scope widening: own-scoped queries are strictly narrower than the previous load-then-filter; the candidate pool carries the identical `scope.condition` (own OR non-private). Measured on a synthetic 6,100-record corpus (6,000 org-wide + 100 own) against an ephemeral Harper instance: bootstrap latency dropped from 350ms (cold) / 309ms (warm mean) to 91ms / 48ms.
+
 ### 🎯 Usage-feedback signal — `usageCount` + `usageBoost` replaces `retrievalBoost` (flair#683)
 
 flair#623 found `compositeScore` measurably losing to raw relevance and flipped the default to `raw`. The root cause was the *signal*, not the model: the reinforcement term was `retrievalCount` — incremented on every search hit (`resources/SemanticSearch.ts`) — so a doc surfacing once got boosted, surfaced more, boosted more, independent of whether it was ever actually useful. This ships a stronger, distinct signal: verified *use*, captured explicitly.
