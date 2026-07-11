@@ -43,12 +43,18 @@
  * see README.md.
  *
  * USAGE:
- *   bun run test/bench/recall-harness/run.ts                  # full sweep: hybrid on+off, 3 runs each
+ *   bun run test/bench/recall-harness/run.ts                  # full sweep: hybrid on+off, 3 runs each, corpus=v1
  *   bun run test/bench/recall-harness/run.ts --runs 1          # quick single-run pass (less trustworthy)
  *   bun run test/bench/recall-harness/run.ts --hybrid on        # only the production-default config
  *   bun run test/bench/recall-harness/run.ts --hybrid on --rerank  # also spawn a hybrid+rerank config
  *   bun run test/bench/recall-harness/run.ts --verbose          # print every query's rank, not just aggregates
  *   bun run test/bench/recall-harness/run.ts --keep-on-fail     # leave a failed run's Harper installDir on disk
+ *   bun run test/bench/recall-harness/run.ts --corpus v2        # eval instrument v2 (corpus-v2.ts) — the
+ *                                                                # standing gate for future embedding/scoring
+ *                                                                # changes; --corpus defaults to "v1" so every
+ *                                                                # existing published number stays reproducible
+ *                                                                # verbatim without passing this flag. See
+ *                                                                # corpus-v2.ts's header and README.md.
  *
  * Reads nothing from the network except what Harper itself needs (model
  * files from FLAIR_MODELS_DIR or a HuggingFace download on first use).
@@ -60,7 +66,9 @@ import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../../helpers/harper-lifecycle";
-import { CORPUS, QUERIES, type QueryKind, type CorpusRecord } from "./corpus";
+import * as CorpusV1 from "./corpus";
+import * as CorpusV2 from "./corpus-v2";
+import type { QueryKind, CorpusRecord } from "./corpus";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const AGENT_ID = "recall-harness-corpus";
@@ -90,7 +98,6 @@ const HYBRID_ARG = argVal("--hybrid", "both"); // "both" | "on" | "off"
 const WITH_RERANK = process.argv.includes("--rerank");
 const VERBOSE = process.argv.includes("--verbose");
 const KEEP_ON_FAIL = process.argv.includes("--keep-on-fail");
-const SEARCH_LIMIT = 20; // candidateLimit = limit*5 = 100 > CORPUS.length(87) → full HNSW coverage
 // flair#683: run ONLY the usage-injection rematch (see "USAGE-FEEDBACK
 // REMATCH" section below) instead of the base composite-vs-raw sweep above.
 const USAGE_REMATCH = process.argv.includes("--usage-rematch");
@@ -104,6 +111,37 @@ const PREFIXES_ARG = argVal("--prefixes", "both"); // "both" | "on" | "off"
 // Run ONLY the mixed-space canary (see "MIXED-SPACE CANARY" section below)
 // instead of the main sweep.
 const RUN_CANARY = process.argv.includes("--canary");
+// eval instrument v2 (flair#504 checkpoint 2): "v1" (default) keeps every
+// existing published number byte-reproducible — corpus.ts is NEVER imported
+// conditionally in a way that changes its content, so a bare `bun run
+// run.ts` with no --corpus flag behaves identically to before this flag
+// existed. "v2" swaps in corpus-v2.ts (test/bench/recall-harness/corpus-v2.ts)
+// — a larger, harder instrument with enough queries per "kind" to make a
+// kind-level delta a real signal instead of 1-2 queries shifting rank at
+// v1's N=30. See corpus-v2.ts's header and README.md's "v2" section.
+const CORPUS_ARG = argVal("--corpus", "v1"); // "v1" | "v2"
+if (CORPUS_ARG !== "v1" && CORPUS_ARG !== "v2") {
+  console.error(`FATAL: --corpus must be "v1" or "v2", got "${CORPUS_ARG}"`);
+  process.exit(2);
+}
+const { CORPUS, QUERIES } = CORPUS_ARG === "v2" ? CorpusV2 : CorpusV1;
+// Every topic cluster present in whichever corpus got selected — drives the
+// per-cluster reporting breakdown below. Computed once at module load since
+// CORPUS is fixed for the whole process (selected by --corpus above).
+const CLUSTERS: string[] = [...new Set(CORPUS.map(c => c.cluster))].sort();
+const MARKER_TO_CLUSTER: Record<string, string> = Object.fromEntries(CORPUS.map(c => [c.marker, c.cluster]));
+// Not every cluster necessarily has a query targeting it (not required by
+// design — see corpus-v2.ts's header); the per-cluster report below only
+// considers clusters that do, so a cluster with zero ground-truth queries
+// doesn't show up as a fake "0.000 MRR" mover.
+const CLUSTERS_WITH_QUERIES = new Set<string>(QUERIES.map(q => MARKER_TO_CLUSTER[q.expectMarker]).filter(Boolean));
+
+// candidateLimit = limit*5 must exceed CORPUS.length or a correct answer can
+// fall outside the candidate set entirely (an artifact of the harness, not a
+// real recall signal) — v1's 20 (candidateLimit=100 > 87) is left EXACTLY as
+// it was so --corpus v1 stays byte-identical to every previously-published
+// number; v2's much larger corpus needs a proportionally larger limit.
+const SEARCH_LIMIT = CORPUS_ARG === "v2" ? Math.ceil(CORPUS.length / 5) + 10 : 20;
 
 const hybridValues: boolean[] = HYBRID_ARG === "on" ? [true] : HYBRID_ARG === "off" ? [false] : [true, false];
 const prefixValues: boolean[] = PREFIXES_ARG === "on" ? [true] : PREFIXES_ARG === "off" ? [false] : [true, false];
@@ -197,9 +235,9 @@ async function waitSearchable(harper: HarperInstance, agent: TestAgent, timeoutM
 }
 
 // ─── Measurement ─────────────────────────────────────────────────────────────
-interface QueryRow { q: string; kind: QueryKind; expectMarker: string; rank: number /* 0-based, -1 = not found */ }
+interface QueryRow { q: string; kind: QueryKind; cluster: string; expectMarker: string; rank: number /* 0-based, -1 = not found */ }
 interface KindStats { p3: number; mrr: number; n: number }
-interface ScoringResult { scoring: "raw" | "composite"; p3: number; mrr: number; n: number; byKind: Record<QueryKind, KindStats>; rows: QueryRow[] }
+interface ScoringResult { scoring: "raw" | "composite"; p3: number; mrr: number; n: number; byKind: Record<QueryKind, KindStats>; byCluster: Record<string, KindStats>; rows: QueryRow[] }
 
 function statsFor(rows: QueryRow[]): { p3: number; mrr: number; n: number } {
   if (!rows.length) return { p3: 0, mrr: 0, n: 0 };
@@ -216,12 +254,13 @@ async function runQueries(harper: HarperInstance, agent: TestAgent, scoring: "ra
     if (!res.ok) throw new Error(`search failed (scoring=${scoring}) for "${q}": HTTP ${res.status} ${JSON.stringify(res.body).slice(0, 200)}`);
     const ids: string[] = (res.body.results || []).map((r: any) => r.id);
     const rank = ids.indexOf(expectId);
-    rows.push({ q, kind, expectMarker, rank });
+    rows.push({ q, kind, cluster: MARKER_TO_CLUSTER[expectMarker] ?? "UNKNOWN", expectMarker, rank });
   }
   const overall = statsFor(rows);
   const kinds: QueryKind[] = ["stress", "trap", "hard", "clean"];
   const byKind = Object.fromEntries(kinds.map(k => [k, statsFor(rows.filter(r => r.kind === k))])) as Record<QueryKind, KindStats>;
-  return { scoring, ...overall, byKind, rows };
+  const byCluster = Object.fromEntries(CLUSTERS.map(c => [c, statsFor(rows.filter(r => r.cluster === c))])) as Record<string, KindStats>;
+  return { scoring, ...overall, byKind, byCluster, rows };
 }
 
 // One independent (spawn → register → seed → wait → measure[raw,composite] →
@@ -281,9 +320,53 @@ function aggStats(vals: number[]): { mean: number; se: number | null } {
 const fmt = (x: number, d = 3) => x.toFixed(d);
 const fmtAgg = (a: { mean: number; se: number | null }, d = 3) => a.se != null ? `${fmt(a.mean, d)} ± ${fmt(a.se, d)}` : fmt(a.mean, d);
 
+// Per-cluster "notable movers" between two arms (e.g. prefixes on vs off, or
+// composite vs raw) — added for eval instrument v2 (flair#504 checkpoint 2):
+// v1's 12 clusters are few enough to just read off the by-kind breakdown,
+// but v2's 30 clusters need this to avoid burying the signal in noise. Only
+// clusters where BOTH arms actually had at least one query targeting them
+// (n>0) are considered; sorted by MRR delta (b − a), most-improved first,
+// with the biggest regressions printed at the bottom of the same list so a
+// reader sees both tails without two separate dumps. `topN` caps how many
+// gainers/losers are printed per side — the full per-cluster numbers are
+// always available by re-running with a narrower --hybrid/--prefixes filter
+// if a reader needs more than the notable movers.
+function printClusterMovers(
+  aByCluster: Record<string, { p3: number[]; mrr: number[] }>,
+  bByCluster: Record<string, { p3: number[]; mrr: number[] }>,
+  labelA: string,
+  labelB: string,
+  topN = 5,
+): void {
+  const movers: { cluster: string; aMrr: number; bMrr: number; delta: number }[] = [];
+  for (const cluster of CLUSTERS) {
+    if (!CLUSTERS_WITH_QUERIES.has(cluster)) continue; // no query targets this cluster — nothing to compare
+    const aVals = aByCluster[cluster]?.mrr ?? [];
+    const bVals = bByCluster[cluster]?.mrr ?? [];
+    if (!aVals.length || !bVals.length) continue;
+    const aMrr = aggStats(aVals).mean, bMrr = aggStats(bVals).mean;
+    movers.push({ cluster, aMrr, bMrr, delta: bMrr - aMrr });
+  }
+  if (!movers.length) { console.log(`  (no per-cluster data — corpus has no cluster-tagged queries)`); return; }
+  movers.sort((x, y) => y.delta - x.delta);
+  const gainers = movers.filter(m => m.delta > 0).slice(0, topN);
+  const losers = movers.filter(m => m.delta < 0).slice(-topN).reverse();
+  const flat = movers.filter(m => m.delta === 0).length;
+  console.log(`  per-cluster MRR movers (${labelB} − ${labelA}, ${movers.length} clusters with data, ${flat} flat):`);
+  if (gainers.length) {
+    console.log(`    gained:`);
+    for (const m of gainers) console.log(`      ${m.cluster.padEnd(14)} ${labelA}=${fmt(m.aMrr)}  ${labelB}=${fmt(m.bMrr)}  Δ=+${fmt(m.delta)}`);
+  }
+  if (losers.length) {
+    console.log(`    lost:`);
+    for (const m of losers) console.log(`      ${m.cluster.padEnd(14)} ${labelA}=${fmt(m.aMrr)}  ${labelB}=${fmt(m.bMrr)}  Δ=${fmt(m.delta)}`);
+  }
+  if (!gainers.length && !losers.length) console.log(`    (all clusters flat)`);
+}
+
 async function main() {
   assertBuilt();
-  console.log(`recall-harness — ISOLATED recall eval (corpus=${CORPUS.length} records, queries=${QUERIES.length})`);
+  console.log(`recall-harness — ISOLATED recall eval (corpus=${CORPUS_ARG}: ${CORPUS.length} records / ${CLUSTERS.length} clusters, queries=${QUERIES.length})`);
   console.log(`config: runs=${RUNS} hybrid=${hybridValues.join(",")} prefixes=${prefixValues.map(p => p ? "on" : "off").join(",")} rerank=${WITH_RERANK ? "on(hybrid=true,prefixes=true only)+off" : "off"}\n`);
   if (process.env.FLAIR_MODELS_DIR) console.log(`FLAIR_MODELS_DIR=${process.env.FLAIR_MODELS_DIR} (reusing pre-downloaded models)\n`);
 
@@ -296,8 +379,12 @@ async function main() {
   for (const h of hybridValues) for (const p of prefixValues) configs.push({ hybrid: h, rerank: false, prefixesOn: p });
   if (WITH_RERANK && hybridValues.includes(true) && prefixValues.includes(true)) configs.push({ hybrid: true, rerank: true, prefixesOn: true });
 
-  type Agg = { p3: number[]; mrr: number[]; byKind: Record<QueryKind, { p3: number[]; mrr: number[] }> };
-  const emptyAgg = (): Agg => ({ p3: [], mrr: [], byKind: { stress: { p3: [], mrr: [] }, trap: { p3: [], mrr: [] }, hard: { p3: [], mrr: [] }, clean: { p3: [], mrr: [] } } });
+  type Agg = { p3: number[]; mrr: number[]; byKind: Record<QueryKind, { p3: number[]; mrr: number[] }>; byCluster: Record<string, { p3: number[]; mrr: number[] }> };
+  const emptyAgg = (): Agg => ({
+    p3: [], mrr: [],
+    byKind: { stress: { p3: [], mrr: [] }, trap: { p3: [], mrr: [] }, hard: { p3: [], mrr: [] }, clean: { p3: [], mrr: [] } },
+    byCluster: Object.fromEntries(CLUSTERS.map(c => [c, { p3: [], mrr: [] }])),
+  });
 
   const keyFor = (cfg: { hybrid: boolean; rerank: boolean; prefixesOn: boolean }) =>
     `hybrid=${cfg.hybrid} rerank=${cfg.rerank} prefixes=${cfg.prefixesOn ? "on" : "off"}`;
@@ -315,6 +402,10 @@ async function main() {
         for (const k of Object.keys(res.byKind) as QueryKind[]) {
           agg.byKind[k].p3.push(res.byKind[k].p3);
           agg.byKind[k].mrr.push(res.byKind[k].mrr);
+        }
+        for (const c of CLUSTERS) {
+          agg.byCluster[c].p3.push(res.byCluster[c].p3);
+          agg.byCluster[c].mrr.push(res.byCluster[c].mrr);
         }
         console.log(`  run ${i}/${RUNS} [${key}] scoring=${scoring}: p@3=${fmt(res.p3, 3)} MRR=${fmt(res.mrr, 3)}`);
         if (VERBOSE) {
@@ -346,6 +437,7 @@ async function main() {
       const r = aggStats(results[key].raw.byKind[k].p3), c = aggStats(results[key].composite.byKind[k].p3);
       console.log(`    ${k.padEnd(6)} raw=${fmt(r.mean)}  composite=${fmt(c.mean)}  Δ=${(c.mean - r.mean) >= 0 ? "+" : ""}${fmt(c.mean - r.mean)}`);
     }
+    printClusterMovers(results[key].raw.byCluster, results[key].composite.byCluster, "raw", "composite");
     console.log();
   }
 
@@ -382,12 +474,18 @@ async function main() {
       console.log(`  prefixes=off (Phase 1 sim)  p@3=${fmtAgg(offP3)}   MRR=${fmtAgg(offMrr)}`);
       console.log(`  prefixes=on  (Phase 2)      p@3=${fmtAgg(onP3)}   MRR=${fmtAgg(onMrr)}`);
       console.log(`  Δ (on − off, live, same session)   p@3=${dP3 >= 0 ? "+" : ""}${fmt(dP3)}   MRR=${dMrr >= 0 ? "+" : ""}${fmt(dMrr)}`);
-      console.log(`  Δ (on − frozen Phase-1 baseline p@3=${PHASE1_BASELINE.p3} MRR=${PHASE1_BASELINE.mrr})   p@3=${(onP3.mean - PHASE1_BASELINE.p3) >= 0 ? "+" : ""}${fmt(onP3.mean - PHASE1_BASELINE.p3)}   MRR=${(onMrr.mean - PHASE1_BASELINE.mrr) >= 0 ? "+" : ""}${fmt(onMrr.mean - PHASE1_BASELINE.mrr)}`);
+      // PHASE1_BASELINE was measured on v1's 87-record corpus — comparing a
+      // v2 run against it would silently mix two different instruments'
+      // numbers, so only print it for --corpus v1 (the default).
+      if (CORPUS_ARG === "v1") {
+        console.log(`  Δ (on − frozen Phase-1 baseline p@3=${PHASE1_BASELINE.p3} MRR=${PHASE1_BASELINE.mrr})   p@3=${(onP3.mean - PHASE1_BASELINE.p3) >= 0 ? "+" : ""}${fmt(onP3.mean - PHASE1_BASELINE.p3)}   MRR=${(onMrr.mean - PHASE1_BASELINE.mrr) >= 0 ? "+" : ""}${fmt(onMrr.mean - PHASE1_BASELINE.mrr)}`);
+      }
       console.log(`  by kind (on − off, MRR):`);
       for (const k of ["stress", "trap", "hard", "clean"] as QueryKind[]) {
         const r = aggStats(results[offKey].raw.byKind[k].mrr), c = aggStats(results[onKey].raw.byKind[k].mrr);
         console.log(`    ${k.padEnd(6)} off=${fmt(r.mean)}  on=${fmt(c.mean)}  Δ=${(c.mean - r.mean) >= 0 ? "+" : ""}${fmt(c.mean - r.mean)}`);
       }
+      printClusterMovers(results[offKey].raw.byCluster, results[onKey].raw.byCluster, "off", "on");
       console.log();
     }
     const primaryOnKey = keyFor({ hybrid: true, rerank: false, prefixesOn: true });
@@ -731,7 +829,12 @@ async function runMixedSpaceCanary(): Promise<void> {
     for (const k of ["stress", "trap", "hard", "clean"] as QueryKind[]) {
       console.log(`    ${k.padEnd(6)} p@3=${fmt(mixed.byKind[k].p3)}  MRR=${fmt(mixed.byKind[k].mrr)}  (n=${mixed.byKind[k].n})`);
     }
-    console.log(`\n  Compare against a fully-consistent prefixes=on hybrid=true run (this PR's PREFIX A/B section above, or \`--hybrid on --prefixes on\`) — the gap IS the quantified stage-2 transient-degradation risk. Frozen Phase-1 reference: p@3=${PHASE1_BASELINE.p3} MRR=${PHASE1_BASELINE.mrr}.`);
+    console.log(`\n  Compare against a fully-consistent prefixes=on hybrid=true run (this PR's PREFIX A/B section above, or \`--hybrid on --prefixes on\`) — the gap IS the quantified stage-2 transient-degradation risk.`);
+    // PHASE1_BASELINE was measured on v1's 87-record corpus — only a
+    // meaningful reference point when the canary itself ran on v1.
+    if (CORPUS_ARG === "v1") {
+      console.log(`  Frozen Phase-1 reference: p@3=${PHASE1_BASELINE.p3} MRR=${PHASE1_BASELINE.mrr}.`);
+    }
   } finally {
     if (inst2) await stopHarper(inst2, { keepInstallDir: false }); // ownsInstallDir=false (installDir passed explicitly) — never removes it
     else if (inst1) await stopHarper(inst1, { keepInstallDir: false });

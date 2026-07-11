@@ -97,6 +97,7 @@ export FLAIR_MODELS_DIR=/path/to/an/existing/flair/checkout/models
 | `--canary`        | off     | Run the mixed-space canary instead of the main sweep (see "MIXED-SPACE CANARY" in run.ts) — quantifies flair#504 Phase 2 stage-2 prod-re-embed transient-degradation risk in isolation. |
 | `--verbose`       | off     | Print every query's rank (hit/miss, kind, marker) under `--runs`. |
 | `--keep-on-fail`  | off     | On a fatal error, print a reminder to inspect (the ephemeral installDir itself is NOT preserved automatically — see caveat below). |
+| `--corpus v1\|v2` | `v1`    | Which eval instrument to run against — see "Eval instrument v2" below. `v1` (`corpus.ts`) is the default so a bare invocation with no flag reproduces every number already published in this file, byte-for-byte, forever. `v2` (`corpus-v2.ts`) is the larger, harder standing gate for future embedding/scoring changes. |
 
 ## Interpreting the output
 
@@ -257,6 +258,162 @@ top-3. Quantifies the stage-2 transient risk at roughly -0.05 MRR
 (mixed vs. fully-consistent-off) — bounded to the pass's wall-clock and
 self-healing once it completes, consistent with the spec's prediction.
 
+## Eval instrument v2
+
+### Why v2 exists
+
+The Phase 2 prefix A/B above (measured on v1, `corpus.ts`) found a small
+regression — p@3 0.967→0.933, MRR 0.892→0.856 — but at v1's N=30 queries that
+is **1-2 queries shifting rank**, not enough for the instrument to tell
+"ship" from "park" apart from ordinary run-to-run noise. v2 exists to have
+enough queries per "kind" (see `QueryKind` in `corpus-v2.ts`) that a
+kind-level delta is a real signal. **v2 does not replace v1** — `corpus.ts`
+is never modified by this change, so every number already published in this
+file above stays reproducible verbatim forever (`--corpus v1`, the default).
+v2 is additive, and becomes **the standing gate for future
+embedding/scoring changes** — run it (not just v1) before trusting the next
+prefix/hybrid/rerank/scoring config change.
+
+### Size and design
+
+`corpus-v2.ts` (see its own header for the full rationale):
+
+- **251 records across 30 topic clusters** (6-10 records/cluster), spanning
+  genuinely different domains: distributed systems, medical scheduling,
+  logistics, cooking, astronomy, legal contracts, fitness, team process,
+  home renovation, marine biology, typography, database internals, finance
+  operations, git workflow, horticulture, music production, sports
+  analytics, cloud infrastructure, winemaking, ornithology, carpentry,
+  meteorology, chess, photography, aviation, insurance, archaeology,
+  perfumery, ceramics, linguistics.
+- **126 ground-truth queries**: 17 stress, 34 trap, 46 hard, 29 clean.
+  (The spec this instrument was built against gave individual per-kind
+  ceilings — stress≤15, trap≤30, hard≤40, clean≤25 — that sum to at most
+  110, ten short of the spec's own 120 total floor. Every kind was scaled up
+  modestly and roughly proportionally to close that gap rather than either
+  breaching the 120 floor or concentrating the extra 16 queries into a
+  single kind — see the "Deviations" note in `corpus-v2.ts` and the
+  flair#504 checkpoint-2 PR description for the full reasoning.)
+- **17 stress pairs** (one per stress-tagged cluster) — same durability/
+  recency composite-vs-raw discriminator design as v1's 7 pairs, just more
+  of them.
+- **3 genuine cross-cluster lexical trap pairs**, each with real, prominent
+  token overlap on a pivotal ambiguous term (not shoehorned in — see
+  `corpus-v2.ts`'s header for the "used naturally and prominently" bar):
+  - `DBSTORE` (database internals) ↔ `FINOPS` (finance operations) — **"transaction"**
+  - `GITWF` (git branching workflows) ↔ `HORTIC` (horticulture) — **"branch"**
+  - `MUSICPROD` (music production) ↔ `SPORTAN` (sports analytics) — **"score"**
+
+  34 trap queries total (12 + 11 + 11 across the three pairs), split roughly
+  evenly between "answer is in cluster A, phrased with cluster B's sense of
+  the shared term nearby" and the reverse.
+- **46 hard queries** — genuine same-cluster near-duplicate disambiguation,
+  2 per cluster in 16 of the 30 clusters and 1 per cluster in the other 14.
+- **29 clean queries** — unambiguous single-best-answer sanity floor, one
+  per cluster in 29 of the 30 clusters.
+
+### Validating the instrument itself
+
+Before trusting any measurement off `corpus-v2.ts`, its own internal
+invariants are checked by a validation script (kind counts hit target, every
+`expectMarker` resolves to a real record, no duplicate record markers, no
+record reused as an answer more than ~2× within the same kind, and — the
+one that actually proves the traps are real — every trap query's shared
+term appears in its own answer record AND in at least 2 records of the
+paired trap cluster). This is a one-off check, not part of the harness
+itself; if you're extending `corpus-v2.ts`, re-derive an equivalent check
+before trusting a new trap pair or a large batch of new queries.
+
+### Running v2
+
+```bash
+# Full v2 sweep — same shape as the v1 sweep above, just pass --corpus v2
+bun run test/bench/recall-harness/run.ts --corpus v2 --runs 3 --hybrid both --prefixes both
+
+# Single config, quick pass
+bun run test/bench/recall-harness/run.ts --corpus v2 --runs 1 --hybrid on --prefixes on
+
+# Mixed-space canary on v2
+bun run test/bench/recall-harness/run.ts --corpus v2 --canary
+```
+
+v2's corpus is ~3× v1's size, so `SEARCH_LIMIT` (the `limit` sent to
+`/SemanticSearch`, which controls candidate-pool coverage — see run.ts's
+comment above its definition) scales up automatically for `--corpus v2`
+only; `--corpus v1`'s `SEARCH_LIMIT` is left at exactly its original value
+of `20` so v1 numbers stay byte-identical to every previous measurement.
+
+### Per-cluster reporting
+
+Both the composite-vs-raw report and the PREFIX A/B report now also print a
+**per-cluster MRR movers** section (gained / lost, sorted by |Δ|, capped to
+the top 5 each way) alongside the existing per-kind breakdown — necessary at
+v2's 30 clusters where dumping every cluster's numbers on every run would
+bury the signal. This works for both `--corpus v1` (12 clusters) and
+`--corpus v2` (30 clusters) since both corpora tag every record with a
+`cluster` field.
+
+### v2 measured results (2026-07-11, isolated — zero production contact)
+
+`--corpus v2 --runs 3 --hybrid both --prefixes both`, scoring=raw for the
+prefix A/B (the production default). Variance was ±0.000 across all 3 runs
+in every arm — deterministic on this corpus, matching v1's behavior. The
+v1 baseline reproduction ran first in the same session (1 run, `--corpus
+v1`, hybrid=true, prefixes=off) and reproduced the frozen v1 baseline
+exactly: raw p@3=0.967 / MRR=0.892.
+
+```
+── PREFIX A/B, hybrid=true (identical numbers under hybrid=false) ──
+  prefixes=off (Phase 1 sim)  p@3=0.992 ± 0.000   MRR=0.949 ± 0.000
+  prefixes=on  (Phase 2)      p@3=0.976 ± 0.000   MRR=0.946 ± 0.000
+  Δ (on − off)   p@3=-0.016   MRR=-0.003
+  by kind (on − off, MRR):
+    stress (n=17) off=0.971  on=0.961  Δ=-0.010
+    trap   (n=34) off=0.943  on=0.930  Δ=-0.013
+    hard   (n=46) off=0.924  on=0.946  Δ=+0.022
+    clean  (n=29) off=0.983  on=0.957  Δ=-0.026
+  per-cluster MRR movers (on − off, 23 of 30 clusters flat):
+    gained: CERAMICS +0.250, PERFUMERY +0.250, FINOPS +0.017
+    lost:   WINEMAKING -0.375, AVIATION -0.250, MUSICPROD -0.017, GITWF -0.010
+```
+
+**Reading at v2's N=126**: the prefix regression v1 flagged (Δp@3 -0.033 at
+N=30 = 1 query) is still present but SMALLER at v2 scale — Δp@3 -0.016 is
+exactly 2 of 126 queries dropping out of top-3, and ΔMRR -0.003 is near
+zero. The per-kind story v1 told (traps hit hardest, -0.167 MRR) does NOT
+replicate at v2 N: trap Δ is only -0.013 (n=34), while `hard` — v2's
+largest kind (n=46) — actually IMPROVES +0.022 under prefixes. The
+regression that remains concentrates in a handful of specific clusters
+(WINEMAKING, AVIATION) rather than in a query kind, and is exactly offset
+by equal-sized gains in others (CERAMICS, PERFUMERY) — consistent with
+prefixes perturbing near-tie rankings in both directions rather than
+systematically degrading a retrieval capability. hybrid=true and
+hybrid=false produce byte-identical prefix deltas, same as v1.
+
+**Composite-vs-raw on v2** (context — measured in the same sweep): with the
+relevance-gated `compositeScore` now on main (#662) plus usageBoost (#683),
+composite is nearly flat vs raw on v2 (worst config Δp@3 -0.008 / ΔMRR
+-0.013 at hybrid=true+prefixes=on, driven by SPORTAN/HORTIC stress pairs) —
+the v1-era collapse documented above predates the relevance gate and is
+preserved there as history, not as the current state.
+
+**Mixed-space canary on v2** (`--corpus v2 --canary`, hybrid=true,
+scoring=raw; 126 records seeded unprefixed, then 125 seeded prefixed after
+a same-installDir restart):
+
+```
+MIXED-SPACE   p@3=0.984   MRR=0.954
+  by kind: stress p@3=0.941 MRR=0.956 (n=17)   trap p@3=0.971 MRR=0.954 (n=34)
+           hard  p@3=1.000 MRR=0.946 (n=46)   clean p@3=1.000 MRR=0.966 (n=29)
+```
+
+The mixed state lands BETWEEN the two consistent endpoints (off
+0.992/0.949, on 0.976/0.946) on p@3 and marginally above both on MRR — at
+v2 scale the stage-2 re-embed transition window shows **no degradation
+below either endpoint**, tightening v1's earlier estimate (v1's canary had
+MRR dip 0.05 below the off-arm; at 4× the query count that dip does not
+reproduce).
+
 ## Caveats
 
 - **retrievalCount drift within a run**: `SemanticSearch` bumps
@@ -289,16 +446,22 @@ self-healing once it completes, consistent with the spec's prediction.
 
 ## Files
 
-- `corpus.ts` — the 87-record synthetic corpus + 30 ground-truth queries.
-  Read its header first; it documents exactly how relevance was assigned and
-  why each "stress"/"trap"/"hard" pair exists.
+- `corpus.ts` — eval instrument v1: the 87-record synthetic corpus + 30
+  ground-truth queries. Read its header first; it documents exactly how
+  relevance was assigned and why each "stress"/"trap"/"hard" pair exists.
+  Frozen — never modified by the v2 work, so every number in this file
+  published against it stays reproducible verbatim.
+- `corpus-v2.ts` — eval instrument v2: the 251-record, 126-query standing
+  gate for future embedding/scoring changes (see "Eval instrument v2"
+  above). Same `CorpusRecord`/`GroundTruthQuery` shapes as v1, selected via
+  `run.ts --corpus v2`.
 - `run.ts` — the harness: spawns ephemeral Harper via
-  `test/helpers/harper-lifecycle.ts`, seeds the corpus via signed
-  `TPS-Ed25519` requests (same pattern as
+  `test/helpers/harper-lifecycle.ts`, seeds the selected corpus (`--corpus
+  v1|v2`, default `v1`) via signed `TPS-Ed25519` requests (same pattern as
   `test/integration/bm25-hybrid-noquery-listing.test.ts`), measures, tears
-  down, aggregates.
+  down, aggregates — including the per-kind and per-cluster breakdowns.
 
-Neither file is swept into CI (`bun test test/unit/`,
+None of these files are swept into CI (`bun test test/unit/`,
 `test/integration/`, etc. — see `.github/workflows/*.yml` — only ever glob
 those specific directories, never `test/bench/`). This is a manually-invoked
 benchmark, not a gating test.
