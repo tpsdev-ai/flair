@@ -14,6 +14,13 @@ import {
   type EntityMatchInput,
   type SemanticMatchInput,
 } from "./collision-lib.js";
+// The bounded HNSW candidate-pool retrieval for the task-relevant/teammate/
+// collision surfaces (flair-bootstrap-scale-fix) — the SAME pure core
+// SemanticSearch.ts's post() wraps, called bare here so an internal
+// bootstrap call never trips SemanticSearch's rate-limit/reranker/
+// retrievalCount hit-tracking side effects (see resources/
+// semantic-retrieval-core.ts's module doc for the full boundary).
+import { retrieveCandidates } from "./semantic-retrieval-core.js";
 
 /**
  * POST /MemoryBootstrap
@@ -73,6 +80,39 @@ import {
 const COLLISION_WINDOW_DAYS = 7;
 const MAX_COLLISION_ENTRIES = 10;
 
+// ─── Bootstrap scale fix (flair-bootstrap-scale-fix) tunables ───────────────
+//
+// Own-scoped, non-permanent memories (the "recent" adaptive-window source,
+// ALSO reused as the "predicted" subject-match source — see the fetch below)
+// are pulled bounded + createdAt-desc instead of the full org corpus. 500 is
+// a generous ceiling: recent's own display is budget-limited (40% of
+// remaining tokenBudget, in practice a handful of lines) and predicted's
+// subject match is a narrow filter over the same set — an agent with more
+// than 500 non-permanent memories in total would only miss an
+// older-than-the-500th subject-tagged predicted candidate, a theoretical
+// edge case traded for turning an O(org) scan into an O(own) bounded seek.
+// If the recall harness ever shows this bound is too tight, widen it —
+// never reintroduce the unbounded org-wide load.
+const OWN_NONPERMANENT_FETCH_LIMIT = 500;
+
+// Candidate-pool K formula (Kern-approved, K&S verdict on
+// FLAIR-BOOTSTRAP-SCALE-FIX.md): K = max(3 × expected fill count,
+// 5 × teammate count, MIN_CANDIDATE_POOL), capped at MAX_CANDIDATE_POOL.
+// "Expected fill count" estimates how many formatted memory lines could fit
+// in the remaining token budget (AVG_LINE_TOKEN_ESTIMATE is deliberately
+// generous/low so the estimate — and thus K — errs LARGE, never small). The
+// greedy token-budget fill loop AND collision's "one top cross-agent hit per
+// teammate" (flair#681) both draw from this SAME pool, so it needs depth for
+// both. If the recall harness ever shows a delta, widen K — never add a
+// second scan (Kern's explicit instruction).
+const AVG_LINE_TOKEN_ESTIMATE = 60;
+const MIN_CANDIDATE_POOL = 50;
+const MAX_CANDIDATE_POOL = 100;
+// Bootstrap's own historical relevance floor (distinct from SemanticSearch's
+// `minScore` request param) — preserved verbatim from the original raw
+// JS dot-product scan's `.filter((s) => s.score > 0.3)`.
+const TASK_RELEVANCE_FLOOR = 0.3;
+
 // Rough token estimate: ~4 chars per token for English text
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -81,10 +121,11 @@ function estimateTokens(text: string): number {
 // `agentId` is the BOOTSTRAPPING agent (the caller) — used only to decide
 // whether to annotate attribution, never to change what's read (that
 // boundary is resolveReadScope()'s job, upstream of this function). A
-// cross-agent record always carries `_source` (set once, above, when the
-// record's own agentId differs from the bootstrapping agent — see the
-// allMemories loop), so `m._source !== agentId` is the "is this a
-// teammate's finding" check; own memories never carry `_source` at all.
+// cross-agent record always carries `_source` (tagged by
+// retrieveCandidates() — see resources/semantic-retrieval-core.ts — when the
+// record's own agentId differs from the bootstrapping agent), so
+// `m._source !== agentId` is the "is this a teammate's finding" check; own
+// memories never carry `_source` at all.
 function formatMemory(m: any, agentId?: string): string {
   const tag = m.durability === "permanent" ? "🔒" : m.durability === "persistent" ? "📌" : "📝";
   const date = m.createdAt ? ` (${m.createdAt.slice(0, 10)})` : "";
@@ -268,8 +309,13 @@ export class BootstrapMemories extends Resource {
     // records missing either field are legacy agents/active — a strict
     // `!== "agent"` check would silently drop them. Assumes single-tenant
     // (one instance = one office); grant-filtered roster is the multi-tenant follow-up.
+    // Hoisted out of the try block below (not just team-roster-local) — the
+    // task-relevant candidate pool's K formula (flair-bootstrap-scale-fix)
+    // needs the teammate count too. Stays `[]` on an Agent.search() failure
+    // (older/standalone deployments without the table), which K's formula
+    // tolerates fine (falls back to its other terms).
+    let teammateIds: string[] = [];
     try {
-      const teammateIds: string[] = [];
       for await (const record of (databases as any).flair.Agent.search()) {
         if (isTeammate(record, agentId)) teammateIds.push(record.id);
       }
@@ -279,64 +325,99 @@ export class BootstrapMemories extends Resource {
       // Agent table may not exist in older / standalone deployments
     }
 
-    // --- 2. Permanent memories (always included, highest priority) ---
+    // ─── Read-scope (flair-bootstrap-scale-fix) ─────────────────────────────
     // Read-scope: own (any visibility) + every OTHER in-org agent's
     // non-private memory — open-within-org read (#578), no MemoryGrant
-    // consulted at all. Centralized in resolveReadScope(): the condition is
-    // pushed into the Harper query (so the table itself never returns an
-    // out-of-scope row), and `scope.isAllowed` re-checks in-process as
-    // defense-in-depth (same belt-and-suspenders discipline as
-    // SemanticSearch's BM25 pre-fusion filter) — this is the #550 foundation:
-    // bootstrap can now safely expand beyond own-only without a parallel
-    // scoping rule, and that rule tracks resolveReadScope()'s model
-    // automatically (grant-gated when #568 first built this, open-within-org
-    // now that #578 has landed — this file never re-implements the rule, so
-    // it never has to change when the rule does).
+    // consulted at all. Centralized in resolveReadScope(): `scope.condition`
+    // is pushed into every Harper query below (so the table itself never
+    // returns an out-of-scope row), and `scope.isAllowed` re-checks
+    // in-process as defense-in-depth on every candidate (Sherlock's
+    // non-negotiable — the pushdown condition is the primary gate, this is
+    // the belt) — this is the #550 foundation: bootstrap can now safely
+    // expand beyond own-only without a parallel scoping rule, and that rule
+    // tracks resolveReadScope()'s model automatically (this file never
+    // re-implements the rule, so it never has to change when the rule does).
+    //
+    // The org-wide "load everything, then filter/scan in JS" this section
+    // used to do (`Memory.search({conditions:[scope.condition]})`, no
+    // limit/select — every row's full embedding vector dragged into RAM on
+    // every bootstrap) is replaced by targeted, bounded queries per
+    // consumer: own-scoped pushdowns for the permanent/recent/predicted
+    // lifecycle slices below (agentId==self — strictly NARROWER than the
+    // full open-within-org scope, so no filter is dropped), a cheap
+    // own-scoped count for `memoriesAvailable`, and a bounded HNSW candidate
+    // pool (via retrieveCandidates(), further down) for the task-relevant/
+    // teammate/collision surfaces — the only consumer that legitimately
+    // spans the org. Each bounded query still re-checks `scope.isAllowed()`
+    // on every record even where it's provably a no-op (e.g. an
+    // agentId==self-only query) — uniform defense-in-depth, never skipped
+    // because "the filter already pushed down."
     const scope = await resolveReadScope(agentId);
-    const allMemories: any[] = [];
-    for await (const record of (databases as any).flair.Memory.search({ conditions: [scope.condition] })) {
+
+    // `memoriesAvailable`: dropped the org-wide exact count (computing it
+    // exactly WAS the scan being removed — `visibility != private` isn't
+    // index-seekable, so even a bare count would scan). Replaced with the
+    // own-scoped count (`agentId==self`, cheap indexed seek) — a more
+    // meaningful "how much do I actually have" figure, and O(own) not
+    // O(org). Cosmetic change, called out to K&S in the spec.
+    let ownMemoriesAvailable = 0;
+    const availabilityRows = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
+      conditions: [{ attribute: "agentId", comparator: "equals", value: agentId }],
+      select: ["id", "expiresAt", "validTo"],
+    }));
+    for await (const record of availabilityRows as AsyncIterable<any>) {
       if (!scope.isAllowed(record)) continue;
       if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
-      // A past validTo ALWAYS means the record has been closed out
-      // (server supersede path — Memory.ts closeSupersededRecord — sets
-      // validTo without necessarily setting `archived`), same root cause and
-      // fix as SemanticSearch.ts's unconditional past-validTo/bm25-filter
-      // exclusion. Unconditional
-      // so a server-superseded record can't resurface in bootstrap just
-      // because its successor isn't co-present in this result set (the
-      // supersededIds filter further down only catches co-presence). A
-      // record with no validTo, or a future validTo, is unaffected.
       if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
-      // Attribution for cross-agent (any other in-org agent's) records — same
-      // convention SemanticSearch.ts already uses: formatMemory() below only USES this
-      // when the record also carries _safetyFlags (labels the untrusted-data
-      // wrapper with whose memory it is), it never forces wrapping on its own.
-      // Real Harper's search() results are non-extensible objects — mutating
-      // `record._source = ...` directly throws ("object is not extensible");
-      // shallow-copy instead of mutating in place.
-      allMemories.push(record.agentId !== agentId ? { ...record, _source: record.agentId } : record);
+      ownMemoriesAvailable++;
     }
-    memoriesAvailable = allMemories.length;
+    memoriesAvailable = ownMemoriesAvailable;
 
-    // Build superseded set: exclude memories that have been replaced by newer ones
-    const supersededIds = new Set<string>();
-    for (const m of allMemories) {
-      if (m.supersedes) supersededIds.add(m.supersedes);
+    // Fields every own-scoped lifecycle slice below needs — explicit (no raw
+    // `embedding`), matching the "select, no raw embedding" pushdown
+    // requirement.
+    const OWN_SELECT = ["id", "agentId", "content", "durability", "createdAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags"];
+
+    // --- 2. Permanent memories (always included, highest priority) ---
+    // Own-scoped pushdown: `agentId==self` + `durability==permanent`, both
+    // @indexed (a seek, not a scan) — strictly narrower than the prior
+    // load-then-filter (own records are always visible to their own agent
+    // regardless of visibility, so agentId==self alone is the correct,
+    // no-filter-dropped condition here; no other agent's data enters this
+    // query at all).
+    const permanentRows: any[] = [];
+    const permanentQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
+      conditions: [
+        { attribute: "agentId", comparator: "equals", value: agentId },
+        { attribute: "durability", comparator: "equals", value: "permanent" },
+      ],
+      select: OWN_SELECT,
+    }));
+    for await (const record of permanentQuery as AsyncIterable<any>) {
+      if (!scope.isAllowed(record)) continue;
+      if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
+      // A past validTo ALWAYS means the record has been closed out (server
+      // supersede path — Memory.ts closeSupersededRecord — sets validTo
+      // without necessarily setting `archived`), same root cause and fix as
+      // SemanticSearch.ts's unconditional past-validTo exclusion.
+      // Unconditional so a server-superseded record can't resurface just
+      // because its successor isn't co-present in THIS bounded set (the
+      // per-set supersededIds filter below only catches co-presence).
+      if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
+      permanentRows.push(record);
     }
-    const activeMemories = allMemories.filter((m) => !supersededIds.has(m.id));
-
-    // #550 design boundary: the permanent / recent / predicted sections are the
-    // agent's OWN working context — own-only, always. `activeMemories` also
-    // carries every other in-org agent's non-private records (`_source` set,
-    // open-within-org read — no grant involved), but that cross-agent
-    // visibility exists to feed the task-relevant "Teammate findings"
-    // surfacing (#550) below, NOT to blend a teammate's memories into the
-    // reader's recent/permanent/predicted view. So these three sections
-    // filter to own (`!m._source`); team knowledge surfaces only when
-    // task-relevant (the teammate section) or via an explicit memory_search.
-    const ownMemories = activeMemories.filter((m) => !m._source);
-
-    const permanent = ownMemories.filter((m) => m.durability === "permanent");
+    // Per-set supersededIds (flair-bootstrap-scale-fix, Kern-approved
+    // narrowing): computed from THIS bounded set alone, never cross-applied
+    // to the recent/predicted sets or the candidate pool below — each is
+    // independent. The uncovered case (predecessor and successor landing in
+    // DIFFERENT bounded sets) is a theoretical gap already covered by the
+    // unconditional past-validTo guard above (the primary supersede
+    // defense); this co-presence check is a secondary belt, same as before
+    // this refactor, just now scoped per-set instead of per the old
+    // org-wide load.
+    const permanentSupersededIds = new Set<string>();
+    for (const m of permanentRows) if (m.supersedes) permanentSupersededIds.add(m.supersedes);
+    const permanent = permanentRows.filter((m) => !permanentSupersededIds.has(m.id));
     for (const m of permanent) {
       const line = formatMemory(m, agentId);
       const cost = estimateTokens(line);
@@ -350,10 +431,39 @@ export class BootstrapMemories extends Resource {
     }
 
     // --- 3. Recent memories (adaptive window) ---
+    // Own-scoped, non-permanent, bounded + createdAt-desc pushdown (agentId
+    // and durability are both @indexed) — replaces the org-wide load's
+    // post-hoc JS filter. This SAME fetched set also feeds "predicted"
+    // (3b, below): both draw from "my own non-permanent memories" bounded to
+    // OWN_NONPERMANENT_FETCH_LIMIT (see that constant's doc for the bound's
+    // rationale) — same shared-source relationship the pre-refactor code
+    // had via `ownMemories`, just bounded now instead of org-wide.
+    const nonPermanentRows: any[] = [];
+    const nonPermanentQuery = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search({
+      conditions: [
+        { attribute: "agentId", comparator: "equals", value: agentId },
+        { attribute: "durability", comparator: "not_equal", value: "permanent" },
+      ],
+      select: OWN_SELECT,
+      sort: { attribute: "createdAt", descending: true },
+      limit: OWN_NONPERMANENT_FETCH_LIMIT,
+    }));
+    for await (const record of nonPermanentQuery as AsyncIterable<any>) {
+      if (!scope.isAllowed(record)) continue;
+      if (record.expiresAt && Date.parse(record.expiresAt) < Date.now()) continue;
+      if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
+      nonPermanentRows.push(record);
+    }
+    // Per-set supersededIds — independent of `permanentSupersededIds` above
+    // (see that block's doc for the full per-set rationale).
+    const nonPermanentSupersededIds = new Set<string>();
+    for (const m of nonPermanentRows) if (m.supersedes) nonPermanentSupersededIds.add(m.supersedes);
+    const nonPermanentActive = nonPermanentRows.filter((m) => !nonPermanentSupersededIds.has(m.id));
+
     // Start with 48h. If nothing found, widen to 7d, then 30d.
     // This prevents empty recent sections for agents that were idle.
-    const nonPermanent = ownMemories
-      .filter((m) => m.durability !== "permanent" && m.createdAt)
+    const nonPermanent = nonPermanentActive
+      .filter((m) => m.createdAt)
       .sort((a: any, b: any) => (b.createdAt || "").localeCompare(a.createdAt || ""));
 
     let effectiveSince: Date;
@@ -402,7 +512,13 @@ export class BootstrapMemories extends Resource {
         ...recent.filter((_: any, i: number) => i < sections.recent.length).map((m: any) => m.id),
       ]);
 
-      const subjectMemories = ownMemories
+      // Draws from the SAME bounded own-scoped, non-permanent set "recent"
+      // uses (nonPermanentActive — see that fetch's doc above for the
+      // shared-source rationale and OWN_NONPERMANENT_FETCH_LIMIT's bound).
+      // `durability !== "permanent"` is now redundant with the source
+      // query's own condition but kept for parity/clarity with the
+      // pre-refactor filter shape.
+      const subjectMemories = nonPermanentActive
         .filter((m: any) =>
           !includedIds.has(m.id) &&
           m.subject &&
@@ -482,22 +598,69 @@ export class BootstrapMemories extends Resource {
           ...recent.filter((_, i) => i < sections.recent.length).map((m) => m.id),
         ]);
 
-        const scored = allMemories
-          .filter((m) => !includedIds.has(m.id) && !supersededIds.has(m.id) && m.embedding?.length > 100)
-          .map((m) => {
-            let dot = 0;
-            const len = Math.min(queryEmbedding!.length, m.embedding.length);
-            for (let i = 0; i < len; i++) dot += queryEmbedding![i] * m.embedding[i];
-            return { memory: m, score: dot };
-          })
-          .filter((s) => s.score > 0.3)
-          .sort((a, b) => b.score - a.score);
+        // Bounded HNSW candidate pool (flair-bootstrap-scale-fix) — replaces
+        // the full-corpus JS dot-product scan (`allMemories` × queryEmbedding,
+        // O(org corpus size) every bootstrap). K formula (Kern-approved):
+        // max(3 × expected fill, 5 × teammate count, MIN_CANDIDATE_POOL),
+        // capped at MAX_CANDIDATE_POOL — deep enough for BOTH the
+        // token-budget fill loop below AND collision's "one top cross-agent
+        // hit per teammate" (flair#681), which draws from the SAME pool. If
+        // the recall harness ever shows a delta, widen K — never add a
+        // second scan (Kern's explicit instruction).
+        const expectedFill = Math.max(1, Math.ceil(tokenBudget / AVG_LINE_TOKEN_ESTIMATE));
+        const candidatePoolK = Math.min(
+          MAX_CANDIDATE_POOL,
+          Math.max(3 * expectedFill, 5 * teammateIds.length, MIN_CANDIDATE_POOL),
+        );
+
+        const candidates = await retrieveCandidates({
+          queryEmbedding,
+          conditions: [scope.condition],
+          limit: candidatePoolK,
+          // HNSW-leg pushdown ONLY (K&S verdict): no BM25 fusion, no
+          // reranker for bootstrap — a different cost profile (BM25 over the
+          // org corpus for a one-shot session-load could be MORE expensive
+          // than HNSW-only unless cached across sessions; the reranker is a
+          // generative call per candidate). Both are explicit opt-in
+          // follow-ons, gated on their own harness runs.
+          hybrid: false,
+          // Per-set (this K-bounded pool only, never cross-applied to the
+          // permanent/recent/predicted sets above) — see this function's
+          // supersededIds docs above and resources/
+          // semantic-retrieval-core.ts's own doc for the full caveat. The
+          // unconditional past-validTo guard (inside retrieveCandidates)
+          // stays the primary supersede defense either way.
+          includeSuperseded: false,
+          // Matches the original raw JS dot product exactly — no
+          // composite/durability-recency weighting for bootstrap's own
+          // relevance ranking.
+          scoring: "raw",
+          agentId,
+          // Sherlock's non-negotiable belt: re-checked on every candidate
+          // even though `conditions` already scoped the query.
+          isAllowed: scope.isAllowed,
+          ctx,
+        });
+
+        // Preserve the ORIGINAL score > 0.3 floor exactly (bootstrap's own
+        // historical relevance floor — distinct from SemanticSearch's
+        // `minScore` request param — strict inequality, applied client-side;
+        // `candidates` are already `_score`-sorted best-first, so filtering
+        // preserves that order). `retrieveCandidates()`'s cosine similarity
+        // replaces the raw JS dot product as the ranking signal (HNSW-only,
+        // no BM25/rerank) — the K&S-ratified, closest-to-a-wash choice; the
+        // recall harness gates any regression from this ranking-signal
+        // change (magnitude-sensitive dot product → normalized cosine).
+        const scored = candidates
+          .filter((m: any) => !includedIds.has(m.id) && m._score > TASK_RELEVANCE_FLOOR)
+          .map((m: any) => ({ memory: m, score: m._score }));
 
         // flair#681: the collision block's semantic surface — one candidate
         // per teammate (the highest-scoring hit; `scored` is already sorted
         // desc, so the first occurrence of a given `_source` IS the best
         // one). `m._source` is only ever set for a cross-agent record (see
-        // the allMemories loop above) — an own memory never contributes here.
+        // retrieveCandidates()'s `_source` tagging) — an own memory never
+        // contributes here.
         const seenCollisionAgents = new Set<string>();
         for (const { memory: m, score } of scored) {
           if (!m._source || seenCollisionAgents.has(m._source)) continue;
@@ -508,12 +671,12 @@ export class BootstrapMemories extends Resource {
         // #550: split the scored, task-relevant set by origin. Own findings
         // go to `relevant` as before; any other in-org agent's non-private
         // record — already read-scoped by resolveReadScope(), no grant
-        // required (`m._source` is only ever set for a cross-agent record,
-        // see the allMemories loop above) — goes to the new `teammate`
-        // section so the agent can tell it apart at a glance. Both draw from
-        // the SAME `tokenBudget` in one score-ordered pass — highest-relevance
-        // memories win the remaining budget regardless of which section they
-        // land in, so neither section double-spends.
+        // required (`m._source` is only ever set for a cross-agent record) —
+        // goes to the new `teammate` section so the agent can tell it apart
+        // at a glance. Both draw from the SAME `tokenBudget` in one
+        // score-ordered pass — highest-relevance memories win the remaining
+        // budget regardless of which section they land in, so neither
+        // section double-spends.
         for (const { memory: m } of scored) {
           const line = formatMemory(m, agentId);
           const cost = estimateTokens(line);

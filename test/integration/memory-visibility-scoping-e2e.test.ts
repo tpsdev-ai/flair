@@ -199,11 +199,15 @@ describe("within-org-read-open — private/shared visibility + centralized read-
       const bodyText = await res.text();
       expect(res.status, `bootstrap → ${res.status}: ${bodyText.slice(0, 2000)}`).toBe(200);
       const body: any = JSON.parse(bodyText);
-      // Layer 1's read boundary (what this file owns): the legacy (no-visibility
-      // → reads as shared) + explicitly-shared records are in the grantee's
-      // read-scope; the owner's PRIVATE record is not. `memoriesAvailable` is
-      // the read-scope signal (allMemories.length), independent of rendering.
-      expect(body.memoriesAvailable, `grantee read-scope should be exactly legacy+shared=2 — got ${body.memoriesAvailable}`).toBe(2);
+      // `memoriesAvailable` (flair-bootstrap-scale-fix) is now the OWN-scoped
+      // count (agentId==self, a cheap indexed seek) — no longer a read-scope
+      // signal. The grantee owns ZERO memories in this fixture (only `owner`
+      // does), so it's 0 regardless of what's readable. The actual read-scope
+      // proof (legacy + shared readable, private excluded) is Path 1/2's job
+      // above (Memory GET/collection, SemanticSearch) — this assertion is
+      // just confirming the new count reflects "mine", not "everything I can
+      // read".
+      expect(body.memoriesAvailable, `grantee's OWN memory count should be 0 (fixture seeds none for grantee) — got ${body.memoriesAvailable}`).toBe(0);
       // #550 design boundary: these owner records are grant-visible TEAMMATE
       // memories, and they were raw-inserted (no embeddings) so they can't
       // surface via the task-relevant "Teammate findings" path either. With
@@ -220,9 +224,12 @@ describe("within-org-read-open — private/shared visibility + centralized read-
       const res = await authFetch(harper, stranger, "POST", "/BootstrapMemories", { agentId: stranger.id, maxTokens: 4000 });
       expect(res.status).toBe(200);
       const body: any = await res.json();
-      // Same read-scope as the grantee above — proving the grant was never
-      // what gated this.
-      expect(body.memoriesAvailable, `stranger read-scope should be exactly legacy+shared=2 — got ${body.memoriesAvailable}`).toBe(2);
+      // Same reasoning as the grantee above: `memoriesAvailable` is now
+      // own-scoped, and the stranger owns zero memories in this fixture too
+      // — proving the grant was never what gated read-scope (Path 1/2 above
+      // are the read-scope proof) and that this cosmetic count doesn't
+      // secretly reintroduce a scope-wide computation either.
+      expect(body.memoriesAvailable, `stranger's OWN memory count should be 0 (fixture seeds none for stranger) — got ${body.memoriesAvailable}`).toBe(0);
       expect(body.context ?? "").not.toContain("pre-migration finding");
       expect(body.context ?? "").not.toContain("explicitly shared finding");
       expect(body.context ?? "").not.toContain("explicitly private note");
