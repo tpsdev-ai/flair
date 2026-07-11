@@ -1,0 +1,21 @@
+{
+  "_comment": "flair#504 Phase 2 (PR #689) — the production-config baseline the future CI ratchet gates on. config block MUST match the harness invocation that produced these numbers (corpus=v2, hybrid=true, prefixes=off i.e. THE GATE EMBEDDING_PREFIXES_ENABLED=false, scoring=raw) — a config mismatch must fail loudly rather than silently compare against the wrong arm. Numbers are the prefixes=off arm from test/bench/recall-harness/README.md's 'v2 measured results' section (2026-07-11, isolated, zero production contact) — see that section for the full sweep including the prefixes=on comparison this baseline deliberately does NOT ship (THE GATE is parked off; re-baseline this file if it's ever flipped).",
+  "corpusVersion": "v2",
+  "config": {
+    "hybrid": true,
+    "prefixes": false,
+    "scoring": "raw"
+  },
+  "aggregate": {
+    "p@3": 0.992,
+    "mrr": 0.949
+  },
+  "perKind": {
+    "hard": { "n": 46, "mrr": 0.924 },
+    "trap": { "n": 34, "mrr": 0.943 },
+    "clean": { "n": 29, "mrr": 0.983 },
+    "stress": { "n": 17, "mrr": 0.971 }
+  },
+  "measuredAt": "2026-07-11",
+  "commit": "f4f5092"
+}
