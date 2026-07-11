@@ -21,6 +21,7 @@ import {
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname } from "node:path";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
 import { keystore } from "./keystore.js";
@@ -409,6 +410,80 @@ function harperBin(): string | null {
   ];
   for (const c of candidates) if (existsSync(c)) return c;
   return null;
+}
+
+/**
+ * Resolve harper-fabric-embeddings' entry file as an ABSOLUTE path, for use as
+ * Harper's `models.embedding.default.backend` value (flair#504 Phase 1).
+ *
+ * Harper's non-built-in `backend:` resolution (bootstrap.ts's
+ * resolveBackendSpecifier) treats a BARE package name as resolvable from the
+ * Harper INSTANCE ROOT's node_modules (ROOTPATH — "where the operator installs
+ * the backend", per that file's own doc comment) — NOT from flair's own
+ * package directory. Flair's ROOTPATH (~/.flair/data by default) is a data
+ * dir, not an npm install root, so a bare `backend: 'harper-fabric-embeddings'`
+ * fails with "Cannot find module" (verified). An absolute path specifier
+ * sidesteps that resolution entirely — resolveBackendSpecifier() passes it
+ * straight to `import()`.
+ *
+ * Uses the top-level ESM-imported `createRequire` anchored at THIS file's own
+ * location (`dist/cli.js`, inside flair's package dir — the same directory
+ * harper-fabric-embeddings is installed into as a flair dependency), and
+ * respects its package.json `exports`/`main`, so this doesn't hardcode an
+ * internal `dist/index.js` path that could drift. NOTE: `createRequire` MUST be
+ * the module-scope ESM import — `require('node:module')` throws "require is not
+ * defined" here because the built `dist/cli.js` is a pure ES module (the CJS
+ * bin shim `import()`s it). That exact bug silently returned null on a real
+ * install → no `models` block → the clean-VM embed→search gate reported
+ * "Semantic search DEGRADED" (flair#504 review).
+ */
+function resolveEmbeddingBackendModule(): string | null {
+  try {
+    const req = createRequire(import.meta.url);
+    return req.resolve("harper-fabric-embeddings");
+  } catch {
+    return null; // harper-fabric-embeddings not installed — models.embedding.default is simply omitted below
+  }
+}
+
+/**
+ * Build the `models.embedding.default` registration config (flair#504 Phase 1),
+ * or `undefined` if harper-fabric-embeddings can't be resolved (degrades to
+ * Harper's keyword-only fallback, matching the pre-migration behavior when the
+ * embeddings engine was unavailable). Delivered to Harper via HARPER_CONFIG
+ * (see buildEmbeddingsHarperConfigEnv) — a merge layer, NOT HARPER_SET_CONFIG's
+ * force-override (which would fight Fabric-managed config and drift-lock).
+ */
+function buildModelsConfig(modelsDir: string): Record<string, unknown> | undefined {
+  const backend = resolveEmbeddingBackendModule();
+  if (!backend) return undefined;
+  return {
+    embedding: {
+      default: { backend, modelName: "nomic-embed-text", modelsDir },
+    },
+  };
+}
+
+/**
+ * The HARPER_CONFIG env value that registers the local embedding backend
+ * (flair#504 Phase 1), or `undefined` when the engine can't be resolved.
+ *
+ * HARPER_CONFIG (not HARPER_SET_CONFIG) on purpose, per Nathan: HARPER_SET_CONFIG
+ * is a force-override that also LOCKS against drift — it would clobber
+ * Fabric-managed config and, because it reverts any key a later boot omits,
+ * forced the earlier authentication-readback complexity. HARPER_CONFIG is a
+ * merge layer: it reasserts ONLY the keys it names (here just
+ * `models.embedding.default`) on every boot, yields to Fabric's own
+ * HARPER_SET_CONFIG, and never touches unrelated config. Set it on EVERY Harper
+ * spawn path (install, run, launchd plist, and both restart fallbacks) so it's
+ * always present — an omitted boot would revert `models` the same way, but
+ * since we always assert it, `models` stays registered and nothing else moves.
+ * Reaches bootstrapModels() the same way HARPER_SET_CONFIG did (both merge into
+ * the instance-root config getConfigObj() reads).
+ */
+function buildEmbeddingsHarperConfigEnv(modelsDir: string): string | undefined {
+  const modelsConfig = buildModelsConfig(modelsDir);
+  return modelsConfig ? JSON.stringify({ models: modelsConfig }) : undefined;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -2095,6 +2170,13 @@ program
 
     let alreadyRunning = false;
 
+    // <ROOTPATH>/models — resources/embeddings-provider.ts's resolveModelsDir()
+    // tier 2 default; an operator override already in the environment wins
+    // (tier 1). Scoped above the alreadyRunning branch below (not just inside
+    // the fresh-start path) since the launchd plist step needs it too, even
+    // when Harper was already running and the fresh-spawn branch was skipped.
+    const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
+
     if (!opts.skipStart) {
       // Check if already running
       try {
@@ -2132,6 +2214,7 @@ program
         const env: Record<string, string> = {
           ...(process.env as Record<string, string>),
           ROOTPATH: dataDir,
+          FLAIR_MODELS_DIR: modelsDir,
           HARPER_SET_CONFIG: harperSetConfig,
           DEFAULTS_MODE: "dev",
           HDB_ADMIN_USERNAME: adminUser,
@@ -2142,6 +2225,17 @@ program
           OPERATIONSAPI_NETWORK_PORT: String(opsPort),
           LOCAL_STUDIO: "false",
         };
+        // models (flair#504 Phase 1): register harper-fabric-embeddings as
+        // Harper's `embedding`/`default` backend via HARPER_CONFIG (merge
+        // layer, Fabric-safe) — NOT HARPER_SET_CONFIG and NOT config.yaml.
+        // bootstrapModels() only reads the `models:` block from the
+        // INSTANCE-ROOT config (never a per-application config.yaml); HARPER_CONFIG
+        // and HARPER_SET_CONFIG both merge into that instance-root config, but
+        // HARPER_CONFIG doesn't force-override Fabric's config or drift-lock
+        // sibling keys. See buildEmbeddingsHarperConfigEnv. Present on install AND
+        // run (same env) so it persists and is reasserted each boot.
+        const embeddingsHarperConfig = buildEmbeddingsHarperConfigEnv(modelsDir);
+        if (embeddingsHarperConfig) env.HARPER_CONFIG = embeddingsHarperConfig;
 
         if (alreadyInstalled) {
           console.log("Existing Harper installation found — skipping install.");
@@ -2210,6 +2304,14 @@ program
             localStudio: { enabled: false },
             authentication: { authorizeLocal: false, enableSessions: true },
           });
+          // models (flair#504 Phase 1) via HARPER_CONFIG — see the initial spawn's
+          // comment. The launchd-managed process must carry it too, so every
+          // KeepAlive restart re-registers the embedding backend.
+          const escapeXml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+          const plistEmbeddingsConfig = buildEmbeddingsHarperConfigEnv(modelsDir);
+          const harperConfigPlistLine = plistEmbeddingsConfig
+            ? `\n    <key>HARPER_CONFIG</key><string>${escapeXml(plistEmbeddingsConfig)}</string>`
+            : "";
           const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -2226,7 +2328,8 @@ program
   <key>EnvironmentVariables</key>
   <dict>
     <key>ROOTPATH</key><string>${dataDir}</string>
-    <key>HARPER_SET_CONFIG</key><string>${setConfig.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;")}</string>
+    <key>FLAIR_MODELS_DIR</key><string>${modelsDir}</string>
+    <key>HARPER_SET_CONFIG</key><string>${escapeXml(setConfig)}</string>${harperConfigPlistLine}
     <key>DEFAULTS_MODE</key><string>dev</string>
     <key>HDB_ADMIN_USERNAME</key><string>${adminUser}</string>
     <key>HDB_ADMIN_PASSWORD</key><string>${adminPass}</string>
@@ -7546,9 +7649,12 @@ program
 
     const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
     const opsPort = resolveOpsPort(opts);
+    const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       ROOTPATH: dataDir,
+      // See the matching comment at the install-time spawn site above.
+      FLAIR_MODELS_DIR: modelsDir,
       DEFAULTS_MODE: "dev",
       HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
       HTTP_PORT: String(port),
@@ -7560,6 +7666,13 @@ program
     if (adminPass) {
       env.HDB_ADMIN_PASSWORD = adminPass;
     }
+    // models (flair#504 Phase 1) via HARPER_CONFIG — merge layer, so registering
+    // the embedding backend here does NOT disturb the authentication/port config
+    // the install-time HARPER_SET_CONFIG set (that's exactly why HARPER_CONFIG,
+    // not HARPER_SET_CONFIG — no force-override, no drift-lock, no read-back
+    // needed). See buildEmbeddingsHarperConfigEnv.
+    const embeddingsHarperConfig = buildEmbeddingsHarperConfigEnv(modelsDir);
+    if (embeddingsHarperConfig) env.HARPER_CONFIG = embeddingsHarperConfig;
 
     const proc = spawn(process.execPath, [bin, "run", "."], {
       cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
@@ -7661,9 +7774,12 @@ async function startFlairProcess(port: number): Promise<void> {
   // to the initial Harper spawn) followed by `flair restart` would silently
   // drop admin credentials — any subsequent auth'd call returns 401.
   const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
+  const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     ROOTPATH: dataDir,
+    // See the matching comment at the install-time spawn site above.
+    FLAIR_MODELS_DIR: modelsDir,
     DEFAULTS_MODE: "dev",
     HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
     HTTP_PORT: String(port),
@@ -7672,6 +7788,12 @@ async function startFlairProcess(port: number): Promise<void> {
   if (adminPass) {
     env.HDB_ADMIN_PASSWORD = adminPass;
   }
+  // models (flair#504 Phase 1) via HARPER_CONFIG — merge layer, so registering
+  // the embedding backend here does NOT disturb the authentication/port config
+  // the install-time HARPER_SET_CONFIG set (no force-override, no drift-lock, no
+  // read-back needed). See buildEmbeddingsHarperConfigEnv.
+  const embeddingsHarperConfig = buildEmbeddingsHarperConfigEnv(modelsDir);
+  if (embeddingsHarperConfig) env.HARPER_CONFIG = embeddingsHarperConfig;
 
   const proc = spawn(process.execPath, [bin, "run", "."], {
     cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
