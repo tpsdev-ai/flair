@@ -83,6 +83,7 @@ import { resolveReadScope } from "./memory-read-scope.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { wrapUntrusted } from "./content-safety.js";
+import { getPresenceRoster } from "./presence-internal.js";
 
 // ─── Tunables ─────────────────────────────────────────────────────────────────
 
@@ -314,32 +315,15 @@ interface PresenceHit {
   lastHeartbeatAt: unknown;
 }
 
-/**
- * Build a synthetic delegation context for the exported `Presence` class's
- * get(), pre-seeding verifyAgentRequest's OWN per-request memoization cache
- * (`_flairAgentAuth` — see resources/agent-auth.ts) with the verdict this
- * SAME request already established via resolveAgentAuth. See this file's
- * module doc ("Presence") for why a fresh signature re-verify isn't possible
- * (nonce already consumed by auth-middleware.ts) and why this isn't a
- * forgery (it relays an already-verified fact, gated on `auth.kind` already
- * being "agent" or "internal" — anonymous never reaches this call site, see
- * the top-level gate in post() below).
- */
-function presenceDelegationContext(auth: AgentAuthVerdict): any {
-  const agentAuth = auth.kind === "agent"
-    ? { agentId: auth.agentId, isAdmin: auth.isAdmin }
-    : { agentId: "internal", isAdmin: true };
-  return { request: { _flairAgentAuth: agentAuth } };
-}
+// Presence roster fetch (the synthetic delegation-context trick) now lives in
+// resources/presence-internal.ts, shared with MemoryBootstrap.ts's collision
+// surfacing (flair#681) — see that file's module doc for the full security
+// rationale (why this isn't a forgery, why a fresh signature re-verify isn't
+// possible). This file's own "Presence" doc section above still applies; it
+// just no longer duplicates the code.
 
 async function queryPresence(auth: AgentAuthVerdict, entity: string): Promise<PresenceHit[]> {
-  const { Presence } = await import("./Presence.js");
-  const p: any = new (Presence as any)();
-  p.getContext = () => presenceDelegationContext(auth);
-
-  const roster = await p.get();
-  if (roster instanceof Response) return []; // presence_query_failed — fail-open (empty), never fail the whole attention query
-  if (!Array.isArray(roster)) return [];
+  const roster = await getPresenceRoster(auth); // fail-open (empty) — never fail the whole attention query
 
   // Bounded scan: Presence carries exactly one row per agent (org-wide agent
   // count is small), so a free-text substring match here is the pushdown-free

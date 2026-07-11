@@ -245,6 +245,7 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
     channel: args?.channel,
     surface: args?.surface,
     subjects: args?.subjects,
+    entities: args?.entities,
   }));
 }
 
@@ -418,6 +419,12 @@ export const TOOLS: Record<string, ToolEntry> = {
           channel: { type: "string", description: "Channel name (discord, tps-mail, claude-code)" },
           surface: { type: "string", description: "Surface name (tps-build, tps-review, cli-session)" },
           subjects: { type: "array", items: { type: "string" }, description: "Entity names to preload context for" },
+          entities: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Your declared attention-plane vocabulary strings (e.g. \"issue:owner/repo#123\") for collision surfacing's 'Others in the room' block — teammates with overlapping active work. Falls back to your own most-recent workspace-state entities when omitted.",
+          },
         },
       },
     },

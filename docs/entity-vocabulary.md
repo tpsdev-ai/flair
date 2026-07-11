@@ -97,8 +97,11 @@ vocabulary; wiring that validation is a follow-up, not part of this foundation s
 ## What's explicitly NOT in this slice
 
 - The attention query (`AttentionQuery` / `flair attention <entity>`) that joins Memory,
-  Relationship, WorkspaceState, Presence, and OrgEvent by entity.
-- Bootstrap collision surfacing ("others in the room").
+  Relationship, WorkspaceState, Presence, and OrgEvent by entity — shipped in flair#678
+  (`resources/AttentionQuery.ts`), a later slice.
+- Bootstrap collision surfacing ("others in the room") — shipped in flair#681
+  (`resources/collision-lib.ts` + `MemoryBootstrap.ts`'s "Others in the room" section), a
+  later slice.
 - Automatic entity extraction/tagging on write (producers set `entities` themselves today,
   where they choose to; there's no NLP-derived auto-population yet).
 - Validating `Relationship.subject`/`object` against this vocabulary.
