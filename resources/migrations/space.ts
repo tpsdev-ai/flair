@@ -1,6 +1,6 @@
 /**
  * space.ts — pre-flight space check, step 1 of the ladder
- * (~/ops/FLAIR-MIGRATION-SAFETY.md, "Space pressure"):
+ * (flair#695, "Space pressure"):
  *
  * "Pre-flight space check before any write — estimate snapshot size AND the
  * migration's own working set (supersession transforms temporarily hold

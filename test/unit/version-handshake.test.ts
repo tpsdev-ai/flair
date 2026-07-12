@@ -1,6 +1,6 @@
 /**
  * version-handshake.test.ts — src/version-handshake.ts, the CLI↔server
- * version handshake (ops-1l18 §B). Mirrors test/unit/version-check.test.ts's
+ * version handshake (flair#695 §B). Mirrors test/unit/version-check.test.ts's
  * technique (injected fetch/cache/clock) for the sibling "installed vs
  * latest-published" checker.
  */

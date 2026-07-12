@@ -1,7 +1,7 @@
 /**
  * envelope.ts — the corpus-wide integrity envelope: "full-corpus
  * hash-of-source-field-hashes computed before first write and after
- * completion; must match" (~/ops/FLAIR-MIGRATION-SAFETY.md invariant IV /
+ * completion; must match" (flair#695 invariant IV /
  * Kern verdict), computed ONCE per boot cycle (K&S: "Envelope ASYNC after
  * ready — boot serves immediately on the old shape; pre-hash runs async;
  * migration deferred until it completes").

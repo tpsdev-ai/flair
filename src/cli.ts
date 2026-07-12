@@ -1869,7 +1869,7 @@ const __pkgVersion = (() => {
 const program = new Command();
 program.name("flair").version(__pkgVersion, "-v, --version");
 
-// ─── CLI↔server version handshake (ops-1l18 §B) ────────────────────────────
+// ─── CLI↔server version handshake (flair#695 §B) ────────────────────────────
 // Every command invocation gets a cheap, cached (~60s), short-timeout check
 // of the running server's version against this CLI's own — catches the
 // bare-npm-upgrade trap where `npm i -g @tpsdev-ai/flair@latest` swaps the
@@ -3886,7 +3886,7 @@ federation
   });
 
 // `flair federation reachability` — probe local instance + all paired peers.
-// Productizes ~/ops/scripts/flair-boot-probe.sh: a single command that tells
+// Productizes flair#695: a single command that tells
 // you whether memories CAN flow across the federation right now. Read-only;
 // no mutations, no side effects beyond a single tagged status read per peer.
 federation
@@ -4597,7 +4597,7 @@ federation
   });
 
 // `flair federation prune` — remove stale spoke peers (never the hub).
-// Productizes ~/ops/scripts/cleanup-stale-fed-peers.sh into a real CLI
+// Productizes flair#695 into a real CLI
 // subcommand with safety: dry-run is the default, --apply required to delete.
 function parseDuration(spec: string): number | null {
   // Accept forms like "30d", "12h", "90m". Returns milliseconds.
@@ -4704,7 +4704,7 @@ federation
 
 // `flair federation verify` — end-to-end roundtrip: write a tagged memory
 // locally, wait for federation push, probe peers for the tag. Productizes
-// ~/ops/scripts/verify-fed-sync.sh. Cleans up the test memory at the end.
+// flair#695 Cleans up the test memory at the end.
 federation
   .command("verify")
   .description("End-to-end check: write a tagged memory locally and verify it shows up on each peer")
@@ -8631,7 +8631,7 @@ program
       }
     }
 
-    // 1a. CLI ↔ running-server version handshake (ops-1l18 §B) — the
+    // 1a. CLI ↔ running-server version handshake (flair#695 §B) — the
     // version TRIPLE: this CLI's own version (__pkgVersion, checked against
     // npm-latest in step 0 above), and the RUNNING server's reported
     // version (GET /Health — public, no auth needed). A mismatch means the
@@ -8999,7 +8999,7 @@ program
       }
     }
 
-    // 9. Migration state (ops-1l18) — pending/in-progress/blocked + last
+    // 9. Migration state (flair#695) — pending/in-progress/blocked + last
     // ledger-derived outcome per registered migration, read off the same
     // authenticated /HealthDetail the "Fleet presence" section above
     // already fetches. `--fix` here means the SAME restart offered in step

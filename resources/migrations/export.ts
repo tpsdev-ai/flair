@@ -4,7 +4,7 @@
  * data-dir size; the irreplaceable part (memory content + provenance)
  * exports far smaller. If the physical snapshot doesn't fit but the content
  * export does → export content, proceed (derived is recomputable by
- * definition)." (~/ops/FLAIR-MIGRATION-SAFETY.md, space-pressure step 4)
+ * definition)." (flair#695, space-pressure step 4)
  *
  * Exports SOURCE_FIELDS ONLY (+id) — never derived fields (embedding is the
  * dominant size driver this exists to skip) — as JSONL, one row per line,

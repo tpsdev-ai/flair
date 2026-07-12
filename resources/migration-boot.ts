@@ -1,5 +1,5 @@
 /**
- * migration-boot.ts — the boot-keyed trigger (~/ops/FLAIR-ZERO-TOUCH-UPGRADE.md
+ * migration-boot.ts — the boot-keyed trigger (flair#695
  * §A, Kern verdict): "Envelope ASYNC after ready — boot serves immediately
  * on the old shape; pre-hash runs async; migration deferred until it
  * completes; health shows 'pre-flight integrity check in progress'."

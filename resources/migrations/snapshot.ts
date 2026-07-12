@@ -14,7 +14,7 @@
  * files, stat-verified — see dir-safety.ts) as the rest of Flair's snapshot
  * machinery.
  *
- * Scope per risk class (~/ops/FLAIR-MIGRATION-SAFETY.md, space-pressure
+ * Scope per risk class (flair#695, space-pressure
  * step 3 / resources/migrations/risk-policy.ts):
  *   - metadata-only:      manifest only (row counts, versions) — no corpus
  *                          snapshot needed; derived data is recomputable by

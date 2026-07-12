@@ -1,6 +1,6 @@
 /**
  * migrations-synthetic-e2e.test.ts — end-to-end coverage of the zero-touch
- * migration runner against a REAL ephemeral Harper (ops-1l18). Exercises the
+ * migration runner against a REAL ephemeral Harper (flair#695). Exercises the
  * FULL boot-keyed path: process boot → resources/migration-boot.ts's
  * setImmediate trigger → shared async pre-hash → the synthetic CI-only
  * migration's own pre-flight ladder → risk-scoped snapshot → throttled
