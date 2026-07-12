@@ -89,6 +89,35 @@ import { resolveModelsDir } from "./embeddings-provider.js";
 const LOGICAL_NAME = "default";
 const MODEL_NAME = "nomic-embed-text";
 
+/**
+ * BENCH-ONLY escape hatch — NOT a production feature flag, never documented
+ * as an operator setting, and never read anywhere else in this codebase.
+ * Mirrors `embeddings-provider.ts`'s `FLAIR_RECALL_HARNESS_FORCE_PREFIX`
+ * hatch (see that file's header for the pattern this follows): a bench-only
+ * env var, read lazily, that lets `test/bench/recall-harness/run.ts`'s
+ * `--model-file <path>` flag override model SELECTION the same way that
+ * hatch overrides prefix behavior — without editing this file's hardcoded
+ * `MODEL_NAME`/`resolveModelsDir()` call every time a bakeoff needs a
+ * different GGUF (e.g. a Q8_0 quant of the same base model).
+ *
+ * This is not a new capability grafted on — `harper-fabric-embeddings`'
+ * `register()` factory already accepts `config.modelPath` as an alternative
+ * to `modelName`+`modelsDir` (see `engineOptionsFromConfig()` in
+ * `harper-fabric-embeddings`' `dist/index.js`): an absolute path bypasses its
+ * built-in model registry and HuggingFace-download resolution entirely. This
+ * hatch is the one line that lets a caller reach that existing parameter.
+ * `EmbeddingEngine`'s `modelIdentity` (used for nomic-prefix detection, see
+ * `engine.js`'s `#applyPrefix`) becomes the file's basename in this path, so
+ * prefix behavior is unaffected as long as the GGUF's filename still
+ * contains "nomic-embed-text".
+ *
+ * No production deploy sets this env var, so the unset (overwhelmingly
+ * common) case is byte-identical to before this hatch existed.
+ */
+function benchModelPathOverride(): string | undefined {
+  return process.env.FLAIR_RECALL_HARNESS_MODEL_PATH || undefined;
+}
+
 let registered = false;
 
 /**
@@ -101,10 +130,11 @@ export async function registerEmbeddingsBackend(): Promise<void> {
   registered = true;
   try {
     const { register } = await import("harper-fabric-embeddings");
+    const modelPath = benchModelPathOverride();
     await register({
       logicalName: LOGICAL_NAME,
       kind: "embedding",
-      config: { modelName: MODEL_NAME, modelsDir: resolveModelsDir() },
+      config: modelPath ? { modelPath } : { modelName: MODEL_NAME, modelsDir: resolveModelsDir() },
     });
   } catch (err) {
     // Not installed, or globalThis.models isn't ready (module loaded outside

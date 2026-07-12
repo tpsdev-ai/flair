@@ -98,6 +98,7 @@ export FLAIR_MODELS_DIR=/path/to/an/existing/flair/checkout/models
 | `--verbose`       | off     | Print every query's rank (hit/miss, kind, marker) under `--runs`. |
 | `--keep-on-fail`  | off     | On a fatal error, print a reminder to inspect (the ephemeral installDir itself is NOT preserved automatically — see caveat below). |
 | `--corpus v1\|v2` | `v1`    | Which eval instrument to run against — see "Eval instrument v2" below. `v1` (`corpus.ts`) is the default so a bare invocation with no flag reproduces every number already published in this file, byte-for-byte, forever. `v2` (`corpus-v2.ts`) is the larger, harder standing gate for future embedding/scoring changes. |
+| `--model-file <path>` | unset | Bench-only GGUF override for A/B'ing a different quant/model of the same family (e.g. a Q8_0 requant) without a code change. Sets `FLAIR_RECALL_HARNESS_MODEL_PATH`, forwarded to the spawned Harper process; `resources/embeddings-boot.ts`'s `benchModelPathOverride()` passes it straight through to `harper-fabric-embeddings`' `register()` as `config.modelPath`, which that package already supports as an alternative to `modelName`+`modelsDir` (bypasses its registry + HuggingFace-download resolution entirely). One value per invocation, not swept per-config — compare two GGUFs by running the harness twice and comparing the aggregate reports, the same way you'd compare against `BASELINE.json`. Unset (the default) is byte-identical to before this flag existed. |
 
 ## Interpreting the output
 
