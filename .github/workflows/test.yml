@@ -555,34 +555,25 @@ jobs:
           }
 
           # 2a. ci(migrations) extension (#504/ops-1l18 enforcement arm — see
-          # ~/ops/FLAIR-CI-FOUNDATION.md §2): seed STUB-STAMPED rows (a raw
-          # ops-API bulk insert, same pattern
-          # test/integration/migrations-synthetic-e2e.test.ts uses — bypasses
-          # Memory.post()'s own regen branch on purpose, so these rows carry a
-          # deliberately-stale embeddingModel regardless of the embeddings
-          # pipeline's readiness) as the reserved synthetic-migration test
-          # agent, so there is REAL pending work for the auto-migration to do
-          # once HEAD boots below. `flair reembed` (step 4a) already proves
+          # ~/ops/FLAIR-CI-FOUNDATION.md §2): seed STUB-STAMPED rows via the
+          # version-stable ops-API bulk insert (ops_seed_stub_memory_rows —
+          # see its doc in migration-lane-lib.sh for why a CLI/REST seed
+          # can't be trusted against the published baseline: its api() auth
+          # chain differs from HEAD's and 401s for a keyless agent). The
+          # deliberately-stale 'upgrade-lane-stub-stamp' (and NO
+          # FLAIR_EMBEDDING_MODEL pinning in this job — the opposite choice
+          # from the downgrade lane, on purpose) means the always-on
+          # embedding-stamp migration has REAL pending work on the HEAD
+          # boot: it re-embeds these rows with genuine vectors via its
+          # production regen path, and the synthetic migration then stamps
+          # them — so the recall-parity search below exercises real
+          # embeddings, not stubs. `flair reembed` (step 4b) already proves
           # the OLD manual re-embed path; this proves the NEW boot-keyed
           # runner actually ran, independent of it.
           MIGRATION_SEED_COUNT=20
-          MIGRATION_SEED_BODY=$(MIGRATION_SEED_COUNT="$MIGRATION_SEED_COUNT" AGENT_ID="$RESERVED_TEST_AGENT_ID" node -e '
-            const n = Number(process.env.MIGRATION_SEED_COUNT);
-            const agentId = process.env.AGENT_ID;
-            const records = Array.from({ length: n }, (_, i) => ({
-              id: "upgrade-lane-migration-seed-" + i,
-              agentId: agentId,
-              content: "upgrade-lane-migration-seed-row-" + i,
-              source: "not-yet",
-              embedding: [0.1, 0.2, 0.3],
-              embeddingModel: "upgrade-lane-stub-stamp",
-              createdAt: new Date().toISOString(),
-            }));
-            process.stdout.write(JSON.stringify({ operation: "insert", database: "flair", table: "Memory", records }));
-          ')
           BASE_OPS_PORT=$((PORT - 1))
-          curl -sf -u "admin:${FLAIR_ADMIN_PASS}" -X POST -H "Content-Type: application/json" \
-            -d "$MIGRATION_SEED_BODY" --max-time 15 "http://127.0.0.1:${BASE_OPS_PORT}/" > /dev/null
+          ops_seed_stub_memory_rows "http://127.0.0.1:${BASE_OPS_PORT}" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" \
+            "upgrade-lane-migration-seed" "upgrade-lane-migration-seed-row" "$MIGRATION_SEED_COUNT" "upgrade-lane-stub-stamp"
           echo "Seeded ${MIGRATION_SEED_COUNT} stub-stamped rows as ${RESERVED_TEST_AGENT_ID} for the upgrade lane's migration assertions."
 
           # 3. Stop baseline. Install HEAD into a FRESH project dir rather than

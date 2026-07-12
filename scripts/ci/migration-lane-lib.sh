@@ -235,6 +235,52 @@ check_ledger_hash_envelope() {
   ' <<< "$resp"
 }
 
+# ─── ops API: bulk-insert stub-stamped Memory rows (version-stable seeding) ─
+# Seeds `count` rows as `agent_id` via the Harper OPERATIONS API with Basic
+# admin auth — the one write channel authenticated identically on EVERY
+# published flair version. The REST path's auth chain has genuinely differed
+# across releases: published 0.21.0's api() only honors FLAIR_ADMIN_PASS for
+# REMOTE (!isLocal) targets and falls through to per-agent Ed25519 keys
+# locally — the reserved synthetic-migration test agent has no key (init only
+# creates the init agent's), so a published-baseline `flair memory add
+# --agent <reserved>` goes out with NO auth header and 401s
+# ("authentication required" — hit live in CI run 29180826116; root cause
+# confirmed by reading the published dist's api()). The ops API, by that same
+# release's own comment, "always requires Basic admin auth, and those helpers
+# send it unconditionally" — version-stable by design.
+#
+# Rows carry a STUB embedding + the given embeddingModel stamp: raw ops
+# inserts bypass resources/Memory.ts's regen branch entirely, so without a
+# stub stamp the rows would land embedding-less and the always-on
+# embedding-stamp migration would contend with the migration under test on
+# the next boot (the migrations-resume-after-kill.test.ts isolation lesson).
+# Callers that need embedding-stamp to see NO pending work pin
+# FLAIR_EMBEDDING_MODEL to the same stamp for the swapped-in build's boot;
+# callers that WANT embedding-stamp to have real pending work (the upgrade
+# lane) pass a deliberately-stale stamp and don't pin.
+#
+# Args: ops_url admin_pass agent_id id_prefix content_prefix count stamp
+# Row shape: id="<id_prefix>-<i>", content="<content_prefix>-<i>", i in 0..count-1.
+ops_seed_stub_memory_rows() {
+  local ops_url="$1" admin_pass="$2" agent_id="$3" id_prefix="$4" content_prefix="$5" count="$6" stamp="$7"
+  local body
+  body=$(AGENT_ID="$agent_id" ID_PREFIX="$id_prefix" CONTENT_PREFIX="$content_prefix" COUNT="$count" STAMP="$stamp" node -e '
+    const n = Number(process.env.COUNT);
+    const records = Array.from({ length: n }, (_, i) => ({
+      id: process.env.ID_PREFIX + "-" + i,
+      agentId: process.env.AGENT_ID,
+      content: process.env.CONTENT_PREFIX + "-" + i,
+      source: "not-yet",
+      embedding: [0.1, 0.2, 0.3],
+      embeddingModel: process.env.STAMP,
+      createdAt: new Date().toISOString(),
+    }));
+    process.stdout.write(JSON.stringify({ operation: "insert", database: "flair", table: "Memory", records }));
+  ')
+  curl -sf -u "admin:${admin_pass}" -X POST -H "Content-Type: application/json" \
+    -d "$body" --max-time 30 "${ops_url}/" > /dev/null
+}
+
 # ─── ops API: exact row read-back for an agent (version-stable path) ───────
 # Same rationale as test/compat/downgrade-boot.test.ts's fetchAgentMemories:
 # a raw ops search_by_value doesn't depend on either build's `flair memory
