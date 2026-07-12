@@ -26,11 +26,14 @@
  * plus embedding-stamp's own knob-widened batch sleeps: past the deadline.
  * Local Metal-accelerated embeds (~10-30ms/row) masked this entirely.
  * Fix: pin FLAIR_EMBEDDING_MODEL (only consumed by getModelId() — the
- * stamp string, never model loading) and seed rows with that exact value,
- * so embedding-stamp detects NOTHING and the synthetic migration — the one
+ * stamp string, never model loading) and seed rows with the EXACT stamp
+ * getModelId() computes for that pinned base id (derived by calling the
+ * real function, below — not hardcoded, so this test can't silently drift
+ * from embeddings-provider.ts's actual gate state, see flair#504), so
+ * embedding-stamp detects NOTHING and the synthetic migration — the one
  * under test — starts immediately after the shared pre-hash. The ground
  * truth check asserts the isolation held (embeddingModel still the pinned
- * value at the end — embedding-stamp never touched the rows).
+ * stamp at the end — embedding-stamp never touched the rows).
  *
  * ── DETERMINISM (fix for CI failure #1) ──
  *   - FLAIR_MIGRATION_TEST_BATCH_DELAY_MS (runner.ts's test-only throttle
@@ -52,16 +55,37 @@ import { rm } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { getModelId } from "../../resources/embeddings-provider";
 
 const RESERVED_TEST_AGENT_ID = "__flair_migration_synthetic_test_agent__";
 const SYNTHETIC_TARGET_MARKER = "synthetic-ci-schema-stamp-done";
 const SYNTHETIC_MIGRATION_ID = "synthetic-ci-schema-stamp";
 const ROW_COUNT = 140; // 3 batches at the schema-additive batch size (50) — two observable mid-flight windows
 const TEST_BATCH_DELAY_MS = 2500; // widens each mid-flight window to ~2.5s (vs the 100ms prod default)
-// Pinned stamp — see "MIGRATION ISOLATION" above. getModelId() returns this
-// verbatim (gate off, no suffix) inside the spawned Harper, and every seeded
-// row carries it, so embedding-stamp's stale-detection finds nothing.
+// Pinned base id — see "MIGRATION ISOLATION" above. Set as FLAIR_EMBEDDING_MODEL
+// for the spawned Harper (beforeAll, below).
 const PINNED_EMBEDDING_MODEL = "resume-test-pinned-model";
+// The EXACT stamp getModelId() computes for PINNED_EMBEDDING_MODEL under
+// this build's THE GATE (flair#504) — derived by calling the real,
+// harper-free `getModelId()` (it only reads env vars + the module-level
+// gate constant, never triggers embeddings-provider.ts's deferred Harper
+// import), not hardcoded as a literal. This is what makes the isolation
+// hold regardless of which way THE GATE is currently set: whether
+// `getModelId()` returns the bare base id or `<base>+searchprefix`, this
+// constant always matches it, so the seeded rows below never read as stale
+// to embedding-stamp inside the spawned Harper (same build, same env var,
+// same gate — see the spawned process's own getModelId() for why this is a
+// faithful mirror, not a guess).
+const PINNED_EMBEDDING_STAMP = (() => {
+  const saved = process.env.FLAIR_EMBEDDING_MODEL;
+  process.env.FLAIR_EMBEDDING_MODEL = PINNED_EMBEDDING_MODEL;
+  try {
+    return getModelId();
+  } finally {
+    if (saved === undefined) delete process.env.FLAIR_EMBEDDING_MODEL;
+    else process.env.FLAIR_EMBEDDING_MODEL = saved;
+  }
+})();
 
 let harper: HarperInstance;
 let installDir: string;
@@ -139,7 +163,7 @@ describe("zero-touch migrations — resume after a mid-migration process kill (r
       content: `resume row ${i}`,
       source: "not-yet",
       embedding: [0.1, 0.2, 0.3],
-      embeddingModel: PINNED_EMBEDDING_MODEL, // matches getModelId() in the spawned server — invisible to embedding-stamp
+      embeddingModel: PINNED_EMBEDDING_STAMP, // matches getModelId() in the spawned server — invisible to embedding-stamp
       createdAt: new Date().toISOString(),
     }));
     // Single bulk insert — ops API accepts multiple records per call. (The
@@ -267,7 +291,7 @@ describe("zero-touch migrations — resume after a mid-migration process kill (r
     expect(list).toHaveLength(ROW_COUNT);
     for (const row of list) {
       expect(row.source).toBe(SYNTHETIC_TARGET_MARKER);
-      expect(row.embeddingModel).toBe(PINNED_EMBEDDING_MODEL);
+      expect(row.embeddingModel).toBe(PINNED_EMBEDDING_STAMP);
     }
   }, 400_000);
 });

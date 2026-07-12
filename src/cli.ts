@@ -7890,17 +7890,18 @@ program
     // tsconfig.cli.json's rootDir is "src" and only includes src/cli.ts +
     // src/cli-shim.cts, and the published CLI package ships only dist/ built
     // from that config (package.json's "files"), so resources/ isn't
-    // reachable from (or bundled into) the CLI binary. THE GATE is currently
-    // OFF (parked on v2 A/B evidence — see embeddings-provider.ts's file
-    // header and PR #689), so `currentModel` here is the bare base id, no
-    // suffix — matching getModelId()'s gate-off return exactly. If
+    // reachable from (or bundled into) the CLI binary. THE GATE is now ON
+    // (flipped, re-baselined through the ratchet gate — see
+    // embeddings-provider.ts's file header and PR #689 for the park history
+    // this flip revisits), so `currentModel` here is `<base>+searchprefix` —
+    // matching getModelId()'s gate-on return exactly. If
     // EMBEDDING_PREFIXES_ENABLED or EMBEDDING_VARIANT ever changes in
     // embeddings-provider.ts, update this block too — a drift here silently
     // breaks `--stale-only`: it would compare every row's embeddingModel
     // against the WRONG current-model string, so rows would read as already
     // "current" (or as needing re-embed) out of sync with what getModelId()
     // is actually stamping new writes with.
-    const EMBEDDING_PREFIXES_ENABLED = false; // MUST mirror resources/embeddings-provider.ts's gate
+    const EMBEDDING_PREFIXES_ENABLED = true; // MUST mirror resources/embeddings-provider.ts's gate
     const EMBEDDING_VARIANT = "searchprefix";
     const baseModel = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
     const currentModel = EMBEDDING_PREFIXES_ENABLED ? `${baseModel}+${EMBEDDING_VARIANT}` : baseModel;
