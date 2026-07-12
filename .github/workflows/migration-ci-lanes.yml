@@ -1,0 +1,528 @@
+# Migration CI lanes (#695 enforcement arm) — the K&S-ratified, per-PR
+# proof of the migration safety invariants (flair#695)
+# for the zero-touch boot-keyed auto-migration runner (flair#695,
+# resources/migrations/*, PR #690). Extends flair#695's
+# upgrade-path CI with the two lanes Kern's design-review verdict called
+# non-negotiable:
+#
+#   - downgrade-and-revert: "the proof of invariant I" — a PR build that goes
+#     bad mid-migration must not brick the fleet; reinstalling the previously
+#     published release must boot cleanly against the partially-migrated
+#     store. Runs PER MIGRATION PR, not nightly-only.
+#   - snapshot-restore drill: invariant III ("a backup that has never been
+#     restored is a prayer") — proves the restore path actually recovers
+#     corrupted content, not just that a snapshot file gets written.
+#
+# The third ratified lane (upgrade-lane migration assertions: auto-migration
+# ran, content-hash envelope match=true, recall parity) extends the EXISTING
+# `upgrade-smoke` job in test.yml instead of duplicating it here — see that
+# file's comment block on the extension.
+#
+# Sherlock §4 compliance (flair#695): pull_request trigger only
+# (never pull_request_target with PR-code checkout); no secrets exposed to
+# either job (public npm install + public GITHUB_TOKEN-default only — no
+# NPM_TOKEN, no deploy credentials); every third-party action below is
+# pinned to a full commit SHA, not a tag; no `${{ }}` interpolation of
+# PR-controlled metadata (title/body/branch) into any `run:` block — the only
+# `${{ }}` uses here are `github.workspace` (runner-controlled, not
+# PR-controlled) and this workflow's own step outputs.
+name: Migration CI Lanes
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ── Downgrade-and-revert (Kern: "non-negotiable per migration PR") ───────
+  # Scenario (mirrors a real bad-PR-build incident exactly):
+  #   1. Install the previously-published release, init, seed a corpus AS the
+  #      reserved synthetic-migration test agent via the real CLI write path.
+  #   2. Swap in the PR build, restart (boot-keyed — this is the boot that
+  #      discovers the seeded rows as pending), with the test-migration gate
+  #      on and the batch delay widened so the synthetic migration runs slow
+  #      enough to catch genuinely mid-flight.
+  #   3. Kill Harper while it's mid-migration (a real SIGTERM, not simulated).
+  #   4. Reinstall (start) the previously-published release again against
+  #      that SAME, now partially-migrated data directory.
+  #   5. Assert: it boots (health OK) and serves the seeded corpus correctly
+  #      — byte-identical content, exact count — through BOTH a version-stable
+  #      raw ops-API read (same rationale as
+  #      test/compat/downgrade-boot.test.ts's fetchAgentMemories: doesn't
+  #      depend on either build's CLI/REST auth resolution, which has
+  #      genuinely differed across versions) AND a real `flair memory search`
+  #      CLI round-trip.
+  downgrade-and-revert:
+    name: Migration downgrade-and-revert (invariant I proof)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+
+      # Node 22 — same native-Harper-spawn stability rationale test.yml's
+      # "Integration Tests" job documents (avoids a known HNSW race present
+      # only under the Docker image's bundled Node 24, not native spawns).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+
+      - run: sfw bun install --frozen-lockfile
+
+      - name: Install linux-x64 native binary for embeddings (HEAD build)
+        run: bun add --no-save @node-llama-cpp/linux-x64@3
+
+      - run: bun run build && bun run build:cli
+
+      # Pre-downloaded ONCE and pointed at by FLAIR_MODELS_DIR (below) for
+      # BOTH the baseline and PR-build boots — avoids the baseline init's own
+      # in-band HuggingFace download (the #463/#465 429-flake class) and any
+      # re-download after the swap.
+      - name: Pre-download embedding model (shared by baseline + PR build)
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+            "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
+            -o models/nomic-embed-text-v1.5.Q4_K_M.gguf
+          echo "Model downloaded ($(du -sh models/*.gguf | cut -f1))"
+
+      - name: Pack HEAD (PR build)
+        id: pack
+        run: |
+          set -euo pipefail
+          npm pack
+          echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> "$GITHUB_OUTPUT"
+
+      - name: Downgrade-and-revert drill
+        env:
+          TGZ_PATH: ${{ steps.pack.outputs.TGZ_PATH }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/ci/migration-lane-lib.sh"
+
+          PORT=19995
+          OPS_PORT=$((PORT - 1))
+          BASE_URL="http://127.0.0.1:${PORT}"
+          OPS_URL="http://127.0.0.1:${OPS_PORT}"
+          DATA_DIR="$HOME/.flair/data"
+          DIAG_DIR="$GITHUB_WORKSPACE/diagnostics/downgrade-and-revert"
+          mkdir -p "$DIAG_DIR"
+          export FLAIR_ADMIN_PASS="downgrade-lane-admin-$$"
+          export FLAIR_MODELS_DIR="$GITHUB_WORKSPACE/models"
+          # Self-diagnosing (deliverable #4): ANY failing command in this
+          # script dumps HealthDetail + the migrations state file + Harper's
+          # own hdb.log tail (see the module doc on why that file, not the
+          # spawned process's stdout, carries Harper-internal diagnostics on
+          # Linux) before the step fails — no separate evidence-gathering
+          # cycle needed to triage a red run.
+          trap 'dump_migration_diagnostics "$DATA_DIR" "$BASE_URL" "$FLAIR_ADMIN_PASS" "$DIAG_DIR"' ERR
+
+          ROW_COUNT=140            # 3 batches at the schema-additive batch size (50) —
+          DELAY_MS=2500            # matches migrations-resume-after-kill.test.ts's proven
+                                    # constants for reliably catching a genuine mid-flight window.
+          RUN_ID="dg-${GITHUB_RUN_ID:-local}-$$"
+          # Pinned embeddingModel stamp — the resume-after-kill isolation
+          # pattern: seeded rows carry this exact stamp AND the PR-build boot
+          # runs with FLAIR_EMBEDDING_MODEL pinned to it (only consumed by
+          # getModelId(), the stamp string — never model loading), so the
+          # always-on embedding-stamp migration (first in registry order)
+          # detects NO pending work on the seeded corpus and the synthetic
+          # migration — the one whose mid-flight window this lane must catch
+          # deterministically — starts right after the shared pre-hash.
+          PINNED_EMBEDDING_MODEL="downgrade-lane-pinned-model"
+
+          # ── 1. Install the previously-published baseline ──────────────────
+          BASE_DIR=$(mktemp -d)
+          ( cd "$BASE_DIR" && npm init -y > /dev/null )
+          ( cd "$BASE_DIR" && npm install @tpsdev-ai/flair@latest )
+          ( cd "$BASE_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3 )
+          BASE_FLAIR="node $BASE_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
+          BASELINE_VERSION=$(node -p "require('$BASE_DIR/node_modules/@tpsdev-ai/flair/package.json').version")
+          HEAD_VERSION=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
+          echo "Baseline (previously published): ${BASELINE_VERSION} — HEAD (PR build): ${HEAD_VERSION}"
+
+          # ── 2. Init baseline, then seed the corpus AS the reserved
+          # synthetic-migration test agent via the OPS API with Basic admin
+          # auth — the version-stable authenticated write channel (see
+          # ops_seed_stub_memory_rows's doc in migration-lane-lib.sh).
+          # NOT `flair memory add`: the published baseline's REST auth chain
+          # differs from HEAD's — 0.21.0 only honors FLAIR_ADMIN_PASS for
+          # remote targets and falls through to a per-agent Ed25519 key the
+          # reserved agent doesn't have, so the CLI path 401s on the baseline
+          # half of this lane (hit live in CI run 29180826116).
+          #
+          # cwd = $BASE_DIR for every baseline CLI call (same convention as
+          # upgrade-smoke's `cd "$BASE_DIR"`): harperBin() falls back to
+          # process.cwd()/node_modules when @harperfast/harper isn't nested
+          # inside the flair package (npm hoists it to the install root), so
+          # running from the workspace would silently make the BASELINE spawn
+          # the WORKSPACE'S Harper instead of its own — wrong binary for the
+          # downgrade claim this lane makes. ──
+          cd "$BASE_DIR"
+          $BASE_FLAIR init --agent-id downgrade-lane --port $PORT --admin-pass "$FLAIR_ADMIN_PASS" --skip-soul
+
+          echo "Seeding ${ROW_COUNT} rows as the reserved synthetic-migration test agent (ops API, stub embedding, pinned stamp)..."
+          ops_seed_stub_memory_rows "$OPS_URL" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" \
+            "downgrade-seed-${RUN_ID}" "downgrade-drill-row-${RUN_ID}" "$ROW_COUNT" "$PINNED_EMBEDDING_MODEL"
+          EXPECTED_CONTENT_FILE="$DIAG_DIR/expected-content.txt"
+          : > "$EXPECTED_CONTENT_FILE"
+          for i in $(seq 0 $((ROW_COUNT - 1))); do
+            echo "downgrade-drill-row-${RUN_ID}-${i}" >> "$EXPECTED_CONTENT_FILE"
+          done
+          echo "Seed complete."
+
+          fetch_agent_memories_json "$OPS_URL" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" > "$DIAG_DIR/seeded-rows-pre-swap.json"
+          SEEDED_COUNT=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$DIAG_DIR/seeded-rows-pre-swap.json','utf8')).length)")
+          [[ "$SEEDED_COUNT" == "$ROW_COUNT" ]] || { echo "::error::seeded ${SEEDED_COUNT} rows, expected ${ROW_COUNT} — setup broken, not a downgrade regression"; exit 1; }
+          echo "Confirmed ${SEEDED_COUNT} seeded rows readable on baseline before the swap."
+
+          # ── 3. Stop baseline. Confirm it actually exited (flair stop sends
+          # SIGTERM and returns immediately — see src/cli.ts's own comment on
+          # this race) before touching the data dir with a different binary. ──
+          $BASE_FLAIR stop --port $PORT || true
+          wait_for_http_down "${BASE_URL}/Health" 30 "baseline Harper (post-stop)"
+
+          # ── 4. Install the PR build fresh, in its own directory (never
+          # overwrite baseline's node_modules in place — the exact npm
+          # arborist/teardown race upgrade-smoke's own comment documents,
+          # flair#611). ──
+          HEAD_DIR=$(mktemp -d)
+          ( cd "$HEAD_DIR" && npm init -y > /dev/null )
+          ( cd "$HEAD_DIR" && npm install "$TGZ_PATH" )
+          ( cd "$HEAD_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3 )
+          HEAD_FLAIR="node $HEAD_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
+          NEW=$(node -p "require('$HEAD_DIR/node_modules/@tpsdev-ai/flair/package.json').version")
+          [[ "$NEW" == "$HEAD_VERSION" ]] || { echo "::error::expected ${HEAD_VERSION} in node_modules, got ${NEW}"; exit 1; }
+
+          # ── 5. Swap in the PR build against baseline's SAME data dir
+          # (default ~/.flair/data — neither install overrides HOME), with
+          # the synthetic-migration gate on, the batch delay widened, and the
+          # embeddingModel stamp pinned (embedding-stamp isolation — see the
+          # PINNED_EMBEDDING_MODEL comment above). This boot is the one that
+          # discovers the seeded rows as pending. cwd = $HEAD_DIR so
+          # harperBin() resolves the PR install's own Harper (see step 2's
+          # cwd comment). ──
+          cd "$HEAD_DIR"
+          export FLAIR_ENABLE_TEST_MIGRATIONS=1
+          export FLAIR_MIGRATION_TEST_BATCH_DELAY_MS=$DELAY_MS
+          export FLAIR_EMBEDDING_MODEL="$PINNED_EMBEDDING_MODEL"
+          $HEAD_FLAIR start --port $PORT
+          wait_for_http_ok "${BASE_URL}/Health" 90 "PR-build Harper (post-restart)"
+
+          # ── 6. Wait until the synthetic migration is GENUINELY mid-flight
+          # (not just "running" — rowsDone>0 AND rowsRemaining>0), bounded
+          # retry throughout (never a single-shot probe — the flair#691 class
+          # of bug this PR also fixes in the tarball-smoke lane). ──
+          wait_for_migration_mid_flight "$BASE_URL" "$FLAIR_ADMIN_PASS" "$SYNTHETIC_MIGRATION_ID" 150 90
+
+          # ── 7. The real kill — SIGTERM mid-migration, confirmed exited. ──
+          $HEAD_FLAIR stop --port $PORT || true
+          wait_for_http_down "${BASE_URL}/Health" 30 "PR-build Harper (post-kill)"
+
+          # ── 8. Reinstall the previously-published release: start the SAME
+          # already-installed baseline binary again against the now
+          # partially-migrated data directory — exactly what a real operator
+          # downgrade is (`flair stop && npm install -g @tpsdev-ai/flair@<prev>
+          # && flair restart`), no re-init, no touching the files by hand.
+          # Back to $BASE_DIR so the baseline spawns ITS OWN Harper. ──
+          cd "$BASE_DIR"
+          unset FLAIR_ENABLE_TEST_MIGRATIONS FLAIR_MIGRATION_TEST_BATCH_DELAY_MS FLAIR_EMBEDDING_MODEL
+          $BASE_FLAIR start --port $PORT
+          wait_for_http_ok "${BASE_URL}/Health" 90 "baseline Harper (post-downgrade)"
+          # Version-safe on the baseline: 0.21.0's `flair status` probes the
+          # PUBLIC /Health (with a Basic fallback on 401) — no per-agent
+          # auth in the loop (verified by reading the published dist).
+          wait_for_flair_status_running "$BASE_FLAIR" "$PORT" 60
+
+          # ── 9. Assert the old binary serves the corpus CORRECTLY, not just
+          # that it boots — the honest bar per flair#695
+          # invariant II ("still serving on the pre-migration shape"). All
+          # reads go through the version-stable ops API with Basic auth —
+          # deliberately NOT the baseline's `flair memory search`/REST
+          # surface, whose auth chain for a keyless agent differs across
+          # published versions (the same class of bug that broke the CLI
+          # seeding path in CI run 29180826116; the ops read IS the old
+          # binary's own serving surface, so readability is genuinely
+          # exercised). ──
+          fetch_agent_memories_json "$OPS_URL" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" > "$DIAG_DIR/post-downgrade-rows.json"
+          ACTUAL_COUNT=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$DIAG_DIR/post-downgrade-rows.json','utf8')).length)")
+          [[ "$ACTUAL_COUNT" == "$ROW_COUNT" ]] || { echo "::error::post-downgrade row count ${ACTUAL_COUNT} != expected ${ROW_COUNT} — DATA LOSS across the downgrade"; exit 1; }
+
+          MARKER="$SYNTHETIC_TARGET_MARKER" PINNED="$PINNED_EMBEDDING_MODEL" ROWS_FILE="$DIAG_DIR/post-downgrade-rows.json" EXPECTED_FILE="$EXPECTED_CONTENT_FILE" TOTAL="$ROW_COUNT" node -e '
+            const fs = require("fs");
+            const rows = JSON.parse(fs.readFileSync(process.env.ROWS_FILE, "utf8"));
+            const total = Number(process.env.TOTAL);
+
+            // (a) Byte-identical content — no row lost, none corrupted.
+            const actual = rows.map((r) => r.content).sort();
+            const expected = fs.readFileSync(process.env.EXPECTED_FILE, "utf8").trim().split("\n").sort();
+            if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+              console.error("content mismatch after downgrade — some seeded rows changed or were lost");
+              process.exit(1);
+            }
+
+            // (b) Isolation held: every row still carries the pinned stamp —
+            // embedding-stamp never touched the seeded corpus on the PR boot.
+            const notPinned = rows.filter((r) => r.embeddingModel !== process.env.PINNED).length;
+            if (notPinned > 0) {
+              console.error(notPinned + " rows lost the pinned embeddingModel stamp — embedding-stamp contended with the synthetic migration (isolation broken)");
+              process.exit(1);
+            }
+
+            // (c) The store is GENUINELY partially migrated — the scenario
+            // invariant I must survive. Some rows stamped (rowsDone>0 was
+            // observed pre-kill and those writes persist), some not (the
+            // kill landed mid-flight). Fully-stamped means the kill landed
+            // too late (widen FLAIR_MIGRATION_TEST_BATCH_DELAY_MS / raise
+            // ROW_COUNT); zero-stamped means no migration write ever
+            // persisted — both fail loud, same philosophy as the resume
+            // tests too-fast guard.
+            const stamped = rows.filter((r) => r.source === process.env.MARKER).length;
+            if (stamped === 0) {
+              console.error("0 rows carry the migration marker post-kill — no migration write persisted before the kill (mid-flight observation was hollow)");
+              process.exit(1);
+            }
+            if (stamped === total) {
+              console.error("ALL " + total + " rows are migrated — the kill landed after completion, the store is not partially migrated; widen FLAIR_MIGRATION_TEST_BATCH_DELAY_MS or raise ROW_COUNT");
+              process.exit(1);
+            }
+            console.log("all " + total + " seeded rows byte-identical after downgrade; store genuinely partial (" + stamped + "/" + total + " migrated); pinned-stamp isolation held (raw ops-API read through the old binary)");
+          '
+
+          echo "✅ downgrade-and-revert: old binary (${BASELINE_VERSION}) boots and serves ${ROW_COUNT} seeded rows correctly against the store PR build ${HEAD_VERSION} left partially migrated."
+
+          $BASE_FLAIR stop --port $PORT || true
+
+      - name: Upload diagnostics (failure only)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: downgrade-and-revert-diagnostics
+          path: diagnostics/downgrade-and-revert/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ── Snapshot-restore drill (invariant III: "a backup that has never been
+  # restored is a prayer") ───────────────────────────────────────────────────
+  # Finding, not a bug (documented here + in the PR body): the auto-migration
+  # runner's OWN pre-flight snapshot (resources/migrations/snapshot.ts) is
+  # deliberately risk-class-scoped — metadata-only for derived-only migrations,
+  # schema+metadata for schema-additive ones (see that file's module doc for
+  # why: it's a logical in-process manifest, not `flair snapshot create`'s
+  # byte-exact tar.gz, because the runner executes inside the ALREADY-serving
+  # process and stopping Harper to snapshot would undo the #687 boot-win).
+  # Neither of the two migrations registered today (embedding-stamp,
+  # derived-only; the synthetic CI variant, schema-additive) writes row
+  # CONTENT into that internal snapshot — there is nothing there to restore
+  # FROM for a content-corruption drill. This lane therefore exercises the
+  # invariant III "floor beneath everything" mechanism instead: `flair
+  # snapshot create` / `flair snapshot restore` — the shipped, byte-exact
+  # physical mechanism, and the one the migration-safety doc's "rides the
+  # existing `flair snapshot` machinery" language actually describes for
+  # content recovery. It ALSO asserts the migration's own internal pre-flight
+  # snapshot exists (proving that mechanism fired), as a complementary,
+  # cheaper check. See the PR description for the full reasoning — this is a
+  # design-fit observation for K&S, not a runtime change (out of scope here).
+  snapshot-restore-drill:
+    name: Migration snapshot-restore drill (invariant III proof)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+
+      - run: sfw bun install --frozen-lockfile
+
+      - name: Install linux-x64 native binary for embeddings
+        run: bun add --no-save @node-llama-cpp/linux-x64@3
+
+      - run: bun run build && bun run build:cli
+
+      - name: Pre-download embedding model
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+            "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
+            -o models/nomic-embed-text-v1.5.Q4_K_M.gguf
+
+      - name: Pack HEAD (PR build)
+        id: pack
+        run: |
+          set -euo pipefail
+          npm pack
+          echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> "$GITHUB_OUTPUT"
+
+      - name: Snapshot-restore drill
+        env:
+          TGZ_PATH: ${{ steps.pack.outputs.TGZ_PATH }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/ci/migration-lane-lib.sh"
+
+          PORT=19994
+          OPS_PORT=$((PORT - 1))
+          BASE_URL="http://127.0.0.1:${PORT}"
+          OPS_URL="http://127.0.0.1:${OPS_PORT}"
+          DATA_DIR="$HOME/.flair/data"
+          DIAG_DIR="$GITHUB_WORKSPACE/diagnostics/snapshot-restore-drill"
+          mkdir -p "$DIAG_DIR"
+          export FLAIR_ADMIN_PASS="snapshot-drill-admin-$$"
+          export FLAIR_MODELS_DIR="$GITHUB_WORKSPACE/models"
+          trap 'dump_migration_diagnostics "$DATA_DIR" "$BASE_URL" "$FLAIR_ADMIN_PASS" "$DIAG_DIR"' ERR
+
+          ROW_COUNT=60
+          RUN_ID="sr-${GITHUB_RUN_ID:-local}-$$"
+
+          HEAD_DIR=$(mktemp -d)
+          ( cd "$HEAD_DIR" && npm init -y > /dev/null )
+          ( cd "$HEAD_DIR" && npm install "$TGZ_PATH" )
+          ( cd "$HEAD_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3 )
+          FLAIR="node $HEAD_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
+          # cwd = $HEAD_DIR for every CLI call: harperBin() falls back to
+          # process.cwd()/node_modules for the npm-hoisted @harperfast/harper,
+          # so this install must run ITS OWN Harper, not the workspace's
+          # (same convention as upgrade-smoke's `cd`; see the downgrade
+          # lane's step-2 comment for the full rationale).
+          cd "$HEAD_DIR"
+
+          # ── 1. First boot (empty corpus — its migration cycle finds nothing
+          # pending), then seed AS the reserved synthetic-migration test
+          # agent via the real CLI write path — fine HERE because this lane
+          # only ever drives the PR build, whose api() honors
+          # FLAIR_ADMIN_PASS for local targets (the published-baseline auth
+          # skew that forced the downgrade lane onto the ops API doesn't
+          # apply; validated live against a real ephemeral Harper). Boot-keyed
+          # means a cycle only runs at boot time — restarting AFTER seeding
+          # is what makes the NEXT boot's cycle discover the pending rows
+          # (same two-boot shape migrations-synthetic-e2e.test.ts uses). ──
+          export FLAIR_ENABLE_TEST_MIGRATIONS=1
+          $FLAIR init --agent-id snapshot-drill --port $PORT --admin-pass "$FLAIR_ADMIN_PASS" --skip-soul
+
+          echo "Seeding ${ROW_COUNT} rows as the reserved synthetic-migration test agent..."
+          EXPECTED_CONTENT_FILE="$DIAG_DIR/expected-content.txt"
+          : > "$EXPECTED_CONTENT_FILE"
+          for i in $(seq 1 "$ROW_COUNT"); do
+            CONTENT="snapshot-drill-row-${i}-${RUN_ID}"
+            echo "$CONTENT" >> "$EXPECTED_CONTENT_FILE"
+            $FLAIR memory add --agent "$RESERVED_TEST_AGENT_ID" --content "$CONTENT" > /dev/null
+          done
+          echo "Seed complete."
+
+          # ── 2. Restart so THIS boot's cycle discovers the seeded rows, and
+          # let the auto-migration run to completion (bounded retry). ──
+          $FLAIR restart --port $PORT
+          wait_for_http_ok "${BASE_URL}/Health" 90 "Harper (post-restart, pre-migration-wait)"
+          wait_for_migration_state "$BASE_URL" "$FLAIR_ADMIN_PASS" "$SYNTHETIC_MIGRATION_ID" "completed" 150
+
+          # ── 3. Complementary check: the migration's OWN pre-flight snapshot
+          # fired (invariant III's boot-keyed mechanism), even though — per
+          # this job's header comment — it's metadata/schema-scoped, not a
+          # content-restorable snapshot for this risk class. ──
+          SNAPSHOT_COUNT=0
+          for entry in "${DATA_DIR}/.migrations/snapshots/${SYNTHETIC_MIGRATION_ID}"-*; do
+            [[ -d "$entry" ]] && SNAPSHOT_COUNT=$((SNAPSHOT_COUNT + 1))
+          done
+          [[ "$SNAPSHOT_COUNT" -ge 1 ]] || { echo "::error::no internal pre-flight snapshot found under .migrations/snapshots/ for ${SYNTHETIC_MIGRATION_ID} — invariant III's boot-keyed snapshot step did not fire"; exit 1; }
+          echo "Confirmed the migration's own pre-flight snapshot fired (${SNAPSHOT_COUNT} entr$([ "$SNAPSHOT_COUNT" = 1 ] && echo y || echo ies))."
+
+          # ── 4. Take the shipped, byte-exact PHYSICAL snapshot (the
+          # invariant III 'floor beneath everything' mechanism, and the one
+          # that can actually restore row content) — AFTER the migration has
+          # completed, so this is the restore point we drill against. ──
+          $FLAIR snapshot create --port $PORT
+          SNAPSHOT_PATH=$(node -e "
+            const {execFileSync} = require('child_process');
+            const out = JSON.parse(execFileSync('node', ['$HEAD_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js', 'snapshot', 'list', '--json'], {env: process.env}).toString());
+            if (!out.length) { console.error('no snapshots listed'); process.exit(1); }
+            out.sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
+            console.log(out[0].path);
+          ")
+          echo "Restore point: ${SNAPSHOT_PATH}"
+
+          # ── 5. Record pre-corruption ground truth, then deliberately mangle
+          # the rows the migration touched (every seeded row now carries the
+          # migration's marker in `source`) via a raw ops-API partial update —
+          # simulates real corruption (bit-rot / bad write / operator
+          # mistake), not a synthetic marker the restore path could special-case. ──
+          fetch_agent_memories_json "$OPS_URL" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" > "$DIAG_DIR/pre-corrupt-rows.json"
+          PRE_COUNT=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$DIAG_DIR/pre-corrupt-rows.json','utf8')).length)")
+          [[ "$PRE_COUNT" == "$ROW_COUNT" ]] || { echo "::error::expected ${ROW_COUNT} seeded rows before corruption, found ${PRE_COUNT}"; exit 1; }
+
+          CORRUPT_BODY=$(node -e "
+            const fs = require('fs');
+            const rows = JSON.parse(fs.readFileSync('$DIAG_DIR/pre-corrupt-rows.json', 'utf8'));
+            const records = rows.map((r) => ({ id: r.id, content: 'CORRUPTED-BY-CI-RESTORE-DRILL' }));
+            process.stdout.write(JSON.stringify({ operation: 'update', database: 'flair', table: 'Memory', records }));
+          ")
+          curl -sf -u "admin:${FLAIR_ADMIN_PASS}" -X POST -H "Content-Type: application/json" -d "$CORRUPT_BODY" --max-time 15 "${OPS_URL}/" > /dev/null
+          echo "Corrupted ${ROW_COUNT} rows' content in place."
+
+          POST_CORRUPT=$(fetch_agent_memories_json "$OPS_URL" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID")
+          echo "$POST_CORRUPT" | node -e "
+            let d = ''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => {
+              const rows = JSON.parse(d);
+              const stillGood = rows.filter((r) => r.content !== 'CORRUPTED-BY-CI-RESTORE-DRILL').length;
+              if (stillGood > 0) { console.error(stillGood + ' rows were NOT corrupted — corruption step itself is broken, drill proves nothing'); process.exit(1); }
+              console.log('confirmed all ' + rows.length + ' rows corrupted in place');
+            });
+          "
+
+          # ── 6. Restore from the pre-corruption snapshot via the shipped
+          # mechanism (stops Flair, replaces the data dir, restarts — all
+          # handled internally by `flair snapshot restore`). ──
+          $FLAIR snapshot restore "$SNAPSHOT_PATH" --port $PORT --yes
+          wait_for_http_ok "${BASE_URL}/Health" 90 "Harper (post-restore)"
+          wait_for_flair_status_running "$FLAIR" "$PORT" 60
+
+          # ── 7. Verify integrity: seeded content reads back correct, counts
+          # match — the honest bar invariant III sets for a restore drill. ──
+          fetch_agent_memories_json "$OPS_URL" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" > "$DIAG_DIR/post-restore-rows.json"
+          POST_COUNT=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$DIAG_DIR/post-restore-rows.json','utf8')).length)")
+          [[ "$POST_COUNT" == "$ROW_COUNT" ]] || { echo "::error::post-restore row count ${POST_COUNT} != expected ${ROW_COUNT}"; exit 1; }
+
+          node -e "
+            const fs = require('fs');
+            const rows = JSON.parse(fs.readFileSync('$DIAG_DIR/post-restore-rows.json', 'utf8'));
+            const actual = rows.map((r) => r.content).sort();
+            const expected = fs.readFileSync('$EXPECTED_CONTENT_FILE', 'utf8').trim().split('\n').sort();
+            if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+              console.error('content mismatch after restore — corruption was not fully reverted');
+              process.exit(1);
+            }
+            console.log('all ${ROW_COUNT} seeded rows byte-identical after restore — corruption fully reverted');
+          "
+
+          echo "✅ snapshot-restore-drill: corrupted ${ROW_COUNT} migration-touched rows, restored via the shipped snapshot mechanism, integrity verified."
+
+          $FLAIR stop --port $PORT || true
+
+      - name: Upload diagnostics (failure only)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: snapshot-restore-drill-diagnostics
+          path: diagnostics/snapshot-restore-drill/
+          retention-days: 7
+          if-no-files-found: ignore

@@ -408,15 +408,21 @@ jobs:
           # ── end flair#654 hard gate ─────────────────────────────────────────────
 
           # Restart race guard (0.5.4 regression): `flair restart` must block until
-          # Harper is actually reachable, so an immediately following `flair status`
-          # must not report unreachable.
+          # Harper is actually reachable, so a following `flair status` must
+          # eventually report running, not unreachable.
+          #
+          # flair#691: this used to be a SINGLE-SHOT check immediately after
+          # `flair restart` returned — on a slow CI runner that races the
+          # daemon's own post-restart boot (deferred migration-boot readiness
+          # poll, embeddings-settle window, etc.) and flakes on "unreachable"
+          # even though the restart is genuinely still in flight, not broken.
+          # Bounded-retry instead (never a fixed `sleep N` guess either) —
+          # see scripts/ci/migration-lane-lib.sh's wait_for_flair_status_running,
+          # the same primitive the migration CI lanes use for every
+          # post-boot/post-restart verification (ci(migrations) PR, #691).
+          source "$GITHUB_WORKSPACE/scripts/ci/migration-lane-lib.sh"
           $FLAIR restart --port $PORT
-          STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
-          if echo "$STATUS" | grep -q "unreachable"; then
-            echo "FAIL: unreachable immediately after restart (0.5.4 regression)"
-            exit 1
-          fi
-          echo "$STATUS" | grep -q "running" || { echo "FAIL: not running after restart"; exit 1; }
+          wait_for_flair_status_running "$FLAIR" "$PORT" 90
 
           # Write/search round-trip (0.5.2-class regression guard): write a
           # memory as the smoke agent, then search for it. Exercises the
@@ -481,9 +487,25 @@ jobs:
         run: |
           npm pack
           echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> $GITHUB_OUTPUT
+      # Pre-downloaded and pointed at by FLAIR_MODELS_DIR (below) for BOTH the
+      # baseline and HEAD boots — ci(migrations) extension (#504/#695
+      # enforcement): keeps `getModelId()`'s embeddingModel stamp identical
+      # across the swap, so embedding-stamp (always-on, runs before the
+      # synthetic migration in registry order) doesn't contend with the
+      # migration-assertion seeding added below. Same rationale as the new
+      # migration-ci-lanes.yml downgrade-and-revert job.
+      - name: Pre-download embedding model (shared by baseline + HEAD)
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+            "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
+            -o models/nomic-embed-text-v1.5.Q4_K_M.gguf
       - name: Install npm-stable, seed data, upgrade, verify
         run: |
           set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/ci/migration-lane-lib.sh"
+          export FLAIR_MODELS_DIR="$GITHUB_WORKSPACE/models"
           BASE_DIR=$(mktemp -d)
           cd "$BASE_DIR"
           npm init -y > /dev/null
@@ -532,6 +554,28 @@ jobs:
             exit 1
           }
 
+          # 2a. ci(migrations) extension (#504/#695 enforcement arm — see
+          # flair#695): seed STUB-STAMPED rows via the
+          # version-stable ops-API bulk insert (ops_seed_stub_memory_rows —
+          # see its doc in migration-lane-lib.sh for why a CLI/REST seed
+          # can't be trusted against the published baseline: its api() auth
+          # chain differs from HEAD's and 401s for a keyless agent). The
+          # deliberately-stale 'upgrade-lane-stub-stamp' (and NO
+          # FLAIR_EMBEDDING_MODEL pinning in this job — the opposite choice
+          # from the downgrade lane, on purpose) means the always-on
+          # embedding-stamp migration has REAL pending work on the HEAD
+          # boot: it re-embeds these rows with genuine vectors via its
+          # production regen path, and the synthetic migration then stamps
+          # them — so the recall-parity search below exercises real
+          # embeddings, not stubs. `flair reembed` (step 4b) already proves
+          # the OLD manual re-embed path; this proves the NEW boot-keyed
+          # runner actually ran, independent of it.
+          MIGRATION_SEED_COUNT=20
+          BASE_OPS_PORT=$((PORT - 1))
+          ops_seed_stub_memory_rows "http://127.0.0.1:${BASE_OPS_PORT}" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" \
+            "upgrade-lane-migration-seed" "upgrade-lane-migration-seed-row" "$MIGRATION_SEED_COUNT" "upgrade-lane-stub-stamp"
+          echo "Seeded ${MIGRATION_SEED_COUNT} stub-stamped rows as ${RESERVED_TEST_AGENT_ID} for the upgrade lane's migration assertions."
+
           # 3. Stop baseline. Install HEAD into a FRESH project dir rather than
           # reifying the tarball on top of baseline's node_modules in place.
           #
@@ -577,13 +621,51 @@ jobs:
           [ "$NEW" = "$HEAD_VERSION" ] || { echo "FAIL: expected $HEAD_VERSION in node_modules, got $NEW"; exit 1; }
           echo "Upgraded $BASELINE → $NEW"
 
-          # 4. Start HEAD against baseline's data dir (~/.flair by default)
+          # 4. Start HEAD against baseline's data dir (~/.flair by default).
+          # FLAIR_ENABLE_TEST_MIGRATIONS=1 registers the CI-only synthetic
+          # migration (never ships — registration is conditional on this
+          # exact-match env var, see resources/migrations/synthetic-test-migration.ts)
+          # so this boot has the stub-stamped rows seeded in 2a above as real
+          # pending work.
+          export FLAIR_ENABLE_TEST_MIGRATIONS=1
           $FLAIR start --port $PORT
 
-          STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
-          echo "$STATUS" | grep -q "running" || { echo "FAIL: HEAD didn't start after upgrade from $BASELINE"; exit 1; }
+          # Bounded-retry, not a single-shot check (flair#691's lesson,
+          # generalized — see scripts/ci/migration-lane-lib.sh).
+          wait_for_flair_status_running "$FLAIR" "$PORT" 90
 
-          # 4a. Run the documented post-upgrade migration: re-embed all memories
+          # 4a. ci(migrations) extension — the zero-touch boot-keyed
+          # auto-migration assertions this lane exists to enforce
+          # (flair#695 / flair#695):
+          #   (a) the auto-migration actually RAN (not just "boot didn't crash")
+          #   (b) its content-hash envelope matched (invariant IV's completion gate)
+          #   (c) recall parity — the migration-touched ground truth is still
+          #       retrievable by search post-migration, not just present in storage
+          # Deliberately BEFORE the manual `flair reembed` below (4b): the
+          # always-on embedding-stamp migration (runs ahead of the synthetic
+          # one in registry order) already gives these stub-stamped rows real
+          # embeddings as part of THIS SAME auto-migration cycle — waiting for
+          # the cycle to finish here, before reembed's own writes touch the
+          # same rows, avoids two independent writers racing on them.
+          BASE_URL="http://127.0.0.1:${PORT}"
+          OPS_URL="http://127.0.0.1:$((PORT - 1))"
+
+          wait_for_migration_state "$BASE_URL" "$FLAIR_ADMIN_PASS" "$SYNTHETIC_MIGRATION_ID" "completed" 120
+
+          echo "Ledger content-hash envelope for ${SYNTHETIC_MIGRATION_ID}:"
+          check_ledger_hash_envelope "$OPS_URL" "$FLAIR_ADMIN_PASS" "$SYNTHETIC_MIGRATION_ID" || {
+            echo "FAIL: content-hash envelope did not match=true after the upgrade-lane migration run"
+            exit 1
+          }
+
+          MIGRATION_RECALL=$($FLAIR memory search --agent "$RESERVED_TEST_AGENT_ID" --q "upgrade-lane-migration-seed-row-0")
+          echo "$MIGRATION_RECALL" | grep -q "upgrade-lane-migration-seed-row-0" || {
+            echo "FAIL: migration-seeded ground truth not retrievable by search post-migration (recall parity broken)"
+            exit 1
+          }
+          echo "Migration ran, envelope matched, migration-seeded ground truth recalls correctly."
+
+          # 4b. Run the documented post-upgrade migration: re-embed all memories
           # so their stored vectors match the running Harper version's expected
           # shape. Required when bumping @harperfast/harper across versions where
           # HNSW storage internals changed (e.g. 5.0.1 → 5.0.9). See CHANGELOG.
