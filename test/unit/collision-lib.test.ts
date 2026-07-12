@@ -1,6 +1,6 @@
 // Unit tests for resources/collision-lib.ts — the pure join/rank/format
 // logic behind MemoryBootstrap's "Others in the room" collision-surfacing
-// block (flair#681, spec: ~/ops/FLAIR-ATTENTION-PLANE.md "Phase 2").
+// block (flair#681, spec: flair#695 "Phase 2").
 //
 // These exercise the real shipped logic directly (no Harper dependency —
 // same reason test/unit/bootstrap-team.test.ts imports memory-bootstrap-lib.ts

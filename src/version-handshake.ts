@@ -1,5 +1,5 @@
 /**
- * version-handshake.ts — CLI↔server version handshake (ops-1l18 §B, the
+ * version-handshake.ts — CLI↔server version handshake (flair#695 §B, the
  * bare-npm rescue): "Every CLI invocation (cheap, cached ~60s) compares:
  * CLI version, installed-package version, running-server version. Mismatch
  * → one-line nudge on stderr: `flair 0.23.0 installed but server is running

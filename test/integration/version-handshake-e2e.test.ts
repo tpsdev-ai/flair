@@ -1,5 +1,5 @@
 /**
- * version-handshake-e2e.test.ts — ops-1l18 §B, the CLI↔server version
+ * version-handshake-e2e.test.ts — flair#695 §B, the CLI↔server version
  * handshake, against a REAL Harper instance. Unit coverage
  * (test/unit/version-handshake.test.ts) already exhaustively covers
  * caching/TTL/offline-tolerance with a fake fetch; this file proves the

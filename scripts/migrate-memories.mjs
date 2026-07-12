@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Migrate flat-file daily memories into Flair.
- * Usage: FLAIR_AGENT_ID=flint node scripts/migrate-memories.mjs ~/ops/agents/flint/memory/
+ * Usage: FLAIR_AGENT_ID=flint node scripts/migrate-memories.mjs <memory-dir>/
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';

@@ -74,7 +74,7 @@ export class Health extends Resource {
     return true;
   }
   async get() {
-    // `version` (ops-1l18, the CLI↔server handshake — src/version-handshake.ts):
+    // `version` (flair#695, the CLI↔server handshake — src/version-handshake.ts):
     // exposed on the PUBLIC endpoint deliberately, so the check works even
     // before an agent identity/key exists (fresh install, pre-`flair init`).
     // Sherlock verdict: fine while locally bound; if /Health is ever fronted
@@ -443,9 +443,9 @@ export class HealthDetail extends Resource {
       }
     } catch { stats.rem = null; }
 
-    // ── Migrations (ops-1l18: zero-touch boot-keyed auto-migration) ──
+    // ── Migrations (flair#695: zero-touch boot-keyed auto-migration) ──
     // `{ id, rowsDone, rowsRemaining, state }` per registered migration, per
-    // ~/ops/FLAIR-ZERO-TOUCH-UPGRADE.md §A. `cyclePhase: "pre-hash"` is the
+    // flair#695 §A. `cyclePhase: "pre-hash"` is the
     // "pre-flight integrity check in progress" state the K&S verdict calls
     // for; a halted migration surfaces here (with `reason`) AND as a
     // warning below so it's visible without a separate lookup.

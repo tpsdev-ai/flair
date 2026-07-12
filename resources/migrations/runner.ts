@@ -6,7 +6,7 @@
  * risk-scoped completion gate → post-hash comparison → ledger OrgEvent →
  * state-file update → snapshot prune.
  *
- * Halt-don't-brick everywhere (~/ops/FLAIR-MIGRATION-SAFETY.md invariant
+ * Halt-don't-brick everywhere (flair#695 invariant
  * II): this function NEVER throws — every failure mode (space-blocked,
  * snapshot-failed, pre-hash-failed, gate-failed, an unexpected exception)
  * resolves to a halted/failed progress entry + (where applicable) a ledger

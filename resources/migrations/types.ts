@@ -1,8 +1,8 @@
 /**
- * types.ts — shared shapes for the zero-touch migration runner (ops-1l18).
+ * types.ts — shared shapes for the zero-touch migration runner (flair#695).
  *
- * Governed by ~/ops/FLAIR-MIGRATION-SAFETY.md (the four invariants) and
- * ~/ops/FLAIR-ZERO-TOUCH-UPGRADE.md (the runner design + K&S verdict
+ * Governed by flair#695 (the four invariants) and
+ * flair#695 (the runner design + K&S verdict
  * refinements). Every migration registered in resources/migrations/registry.ts
  * implements the `Migration` interface below.
  */
