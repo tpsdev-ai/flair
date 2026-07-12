@@ -4,34 +4,9 @@ import type { AddressInfo, Server } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 
 const STARTUP_TIMEOUT_MS = 45_000;
 const MAX_SPAWN_ATTEMPTS = 3;
-
-/**
- * Resolve harper-fabric-embeddings' entry file as an ABSOLUTE path, for
- * Harper's `models.embedding.default.backend` (flair#504 Phase 1).
- *
- * Harper's non-built-in `backend:` resolution (bootstrap.ts) treats a bare
- * package name as resolvable from the Harper INSTANCE ROOT's node_modules
- * (ROOTPATH — an ephemeral mkdtemp dir here, with no node_modules at all),
- * not from `cwd` where harper-fabric-embeddings is actually installed as a
- * flair dependency — a bare name fails with "Cannot find module" (verified).
- * An absolute path sidesteps that resolution; anchoring `createRequire` at a
- * synthetic `<cwd>/index.js` (mirrors bootstrap.ts's own
- * `resolveBackendSpecifier` pattern) resolves via `cwd`'s node_modules
- * without hardcoding harper-fabric-embeddings' internal dist/ layout.
- */
-function resolveEmbeddingBackendModule(cwd: string): string | null {
-  try {
-    const req = createRequire(pathToFileURL(join(cwd, "index.js")).href);
-    return req.resolve("harper-fabric-embeddings");
-  } catch {
-    return null; // not installed — models.embedding.default is simply omitted
-  }
-}
 
 // Harper logs exactly this ("Unable to bind to port NNNNN: Address already in
 // use") when its HTTP/ops listener can't bind, but it STILL prints "successfully
@@ -305,24 +280,15 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
   };
 
-  // models (flair#504 Phase 1): registers harper-fabric-embeddings as Harper's
-  // `embedding`/`default` backend via HARPER_CONFIG (the merge-layer mechanism
-  // flair's CLI uses in production — buildEmbeddingsHarperConfigEnv), NOT
-  // HARPER_SET_CONFIG. Harper's bootstrapModels() only reads `models:` from the
-  // INSTANCE-ROOT config (isRoot:true), never a per-application config.yaml, so
-  // this can't live in flair's own config.yaml (see that file's comment).
-  // Present on both the install spawn below AND the dev spawn (env =
-  // {...baseEnv, ...}), so there's no cross-spawn gap.
-  const embeddingBackend = resolveEmbeddingBackendModule(cwd);
-  if (embeddingBackend) {
-    baseEnv.HARPER_CONFIG = JSON.stringify({
-      models: {
-        embedding: {
-          default: { backend: embeddingBackend, modelName: "nomic-embed-text", modelsDir: baseEnv.FLAIR_MODELS_DIR },
-        },
-      },
-    });
-  }
+  // models (flair#504 Phase 1): no env var needed here anymore — the spawned
+  // build's own dist/resources/embeddings-boot.js self-registers the backend
+  // in-process at boot (flair#694 fixed the old HARPER_CONFIG mechanism,
+  // which persisted a `models.embedding.default` block that an
+  // older/downgraded build's boot would tear down to an invalid empty shell;
+  // see that file's header). FLAIR_MODELS_DIR above still tells the
+  // registration where to find/download the model. A baseline build that
+  // predates flair#504 simply has no such file and skips registration —
+  // exactly the pre-#504 degrade behavior.
 
   const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd, env: baseEnv });
   await new Promise<void>((resolve, reject) => {
