@@ -1,6 +1,6 @@
 /**
  * attention-query.test.ts — unit coverage for resources/AttentionQuery.ts
- * (flair#677, spec: ~/ops/FLAIR-ATTENTION-PLANE.md "Phase 1 — the query").
+ * (flair#677, "Phase 1 — the query").
  *
  * Exercises the SHIPPED AttentionQuery.post() directly against a mocked
  * @harperfast/harper, using the same in-memory-store mocking technique as

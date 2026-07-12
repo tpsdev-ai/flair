@@ -7,7 +7,7 @@
  * full envelope; content-transform: envelope over OLD rows' SOURCE_FIELDS +
  * new-row presence — strictest)."
  *
- * Snapshot scope (~/ops/FLAIR-MIGRATION-SAFETY.md invariant III, space
+ * Snapshot scope (flair#695 invariant III, space
  * pressure step 3): derived-only → metadata-only (no corpus snapshot
  * needed — recomputable by definition); schema-additive → schema+metadata
  * (no row rewrites); content-transform → pointers+metadata (old rows are

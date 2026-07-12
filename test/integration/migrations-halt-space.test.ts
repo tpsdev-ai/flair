@@ -1,6 +1,6 @@
 /**
  * migrations-halt-space.test.ts — halt-don't-brick under a blocked disk
- * (~/ops/FLAIR-MIGRATION-SAFETY.md invariant III space-pressure steps 1/5):
+ * (flair#695 invariant III space-pressure steps 1/5):
  * "No safe path → halt-don't-brick: serve old shape, health + doctor state
  * exactly what's needed."
  *

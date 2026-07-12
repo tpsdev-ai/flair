@@ -1,7 +1,7 @@
 /**
  * collision-lib.ts — pure join/rank/format logic for MemoryBootstrap's
  * "Others in the room" collision-surfacing block (flair#681, the attention-
- * plane flagship — spec: ~/ops/FLAIR-ATTENTION-PLANE.md "Phase 2 — collision
+ * plane flagship — spec: flair#681 "Phase 2 — collision
  * surfacing in bootstrap").
  *
  * This module does NO Harper reads of its own. resources/MemoryBootstrap.ts's

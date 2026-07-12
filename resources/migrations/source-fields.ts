@@ -1,6 +1,6 @@
 /**
  * source-fields.ts — SOURCE_FIELDS enumerations + the integrity envelope
- * hash (~/ops/FLAIR-MIGRATION-SAFETY.md invariant I + Kern verdict).
+ * hash (flair#695 invariant I + Kern verdict).
  *
  * "SOURCE_FIELDS constant per resource — enumerate source vs derived per
  * table, mechanically checked by the hash gate." The exact enumerations

@@ -2,7 +2,7 @@
 
 Measures Flair's recall precision (p@3, MRR) against a **harder, representative
 synthetic corpus**, on a **fully ephemeral Harper instance**. It never touches
-`~/ops/flair`, the live `:9926` service, or any production memory.
+any live checkout, the live `:9926` service, or any production memory.
 
 ## Why this exists
 

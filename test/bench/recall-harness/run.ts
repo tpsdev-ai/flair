@@ -15,7 +15,7 @@
  *
  * This harness is isolated (spawns an EPHEMERAL Harper via
  * test/helpers/harper-lifecycle.ts — zero contact with the live :9926
- * service or ~/ops/flair) AND uses a harder, representative corpus
+ * service or any live checkout) AND uses a harder, representative corpus
  * (./corpus.ts — near-duplicate clusters, lexical-overlap traps, varied
  * durability/recency) that can actually discriminate. It reproduces, in
  * isolation, the exact finding that flair#623 (commit 624299c, 2026-07-08)
@@ -37,7 +37,7 @@
  * SAFETY: every Harper instance is a fresh `mkdtemp` ROOTPATH/HOME
  * (test/helpers/harper-lifecycle.ts), bound to OS-assigned free ports, and
  * killed + removed at the end of each run. This script never imports, reads
- * from, or writes to ~/ops/flair or any live Flair service. FLAIR_MODELS_DIR
+ * from, or writes to any live checkout or any live Flair service. FLAIR_MODELS_DIR
  * may be pointed at an EXISTING flair install's models/ directory (read-only
  * — just the GGUF weight files) to skip re-downloading the embedding model;
  * see README.md.

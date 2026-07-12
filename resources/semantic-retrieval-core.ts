@@ -1,7 +1,7 @@
 // ─── retrieveCandidates() — the pure retrieval core (flair bootstrap-scale-fix) ──
 //
 // Extracted from resources/SemanticSearch.ts's post() (Kern-approved
-// refactor, ~/ops/FLAIR-BOOTSTRAP-SCALE-FIX.md). Before this module existed,
+// refactor, flair#695). Before this module existed,
 // SemanticSearch.post() was one function entangling auth resolution,
 // rate-limiting, HNSW/BM25 retrieval, post-retrieval filtering, the
 // cross-encoder reranker, AND retrievalCount/lastRetrieved hit-tracking side

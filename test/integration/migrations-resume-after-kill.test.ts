@@ -1,7 +1,7 @@
 /**
  * migrations-resume-after-kill.test.ts — proves crash-resume (invariant IV:
  * "Idempotent, resumable, observable... crash-resume free" /
- * ~/ops/FLAIR-ZERO-TOUCH-UPGRADE.md: "ENOSPC/crash mid-run = clean halt,
+ * flair#695: "ENOSPC/crash mid-run = clean halt,
  * auto-resume next boot").
  *
  * Seeds rows spanning multiple batches, starts Harper, waits for the
