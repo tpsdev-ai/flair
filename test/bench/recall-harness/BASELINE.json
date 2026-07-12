@@ -1,21 +1,21 @@
 {
-  "_comment": "flair#504 Phase 2 (PR #689) — the production-config baseline the future CI ratchet gates on. config block MUST match the harness invocation that produced these numbers (corpus=v2, hybrid=true, prefixes=off i.e. THE GATE EMBEDDING_PREFIXES_ENABLED=false, scoring=raw) — a config mismatch must fail loudly rather than silently compare against the wrong arm. Numbers are the prefixes=off arm from test/bench/recall-harness/README.md's 'v2 measured results' section (2026-07-11, isolated, zero production contact) — see that section for the full sweep including the prefixes=on comparison this baseline deliberately does NOT ship (THE GATE is parked off; re-baseline this file if it's ever flipped).",
+  "_comment": "flair#504 Phase 2 (flipped ON — see PR body / test/bench/recall-harness/README.md 'The gate, the flip decision, and BASELINE.json') — the production-config baseline the future CI ratchet gates on. config block MUST match the harness invocation that produced these numbers (corpus=v2, hybrid=true, prefixes=true i.e. THE GATE EMBEDDING_PREFIXES_ENABLED=true, scoring=raw) — a config mismatch must fail loudly rather than silently compare against the wrong arm. Numbers are the prefixes=on arm from test/bench/recall-harness/README.md's 'Post-flip re-baseline' section — see that section for the full sweep including the prefixes=off comparison arm this baseline deliberately does NOT ship (THE GATE is on; re-baseline this file if it's ever flipped back). These numbers reproduce PR #689's original v2 A/B byte-for-byte (this flip changed which arm ships by default, not the embedding math either arm computes).",
   "corpusVersion": "v2",
   "config": {
     "hybrid": true,
-    "prefixes": false,
+    "prefixes": true,
     "scoring": "raw"
   },
   "aggregate": {
-    "p@3": 0.992,
-    "mrr": 0.949
+    "p@3": 0.976,
+    "mrr": 0.946
   },
   "perKind": {
-    "hard": { "n": 46, "mrr": 0.924 },
-    "trap": { "n": 34, "mrr": 0.943 },
-    "clean": { "n": 29, "mrr": 0.983 },
-    "stress": { "n": 17, "mrr": 0.971 }
+    "hard": { "n": 46, "mrr": 0.946 },
+    "trap": { "n": 34, "mrr": 0.930 },
+    "clean": { "n": 29, "mrr": 0.957 },
+    "stress": { "n": 17, "mrr": 0.961 }
   },
-  "measuredAt": "2026-07-11",
-  "commit": "f4f5092"
+  "measuredAt": "2026-07-12",
+  "commit": "ddc6e7b"
 }
