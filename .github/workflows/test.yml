@@ -105,9 +105,15 @@ jobs:
       - name: "flair-client package tests"
         run: cd packages/flair-client && bun test
       - name: "Remaining workspace package tests (flair-client dep already built above)"
+        # flair-bench has no @tpsdev-ai/flair-client dependency (it's a standalone
+        # embedding-benchmark CLI/library, node-llama-cpp is its only prod dep) —
+        # riding this same loop anyway since its `bun test` is equally hermetic
+        # (pure-logic scorer/prefix/recommend-heuristic/share-schema assertions +
+        # two source-text sync-checks against test/bench/recall-harness/, no live
+        # model load or network I/O) and it doesn't need its own dedicated step.
         run: |
           FAIL=0
-          for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair; do
+          for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
             echo "::group::test $pkg"
             (cd "packages/$pkg" && bun test) || FAIL=1
             echo "::endgroup::"
@@ -874,7 +880,7 @@ jobs:
       # release-time check (#528). Building here moves that catch to the PR.
       - name: Build publishable packages
         run: |
-          for pkg in flair-client flair-mcp langgraph-flair n8n-nodes-flair openclaw-flair pi-flair; do
+          for pkg in flair-client flair-mcp langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
             echo "::group::build $pkg"
             (cd "packages/$pkg" && bun run build)
             echo "::endgroup::"
