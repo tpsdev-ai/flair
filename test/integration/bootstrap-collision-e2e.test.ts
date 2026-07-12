@@ -1,7 +1,7 @@
 // bootstrap-collision-e2e.test.ts — real-Harper, real-embedding end-to-end
 // coverage for MemoryBootstrap's "Others in the room" collision-surfacing
 // block (flair#681, the attention-plane flagship — spec:
-// flair#695 "Phase 2 — collision surfacing in
+// flair#681 "Phase 2 — collision surfacing in
 // bootstrap"). Builds on #676 (entity vocab + entities[] fields), #678
 // (AttentionQuery's internal WorkspaceState read + Presence-via-resource
 // pattern, reused here), and #550 (Memory semantic scoring during bootstrap,

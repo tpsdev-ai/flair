@@ -1,6 +1,6 @@
 /**
  * attention-query-e2e.test.ts — real-Harper integration coverage for
- * POST /AttentionQuery (flair#677, spec: flair#695).
+ * POST /AttentionQuery (flair#677).
  *
  * The unit suite (test/unit/attention-query.test.ts) exercises
  * resources/AttentionQuery.ts against a HAND-WRITTEN mock of Harper's
