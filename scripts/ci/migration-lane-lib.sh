@@ -3,8 +3,8 @@
 # (downgrade-and-revert, snapshot-restore-drill, and the upgrade-lane
 # migration assertions bolted onto `upgrade-smoke` in test.yml).
 #
-# Governed by ~/ops/FLAIR-CI-FOUNDATION.md §2 / ~/ops/FLAIR-MIGRATION-SAFETY.md
-# / ~/ops/FLAIR-ZERO-TOUCH-UPGRADE.md. Meant to be `source`d, not executed —
+# Governed by flair#695 / flair#695
+# / flair#695. Meant to be `source`d, not executed —
 # every function below is a bounded-retry (never single-shot) verification
 # primitive, per flair#691's lesson (a single post-restart status check races
 # boot on a slow CI runner) generalized to every lane that polls Harper after

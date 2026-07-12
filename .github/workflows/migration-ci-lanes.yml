@@ -1,7 +1,7 @@
-# Migration CI lanes (ops-1l18 enforcement arm) — the K&S-ratified, per-PR
-# proof of the migration safety invariants (~/ops/FLAIR-MIGRATION-SAFETY.md)
-# for the zero-touch boot-keyed auto-migration runner (~/ops/FLAIR-ZERO-TOUCH-UPGRADE.md,
-# resources/migrations/*, PR #690). Extends ~/ops/FLAIR-CI-FOUNDATION.md §2's
+# Migration CI lanes (#695 enforcement arm) — the K&S-ratified, per-PR
+# proof of the migration safety invariants (flair#695)
+# for the zero-touch boot-keyed auto-migration runner (flair#695,
+# resources/migrations/*, PR #690). Extends flair#695's
 # upgrade-path CI with the two lanes Kern's design-review verdict called
 # non-negotiable:
 #
@@ -18,7 +18,7 @@
 # `upgrade-smoke` job in test.yml instead of duplicating it here — see that
 # file's comment block on the extension.
 #
-# Sherlock §4 compliance (FLAIR-CI-FOUNDATION.md): pull_request trigger only
+# Sherlock §4 compliance (flair#695): pull_request trigger only
 # (never pull_request_target with PR-code checkout); no secrets exposed to
 # either job (public npm install + public GITHUB_TOKEN-default only — no
 # NPM_TOKEN, no deploy credentials); every third-party action below is
@@ -245,7 +245,7 @@ jobs:
           wait_for_flair_status_running "$BASE_FLAIR" "$PORT" 60
 
           # ── 9. Assert the old binary serves the corpus CORRECTLY, not just
-          # that it boots — the honest bar per FLAIR-MIGRATION-SAFETY.md
+          # that it boots — the honest bar per flair#695
           # invariant II ("still serving on the pre-migration shape"). All
           # reads go through the version-stable ops API with Basic auth —
           # deliberately NOT the baseline's `flair memory search`/REST

@@ -488,7 +488,7 @@ jobs:
           npm pack
           echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> $GITHUB_OUTPUT
       # Pre-downloaded and pointed at by FLAIR_MODELS_DIR (below) for BOTH the
-      # baseline and HEAD boots — ci(migrations) extension (#504/ops-1l18
+      # baseline and HEAD boots — ci(migrations) extension (#504/#695
       # enforcement): keeps `getModelId()`'s embeddingModel stamp identical
       # across the swap, so embedding-stamp (always-on, runs before the
       # synthetic migration in registry order) doesn't contend with the
@@ -554,8 +554,8 @@ jobs:
             exit 1
           }
 
-          # 2a. ci(migrations) extension (#504/ops-1l18 enforcement arm — see
-          # ~/ops/FLAIR-CI-FOUNDATION.md §2): seed STUB-STAMPED rows via the
+          # 2a. ci(migrations) extension (#504/#695 enforcement arm — see
+          # flair#695): seed STUB-STAMPED rows via the
           # version-stable ops-API bulk insert (ops_seed_stub_memory_rows —
           # see its doc in migration-lane-lib.sh for why a CLI/REST seed
           # can't be trusted against the published baseline: its api() auth
@@ -636,7 +636,7 @@ jobs:
 
           # 4a. ci(migrations) extension — the zero-touch boot-keyed
           # auto-migration assertions this lane exists to enforce
-          # (~/ops/FLAIR-CI-FOUNDATION.md §2 / ~/ops/FLAIR-ZERO-TOUCH-UPGRADE.md):
+          # (flair#695 / flair#695):
           #   (a) the auto-migration actually RAN (not just "boot didn't crash")
           #   (b) its content-hash envelope matched (invariant IV's completion gate)
           #   (c) recall parity — the migration-touched ground truth is still
