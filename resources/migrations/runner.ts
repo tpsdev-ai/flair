@@ -25,9 +25,36 @@ import { postureFor, type SnapshotScope } from "./risk-policy.js";
 import { readMigrationState, writeMigrationStateEntry, isShortCircuited, defaultStatePath } from "./state.js";
 import { writeLedgerEvent, type LedgerDeps, type LedgerEvent } from "./ledger.js";
 import { setCyclePhase, setMigrationProgress, seedIdleProgress } from "./progress.js";
+import { shouldRegisterSyntheticMigration } from "./synthetic-test-migration.js";
 import type { MigrationRegistry } from "./registry.js";
 import type { Migration, RiskClass, SourceTable } from "./types.js";
 import { join } from "node:path";
+
+/**
+ * Test-only batch-throttle override, mirroring space.ts's
+ * FLAIR_MIGRATION_TEST_FREE_BYTES pattern (real Harper is a spawned child
+ * process in the integration tests — an env var propagated at spawn time is
+ * the only injection lever available there). Used by
+ * test/integration/migrations-resume-after-kill.test.ts to WIDEN the
+ * per-batch delay so the migration's running phase spans seconds instead of
+ * a few hundred milliseconds, making "kill it mid-flight" deterministic
+ * rather than a poll-timing race (the CI failure mode this fixes: on a slow
+ * shared runner, the whole running phase fit between two health polls).
+ *
+ * DOUBLE-GATED: honored ONLY when the synthetic CI-migration gate
+ * (FLAIR_ENABLE_TEST_MIGRATIONS === "1", the same exact-match opt-in that
+ * admits the synthetic migration itself) is active — a stray env var on a
+ * production deployment (gate off) can never alter the real 100ms throttle.
+ */
+export const TEST_BATCH_DELAY_ENV = "FLAIR_MIGRATION_TEST_BATCH_DELAY_MS";
+
+function resolveTestBatchDelayMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  if (!shouldRegisterSyntheticMigration(env)) return undefined;
+  const raw = env[TEST_BATCH_DELAY_ENV];
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
 
 export interface RunnerDeps {
   registry: MigrationRegistry;
@@ -69,7 +96,7 @@ function resolveDeps(deps: RunnerDeps): ResolvedDeps {
     now: deps.now ?? (() => new Date()),
     sleep: deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms))),
     ledgerDeps: deps.ledgerDeps ?? {},
-    batchDelayMs: deps.batchDelayMs ?? 100,
+    batchDelayMs: deps.batchDelayMs ?? resolveTestBatchDelayMs() ?? 100,
     initiator: deps.initiator ?? "auto",
     headroomFloor: deps.headroomFloor,
   };

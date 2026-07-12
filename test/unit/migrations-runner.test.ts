@@ -677,3 +677,53 @@ describe("runMigrationCycle — never throws (defense-in-depth)", () => {
     expect(failedProgress?.reason).toContain("boom");
   });
 });
+
+describe("runMigrationCycle — test-only batch-delay knob (FLAIR_MIGRATION_TEST_BATCH_DELAY_MS)", () => {
+  // The knob lets the resume-after-kill integration test widen the running
+  // phase to seconds so the kill lands mid-flight deterministically. These
+  // tests pin its DOUBLE gate: honored only when the synthetic CI-migration
+  // gate (FLAIR_ENABLE_TEST_MIGRATIONS=1) is also active — a stray env var
+  // on a production deployment can never alter the real 100ms throttle.
+  afterEach(() => {
+    delete process.env.FLAIR_ENABLE_TEST_MIGRATIONS;
+    delete process.env.FLAIR_MIGRATION_TEST_BATCH_DELAY_MS;
+  });
+
+  async function runOneCycleCapturingSleeps(): Promise<number[]> {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1", stale: true }]);
+    const relationship = makeStore([]);
+    const registry = buildRegistryWith(makeDerivedOnlyMigration(memory, "knob-probe"));
+    const sleeps: number[] = [];
+    await runMigrationCycle({
+      registry,
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: async (ms: number) => { sleeps.push(ms); },
+      // batchDelayMs deliberately NOT passed — exercising the env-var default resolution.
+    });
+    return sleeps;
+  }
+
+  it("honors the override when the synthetic gate is active", async () => {
+    process.env.FLAIR_ENABLE_TEST_MIGRATIONS = "1";
+    process.env.FLAIR_MIGRATION_TEST_BATCH_DELAY_MS = "1234";
+    const sleeps = await runOneCycleCapturingSleeps();
+    expect(sleeps).toContain(1234);
+    expect(sleeps).not.toContain(100);
+  });
+
+  it("IGNORES the override when the synthetic gate is OFF (prod default throttle survives a stray env var)", async () => {
+    process.env.FLAIR_MIGRATION_TEST_BATCH_DELAY_MS = "1234";
+    const sleeps = await runOneCycleCapturingSleeps();
+    expect(sleeps).toContain(100);
+    expect(sleeps).not.toContain(1234);
+  });
+
+  it("ignores an unparseable/negative override value even with the gate active", async () => {
+    process.env.FLAIR_ENABLE_TEST_MIGRATIONS = "1";
+    process.env.FLAIR_MIGRATION_TEST_BATCH_DELAY_MS = "not-a-number";
+    const sleeps = await runOneCycleCapturingSleeps();
+    expect(sleeps).toContain(100);
+  });
+});
