@@ -7,15 +7,21 @@
  * through Harper's process-wide `models` singleton instead of this file
  * dynamic-importing `harper-fabric-embeddings` and initializing it itself.
  * The engine is the SAME one, registered as the `embedding`/`default`
- * backend by harper-fabric-embeddings@0.3.0's own `register()` factory
- * (invoked by Harper's `bootstrapModels` off the Harper INSTANCE-ROOT
- * config's `models.embedding.default` block — NOT this package's own
- * config.yaml, which is loaded as a non-root application and never reaches
- * bootstrapModels; see config.yaml's own comment, and src/cli.ts's
- * `buildEmbeddingsHarperConfigEnv` / `buildModelsConfig`, which write that
- * root-config block via HARPER_CONFIG — Harper's merge-layer env that reasserts
- * only the keys it names and yields to Fabric-managed config, never
- * HARPER_SET_CONFIG's force-override). Phase 1 passed no `inputType`, so no
+ * backend by harper-fabric-embeddings@0.3.0's own `register()` factory —
+ * called DIRECTLY, in-process, by `resources/embeddings-boot.ts` on every
+ * boot (flair#694; see that file's header for why: the original mechanism
+ * drove `register()` off a `models.embedding.default` block Harper's
+ * `bootstrapModels()` read from the INSTANCE-ROOT config, delivered via the
+ * `HARPER_CONFIG` env var — but that env var's value got PERSISTED into
+ * `harper-config.yaml`, and a boot that didn't reassert it (any
+ * older/downgraded build) tore the persisted block down to an invalid empty
+ * shell that the next boot's config validator rejected outright, bricking
+ * the instance). Registering directly means nothing is ever written to the
+ * config file, so there is no downgrade-unsafe state — and it works
+ * uniformly whether this package's own `config.yaml` loads root or non-root
+ * (e.g. a Harper Fabric deploy, where it's always non-root and
+ * `bootstrapModels()` was never reachable at all). Phase 1 passed no
+ * `inputType`, so no
  * `search_document:`/`search_query:` prefix was applied — output was
  * byte-identical to the pre-migration direct-import path. That's what made
  * that swap a dead-flat wash: same model, same weights, same input, same
@@ -228,15 +234,13 @@ async function getModelsApi(): Promise<HarperModelsApi> {
  * The chosen dir is always writable, so the embeddings engine can download the
  * model on first use without hitting EACCES on a root-owned package dir.
  *
- * Not called by this file anymore (Phase 1 moved model-directory resolution
- * to src/cli.ts, which computes the SAME <ROOTPATH>/models default and bakes
- * it directly into the `models.embedding.default.modelsDir` value it writes
- * via HARPER_CONFIG — a plain env-var default, not this function, since
- * cli.ts runs in a separate process from the one that would import this
- * file). Kept — and still exported and tested
- * (test/unit/embeddings-models-dir.test.ts) — as the single documented
- * source of truth for that default, and for any external caller that still
- * depends on it.
+ * Called by `resources/embeddings-boot.ts` (flair#694) to build the
+ * `modelsDir` it passes to harper-fabric-embeddings' `register()` — both run
+ * in the SAME process now (unlike the retired src/cli.ts-side computation,
+ * which duplicated this exact default because it ran in a separate process
+ * that set the resulting value via an env var). Still exported and tested
+ * independently (test/unit/embeddings-models-dir.test.ts) as the single
+ * documented source of truth for this default.
  */
 export function resolveModelsDir(): string {
   const override = process.env.FLAIR_MODELS_DIR;
