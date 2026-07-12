@@ -132,6 +132,27 @@ if (CORPUS_ARG !== "v1" && CORPUS_ARG !== "v2") {
   process.exit(2);
 }
 const { CORPUS, QUERIES } = CORPUS_ARG === "v2" ? CorpusV2 : CorpusV1;
+// bench-only model-file override (Q4/Q8 GGUF A/B — see
+// resources/embeddings-boot.ts's `benchModelPathOverride()` for the mechanism
+// this flag drives): an absolute or cwd-relative path to a GGUF file,
+// forwarded to the spawned Harper process as FLAIR_RECALL_HARNESS_MODEL_PATH
+// so harper-fabric-embeddings' `register()` loads THAT file directly
+// (bypassing its modelName/modelsDir registry+download resolution) for every
+// config this invocation runs. Unset (the default) keeps the existing
+// resolveModelsDir()+modelName path — byte-identical to before this flag
+// existed. One value per invocation, not swept per-config like
+// hybrid/prefixes/rerank: comparing two GGUF files means comparing two
+// separate harness invocations' aggregate numbers, not two arms measured
+// against the same seeded corpus.
+const MODEL_FILE_ARG = argVal("--model-file", "");
+if (MODEL_FILE_ARG) {
+  const resolvedModelFile = path.resolve(MODEL_FILE_ARG);
+  if (!existsSync(resolvedModelFile)) {
+    console.error(`FATAL: --model-file ${resolvedModelFile} does not exist.`);
+    process.exit(2);
+  }
+  process.env.FLAIR_RECALL_HARNESS_MODEL_PATH = resolvedModelFile;
+}
 // Every topic cluster present in whichever corpus got selected — drives the
 // per-cluster reporting breakdown below. Computed once at module load since
 // CORPUS is fixed for the whole process (selected by --corpus above).
@@ -296,7 +317,19 @@ async function runOnce(hybrid: boolean, rerank: boolean, prefixesOn: boolean, ru
     const agent = mkAgent(AGENT_ID);
     await registerAgent(harper, agent);
     console.log(`${label} seeding ${CORPUS.length} records...`);
+    // Wall-clock the seed pass — a simple, comparable embed-latency proxy for
+    // A/B'ing model files (--model-file): each seedRecord's PUT awaits
+    // embedding generation before responding (Memory.put()'s contract, see
+    // waitSearchable's comment below), and the native engine serializes embed
+    // calls on its own internal queue (engine.js's `#queue`) even though
+    // seedCorpus fires BATCH=6 concurrent HTTP requests — so total elapsed
+    // divided by record count is a cleaner per-embed estimate than timing any
+    // single concurrent PUT in isolation (which would include queueing wait
+    // behind its batch-mates, not pure compute).
+    const seedStart = performance.now();
     await seedCorpus(harper, agent);
+    const seedMs = performance.now() - seedStart;
+    console.log(`${label} seeded ${CORPUS.length} records in ${seedMs.toFixed(0)}ms (${(seedMs / CORPUS.length).toFixed(1)}ms/record avg)`);
     await waitSearchable(harper, agent);
     console.log(`${label} corpus searchable, measuring ${QUERIES.length} queries × 2 scoring modes...`);
 
@@ -377,6 +410,7 @@ async function main() {
   console.log(`recall-harness — ISOLATED recall eval (corpus=${CORPUS_ARG}: ${CORPUS.length} records / ${CLUSTERS.length} clusters, queries=${QUERIES.length})`);
   console.log(`config: runs=${RUNS} hybrid=${hybridValues.join(",")} prefixes=${prefixValues.map(p => p ? "on" : "off").join(",")} rerank=${WITH_RERANK ? "on(hybrid=true,prefixes=true only)+off" : "off"}\n`);
   if (process.env.FLAIR_MODELS_DIR) console.log(`FLAIR_MODELS_DIR=${process.env.FLAIR_MODELS_DIR} (reusing pre-downloaded models)\n`);
+  if (MODEL_FILE_ARG) console.log(`--model-file ${process.env.FLAIR_RECALL_HARNESS_MODEL_PATH} (overriding model selection for this invocation)\n`);
 
   // Build the (hybrid, rerank, prefixesOn) config list. rerank is opt-in and
   // only ever tested alongside hybrid=true, prefixes=true (the
@@ -435,6 +469,20 @@ async function main() {
       const agg = results[key][scoring];
       const p3 = aggStats(agg.p3), mrr = aggStats(agg.mrr);
       console.log(`  scoring=${scoring.padEnd(9)} p@3=${fmtAgg(p3)}   MRR=${fmtAgg(mrr)}`);
+    }
+    // Per-kind MRR for scoring=raw — same shape as BASELINE.json's `perKind`
+    // block (n + mrr per kind), so a model/quant A/B's per-kind numbers are
+    // directly diffable against that file without re-deriving them from the
+    // p@3-only composite-vs-raw breakdown printed below. Collected in the same
+    // loop as everything else above (agg.byKind[k].mrr) — this just prints
+    // data that already existed but had no standalone print site.
+    {
+      const rawAgg = results[key].raw;
+      const parts = (["stress", "trap", "hard", "clean"] as QueryKind[]).map(k => {
+        const n = QUERIES.filter(q => q.kind === k).length;
+        return `${k}(n=${n})=${fmtAgg(aggStats(rawAgg.byKind[k].mrr))}`;
+      });
+      console.log(`  scoring=raw per-kind MRR: ${parts.join("  ")}`);
     }
     const rawP3 = aggStats(results[key].raw.p3), compP3 = aggStats(results[key].composite.p3);
     const rawMrr = aggStats(results[key].raw.mrr), compMrr = aggStats(results[key].composite.mrr);
