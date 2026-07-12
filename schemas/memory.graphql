@@ -5,6 +5,16 @@ type Memory @table(database: "flair") {
   contentHash: String @indexed
   visibility: String
   embedding: [Float] @indexed(type: "HNSW")
+  embeddingModel: String @indexed  # ops-1l18: previously written (resources/Memory.ts stamps every
+                               # write) but never DECLARED in this schema, so it was storable but not
+                               # queryable — Harper's Table.search({conditions}) rejects a condition on
+                               # an undeclared attribute ("X is not a defined attribute"), which the
+                               # zero-touch migration runner's bounded detect()/countPending()/run()
+                               # queries (resources/migrations/embedding-stamp.ts: `embeddingModel
+                               # not_equal <current>`) need in order to stay O(1)-bounded rather than a
+                               # full-corpus scan on every boot. Purely additive — existing rows already
+                               # carry this value on disk; declaring it queryable changes nothing about
+                               # what's written or how embeddings/prefixes behave (#689's gate untouched).
   tags: [String] @indexed
   durability: String @indexed
   source: String
