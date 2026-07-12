@@ -28,6 +28,7 @@ import { keystore } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
 import { checkVersion, formatVersionNudge } from "./version-check.js";
+import { checkServerHandshake, formatHandshakeNudge } from "./version-handshake.js";
 import { probeInstance, type ProbeResult } from "./probe.js";
 import {
   sweepFleet,
@@ -1867,6 +1868,45 @@ const __pkgVersion = (() => {
 
 const program = new Command();
 program.name("flair").version(__pkgVersion, "-v, --version");
+
+// ─── CLI↔server version handshake (ops-1l18 §B) ────────────────────────────
+// Every command invocation gets a cheap, cached (~60s), short-timeout check
+// of the running server's version against this CLI's own — catches the
+// bare-npm-upgrade trap where `npm i -g @tpsdev-ai/flair@latest` swaps the
+// CLI binary but the already-running Harper daemon keeps serving the OLD
+// code until `flair restart`. `doctor` is excluded here — it already prints
+// a richer version triple (CLI/installed, running, latest-published) plus
+// migration state, so a global hook nudge on top of that would be
+// redundant noise on the one command whose whole job is this exact report.
+program.hook("preAction", async (_thisCommand, actionCommand) => {
+  if (actionCommand.name() === "doctor") return;
+  // Interactive-only: this is a pure stderr UX nudge for a human at a
+  // terminal ("bare-npm users must not get stuck"), not a machine-consumed
+  // signal — it never changes exit codes or stdout. Gating on TTY means a
+  // piped/scripted/CI invocation (and every existing test that spawns the
+  // CLI against a mock server) never pays the extra network round trip,
+  // which matters beyond latency: several unit tests spawn this CLI against
+  // a single-shot mock HTTP server asserting on exactly one received
+  // request (e.g. test/unit/presence-set.test.ts) — an unconditional extra
+  // GET /Health here would silently consume that slot and break them.
+  if (!process.stdout.isTTY) return;
+  try {
+    const opts = (actionCommand.opts?.() ?? {}) as { port?: string | number };
+    const serverUrl = `http://127.0.0.1:${resolveHttpPort(opts)}`;
+    // Cache key component: prefer the server's own ROOTPATH if this shell
+    // happens to have it set (operating a non-default Harper instance
+    // root), else fall back to Flair's own resolved data directory — same
+    // "which local install is this" identity every other doctor/status
+    // check already keys off, so a stale cache from a since-reinstalled
+    // instance sharing the same port never bleeds into a fresh one.
+    const rootPath = process.env.ROOTPATH ?? defaultDataDir();
+    const result = await checkServerHandshake(__pkgVersion, rootPath, serverUrl);
+    const nudge = formatHandshakeNudge(result);
+    if (nudge) console.error(`⚠️  ${nudge}`);
+  } catch {
+    // NEVER block or fail the underlying command over this check.
+  }
+});
 
 // ─── flair init ──────────────────────────────────────────────────────────────
 
@@ -8591,6 +8631,49 @@ program
       }
     }
 
+    // 1a. CLI ↔ running-server version handshake (ops-1l18 §B) — the
+    // version TRIPLE: this CLI's own version (__pkgVersion, checked against
+    // npm-latest in step 0 above), and the RUNNING server's reported
+    // version (GET /Health — public, no auth needed). A mismatch means the
+    // installed package was upgraded but the daemon hasn't restarted onto
+    // it yet — exactly the bare-npm trap the global preAction hook (above,
+    // every other command) nudges about on stderr; doctor prints the full
+    // picture here instead of a one-liner and `--fix` offers the restart.
+    let runningVersion: string | null = null;
+    if (harperResponding) {
+      try {
+        const healthRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
+        if (healthRes.ok) {
+          const body = (await healthRes.json()) as { version?: unknown };
+          runningVersion = typeof body?.version === "string" ? body.version : null;
+        }
+      } catch { /* leave runningVersion null — reported below as "unknown" */ }
+
+      if (runningVersion && runningVersion !== __pkgVersion) {
+        console.log(`  ${render.icons.error} Version mismatch: CLI/installed ${render.wrap(render.c.bold, __pkgVersion)} but server is running ${render.wrap(render.c.bold, runningVersion)}`);
+        if (autoFix) {
+          if (dryRun) {
+            console.log(`     ${render.wrap(render.c.dim, "Would run:")} flair restart`);
+          } else {
+            try {
+              const { execSync } = await import("node:child_process");
+              execSync(`${process.argv[0]} ${process.argv[1]} restart --port ${effectivePort}`, { stdio: "inherit" });
+              console.log(`     ${render.icons.ok} Restarted onto ${__pkgVersion}`);
+            } catch {
+              console.log(`     ${render.icons.error} Restart failed — try: flair restart`);
+            }
+          }
+        } else {
+          console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair restart`);
+        }
+        issues++;
+      } else if (runningVersion) {
+        console.log(`  ${render.icons.ok} Server running version matches CLI (${runningVersion})`);
+      } else {
+        console.log(`  ${render.icons.warn} Could not determine the running server's version`);
+      }
+    }
+
     // 2. Keys directory
     const keysDir = defaultKeysDir();
     if (existsSync(keysDir)) {
@@ -8913,6 +8996,55 @@ program
         }
       } catch (err: any) {
         console.log(`  ${render.icons.warn} Fleet presence check failed: ${err?.message ?? err}`);
+      }
+    }
+
+    // 9. Migration state (ops-1l18) — pending/in-progress/blocked + last
+    // ledger-derived outcome per registered migration, read off the same
+    // authenticated /HealthDetail the "Fleet presence" section above
+    // already fetches. `--fix` here means the SAME restart offered in step
+    // 1a above (a halted migration retries automatically on the next boot —
+    // there's no separate "run the migration now" fix; the fix for
+    // "blocked" is whatever the halt reason names, e.g. freeing disk).
+    if (harperResponding) {
+      console.log(`\n  ${render.wrap(render.c.bold, "Migrations")}`);
+      try {
+        const migAgentId: string | undefined = opts.agent || process.env.FLAIR_AGENT_ID;
+        const migKeyPath = migAgentId ? join(defaultKeysDir(), `${migAgentId}.key`) : undefined;
+        const migCanSign = !!(migAgentId && migKeyPath && existsSync(migKeyPath));
+        if (!migCanSign) {
+          console.log(`  ${render.icons.info} Pass --agent <id> (with a matching key in ~/.flair/keys) to see migration state — requires a verified read, same as Fleet presence above.`);
+        } else {
+          const migHeaders: Record<string, string> = { Authorization: buildEd25519Auth(migAgentId!, "GET", "/HealthDetail", migKeyPath!) };
+          const migRes = await fetch(`${baseUrl}/HealthDetail`, { headers: migHeaders, signal: AbortSignal.timeout(5000) });
+          if (!migRes.ok) {
+            console.log(`  ${render.icons.warn} Could not fetch migration state (HTTP ${migRes.status})`);
+          } else {
+            const detail = (await migRes.json()) as { migrations?: { cyclePhase?: string; migrations?: Array<{ id: string; state: string; rowsDone: number; rowsRemaining: number; reason?: string }> } };
+            const migBlock = detail?.migrations;
+            if (!migBlock || !Array.isArray(migBlock.migrations) || migBlock.migrations.length === 0) {
+              console.log(`  ${render.icons.info} No migrations registered on this instance`);
+            } else {
+              if (migBlock.cyclePhase === "pre-hash") {
+                console.log(`  ${render.icons.info} Pre-flight integrity check in progress — migrations deferred until it completes`);
+              }
+              for (const m of migBlock.migrations) {
+                if (m.state === "completed") {
+                  console.log(`  ${render.icons.ok} ${m.id}: completed`);
+                } else if (m.state === "halted" || m.state === "failed") {
+                  console.log(`  ${render.icons.error} ${m.id}: ${m.state}${m.reason ? ` — ${m.reason}` : ""}`);
+                  issues++;
+                } else if (m.state === "running") {
+                  console.log(`  ${render.icons.info} ${m.id}: in progress (${m.rowsDone} done, ${m.rowsRemaining} remaining)`);
+                } else {
+                  console.log(`  ${render.icons.info} ${m.id}: ${m.state}`);
+                }
+              }
+            }
+          }
+        }
+      } catch (err: any) {
+        console.log(`  ${render.icons.warn} Migration state check failed: ${err?.message ?? err}`);
       }
     }
 
