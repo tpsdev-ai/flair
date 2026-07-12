@@ -93,7 +93,7 @@ export FLAIR_MODELS_DIR=/path/to/an/existing/flair/checkout/models
 | `--runs N`        | `3`     | Independent seed→measure→teardown cycles per config, aggregated as mean ± standard error. |
 | `--hybrid on\|off\|both` | `both` | Which `FLAIR_HYBRID_RETRIEVAL` value(s) to spawn instances for. |
 | `--rerank`        | off     | Additionally spawn one `hybrid=true, rerank=true` config. Opt-in — see "On the rerank knob" below. |
-| `--prefixes on\|off\|both` | `both` | flair#504 Phase 2 (**PARKED**, PR #689 — see "The gate, the park decision, and BASELINE.json" below): which nomic search-prefix state(s) to spawn instances for. `off` = the real, unmodified shipped default (`EMBEDDING_PREFIXES_ENABLED = false` in `resources/embeddings-provider.ts` — no hatch needed, this IS production behavior); `on` = the harness-only `FLAIR_RECALL_HARNESS_FORCE_PREFIX` escape hatch, which force-enables the SAME gate against the SAME dist build (see `resources/embeddings-provider.ts`'s `harnessForcePrefix()`) — this is how the harness keeps measuring the parked arm even though production never exercises it. |
+| `--prefixes on\|off\|both` | `both` | flair#504 Phase 2 (**FLIPPED ON** — see "The gate, the flip decision, and BASELINE.json" below): which nomic search-prefix state(s) to spawn instances for. `on` = the real, unmodified shipped default (`EMBEDDING_PREFIXES_ENABLED = true` in `resources/embeddings-provider.ts` — no hatch needed, this IS production behavior); `off` = the harness-only `FLAIR_RECALL_HARNESS_FORCE_PREFIX` escape hatch (set to the literal string `"false"`), which force-disables the SAME gate against the SAME dist build (see `resources/embeddings-provider.ts`'s `harnessPrefixOverride()`) — this is how the harness keeps measuring the comparison arm even though production never exercises it. The hatch is bidirectional (reads `"true"`/`"false"`, not just presence), so it stays correct if the gate's default ever flips again. |
 | `--canary`        | off     | Run the mixed-space canary instead of the main sweep (see "MIXED-SPACE CANARY" in run.ts) — quantifies flair#504 Phase 2 stage-2 prod-re-embed transient-degradation risk in isolation. |
 | `--verbose`       | off     | Print every query's rank (hit/miss, kind, marker) under `--runs`. |
 | `--keep-on-fail`  | off     | On a fatal error, print a reminder to inspect (the ephemeral installDir itself is NOT preserved automatically — see caveat below). |
@@ -196,6 +196,15 @@ it's `compositeScore`'s unconditional multiplier, full stop.
 
 ## Phase 2 prefix A/B — measured results (2026-07-11, isolated)
 
+**History — this section and the "v2 measured results" section below record
+the v1/v2 measurements that led to PR #689's original park decision.** THE
+GATE has since flipped ON (see "The gate, the flip decision, and
+BASELINE.json" further down for the current state, the post-flip
+re-baseline, and why the flip happened on strategic grounds despite this
+section's own numbers never showing a real win). Left here verbatim as
+history — the numbers below are real and reproducible, just no longer the
+current gate state.
+
 `--runs 3 --hybrid both --prefixes both`, scoring=raw (the production
 default; `PHASE1_BASELINE` in run.ts was measured under this same config).
 Variance was ±0.000 across all 3 runs in every arm — deterministic on this
@@ -238,14 +247,18 @@ large, diverse production corpus) specifically because an isolated
 synthetic-corpus result — in either direction — isn't the final word. See
 the PR for flair#504 Phase 2 for how this was resolved.
 
-**Resolved (PR #689)**: the v2 A/B below reproduced this same regression at
-4× the query count, and K&S ratified parking the flip — see "The gate, the
-park decision, and BASELINE.json" further down. `EMBEDDING_PREFIXES_ENABLED`
-now defaults `false`; this section's numbers and the `FLAIR_RECALL_HARNESS_NO_PREFIX`
-hatch they were measured with are preserved here as history — the harness's
-current mechanism is `FLAIR_RECALL_HARNESS_FORCE_PREFIX` (see "Flags" above),
-which force-enables prefixes rather than force-disabling them, matching the
-gate's new off-by-default shape.
+**Resolved, twice (PR #689, then this PR):** the v2 A/B below reproduced this
+same small delta at 4× the query count, and PR #689's K&S review ratified
+parking the flip on it. This PR (see "The gate, the flip decision, and
+BASELINE.json" further down) revisits that decision and flips
+`EMBEDDING_PREFIXES_ENABLED` to `true` — the delta itself never changed, only
+the read of what it means (noise-scale, not a real regression) and the
+strategic case for shipping anyway. This section's numbers and the
+`FLAIR_RECALL_HARNESS_NO_PREFIX` hatch they were originally measured with are
+preserved here as history — the harness's current mechanism is the
+bidirectional `FLAIR_RECALL_HARNESS_FORCE_PREFIX` (see "Flags" above), which
+now force-disables prefixes (the `off` comparison arm) rather than
+force-enabling them, matching the gate's new on-by-default shape.
 
 **Mixed-space canary** (`--canary`, hybrid=true, scoring=raw; 44 records
 seeded unprefixed then 43 more seeded prefixed after a same-installDir
@@ -423,42 +436,86 @@ below either endpoint**, tightening v1's earlier estimate (v1's canary had
 MRR dip 0.05 below the off-arm; at 4× the query count that dip does not
 reproduce).
 
-## The gate, the park decision, and BASELINE.json
+## The gate, the flip decision, and BASELINE.json
 
-The v2 A/B above (N=126, the largest and most reliable measurement this
-harness has produced) is what decided flair#504 Phase 2's outcome: prefixes
-regress both p@3 and MRR (off 0.992/0.949 vs on 0.976/0.946, Δ −0.016/−0.003)
-— small, but real (±0.000 variance across 3 runs, not noise), and the design
-hypothesis was that prefixes would *help*, not merely "not hurt." K&S
-reviewed this evidence and ratified the decision (PR #689): **park the flip**
-rather than ship it. `resources/embeddings-provider.ts` now has a single
-module-level constant, `EMBEDDING_PREFIXES_ENABLED = false`, that atomically
-gates BOTH `inputType` forwarding to `models.embed()` and the `+searchprefix`
-suffix `getModelId()` stamps — the two can never diverge, enforced at that
-one chokepoint (see the constant's own doc for why a stamp/behavior mismatch
-would silently corrupt dedup and stale-detection). `src/cli.ts`'s
+**History (PR #689):** the v2 A/B above (N=126, the largest and most
+reliable measurement this harness had produced at the time) is what decided
+flair#504 Phase 2's original outcome: prefixes=off p@3=0.992/MRR=0.949 vs
+prefixes=on p@3=0.976/MRR=0.946, Δ −0.016/−0.003 — small, reproducible
+(±0.000 variance across 3 runs), and the design hypothesis had been that
+prefixes would *help*, not merely "not hurt." K&S reviewed this evidence and
+ratified parking the flip rather than shipping it.
+
+**This PR flips it.** Read plainly, that Δ −0.016 p@3 / −0.003 MRR at N=126
+is 2 of 126 queries moving rank — noise-scale for this instrument, not a
+directional regression in either direction. The recall measurement alone was
+a wash either way, so this PR flips `EMBEDDING_PREFIXES_ENABLED` to `true` on
+strategic grounds instead: nomic-embed-text-v1.5 is trained expecting these
+prefixes (running it unprefixed indefinitely is the actual departure from
+convention), and the flip is the first real payload for the boot-keyed
+auto-migration machinery (flair#690, flair#695) — exercising the
+detect-stale/re-embed path now, on a change with a proven noise-scale recall
+floor, is lower-risk than letting that machinery sit unexercised until some
+future higher-stakes change needs it first, and avoids two unrelated
+stamp-bumping changes compounding into one migration debt pile. See the PR
+description for the full context.
+
+`resources/embeddings-provider.ts` still has a single module-level constant,
+`EMBEDDING_PREFIXES_ENABLED`, that atomically gates BOTH `inputType`
+forwarding to `models.embed()` and the `+searchprefix` suffix `getModelId()`
+stamps — the two can never diverge, enforced at that one chokepoint (see the
+constant's own doc for why a stamp/behavior mismatch would silently corrupt
+dedup and stale-detection). It now defaults `true`. `src/cli.ts`'s
 `--stale-only` duplicates the same gate-then-suffix logic (separate build
 target) and must be kept in sync manually — see its own comment.
 
-This PR ships the plumbing (typed `inputType`, every call site passing the
-correct literal), the stamp mechanism, and this measurement instrument — not
-the prefix behavior itself. The `--prefixes on\|off\|both` flag documented
-above still measures both arms: `off` needs no hatch (it's simply the real
-default), `on` uses the bench-only `FLAIR_RECALL_HARNESS_FORCE_PREFIX`
-escape hatch to force-enable the same gate against the same dist build — so
-this harness stays able to validate the parked mechanism without a second
-build config.
+The `--prefixes on\|off\|both` flag documented above still measures both
+arms: `on` needs no hatch (it's simply the real default now), `off` uses the
+bench-only `FLAIR_RECALL_HARNESS_FORCE_PREFIX` escape hatch (bidirectional —
+reads `"true"`/`"false"`, not just presence) to force-disable the same gate
+against the same dist build — so this harness stays able to validate the
+comparison arm without a second build config, in whichever direction the
+gate defaults.
 
-`BASELINE.json` (in this directory) freezes the production-config numbers —
-`corpus=v2, hybrid=true, prefixes=false, scoring=raw` — as the reference
-point a future CI ratchet gates on: `p@3=0.992, mrr=0.949` aggregate, with
-per-kind MRRs (`stress=0.971, trap=0.943, hard=0.924, clean=0.983`). It
-carries an explicit `config` block so a mismatched invocation (wrong corpus
-version, wrong hybrid/prefix/scoring combination) fails loudly instead of
-silently comparing against the wrong arm. Flipping `EMBEDDING_PREFIXES_ENABLED`
-back to `true` in the future requires a fresh, re-baselined A/B through that
-ratchet — not a unilateral code change — per the same K&S-ratified process
-that parked it.
+### Post-flip re-baseline (measured on this PR's build, isolated)
+
+`--corpus v2 --runs 3 --hybrid both --prefixes both`, scoring=raw for the
+prefix A/B (the production default). Variance was ±0.000 across all 3 runs
+in every arm — deterministic, same as every prior measurement in this file.
+Both hybrid modes produced byte-identical prefix deltas, same as every prior
+sweep:
+
+```
+── PREFIX A/B, hybrid=true (identical numbers under hybrid=false) ──
+  prefixes=off (comparison, via force-off hatch)  p@3=0.992 ± 0.000   MRR=0.949 ± 0.000
+  prefixes=on  (shipped default)                  p@3=0.976 ± 0.000   MRR=0.946 ± 0.000
+  Δ (on − off)   p@3=-0.016   MRR=-0.003
+  by kind (on − off, MRR):
+    stress (n=17) off=0.971  on=0.961  Δ=-0.010
+    trap   (n=34) off=0.943  on=0.930  Δ=-0.013
+    hard   (n=46) off=0.924  on=0.946  Δ=+0.022
+    clean  (n=29) off=0.983  on=0.957  Δ=-0.026
+  per-cluster MRR movers (on − off, 23 of 30 clusters flat):
+    gained: CERAMICS +0.250, PERFUMERY +0.250, FINOPS +0.017
+    lost:   WINEMAKING -0.375, AVIATION -0.250, MUSICPROD -0.017, GITWF -0.010
+```
+
+These numbers reproduce PR #689's original v2 A/B byte-for-byte (same Δ,
+same per-kind breakdown, same per-cluster movers) — expected and reassuring,
+not a coincidence: this flip changes which arm the production code path
+takes by default, not the embedding math either arm computes. The decision
+to flip rests on the strategic case in "This PR flips it" above, not on a
+changed recall number — there isn't one.
+
+`BASELINE.json` (in this directory) now freezes the production-config
+numbers — `corpus=v2, hybrid=true, prefixes=true, scoring=raw` — as the
+reference point a future CI ratchet gates on. It carries an explicit
+`config` block so a mismatched invocation (wrong corpus version, wrong
+hybrid/prefix/scoring combination) fails loudly instead of silently
+comparing against the wrong arm. Flipping `EMBEDDING_PREFIXES_ENABLED` back
+to `false` in the future requires the same process in reverse: a fresh,
+re-baselined A/B through that ratchet showing staying on is actively worse,
+not just unproven — not a unilateral code change.
 
 ## Caveats
 

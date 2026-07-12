@@ -132,14 +132,28 @@ jobs:
                                     # constants for reliably catching a genuine mid-flight window.
           RUN_ID="dg-${GITHUB_RUN_ID:-local}-$$"
           # Pinned embeddingModel stamp — the resume-after-kill isolation
-          # pattern: seeded rows carry this exact stamp AND the PR-build boot
-          # runs with FLAIR_EMBEDDING_MODEL pinned to it (only consumed by
+          # pattern: seeded rows carry the EXACT stamp getModelId() computes
+          # for the pinned base id, AND the PR-build boot runs with
+          # FLAIR_EMBEDDING_MODEL pinned to the base id (only consumed by
           # getModelId(), the stamp string — never model loading), so the
           # always-on embedding-stamp migration (first in registry order)
           # detects NO pending work on the seeded corpus and the synthetic
           # migration — the one whose mid-flight window this lane must catch
           # deterministically — starts right after the shared pre-hash.
+          #
+          # PINNED_EMBEDDING_STAMP mirrors resources/embeddings-provider.ts's
+          # getModelId() output for this base id — CI shell can't `import` a
+          # TS module, so this is a deliberate, documented duplication (same
+          # idiom migration-lane-lib.sh's SYNTHETIC_MIGRATION_ID and
+          # src/cli.ts's --stale-only mirror both use). THE GATE
+          # (EMBEDDING_PREFIXES_ENABLED) is now ON (flair#504, flipped), so
+          # getModelId() appends `+searchprefix` — if that gate or the
+          # `+searchprefix` suffix (EMBEDDING_VARIANT) ever changes, update
+          # this literal too, or this lane's isolation silently breaks the
+          # same way the resume-after-kill CI failure this pattern was built
+          # to prevent did.
           PINNED_EMBEDDING_MODEL="downgrade-lane-pinned-model"
+          PINNED_EMBEDDING_STAMP="${PINNED_EMBEDDING_MODEL}+searchprefix"
 
           # ── 1. Install the previously-published baseline ──────────────────
           BASE_DIR=$(mktemp -d)
@@ -173,7 +187,7 @@ jobs:
 
           echo "Seeding ${ROW_COUNT} rows as the reserved synthetic-migration test agent (ops API, stub embedding, pinned stamp)..."
           ops_seed_stub_memory_rows "$OPS_URL" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" \
-            "downgrade-seed-${RUN_ID}" "downgrade-drill-row-${RUN_ID}" "$ROW_COUNT" "$PINNED_EMBEDDING_MODEL"
+            "downgrade-seed-${RUN_ID}" "downgrade-drill-row-${RUN_ID}" "$ROW_COUNT" "$PINNED_EMBEDDING_STAMP"
           EXPECTED_CONTENT_FILE="$DIAG_DIR/expected-content.txt"
           : > "$EXPECTED_CONTENT_FILE"
           for i in $(seq 0 $((ROW_COUNT - 1))); do
@@ -258,7 +272,7 @@ jobs:
           ACTUAL_COUNT=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$DIAG_DIR/post-downgrade-rows.json','utf8')).length)")
           [[ "$ACTUAL_COUNT" == "$ROW_COUNT" ]] || { echo "::error::post-downgrade row count ${ACTUAL_COUNT} != expected ${ROW_COUNT} — DATA LOSS across the downgrade"; exit 1; }
 
-          MARKER="$SYNTHETIC_TARGET_MARKER" PINNED="$PINNED_EMBEDDING_MODEL" ROWS_FILE="$DIAG_DIR/post-downgrade-rows.json" EXPECTED_FILE="$EXPECTED_CONTENT_FILE" TOTAL="$ROW_COUNT" node -e '
+          MARKER="$SYNTHETIC_TARGET_MARKER" PINNED="$PINNED_EMBEDDING_STAMP" ROWS_FILE="$DIAG_DIR/post-downgrade-rows.json" EXPECTED_FILE="$EXPECTED_CONTENT_FILE" TOTAL="$ROW_COUNT" node -e '
             const fs = require("fs");
             const rows = JSON.parse(fs.readFileSync(process.env.ROWS_FILE, "utf8"));
             const total = Number(process.env.TOTAL);

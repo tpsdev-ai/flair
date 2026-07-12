@@ -6,11 +6,18 @@
  * (invariant I), so this is the cheapest posture: metadata-only snapshot,
  * no content-hash gate (row-count + stamp convergence only).
  *
- * "With the prefix gate OFF this detects nothing in prod — correct." Today
- * `getModelId()` returns the bare base model id (THE GATE is off, per
- * resources/embeddings-provider.ts), so this migration is a live, real,
- * always-registered migration that simply has nothing to do until the
- * prefix flip (a separate, later PR) changes what "current" means.
+ * THE GATE (`EMBEDDING_PREFIXES_ENABLED` in resources/embeddings-provider.ts)
+ * is now ON (flair#504, flipped and re-baselined through the ratchet gate),
+ * so `getModelId()` returns `<base>+searchprefix` — every row written before
+ * this flip was stamped with the bare base id, so it now reads as stale and
+ * gets picked up by this migration on the next boot that reaches it. This is
+ * this migration's first real payload: before the flip, `getModelId()`
+ * returned the bare base id unconditionally, so this migration — live and
+ * always-registered from the day it shipped — had nothing to detect. That
+ * was intentional groundwork, not dead code: proving the detect/re-embed
+ * mechanism end-to-end (this file, `test/integration/
+ * migrations-embedding-stamp-e2e.test.ts`) before it ever had real work to
+ * do was the point.
  *
  * Reuses Memory's OWN regen branch — never duplicates embedding logic —
  * via the SAME mechanism `flair reembed` (src/cli.ts) already uses in

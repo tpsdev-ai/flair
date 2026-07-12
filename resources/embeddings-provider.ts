@@ -52,24 +52,38 @@
  * requested, exactly mirroring this file's own pre-existing pattern for
  * harper-fabric-embeddings.
  *
- * Phase 2 (flair#504) — nomic search prefixes. Verified from HFE 0.3.0's
- * shipped `engine.js` (`#applyPrefix`): `models.embed(text, { model,
+ * Phase 2 (flair#504) — nomic search prefixes, now ON. Verified from HFE
+ * 0.3.0's shipped `engine.js` (`#applyPrefix`): `models.embed(text, { model,
  * inputType })` forwards `inputType` to the backend, which prepends
  * `search_document: ` for `inputType === 'document'`, `search_query: ` for
  * `'query'`, and nothing for `undefined` (Phase 1's wash). nomic-embed-text-
- * v1.5 is *trained* on this asymmetry, so the design hypothesis was that
- * turning it on is a real recall improvement, not plumbing — but the
- * measured A/B (recall-harness instrument v2, N=126 queries, 2026-07-11; see
- * `test/bench/recall-harness/README.md`'s "v2 measured results") found NO
- * net benefit: prefixes=off p@3=0.992/MRR=0.949 vs prefixes=on
- * p@3=0.976/MRR=0.946 (Δp@3 -0.016, ΔMRR -0.003) — a small, real regression,
- * not noise (±0.000 variance across 3 runs). K&S-ratified decision (PR
- * #689): PARK the flip. `EMBEDDING_PREFIXES_ENABLED` below defaults `false`
- * — this file ships the plumbing (typed `inputType`, every call site passing
- * the correct literal), the stamp mechanism (`EMBEDDING_VARIANT`/
- * `getModelId()`), and the measurement instrument, but the actual prefix
- * behavior stays OFF until a re-baselined A/B through the CI ratchet
- * (`test/bench/recall-harness/BASELINE.json`) justifies flipping it.
+ * v1.5 is *trained* on this asymmetry, so the design hypothesis going in was
+ * that turning it on would be a real recall improvement, not just plumbing.
+ * The measured A/B (recall-harness instrument v2, N=126 queries,
+ * 2026-07-11; see `test/bench/recall-harness/README.md`'s "v2 measured
+ * results") didn't confirm that hypothesis, but it didn't refute it either:
+ * prefixes=off p@3=0.992/MRR=0.949 vs prefixes=on p@3=0.976/MRR=0.946
+ * (Δp@3 -0.016 — 2 of 126 queries — ΔMRR -0.003, SE=±0.000 across 3 runs in
+ * both arms). Stated plainly: that delta is noise-scale at this instrument's
+ * N, not a directional signal either way — see PR #689 for the full
+ * measurement and its initial "park on the numbers" read.
+ *
+ * This checkpoint of flair#504 revisits that read and flips
+ * `EMBEDDING_PREFIXES_ENABLED` to `true` on strategic grounds instead, since
+ * the recall measurement alone was a wash: nomic-embed-text-v1.5 is trained
+ * expecting these prefixes, so running it unprefixed indefinitely is the
+ * actual departure from convention, not the reverse. The flip is also the
+ * first real payload for the boot-keyed auto-migration machinery (flair#690,
+ * flair#695) — exercising the detect-stale/re-embed path now, on a change
+ * with a proven noise-scale recall floor, is lower-risk than letting that
+ * machinery sit unexercised until some future higher-stakes change needs it
+ * first, and avoids two unrelated stamp-bumping changes compounding into one
+ * migration debt pile. This file still ships the same plumbing (typed
+ * `inputType`, every call site passing the correct literal), the same stamp
+ * mechanism (`EMBEDDING_VARIANT`/`getModelId()`), and the same measurement
+ * instrument as PR #689 — what changed is the gate value and the
+ * re-baselined `test/bench/recall-harness/BASELINE.json` this flip required.
+ *
  * `EmbedInputType` is a closed union — `'document' | 'query'` — because the
  * values are literal and load-bearing: `'search_document'` (the PREFIX
  * STRING, not the inputType VALUE) is truthy but `!== 'document'`, so passing
@@ -81,10 +95,17 @@
  * passes the correct literal unconditionally — they declare INTENT
  * ('document' for stored content, 'query' for a search query); the gate at
  * `buildEmbedOptions()`/`getModelId()` is the single chokepoint that decides
- * whether that intent actually reaches the backend. This does NOT re-embed
- * the existing corpus (a separate, deliberate ops step, and moot while the
- * gate is off); see `EMBEDDING_VARIANT` below for how stale-detection would
- * find the rows that still need it if the gate is ever flipped on.
+ * whether that intent actually reaches the backend. Flipping the gate DOES
+ * change `getModelId()`'s output (the `+searchprefix` suffix now applies by
+ * default — see `EMBEDDING_VARIANT` below), which means every row written
+ * before this PR now reads as stale against the new model id — the
+ * boot-keyed auto-migration runner
+ * (`resources/migrations/embedding-stamp.ts`) picks that up and re-embeds
+ * automatically on next boot. That is this flip's intended, not incidental,
+ * consequence: proving the migration machinery actually re-embeds a real
+ * corpus end to end. A live production instance re-embedding on upgrade is
+ * still a separate, deliberate step from shipping this code — see the PR
+ * description for that distinction.
  */
 
 import { join } from "node:path";
@@ -104,15 +125,22 @@ export type EmbedInputType = "document" | "query";
 const VALID_INPUT_TYPES: ReadonlySet<string> = new Set<EmbedInputType>(["document", "query"]);
 
 /**
- * THE GATE (flair#504 Phase 2, parked — PR #689). A module-level constant,
- * not an env toggle: Kern's Phase 2 review called this "a code-level
- * decision," and that principle survives the park — an operator must not be
- * able to flip prefix behavior out of sync with a re-baselined A/B. Flipping
- * this to `true` requires a fresh harness run through the CI ratchet gate
- * (`test/bench/recall-harness/BASELINE.json`) — see that file and
+ * THE GATE (flair#504 Phase 2 — flipped ON). A module-level constant, not an
+ * env toggle: Kern's original Phase 2 review called this "a code-level
+ * decision," and that principle survives the flip — an operator must not be
+ * able to move prefix behavior out of sync with a re-baselined A/B. This PR
+ * IS that re-baseline: `test/bench/recall-harness/BASELINE.json` now records
+ * the prefixes=on numbers this gate change measured, replacing the
+ * prefixes=off baseline PR #689 froze. See that file and
  * `test/bench/recall-harness/README.md`'s "Phase 2 prefix A/B" section for
- * why it's off: the measured v2 A/B (N=126) showed prefixes=on net-regress
- * p@3/MRR vs prefixes=off, not the hypothesized bump.
+ * why it's on: the measured v2 A/B (N=126) showed a noise-scale delta
+ * between arms (Δp@3 -0.016, ΔMRR -0.003, 2 of 126 queries) — not the
+ * hypothesized bump, but not a real regression either — so the decision to
+ * flip rests on strategic grounds (training-convention alignment, and using
+ * this wash-scale change as the auto-migration machinery's proving payload)
+ * rather than a recall win. Flipping this back to `false` requires the same
+ * process in reverse: a fresh harness run through the ratchet gate that
+ * shows staying on is actively worse, not just unproven.
  *
  * This is THE single chokepoint both `buildEmbedOptions()` (inputType
  * forwarding) and `getModelId()` (the `+searchprefix` stamp) read — see
@@ -125,7 +153,7 @@ const VALID_INPUT_TYPES: ReadonlySet<string> = new Set<EmbedInputType>(["documen
  * stamp-reader to independently agree — is what makes that impossible by
  * construction instead of by convention.
  */
-const EMBEDDING_PREFIXES_ENABLED = false; // Phase 2 prefix flip parked on v2 evidence (PR #689) — flipping this requires a re-baselined harness A/B through the ratchet gate
+const EMBEDDING_PREFIXES_ENABLED = true; // Phase 2 prefix flip ON — re-baselined through the ratchet gate (flair#504)
 
 /**
  * BENCH-ONLY escape hatch — NOT a production feature flag, never documented
@@ -134,32 +162,41 @@ const EMBEDDING_PREFIXES_ENABLED = false; // Phase 2 prefix flip parked on v2 ev
  * `'document'`/`'query'` unconditionally regardless of the gate; only
  * `prefixesEnabled()` (immediately below) reads this.
  *
- * test/bench/recall-harness/run.ts's `--prefixes on` arm and its mixed-space
- * canary need to measure "as if the gate were flipped on" against the SAME
- * dist build the gate-off default ships — the harness is an external HTTP
- * client with no way to reach into a spawned Harper process's embedding
- * call, so this lets it force-enable the ONE thing that matters (whether
- * `models.embed` receives `inputType`, and whether `getModelId()` stamps the
- * suffix) via the env var it already forwards to `startHarper()` (the same
- * mechanism `FLAIR_HYBRID_RETRIEVAL`/`FLAIR_RERANK_ENABLED` use). It force-
- * ENABLES rather than force-disables because the gate now defaults OFF — the
- * `--prefixes off` arm needs no hatch at all, it's just the default. Read
- * lazily (not cached at module load) to match this codebase's existing
- * env-var convention (see resources/rate-limiter.ts).
+ * test/bench/recall-harness/run.ts's `--prefixes on|off` arms and its
+ * mixed-space canary need to measure "as if the gate were flipped the other
+ * way" against the SAME dist build the default ships — the harness is an
+ * external HTTP client with no way to reach into a spawned Harper process's
+ * embedding call, so this lets it override the ONE thing that matters
+ * (whether `models.embed` receives `inputType`, and whether `getModelId()`
+ * stamps the suffix) via the env var it already forwards to `startHarper()`
+ * (the same mechanism `FLAIR_HYBRID_RETRIEVAL`/`FLAIR_RERANK_ENABLED` use).
+ *
+ * Bidirectional, not two separate force-on/force-off hatches: THE GATE has
+ * flipped direction once already (off→on, this PR) and may again in the
+ * future, so a single override that reads `"true"`/`"false"` (unset = defer
+ * to THE GATE) stays correct regardless of which way the gate itself is
+ * currently set — the harness always names the arm it wants explicitly
+ * rather than assuming "no hatch" means "off" (or "on"). Read lazily (not
+ * cached at module load) to match this codebase's existing env-var
+ * convention (see resources/rate-limiter.ts).
  */
-function harnessForcePrefix(): boolean {
-  return process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX === "true";
+function harnessPrefixOverride(): boolean | undefined {
+  const v = process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX;
+  if (v === "true") return true;
+  if (v === "false") return false;
+  return undefined;
 }
 
 /**
  * The single source of truth for "are prefixes active right now" — reads
- * THE GATE plus the bench-only force hatch. Both `buildEmbedOptions()` and
- * `getModelId()` call this and nothing else, so the suffix and the
- * inputType-forwarding can never diverge (see `EMBEDDING_PREFIXES_ENABLED`'s
- * doc above for why that invariant matters).
+ * THE GATE, overridden by the bench-only hatch when set. Both
+ * `buildEmbedOptions()` and `getModelId()` call this and nothing else, so
+ * the suffix and the inputType-forwarding can never diverge (see
+ * `EMBEDDING_PREFIXES_ENABLED`'s doc above for why that invariant matters).
  */
 function prefixesEnabled(): boolean {
-  return EMBEDDING_PREFIXES_ENABLED || harnessForcePrefix();
+  const override = harnessPrefixOverride();
+  return override !== undefined ? override : EMBEDDING_PREFIXES_ENABLED;
 }
 
 /**
@@ -169,19 +206,20 @@ function prefixesEnabled(): boolean {
  * `@harperfast/harper` import this file's header explains — see
  * test/unit/embeddings-provider-input-type.test.ts.
  *
- * Gate OFF (default): `inputType` is dropped even when a call site passes
- * one — call sites keep passing `'document'`/`'query'` unconditionally (they
- * declare intent; this chokepoint enforces the gate), matching Phase 1's
- * wash behavior exactly.
+ * Gate ON (default): rejects anything other than the literal
+ * `'document'`/`'query'` (or omitted): TypeScript's `EmbedInputType` union
+ * already makes a wrong value a COMPILE-time error for typed callers; this
+ * is defense in depth for a caller that bypasses the type system (`as any`,
+ * a future refactor that loosens the type, a plain-JS caller). A rejected
+ * value is treated as if omitted (no prefix) rather than forwarded — see the
+ * file header for why forwarding the wrong value is actively harmful, not
+ * just a no-op.
  *
- * Gate ON (`EMBEDDING_PREFIXES_ENABLED` or the bench-only force hatch):
- * rejects anything other than the literal `'document'`/`'query'` (or
- * omitted): TypeScript's `EmbedInputType` union already makes a wrong value
- * a COMPILE-time error for typed callers; this is defense in depth for a
- * caller that bypasses the type system (`as any`, a future refactor that
- * loosens the type, a plain-JS caller). A rejected value is treated as if
- * omitted (no prefix) rather than forwarded — see the file header for why
- * forwarding the wrong value is actively harmful, not just a no-op.
+ * Gate OFF (only reachable now via the bench-only override — see
+ * `harnessPrefixOverride()`): `inputType` is dropped even when a call site
+ * passes one — call sites keep passing `'document'`/`'query'`
+ * unconditionally (they declare intent; this chokepoint enforces the gate),
+ * matching Phase 1's wash behavior exactly.
  */
 export function buildEmbedOptions(inputType?: EmbedInputType): { model: "default"; inputType?: EmbedInputType } {
   if (!prefixesEnabled()) return { model: "default" };
@@ -344,10 +382,10 @@ function ensureProbeStarted(): void {
  * `inputType` actually reaches HFE 0.3.0 (which would prepend the matching
  * `search_document: `/`search_query: ` prefix — see file header) is gated:
  * `buildEmbedOptions()` is the single chokepoint that turns `inputType` into
- * the options object, and it drops `inputType` entirely while THE GATE
- * (`EMBEDDING_PREFIXES_ENABLED`) is off — the current, parked default (PR
- * #689). Omitted (no second arg) always stays a no-op regardless of the
- * gate, same as Phase 1.
+ * the options object, and it forwards `inputType` while THE GATE
+ * (`EMBEDDING_PREFIXES_ENABLED`) is on — the current default (flipped this
+ * PR; see the file header for why). Omitted (no second arg) always stays a
+ * no-op regardless of the gate, same as Phase 1.
  */
 export async function getEmbedding(text: string, inputType?: EmbedInputType): Promise<number[] | null> {
   ensureProbeStarted();
@@ -383,19 +421,20 @@ export function getMode(): Mode {
 
 /**
  * Variant suffix — Kern's call (flair#504 Phase 2 review), NOT
- * `FLAIR_EMBEDDING_MODEL`: prefix-on would use the SAME model/weights as
- * Phase 1, so the base model id alone can't distinguish a prefixed vector
- * from an unprefixed one. Without a distinct stamp, `flair reembed
- * --stale-only` would see every row's `embeddingModel` already match
- * `getModelId()` and skip them all, and `health.ts` would report a false
- * "all uniform" state — this is the linchpin that makes stale-detection (and
- * therefore a future re-embed, IF the gate is ever flipped on) possible at
- * all. Only appended when `prefixesEnabled()` is true (see `getModelId()`
- * below) — with THE GATE off (the current default), `getModelId()` returns
- * the bare base id, no suffix: appending a stamp for a prefix that was never
- * actually applied would make every already-embedded row read as "stale"
- * for a no-op re-embed the moment this PR ships, which is exactly the
- * false-positive stale-detection would exist to prevent, not cause.
+ * `FLAIR_EMBEDDING_MODEL`: prefix-on uses the SAME model/weights as Phase 1,
+ * so the base model id alone can't distinguish a prefixed vector from an
+ * unprefixed one. Without a distinct stamp, `flair reembed --stale-only`
+ * would see every row's `embeddingModel` already match `getModelId()` and
+ * skip them all, and `health.ts` would report a false "all uniform" state —
+ * this is the linchpin that makes stale-detection (and therefore the
+ * re-embed this flip triggers) possible at all. Only appended when
+ * `prefixesEnabled()` is true (see `getModelId()` below) — with THE GATE now
+ * on (this PR's default), `getModelId()` returns `<base>+searchprefix` by
+ * default, so every row embedded before this PR (stamped with the bare base
+ * id, since the gate was off when it was written) now reads as stale —
+ * exactly the signal the boot-keyed auto-migration runner
+ * (`resources/migrations/embedding-stamp.ts`) needs to re-embed them. That
+ * mass "stale" transition is this flip's intended payload, not a bug.
  */
 const EMBEDDING_VARIANT = "searchprefix";
 
@@ -403,15 +442,16 @@ const EMBEDDING_VARIANT = "searchprefix";
  * Get the current embedding model identifier.
  * Used for stamping memories and detecting stale embeddings. Reads the SAME
  * `prefixesEnabled()` chokepoint `buildEmbedOptions()` does (see THE GATE's
- * doc above `EMBEDDING_PREFIXES_ENABLED`) — gate off (default): bare base
- * id, no suffix. Gate on: bumps to `<base>+searchprefix` (see
- * `EMBEDDING_VARIANT` above) — a prefixed vector and an unprefixed vector of
- * the SAME text are genuinely different vectors (dedup must not
- * short-circuit across them), and `--stale-only` needs a distinct string to
- * target the rows that still need re-embedding. `+` is URL-safe and doesn't
- * collide with the existing `-`/`_` id characters. `src/cli.ts` duplicates
- * this exact gate-then-suffix logic for `--stale-only` (separate build
- * target, see its own comment) — the two must never drift.
+ * doc above `EMBEDDING_PREFIXES_ENABLED`) — gate on (default): bumps to
+ * `<base>+searchprefix` (see `EMBEDDING_VARIANT` above). Gate off (only
+ * reachable now via the bench-only override, see `harnessPrefixOverride()`):
+ * bare base id, no suffix. A prefixed vector and an unprefixed vector of the
+ * SAME text are genuinely different vectors (dedup must not short-circuit
+ * across them), and `--stale-only` needs a distinct string to target the
+ * rows that still need re-embedding. `+` is URL-safe and doesn't collide
+ * with the existing `-`/`_` id characters. `src/cli.ts` duplicates this
+ * exact gate-then-suffix logic for `--stale-only` (separate build target,
+ * see its own comment) — the two must never drift.
  */
 export function getModelId(): string {
   const base = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";

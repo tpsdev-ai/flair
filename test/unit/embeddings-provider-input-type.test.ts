@@ -4,14 +4,17 @@ import { buildEmbedOptions, getModelId } from "../../resources/embeddings-provid
 
 /**
  * buildEmbedOptions() / getModelId() (flair#504 Phase 2, nomic search
- * prefixes — PARKED behind THE GATE as of PR #689) — the single chokepoint
- * (`prefixesEnabled()` inside embeddings-provider.ts) both functions read to
- * decide whether inputType-forwarding and the `+searchprefix` model-id
- * suffix are active. THE GATE (`EMBEDDING_PREFIXES_ENABLED`) defaults to
- * `false` on measured v2 evidence (see test/bench/recall-harness/README.md's
- * "v2 measured results" and BASELINE.json) — this file pins that default AND
- * the bench-only force hatch (`FLAIR_RECALL_HARNESS_FORCE_PREFIX`) that lets
- * the harness still measure the parked "on" arm against the SAME dist build.
+ * prefixes — FLIPPED ON, re-baselined through the ratchet gate) — the single
+ * chokepoint (`prefixesEnabled()` inside embeddings-provider.ts) both
+ * functions read to decide whether inputType-forwarding and the
+ * `+searchprefix` model-id suffix are active. THE GATE
+ * (`EMBEDDING_PREFIXES_ENABLED`) now defaults to `true` (see
+ * test/bench/recall-harness/README.md's "v2 measured results" and
+ * BASELINE.json — the measured recall delta between arms was noise-scale,
+ * not a regression) — this file pins that default AND the bidirectional
+ * bench-only override (`FLAIR_RECALL_HARNESS_FORCE_PREFIX`, reading
+ * `"true"`/`"false"`) that lets the harness measure BOTH arms against the
+ * SAME dist build.
  *
  * Deliberately does NOT go through `getEmbedding()` itself (which would
  * require mocking `@harperfast/harper`'s deferred dynamic import) — that
@@ -37,14 +40,14 @@ import { buildEmbedOptions, getModelId } from "../../resources/embeddings-provid
  * for anything that bypasses the type system (`as any`, a future refactor
  * that loosens the type, a plain-JS caller).
  */
-describe("buildEmbedOptions / getModelId (flair#504 Phase 2 — nomic search prefix gate, parked OFF)", () => {
+describe("buildEmbedOptions / getModelId (flair#504 Phase 2 — nomic search prefix gate, ON by default)", () => {
   const SAVED_HARNESS_FLAG = process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX;
   const SAVED_MODEL = process.env.FLAIR_EMBEDDING_MODEL;
 
   beforeEach(() => {
     // Belt-and-suspenders against env leak from another file/run — the
-    // bench-only force hatch and any operator model override must start
-    // clean so these tests exercise the real shipped default.
+    // bench-only override and any operator model override must start clean
+    // so these tests exercise the real shipped default.
     delete process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX;
     delete process.env.FLAIR_EMBEDDING_MODEL;
   });
@@ -56,33 +59,17 @@ describe("buildEmbedOptions / getModelId (flair#504 Phase 2 — nomic search pre
     else process.env.FLAIR_EMBEDDING_MODEL = SAVED_MODEL;
   });
 
-  describe("gate OFF (default — EMBEDDING_PREFIXES_ENABLED=false, no force hatch)", () => {
-    it("drops inputType even when a call site passes one", () => {
-      expect(buildEmbedOptions("document")).toEqual({ model: "default" });
-      expect(buildEmbedOptions("query")).toEqual({ model: "default" });
-    });
-
-    it("omits inputType when not provided", () => {
-      expect(buildEmbedOptions()).toEqual({ model: "default" });
-    });
-
-    it("getModelId() has no suffix — base id only (no stale-read false-positive on a no-op re-embed)", () => {
-      expect(getModelId()).toBe("nomic-embed-text-v1.5-Q4_K_M");
-      expect(getModelId()).not.toContain("+searchprefix");
-    });
-  });
-
-  describe("bench-only force hatch (FLAIR_RECALL_HARNESS_FORCE_PREFIX=true) — the recall-harness '--prefixes on' arm", () => {
-    beforeEach(() => {
-      process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX = "true";
-    });
-
+  describe("gate ON (default — EMBEDDING_PREFIXES_ENABLED=true, no override)", () => {
     it("forwards 'document' exactly", () => {
       expect(buildEmbedOptions("document")).toEqual({ model: "default", inputType: "document" });
     });
 
     it("forwards 'query' exactly", () => {
       expect(buildEmbedOptions("query")).toEqual({ model: "default", inputType: "query" });
+    });
+
+    it("omits inputType when not provided", () => {
+      expect(buildEmbedOptions()).toEqual({ model: "default" });
     });
 
     it("getModelId() carries the +searchprefix suffix", () => {
@@ -102,24 +89,70 @@ describe("buildEmbedOptions / getModelId (flair#504 Phase 2 — nomic search pre
     });
   });
 
+  describe("bench-only override (FLAIR_RECALL_HARNESS_FORCE_PREFIX=false) — the recall-harness '--prefixes off' arm", () => {
+    beforeEach(() => {
+      process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX = "false";
+    });
+
+    it("drops inputType even when a call site passes one", () => {
+      expect(buildEmbedOptions("document")).toEqual({ model: "default" });
+      expect(buildEmbedOptions("query")).toEqual({ model: "default" });
+    });
+
+    it("omits inputType when not provided", () => {
+      expect(buildEmbedOptions()).toEqual({ model: "default" });
+    });
+
+    it("getModelId() has no suffix — base id only (no stale-read false-positive on a no-op re-embed)", () => {
+      expect(getModelId()).toBe("nomic-embed-text-v1.5-Q4_K_M");
+      expect(getModelId()).not.toContain("+searchprefix");
+    });
+  });
+
+  describe("bench-only override (FLAIR_RECALL_HARNESS_FORCE_PREFIX=true) — explicit, redundant with the default, but must agree with it", () => {
+    beforeEach(() => {
+      process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX = "true";
+    });
+
+    it("forwards 'document' exactly", () => {
+      expect(buildEmbedOptions("document")).toEqual({ model: "default", inputType: "document" });
+    });
+
+    it("forwards 'query' exactly", () => {
+      expect(buildEmbedOptions("query")).toEqual({ model: "default", inputType: "query" });
+    });
+
+    it("getModelId() carries the +searchprefix suffix", () => {
+      expect(getModelId()).toBe("nomic-embed-text-v1.5-Q4_K_M+searchprefix");
+    });
+  });
+
   /**
-   * THE INVARIANT (Kern's ratified mechanism, PR #689): THE GATE atomically
-   * controls BOTH inputType-forwarding and the model-id suffix — they must
-   * NEVER diverge. A row stamped `+searchprefix` whose vector was actually
-   * computed WITHOUT the prefix (or vice versa) would silently corrupt
-   * dedup and stale-detection, which both key off `embeddingModel` matching
-   * what was actually forwarded to `models.embed()`. This sweeps every
-   * externally-reachable configuration — the bench-only force hatch is the
-   * only runtime lever; `EMBEDDING_PREFIXES_ENABLED` itself is a hardcoded
-   * module constant, not a runtime toggle, by design (see that constant's
-   * doc in resources/embeddings-provider.ts) — and asserts the two never
-   * disagree in either state.
+   * THE INVARIANT (Kern's ratified mechanism, PR #689, unchanged by the
+   * flip): THE GATE atomically controls BOTH inputType-forwarding and the
+   * model-id suffix — they must NEVER diverge. A row stamped `+searchprefix`
+   * whose vector was actually computed WITHOUT the prefix (or vice versa)
+   * would silently corrupt dedup and stale-detection, which both key off
+   * `embeddingModel` matching what was actually forwarded to
+   * `models.embed()`. This sweeps every externally-reachable configuration —
+   * the bench-only override is the only runtime lever (three states: unset
+   * defers to THE GATE, `"true"` forces on, `"false"` forces off);
+   * `EMBEDDING_PREFIXES_ENABLED` itself is a hardcoded module constant, not a
+   * runtime toggle, by design (see that constant's doc in
+   * resources/embeddings-provider.ts) — and asserts the two never disagree
+   * in any of the three reachable states, in either direction the gate might
+   * default to.
    */
   describe("invariant: suffix presence and inputType-forwarding never diverge", () => {
-    for (const forceOn of [false, true]) {
-      it(`force hatch=${forceOn}: it is impossible to observe suffix-without-inputType or inputType-without-suffix`, () => {
-        if (forceOn) process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX = "true";
-        else delete process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX;
+    const overrides: { label: string; value: string | undefined }[] = [
+      { label: "unset (defers to THE GATE, currently on)", value: undefined },
+      { label: 'override="true"', value: "true" },
+      { label: 'override="false"', value: "false" },
+    ];
+    for (const { label, value } of overrides) {
+      it(`${label}: it is impossible to observe suffix-without-inputType or inputType-without-suffix`, () => {
+        if (value === undefined) delete process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX;
+        else process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX = value;
 
         const hasSuffix = getModelId().endsWith("+searchprefix");
         const docForwards = "inputType" in buildEmbedOptions("document");
