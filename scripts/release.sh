@@ -38,6 +38,7 @@ PACKAGES=(
   "$ROOT/packages/pi-flair"
   "$ROOT/packages/n8n-nodes-flair"
   "$ROOT/packages/langgraph-flair"
+  "$ROOT/packages/flair-bench"
   "$ROOT"
 )
 
@@ -48,6 +49,7 @@ PACKAGE_JSONS=(
   "$ROOT/packages/pi-flair/package.json"
   "$ROOT/packages/n8n-nodes-flair/package.json"
   "$ROOT/packages/langgraph-flair/package.json"
+  "$ROOT/packages/flair-bench/package.json"
   "$ROOT/package.json"
 )
 
@@ -140,6 +142,14 @@ if [[ "$MODE" == "--publish" ]]; then
 
   echo "  Publishing @tpsdev-ai/langgraph-flair..."
   (cd "$ROOT/packages/langgraph-flair" && npm publish) || { echo "⚠️  langgraph-flair publish failed (may need build step)"; }
+
+  echo "  Publishing @tpsdev-ai/flair-bench..."
+  # NOTE: until the one-time bootstrap in docs/releasing.md is done (first
+  # manual publish + npm Trusted Publisher registration for this package),
+  # this is expected to fail on brand-new installs of the package — see PR
+  # that added this line for context. Soft-fail like the other prepublishOnly
+  # leaf packages above so a break-glass publish of the other 7 isn't blocked.
+  (cd "$ROOT/packages/flair-bench" && npm publish) || { echo "⚠️  flair-bench publish failed (may need build step, or first-publish bootstrap — see docs/releasing.md)"; }
 
   echo "🏷️  Tagging v${VERSION} on main..."
   git -C "$ROOT" tag -a "v${VERSION}" -m "Release v${VERSION}"
@@ -266,6 +276,7 @@ git -C "$ROOT" add \
   "$ROOT/packages/pi-flair/package.json" \
   "$ROOT/packages/n8n-nodes-flair/package.json" \
   "$ROOT/packages/langgraph-flair/package.json" \
+  "$ROOT/packages/flair-bench/package.json" \
   "$ROOT/bun.lock"
 
 # Also stage CHANGELOG.md and scripts/release.sh if they have pre-staged changes —

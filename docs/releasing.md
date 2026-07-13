@@ -1,9 +1,13 @@
 # Releasing Flair
 
-Flair publishes seven workspace packages to npm under `@tpsdev-ai/*`. Releases are
+Flair publishes eight workspace packages to npm under `@tpsdev-ai/*`. Releases are
 **tokenless** and **staged**: CI authenticates to npm with a short-lived OIDC token
 (no `NPM_TOKEN` lives anywhere) and submits each package to npm's **staging** area.
 A maintainer then approves the staged tarballs on npmjs.com with 2FA to make them live.
+
+> `flair-bench` is version-bumped and tagged in lockstep with the other 7, but stages
+> in its own step in CI (allowed to fail) until its one-time bootstrap is done — see
+> [flair-bench bootstrap](#flair-bench-bootstrap-one-time) below.
 
 ```
  merge release PR ──▶ push tag v0.11.0 ──▶ CI stages all packages ──▶ npm staging
@@ -78,9 +82,10 @@ npm stage view <stage-id> # inspect one
 npm stage approve <stage-id>   # 2FA prompt; package goes live
 ```
 
-There are seven packages, so there are seven approvals (the web UI lists them on one
-page). Approve in dependency order if installing immediately — flair-client before its
-dependents — though staging does not itself resolve dependencies.
+There are seven lockstep-staged packages, so seven approvals (the web UI lists them on
+one page). Approve in dependency order if installing immediately — flair-client before
+its dependents — though staging does not itself resolve dependencies. `flair-bench`
+stages separately and only appears here once its bootstrap (below) is done.
 
 Verify when done:
 
@@ -115,6 +120,28 @@ Packages: `flair-client`, `flair-mcp`, `flair`, `openclaw-flair`, `pi-flair`,
 
 > A package must already exist on npm before a trusted publisher can be added — all
 > seven already do. This account-level config can only be done by an npm org owner.
+> `flair-bench` doesn't exist on npm yet (verified via `npm view @tpsdev-ai/flair-bench`
+> → 404 as of 2026-07-13) so it can't have a Trusted Publisher yet either — see below.
+
+### `flair-bench` bootstrap (one-time)
+
+`flair-bench` (added 2026-07-12, flair#702) is wired into the version-bump/tag flow
+(`scripts/release.sh`, `release-publish.yml`'s version-check) alongside the other 7, but
+`npm stage publish` categorically requires the package already exist on the npm registry
+(`npm help stage`: "Package must exist"), and a Trusted Publisher can only be registered
+for a package that already exists — chicken-and-egg for a brand-new package. Until an npm
+org owner does this once, the workflow's dedicated "Stage-publish flair-bench" step is
+expected to fail (it's `continue-on-error: true` so it doesn't block the other 7):
+
+1. From a machine logged into npm with 2FA: `cd packages/flair-bench && npm run build &&
+   npm publish --access public` — one normal (non-staged) publish to create the package
+   on the registry. Any valid semver works; the very next lockstep release will bump it
+   to match the other 7 automatically (it's in `scripts/release.sh`'s `PACKAGES` array).
+2. Add the Trusted Publisher for `@tpsdev-ai/flair-bench` using the same table as the
+   other 7 above (org=`tpsdev-ai`, repo=`flair`, workflow=`release-publish.yml`,
+   environment=`release`, allowed=`npm stage publish` only).
+3. Remove `continue-on-error: true` from the "Stage-publish flair-bench" step in
+   `release-publish.yml` once a tag push has staged it successfully.
 
 ### GitHub `release` environment
 
