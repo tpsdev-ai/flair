@@ -4,12 +4,13 @@
  * Produces the JSON metadata document an OAuth authorization server fetches
  * when a client_id is an HTTPS URL — draft-ietf-oauth-client-id-metadata-
  * document-00, adopted by the MCP draft authorization spec IN PLACE OF DCR
- * (see ~/ops/FLAIR-CLOUD-AGENT-BETA-ALIGNMENT.md Delta 2).
+ * (no registration row to create or replicate across nodes; the served
+ * document IS the registration).
  *
  * Shape is pinned to HarperFast/oauth **issue #161** ("client_credentials
  * (2/4): CIMD-first client resolution for private_key_jwt agents") — the
- * FORMAL shape spec for this document, re-scoped 2026-07-09 to CIMD-first
- * (DCR demoted to optional back-compat). #161 requires:
+ * FORMAL shape spec for this document, shipped in @harperfast/oauth@2.2.0
+ * via PR #170 (with #167's CIMD resolution layer). #161 requires:
  *
  *   - `grant_types: ["client_credentials"]`;
  *     `token_endpoint_auth_method: "private_key_jwt"`.
@@ -27,43 +28,19 @@
  *     it — merely hosting a reachable document must never be sufficient to
  *     mint tokens. Replaces the old DCR `initialAccessToken` gate.
  *
- * HarperFast/oauth PR #167 ("CIMD resolution layer") implements the AS-side
- * fetch/validate/cache machinery #161 builds on. **#167 is an OPEN DRAFT PR
- * as of this writing — NOT merged** (a prior version of this comment
- * claimed "merged @ commit f0da8a1"; that was inaccurate and is corrected
- * here 2026-07-09). Its current `validateCimdDocument` / `clientValidator.ts`
- * do not yet accept this document's `client_credentials` shape — see the
- * "pending #161/#162" section below.
+ * The AS-side machinery consuming this document (fetch/validate/cache —
+ * #167's CIMD resolution layer, extended by #170 for client_credentials +
+ * private_key_jwt) is SHIPPED in the published @harperfast/oauth@2.2.0.
+ * This module's output is proven against that real published code — not a
+ * mirror — in test/unit/mcp-client-credentials-live-package.test.ts, which
+ * drives 2.2.0's actual `resolveCimdClient` pipeline (via its exported
+ * `_setDnsLookup`/`_setFetch` test hooks) and confirms the document
+ * resolves and validates end-to-end, plus the fail-closed negatives (no
+ * `allowedHosts` configured → rejected; leaked private `d` in a JWK →
+ * rejected by the plugin even if our own build-time guard were bypassed).
  *
  * Kept free of any @harperfast/harper import (mirrors agentcard-fields.ts)
  * so the document shape is unit-testable without spinning up Harper.
- *
- * ── pending oauth#161/#162 ──────────────────────────────────────────────────
- * This module produces the shape FORMALIZED by #161 — not what today's
- * still-open-draft #167 validator currently accepts. As coded in #167's
- * draft (`src/lib/mcp/{cimd,clientValidator}.ts`):
- *
- *   1. `clientValidator.ts`'s `SUPPORTED_GRANT_TYPES` is
- *      `{authorization_code, refresh_token}` — `"client_credentials"` is
- *      rejected (`Unsupported grant_type`) until #161 lands.
- *   2. `cimd.ts`'s `validateCimdDocument` hardcodes CIMD clients to
- *      `token_endpoint_auth_method === 'none'` — `"private_key_jwt"` is
- *      rejected until #161/#159 activates it (the plugin's own comment says
- *      as much: "private_key_jwt will be activated by issue #159").
- *   3. `redirect_uris` is REQUIRED and non-empty today (inherited from the
- *      DCR-shaped validator) — meaningless for a pure client_credentials
- *      agent that never does a redirect-based flow. #161 now explicitly
- *      blesses omitting it (and `response_types`) for client_credentials-only
- *      CIMD clients, so this is a documented, upstream-endorsed deviation —
- *      not a guess we're hoping gets accepted.
- *
- * All three gaps mean fetching this document against TODAY's deployed AS
- * (running #167's current draft code) fails closed (missing/invalid field →
- * 400) rather than silently degrading to a weaker auth method — that
- * fail-closed behavior is what we want in the interim. See
- * docs/notes/mcp-agent-auth-consumer.md for the resolved open-questions list
- * and the deployment-coordination note (`allowedHosts` must include this
- * document's host once #161/#167 land).
  */
 
 export interface Ed25519Jwk {
@@ -87,9 +64,9 @@ export interface CimdDocument {
   grant_types: string[];
 }
 
-/** The grant this agent's CIMD document targets — formalized by oauth#161; rejected by today's open-draft #167 validator until #161 lands. See module header. */
+/** The grant this agent's CIMD document targets — formalized by oauth#161, accepted by the published 2.2.0 validator. See module header. */
 export const CIMD_TARGET_GRANT_TYPES = ["client_credentials"] as const;
-/** The auth method this agent's CIMD document targets — formalized by oauth#161; rejected by today's open-draft #167 validator until #161 lands. See module header. */
+/** The auth method this agent's CIMD document targets — formalized by oauth#161, accepted by the published 2.2.0 validator. See module header. */
 export const CIMD_TARGET_AUTH_METHOD = "private_key_jwt" as const;
 
 export interface BuildCimdDocumentParams {

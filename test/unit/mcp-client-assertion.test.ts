@@ -12,19 +12,34 @@
  * not a reimplementation we ship.
  *
  * A second claim, covered further down: the token-request form
- * (`buildTokenRequestForm`) matches what HarperFast/oauth **issue #162**
- * ("client_credentials (3/4): token-endpoint grant") specifies for the
- * request side — `client_assertion_type`/`client_assertion`/`client_id`
- * present, `client_id` equal to the assertion's `iss`/`sub`, and an
- * optional RFC 8707 `resource` pass-through. #162 is an open issue (not yet
- * a PR), so this is shape coverage against its written scope, not a
- * round-trip against shipped verification code (there is none yet).
+ * (`buildTokenRequestForm`) matches what shipped in HarperFast/oauth@2.2.0
+ * PR #170 (closing issues #161/#162, "client_credentials (3/4):
+ * token-endpoint grant") for the request side —
+ * `client_assertion_type`/`client_assertion`/`client_id` present, `client_id`
+ * equal to the assertion's `iss`/`sub`, and an optional RFC 8707 `resource`
+ * pass-through — confirmed against the published package's source
+ * (`node_modules/@harperfast/oauth/dist/lib/mcp/token.js`).
+ *
+ * A third claim: `requestMcpAccessToken`/`getMcpAccessToken` perform a real
+ * HTTP round-trip against a token endpoint shaped like the published
+ * package's (a local `node:http` server standing in for it here, since the
+ * plugin's own SSRF-guarded CIMD client-resolution step cannot be driven
+ * from a loopback-only ephemeral Harper — see
+ * `test/integration/mcp-client-credentials-e2e.test.ts` and
+ * `docs/notes/mcp-agent-auth-consumer.md` for the live-Harper proof of what
+ * IS reachable, and the documented reason the full mint can't be forced
+ * further in this environment): success parsing, non-2xx error mapping,
+ * `429 slow_down` + `Retry-After` jittered-backoff retry (#171/#163's
+ * client-side counterpart), and token caching (mint sparingly, reuse until
+ * near-expiry — the consumer requirement flair#663's tracking-issue comment
+ * pins to the 2.2.0 rate limiter).
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { generateKeyPairSync, createPublicKey, verify as verifySignature, type KeyObject } from "node:crypto";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import {
   CLIENT_ASSERTION_TYPE_JWT_BEARER,
   MAX_ASSERTION_LIFETIME_SECONDS,
@@ -32,6 +47,9 @@ import {
   publicJwkFromPrivateKey,
   buildTokenRequestForm,
   requestMcpAccessToken,
+  getMcpAccessToken,
+  clearMcpAccessTokenCache,
+  McpTokenRequestError,
   resolveAgentKeyPath,
   loadEd25519PrivateKeyFromFile,
   defaultMcpIssuer,
@@ -322,10 +340,270 @@ describe("buildTokenRequestForm", () => {
   });
 });
 
-describe("requestMcpAccessToken — pending #162 stub", () => {
-  test("always throws, naming #162 as the blocker", async () => {
+// ─── requestMcpAccessToken / getMcpAccessToken — live round trip ───────────
+//
+// A local node:http server stands in for the token endpoint, shaped exactly
+// like @harperfast/oauth@2.2.0's published `/oauth/mcp/token` responses
+// (verified against node_modules/@harperfast/oauth/dist/lib/mcp/token.js:
+// 200 `{access_token, token_type, expires_in}`; non-2xx OAuth error objects
+// `{error, error_description}`; `429 {"error":"slow_down"}` with a
+// `Retry-After` header on the issuance rate limit, #171/#163). This proves
+// the CLIENT's real fetch/parse/retry logic against real HTTP, not a mocked
+// fetch function — sleep/random are injected only to keep 429-retry tests
+// fast and deterministic (no real waiting).
+
+type TokenHandler = (req: IncomingMessage, res: ServerResponse, body: string) => void;
+
+async function startTokenServer(handler: TokenHandler): Promise<{ url: string; server: Server; requests: string[] }> {
+  const requests: string[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      requests.push(body);
+      handler(req, res, body);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return { url: `http://127.0.0.1:${port}/oauth/mcp/token`, server, requests };
+}
+
+function jsonResponse(res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>) {
+  res.writeHead(status, { "Content-Type": "application/json", ...headers });
+  res.end(JSON.stringify(body));
+}
+
+let activeServer: Server | undefined;
+afterEach(async () => {
+  if (activeServer) {
+    await new Promise<void>((resolve) => activeServer!.close(() => resolve()));
+    activeServer = undefined;
+  }
+  clearMcpAccessTokenCache();
+});
+
+describe("requestMcpAccessToken — live round trip against a 2.2.0-shaped token endpoint", () => {
+  test("mints a token from a 200 response, POSTing the exact form oauth#162 (shipped 2.2.0) expects", async () => {
+    const { url, server, requests } = await startTokenServer((req, res) => {
+      expect(req.method).toBe("POST");
+      expect(req.headers["content-type"]).toBe("application/x-www-form-urlencoded");
+      jsonResponse(res, 200, { access_token: "tok_abc123", token_type: "Bearer", expires_in: 300, scope: "memory:read" });
+    });
+    activeServer = server;
+
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const { assertion } = signClientAssertion({ clientId: CLIENT_ID, tokenEndpoint: url, privateKey });
+    const form = buildTokenRequestForm({ clientId: CLIENT_ID, assertion, resource: "https://flair.example.com/mcp" });
+
+    const before = Date.now();
+    const token = await requestMcpAccessToken(form, url);
+    expect(token.accessToken).toBe("tok_abc123");
+    expect(token.tokenType).toBe("Bearer");
+    expect(token.expiresIn).toBe(300);
+    expect(token.scope).toBe("memory:read");
+    expect(token.mintedAtMs).toBeGreaterThanOrEqual(before);
+    expect(token.expiresAtMs).toBe(token.mintedAtMs + 300_000);
+
+    expect(requests.length).toBe(1);
+    const sent = new URLSearchParams(requests[0]);
+    expect(sent.get("grant_type")).toBe("client_credentials");
+    expect(sent.get("client_assertion_type")).toBe(CLIENT_ASSERTION_TYPE_JWT_BEARER);
+    expect(sent.get("client_assertion")).toBe(assertion);
+    expect(sent.get("client_id")).toBe(CLIENT_ID);
+    expect(sent.get("resource")).toBe("https://flair.example.com/mcp");
+  });
+
+  test("defaults expires_in to 300s (the plugin's client_credentials default) when the response omits it", async () => {
+    const { url, server } = await startTokenServer((_req, res) => {
+      jsonResponse(res, 200, { access_token: "tok_no_ttl", token_type: "Bearer" });
+    });
+    activeServer = server;
     const form = buildTokenRequestForm({ clientId: CLIENT_ID, assertion: "a.b.c" });
-    await expect(requestMcpAccessToken(form, TOKEN_ENDPOINT)).rejects.toThrow(/pending #162/);
+    const token = await requestMcpAccessToken(form, url);
+    expect(token.expiresIn).toBe(300);
+  });
+
+  test("throws McpTokenRequestError on a 401 invalid_client response, preserving status + error code", async () => {
+    const { url, server } = await startTokenServer((_req, res) => {
+      jsonResponse(res, 401, { error: "invalid_client", error_description: "client_assertion verification failed: signature invalid" });
+    });
+    activeServer = server;
+    const form = buildTokenRequestForm({ clientId: CLIENT_ID, assertion: "a.b.c" });
+    await expect(requestMcpAccessToken(form, url)).rejects.toThrow(McpTokenRequestError);
+    try {
+      await requestMcpAccessToken(form, url);
+      throw new Error("expected rejection");
+    } catch (err) {
+      expect(err).toBeInstanceOf(McpTokenRequestError);
+      expect((err as McpTokenRequestError).status).toBe(401);
+      expect((err as McpTokenRequestError).error).toBe("invalid_client");
+    }
+  });
+
+  test("throws on a non-JSON response body", async () => {
+    const { url, server } = await startTokenServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("not json");
+    });
+    activeServer = server;
+    const form = buildTokenRequestForm({ clientId: CLIENT_ID, assertion: "a.b.c" });
+    await expect(requestMcpAccessToken(form, url)).rejects.toThrow(McpTokenRequestError);
+  });
+
+  test("429 slow_down: honors Retry-After with jittered backoff, then succeeds on retry", async () => {
+    let calls = 0;
+    const { url, server } = await startTokenServer((_req, res) => {
+      calls++;
+      if (calls === 1) {
+        jsonResponse(res, 429, { error: "slow_down" }, { "Retry-After": "2" });
+        return;
+      }
+      jsonResponse(res, 200, { access_token: "tok_after_retry", token_type: "Bearer", expires_in: 300 });
+    });
+    activeServer = server;
+
+    const sleepCalls: number[] = [];
+    const form = buildTokenRequestForm({ clientId: CLIENT_ID, assertion: "a.b.c" });
+    const token = await requestMcpAccessToken(form, url, {
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+      },
+      random: () => 0.5, // full-jitter: sleep = round(0.5 * retryAfterMs)
+    });
+
+    expect(token.accessToken).toBe("tok_after_retry");
+    expect(calls).toBe(2);
+    expect(sleepCalls.length).toBe(1);
+    // Retry-After: 2s -> baseMs 2000 -> jittered with random()=0.5 -> 1000ms.
+    expect(sleepCalls[0]).toBe(1000);
+  });
+
+  test("429 without Retry-After falls back to exponential backoff, never hammering", async () => {
+    let calls = 0;
+    const { url, server } = await startTokenServer((_req, res) => {
+      calls++;
+      jsonResponse(res, 429, { error: "slow_down" }); // no Retry-After header
+    });
+    activeServer = server;
+
+    const sleepCalls: number[] = [];
+    const form = buildTokenRequestForm({ clientId: CLIENT_ID, assertion: "a.b.c" });
+    await expect(
+      requestMcpAccessToken(form, url, {
+        maxRetries: 2,
+        sleep: async (ms) => {
+          sleepCalls.push(ms);
+        },
+        random: () => 1, // upper bound of the jitter range
+      }),
+    ).rejects.toThrow(McpTokenRequestError);
+
+    expect(calls).toBe(3); // initial + 2 retries
+    expect(sleepCalls.length).toBe(2);
+    // Fallback base doubles per attempt: 1000ms, then 2000ms (random()=1 -> full base).
+    expect(sleepCalls[0]).toBe(1000);
+    expect(sleepCalls[1]).toBe(2000);
+  });
+
+  test("gives up after maxRetries consecutive 429s and throws McpTokenRequestError(429)", async () => {
+    let calls = 0;
+    const { url, server } = await startTokenServer((_req, res) => {
+      calls++;
+      jsonResponse(res, 429, { error: "slow_down" }, { "Retry-After": "0" });
+    });
+    activeServer = server;
+    const form = buildTokenRequestForm({ clientId: CLIENT_ID, assertion: "a.b.c" });
+    try {
+      await requestMcpAccessToken(form, url, { maxRetries: 1, sleep: async () => {}, random: () => 0 });
+      throw new Error("expected rejection");
+    } catch (err) {
+      expect(err).toBeInstanceOf(McpTokenRequestError);
+      expect((err as McpTokenRequestError).status).toBe(429);
+      expect((err as McpTokenRequestError).error).toBe("slow_down");
+    }
+    expect(calls).toBe(2); // initial + 1 retry, then gives up
+  });
+});
+
+describe("getMcpAccessToken — token caching (consumer requirement: mint sparingly)", () => {
+  test("mints once and reuses the cached token for a second call with the same clientId/tokenEndpoint/resource", async () => {
+    let mintCount = 0;
+    const { url, server } = await startTokenServer((_req, res) => {
+      mintCount++;
+      jsonResponse(res, 200, { access_token: `tok_${mintCount}`, token_type: "Bearer", expires_in: 300 });
+    });
+    activeServer = server;
+    const { privateKey } = generateKeyPairSync("ed25519");
+
+    const first = await getMcpAccessToken({ clientId: CLIENT_ID, tokenEndpoint: url, privateKey, resource: "https://flair.example.com/mcp" });
+    const second = await getMcpAccessToken({ clientId: CLIENT_ID, tokenEndpoint: url, privateKey, resource: "https://flair.example.com/mcp" });
+
+    expect(mintCount).toBe(1);
+    expect(second.accessToken).toBe(first.accessToken);
+  });
+
+  test("re-mints when the cached token is within the refresh margin of expiry", async () => {
+    let mintCount = 0;
+    const { url, server } = await startTokenServer((_req, res) => {
+      mintCount++;
+      jsonResponse(res, 200, { access_token: `tok_${mintCount}`, token_type: "Bearer", expires_in: 300 });
+    });
+    activeServer = server;
+    const { privateKey } = generateKeyPairSync("ed25519");
+
+    let now = 1_000_000;
+    const first = await getMcpAccessToken({
+      clientId: CLIENT_ID,
+      tokenEndpoint: url,
+      privateKey,
+      refreshMarginMs: 30_000,
+      now: () => now,
+    });
+    // Advance to inside the 30s refresh margin (300s TTL - 29s elapsed = 271s left).
+    now += 271_000;
+    const second = await getMcpAccessToken({
+      clientId: CLIENT_ID,
+      tokenEndpoint: url,
+      privateKey,
+      refreshMarginMs: 30_000,
+      now: () => now,
+    });
+
+    expect(mintCount).toBe(2);
+    expect(second.accessToken).not.toBe(first.accessToken);
+  });
+
+  test("forceRefresh mints unconditionally even when the cache is fresh", async () => {
+    let mintCount = 0;
+    const { url, server } = await startTokenServer((_req, res) => {
+      mintCount++;
+      jsonResponse(res, 200, { access_token: `tok_${mintCount}`, token_type: "Bearer", expires_in: 300 });
+    });
+    activeServer = server;
+    const { privateKey } = generateKeyPairSync("ed25519");
+
+    await getMcpAccessToken({ clientId: CLIENT_ID, tokenEndpoint: url, privateKey });
+    await getMcpAccessToken({ clientId: CLIENT_ID, tokenEndpoint: url, privateKey, forceRefresh: true });
+
+    expect(mintCount).toBe(2);
+  });
+
+  test("caches separately per resource — a token minted for one resource never serves another", async () => {
+    let mintCount = 0;
+    const { url, server } = await startTokenServer((_req, res) => {
+      mintCount++;
+      jsonResponse(res, 200, { access_token: `tok_${mintCount}`, token_type: "Bearer", expires_in: 300 });
+    });
+    activeServer = server;
+    const { privateKey } = generateKeyPairSync("ed25519");
+
+    await getMcpAccessToken({ clientId: CLIENT_ID, tokenEndpoint: url, privateKey, resource: "https://flair.example.com/mcp" });
+    await getMcpAccessToken({ clientId: CLIENT_ID, tokenEndpoint: url, privateKey, resource: "https://other.example.com/mcp" });
+
+    expect(mintCount).toBe(2);
   });
 });
 

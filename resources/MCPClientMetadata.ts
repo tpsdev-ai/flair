@@ -7,15 +7,15 @@ import { agentPublicKeyToJwk, buildCimdDocument } from "./mcp-client-metadata-fi
  * Flair agent at `GET /MCPClientMetadata/{agentId}`.
  *
  * This is the "publish" half of RFC 7523 private_key_jwt / client_credentials
- * agent-auth (see ~/ops/FLAIR-AGENT-AUTH-CONSUMER-SPEC.md and
- * HarperFast/oauth#159, decomposed into #160 [merged], #161 [open — formal
- * CIMD shape spec], #162 [open issue — token-endpoint grant], #167 [open
- * draft PR — CIMD resolution layer]). An authorization server that treats
- * an agent's `client_id` as this URL fetches this document to learn the
- * agent's JWKS (its EXISTING Ed25519 identity key) instead of doing a DCR
- * registration — no registration state to replicate across Fabric nodes,
- * matching Flair's stateless posture (see the beta-alignment doc's
- * Delta 2/4).
+ * agent-auth (see docs/notes/mcp-agent-auth-consumer.md and
+ * HarperFast/oauth#159, whose full chain is now shipped in the published
+ * @harperfast/oauth@2.2.0: assertion verification #160/PR #165, CIMD-first
+ * client resolution #161/#167, token-endpoint grant + issuance rate
+ * limiting #162/#163 via PRs #170/#171). An authorization server that
+ * treats an agent's `client_id` as this URL fetches this document to learn
+ * the agent's JWKS (its EXISTING Ed25519 identity key) instead of doing a
+ * DCR registration — no registration state to replicate across Fabric
+ * nodes, matching Flair's stateless posture.
  *
  * Public, unauthenticated — mirrors AgentCard.ts. CIMD documents are meant
  * to be fetched by an AS with no prior trust relationship (same posture as
@@ -23,22 +23,21 @@ import { agentPublicKeyToJwk, buildCimdDocument } from "./mcp-client-metadata-fi
  * agent's already-public identity key (the same value a verified caller
  * already reads via `GET /Agent/{id}`), never anything secret.
  *
- * ── pending oauth#161/#162 ───────────────────────────────────────────────────
- * The document served here is the shape FORMALIZED by oauth#161
- * (`grant_types: ["client_credentials"]`, `token_endpoint_auth_method:
- * "private_key_jwt"`), which today's still-open-draft #167 CIMD validator
- * does not yet accept — see mcp-client-metadata-fields.ts's header for the
- * exact gaps. Serving it is harmless (an AS that doesn't yet understand
- * client_credentials CIMD clients simply 400s on fetch, the same
- * fail-closed outcome as if this route didn't exist) and means no code
- * change is needed HERE once #161/#162 land — the fix is entirely on the
- * plugin side.
+ * The document served here is proven against the REAL published plugin:
+ * test/unit/mcp-client-credentials-live-package.test.ts feeds it through
+ * 2.2.0's actual `resolveCimdClient` fetch+validate pipeline, and
+ * test/integration/mcp-client-credentials-e2e.test.ts serves it from a live
+ * spawned Harper. Note the plugin's CIMD fetch enforces an UNCONDITIONAL
+ * SSRF gate (https only, no private/loopback/link-local DNS answers, no
+ * override knob) — so an AS can only ever consume this document when it is
+ * served from a genuinely public HTTPS host. See the doc note's
+ * "SSRF/loopback boundary" section.
  *
- * Deployment coordination: once the AS side lands, its
- * `clientIdMetadataDocuments.allowedHosts` config MUST include this route's
- * host (derived from `FLAIR_MCP_ISSUER` / `FLAIR_PUBLIC_URL`, same env vars
- * as `mcpIssuer()` below) — merely being reachable is not enough per #161's
- * security gate. See docs/notes/mcp-agent-auth-consumer.md.
+ * Deployment coordination: the AS's `clientIdMetadataDocuments.allowedHosts`
+ * config MUST include this route's host (derived from `FLAIR_MCP_ISSUER` /
+ * `FLAIR_PUBLIC_URL`, same env vars as `mcpIssuer()` below) — merely being
+ * reachable is not enough; the allowlist gate is AS-side config and
+ * fail-closed. See docs/notes/mcp-agent-auth-consumer.md.
  */
 export class MCPClientMetadata extends Resource {
   allowRead(): boolean {
