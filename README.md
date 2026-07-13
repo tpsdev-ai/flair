@@ -67,13 +67,13 @@ If you need any of those specifically, use them. If you need crypto-pinned ident
 
 Anthropic shipped [Claude Dreams](https://platform.claude.com/docs/en/managed-agents/dreams) (research preview, April 2026) — async pipeline that reads a memory store + session transcripts and produces a curated output store: duplicates merged, stale entries replaced, insights surfaced. Validates the category: agent memory accumulates drift and needs cleanup.
 
-Flair ships both the on-demand curation surface (`flair rem rapid`) AND the scheduled nightly cycle in v0.9.0, per the [FLAIR-NIGHTLY-REM spec](specs/FLAIR-NIGHTLY-REM.md).
+Flair ships both the on-demand curation surface (`flair rem rapid`) AND the scheduled nightly cycle, per the [FLAIR-NIGHTLY-REM spec](specs/FLAIR-NIGHTLY-REM.md) and its [in-process distillation slice](specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md). Config recipe (Ollama zero-key default, hosted-provider egress warning, clustered-deploy rules): [`docs/rem.md`](docs/rem.md).
 
-- **`flair rem rapid`** — on-demand reflection. `--focus {lessons_learned, patterns, decisions, errors}` mirrors Dreams' `instructions` parameter. Outputs *candidates*, not a wholesale store swap.
+- **`flair rem rapid`** — reflects and distills server-side by default, staging candidates in one bounded call. `--focus {lessons_learned, patterns, decisions, errors}` mirrors Dreams' `instructions` parameter. `--prompt-only` falls back to the bring-your-own-model handoff. Outputs *candidates*, not a wholesale store swap.
 - **`flair rem candidates` / `flair rem promote <id> --rationale "<why>"` / `flair rem reject <id>`** — review and promote distilled candidates with required rationale.
-- **`flair rem nightly enable [--at HH:MM]`** — scheduled automation via platform-native scheduler (launchd / systemd). Pre-cycle snapshot to `~/.flair/snapshots/<agent>/<iso>.tar.gz`. Maintenance step (soft-delete expired + soft-archive stale). Audit log to `~/.flair/logs/rem-nightly.jsonl`. `flair rem pause` / `resume` for emergency stop.
+- **`flair rem nightly enable [--at HH:MM]`** — scheduled automation via platform-native scheduler (launchd / systemd). Pre-cycle snapshot to `~/.flair/snapshots/<agent>/<iso>.tar.gz`. Maintenance (soft-delete expired + soft-archive stale) and distillation (staged candidates) both run each cycle. Audit log to `~/.flair/logs/rem-nightly.jsonl`. `flair rem pause` / `resume` for emergency stop.
 - **`flair rem restore <date> --apply`** — rewinds Harper state to a snapshot. Takes a pre-restore snapshot of current state first, so the rewind itself is reversible.
-- *Slice-3 (1.1)* — automated server-side distillation (requires pluggable LLM provider), trust-tier filter on REM input, cross-agent restore. Until then, distillation is operator-triggered via `flair rem rapid` followed by manual promote/reject.
+- *Next* — trust-tier filter on REM input, cross-agent restore. Until the trust-tier arc lands, the input filter stays scope-based (own agent, non-archived, non-permanent, scope window); the structural safety net is unchanged either way — candidates are staged, never auto-promoted.
 
 The substantive difference is the **promotion contract**:
 
