@@ -13,6 +13,7 @@
 
 import { databases } from "@harperfast/harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { invalidEntitiesResponse } from "./entity-vocab.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -45,6 +46,13 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
 
     if (!content.id) content.id = `${content.authorId}-${new Date().toISOString()}`;
     content.createdAt = new Date().toISOString();
+
+    // attention-plane vocabulary gate (flair#675): `entities`, if present,
+    // must be well-formed vocabulary strings — see resources/entity-vocab.ts.
+    // Field is additive/optional; absent entities is not an error.
+    const entitiesError = invalidEntitiesResponse(content.entities);
+    if (entitiesError) return entitiesError;
+
     // Harper 5: table resources use put() for create/upsert (post() removed).
     return (databases as any).flair.OrgEvent.put(content);
   }
@@ -55,6 +63,11 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     if (auth.kind === "agent" && !auth.isAdmin && content.authorId !== auth.agentId) {
       return FORBIDDEN("forbidden: authorId must match authenticated agent");
     }
+
+    // attention-plane vocabulary gate (flair#675) — same as post() above.
+    const entitiesError = invalidEntitiesResponse(content.entities);
+    if (entitiesError) return entitiesError;
+
     return (databases as any).flair.OrgEvent.put(content);
   }
 

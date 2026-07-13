@@ -3,9 +3,20 @@
  * (coordination write surface / Kris #510).
  *
  * Uses a mock HTTP server. No real Harper instance required. Mirrors
- * presence-set.test.ts. The security-critical assertion: the request carries an
- * Ed25519 Authorization header and does NOT put agentId in the body — identity
- * is attributed server-side from the signature (no forging).
+ * presence-set.test.ts. The security-critical assertion: the request carries
+ * an Ed25519 Authorization header, and DOES include agentId in the body — but
+ * that's a self-declaration the server (WorkspaceState.put()) verifies 1:1
+ * against the signature and 403s on mismatch, not a trusted claim (no
+ * forging).
+ *
+ * flair#679: `workspace set` writes via PUT /WorkspaceState/{id} (id in the
+ * URL), NOT a bare POST — a real spawned Harper 405s a collection POST to a
+ * table-backed resource (see resources/Memory.ts's documented restriction,
+ * and test/integration/attention-query-e2e.test.ts, which measured this
+ * exact 405 against real Harper). This mock-server suite only proves the
+ * CLI's OWN request shape; it cannot catch a 405 (the mock accepts anything)
+ * — that's why this bug shipped past unit tests. The real-Harper coverage is
+ * test/integration/workspace-orgevent-cli-e2e.test.ts.
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "bun:test";
@@ -117,20 +128,25 @@ describe("flair workspace set", () => {
     expect(stderr).toContain("private key not found");
   });
 
-  it("POSTs to /WorkspaceState with ref/phase/task and NO agentId in body (no forging)", async () => {
+  it("PUTs to /WorkspaceState/{agentId:ref} with ref/phase/task/agentId/createdAt (#679)", async () => {
     const agentId = "test-agent-ws";
     writeAgentKey(keysDir, agentId);
 
     const { server, url } = await startMockServer((req, body, res) => {
-      expect(req.method).toBe("POST");
-      expect(req.url).toBe("/WorkspaceState");
+      expect(req.method).toBe("PUT");
+      expect(req.url).toBe(`/WorkspaceState/${agentId}:cp7-coord`);
       const parsed = JSON.parse(body);
+      expect(parsed.id).toBe(`${agentId}:cp7-coord`);
       expect(parsed.ref).toBe("cp7-coord");
       expect(parsed.phase).toBe("implement");
       expect(parsed.taskId).toBe("cp7-implement-task");
-      // SECURITY: the body must NOT carry agentId — identity is attributed
-      // server-side from the Ed25519 signature.
-      expect(parsed.agentId).toBeUndefined();
+      // agentId + createdAt are now required in the body: WorkspaceState.put()
+      // (unlike post()) does not auto-attribute or default these — it 403s a
+      // mismatched agentId rather than overwriting it. Self-declaration, not
+      // forging: the server rejects (never accepts) a value that doesn't
+      // match the Ed25519 signature's agentId.
+      expect(parsed.agentId).toBe(agentId);
+      expect(typeof parsed.createdAt).toBe("string");
       jsonRes(res, 200, { id: `${agentId}:cp7-coord`, agentId });
     });
 
@@ -184,7 +200,7 @@ describe("flair workspace set", () => {
         { FLAIR_AGENT_ID: agentId, FLAIR_KEY_DIR: keysDir, FLAIR_URL: url },
       );
       expect(code).toBe(1);
-      expect(stderr).toContain("POST /WorkspaceState failed");
+      expect(stderr).toContain(`PUT /WorkspaceState/${agentId}:main failed`);
     } finally {
       await stopServer(server);
     }

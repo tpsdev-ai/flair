@@ -177,6 +177,9 @@ Passive extraction of entities from memory content on write. Entities are indexe
 ### Memory Bridges
 Pluggable import/export to foreign memory systems. Every agent-memory format (agentic-stack, Mem0, Letta, Anthropic memory, the next viral one) shouldn't need its own Flair PR. Bridges give you one contract with two shapes — a YAML descriptor for file-format targets or a code plugin for API targets — and a scaffold/test loop that lets an agent ship a working adapter in one pass. See [docs/bridges.md](docs/bridges.md).
 
+### Embedding benchmarks (`flair-bench`)
+A standalone benchmark you can run anywhere — no Flair install, no server, just Node and a GGUF file. It ships the same 126-query recall corpus and scoring Flair's own CI gates on, so its numbers are directly comparable: benchmark candidate embedding models (`--model-file`, batchable), get a model recommendation for the host you're on backed by the numbers it just measured (`recommend`), and optionally save a redacted, shareable result (`--share`) — including a `--label` for tagging host classes when characterizing fleet hardware. See [packages/flair-bench](packages/flair-bench/README.md).
+
 ## Quick Start
 
 ### Prerequisites

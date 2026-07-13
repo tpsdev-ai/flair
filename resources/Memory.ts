@@ -4,6 +4,7 @@ import { isAdmin, resolveAgentAuth, allowVerified, type AgentAuthVerdict } from 
 import { localInstanceId } from "./instance-identity.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
+import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners, resolveReadScope } from "./memory-read-scope.js";
 import {
@@ -15,6 +16,7 @@ import {
   isConservativeMatch,
   type DedupMatch,
 } from "./dedup.js";
+import { buildProvenance } from "./provenance.js";
 
 const FORBIDDEN = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -195,10 +197,29 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
     return null;
   }
 
+  // flair#504 Phase 2: 'document' — this embedding IS the stored vector (the
+  // "generate embedding if missing" step in post()/put() below reuses
+  // whatever this computes), so it MUST use the same inputType as every
+  // other document-write site or dedup's cosine compare would cross prefixed
+  // and unprefixed spaces. All three Memory doc sites (here, post(), put())
+  // move together in one commit for exactly that reason — see
+  // embeddings-provider.ts's file header for why the VALUE must be the
+  // literal 'document', never the prefix string.
+  //
+  // Dedup-during-transition transient (documented per Kern's review, not a
+  // bug to fix here): mid stage-2 re-embed, a NEW write embeds 'document'
+  // (prefixed) but may compare against an OLDER stored vector that hasn't
+  // been re-embedded yet (unprefixed) — cross-space cosine, so dedup can
+  // miss a near-duplicate during that window. Bounded (the re-embed pass is
+  // batched and finishes in minutes), self-healing once the pass completes,
+  // and a missed dedup is a duplicate row, not data loss — quality, not
+  // correctness. Stage 1 (this PR) doesn't trigger this at all: no re-embed
+  // runs, so there's no mixed-space window until stage 2's separate,
+  // deliberate ops step.
   let embedding: number[] | null = Array.isArray(content.embedding) ? content.embedding : null;
   if (!embedding) {
     try {
-      embedding = await getEmbedding(content.content);
+      embedding = await getEmbedding(content.content, "document");
     } catch {
       embedding = null;
     }
@@ -343,59 +364,17 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
 /**
  * ─── Write-time provenance stamp (memory-provenance slice 1) ────────────────
  *
- * Foundational capture for an emergent-trust model: every Memory write gets a
- * structured, versioned `provenance` JSON blob recording what the server can
- * actually VERIFY about the write, plus (optionally) what the caller merely
- * CLAIMS. Deliberately minimal — verified fields only:
- *
- *   { v: 1,
- *     verified: { agentId: <string|null>, timestamp: <ISO string> },
- *     claimed?: { model: <string> } }
- *
- * - `verified.agentId` comes from the ALREADY-RESOLVED auth verdict
- *   (resolveAgentAuth) — never from anything the caller can forge on the
- *   request body. `kind: "agent"` → the Ed25519-verified agentId. Any other
- *   verdict (in practice only `kind: "internal"` — a trusted in-process call
- *   with no per-agent identity to attribute) stamps `null` rather than
- *   throwing; `kind: "anonymous"` never reaches here — both post()/put()
- *   already 401 it before this point.
- * - `verified.timestamp` reuses the server-clock `createdAt` the caller has
- *   already computed by this point (never client-suppliable) — the same
- *   "stamp a dynamic attribute the server controls" mechanism as the existing
- *   `embeddingModel = getModelId()` stamp elsewhere in this file. NOTE: the
- *   *signed* Ed25519 request timestamp is also available (it's verified in
- *   auth-middleware) but currently discarded there rather than threaded
- *   through to resource methods — a future slice can carry it alongside (or
- *   instead of) this server-clock timestamp without changing this shape's
- *   `v: 1` contract. Not done here to keep auth-middleware untouched.
- * - `claimed.model` is an OPTIONAL, UNVERIFIED passthrough: included only
- *   when the incoming write payload itself already carries a non-empty
- *   string `model` field. No client/CLI sets one today — this just means the
- *   server won't discard it if/when a future write path does. Never
- *   invented, never defaulted, and the `claimed` key is omitted entirely
- *   (not stamped as `{}`) when absent.
- *
- * Deliberately NOT implemented in this slice: a context-fingerprint field —
- * bootstrap doesn't return the IDs a fingerprint would need, so it requires
- * client cooperation that's out of scope here.
+ * `buildProvenance` itself now lives in ./provenance.ts (imported above) —
+ * extracted so resources/Relationship.ts's write path can reuse the EXACT
+ * same `{v, verified, claimed?}` shape (the relationship-write-path spec's
+ * "reuse buildProvenance as-is" contract) instead of a hand-copied format
+ * that could drift. See that module for the full field-by-field rationale
+ * (verified.agentId from the auth verdict never the body, verified.timestamp
+ * = the server-computed createdAt, optional unverified claimed.model
+ * passthrough). Deliberately NOT implemented in this slice: a
+ * context-fingerprint field — bootstrap doesn't return the IDs a fingerprint
+ * would need, so it requires client cooperation that's out of scope here.
  */
-function buildProvenance(auth: AgentAuthVerdict, createdAt: string, content: any): string {
-  const provenance: {
-    v: 1;
-    verified: { agentId: string | null; timestamp: string };
-    claimed?: { model: string };
-  } = {
-    v: 1,
-    verified: {
-      agentId: auth.kind === "agent" ? auth.agentId : null,
-      timestamp: createdAt,
-    },
-  };
-  if (typeof content?.model === "string" && content.model.length > 0) {
-    provenance.claimed = { model: content.model };
-  }
-  return JSON.stringify(provenance);
-}
 
 /**
  * ─── Write-time originatorInstanceId stamp (federation-edge-hardening slice 1) ──
@@ -618,6 +597,13 @@ export class Memory extends (databases as any).flair.Memory {
       content.validFrom = content.createdAt;
     }
 
+    // attention-plane vocabulary gate (flair#675): `entities`, if present,
+    // must be well-formed vocabulary strings — see resources/entity-vocab.ts.
+    // Field is additive/optional (v1 schema-only; no auto-derivation here —
+    // that producer is a follow-up); absent entities is not an error.
+    const entitiesError = invalidEntitiesResponse(content.entities);
+    if (entitiesError) return entitiesError;
+
     if (content.durability === "ephemeral" && !content.expiresAt) {
       const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
       content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
@@ -654,9 +640,11 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     // Generate embedding from content text (no-op if the dedup gate above
-    // already computed one for this content).
+    // already computed one for this content). flair#504 Phase 2: 'document'
+    // — see runDedupGate's comment above for why all three Memory doc sites
+    // must move together.
     if (content.content && !content.embedding) {
-      const vec = await getEmbedding(content.content);
+      const vec = await getEmbedding(content.content, "document");
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 
@@ -760,6 +748,10 @@ export class Memory extends (databases as any).flair.Memory {
       content.validFrom = content.createdAt;
     }
 
+    // attention-plane vocabulary gate (flair#675) — see post()'s comment above.
+    const entitiesError = invalidEntitiesResponse(content.entities);
+    if (entitiesError) return entitiesError;
+
     // Content safety scan on updated content + summary.
     if (content.content || content.summary) {
       const safety = scanFields(content, ["content", "summary"]);
@@ -804,9 +796,12 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     // Re-generate embedding if content changed (no-op if the dedup gate above
-    // already computed one for this content).
+    // already computed one for this content). flair#504 Phase 2: 'document'
+    // — this is also the regen branch `flair reembed` triggers (clears
+    // embedding/embeddingModel then hits this put()), so it's what actually
+    // re-embeds a stale row WITH the prefix once stage 2 runs.
     if (content.content && !content.embedding) {
-      const vec = await getEmbedding(content.content);
+      const vec = await getEmbedding(content.content, "document");
       if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
     }
 

@@ -6,6 +6,7 @@
  *
  *   FLAIR_RATE_LIMIT_RPM     — requests per minute per agent (default: 120)
  *   FLAIR_RATE_LIMIT_EMBED   — embedding requests per minute per agent (default: 30)
+ *   FLAIR_RATE_LIMIT_USAGE   — usage-feedback requests per minute per agent (default: 30)
  *   FLAIR_RATE_LIMIT_STORAGE — max memories per agent (default: 10000)
  *   FLAIR_RATE_LIMIT_ENABLED — "true" to enable (default: disabled for local, enabled when FLAIR_PUBLIC=true)
  */
@@ -36,14 +37,20 @@ function isEnabled(): boolean {
  */
 export function checkRateLimit(
   agentId: string,
-  bucket: "general" | "embedding" = "general",
+  bucket: "general" | "embedding" | "usage" = "general",
 ): { allowed: boolean; retryAfterMs?: number; remaining?: number } {
   if (!isEnabled()) return { allowed: true };
   if (!agentId) return { allowed: true }; // admin/internal calls
 
   const limit = bucket === "embedding"
     ? getLimit("FLAIR_RATE_LIMIT_EMBED", 30)
-    : getLimit("FLAIR_RATE_LIMIT_RPM", 120);
+    // flair#683: usage-feedback is a write-that-affects-ranking (anti-gaming
+    // surface) — Sherlock's three-layer defense is rate-limiter (~30 RPM
+    // bucket) + per-agent dedup bound (MemoryUsage ledger) + the capped
+    // usageBoost itself. This bucket is that first layer.
+    : bucket === "usage"
+      ? getLimit("FLAIR_RATE_LIMIT_USAGE", 30)
+      : getLimit("FLAIR_RATE_LIMIT_RPM", 120);
 
   const key = `${agentId}:${bucket}`;
   const now = Date.now();

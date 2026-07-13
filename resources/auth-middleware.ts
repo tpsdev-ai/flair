@@ -53,7 +53,9 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     const record = await (databases as any).flair.Memory.get(memoryId);
     if (!record?.content) return;
     if (record.embedding?.length > 100) return;
-    const embedding = await getEmbedding(record.content);
+    // flair#504 Phase 2: 'document' — a backfilled embedding IS a stored
+    // document vector, same as the three Memory.ts sites; must match.
+    const embedding = await getEmbedding(record.content, "document");
     if (!embedding) return;
     await patchRecord((databases as any).flair.Memory, memoryId, { embedding });
     console.log(`[auto-embed] ${memoryId}: ${embedding.length}d`);
@@ -96,12 +98,6 @@ server.http(async (request: any, nextLayer: any) => {
     url.pathname === "/OAuthRevoke" ||
     url.pathname === "/.well-known/oauth-authorization-server" ||
     url.pathname === "/OAuthMetadata" ||
-    // ObservationCenter HTML shell is public — the page itself is just markup
-    // and inline JS, with no embedded data. The JS prompts for admin-pass and
-    // auths every API call (/Agent, /SemanticSearch, /FederationPeers, etc).
-    // Without this allow-list entry, the HTML is 401-blocked on hosted Flair
-    // instances (rockit-local works only because authorizeLocal=true).
-    url.pathname === "/ObservationCenter" ||
     // Presence roster is public-safe (field-allowlisted); GET serves the
     // Office Space renderer without auth. Scoped to GET only (#604): the
     // exact-path match used to match ANY method, so a bare `PUT /Presence`

@@ -5,6 +5,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getRerankStatus } from "./rerank-provider.js";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
+import { getMigrationStatusSnapshot } from "./migrations/status.js";
 
 const db = databases as any;
 
@@ -73,7 +74,14 @@ export class Health extends Resource {
     return true;
   }
   async get() {
-    return { ok: true };
+    // `version` (flair#695, the CLI↔server handshake — src/version-handshake.ts):
+    // exposed on the PUBLIC endpoint deliberately, so the check works even
+    // before an agent identity/key exists (fresh install, pre-`flair init`).
+    // Sherlock verdict: fine while locally bound; if /Health is ever fronted
+    // PUBLICLY over Fabric, the public surface must omit this field (the
+    // richer, auth-gated /HealthDetail already carried version pre-existing —
+    // this only adds it to the anonymous endpoint too).
+    return { ok: true, version: resolveVersion() };
   }
 }
 
@@ -434,6 +442,27 @@ export class HealthDetail extends Resource {
         }
       }
     } catch { stats.rem = null; }
+
+    // ── Migrations (flair#695: zero-touch boot-keyed auto-migration) ──
+    // `{ id, rowsDone, rowsRemaining, state }` per registered migration, per
+    // flair#695 §A. `cyclePhase: "pre-hash"` is the
+    // "pre-flight integrity check in progress" state the K&S verdict calls
+    // for; a halted migration surfaces here (with `reason`) AND as a
+    // warning below so it's visible without a separate lookup.
+    try {
+      const migrationsDataDir = process.env.HDB_ROOT ?? join(homedir(), ".flair", "data");
+      const snapshot = getMigrationStatusSnapshot(migrationsDataDir);
+      stats.migrations = {
+        cyclePhase: snapshot.cyclePhase,
+        lastCycleAt: snapshot.lastCycleAt ?? null,
+        migrations: snapshot.migrations,
+      };
+      for (const m of snapshot.migrations) {
+        if (m.state === "halted" || m.state === "failed") {
+          warnings.push({ level: "warn", message: `migration '${m.id}' ${m.state}${m.reason ? `: ${m.reason}` : ""} — see \`flair doctor\`` });
+        }
+      }
+    } catch { stats.migrations = null; }
 
     // ── Disk ──
     try {

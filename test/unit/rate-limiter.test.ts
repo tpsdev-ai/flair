@@ -17,11 +17,13 @@ const ORIGINAL_ENV = {
   FLAIR_RATE_LIMIT_ENABLED: process.env.FLAIR_RATE_LIMIT_ENABLED,
   FLAIR_RATE_LIMIT_RPM: process.env.FLAIR_RATE_LIMIT_RPM,
   FLAIR_RATE_LIMIT_EMBED: process.env.FLAIR_RATE_LIMIT_EMBED,
+  FLAIR_RATE_LIMIT_USAGE: process.env.FLAIR_RATE_LIMIT_USAGE,
   FLAIR_RATE_LIMIT_STORAGE: process.env.FLAIR_RATE_LIMIT_STORAGE,
 };
 process.env.FLAIR_RATE_LIMIT_ENABLED = "true";
 process.env.FLAIR_RATE_LIMIT_RPM = "5"; // Low limit for testing
 process.env.FLAIR_RATE_LIMIT_EMBED = "3";
+process.env.FLAIR_RATE_LIMIT_USAGE = "2";
 process.env.FLAIR_RATE_LIMIT_STORAGE = "100";
 
 afterAll(() => {
@@ -62,6 +64,20 @@ describe("rate limiter", () => {
     }
     expect(checkRateLimit(agent, "embedding").allowed).toBe(false);
     // General bucket should still work
+    expect(checkRateLimit(agent, "general").allowed).toBe(true);
+  });
+
+  // flair#683: usage-feedback's own bucket (Sherlock's rate-limiter layer of
+  // the three-layer anti-gaming defense — see resources/RecordUsage.ts).
+  test("usage bucket has its own separate limit", () => {
+    const agent = "test-agent-usage-" + Date.now();
+    // Usage limit is 2 (set above)
+    expect(checkRateLimit(agent, "usage").allowed).toBe(true);
+    expect(checkRateLimit(agent, "usage").allowed).toBe(true);
+    const blocked = checkRateLimit(agent, "usage");
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterMs).toBeGreaterThan(0);
+    // Other buckets are unaffected by the usage bucket being exhausted.
     expect(checkRateLimit(agent, "general").allowed).toBe(true);
   });
 

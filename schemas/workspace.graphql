@@ -11,4 +11,7 @@ type WorkspaceState @table(database: "flair") @export {
   summary: String
   filesChanged: [String]
   createdAt: String!
+  entities: [String] @indexed  # attention-plane vocabulary strings (flair#675); additive/nullable —
+                               # existing rows carry no entities, readers tolerate absent (same
+                               # pattern as Presence.activityUpdatedAt). See docs/entity-vocabulary.md.
 }

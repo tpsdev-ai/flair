@@ -1,17 +1,20 @@
 /**
- * mcp-tools.ts — the 10 curated flair tools for the Model-2 custom /mcp handler.
+ * mcp-tools.ts — the 12 curated flair tools for the Model-2 custom /mcp handler.
  *
- * Curated BY CONSTRUCTION: this module implements exactly the 10 tools that the
- * `@tpsdev-ai/flair-mcp` stdio proxy exposes, each a thin wrapper over the
- * existing flair Resource handler. No business logic is re-implemented — the
- * wrapped handlers (Memory / SemanticSearch / BootstrapMemories / Soul /
- * WorkspaceState / OrgEvent) enforce per-agent scoping/ownership via
- * `resolveAgentAuth(getContext())`, so the MCP surface inherits the SAME security
- * model as the signed-REST path. There is no raw CRUD surface — the only way to
- * reach the datastore through /mcp is via one of these 10 semantic tools.
+ * Curated BY CONSTRUCTION: this module implements a fixed set of tools, each a
+ * thin wrapper over the existing flair Resource handler. No business logic is
+ * re-implemented — the wrapped handlers (Memory / SemanticSearch /
+ * BootstrapMemories / Soul / WorkspaceState / OrgEvent / AttentionQuery /
+ * RecordUsage) enforce per-agent scoping/ownership via
+ * `resolveAgentAuth(getContext())` (or, for `attention`, AttentionQuery's own
+ * per-source scoping — see resources/AttentionQuery.ts's module doc), so the
+ * MCP surface inherits the SAME security model as the signed-REST path. There
+ * is no raw CRUD surface — the only way to reach the datastore through /mcp is
+ * via one of these 12 semantic tools.
  *
  *   memory_search · memory_store · memory_update · memory_get · memory_delete ·
- *   bootstrap · soul_set · soul_get · flair_workspace_set · flair_orgevent
+ *   bootstrap · soul_set · soul_get · flair_workspace_set · flair_orgevent ·
+ *   attention · record_usage
  *
  * ── The scoping seam ────────────────────────────────────────────────────────
  * The /mcp handler resolves the OAuth token's `sub` → a flair `Agent` id, then
@@ -21,6 +24,16 @@
  * agent exactly as an Ed25519-signed REST call would. Identity ALWAYS comes from
  * the resolved agent, never from the tool arguments — an agent can only act as
  * itself (no forging of agentId / authorId in the body).
+ *
+ * NOTE (flair#677 scope call): the legacy `@tpsdev-ai/flair-mcp` stdio proxy
+ * (packages/flair-mcp) is a SEPARATE, independently-published package that
+ * talks to flair over HTTP via `FlairClient` — it is not wired through this
+ * registry at all (its own tool list is hardcoded in packages/flair-mcp/src/
+ * index.ts). Per the zero-install north star (retiring flair-mcp in favor of
+ * this native /mcp handler), `attention` is added HERE only, not mirrored into
+ * the legacy stdio proxy — adding it there would mean a separate package
+ * version bump + a new FlairClient method, out of scope for this query-only
+ * slice.
  */
 
 /**
@@ -38,7 +51,7 @@
  *
  * Prod: first tool call loads the real classes against a fully-real Harper.
  */
-type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent";
+type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};
 
 const LOADERS: Record<HandlerKey, () => Promise<any>> = {
@@ -48,6 +61,8 @@ const LOADERS: Record<HandlerKey, () => Promise<any>> = {
   Soul: async () => (await import("./Soul.js")).Soul,
   WorkspaceState: async () => (await import("./WorkspaceState.js")).WorkspaceState,
   OrgEvent: async () => (await import("./OrgEvent.js")).OrgEvent,
+  AttentionQuery: async () => (await import("./AttentionQuery.js")).AttentionQuery,
+  RecordUsage: async () => (await import("./RecordUsage.js")).RecordUsage,
 };
 
 /** Resolve a handler class — from the test override if set, else lazy-load + cache. */
@@ -231,6 +246,7 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
     channel: args?.channel,
     surface: args?.surface,
     subjects: args?.subjects,
+    entities: args?.entities,
   }));
 }
 
@@ -288,6 +304,30 @@ async function orgEvent(agent: ResolvedAgent, args: any) {
   if (args?.scope) body.scope = args.scope;
   if (Array.isArray(args?.targets) && args.targets.length > 0) body.targetIds = args.targets;
   return unwrap(await h.post(body));
+}
+
+async function attention(agent: ResolvedAgent, args: any) {
+  const Cls = await handler("AttentionQuery");
+  const h = new Cls(undefined, delegationContext(agent));
+  return unwrap(await h.post({ entity: args?.entity, days: args?.days }));
+}
+
+/**
+ * record_usage (flair#683) — report that memory(ies) were actually used
+ * (cited/grounded an answer or decision), driving the usage-feedback signal
+ * (Memory.usageCount → usageBoost → compositeScore). Distinct from search:
+ * calling memory_search does NOT count as usage — this tool is the explicit,
+ * verified-use report resources/RecordUsage.ts's module doc describes.
+ * Identity is the RESOLVED agent (delegationContext), never forgeable via
+ * args — same no-forge contract as every other write tool here.
+ */
+async function recordUsage(agent: ResolvedAgent, args: any) {
+  const Cls = await handler("RecordUsage");
+  const h = new Cls(undefined, delegationContext(agent));
+  const memoryIds = Array.isArray(args?.memoryIds)
+    ? args.memoryIds
+    : typeof args?.memoryId === "string" ? [args.memoryId] : undefined;
+  return unwrap(await h.post({ memoryIds, attribution: args?.attribution }));
 }
 
 type ToolImpl = (agent: ResolvedAgent, args: any) => Promise<any>;
@@ -398,6 +438,12 @@ export const TOOLS: Record<string, ToolEntry> = {
           channel: { type: "string", description: "Channel name (discord, tps-mail, claude-code)" },
           surface: { type: "string", description: "Surface name (tps-build, tps-review, cli-session)" },
           subjects: { type: "array", items: { type: "string" }, description: "Entity names to preload context for" },
+          entities: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Your declared attention-plane vocabulary strings (e.g. \"issue:owner/repo#123\") for collision surfacing's 'Others in the room' block — teammates with overlapping active work. Falls back to your own most-recent workspace-state entities when omitted.",
+          },
         },
       },
     },
@@ -469,6 +515,43 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: orgEvent,
+  },
+  attention: {
+    def: {
+      name: "attention",
+      description:
+        "What's touching entity E in the last N days? A unified, grouped-by-source view across memories, " +
+        "relationships, active work (WorkspaceState), teammate presence, and org events. Entity must be a " +
+        "vocabulary string (e.g. 'repo:owner/name', 'issue:owner/repo#123', 'subsystem:embeddings').",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        type: "object",
+        properties: {
+          entity: { type: "string", description: "Vocabulary string, exact match (type:value — e.g. 'repo:tpsdev-ai/flair')" },
+          days: { type: "number", description: "Window size in days (default 7)" },
+        },
+        required: ["entity"],
+      },
+    },
+    impl: attention,
+  },
+  record_usage: {
+    def: {
+      name: "record_usage",
+      description:
+        "Report that one or more memories were actually USED — cited or relied on to ground an answer or decision. " +
+        "Distinct from search (surfacing a memory is not usage). Drives the recall-quality usage signal; dedup'd " +
+        "(you can only count once per memory) and rate-limited.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          memoryIds: { type: "array", items: { type: "string" }, description: "IDs of the memories that were used (max 20 per call)" },
+          memoryId: { type: "string", description: "Convenience alias for a single memory id (use memoryIds for multiple)" },
+          attribution: { type: "string", description: "Optional free-text note on what used it (opaque — stored for audit only, max 500 chars)" },
+        },
+      },
+    },
+    impl: recordUsage,
   },
 };
 

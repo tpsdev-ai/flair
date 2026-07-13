@@ -9,4 +9,9 @@ type OrgEvent @table(database: "flair") @export {
   refId: String @indexed
   createdAt: String! @indexed
   expiresAt: String @indexed
+  entities: [String] @indexed  # attention-plane vocabulary strings (flair#675); formalizes a typed,
+                               # vocabulary-consistent entity ref (targetIds stays for actor/target
+                               # ids). Additive/nullable — old rows carry no entities, readers
+                               # tolerate absent (same pattern as Presence.activityUpdatedAt).
+                               # See docs/entity-vocabulary.md.
 }

@@ -280,6 +280,16 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
   };
 
+  // models (flair#504 Phase 1): no env var needed here anymore — the spawned
+  // build's own dist/resources/embeddings-boot.js self-registers the backend
+  // in-process at boot (flair#694 fixed the old HARPER_CONFIG mechanism,
+  // which persisted a `models.embedding.default` block that an
+  // older/downgraded build's boot would tear down to an invalid empty shell;
+  // see that file's header). FLAIR_MODELS_DIR above still tells the
+  // registration where to find/download the model. A baseline build that
+  // predates flair#504 simply has no such file and skips registration —
+  // exactly the pre-#504 degrade behavior.
+
   const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd, env: baseEnv });
   await new Promise<void>((resolve, reject) => {
     let output = "";

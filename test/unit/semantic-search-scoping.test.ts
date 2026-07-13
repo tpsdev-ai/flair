@@ -31,14 +31,23 @@ process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
 delete (process.env as any).FLAIR_HYBRID_RETRIEVAL;
 
-// None of this file's tests set `q`/`queryEmbedding`, so SemanticSearch.ts
-// never actually CALLS getEmbedding/getMode — but `bun test test/unit` runs
-// every file in one process, and another file's `mock.module` for this same
-// specifier can win the module cache race. Mock it explicitly here too (a
-// superset of SemanticSearch.ts's named imports) so this file never depends
-// on another file's mock being complete.
+// Most of this file's tests set neither `q` nor `queryEmbedding`, so
+// SemanticSearch.ts never actually calls getEmbedding/getMode for them — but
+// `bun test test/unit` runs every file in one process, and another file's
+// `mock.module` for this same specifier can win the module cache race. Mock
+// it explicitly here too (a superset of SemanticSearch.ts's named imports)
+// so this file never depends on another file's mock being complete. The
+// flair#623 default-scoring tests below DO pass `q`, so this mock also
+// records the inputType each call receives (flair#504 Phase 2) — pinning
+// that SemanticSearch.ts's query-embed call site passes 'query', never
+// 'document' (see embeddings-provider-input-type.test.ts for the value-
+// forwarding logic itself).
+let embedInputTypeCalls: (string | undefined)[] = [];
 mock.module("../../resources/embeddings-provider.ts", () => ({
-  getEmbedding: async () => null,
+  getEmbedding: async (_text: string, inputType?: string) => {
+    embedInputTypeCalls.push(inputType);
+    return null;
+  },
   getMode: () => "none",
 }));
 
@@ -109,6 +118,7 @@ const anonCtx = () => ({ tpsAnonymous: true });
 function reset() {
   memoryStore = new Map();
   memoryGrants = [];
+  embedInputTypeCalls = [];
 }
 
 describe("SemanticSearch.post() — centralized read-scoping", () => {
@@ -296,5 +306,13 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
     // undefined here confirms the default actually took the "raw" branch rather
     // than coincidentally landing in the same order.
     expect(defaulted.results[0]?._rawScore).toBeUndefined();
+
+    // flair#504 Phase 2: every one of the three `q`-bearing calls above
+    // (composite/raw/defaulted) is a SEARCH QUERY, never stored content —
+    // SemanticSearch.ts's getEmbedding call site must pass 'query', never
+    // 'document' (a 'document'-prefixed query would degrade recall, not
+    // just fail to help it).
+    expect(embedInputTypeCalls.length).toBeGreaterThan(0);
+    expect(embedInputTypeCalls.every((t) => t === "query")).toBe(true);
   });
 });

@@ -12,11 +12,38 @@ graphqlSchema:
 jsResource:
   files: dist/resources/*.js
 
-'harper-fabric-embeddings':
-  package: 'harper-fabric-embeddings'
-  modelName: nomic-embed-text
+# Phase 1 (flair#504): embeddings now run through Harper's native
+# models.embed() facade, backed by harper-fabric-embeddings registered as the
+# `embedding` backend. That registration is NOT configured here, and (as of
+# flair#694) is no longer config-driven anywhere: a `models:` block in THIS
+# file would silently never be read (this application always loads with
+# `isRoot: false` — components/componentLoader.ts gates `bootstrapModels()`
+# on `isRoot`), and the earlier fix for that — reasserting the block into the
+# Harper INSTANCE-ROOT config via the HARPER_CONFIG env var on every spawn —
+# turned out to PERSIST that block into harper-config.yaml, which an
+# older/downgraded build's boot (never having set the env var) would tear
+# down to an invalid empty shell and refuse to boot against (flair#694; see
+# flair#695 for the invariant this violated). The registration now happens
+# in-process instead: `dist/resources/embeddings-boot.js` (built from
+# resources/embeddings-boot.ts, loaded by the `jsResource` glob below like
+# every other file under resources/) calls harper-fabric-embeddings'
+# `register()` factory directly on every boot — nothing is ever written to
+# the config file, so there is nothing for a downgrade to trip over. This
+# also means a `package:`-style sub-component entry
+# (`'harper-fabric-embeddings': { package: ... }`, which used to sit here and
+# drove `handleApplication`) still must not be reintroduced alongside it —
+# that hook populates a SEPARATE raw-API engine, not `models.embed()`, and
+# running both would double-init (two separate EmbeddingEngine instances:
+# one unused, one backing models.embed).
 
 authentication:
-  # Default secure. Set to false for local development only.
-  authorizeLocal: true
+  # Default secure (flair#654): a credential-less loopback request to the
+  # Harper ops API (:9925) is no longer auto-authorized as super_user. Local
+  # admin operations now require a real credential — ~/.flair/admin-pass
+  # (written by `flair init`), --admin-pass, or FLAIR_ADMIN_PASS. flair's own
+  # application-layer resources were already immune to this forgery (#655's
+  # credential-evidence gate); this closes the remaining gap below it, in the
+  # raw Harper ops API itself. Set true only for local development, at your
+  # own risk.
+  authorizeLocal: false
   enableSessions: true

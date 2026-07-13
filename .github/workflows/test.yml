@@ -14,12 +14,30 @@ on:
 
 jobs:
   test-unit:
-    name: Unit Tests
+    # Matrixed name (#672): GitHub Actions always suffixes a
+    # matrixed job's display name/check context with the matrix values (e.g.
+    # "Unit Tests (22)"), so this can no longer be the bare "Unit Tests" the
+    # branch-protection required check expects — see the `test-unit-gate` job
+    # below, which reports that fixed context instead.
+    name: "Unit Tests (node ${{ matrix.node-version }})"
     runs-on: ubuntu-latest
     # No job timeout here either (ops-fumh): this job's `sfw bun install` below
     # hung 16+ min on 2026-07-04, blocking merge on a required check. Unit tests
     # run in ~1 min; 10 min bounds a hung install/runner.
     timeout-minutes: 10
+    strategy:
+      # fail-fast: false — a failure on one Node major must not cancel the
+      # others still running; we want to see all three results, not just the
+      # first failure (#672, Nathan: a recent incident had flair
+      # running in production on a Node major CI never exercised).
+      fail-fast: false
+      matrix:
+        # Currently-maintained Node releases as of 2026-07 (nodejs.org/en/about/eol,
+        # https://endoflife.date/nodejs): 22 = Maintenance LTS (EOL 2027-04),
+        # 24 = Active LTS (EOL 2028-04), 26 = Current (released 2026-05, becomes
+        # Active LTS 2026-10). Node 25 was Current-only and reached EOL 2026-06-01
+        # when 26 superseded it — deliberately excluded, it's already dead upstream.
+        node-version: ["22", "24", "26"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - name: "Check for local file: deps"
@@ -39,7 +57,7 @@ jobs:
           fi
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node-version }}
       - name: "Check workspace internal-dep version lockstep"
         # Catches the bug shape from 0.8.0: a workspace package declaring an
         # internal @tpsdev-ai/* dep at a version different from the version
@@ -87,9 +105,15 @@ jobs:
       - name: "flair-client package tests"
         run: cd packages/flair-client && bun test
       - name: "Remaining workspace package tests (flair-client dep already built above)"
+        # flair-bench has no @tpsdev-ai/flair-client dependency (it's a standalone
+        # embedding-benchmark CLI/library, node-llama-cpp is its only prod dep) —
+        # riding this same loop anyway since its `bun test` is equally hermetic
+        # (pure-logic scorer/prefix/recommend-heuristic/share-schema assertions +
+        # two source-text sync-checks against test/bench/recall-harness/, no live
+        # model load or network I/O) and it doesn't need its own dedicated step.
         run: |
           FAIL=0
-          for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair; do
+          for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
             echo "::group::test $pkg"
             (cd "packages/$pkg" && bun test) || FAIL=1
             echo "::endgroup::"
@@ -99,10 +123,30 @@ jobs:
             exit 1
           fi
 
+  # Required-status-check adapter (#672): branch protection's
+  # required_status_checks pins the exact context "Unit Tests", which a
+  # matrixed job can no longer produce directly (GHA reports each leg as
+  # "Unit Tests (22)" / "(24)" / "(26)"). This gate job re-emits the fixed
+  # "Unit Tests" name and fails unless every matrix leg succeeded, so branch
+  # protection needs no change and still genuinely gates on all three majors.
+  test-unit-gate:
+    name: Unit Tests
+    needs: test-unit
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Require all Node-version legs to pass
+        run: |
+          echo "test-unit matrix result: ${{ needs.test-unit.result }}"
+          if [ "${{ needs.test-unit.result }}" != "success" ]; then
+            echo "::error::One or more Unit Tests Node-version legs did not succeed"
+            exit 1
+          fi
+
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -120,6 +164,15 @@ jobs:
       # below, #625 — so it can't drift) and are where the race, if still
       # present, surfaces.
       # Tracked upstream: https://github.com/HarperFast/harper/issues/386
+      #
+      # Deliberately NOT part of the node-version matrix added elsewhere in this
+      # file (#672): this job's Node 22 pin is the load-bearing half
+      # of the #386 mitigation above (native node 22 vs. the Docker image's
+      # bundled Node 24) — retargeting it to 24 or 26 would undo that specific,
+      # already-validated regression test rather than add coverage. Node-major
+      # breadth for the "flair actually runs under Node vX" question is instead
+      # covered by `pack-smoke` below, which matrices 22/24/26 and is the more
+      # representative real-user path (spawns the packed tarball's CLI directly).
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
@@ -229,9 +282,23 @@ jobs:
           FLAIR_ADMIN_PASS: admin123
 
   pack-smoke:
-    name: Install-from-tarball smoke
+    # Matrixed (#672), not just pinned to the primary version: this
+    # job is the closest thing in this pipeline to "a real user runs the
+    # published flair CLI" — install the packed tarball, then every step below
+    # runs `node .../dist/cli.js` directly (no Bun in the loop). That's exactly
+    # the path the motivating incident hit (flair running in production on a
+    # Node major CI never exercised), it's not network/download-heavy like
+    # test-integration (no Docker image, no HuggingFace model pull, no
+    # Playwright), and its own timeout budget (15 min) has headroom — so the
+    # 3x cost buys real, high-signal coverage rather than padding the matrix
+    # for its own sake.
+    name: "Install-from-tarball smoke (node ${{ matrix.node-version }})"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22", "24", "26"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -242,7 +309,7 @@ jobs:
       # bun) on PATH for that to resolve correctly.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node-version }}
       - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
         with:
           mode: firewall-free
@@ -287,16 +354,81 @@ jobs:
           STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
           echo "$STATUS" | grep -q "running" || { echo "FAIL: not running after init"; exit 1; }
 
-          # Restart race guard (0.5.4 regression): `flair restart` must block until
-          # Harper is actually reachable, so an immediately following `flair status`
-          # must not report unreachable.
-          $FLAIR restart --port $PORT
-          STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
-          if echo "$STATUS" | grep -q "unreachable"; then
-            echo "FAIL: unreachable immediately after restart (0.5.4 regression)"
+          # ── flair#654 HARD GATE: authorizeLocal now defaults to false ──────────
+          # Proves the bootstrap-ordering invariant K&S required: the admin
+          # credential (~/.flair/admin-pass / --admin-pass / FLAIR_ADMIN_PASS) is
+          # established BEFORE any ops-API seed call fires, so seeding never rode
+          # (and post-flip, never needs) Harper's authorizeLocal loopback forgery.
+          OPS_PORT=$((PORT - 1))
+
+          # 1. NEGATIVE: a credential-less loopback ops-API call must now be
+          #    REJECTED, not auto-authorized as super_user. This is the actual
+          #    hole #654 closes — proves the toggle really is off (not silently
+          #    overridden by a stale config path) rather than just asserting the
+          #    seed above happened to succeed for the wrong reason.
+          UNAUTH_STATUS=$(curl -s -o /tmp/flair654-unauth.json -w "%{http_code}" -X POST "http://127.0.0.1:${OPS_PORT}/" \
+            -H "Content-Type: application/json" -d '{"operation":"system_information"}')
+          echo "Unauthenticated loopback ops-API call → HTTP $UNAUTH_STATUS ($(cat /tmp/flair654-unauth.json))"
+          if [ "$UNAUTH_STATUS" = "200" ]; then
+            echo "FAIL: unauthenticated loopback ops-API call returned 200 — authorizeLocal is still forging super_user (flair#654 regression)"
             exit 1
           fi
-          echo "$STATUS" | grep -q "running" || { echo "FAIL: not running after restart"; exit 1; }
+
+          # 2. POSITIVE: the same ops API accepts genuine Basic admin auth. The
+          #    agent seed inside `flair init` above already proved this
+          #    implicitly (it would have failed otherwise); assert it directly.
+          AUTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:${OPS_PORT}/" \
+            -u "admin:${FLAIR_ADMIN_PASS}" -H "Content-Type: application/json" -d '{"operation":"system_information"}')
+          echo "Basic-authed loopback ops-API call → HTTP $AUTH_STATUS"
+          [ "$AUTH_STATUS" = "200" ] || { echo "FAIL: Basic-authed ops-API call did not succeed ($AUTH_STATUS)"; exit 1; }
+
+          # 3. FEDERATION SEED: seedFederationInstanceViaOpsApi is only exercised
+          #    by --remote/hub init, never by the plain local init above — so the
+          #    agent seed alone doesn't cover it. Point a second, --remote init AT
+          #    THIS SAME already-running instance (self-federation-style; no real
+          #    Fabric needed) to exercise both seedAgentViaOpsApi (a second agent)
+          #    and seedFederationInstanceViaOpsApi (a FederationInstance row) via
+          #    genuine Basic admin auth against the live, already-credentialed
+          #    daemon from the init above.
+          INIT_REMOTE_OUT=$($FLAIR init --target "http://127.0.0.1:$PORT" --remote --force \
+            --admin-pass "$FLAIR_ADMIN_PASS" --agent-id smoke-hub-agent 2>&1)
+          echo "$INIT_REMOTE_OUT"
+          echo "$INIT_REMOTE_OUT" | grep -q "registered on remote instance" || {
+            echo "FAIL: federation-seed init did not report the agent seed succeeding"
+            exit 1
+          }
+          echo "$INIT_REMOTE_OUT" | grep -q "Federation Instance created" || {
+            echo "FAIL: federation-seed init did not report the FederationInstance seed succeeding"
+            exit 1
+          }
+
+          # Confirm the FederationInstance row actually landed (not just a 0 exit
+          # code) — a genuine Basic-authed read-back, independent of the init
+          # command's own success message.
+          FEDERATION_CHECK=$(curl -s -o /dev/null -w "%{http_code}" \
+            -u "admin:${FLAIR_ADMIN_PASS}" "http://127.0.0.1:${PORT}/FederationInstance")
+          [ "$FEDERATION_CHECK" = "200" ] || {
+            echo "FAIL: /FederationInstance not reachable with Basic admin auth after federation seed ($FEDERATION_CHECK)"
+            exit 1
+          }
+          # ── end flair#654 hard gate ─────────────────────────────────────────────
+
+          # Restart race guard (0.5.4 regression): `flair restart` must block until
+          # Harper is actually reachable, so a following `flair status` must
+          # eventually report running, not unreachable.
+          #
+          # flair#691: this used to be a SINGLE-SHOT check immediately after
+          # `flair restart` returned — on a slow CI runner that races the
+          # daemon's own post-restart boot (deferred migration-boot readiness
+          # poll, embeddings-settle window, etc.) and flakes on "unreachable"
+          # even though the restart is genuinely still in flight, not broken.
+          # Bounded-retry instead (never a fixed `sleep N` guess either) —
+          # see scripts/ci/migration-lane-lib.sh's wait_for_flair_status_running,
+          # the same primitive the migration CI lanes use for every
+          # post-boot/post-restart verification (ci(migrations) PR, #691).
+          source "$GITHUB_WORKSPACE/scripts/ci/migration-lane-lib.sh"
+          $FLAIR restart --port $PORT
+          wait_for_flair_status_running "$FLAIR" "$PORT" 90
 
           # Write/search round-trip (0.5.2-class regression guard): write a
           # memory as the smoke agent, then search for it. Exercises the
@@ -340,9 +472,17 @@ jobs:
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
+      # Pinned, not matrixed (#672): this job's invariant is
+      # data/schema survival across a flair VERSION upgrade (baseline npm-latest
+      # → HEAD), which is orthogonal to which Node major runs it — matrixing
+      # would 3x an already-heavy job (full pack + two `flair init` lifecycles +
+      # reembed) for no extra signal on the thing it actually tests. Pinned to
+      # 26 (Current) rather than the old 22 default so at least one non-matrixed
+      # job runs on the newest supported runtime; Node-major breadth itself is
+      # covered by pack-smoke (22/24/26) and test-unit/typecheck above.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22"
+          node-version: "26"
       - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
         with:
           mode: firewall-free
@@ -353,9 +493,25 @@ jobs:
         run: |
           npm pack
           echo "TGZ_PATH=$(pwd)/$(ls tpsdev-ai-flair-*.tgz)" >> $GITHUB_OUTPUT
+      # Pre-downloaded and pointed at by FLAIR_MODELS_DIR (below) for BOTH the
+      # baseline and HEAD boots — ci(migrations) extension (#504/#695
+      # enforcement): keeps `getModelId()`'s embeddingModel stamp identical
+      # across the swap, so embedding-stamp (always-on, runs before the
+      # synthetic migration in registry order) doesn't contend with the
+      # migration-assertion seeding added below. Same rationale as the new
+      # migration-ci-lanes.yml downgrade-and-revert job.
+      - name: Pre-download embedding model (shared by baseline + HEAD)
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
+            "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
+            -o models/nomic-embed-text-v1.5.Q4_K_M.gguf
       - name: Install npm-stable, seed data, upgrade, verify
         run: |
           set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/ci/migration-lane-lib.sh"
+          export FLAIR_MODELS_DIR="$GITHUB_WORKSPACE/models"
           BASE_DIR=$(mktemp -d)
           cd "$BASE_DIR"
           npm init -y > /dev/null
@@ -368,12 +524,25 @@ jobs:
           HEAD_VERSION=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
           echo "Baseline: $BASELINE — HEAD: $HEAD_VERSION"
 
-          # Same-version runs (e.g. a PR that hasn't bumped) are a no-op test;
-          # we still assert the install worked, but skip the upgrade assertion
-          # because there's no "previous" to upgrade from.
+          # flair#620: this used to skip the entire upgrade-verify path whenever
+          # $BASELINE == $HEAD_VERSION (true on every ordinary feature PR that
+          # hasn't bumped package.json — the vast majority of PRs), so the real
+          # cross-version data-survival path only ever ran at release-bump PRs.
+          # That's backwards: the code under test on a feature PR differs from
+          # published-latest regardless of whether the *semver string* moved —
+          # a feature PR can still change the daemon start/stop sequence, the
+          # reembed migration, storage schema, etc. The invariant we care about
+          # (HEAD's binary must start cleanly against baseline's on-disk data
+          # and not lose or corrupt memories) has nothing to do with whether
+          # someone remembered to bump the version. So: no early exit — always
+          # install published-latest as baseline, pack+install HEAD's actual
+          # built tarball as the upgrade target, and run the full sequence.
+          # The one no-op case left (baseline tag == this exact HEAD commit,
+          # e.g. a re-run against an unchanged tree) still exercises install +
+          # start + reembed + round-trip; it just isn't testing a *content*
+          # diff, and that's an acceptable, rare edge rather than the default.
           if [ "$BASELINE" = "$HEAD_VERSION" ]; then
-            echo "Baseline == HEAD; nothing to upgrade. Passing trivially."
-            exit 0
+            echo "Note: BASELINE version string ($BASELINE) == HEAD package.json version. This PR hasn't bumped semver, but HEAD's packed tarball is still this PR's actual code — running the full upgrade-verify path against it, not skipping."
           fi
 
           BASE_FLAIR="node $BASE_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
@@ -390,6 +559,28 @@ jobs:
             echo "FAIL: baseline write/search didn't work — setup broken, not an upgrade regression"
             exit 1
           }
+
+          # 2a. ci(migrations) extension (#504/#695 enforcement arm — see
+          # flair#695): seed STUB-STAMPED rows via the
+          # version-stable ops-API bulk insert (ops_seed_stub_memory_rows —
+          # see its doc in migration-lane-lib.sh for why a CLI/REST seed
+          # can't be trusted against the published baseline: its api() auth
+          # chain differs from HEAD's and 401s for a keyless agent). The
+          # deliberately-stale 'upgrade-lane-stub-stamp' (and NO
+          # FLAIR_EMBEDDING_MODEL pinning in this job — the opposite choice
+          # from the downgrade lane, on purpose) means the always-on
+          # embedding-stamp migration has REAL pending work on the HEAD
+          # boot: it re-embeds these rows with genuine vectors via its
+          # production regen path, and the synthetic migration then stamps
+          # them — so the recall-parity search below exercises real
+          # embeddings, not stubs. `flair reembed` (step 4b) already proves
+          # the OLD manual re-embed path; this proves the NEW boot-keyed
+          # runner actually ran, independent of it.
+          MIGRATION_SEED_COUNT=20
+          BASE_OPS_PORT=$((PORT - 1))
+          ops_seed_stub_memory_rows "http://127.0.0.1:${BASE_OPS_PORT}" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" \
+            "upgrade-lane-migration-seed" "upgrade-lane-migration-seed-row" "$MIGRATION_SEED_COUNT" "upgrade-lane-stub-stamp"
+          echo "Seeded ${MIGRATION_SEED_COUNT} stub-stamped rows as ${RESERVED_TEST_AGENT_ID} for the upgrade lane's migration assertions."
 
           # 3. Stop baseline. Install HEAD into a FRESH project dir rather than
           # reifying the tarball on top of baseline's node_modules in place.
@@ -436,13 +627,51 @@ jobs:
           [ "$NEW" = "$HEAD_VERSION" ] || { echo "FAIL: expected $HEAD_VERSION in node_modules, got $NEW"; exit 1; }
           echo "Upgraded $BASELINE → $NEW"
 
-          # 4. Start HEAD against baseline's data dir (~/.flair by default)
+          # 4. Start HEAD against baseline's data dir (~/.flair by default).
+          # FLAIR_ENABLE_TEST_MIGRATIONS=1 registers the CI-only synthetic
+          # migration (never ships — registration is conditional on this
+          # exact-match env var, see resources/migrations/synthetic-test-migration.ts)
+          # so this boot has the stub-stamped rows seeded in 2a above as real
+          # pending work.
+          export FLAIR_ENABLE_TEST_MIGRATIONS=1
           $FLAIR start --port $PORT
 
-          STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
-          echo "$STATUS" | grep -q "running" || { echo "FAIL: HEAD didn't start after upgrade from $BASELINE"; exit 1; }
+          # Bounded-retry, not a single-shot check (flair#691's lesson,
+          # generalized — see scripts/ci/migration-lane-lib.sh).
+          wait_for_flair_status_running "$FLAIR" "$PORT" 90
 
-          # 4a. Run the documented post-upgrade migration: re-embed all memories
+          # 4a. ci(migrations) extension — the zero-touch boot-keyed
+          # auto-migration assertions this lane exists to enforce
+          # (flair#695 / flair#695):
+          #   (a) the auto-migration actually RAN (not just "boot didn't crash")
+          #   (b) its content-hash envelope matched (invariant IV's completion gate)
+          #   (c) recall parity — the migration-touched ground truth is still
+          #       retrievable by search post-migration, not just present in storage
+          # Deliberately BEFORE the manual `flair reembed` below (4b): the
+          # always-on embedding-stamp migration (runs ahead of the synthetic
+          # one in registry order) already gives these stub-stamped rows real
+          # embeddings as part of THIS SAME auto-migration cycle — waiting for
+          # the cycle to finish here, before reembed's own writes touch the
+          # same rows, avoids two independent writers racing on them.
+          BASE_URL="http://127.0.0.1:${PORT}"
+          OPS_URL="http://127.0.0.1:$((PORT - 1))"
+
+          wait_for_migration_state "$BASE_URL" "$FLAIR_ADMIN_PASS" "$SYNTHETIC_MIGRATION_ID" "completed" 120
+
+          echo "Ledger content-hash envelope for ${SYNTHETIC_MIGRATION_ID}:"
+          check_ledger_hash_envelope "$OPS_URL" "$FLAIR_ADMIN_PASS" "$SYNTHETIC_MIGRATION_ID" || {
+            echo "FAIL: content-hash envelope did not match=true after the upgrade-lane migration run"
+            exit 1
+          }
+
+          MIGRATION_RECALL=$($FLAIR memory search --agent "$RESERVED_TEST_AGENT_ID" --q "upgrade-lane-migration-seed-row-0")
+          echo "$MIGRATION_RECALL" | grep -q "upgrade-lane-migration-seed-row-0" || {
+            echo "FAIL: migration-seeded ground truth not retrievable by search post-migration (recall parity broken)"
+            exit 1
+          }
+          echo "Migration ran, envelope matched, migration-seeded ground truth recalls correctly."
+
+          # 4b. Run the documented post-upgrade migration: re-embed all memories
           # so their stored vectors match the running Harper version's expected
           # shape. Required when bumping @harperfast/harper across versions where
           # HNSW storage internals changed (e.g. 5.0.1 → 5.0.9). See CHANGELOG.
@@ -468,18 +697,56 @@ jobs:
           $FLAIR stop --port $PORT || true
 
   typecheck:
-    name: Type Check
+    # Matrixed name — see test-unit's comment above for why (GHA suffixes
+    # matrixed job names/contexts; the "Type Check" required check is
+    # re-emitted by the typecheck-gate job below instead).
+    #
+    # Honesty note (#672): as of this PR, `bunx tsc` below runs
+    # entirely under Bun's own runtime — this job has no other step that
+    # shells out to `node` — so today the matrix only changes which Node major
+    # is on PATH without anything actually consuming it; it is not yet a
+    # source of NEW signal the way test-unit's `node scripts/*.mjs` checks or
+    # pack-smoke's full CLI lifecycle are. Added anyway for (a) consistency
+    # with "core test jobs" per the CI matrix ask, and (b) future-proofing: a
+    # future type-check step that shells to `node` (or a `@types/node`
+    # resolution quirk) is then already covered without another CI PR. If that
+    # tradeoff isn't wanted, dropping the matrix here (keep node-version
+    # unpinned/removed entirely, since nothing needs it) is a reasonable
+    # follow-up — flagging for reviewer call rather than silently deciding.
+    name: "Type Check (node ${{ matrix.node-version }})"
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22", "24", "26"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
         with:
           bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
       - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
         with:
           mode: firewall-free
       - run: sfw bun install --frozen-lockfile
       - run: bunx tsc --noEmit -p tsconfig.check.json
+
+  # Required-status-check adapter — see test-unit-gate's comment above.
+  typecheck-gate:
+    name: Type Check
+    needs: typecheck
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Require all Node-version legs to pass
+        run: |
+          echo "typecheck matrix result: ${{ needs.typecheck.result }}"
+          if [ "${{ needs.typecheck.result }}" != "success" ]; then
+            echo "::error::One or more Type Check Node-version legs did not succeed"
+            exit 1
+          fi
 
   typecheck-strict:
     name: "Type Check (strict)"
@@ -497,6 +764,14 @@ jobs:
       # so harper's raw .ts internals don't pollute the output)
       - name: Type check root (resources)
         run: npx tsc --noEmit -p tsconfig.check.json
+      # Root src/ (CLI, probe, fleet-verify, deploy, bridges, etc. — everything
+      # under src/ EXCEPT cli.ts, which stays on tsconfig.cli.json's strict:false
+      # until #622 splits the monolith). Closes #643: src/** previously had zero
+      # strict coverage — tsconfig.check.json only ever covered resources/**, so a
+      # module like src/probe.ts or src/fleet-verify.ts could regress without CI
+      # noticing. Verified strict-clean with zero errors before wiring this in.
+      - name: Type check root src (strict, excl. cli.ts — #622)
+        run: npx tsc --noEmit -p tsconfig.check.src.json
       # Root CLI entry point (tsconfig.cli.json — strict: false, matches build:cli)
       - name: Type check root CLI
         run: npx tsc --noEmit -p tsconfig.cli.json
@@ -605,7 +880,7 @@ jobs:
       # release-time check (#528). Building here moves that catch to the PR.
       - name: Build publishable packages
         run: |
-          for pkg in flair-client flair-mcp langgraph-flair n8n-nodes-flair openclaw-flair pi-flair; do
+          for pkg in flair-client flair-mcp langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
             echo "::group::build $pkg"
             (cd "packages/$pkg" && bun run build)
             echo "::endgroup::"

@@ -597,6 +597,30 @@ describe("Presence API integration", () => {
     expect(body.error).toBe("invalid_activity");
   });
 
+  // ── 6b. "debugging" activity accepted end-to-end (flair#613) ───────────────
+  // The flagship collision-detection use case — a live incident/production
+  // investigation — had no matching activity value; agents fell back to
+  // "reviewing", misrepresenting what they were doing on the public roster.
+
+  test("POST /Presence with activity 'debugging' succeeds and is readable on the roster", async () => {
+    const auth = buildAuthHeader(agent1.id, "POST", "/Presence", agent1.privateKey);
+    const res = await fetch(`${harper.httpURL}/Presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ currentTask: "investigating preprod-db-3: replication lag", activity: "debugging" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.agentId).toBe(agent1.id);
+
+    const getAuth = buildAuthHeader(agent1.id, "GET", "/Presence", agent1.privateKey);
+    const getRes = await fetch(`${harper.httpURL}/Presence`, { headers: { Authorization: getAuth } });
+    const roster = await getRes.json();
+    const row = roster.find((r: any) => r.id === agent1.id);
+    expect(row.activity).toBe("debugging");
+  });
+
   // ── 7. Missing auth rejected (401) ────────────────────────────────────────
 
   test("POST /Presence without auth header → 401", async () => {

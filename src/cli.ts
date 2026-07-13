@@ -21,12 +21,14 @@ import {
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname } from "node:path";
 import { spawn } from "node:child_process";
-import { createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
+import { createHash, createPrivateKey, sign as nodeCryptoSign, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
 import { keystore } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
 import { checkVersion, formatVersionNudge } from "./version-check.js";
+import { checkServerHandshake, formatHandshakeNudge } from "./version-handshake.js";
 import { probeInstance, type ProbeResult } from "./probe.js";
 import {
   sweepFleet,
@@ -876,10 +878,13 @@ function readHarperPid(dataDir: string): number | null {
  * Seed an agent record via the Harper operations API.
  * Accepts either a port number (localhost) or a full URL string (--target).
  *
- * `adminPass` is typed as optional but in practice the Harper operations API
- * always requires Basic admin auth — every existing call site passes one.
- * The optional signature leaves headroom for a future Harper that honors
- * `authorizeLocal` on its ops endpoint; until then, callers must pass it.
+ * `adminPass` is optional: a local caller may omit it and ride Harper's
+ * `authorizeLocal`, which auto-authorizes a header-less loopback request to
+ * the ops port as super_user (current behavior, verified by live probe —
+ * flair#610). When passed, the helper sends Basic admin auth so it never
+ * depends on that ambient elevation and behaves identically against a remote
+ * or hardened instance. Hardening the ops-API loopback posture is tracked in
+ * flair#654.
  */
 export async function seedAgentViaOpsApi(
   opsPortOrUrl: number | string,
@@ -943,10 +948,12 @@ export async function seedAgentViaOpsApi(
 // admin:admin-pass), not the REST API (which needs server-side HDB_ADMIN_PASSWORD
 // — unavailable on Fabric).  Same pattern as seedAgentViaOpsApi above.
 //
-// `adminPass` is optional in the signature for symmetry with seedAgentViaOpsApi
-// and to keep the door open for a future Harper that honors authorizeLocal on
-// its ops endpoint. Today the Harper operations API always requires Basic admin
-// auth; every current caller passes it.
+// `adminPass` is optional (symmetry with seedAgentViaOpsApi): a local caller may
+// omit it and ride authorizeLocal, which the Harper ops API honors today — a
+// header-less loopback request is auto-authorized as super_user (flair#610).
+// When passed, the helper sends Basic admin auth so it never depends on that
+// ambient elevation and behaves identically against a remote or hardened
+// instance. Hardening that posture is tracked in flair#654.
 
 export async function seedFederationInstanceViaOpsApi(
   opsPortOrUrl: number | string,
@@ -1285,9 +1292,6 @@ export async function ensureFlairPairInitiatorRole(
 //      WorkspaceState, OAuthClient — NOT the logical Memory/Event/Workspace/OAuth
 //      shorthand the flair_pair_initiator spec used, which was harmless only
 //      because every grant there is false).
-//   3. Obs* writes: if the presence-emitter writes ObsAgentSnapshot AS the agent
-//      it needs insert/update — currently read-only here; confirm the writer's
-//      identity (system vs agent) and widen only if it's the agent.
 
 // Harper 5.0.21 add_role requires an `attribute_permissions` array on EVERY table
 // grant (empty = no attribute-level restriction, so the table-level CRUD applies);
@@ -1316,14 +1320,20 @@ const FLAIR_AGENT_PERMISSION = {
       Integration:     grant(true,  true,  true,  true),
       Credential:      grant(true,  true,  true,  true),
       Presence:        grant(true,  true,  true,  false),
+      // MemoryUsage (flair#683): the usage-feedback dedup ledger. Read (own
+      // contributions, scoped in resources/MemoryUsage.ts) + insert (a fresh
+      // contribution row) only — NO update/delete. This is load-bearing, not
+      // just least-privilege tidiness: the dedup rule ("(agent, memory)
+      // contributes ≤ 1") is enforced by requiring a NEW ledger row before
+      // any usageCount bump; if an agent could delete its own row, it could
+      // re-trigger the /RecordUsage endpoint for the same memory indefinitely
+      // (create → count → delete → count again → repeat), defeating the cap
+      // entirely. See resources/MemoryUsage.ts's module doc.
+      MemoryUsage:     grant(true,  true,  false, false),
       // Agent: read for discovery, update own card; creation/removal is admin.
       Agent:           grant(true,  false, true,  false),
       // Read-only reference data.
       Instance:        grant(true,  false, false, false),
-      // Observatory read-models — public reads; writes are system-driven (gate 3).
-      ObsOffice:        grant(true, false, false, false),
-      ObsAgentSnapshot: grant(true, false, false, false),
-      ObsEventFeed:     grant(true, false, false, false),
       // Federation / OAuth / IdP / internal — system + admin only; agents get none.
       Peer:          grant(false, false, false, false),
       PairingToken:  grant(false, false, false, false),
@@ -1795,6 +1805,45 @@ const __pkgVersion = (() => {
 const program = new Command();
 program.name("flair").version(__pkgVersion, "-v, --version");
 
+// ─── CLI↔server version handshake (flair#695 §B) ────────────────────────────
+// Every command invocation gets a cheap, cached (~60s), short-timeout check
+// of the running server's version against this CLI's own — catches the
+// bare-npm-upgrade trap where `npm i -g @tpsdev-ai/flair@latest` swaps the
+// CLI binary but the already-running Harper daemon keeps serving the OLD
+// code until `flair restart`. `doctor` is excluded here — it already prints
+// a richer version triple (CLI/installed, running, latest-published) plus
+// migration state, so a global hook nudge on top of that would be
+// redundant noise on the one command whose whole job is this exact report.
+program.hook("preAction", async (_thisCommand, actionCommand) => {
+  if (actionCommand.name() === "doctor") return;
+  // Interactive-only: this is a pure stderr UX nudge for a human at a
+  // terminal ("bare-npm users must not get stuck"), not a machine-consumed
+  // signal — it never changes exit codes or stdout. Gating on TTY means a
+  // piped/scripted/CI invocation (and every existing test that spawns the
+  // CLI against a mock server) never pays the extra network round trip,
+  // which matters beyond latency: several unit tests spawn this CLI against
+  // a single-shot mock HTTP server asserting on exactly one received
+  // request (e.g. test/unit/presence-set.test.ts) — an unconditional extra
+  // GET /Health here would silently consume that slot and break them.
+  if (!process.stdout.isTTY) return;
+  try {
+    const opts = (actionCommand.opts?.() ?? {}) as { port?: string | number };
+    const serverUrl = `http://127.0.0.1:${resolveHttpPort(opts)}`;
+    // Cache key component: prefer the server's own ROOTPATH if this shell
+    // happens to have it set (operating a non-default Harper instance
+    // root), else fall back to Flair's own resolved data directory — same
+    // "which local install is this" identity every other doctor/status
+    // check already keys off, so a stale cache from a since-reinstalled
+    // instance sharing the same port never bleeds into a fresh one.
+    const rootPath = process.env.ROOTPATH ?? defaultDataDir();
+    const result = await checkServerHandshake(__pkgVersion, rootPath, serverUrl);
+    const nudge = formatHandshakeNudge(result);
+    if (nudge) console.error(`⚠️  ${nudge}`);
+  } catch {
+    // NEVER block or fail the underlying command over this check.
+  }
+});
+
 // ─── flair init ──────────────────────────────────────────────────────────────
 
 program
@@ -2097,6 +2146,13 @@ program
 
     let alreadyRunning = false;
 
+    // <ROOTPATH>/models — resources/embeddings-provider.ts's resolveModelsDir()
+    // tier 2 default; an operator override already in the environment wins
+    // (tier 1). Scoped above the alreadyRunning branch below (not just inside
+    // the fresh-start path) since the launchd plist step needs it too, even
+    // when Harper was already running and the fresh-spawn branch was skipped.
+    const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
+
     if (!opts.skipStart) {
       // Check if already running
       try {
@@ -2118,18 +2174,23 @@ program
         const alreadyInstalled = existsSync(join(dataDir, "harper-config.yaml"));
 
         const opsSocket = join(dataDir, "operations-server");
+        // authorizeLocal: false (flair#654) — a credential-less loopback ops-API
+        // request is no longer auto-authorized as super_user. Every ops-API
+        // seed call below (seedAgentViaOpsApi et al.) already passes a real
+        // adminPass via Basic auth, so this does not change local-init behavior.
         const harperSetConfig = JSON.stringify({
           rootPath: dataDir,
           http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
           operationsApi: { network: { port: opsPort, cors: true }, domainSocket: opsSocket },
           mqtt: { network: { port: null }, webSocket: false },
           localStudio: { enabled: false },
-          authentication: { authorizeLocal: true, enableSessions: true },
+          authentication: { authorizeLocal: false, enableSessions: true },
         });
 
         const env: Record<string, string> = {
           ...(process.env as Record<string, string>),
           ROOTPATH: dataDir,
+          FLAIR_MODELS_DIR: modelsDir,
           HARPER_SET_CONFIG: harperSetConfig,
           DEFAULTS_MODE: "dev",
           HDB_ADMIN_USERNAME: adminUser,
@@ -2140,6 +2201,14 @@ program
           OPERATIONSAPI_NETWORK_PORT: String(opsPort),
           LOCAL_STUDIO: "false",
         };
+        // models (flair#504 Phase 1): the embedding backend registers itself
+        // in-process at boot (resources/embeddings-boot.ts, loaded by
+        // config.yaml's `jsResource` glob) — NOT via a config env var. See
+        // that file's header for why (flair#694: HARPER_CONFIG persisted a
+        // `models.embedding.default` block into harper-config.yaml that an
+        // older/downgraded build's boot would tear down to an invalid empty
+        // shell). FLAIR_MODELS_DIR above is still the channel that tells the
+        // registration where to find/download the model.
 
         if (alreadyInstalled) {
           console.log("Existing Harper installation found — skipping install.");
@@ -2198,14 +2267,23 @@ program
           mkdirSync(plistDir, { recursive: true });
           const plistPath = join(plistDir, `${label}.plist`);
           const opsSocket = join(dataDir, "operations-server");
+          // authorizeLocal: false (flair#654) — same posture as the initial spawn
+          // above; the launchd-managed process must not diverge from it.
           const setConfig = JSON.stringify({
             rootPath: dataDir,
             http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
             operationsApi: { network: { port: opsPort, cors: true }, domainSocket: opsSocket },
             mqtt: { network: { port: null }, webSocket: false },
             localStudio: { enabled: false },
-            authentication: { authorizeLocal: true, enableSessions: true },
+            authentication: { authorizeLocal: false, enableSessions: true },
           });
+          // models (flair#504 Phase 1): no env var needed here — the
+          // launchd-managed process loads the SAME dist/resources/*.js as any
+          // other spawn, so resources/embeddings-boot.ts self-registers the
+          // backend on every KeepAlive restart in-process. See that file's
+          // header (flair#694) for why this replaced the old HARPER_CONFIG
+          // plist line.
+          const escapeXml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
           const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -2222,7 +2300,8 @@ program
   <key>EnvironmentVariables</key>
   <dict>
     <key>ROOTPATH</key><string>${dataDir}</string>
-    <key>HARPER_SET_CONFIG</key><string>${setConfig.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;")}</string>
+    <key>FLAIR_MODELS_DIR</key><string>${modelsDir}</string>
+    <key>HARPER_SET_CONFIG</key><string>${escapeXml(setConfig)}</string>
     <key>DEFAULTS_MODE</key><string>dev</string>
     <key>HDB_ADMIN_USERNAME</key><string>${adminUser}</string>
     <key>HDB_ADMIN_PASSWORD</key><string>${adminPass}</string>
@@ -3842,7 +3921,7 @@ federation
   });
 
 // `flair federation reachability` — probe local instance + all paired peers.
-// Productizes ~/ops/scripts/flair-boot-probe.sh: a single command that tells
+// Productizes flair#695: a single command that tells
 // you whether memories CAN flow across the federation right now. Read-only;
 // no mutations, no side effects beyond a single tagged status read per peer.
 federation
@@ -4553,7 +4632,7 @@ federation
   });
 
 // `flair federation prune` — remove stale spoke peers (never the hub).
-// Productizes ~/ops/scripts/cleanup-stale-fed-peers.sh into a real CLI
+// Productizes flair#695 into a real CLI
 // subcommand with safety: dry-run is the default, --apply required to delete.
 function parseDuration(spec: string): number | null {
   // Accept forms like "30d", "12h", "90m". Returns milliseconds.
@@ -4660,7 +4739,7 @@ federation
 
 // `flair federation verify` — end-to-end roundtrip: write a tagged memory
 // locally, wait for federation push, probe peers for the tag. Productizes
-// ~/ops/scripts/verify-fed-sync.sh. Cleans up the test memory at the end.
+// flair#695 Cleans up the test memory at the end.
 federation
   .command("verify")
   .description("End-to-end check: write a tagged memory locally and verify it shows up on each peer")
@@ -7645,9 +7724,12 @@ program
 
     const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
     const opsPort = resolveOpsPort(opts);
+    const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       ROOTPATH: dataDir,
+      // See the matching comment at the install-time spawn site above.
+      FLAIR_MODELS_DIR: modelsDir,
       DEFAULTS_MODE: "dev",
       HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
       HTTP_PORT: String(port),
@@ -7659,6 +7741,8 @@ program
     if (adminPass) {
       env.HDB_ADMIN_PASSWORD = adminPass;
     }
+    // models (flair#504 Phase 1): no env var needed — resources/embeddings-boot.ts
+    // self-registers the backend in-process on every boot (flair#694).
 
     const proc = spawn(process.execPath, [bin, "run", "."], {
       cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
@@ -7760,9 +7844,12 @@ async function startFlairProcess(port: number): Promise<void> {
   // to the initial Harper spawn) followed by `flair restart` would silently
   // drop admin credentials — any subsequent auth'd call returns 401.
   const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
+  const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     ROOTPATH: dataDir,
+    // See the matching comment at the install-time spawn site above.
+    FLAIR_MODELS_DIR: modelsDir,
     DEFAULTS_MODE: "dev",
     HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
     HTTP_PORT: String(port),
@@ -7771,6 +7858,8 @@ async function startFlairProcess(port: number): Promise<void> {
   if (adminPass) {
     env.HDB_ADMIN_PASSWORD = adminPass;
   }
+  // models (flair#504 Phase 1): no env var needed — resources/embeddings-boot.ts
+  // self-registers the backend in-process on every boot (flair#694).
 
   const proc = spawn(process.execPath, [bin, "run", "."], {
     cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
@@ -7907,7 +7996,28 @@ program
     const batchSize = Number(opts.batchSize);
     const delayMs = Number(opts.delayMs);
 
-    const currentModel = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
+    // flair#504 Phase 2: MUST match resources/embeddings-provider.ts's
+    // getModelId() — including THE GATE (EMBEDDING_PREFIXES_ENABLED), not
+    // just the suffix. Duplicated as literals, not imported, because
+    // src/cli.ts and resources/**.ts are separate build targets —
+    // tsconfig.cli.json's rootDir is "src" and only includes src/cli.ts +
+    // src/cli-shim.cts, and the published CLI package ships only dist/ built
+    // from that config (package.json's "files"), so resources/ isn't
+    // reachable from (or bundled into) the CLI binary. THE GATE is now ON
+    // (flipped, re-baselined through the ratchet gate — see
+    // embeddings-provider.ts's file header and PR #689 for the park history
+    // this flip revisits), so `currentModel` here is `<base>+searchprefix` —
+    // matching getModelId()'s gate-on return exactly. If
+    // EMBEDDING_PREFIXES_ENABLED or EMBEDDING_VARIANT ever changes in
+    // embeddings-provider.ts, update this block too — a drift here silently
+    // breaks `--stale-only`: it would compare every row's embeddingModel
+    // against the WRONG current-model string, so rows would read as already
+    // "current" (or as needing re-embed) out of sync with what getModelId()
+    // is actually stamping new writes with.
+    const EMBEDDING_PREFIXES_ENABLED = true; // MUST mirror resources/embeddings-provider.ts's gate
+    const EMBEDDING_VARIANT = "searchprefix";
+    const baseModel = process.env.FLAIR_EMBEDDING_MODEL ?? "nomic-embed-text-v1.5-Q4_K_M";
+    const currentModel = EMBEDDING_PREFIXES_ENABLED ? `${baseModel}+${EMBEDDING_VARIANT}` : baseModel;
 
     if (agentId) {
       console.log(`Re-embedding memories for agent: ${agentId}`);
@@ -8548,6 +8658,49 @@ program
       }
     }
 
+    // 1a. CLI ↔ running-server version handshake (flair#695 §B) — the
+    // version TRIPLE: this CLI's own version (__pkgVersion, checked against
+    // npm-latest in step 0 above), and the RUNNING server's reported
+    // version (GET /Health — public, no auth needed). A mismatch means the
+    // installed package was upgraded but the daemon hasn't restarted onto
+    // it yet — exactly the bare-npm trap the global preAction hook (above,
+    // every other command) nudges about on stderr; doctor prints the full
+    // picture here instead of a one-liner and `--fix` offers the restart.
+    let runningVersion: string | null = null;
+    if (harperResponding) {
+      try {
+        const healthRes = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(3000) });
+        if (healthRes.ok) {
+          const body = (await healthRes.json()) as { version?: unknown };
+          runningVersion = typeof body?.version === "string" ? body.version : null;
+        }
+      } catch { /* leave runningVersion null — reported below as "unknown" */ }
+
+      if (runningVersion && runningVersion !== __pkgVersion) {
+        console.log(`  ${render.icons.error} Version mismatch: CLI/installed ${render.wrap(render.c.bold, __pkgVersion)} but server is running ${render.wrap(render.c.bold, runningVersion)}`);
+        if (autoFix) {
+          if (dryRun) {
+            console.log(`     ${render.wrap(render.c.dim, "Would run:")} flair restart`);
+          } else {
+            try {
+              const { execSync } = await import("node:child_process");
+              execSync(`${process.argv[0]} ${process.argv[1]} restart --port ${effectivePort}`, { stdio: "inherit" });
+              console.log(`     ${render.icons.ok} Restarted onto ${__pkgVersion}`);
+            } catch {
+              console.log(`     ${render.icons.error} Restart failed — try: flair restart`);
+            }
+          }
+        } else {
+          console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair restart`);
+        }
+        issues++;
+      } else if (runningVersion) {
+        console.log(`  ${render.icons.ok} Server running version matches CLI (${runningVersion})`);
+      } else {
+        console.log(`  ${render.icons.warn} Could not determine the running server's version`);
+      }
+    }
+
     // 2. Keys directory
     const keysDir = defaultKeysDir();
     if (existsSync(keysDir)) {
@@ -8870,6 +9023,55 @@ program
         }
       } catch (err: any) {
         console.log(`  ${render.icons.warn} Fleet presence check failed: ${err?.message ?? err}`);
+      }
+    }
+
+    // 9. Migration state (flair#695) — pending/in-progress/blocked + last
+    // ledger-derived outcome per registered migration, read off the same
+    // authenticated /HealthDetail the "Fleet presence" section above
+    // already fetches. `--fix` here means the SAME restart offered in step
+    // 1a above (a halted migration retries automatically on the next boot —
+    // there's no separate "run the migration now" fix; the fix for
+    // "blocked" is whatever the halt reason names, e.g. freeing disk).
+    if (harperResponding) {
+      console.log(`\n  ${render.wrap(render.c.bold, "Migrations")}`);
+      try {
+        const migAgentId: string | undefined = opts.agent || process.env.FLAIR_AGENT_ID;
+        const migKeyPath = migAgentId ? join(defaultKeysDir(), `${migAgentId}.key`) : undefined;
+        const migCanSign = !!(migAgentId && migKeyPath && existsSync(migKeyPath));
+        if (!migCanSign) {
+          console.log(`  ${render.icons.info} Pass --agent <id> (with a matching key in ~/.flair/keys) to see migration state — requires a verified read, same as Fleet presence above.`);
+        } else {
+          const migHeaders: Record<string, string> = { Authorization: buildEd25519Auth(migAgentId!, "GET", "/HealthDetail", migKeyPath!) };
+          const migRes = await fetch(`${baseUrl}/HealthDetail`, { headers: migHeaders, signal: AbortSignal.timeout(5000) });
+          if (!migRes.ok) {
+            console.log(`  ${render.icons.warn} Could not fetch migration state (HTTP ${migRes.status})`);
+          } else {
+            const detail = (await migRes.json()) as { migrations?: { cyclePhase?: string; migrations?: Array<{ id: string; state: string; rowsDone: number; rowsRemaining: number; reason?: string }> } };
+            const migBlock = detail?.migrations;
+            if (!migBlock || !Array.isArray(migBlock.migrations) || migBlock.migrations.length === 0) {
+              console.log(`  ${render.icons.info} No migrations registered on this instance`);
+            } else {
+              if (migBlock.cyclePhase === "pre-hash") {
+                console.log(`  ${render.icons.info} Pre-flight integrity check in progress — migrations deferred until it completes`);
+              }
+              for (const m of migBlock.migrations) {
+                if (m.state === "completed") {
+                  console.log(`  ${render.icons.ok} ${m.id}: completed`);
+                } else if (m.state === "halted" || m.state === "failed") {
+                  console.log(`  ${render.icons.error} ${m.id}: ${m.state}${m.reason ? ` — ${m.reason}` : ""}`);
+                  issues++;
+                } else if (m.state === "running") {
+                  console.log(`  ${render.icons.info} ${m.id}: in progress (${m.rowsDone} done, ${m.rowsRemaining} remaining)`);
+                } else {
+                  console.log(`  ${render.icons.info} ${m.id}: ${m.state}`);
+                }
+              }
+            }
+          }
+        }
+      } catch (err: any) {
+        console.log(`  ${render.icons.warn} Migration state check failed: ${err?.message ?? err}`);
       }
     }
 
@@ -9689,6 +9891,70 @@ program
       console.error(`${render.icons.error} Bootstrap failed: ${err.message}`);
       process.exit(1);
     }
+  });
+
+// ─── flair relationship add ──────────────────────────────────────────────────
+//
+// Ergonomic agent-directed write surface for the Relationship graph
+// (relationship-write-path spec): an explicit subject/predicate/object triple
+// ("record that <subject> <predicate> <object>"), distinct from a free-text
+// Memory. Mirrors `flair memory add`'s shape (--agent required, signed via
+// the shared `api()` helper — see api()'s doc above for the Ed25519
+// resolution order) rather than hand-rolling a signer, per this repo's
+// existing convention (flair orgevent does hand-roll one because OrgEvent.put()
+// self-verifies authorId against the signature; Relationship doesn't need that
+// — the server stamps agentId from the verdict regardless of what's sent).
+//
+// PUTs to the CANONICAL id (see canonicalRelationshipId below), not a random
+// one — re-running this command with the SAME subject/predicate/object
+// UPSERTS the existing row (confidence/validTo/source refresh) instead of
+// creating a duplicate. This mirrors flair-client's RelationshipApi.write()
+// (packages/flair-client/src/client.ts) BYTE FOR BYTE — the CLI can't import
+// that workspace package into the published @tpsdev-ai/flair bundle (same
+// reasoning as the existing Memory-id-generation mirroring a few thousand
+// lines up), so the algorithm is duplicated here rather than shared. A
+// cross-check test (test/unit/cli-relationship-add.test.ts) pins the two
+// implementations to identical output so they can't silently drift apart —
+// a drift here would mean the CLI and the MCP tool/RelationshipApi land the
+// SAME triple at TWO different ids, defeating the whole dedup guarantee.
+function canonicalRelationshipId(agentId: string, subject: string, predicate: string, object: string): string {
+  const material = [agentId, subject, predicate, object].join("\u0000").toLowerCase();
+  return createHash("sha256").update(material, "utf8").digest().subarray(0, 16).toString("base64url");
+}
+
+const relationship = program.command("relationship").description("Manage agent relationship triples (knowledge graph)");
+relationship.command("add")
+  .description(
+    "Record that <subject> <predicate> <object> — an explicit entity-to-entity relationship triple. " +
+    "Re-asserting the SAME triple (same subject/predicate/object) UPSERTS the existing row rather than " +
+    "duplicating it. Predicate is free text; recommended vocabulary: manages, works_on, reviews, depends_on, " +
+    "replaces, owns, reports_to, advises. To CONTRADICT a prior relationship: changing the predicate creates " +
+    "a SEPARATE row and does NOT auto-close the old one — re-assert the OLD triple with --valid-to set to now " +
+    "(or delete it) before/after writing the new one.",
+  )
+  .requiredOption("--agent <id>")
+  .requiredOption("--subject <text>", "Source entity (e.g. 'nathan')")
+  .requiredOption("--predicate <text>", "Relationship type, free text (e.g. 'manages')")
+  .requiredOption("--object <text>", "Target entity (e.g. 'flair')")
+  .option("--confidence <n>", "0.0-1.0, how certain (default 1.0 = explicitly stated)")
+  .option("--valid-from <iso>", "ISO timestamp this relationship became true (default: now)")
+  .option("--valid-to <iso>", "ISO timestamp this relationship ended (leave unset for an active relationship)")
+  .option("--source <text>", "Where this was learned from (a memory ID, conversation, etc.)")
+  .action(async (opts) => {
+    const id = canonicalRelationshipId(opts.agent, opts.subject, opts.predicate, opts.object);
+    const body: Record<string, unknown> = {
+      id,
+      agentId: opts.agent,
+      subject: opts.subject,
+      predicate: opts.predicate,
+      object: opts.object,
+    };
+    if (opts.confidence !== undefined) body.confidence = Number(opts.confidence);
+    if (opts.validFrom) body.validFrom = opts.validFrom;
+    if (opts.validTo) body.validTo = opts.validTo;
+    if (opts.source) body.source = opts.source;
+    const out = await api("PUT", `/Relationship/${id}`, body);
+    console.log(JSON.stringify(out, null, 2));
   });
 
 const soul = program.command("soul").description("Manage agent soul entries");
@@ -11166,7 +11432,7 @@ program
 
 // ─── flair presence ─────────────────────────────────────────────────────────
 
-const VALID_PRESENCE_ACTIVITIES = ["coding", "reviewing", "planning", "idle"] as const;
+const VALID_PRESENCE_ACTIVITIES = ["coding", "reviewing", "planning", "debugging", "idle"] as const;
 const MAX_TASK_LENGTH = 120;
 
 const presence = program.command("presence").description("Manage agent presence (The Office Space)");
@@ -11242,10 +11508,21 @@ presence
 // ─── flair workspace ─────────────────────────────────────────────────────────
 //
 // Coordination write surface (Kris #510). `workspace set` writes the
-// agent's OWN WorkspaceState via a signed POST /WorkspaceState. Identity comes
-// from the Ed25519 signature — the body carries NO agentId, so an agent can only
-// write as itself (the WorkspaceState.post() handler overwrites agentId from the
-// signature regardless of body content). Mirrors `presence set`'s signed-POST shape.
+// agent's OWN WorkspaceState via a signed PUT /WorkspaceState/{id}. Identity
+// is asserted by including agentId in the body — the server never trusts it
+// blindly, it 403s any mismatch against the Ed25519 signature's agentId
+// (WorkspaceState.put(), resources/WorkspaceState.ts), so this is a
+// self-declaration the server verifies 1:1, not attribution-from-body.
+//
+// (flair#679, measured against a real spawned Harper): table-backed resources
+// only accept writes via PUT /<Table>/<id> — a bare POST /WorkspaceState 405s
+// ("does not have a post method implemented to handle HTTP method POST"),
+// same restriction documented in resources/Memory.ts and already fixed for
+// `soul set` (#498). WorkspaceState.ts DOES define a post() method, but
+// Harper's REST layer never routes a real HTTP POST to it — post() is only
+// reachable via in-process resource instantiation, never the wire. put(),
+// unlike post(), does NOT default createdAt/timestamp/agentId — the CLI
+// supplies them all explicitly below.
 
 const MAX_WORKSPACE_FIELD_LENGTH = 2000;
 
@@ -11253,7 +11530,7 @@ const workspace = program.command("workspace").description("Manage agent workspa
 
 workspace
   .command("set")
-  .description("Set your agent's current workspace state (POST /WorkspaceState)")
+  .description("Set your agent's current workspace state (PUT /WorkspaceState/{id})")
   .requiredOption("--ref <ref>", "Workspace ref (branch, worktree, or task ref)")
   .option("--label <text>", "Human-readable label for this workspace")
   .option("--provider <name>", "Provider/runtime (e.g. claude-code, openclaw)", "cli")
@@ -11285,31 +11562,39 @@ workspace
     }
 
     const baseUrl = resolveBaseUrl(opts).replace(/\/$/, "");
-    const auth = buildEd25519Auth(agentId, "POST", "/WorkspaceState", keyPath);
+    // Deterministic id (agentId:ref) — re-running `workspace set` for the same
+    // ref overwrites the same record, which is intentional (one row per
+    // agent+ref, not an append log).
+    const id = `${agentId}:${opts.ref}`;
+    const auth = buildEd25519Auth(agentId, "PUT", `/WorkspaceState/${id}`, keyPath);
 
-    // NOTE: agentId is intentionally NOT included in the body — the handler
-    // attributes the record from the Ed25519 signature (no forging).
+    // agentId IS included in the body now — WorkspaceState.put() (unlike
+    // post()) does not auto-attribute from the signature, it 403s any
+    // mismatch. This is a self-declaration the server verifies against the
+    // signature, not a forgeable claim.
     const now = new Date().toISOString();
     const body: Record<string, unknown> = {
-      id: `${agentId}:${opts.ref}`,
+      id,
+      agentId,
       ref: opts.ref,
       provider: opts.provider ?? "cli",
       timestamp: now,
+      createdAt: now,
     };
     if (opts.label) body.label = opts.label;
     if (opts.task) body.taskId = opts.task;
     if (opts.phase) body.phase = opts.phase;
     if (opts.summary) body.summary = opts.summary;
 
-    const res = await fetch(`${baseUrl}/WorkspaceState`, {
-      method: "POST",
+    const res = await fetch(`${baseUrl}/WorkspaceState/${id}`, {
+      method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify(body),
     });
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.error(`Error: POST /WorkspaceState failed (${res.status}): ${text}`);
+      console.error(`Error: PUT /WorkspaceState/${id} failed (${res.status}): ${text}`);
       process.exit(1);
     }
 
@@ -11319,17 +11604,30 @@ workspace
 // ─── flair orgevent ──────────────────────────────────────────────────────────
 //
 // Coordination write surface (Kris #510). `orgevent` publishes an
-// OrgEvent ATTRIBUTED to the authenticated agent via a signed POST /OrgEvent.
-// The event's authorId comes from the Ed25519 signature — the body carries NO
-// authorId, so an agent CANNOT forge another agent's events (the OrgEvent.post()
-// handler overwrites authorId from the signature). Mirrors `presence set`'s shape.
+// OrgEvent ATTRIBUTED to the authenticated agent via a signed PUT
+// /OrgEvent/{id}. authorId is asserted in the body but self-verified server
+// side: OrgEvent.put() (resources/OrgEvent.ts) 403s any authorId that doesn't
+// match the Ed25519 signature's agentId, so an agent still cannot forge
+// another agent's events — the difference from post() is that put() checks-
+// and-rejects a mismatch rather than silently overwriting it.
+//
+// (flair#679, measured against a real spawned Harper): table-backed resources
+// only accept writes via PUT /<Table>/<id> — a bare POST /OrgEvent 405s
+// ("does not have a post method implemented to handle HTTP method POST"),
+// same restriction documented in resources/Memory.ts and already fixed for
+// `soul set` (#498). OrgEvent.ts DOES define a post() method that
+// auto-generates id/createdAt, but Harper's REST layer never routes a real
+// HTTP POST to it — post() is only reachable via in-process resource
+// instantiation, never the wire. put() does NOT default id/createdAt, so the
+// CLI generates and supplies them itself (id convention mirrors flair-client's
+// Memory.write(): `${agentId}-${randomUUID()}`).
 
 const MAX_ORGEVENT_SUMMARY_LENGTH = 500;
 const MAX_ORGEVENT_DETAIL_LENGTH = 8000;
 
 program
   .command("orgevent")
-  .description("Publish an org-wide coordination event attributed to your agent (POST /OrgEvent)")
+  .description("Publish an org-wide coordination event attributed to your agent (PUT /OrgEvent/{id})")
   .requiredOption("--kind <kind>", "Event kind (e.g. coord.claim, coord.release, status)")
   .requiredOption("--summary <text>", "Short summary of the event")
   .option("--detail <text>", "Longer detail payload")
@@ -11363,34 +11661,160 @@ program
     // orgevent reuses --target for recipients, so the remote-URL override is
     // --target-url here (env FLAIR_TARGET still honored via resolveBaseUrl).
     const baseUrl = resolveBaseUrl({ target: opts.targetUrl, port: opts.port }).replace(/\/$/, "");
-    const auth = buildEd25519Auth(agentId, "POST", "/OrgEvent", keyPath);
+    // id generation mirrors flair-client's Memory.write() convention
+    // (`${agentId}-${randomUUID()}`) — unique per publish, unlike OrgEvent's
+    // own (HTTP-unreachable) post() default of `${authorId}-${isoTimestamp}`,
+    // which can collide within the same millisecond.
+    const id = `${agentId}-${randomUUID()}`;
+    const auth = buildEd25519Auth(agentId, "PUT", `/OrgEvent/${id}`, keyPath);
 
-    // NOTE: authorId is intentionally NOT included in the body — the handler
-    // attributes the event from the Ed25519 signature (no forging).
+    // authorId IS included in the body now — OrgEvent.put() (unlike post())
+    // does not auto-attribute from the signature, it 403s any mismatch. This
+    // is a self-declaration the server verifies against the signature, not a
+    // forgeable claim.
     const body: Record<string, unknown> = {
+      id,
+      authorId: agentId,
       kind: opts.kind,
       summary: opts.summary,
+      createdAt: new Date().toISOString(),
     };
     if (opts.detail) body.detail = opts.detail;
     if (opts.scope) body.scope = opts.scope;
     if (Array.isArray(opts.target) && opts.target.length > 0) body.targetIds = opts.target;
 
-    const res = await fetch(`${baseUrl}/OrgEvent`, {
-      method: "POST",
+    const res = await fetch(`${baseUrl}/OrgEvent/${id}`, {
+      method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify(body),
     });
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.error(`Error: POST /OrgEvent failed (${res.status}): ${text}`);
+      console.error(`Error: PUT /OrgEvent/${id} failed (${res.status}): ${text}`);
       process.exit(1);
     }
 
     const data = await res.json().catch(() => null);
     const targets = Array.isArray(opts.target) && opts.target.length > 0 ? ` → ${opts.target.join(", ")}` : "";
     console.log(`✓ OrgEvent published as '${agentId}': kind=${opts.kind}${targets}`);
-    if (data?.id) console.log(`  id: ${data.id}`);
+    console.log(`  id: ${data?.id ?? id}`);
+  });
+
+// ─── flair attention ─────────────────────────────────────────────────────────
+//
+// Entity-scoped attention query (flair#677). "What's touching entity E in the
+// last N days?" — a unified, grouped-by-source view across Memory,
+// Relationship, WorkspaceState, Presence, and OrgEvent (POST /AttentionQuery,
+// resources/AttentionQuery.ts). Read-only; signed the same way `flair search`
+// signs POST /SemanticSearch. Entity must be a vocabulary string (exact
+// type:value match — resources/entity-vocab.ts); the server 400s anything
+// malformed.
+
+/** Render one attention-result row for its source group — human-readable mode only. */
+function describeAttentionRow(source: string, r: any): string {
+  const dim = (s: string) => render.wrap(render.c.dim, s);
+  const day = (iso: unknown) => (typeof iso === "string" ? iso.slice(0, 10) : "");
+  switch (source) {
+    case "memory":
+      return `${r.content ? String(r.content).replace(/\s+/g, " ").slice(0, 100) : "(no content)"} ${dim(`[${r.agentId} · ${day(r.createdAt)}]`)}`;
+    case "relationship":
+      return `${r.subject} —${r.predicate}→ ${r.object} ${dim(`[${r.agentId} · ${day(r.createdAt)}]`)}`;
+    case "workspaceState":
+      return `${r.summary ?? r.ref} ${dim(`[${r.agentId}${r.phase ? ` · ${r.phase}` : ""} · ${String(r.timestamp ?? "").slice(0, 16).replace("T", " ")}]`)}`;
+    case "presence":
+      return `${r.currentTask} ${dim(`[${r.displayName ?? r.agentId}${r.activity ? ` · ${r.activity}` : ""}]`)}`;
+    case "orgEvent":
+      return `${r.summary} ${dim(`[${r.authorId} · ${r.kind} · ${day(r.createdAt)}]`)}`;
+    default:
+      return JSON.stringify(r);
+  }
+}
+
+program
+  .command("attention <entity>")
+  .description("What's touching entity E in the last N days? Grouped view across memory/relationship/workspace/presence/orgevent (POST /AttentionQuery)")
+  .option("--days <n>", "Window size in days (default 7)")
+  .option("--agent <id>", "Agent ID (or set FLAIR_AGENT_ID env)")
+  .option("--key <path>", "Ed25519 private key path")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
+  .option("--json", "Output raw JSON")
+  .action(async (entity, opts) => {
+    try {
+      const agentId = resolveAgentIdOrEnv(opts);
+      if (!agentId) {
+        console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
+        process.exit(2);
+      }
+
+      const payload: Record<string, unknown> = { entity };
+      if (opts.days !== undefined) {
+        const n = Number.parseInt(opts.days, 10);
+        if (!Number.isFinite(n) || n <= 0) {
+          console.error("error: --days must be a positive integer");
+          process.exit(2);
+        }
+        payload.days = n;
+      }
+
+      const baseUrl = resolveBaseUrl(opts);
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      const keyPath = opts.key || resolveKeyPath(agentId);
+      if (keyPath) {
+        headers["authorization"] = buildEd25519Auth(agentId, "POST", "/AttentionQuery", keyPath);
+      }
+
+      const res = await fetch(`${baseUrl}/AttentionQuery`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+      const result = text ? JSON.parse(text) : {};
+
+      const mode = render.resolveOutputMode(opts);
+      if (mode === "json") {
+        console.log(render.asJSON(result));
+        return;
+      }
+
+      const groups: Record<string, any[]> = result.groups ?? {};
+      const counts: Record<string, number> = result.counts ?? {};
+      console.log(
+        `${render.icons.info} Attention: ${render.wrap(render.c.bold, result.entity ?? entity)} ` +
+        `${render.wrap(render.c.dim, `(last ${result.windowDays ?? payload.days ?? 7}d, since ${result.since ?? "?"})`)}`,
+      );
+      console.log(render.wrap(render.c.dim, `total: ${counts.total ?? 0}`));
+      console.log();
+
+      const sections: Array<{ key: string; label: string }> = [
+        { key: "memory", label: "Memory" },
+        { key: "relationship", label: "Relationship" },
+        { key: "workspaceState", label: "Workspace" },
+        { key: "presence", label: "Presence" },
+        { key: "orgEvent", label: "OrgEvent" },
+      ];
+
+      for (const { key, label } of sections) {
+        const rows: any[] = Array.isArray(groups[key]) ? groups[key] : [];
+        console.log(`${render.wrap(render.c.bold, label)} ${render.wrap(render.c.dim, `(${rows.length})`)}`);
+        if (rows.length === 0) {
+          console.log(`  ${render.wrap(render.c.dim, "—")}`);
+          console.log();
+          continue;
+        }
+        for (const r of rows) {
+          console.log(`  ${describeAttentionRow(key, r)}`);
+        }
+        console.log();
+      }
+    } catch (err: any) {
+      console.error(`${render.icons.error} Attention query failed: ${err.message}`);
+      process.exit(1);
+    }
   });
 
 // Parse argv and run the CLI. Exported so the CommonJS preflight shim

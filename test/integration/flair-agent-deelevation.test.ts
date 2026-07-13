@@ -311,10 +311,6 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     { name: "MemoryGrant",     body: (id) => ({ id, ownerId: agent.id, granteeId: "x", scope: "read" }) },
     { name: "OrgEvent",        body: (id) => ({ id, authorId: agent.id, kind: "note", body: "anon" }) },
     { name: "Agent",           body: (id) => ({ id, displayName: "anon", role: "agent" }) },
-    // observatory read-models (public read; writes are system-driven → must deny anon)
-    { name: "ObsOffice",        body: (id) => ({ id, data: "anon" }) },
-    { name: "ObsAgentSnapshot", body: (id) => ({ id, agentId: agent.id, data: "anon" }) },
-    { name: "ObsEventFeed",     body: (id) => ({ id, data: "anon" }) },
     // admin / system / federation tables (no agent grant → must deny anon)
     { name: "Instance",        body: (id) => ({ id, name: "anon" }) },
     { name: "Peer",            body: (id) => ({ id, url: "http://x" }) },

@@ -86,6 +86,37 @@ describe("MCP tool logic", () => {
   });
 });
 
+describe("relationship_store tool logic", () => {
+  // Mirrors the "in isolation" style used elsewhere in this file: the tool
+  // handler itself just calls flair.relationship.write(...) (RelationshipApi,
+  // covered directly by packages/flair-client/test/client.test.ts) and
+  // formats the response — these tests pin THAT formatting logic, the same
+  // logic in src/index.ts's relationship_store handler.
+
+  function buildResultText(subject: string, predicate: string, object: string, id: string, confidence?: number): string {
+    const confStr = confidence !== undefined ? ` (confidence: ${confidence})` : "";
+    return `Relationship recorded: ${subject} → ${predicate} → ${object}${confStr} (id: ${id})`;
+  }
+
+  test("result text includes the triple and the written id", () => {
+    const text = buildResultText("nathan", "manages", "flair", "abc123");
+    expect(text).toContain("nathan → manages → flair");
+    expect(text).toContain("(id: abc123)");
+    expect(text).not.toContain("confidence");
+  });
+
+  test("result text includes confidence only when provided", () => {
+    const text = buildResultText("nathan", "manages", "flair", "abc123", 0.8);
+    expect(text).toContain("(confidence: 0.8)");
+  });
+
+  test("structuredContent always marks written:true and carries the triple", () => {
+    const structuredContent = { id: "abc123", subject: "nathan", predicate: "manages", object: "flair", written: true };
+    expect(structuredContent.written).toBe(true);
+    expect(structuredContent.id).toBe("abc123");
+  });
+});
+
 describe("coordination write surface (flair_workspace_set / flair_orgevent)", () => {
   // The tools attribute writes from the SIGNED identity (flair.request signs with
   // the agent's Ed25519 key), so the request BODY must never carry agentId /

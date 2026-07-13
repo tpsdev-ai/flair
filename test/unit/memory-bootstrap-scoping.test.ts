@@ -25,20 +25,30 @@ delete (process.env as any).FLAIR_PUBLIC;
 
 // Deterministic task-relevance scoring without a real embedding model — same
 // technique as test/unit/memory-integrity.test.ts (constant vector → cosine
-// 1.0 between any two records using it), sized to clear MemoryBootstrap.ts's
-// OWN scored-path candidate filter (`m.embedding?.length > 100` — a record
-// with a short/absent embedding is never even considered "task-relevant").
-// MemoryBootstrap.ts's task-relevant path calls getEmbedding(currentTask) for
-// the query vector and reads `record.embedding` directly off whatever's in
-// the mock store, so the SAME 128-length vector on both sides deterministically
-// clears both the length gate and the `score > 0.3` threshold (dot product
+// 1.0 between any two records using it). MemoryBootstrap.ts's task-relevant
+// path (flair-bootstrap-scale-fix: now routed through the shared
+// retrieveCandidates() core, resources/semantic-retrieval-core.ts) calls
+// getEmbedding(currentTask) for the query vector; this mock's Memory.search()
+// never annotates $distance (no real HNSW sort), so retrieveCandidates()
+// falls back to its point-lookup cosine path (Memory.get(), also mocked
+// above), reading `record.embedding` directly off whatever's in the mock
+// store. The SAME 128-length vector on both sides deterministically clears
+// the `_score > 0.3` (TASK_RELEVANCE_FLOOR) threshold (cosine similarity
 // with itself = 1). memory-integrity.test.ts's own mock of this module only
 // needs "a constant vector returned every call" (never compares its literal
 // values against anything) — length differing between the two files' mocks
 // doesn't matter to either.
 const FAKE_EMBEDDING = [1, ...Array(127).fill(0)];
+// flair#504 Phase 2: records the inputType every getEmbedding() call
+// receives, so a dedicated test can pin that MemoryBootstrap.ts's
+// task-relevance query embed passes 'query' (currentTask is a search query
+// against stored memories, never stored content itself).
+let embedInputTypeCalls: (string | undefined)[] = [];
 mock.module("../../resources/embeddings-provider.ts", () => ({
-  getEmbedding: async (_text: string) => FAKE_EMBEDDING,
+  getEmbedding: async (_text: string, inputType?: string) => {
+    embedInputTypeCalls.push(inputType);
+    return FAKE_EMBEDDING;
+  },
   getModelId: () => "mock-embedding-model",
   getMode: () => "local",
 }));
@@ -74,7 +84,18 @@ function emptyGen() {
 
 const databasesMock = {
   flair: {
-    Memory: { search: (query: any) => memorySearchGen(query) },
+    // `get` added for the flair-bootstrap-scale-fix refactor: bootstrap's
+    // task-relevant candidate pool now goes through the SAME
+    // retrieveCandidates() core SemanticSearch.ts uses (resources/
+    // semantic-retrieval-core.ts), which point-looks-up a record by id via
+    // Memory.get() whenever a search result's $distance is undefined — this
+    // mock's memorySearchGen() never annotates $distance (no real HNSW sort),
+    // so every task-relevant test below exercises that fallback. Same
+    // pattern as test/unit/semantic-search-scoping.test.ts's mock.
+    Memory: {
+      search: (query: any) => memorySearchGen(query),
+      get: async (id: any) => memoryStore.get(typeof id === "string" ? id : id?.id) ?? null,
+    },
     MemoryGrant: {
       search: (query: any) => {
         const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
@@ -109,6 +130,7 @@ const agentCtx = (agentId: string, isAdmin = false) => ({ tpsAgent: agentId, tps
 function reset() {
   memoryStore = new Map();
   memoryGrants = [];
+  embedInputTypeCalls = [];
 }
 
 // formatMemory() (resources/MemoryBootstrap.ts) renders each memory's content
@@ -116,10 +138,19 @@ function reset() {
 // proxy for "was this memory actually surfaced" without reaching into internal
 // state. NOTE (#550 design boundary): for a TEAMMATE (grant-visible) record
 // that proxy holds ONLY when the record is task-relevant — the permanent /
-// recent / predicted sections are own-only, so a teammate record entering
-// read-scope (`memoriesAvailable`) is decoupled from whether it renders. The
-// read-scope tests below therefore assert `memoriesAvailable` for teammate
-// records, and rendering is covered by the #550 describe block further down.
+// recent / predicted sections are own-only, so a teammate record being
+// READABLE is decoupled from whether it renders (own-context sections never
+// blend in a teammate's record regardless of read-scope). Rendering is
+// covered by the #550 describe block further down.
+//
+// `memoriesAvailable` (flair-bootstrap-scale-fix): no longer a read-scope
+// proxy — it's now the OWN-scoped count (agentId==self, a cheap indexed
+// seek), replacing the org-wide "own + every readable cross-agent record"
+// exact count (computing that exactly WAS the scan this PR removes). The
+// tests below assert it as "how many of MY OWN records are available",
+// not as a stand-in for whether a cross-agent record is in read-scope —
+// that read-scope proof lives in the dedicated e2e coverage
+// (test/integration/memory-visibility-scoping-e2e.test.ts).
 
 describe("MemoryBootstrap.post() — centralized read-scoping", () => {
   it("read-scope includes the caller's own memories PLUS any other agent's non-private memory — no grant required (within-org-read-open)", async () => {
@@ -138,7 +169,12 @@ describe("MemoryBootstrap.post() — centralized read-scoping", () => {
     // scope at all.
     expect(res.context).not.toContain("NOT-MINE-BUT-ORG-OPEN-FINDING");
     expect(res.context).not.toContain("NOT-MINE-PRIVATE-FINDING");
-    expect(res.memoriesAvailable).toBe(2);
+    // flair-bootstrap-scale-fix: `memoriesAvailable` is now the OWN-scoped
+    // count (agentId==self, a cheap indexed seek), not the org-wide
+    // scope-wide count — computing the scope-wide figure exactly WAS the
+    // scan this PR removes. Only m1 (own) counts; m2 (cross-agent, in
+    // read-scope but not own) no longer inflates this number.
+    expect(res.memoriesAvailable).toBe(1);
   });
 
   it("a grant-holder's read-scope now includes the owner's SHARED memory (the flair#550 gap this closes) — but it does NOT bleed into own-context sections", async () => {
@@ -148,9 +184,11 @@ describe("MemoryBootstrap.post() — centralized read-scoping", () => {
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
     const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false }); // no currentTask
-    // The grant-gated model: the SHARED memory is in the reader's read-scope ...
-    expect(res.memoriesAvailable).toBe(1);
-    // ... but the #550 design boundary keeps it out of the reader's OWN
+    // The SHARED memory is readable (open-within-org) but it's the OWNER's,
+    // not the reader's — `memoriesAvailable` is now own-scoped
+    // (flair-bootstrap-scale-fix), and the reader owns zero records here.
+    expect(res.memoriesAvailable).toBe(0);
+    // ... and the #550 design boundary ALSO keeps it out of the reader's OWN
     // permanent/recent/predicted view — with no currentTask, its only surface
     // (the task-relevant "Teammate findings" section) is inactive, so it
     // renders nowhere. This is the non-bleed guarantee.
@@ -175,23 +213,31 @@ describe("MemoryBootstrap.post() — centralized read-scoping", () => {
 
     const b = makeBootstrap(agentCtx("agent-grantee"));
     const res: any = await b.post({ agentId: "agent-grantee", includeSoul: false });
-    // The no-visibility-field invariant lives at the READ-SCOPE layer: an absent visibility
-    // field reads as shared, so the legacy record enters the grantee's scope
-    // (vs. a private record, which would not — see the private-exclusion test's
-    // memoriesAvailable === 0). Rendering is still own-only, so with no
-    // currentTask it doesn't bleed into the reader's own-context view.
-    expect(res.memoriesAvailable).toBe(1);
+    // The no-visibility-field invariant lives at the READ-SCOPE layer: an absent
+    // visibility field reads as shared, so the legacy record is READABLE by
+    // the grantee (see the dedicated read-scope e2e coverage in
+    // test/integration/memory-visibility-scoping-e2e.test.ts for the
+    // read-path proof). `memoriesAvailable` (flair-bootstrap-scale-fix) is
+    // now own-scoped, though, and the reader owns zero records here — the
+    // legacy record is the OWNER's, not the reader's, so it doesn't count.
+    // Rendering is still own-only, so with no currentTask it doesn't bleed
+    // into the reader's own-context view either.
+    expect(res.memoriesAvailable).toBe(0);
     expect(res.context).not.toContain("LEGACY-PRE-MIGRATION-FINDING");
   });
 
-  it("within-org-read-open: an ungranted owner's SHARED memory IS now in read-scope (memoriesAvailable), though it still doesn't bleed into own-context sections without a currentTask", async () => {
+  it("within-org-read-open: an ungranted owner's SHARED memory is readable, though it still doesn't bleed into own-context sections without a currentTask", async () => {
     reset();
     memoryStore.set("shared-no-grant", { id: "shared-no-grant", agentId: "agent-owner", content: "SHARED-BUT-UNGRANTED", visibility: "shared", durability: "permanent", createdAt: "2026-01-01T00:00:00Z" });
 
     const b = makeBootstrap(agentCtx("agent-stranger"));
     const res: any = await b.post({ agentId: "agent-stranger", includeSoul: false });
     expect(res.context).not.toContain("SHARED-BUT-UNGRANTED");
-    expect(res.memoriesAvailable).toBe(1);
+    // `memoriesAvailable` is own-scoped (flair-bootstrap-scale-fix) — the
+    // reader (agent-stranger) owns zero records; the shared record is the
+    // OWNER's. The read-scope proof itself (that this record is reachable
+    // at all) lives in the dedicated e2e coverage, not this cosmetic count.
+    expect(res.memoriesAvailable).toBe(0);
   });
 
   it("private-exclusion still holds without a grant: a stranger's read-scope never includes another agent's PRIVATE memory", async () => {
@@ -260,6 +306,12 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
       agentId: "agent-grantee", includeSoul: false, currentTask: "investigate the thing",
     });
     expect(res.context).toContain("[via agent-owner] TEAMMATE-ATTR-FINDING");
+
+    // flair#504 Phase 2: currentTask is a search QUERY against stored
+    // memories, never stored content — MemoryBootstrap.ts's task-relevance
+    // embed call site must pass 'query'.
+    expect(embedInputTypeCalls.length).toBeGreaterThan(0);
+    expect(embedInputTypeCalls.every((t) => t === "query")).toBe(true);
   });
 
   it("the caller's own memory renders WITHOUT any [via ...] attribution (unchanged)", async () => {
@@ -469,7 +521,9 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     expect(res.context).toContain("## Core Principles");
     expect(res.context).toContain("MY-OWN-PERMANENT-RULE");         // own → renders
     expect(res.context).not.toContain("TEAMMATE-PERMANENT-RULE");   // teammate → no bleed
-    expect(res.memoriesAvailable).toBe(2);                          // both in read-scope
+    // `memoriesAvailable` is own-scoped (flair-bootstrap-scale-fix) — only
+    // own-perm counts; teammate-perm is the OWNER's, readable but not owned.
+    expect(res.memoriesAvailable).toBe(1);
   });
 
   it("a teammate's grant-visible RECENT memory does NOT appear in the reader's Recent Context section", async () => {

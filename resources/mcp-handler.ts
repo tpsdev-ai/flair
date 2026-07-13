@@ -1,7 +1,7 @@
 /**
  * mcp-handler.ts — the Model-2 custom MCP protocol handler.
  *
- * A minimal in-process MCP (JSON-RPC 2.0) handler serving the 9 curated flair
+ * A minimal in-process MCP (JSON-RPC 2.0) handler serving the 12 curated flair
  * tools over Streamable HTTP. It is wrapped by `@harperfast/oauth`'s
  * `withMCPAuth` (see mcp-oauth.ts), which fails closed on any missing/invalid
  * Bearer token BEFORE this handler runs and, on success, sets
