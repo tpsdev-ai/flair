@@ -5006,13 +5006,64 @@ rem
     }
   });
 
+// ─── flair rem rapid — pure helpers ──────────────────────────────────────────
+// Extracted for testability, same pattern as validatePromoteOpts /
+// decideCandidateAction above: the action callback below spawns api() +
+// process.exit, which makes it high-effort/low-value to drive directly;
+// these two functions are the actual decision logic.
+
+/** One staged-candidate summary line: `[id] claim, truncated to ~80 chars`. */
+export function formatCandidateLine(candidate: { id?: string; claim?: string }, maxClaimLen = 80): string {
+  const claim = candidate.claim ?? "";
+  const truncated = claim.length > maxClaimLen ? `${claim.slice(0, maxClaimLen)}…` : claim;
+  return `  [${candidate.id ?? "?"}] ${truncated}`;
+}
+
+/**
+ * Classifies a thrown /ReflectMemories execute-mode error for CLI display.
+ * `api()` throws `Error(responseBodyText)` for non-2xx responses (see api()
+ * above) — the two execute-mode failure bodies are:
+ *   503 no-backend:        { error: "No generative backend configured..." }
+ *   502 distillation_failed: { error: "distillation_failed", detail: "..." }
+ * Any other shape (network errors, the 400/403 actor-resolution errors
+ * prompt mode shares) falls back to "other" — printed as a plain message,
+ * no docs pointer or retry hint attached since neither applies.
+ */
+export function describeReflectError(message: string): { kind: "no-backend" | "distillation-failed" | "other"; text: string } {
+  try {
+    const parsed = JSON.parse(message);
+    if (parsed && typeof parsed === "object") {
+      if (parsed.error === "distillation_failed") {
+        return { kind: "distillation-failed", text: String(parsed.detail ?? parsed.error) };
+      }
+      if (typeof parsed.error === "string" && parsed.error.startsWith("No generative backend configured")) {
+        return { kind: "no-backend", text: parsed.error };
+      }
+      if (typeof parsed.error === "string") {
+        return { kind: "other", text: parsed.error };
+      }
+    }
+  } catch {
+    // Not a JSON error body — network error, etc. Pass the raw message through.
+  }
+  return { kind: "other", text: message };
+}
+
+// ─── flair rem rapid ──────────────────────────────────────────────────────────
+// Executes by default (specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md § 3C,
+// issue #707): distills server-side via /ReflectMemories execute:true and
+// stages MemoryCandidate rows, printing a staged-candidate summary. --prompt-only
+// preserves the pre-#710 handoff behavior byte-for-byte, for the bring-your-
+// own-model workflow.
+
 rem
   .command("rapid")
-  .description("REM — reflection/learning: generate a structured LLM reflection prompt")
+  .description("REM — reflection/learning: distill recent memories into staged candidates")
   .option("--port <port>", "Harper HTTP port")
   .option("--agent <id>", "Agent ID (or FLAIR_AGENT_ID env)")
   .option("--focus <type>", "lessons_learned | patterns | decisions | errors", "lessons_learned")
   .option("--since <date>", "ISO timestamp lower bound (default: 24h ago)")
+  .option("--prompt-only", "Return the reflection prompt instead of executing (pre-#710 handoff behavior)")
   .action(async (opts) => {
     const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
     if (!agentId) {
@@ -5023,32 +5074,62 @@ rem
     console.log(`\n-- rem rapid --`);
     console.log(`Agent: ${agentId}  Focus: ${opts.focus}`);
 
-    try {
-      const body: Record<string, any> = {
-        agentId,
-        focus: opts.focus,
-      };
-      if (opts.since) body.since = opts.since;
+    const body: Record<string, any> = {
+      agentId,
+      focus: opts.focus,
+    };
+    if (opts.since) body.since = opts.since;
 
-      const result = await api("POST", "/ReflectMemories", body);
+    if (opts.promptOnly) {
+      // --prompt-only: EXACT pre-#710 behavior — prompt-return mode, unchanged.
+      try {
+        const result = await api("POST", "/ReflectMemories", body);
 
-      if (result.error) {
-        console.error(`Reflection error: ${result.error}`);
+        if (result.error) {
+          console.error(`Reflection error: ${result.error}`);
+          process.exit(1);
+        }
+
+        console.log(`\nSource memories: ${result.count ?? 0}`);
+        if (result.suggestedTags?.length) {
+          console.log(`Tags: ${result.suggestedTags.join(", ")}`);
+        }
+
+        console.log("\n--- Reflection Prompt ---");
+        console.log(result.prompt ?? "(no prompt returned)");
+        console.log("--- End Prompt ---\n");
+        console.log("Feed the prompt above to your LLM, then write insights back with:");
+        console.log("  flair memory add --agent <id> --content <insight> --durability persistent --derived-from <source-ids>");
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
         process.exit(1);
       }
+      return;
+    }
 
-      console.log(`\nSource memories: ${result.count ?? 0}`);
-      if (result.suggestedTags?.length) {
-        console.log(`Tags: ${result.suggestedTags.join(", ")}`);
+    // Default: execute mode — distill server-side, stage candidates.
+    try {
+      const result = await api("POST", "/ReflectMemories", { ...body, execute: true });
+      const candidates: any[] = Array.isArray(result.candidates) ? result.candidates : [];
+
+      console.log(`\nModel:      ${result.model ?? "?"}`);
+      console.log(`Candidates: ${result.count ?? candidates.length}`);
+      if (candidates.length > 0) {
+        console.log();
+        for (const c of candidates) console.log(formatCandidateLine(c));
       }
-
-      console.log("\n--- Reflection Prompt ---");
-      console.log(result.prompt ?? "(no prompt returned)");
-      console.log("--- End Prompt ---\n");
-      console.log("Feed the prompt above to your LLM, then write insights back with:");
-      console.log("  flair memory add --agent <id> --content <insight> --durability persistent --derived-from <source-ids>");
+      console.log(`\nreview: flair rem candidates / flair rem promote <id>`);
     } catch (err: any) {
-      console.error(`Error: ${err.message}`);
+      const desc = describeReflectError(err.message ?? String(err));
+      if (desc.kind === "no-backend") {
+        console.error(`Reflection error: ${desc.text}`);
+        console.error(`See docs/rem.md#configuration for how to point Flair at a models: backend.`);
+      } else if (desc.kind === "distillation-failed") {
+        console.error(`Reflection error: distillation failed — ${desc.text}`);
+        console.error(`Retry, or run with --prompt-only for the manual handoff.`);
+      } else {
+        console.error(`Error: ${desc.text}`);
+      }
       process.exit(1);
     }
   });
@@ -5585,6 +5666,11 @@ remNightly
       if (typeof row.archived === "number" || typeof row.expired === "number") {
         console.log(`Archived:   ${row.archived ?? "—"}`);
         console.log(`Expired:    ${row.expired ?? "—"}`);
+      }
+      // row.candidates populates when step 5 (distillation) was attempted
+      // this cycle — see src/rem/runner.ts. Absent when dry-run skipped it.
+      if (row.candidates) {
+        console.log(`Staged:     ${row.candidates.length} candidate${row.candidates.length === 1 ? "" : "s"}`);
       }
       console.log(`Duration:   ${row.durationMs}ms`);
       if (row.errors.length > 0) {

@@ -4,8 +4,12 @@
  * Pure orchestration coverage. No Harper or filesystem state required
  * outside an isolated tmpdir. Tests pause sentinel, env-var pause, dry-run
  * (skip write but still log), happy path (writes snapshot + log row),
- * api failure (fail-stops-cycle + error in log row), and soul shape
- * coercion (single row vs multi row).
+ * api failure (fail-stops-cycle + error in log row), soul shape coercion
+ * (single row vs multi row), and step 5 distillation (specs/
+ * FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md § 3B): success populates
+ * `candidates` and flips `slice` to "2"; failure is recorded in `errors[]`
+ * without failing the cycle; dry-run skips the /ReflectMemories call
+ * entirely and `slice` stays "2-maintenance".
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
@@ -62,6 +66,7 @@ function baseOpts(overrides: Partial<RunnerOpts> = {}): RunnerOpts {
       "GET:/Soul": () => [{ id: "soul-test-agent", agentId: "test-agent" }],
       "POST:/MemoryCandidate/search_by_conditions": () => [],
       "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+      "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
     }),
     snapshotRoot,
     logPath,
@@ -104,8 +109,10 @@ describe("happy path", () => {
     expect(r.logRow.soulCount).toBe(1);
     expect(r.logRow.pendingCandidates).toBe(0);
     expect(r.logRow.errors).toEqual([]);
-    // With maintenance wired in this PR, baseline cycles are now slice-2-maintenance.
-    expect(r.logRow.slice).toBe("2-maintenance");
+    // With distillation wired in this PR, baseline (non-dry-run) cycles are
+    // now full slice-2 — distillation was attempted (see rem-runner.test.ts
+    // "step 5: distillation" below for the populated-candidates case).
+    expect(r.logRow.slice).toBe("2");
 
     // Log file contains exactly one row.
     const rows = readLogRows();
@@ -123,6 +130,7 @@ describe("happy path", () => {
           { id: "c1" }, { id: "c2" }, { id: "c3" },
         ],
         "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
       }),
     }));
     expect(r.logRow.pendingCandidates).toBe(3);
@@ -135,6 +143,7 @@ describe("happy path", () => {
         "GET:/Soul": () => ({ items: [{ id: "s1" }] }),
         "POST:/MemoryCandidate/search_by_conditions": () => [],
         "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
       }),
     }));
     expect(r.status).toBe("completed");
@@ -149,12 +158,14 @@ describe("happy path", () => {
         "GET:/Soul": () => [sampleSoul],
         "POST:/MemoryCandidate/search_by_conditions": () => [],
         "POST:/MemoryMaintenance": () => ({ expired: 5, archived: 12, total: 200, errors: 0 }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
       }),
     }));
     expect(r.status).toBe("completed");
     expect(r.logRow.archived).toBe(12);
     expect(r.logRow.expired).toBe(5);
-    expect(r.logRow.slice).toBe("2-maintenance");
+    // Distillation was attempted this cycle (not dry-run) — slice is "2".
+    expect(r.logRow.slice).toBe("2");
   });
 
   it("forwards dryRun to /MemoryMaintenance so counts are accurate without mutation", async () => {
@@ -179,6 +190,88 @@ describe("happy path", () => {
   });
 });
 
+describe("step 5: distillation", () => {
+  it("success — audit row slice is '2', candidates lists the staged ids", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+        "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        "POST:/ReflectMemories": () => ({
+          candidates: [
+            { id: "cand_aaa", claim: "first insight" },
+            { id: "cand_bbb", claim: "second insight" },
+          ],
+          count: 2,
+          model: "llama3",
+        }),
+      }),
+    }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.slice).toBe("2");
+    expect(r.logRow.candidates).toEqual(["cand_aaa", "cand_bbb"]);
+    expect(r.logRow.errors).toEqual([]);
+  });
+
+  it("distillation failure is recorded, not fatal — maintenance results stand, status completed", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+        "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => ({ expired: 5, archived: 12, total: 200, errors: 0 }),
+        "POST:/ReflectMemories": () => { throw new Error("fetch failed: connection reset"); },
+      }),
+    }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.slice).toBe("2");
+    // Maintenance results from before the failed distillation call stand.
+    expect(r.logRow.archived).toBe(12);
+    expect(r.logRow.expired).toBe(5);
+    expect(r.logRow.candidates).toBeUndefined();
+    expect(r.logRow.errors.length).toBe(1);
+    expect(r.logRow.errors[0]).toContain("distillation:");
+    expect(r.logRow.errors[0]).toContain("fetch failed: connection reset");
+  });
+
+  it("no-backend (503) failure is recorded distinctly — structured message, not raw JSON", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+        "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        // Mirrors api()'s throw shape (src/cli.ts) for a 503 response body.
+        "POST:/ReflectMemories": () => {
+          throw new Error(JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }));
+        },
+      }),
+    }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.errors.length).toBe(1);
+    expect(r.logRow.errors[0]).toBe("distillation: No generative backend configured. See the models configuration docs.");
+  });
+
+  it("distillation_failed (502) failure surfaces the detail, distinct from the no-backend case", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+        "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        // Mirrors api()'s throw shape (src/cli.ts) for a 502 response body.
+        "POST:/ReflectMemories": () => {
+          throw new Error(JSON.stringify({ error: "distillation_failed", detail: "model output did not validate after one retry" }));
+        },
+      }),
+    }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.errors.length).toBe(1);
+    expect(r.logRow.errors[0]).toBe("distillation: distillation_failed: model output did not validate after one retry");
+  });
+});
+
 describe("dry-run", () => {
   it("logs but does not write a snapshot tarball", async () => {
     const r = await runNightlyCycle(baseOpts({ dryRun: true }));
@@ -190,6 +283,32 @@ describe("dry-run", () => {
     expect(rows[0].status).toBe("dry-run");
     expect(rows[0].dryRun).toBe(true);
     expect(rows[0].memoryCount).toBe(2);
+  });
+
+  it("skips the /ReflectMemories execute call entirely — staging + token spend are side effects", async () => {
+    const calls: string[] = [];
+    const r = await runNightlyCycle(baseOpts({
+      dryRun: true,
+      apiCall: async (method, path, body) => {
+        calls.push(`${method}:${path.split("?")[0]}`);
+        if (method === "POST" && path === "/MemoryMaintenance") {
+          expect((body as any)?.dryRun).toBe(true);
+          return { expired: 0, archived: 0, total: 0, errors: 0 };
+        }
+        if (method === "GET" && path.startsWith("/Memory?")) return sampleMemories;
+        if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
+        if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return [];
+        if (method === "POST" && path === "/ReflectMemories") {
+          throw new Error("must not be called in dry-run mode");
+        }
+        throw new Error(`unexpected api: ${method}:${path}`);
+      },
+    }));
+    expect(r.status).toBe("dry-run");
+    expect(calls).not.toContain("POST:/ReflectMemories");
+    // Distillation was skipped (not attempted) — slice stays "2-maintenance".
+    expect(r.logRow.slice).toBe("2-maintenance");
+    expect(r.logRow.candidates).toBeUndefined();
   });
 });
 
@@ -231,6 +350,7 @@ describe("failure modes", () => {
         "GET:/Soul": () => [],
         "POST:/MemoryCandidate/search_by_conditions": () => { throw new Error("candidate table missing"); },
         "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
       }),
     }));
     // Candidate count is a non-fatal signal — the cycle still completes.

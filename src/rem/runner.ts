@@ -5,22 +5,32 @@
  *   1. Pre-flight: check pause sentinel / FLAIR_REM_PAUSE env. Exit clean if paused.
  *   2. Snapshot agent state (memory + soul) to ~/.flair/snapshots/<agent>/.
  *   3. Maintenance — delegate to /MemoryMaintenance (same code path `flair rem light` uses).
- *   4. (slice-2 next) trust-tier filter on input memories.
- *   5. (slice-2 next) distillation — call /ReflectMemories, persist candidates.
+ *   4. Trust-tier filter on input memories — permanently deferred (see below).
+ *   5. Distillation — call /ReflectMemories with execute:true, persist staged
+ *      candidate ids to the audit row.
  *   6. Append a row to ~/.flair/logs/rem-nightly.jsonl.
  *
  * Status today:
- *   - Steps 1, 2, 6 shipped in slice-1 PR-1 (#414).
- *   - Step 3 (maintenance) ships in this PR — fills `archived`/`expired` in
- *     the audit row.
- *   - Steps 4, 5 are slice-2 follow-ups; require an in-process distillation
- *     LLM path (today `/ReflectMemories` returns a prompt for human/agent
- *     consumption, not server-side candidate generation).
+ *   - Steps 1, 2 shipped in slice-1 PR-1 (#414).
+ *   - Step 3 (maintenance) shipped in a prior slice-2 PR — fills
+ *     `archived`/`expired` in the audit row.
+ *   - Step 4: per specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md § 3B,
+ *     "Deferred from parent § 4 step 4" — trust tiers aren't derivable yet
+ *     (that's the emergent-trust arc). The input filter stays as today (own
+ *     agent, non-archived, non-permanent, scope window); the safety net for
+ *     un-tiered input is structural — candidates are staged, never
+ *     auto-promoted.
+ *   - Step 5 (distillation) ships in this PR: calls `/ReflectMemories` with
+ *     `execute: true` after maintenance succeeds. `dryRun` skips the call
+ *     entirely (staging rows + spending model tokens are side effects).
+ *   - Step 6 shipped in slice-1 PR-1.
  *
  * The audit row's `slice` field tells readers which steps populated which
  * counts: `slice: "1"` rows have `archived`/`expired` undefined; `slice:
- * "2-maintenance"` rows populate them; future slice-2 rows will populate
- * `consolidated` and `candidates`.
+ * "2-maintenance"` rows populate them but distillation didn't run this cycle
+ * (dry-run skip); `slice: "2"` rows had distillation attempted — check
+ * `candidates` for staged ids on success, `errors` for a `distillation:`
+ * entry on failure (maintenance results still stand either way).
  *
  * Pure dependency injection so the runner is unit-testable without Harper.
  * The CLI wires the real `apiCall` + `pkgVersion`; tests pass stubs.
@@ -61,8 +71,11 @@ export type RunnerStatus = "paused" | "completed" | "dry-run" | "failed";
  * from cycles with maintenance / distillation populated:
  *
  *   "1"             — snapshot + log only (slice-1, before #416)
- *   "2-maintenance" — snapshot + /MemoryMaintenance (this PR, slice-2 PR-3)
- *   "2"             — full slice-2 (adds /ReflectMemories distillation + replay)
+ *   "2-maintenance" — snapshot + /MemoryMaintenance, distillation not
+ *                     attempted this cycle (dry-run skip)
+ *   "2"             — distillation attempted (success or failure — see
+ *                     `candidates` / `errors`), per
+ *                     specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md § 3B
  */
 export type RunnerSlice = "1" | "2-maintenance" | "2";
 
@@ -120,6 +133,29 @@ function asArray(raw: unknown): any[] {
     if (Array.isArray(obj.items)) return obj.items as any[];
   }
   return [];
+}
+
+/**
+ * Best-effort extraction of a readable message out of a thrown API error.
+ * `apiCall` implementations (see `api()` in src/cli.ts) throw
+ * `Error(responseBodyText)` for non-2xx HTTP responses — /ReflectMemories's
+ * 503 (no backend configured) and 502 (distillation_failed) bodies are JSON
+ * `{ error: string, detail?: string }`. Unwraps that shape into a single
+ * string so distinct failure modes read distinctly in the audit log instead
+ * of as a raw JSON blob; falls back to the raw input for network errors or
+ * any other shape.
+ */
+function describeApiError(err: unknown): string {
+  const message = typeof err === "string" ? err : (err as any)?.message ?? String(err);
+  try {
+    const parsed = JSON.parse(message);
+    if (parsed && typeof parsed === "object" && typeof parsed.error === "string") {
+      return parsed.detail ? `${parsed.error}: ${parsed.detail}` : parsed.error;
+    }
+  } catch {
+    // Not a JSON error body — network error, plain string, etc.
+  }
+  return message;
 }
 
 /**
@@ -266,6 +302,42 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     return { status: "failed", logRow: row, snapshotPath };
   }
 
+  // Step 5: distillation — call /ReflectMemories with execute:true, now that
+  // maintenance has succeeded. Per spec § 3B, dryRun skips the call entirely:
+  // staging MemoryCandidate rows and spending model tokens are side effects,
+  // the same way dryRun skips the snapshot write.
+  // When the call IS attempted (success or failure), the audit row's `slice`
+  // flips to "2" — "2-maintenance" is reserved for the dry-run skip case.
+  let candidates: string[] | undefined;
+
+  if (!opts.dryRun) {
+    sliceLabel = "2";
+    try {
+      const reflectRaw = await opts.apiCall("POST", "/ReflectMemories", {
+        agentId: opts.agentId,
+        execute: true,
+      });
+      const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
+      if (obj.error) {
+        // Defensive: a 200 response shouldn't carry { error }, since
+        // MemoryReflect signals failure via HTTP status (503/502) — apiCall
+        // implementations throw for those. Handled the same way regardless.
+        errors.push(`distillation: ${describeApiError(obj.error)}`);
+      } else {
+        const staged = asArray(obj.candidates);
+        candidates = staged
+          .map((c) => (c && typeof c === "object" ? (c as Record<string, unknown>).id : c))
+          .filter((id): id is string => typeof id === "string");
+      }
+    } catch (err: any) {
+      // Distillation failure is recorded, not fatal — maintenance already
+      // succeeded and the cycle's guaranteed steps are done (spec § 3B item
+      // 3). Zero partial candidates is guaranteed server-side (all-or-
+      // nothing staging in /ReflectMemories).
+      errors.push(`distillation: ${describeApiError(err?.message ?? err)}`);
+    }
+  }
+
   // Step 6: log
   const row: RunnerLogRow = {
     ...baseRow,
@@ -278,10 +350,11 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     pendingCandidates,
     archived,
     expired,
+    candidates,
     durationMs: Date.now() - startedMs,
     errors,
-    // `consolidated` and `candidates` populate when slice-2 PR-4 (distillation)
-    // lands; today they remain undefined so the row is honest about what ran.
+    // `consolidated` remains undefined — this runner has no consolidation
+    // step; it's reserved for a future slice that adds one.
   };
   appendLogRow(logPath, row);
   return { status: row.status, logRow: row, snapshotPath };
