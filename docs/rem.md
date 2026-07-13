@@ -22,6 +22,9 @@ models:
 
 No credentials, nothing leaves the box (see the warning below).
 
+> **⚠️ Pick a non-thinking model for the Ollama backend.**
+> Thinking/reasoning models (`qwen3-next`, `deepseek-r1`, and similar) currently return **empty generations** through Harper's Ollama backend: Ollama routes their output into the response's `thinking` field, which the backend doesn't read, so every REM execute run fails closed with `distillation_failed` (no candidates are ever staged — the failure is availability, not correctness). Use a non-thinking model (`llama3.1`, `qwen3-coder-next`, `gemma3`, …) until the upstream backend behavior changes. Tracked in #712.
+
 **Hosted provider** (OpenAI / Anthropic / Bedrock also supported — `backend: openai|anthropic|bedrock`):
 
 ```yaml
