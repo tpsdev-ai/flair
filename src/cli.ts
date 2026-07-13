@@ -39,6 +39,18 @@ import {
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
 import { detectClients, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
 import {
+  resolveAgentKeyPath,
+  loadEd25519PrivateKeyFromFile,
+  signClientAssertion,
+  buildTokenRequestForm,
+  getMcpAccessToken,
+  McpTokenRequestError,
+  defaultMcpClientId,
+  defaultMcpTokenEndpoint,
+  defaultMcpResource,
+  MAX_ASSERTION_LIFETIME_SECONDS,
+} from "./mcp-client-assertion.js";
+import {
   readClientMcpBlock,
   checkClaudeMdBootstrap,
   checkSessionStartHook,
@@ -3047,6 +3059,132 @@ agent
     }
 
     console.log(`\n✅ Agent '${id}' removed successfully`);
+  });
+
+// ─── flair mcp ───────────────────────────────────────────────────────────────
+// Headless agent-auth to a Harper MCP `/mcp` endpoint: RFC 7523
+// client_credentials + private_key_jwt, using the agent's EXISTING Ed25519
+// identity key (no new key material, no browser, no human). The plugin side
+// (HarperFast/oauth, parent issue #159) shipped the full chain in the
+// published 2.2.0 release: assertion verification (#160/PR #165), CIMD-first
+// client resolution (#161/#167), and the client_credentials token-endpoint
+// grant + issuance rate limiting (#170/#171, closing #162/#163). `flair mcp
+// token` signs the assertion and, by default, requests a real access token
+// against the token endpoint; see src/mcp-client-assertion.ts.
+
+const mcp = program.command("mcp").description("MCP client-credentials agent-auth (RFC 7523 private_key_jwt)");
+
+mcp
+  .command("token")
+  .description(
+    "Build + sign an RFC 7523 client_assertion and request an MCP client_credentials " +
+      "access token. Caches the minted token (in-process) and reuses it until " +
+      "near-expiry — use --force-refresh to mint unconditionally.",
+  )
+  .requiredOption("--agent-id <id>", "Agent id — becomes the client_id (iss/sub claims)")
+  .option(
+    "--client-id <url>",
+    "Client ID Metadata Document URL for this agent (defaults to this instance's " +
+      "MCPClientMetadata URL, derived from FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)",
+  )
+  .option(
+    "--token-endpoint <url>",
+    "Token-endpoint URL — becomes the `aud` claim (defaults to this instance's " +
+      "own oauth token endpoint, same env vars)",
+  )
+  .option(
+    "--resource <url>",
+    "RFC 8707 resource indicator for the token request (defaults to this instance's canonical /mcp URI)",
+  )
+  .option("--keys-dir <dir>", "Directory to look for <agentId>.key (else FLAIR_KEY_DIR, ~/.flair/keys, ~/.tps/secrets/flair)")
+  .option("--expires-in <seconds>", `Assertion exp - iat window, seconds (default + hard cap: ${MAX_ASSERTION_LIFETIME_SECONDS})`)
+  .option("--dry-run", "Sign the assertion and print what would be sent, but do not call the token endpoint")
+  .option("--force-refresh", "Mint a fresh token even if a cached, not-near-expiry one exists")
+  .option("--json", "Print machine-readable JSON instead of a human summary")
+  .action(async (opts) => {
+    const agentId: string = opts.agentId;
+    const keyPath = resolveAgentKeyPath(agentId, opts.keysDir);
+    if (!keyPath) {
+      console.error(
+        `Error: no private key found for agent '${agentId}'. Checked --keys-dir, FLAIR_KEY_DIR, ` +
+          `~/.flair/keys, and ~/.tps/secrets/flair.`,
+      );
+      process.exit(1);
+    }
+
+    const clientId: string | undefined = opts.clientId ?? defaultMcpClientId(agentId);
+    if (!clientId) {
+      console.error(
+        "Error: --client-id is required (or set FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL to derive it from " +
+          "this instance's MCPClientMetadata URL).",
+      );
+      process.exit(1);
+    }
+
+    const tokenEndpoint: string | undefined = opts.tokenEndpoint ?? defaultMcpTokenEndpoint();
+    if (!tokenEndpoint) {
+      console.error(
+        "Error: --token-endpoint is required (or set FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL to derive " +
+          "this instance's own oauth token endpoint).",
+      );
+      process.exit(1);
+    }
+
+    const resource: string | undefined = opts.resource ?? defaultMcpResource();
+    const expiresIn = opts.expiresIn ? Number(opts.expiresIn) : undefined;
+
+    let privateKey;
+    try {
+      privateKey = loadEd25519PrivateKeyFromFile(keyPath);
+    } catch (err: any) {
+      console.error(`Error: failed to load private key at ${keyPath}: ${err?.message ?? err}`);
+      process.exit(1);
+    }
+
+    if (opts.dryRun) {
+      const { assertion, claims } = signClientAssertion({
+        clientId,
+        tokenEndpoint,
+        privateKey,
+        expiresInSeconds: expiresIn,
+      });
+      const form = buildTokenRequestForm({ clientId, assertion, resource });
+      if (opts.json) {
+        console.log(JSON.stringify({ assertion, claims, wouldSendForm: form, tokenEndpoint }, null, 2));
+        return;
+      }
+      console.log(`client_assertion (RFC 7523, EdDSA):\n\n${assertion}\n`);
+      console.log(`claims: iss=sub=${claims.iss}  aud=${claims.aud}  exp-iat=${claims.exp - claims.iat}s  jti=${claims.jti}`);
+      console.log(
+        `\n--dry-run: NOT sent. This assertion is the client_assertion value for:\n` +
+          `  POST ${tokenEndpoint}\n  ${JSON.stringify(form, null, 2).split("\n").join("\n  ")}`,
+      );
+      return;
+    }
+
+    try {
+      const token = await getMcpAccessToken({
+        clientId,
+        tokenEndpoint,
+        privateKey,
+        resource,
+        expiresInSeconds: expiresIn,
+        forceRefresh: Boolean(opts.forceRefresh),
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(token, null, 2));
+        return;
+      }
+      console.log(`access_token minted (${token.tokenType}, expires_in=${token.expiresIn}s):\n\n${token.accessToken}`);
+      if (token.scope) console.log(`\nscope: ${token.scope}`);
+    } catch (err: any) {
+      if (err instanceof McpTokenRequestError) {
+        console.error(`Error: token request failed (HTTP ${err.status}${err.error ? ` ${err.error}` : ""}): ${err.message}`);
+      } else {
+        console.error(`Error: token request failed: ${err?.message ?? err}`);
+      }
+      process.exit(1);
+    }
   });
 
 // ─── flair principal ─────────────────────────────────────────────────────────
