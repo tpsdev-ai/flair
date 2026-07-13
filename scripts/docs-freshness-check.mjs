@@ -257,6 +257,27 @@ defineCheck("changelog-unreleased", () => {
     return [];
   }
 
+  // Release-PR exception: an empty [Unreleased] is correct when its content was
+  // just PROMOTED to a `## [X.Y.Z]` section for the release being cut — the
+  // CHANGELOG carries a section matching package.json's current version while
+  // no v<version> tag exists yet, so the since-tag work is recorded there.
+  if (!hasContent) {
+    try {
+      const pkgVersion = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
+      // Static regex + captured-group comparison — never build a RegExp from
+      // file-sourced data (CodeQL js/regex-injection, caught on this PR).
+      const hasVersionSection = lines.some((l) => {
+        const m = /^##\s+\[([^\]]+)\]/.exec(l);
+        return m !== null && m[1] === pkgVersion;
+      });
+      const tagExists = execFileSync("git", ["tag", "-l", `v${pkgVersion}`],
+        { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim().length > 0;
+      if (hasVersionSection && !tagExists) return [];
+    } catch {
+      // package.json unreadable or git unavailable — fall through to the normal rule.
+    }
+  }
+
   if (commitsSinceTag !== null && commitsSinceTag > 0 && !hasContent) {
     return [{
       file: "CHANGELOG.md", line: start + 1,
