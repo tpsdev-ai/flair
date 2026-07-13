@@ -18,6 +18,11 @@ name: Release — stage-publish (OIDC) + GitHub release
 #   org=tpsdev-ai, repo=flair, workflow=release-publish.yml, environment=release
 # and allow ONLY "npm stage publish". The `release` GitHub environment must permit
 # `v*` tag deploys.
+#
+# flair-bench is version-bumped/tagged with the other 7 but stages in its own
+# continue-on-error step below — it needs a one-time first manual publish +
+# Trusted Publisher registration before `npm stage publish` will work for it
+# (see docs/releasing.md's "flair-bench bootstrap" section).
 
 on:
   push:
@@ -137,6 +142,7 @@ jobs:
             packages/pi-flair/package.json
             packages/n8n-nodes-flair/package.json
             packages/langgraph-flair/package.json
+            packages/flair-bench/package.json
           )
           for pj in "${PKG_JSONS[@]}"; do
             name="$(node -p "require('./$pj').name")"
@@ -178,6 +184,25 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Stage-publish flair-bench (bootstrap-pending — isolated on purpose)
+        # `npm stage publish` requires the package already exist on the npm
+        # registry (npm-stage(1): "Package must exist"), and a Trusted Publisher
+        # can only be registered for a package that already exists — so this
+        # step WILL fail until a maintainer does the one-time bootstrap in
+        # docs/releasing.md (first manual `npm publish` of @tpsdev-ai/flair-bench,
+        # then register its Trusted Publisher). `continue-on-error: true` keeps
+        # that expected failure from aborting the other 7 packages' staging (the
+        # loop above runs under `set -euo pipefail` with no per-package
+        # isolation — a hard failure here would kill the whole job). Remove
+        # continue-on-error once the bootstrap is confirmed done and this step
+        # has staged flair-bench successfully at least once.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "::group::npm stage publish — @tpsdev-ai/flair-bench (packages/flair-bench)"
+          ( cd packages/flair-bench && npm stage publish )
+          echo "::endgroup::"
+
       - name: Summary
         env:
           VERSION: ${{ steps.ver.outputs.version }}
@@ -185,8 +210,13 @@ jobs:
           {
             echo "### 🚀 v$VERSION staged for release"
             echo ""
-            echo "All 7 workspace packages submitted to npm **staging** with provenance."
-            echo "They are **not live yet**."
+            echo "All 7 lockstep-versioned workspace packages submitted to npm **staging**"
+            echo "with provenance. They are **not live yet**."
+            echo ""
+            echo "flair-bench is included in the version bump/tag but stages in its own"
+            echo "step, which is allowed to fail until the one-time first-publish +"
+            echo "Trusted Publisher bootstrap in docs/releasing.md is done (check the"
+            echo "'Stage-publish flair-bench' step above for its actual result)."
             echo ""
             echo "**To release:** open [npmjs.com → Staged Packages](https://www.npmjs.com/settings/tpsdev-ai/staging),"
             echo "review each tarball, and approve with 2FA. Or: \`npm stage list\` then \`npm stage approve <id>\`."
