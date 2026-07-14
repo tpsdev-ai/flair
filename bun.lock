@@ -35,7 +35,7 @@
     },
     "packages/flair-bench": {
       "name": "@tpsdev-ai/flair-bench",
-      "version": "0.22.0",
+      "version": "0.22.1",
       "bin": {
         "flair-bench": "dist/cli-shim.cjs",
       },
@@ -58,21 +58,21 @@
     },
     "packages/flair-client": {
       "name": "@tpsdev-ai/flair-client",
-      "version": "0.22.0",
+      "version": "0.22.1",
       "devDependencies": {
         "typescript": "5.9.3",
       },
     },
     "packages/flair-mcp": {
       "name": "@tpsdev-ai/flair-mcp",
-      "version": "0.22.0",
+      "version": "0.22.1",
       "bin": {
         "flair-mcp": "dist/mcp-shim.cjs",
         "flair-session-start": "dist/session-start-hook.js",
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.27.1",
-        "@tpsdev-ai/flair-client": "0.22.0",
+        "@tpsdev-ai/flair-client": "0.22.1",
         "zod": "4.3.6",
       },
       "devDependencies": {
@@ -81,9 +81,9 @@
     },
     "packages/langgraph-flair": {
       "name": "@tpsdev-ai/langgraph-flair",
-      "version": "0.22.0",
+      "version": "0.22.1",
       "dependencies": {
-        "@tpsdev-ai/flair-client": "0.22.0",
+        "@tpsdev-ai/flair-client": "0.22.1",
       },
       "peerDependencies": {
         "@langchain/langgraph-checkpoint": ">=0.0.10",
@@ -91,9 +91,9 @@
     },
     "packages/n8n-nodes-flair": {
       "name": "@tpsdev-ai/n8n-nodes-flair",
-      "version": "0.22.0",
+      "version": "0.22.1",
       "dependencies": {
-        "@tpsdev-ai/flair-client": "0.22.0",
+        "@tpsdev-ai/flair-client": "0.22.1",
         "zod": "3.25.76",
       },
       "devDependencies": {
@@ -110,10 +110,10 @@
     },
     "packages/openclaw-flair": {
       "name": "@tpsdev-ai/openclaw-flair",
-      "version": "0.22.0",
+      "version": "0.22.1",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.22.0",
+        "@tpsdev-ai/flair-client": "0.22.1",
       },
       "devDependencies": {
         "typescript": "5.9.3",
@@ -124,10 +124,10 @@
     },
     "packages/pi-flair": {
       "name": "@tpsdev-ai/pi-flair",
-      "version": "0.22.0",
+      "version": "0.22.1",
       "dependencies": {
         "@sinclair/typebox": "0.34.48",
-        "@tpsdev-ai/flair-client": "0.22.0",
+        "@tpsdev-ai/flair-client": "0.22.1",
       },
       "devDependencies": {
         "@mariozechner/pi-coding-agent": "0.73.0",
