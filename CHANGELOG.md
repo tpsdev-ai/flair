@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### 🐛 Migration disk-headroom pre-flight blocked trivially-small migrations on normally-full personal disks (flair#720)
+
+`checkSpace()` (`resources/migrations/space.ts`) required a migration's needed bytes to fit AND that spending them not push disk usage past 90% of TOTAL disk size — a rule designed for a flair-dedicated volume. On a general-purpose machine (a personal Mac especially, where APFS purgeable space makes `statfs.bavail` understate real availability) the system volume routinely sits above 90% used already, so every migration halted regardless of its own footprint: the first 0.22.0 boot on such a disk halted the `embedding-stamp` migration needing 220 KB with 18.6 GB free.
+
+- **New rule**: `ok = neededBytes <= freeBytes AND (freeBytes - neededBytes) >= reserve`, where `reserve = clamp(5% of total disk, 256 MiB, 2 GiB)`. Only the migration's own impact on free space is judged now, not the disk's pre-existing fullness — `RESERVE_MIN_BYTES` / `RESERVE_MAX_BYTES` / `RESERVE_FRACTION` (new named exports in `resources/migrations/space.ts`).
+- **`FLAIR_MIGRATION_RESERVE_BYTES`** overrides the computed reserve for constrained deployments (validated finite/non-negative; `0` disables the reserve check entirely, leaving only the raw fit test) — mirrors the existing `FLAIR_MIGRATION_TEST_FREE_BYTES` test-override pattern.
+- **`headroomFloor`** (the old fraction-of-total DI knob on `checkSpace`/`runMigrationCycle`) is removed — it was never wired from production config, only ever exercised by the fraction-based tests this fix rewrites, and the new rule has no fraction to override (the env var above is the operator-facing lever now).
+- **Failure message rewritten to be truthful and actionable**: no longer suggests pruning snapshots or `FLAIR_SNAPSHOT_DIR` (neither changes the `dataDir` volume's fraction and never could have helped this class of halt) — now states the human-readable bytes needed vs. available vs. the reserve, and names `FLAIR_MIGRATION_RESERVE_BYTES` as the remedy for constrained setups. All byte quantities in the message are formatted human-readable (e.g. `220.0 KB`, `17.37 GB`, `2.00 GB`) via a new `humanBytes()` export, never raw byte counts — structured fields (`SpaceCheckResult`) still carry raw numbers for machine consumers.
+
 ## [0.22.0] - 2026-07-13
 
 ### ⬆️ Upgrade notes

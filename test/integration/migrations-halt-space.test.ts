@@ -41,7 +41,7 @@ async function healthDetail(): Promise<any> {
 describe("zero-touch migrations — halt on blocked disk space (real Harper)", () => {
   beforeAll(async () => {
     process.env.FLAIR_ENABLE_TEST_MIGRATIONS = "1";
-    process.env.FLAIR_MIGRATION_TEST_FREE_BYTES = "1"; // ~zero free space, deterministically fails the headroom-floor check
+    process.env.FLAIR_MIGRATION_TEST_FREE_BYTES = "1"; // ~zero free space, deterministically fails the space check (flair#720: fits-vs-free-bytes fails outright at ~1 byte free, independent of the reserve rule)
 
     const first = await startHarper();
     authHeader = "Basic " + Buffer.from(`${first.admin.username}:${first.admin.password}`).toString("base64");
