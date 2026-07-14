@@ -9,15 +9,24 @@
  */
 
 import { databases } from "@harperfast/harper";
-import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { resolveAgentAuth } from "./agent-auth.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
+import {
+  makeAuthGate,
+  makeReadScope,
+  makeByIdReadGate,
+  resolveAuthGate,
+  stampAttribution,
+  FORBIDDEN,
+  UNAUTH,
+} from "./record-type-kit.js";
 
-const FORBIDDEN = (msg: string) =>
-  new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
-const UNAUTH = () =>
-  new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
-const NOT_FOUND = () =>
-  new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+const workspaceReadScope = makeReadScope("owner-only");
+const workspaceByIdReadGate = makeByIdReadGate(workspaceReadScope);
+// See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
+// prototype method below, never a class-field assignment — Harper's
+// relationship-traversal RBAC path reads allowRead off the prototype.
+const workspaceAuthGate = makeAuthGate();
 
 export class WorkspaceState extends (databases as any).flair.WorkspaceState {
   /** Auth verdict from the request context. internal = trusted in-process call;
@@ -36,14 +45,16 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
    * full record content. Per-record ownership scoping happens in get() below;
    * the collection scope is still in search().
    */
-  allowRead() { return allowVerified((this as any).getContext?.()); }
+  allowRead() { return workspaceAuthGate.call(this); }
 
   /**
    * Override get() to scope by-id reads the same way search() scopes
    * collection reads (memory-soul-read-gate family fix). Never distinguishes
    * "doesn't exist" from "exists but not yours" — both return 404, never
    * 403, so a denied caller can't use get() to enumerate other agents'
-   * workspace-state ids.
+   * workspace-state ids. Wired through record-type-kit.ts's
+   * makeByIdReadGate, scoped "owner-only" — same dispatch shape
+   * Memory.ts/Relationship.ts's get() use.
    */
   async get(target?: any) {
     // Collection / query reads — the `GET /WorkspaceState/?<query>` form and
@@ -57,25 +68,7 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
     if (!target || (typeof target === "object" && target.isCollection)) {
       return this.search(target);
     }
-
-    const auth = await this._auth();
-
-    // Anonymous by-id read is already blocked at the allowRead() gate (403);
-    // this is defense-in-depth if get() is ever reached directly.
-    if (auth.kind === "anonymous") {
-      return NOT_FOUND();
-    }
-
-    // Trusted internal call or admin agent — unfiltered, unchanged behavior.
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.get(target);
-    }
-
-    // Non-admin agent: only its own workspace-state records.
-    const record = await super.get(target);
-    if (!record) return NOT_FOUND();
-    if (record.agentId !== auth.agentId) return NOT_FOUND();
-    return record;
+    return workspaceByIdReadGate.call(this, target, (t: any) => super.get(t));
   }
 
   /**
@@ -84,13 +77,14 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
    * (previously `!authAgent` was treated as unfiltered — the anonymous-read leak).
    */
   async search(query?: any) {
-    const auth = await this._auth();
-    if (auth.kind === "anonymous") return UNAUTH();
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.search(query);
-    }
+    // Dispatch shape shared via record-type-kit.ts's resolveAuthGate — same
+    // three-way branch Memory.ts/Relationship.ts's search() use.
+    const gate = await resolveAuthGate((this as any).getContext?.(), UNAUTH());
+    if (gate.kind === "denied") return gate.response;
+    if (gate.kind === "unfiltered") return super.search(query);
 
-    const agentIdCondition = { attribute: "agentId", comparator: "equals", value: auth.agentId };
+    const scope = await workspaceReadScope(gate.agentId);
+    const agentIdCondition = scope.condition;
 
     // Harper passes `query` as a request target object (pathname, id, isCollection…).
     // Inject the scope condition into its `.conditions` array.
@@ -114,18 +108,19 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
     // there was no authenticated agent, so anonymous could write any record).
     if (auth.kind === "anonymous") return UNAUTH();
 
-    // No-forge: a non-admin agent's workspace record is ALWAYS attributed to the
-    // authenticated identity (from the Ed25519 signature), never the body. We do
-    // NOT trust `content.agentId` — overwriting it (rather than 403'ing a
-    // mismatch) mirrors Presence.post(): "agentId from signature, NOT from body".
-    // An admin may write on behalf of another agent (content.agentId honored if
-    // present, else defaults to the admin's own id). Internal in-process callers
-    // keep whatever agentId they pass.
-    if (auth.kind === "agent" && !auth.isAdmin) {
-      content.agentId = auth.agentId;
-    } else if (auth.kind === "agent" && auth.isAdmin) {
-      content.agentId ||= auth.agentId;
-    }
+    // No-forge attribution ("stamp-default" — see record-type-kit.ts's
+    // stampAttribution doc): a non-admin agent's workspace record is ALWAYS
+    // attributed to the authenticated identity (from the Ed25519 signature),
+    // never the body. We do NOT trust `content.agentId` — overwriting it
+    // (rather than 403'ing a mismatch) mirrors Presence.post(): "agentId
+    // from signature, NOT from body". An admin may write on behalf of
+    // another agent (content.agentId honored if present, else defaults to
+    // the admin's own id). Internal in-process callers keep whatever
+    // agentId they pass.
+    // "stamp-default" never denies (no rejection branch for non-admin) —
+    // the forbiddenMessage arg is dead for this mode, passed for signature
+    // completeness only.
+    stampAttribution(auth, content, "agentId", "stamp-default", "forbidden: unreachable for stamp-default");
 
     content.createdAt = new Date().toISOString();
     content.timestamp ||= content.createdAt;
@@ -142,9 +137,11 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
   async put(content: any) {
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
-    if (auth.kind === "agent" && !auth.isAdmin && content.agentId !== auth.agentId) {
-      return FORBIDDEN("forbidden: cannot write workspace state for another agent");
-    }
+    // No-forge attribution ("validate-strict" — see record-type-kit.ts's
+    // stampAttribution doc): rejects a mismatch INCLUDING when agentId is
+    // absent (a bare `!==` compare, no truthy guard).
+    const attr = stampAttribution(auth, content, "agentId", "validate-strict", "forbidden: cannot write workspace state for another agent");
+    if (attr.denied) return attr.denied;
 
     // attention-plane vocabulary gate (flair#675) — same as post() above.
     const entitiesError = invalidEntitiesResponse(content.entities);
@@ -154,22 +151,20 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
   }
 
   async delete(id: any) {
-    const auth = await this._auth();
-    // Anonymous must NOT delete (previously `!agentId → super.delete` let anonymous
-    // delete any record).
-    if (auth.kind === "anonymous") return UNAUTH();
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.delete(id);
-    }
+    // Dispatch shape shared via record-type-kit.ts's resolveAuthGate — same
+    // three-way branch get()/search() above use.
+    const gate = await resolveAuthGate((this as any).getContext?.(), UNAUTH());
+    if (gate.kind === "denied") return gate.response;
+    if (gate.kind === "unfiltered") return super.delete(id);
 
-    // Use super.get(id), NOT this.get(id): the new get() override above 404s
+    // Use super.get(id), NOT this.get(id): the get() override above 404s
     // (a truthy Response) for a non-owner id, which would otherwise defeat
     // the `if (!record)` check below and mis-route a genuinely-missing
     // record into the FORBIDDEN branch instead of a clean super.delete(id)
     // no-op. Mirrors Memory.ts's delete() — same rationale, same fix.
     const record = await super.get(id);
     if (!record) return super.delete(id);
-    if (record.agentId !== auth.agentId) {
+    if (record.agentId !== gate.agentId) {
       return FORBIDDEN("forbidden: cannot delete workspace state for another agent");
     }
     return super.delete(id);

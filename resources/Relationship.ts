@@ -1,15 +1,24 @@
 import { databases } from "@harperfast/harper";
-import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { resolveAgentAuth } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { localInstanceId } from "./instance-identity.js";
-import { buildProvenance } from "./provenance.js";
+import {
+  buildProvenance,
+  makeAuthGate,
+  makeReadScope,
+  makeByIdReadGate,
+  resolveAuthGate,
+  stampAttribution,
+  FORBIDDEN,
+  UNAUTH,
+} from "./record-type-kit.js";
 
-const NOT_FOUND = () =>
-  new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
-const UNAUTH = () =>
-  new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
-const FORBIDDEN = (msg: string) =>
-  new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
+const relationshipReadScope = makeReadScope("owner-only");
+const relationshipByIdReadGate = makeByIdReadGate(relationshipReadScope);
+// See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
+// prototype method below, never a class-field assignment — Harper's
+// relationship-traversal RBAC path reads allowRead off the prototype.
+const relationshipAuthGate = makeAuthGate();
 
 /**
  * Relationship resource — entity-to-entity relationships with temporal validity.
@@ -33,14 +42,15 @@ export class Relationship extends (databases as any).flair.Relationship {
    * ownership scoping happens in get() below; the collection scope is still
    * in search().
    */
-  allowRead() { return allowVerified((this as any).getContext?.()); }
+  allowRead() { return relationshipAuthGate.call(this); }
 
   /**
    * Override get() to scope by-id reads the same way search() scopes
    * collection reads (memory-soul-read-gate family fix). Never distinguishes
    * "doesn't exist" from "exists but not yours" — both return 404, never
    * 403, so a denied caller can't use get() to enumerate other agents'
-   * relationship ids.
+   * relationship ids. Wired through record-type-kit.ts's makeByIdReadGate,
+   * scoped "owner-only" — same dispatch shape Memory.ts's get() uses.
    */
   async get(target?: any) {
     // Collection / query reads arrive as a RequestTarget with
@@ -53,44 +63,24 @@ export class Relationship extends (databases as any).flair.Relationship {
     if (!target || (typeof target === "object" && target.isCollection)) {
       return this.search(target);
     }
-
-    const auth = await resolveAgentAuth((this as any).getContext?.());
-
-    // Anonymous by-id read is already blocked at the allowRead() gate (403);
-    // this is defense-in-depth if get() is ever reached directly.
-    if (auth.kind === "anonymous") {
-      return NOT_FOUND();
-    }
-
-    // Trusted internal call or admin agent — unfiltered, unchanged behavior.
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.get(target);
-    }
-
-    // Non-admin agent: only its own relationships.
-    const record = await super.get(target);
-    if (!record) return NOT_FOUND();
-    if (record.agentId !== auth.agentId) return NOT_FOUND();
-    return record;
+    return relationshipByIdReadGate.call(this, target, (t: any) => super.get(t));
   }
 
   async search(query?: any) {
-    const auth = await resolveAgentAuth((this as any).getContext?.());
+    const ctx = (this as any).getContext?.();
 
     // Anonymous HTTP must NOT read relationships (previously `!authAgent` was
-    // treated as unfiltered — the anonymous-read leak).
-    if (auth.kind === "anonymous") {
-      return new Response(JSON.stringify({ error: "authentication required" }), {
-        status: 401, headers: { "content-type": "application/json" },
-      });
-    }
-    // Trusted internal call or admin agent → unfiltered.
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.search(query);
-    }
+    // treated as unfiltered — the anonymous-read leak). Trusted internal call
+    // or admin agent → unfiltered. Dispatch shape shared via
+    // record-type-kit.ts's resolveAuthGate — same three-way branch Memory.ts/
+    // WorkspaceState.ts's search() use.
+    const gate = await resolveAuthGate(ctx, UNAUTH());
+    if (gate.kind === "denied") return gate.response;
+    if (gate.kind === "unfiltered") return super.search(query);
 
     // Non-admin agent: scope to own relationships.
-    const agentCondition = { attribute: "agentId", comparator: "equals", value: auth.agentId };
+    const scope = await relationshipReadScope(gate.agentId);
+    const agentCondition = scope.condition;
     if (!query?.conditions) {
       return super.search({ conditions: [agentCondition], ...(query || {}) });
     }
@@ -144,16 +134,12 @@ export class Relationship extends (databases as any).flair.Relationship {
       return UNAUTH();
     }
 
-    if (auth.kind === "agent") {
-      if (!auth.isAdmin) {
-        if (content?.agentId && content.agentId !== auth.agentId) {
-          return FORBIDDEN("cannot write a relationship owned by another agent");
-        }
-        content.agentId = auth.agentId;
-      }
-      // admin: content.agentId left as provided (unfiltered) — see doc above.
-    }
-    // internal: content.agentId left as provided (unfiltered) — see doc above.
+    // No-forge attribution ("stamp-strict" — see record-type-kit.ts's
+    // stampAttribution doc): reject a PRESENT, mismatched agentId, else
+    // unconditionally stamp with the verified identity. Admin/internal:
+    // content.agentId left as provided (unfiltered) — see doc above.
+    const attr = stampAttribution(auth, content, "agentId", "stamp-strict", "cannot write a relationship owned by another agent");
+    if (attr.denied) return attr.denied;
 
     if (!content.agentId || typeof content.agentId !== "string") {
       return new Response(JSON.stringify({ error: "agentId is required" }), {
@@ -235,20 +221,16 @@ export class Relationship extends (databases as any).flair.Relationship {
    */
   async delete(_: any) {
     const ctx = (this as any).getContext?.();
-    const auth = await resolveAgentAuth(ctx);
 
-    if (auth.kind === "anonymous") {
-      return UNAUTH();
-    }
-
-    // Trusted internal call or admin agent — unfiltered, unchanged behavior.
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.delete(_);
-    }
+    // Dispatch shape shared via record-type-kit.ts's resolveAuthGate — same
+    // three-way branch put()/get()/search() above use.
+    const gate = await resolveAuthGate(ctx, UNAUTH());
+    if (gate.kind === "denied") return gate.response;
+    if (gate.kind === "unfiltered") return super.delete(_);
 
     // Non-admin agent: verify ownership before delete.
     const existing = await super.get();
-    if (existing?.agentId && existing.agentId !== auth.agentId) {
+    if (existing?.agentId && existing.agentId !== gate.agentId) {
       return FORBIDDEN("cannot delete another agent's relationship");
     }
 

@@ -1,12 +1,12 @@
 import { databases } from "@harperfast/harper";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
-import { isAdmin, resolveAgentAuth, allowVerified, type AgentAuthVerdict } from "./agent-auth.js";
+import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { localInstanceId } from "./instance-identity.js";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { scanFields, isStrictMode } from "./content-safety.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
-import { resolveAllowedOwners, resolveReadScope } from "./memory-read-scope.js";
+import { resolveAllowedOwners } from "./memory-read-scope.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -16,27 +16,37 @@ import {
   isConservativeMatch,
   type DedupMatch,
 } from "./dedup.js";
-import { buildProvenance } from "./provenance.js";
-
-const FORBIDDEN = (msg: string) =>
-  new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
-const UNAUTH = () =>
-  new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
-const NOT_FOUND = () =>
-  new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+import {
+  buildProvenance,
+  makeAuthGate,
+  makeReadScope,
+  makeByIdReadGate,
+  resolveAuthGate,
+  stampAttribution,
+  FORBIDDEN,
+  UNAUTH,
+} from "./record-type-kit.js";
 
 /**
- * Owner ids a non-admin agent may READ (resolveAllowedOwners) and the full
- * read-scope condition + private-exclusion predicate (resolveReadScope) now
- * live in ./memory-read-scope.ts — the ONE centralized helper every
- * cross-agent Memory read path (search()/get() here, SemanticSearch.ts,
- * MemoryBootstrap.ts, auth-middleware.ts's by-id guard) resolves its scope
- * through, so the scoping rule cannot drift per-path again (a
- * SemanticSearch inline `visibility === "office"` OR-clause leaked office
- * memories to any authenticated agent because the rule had scattered). See
- * that module's doc for the migration invariant (no-visibility-field reads
- * as "shared", never "private").
+ * Owner ids a non-admin agent may READ (resolveAllowedOwners) live in
+ * ./memory-read-scope.ts — still exported/used elsewhere (admin tooling).
+ * The full read-scope condition + private-exclusion predicate is now
+ * consumed through ./record-type-kit.ts's makeReadScope("open-within-org"),
+ * which delegates to that module's resolveReadScope() UNCHANGED — the ONE
+ * centralized helper every cross-agent Memory read path (search()/get()
+ * here, SemanticSearch.ts, MemoryBootstrap.ts, auth-middleware.ts's by-id
+ * guard) resolves its scope through, so the scoping rule cannot drift
+ * per-path again (a SemanticSearch inline `visibility === "office"`
+ * OR-clause leaked office memories to any authenticated agent because the
+ * rule had scattered). See memory-read-scope.ts's doc for the migration
+ * invariant (no-visibility-field reads as "shared", never "private").
  */
+const memoryReadScope = makeReadScope("open-within-org");
+const memoryByIdReadGate = makeByIdReadGate(memoryReadScope);
+// See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
+// prototype method below, never a class-field assignment — Harper's
+// relationship-traversal RBAC path reads allowRead off the prototype.
+const memoryAuthGate = makeAuthGate();
 
 /**
  * ─── Server-side conservative-duplicate gate (memory-integrity fix) ──────────
@@ -364,7 +374,8 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
 /**
  * ─── Write-time provenance stamp (memory-provenance slice 1) ────────────────
  *
- * `buildProvenance` itself now lives in ./provenance.ts (imported above) —
+ * `buildProvenance` itself lives in ./provenance.ts, re-exported unmodified
+ * via ./record-type-kit.ts (imported above) for a single kit import surface —
  * extracted so resources/Relationship.ts's write path can reuse the EXACT
  * same `{v, verified, claimed?}` shape (the relationship-write-path spec's
  * "reuse buildProvenance as-is" contract) instead of a hand-copied format
@@ -425,14 +436,16 @@ export class Memory extends (databases as any).flair.Memory {
    * unverified, risks regressing owner writes/deletes on a P0 security fix
    * that is scoped to the read leak — left as-is on purpose.
    */
-  allowRead() { return allowVerified((this as any).getContext?.()); }
+  allowRead() { return memoryAuthGate.call(this); }
 
   /**
    * Override get() to scope by-id reads the same way search() scopes
    * collection reads (memory-soul-read-gate fix). Never distinguishes
    * "doesn't exist" from "exists but not yours" — both return 404, never
    * 403, so a denied caller can't use get() to enumerate other agents'
-   * memory ids.
+   * memory ids. Wired through record-type-kit.ts's makeByIdReadGate, scoped
+   * with Memory's own "open-within-org" read-scope resolver above — same
+   * dispatch shape Relationship.ts/WorkspaceState.ts's get() overrides use.
    */
   async get(target?: any) {
     // Collection / query reads — the `GET /Memory/?<query>` form and the bare
@@ -444,35 +457,13 @@ export class Memory extends (databases as any).flair.Memory {
     // authenticated self-query would 404 (regression caught by the auth-
     // middleware e2e "TPS-Ed25519 on GET /Memory/?agentId=X → 200"). A by-id
     // get (RequestTarget with isCollection false, or a bare id) falls through.
+    // makeByIdReadGate re-applies this same guard internally (delegating to
+    // this.search via `.call(this, ...)`) — kept here too as documentation of
+    // the invariant at the call site, harmless no-op double-check.
     if (!target || (typeof target === "object" && target.isCollection)) {
       return this.search(target);
     }
-
-    const ctx = (this as any).getContext?.();
-    const auth = await resolveAgentAuth(ctx);
-
-    // Anonymous by-id read is already blocked at the allowRead() gate (403);
-    // this is defense-in-depth if get() is ever reached directly.
-    if (auth.kind === "anonymous") {
-      return NOT_FOUND();
-    }
-
-    // Trusted internal call or admin agent — unfiltered, unchanged behavior.
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.get(target);
-    }
-
-    // Non-admin agent: only its own memories (any visibility), or a granted
-    // owner's SHARED memories — never that owner's private ones (Layer 1
-    // private-exclusion). Centralized in resolveReadScope() so this
-    // and search() below cannot drift.
-    const record = await super.get(target);
-    if (!record) return NOT_FOUND();
-
-    const scope = await resolveReadScope(auth.agentId);
-    if (!scope.isAllowed(record)) return NOT_FOUND();
-
-    return record;
+    return memoryByIdReadGate.call(this, target, (t: any) => super.get(t));
   }
 
   /**
@@ -488,26 +479,23 @@ export class Memory extends (databases as any).flair.Memory {
   async search(query?: any) {
     // Access request context via Harper's Resource instance context.
     const ctx = (this as any).getContext?.();
-    const auth = await resolveAgentAuth(ctx);
 
     // Anonymous HTTP must NOT read memories. (Previously `!authAgent` was treated
     // as unfiltered — the anonymous-read leak once the gate stops rejecting.)
-    if (auth.kind === "anonymous") {
-      return new Response(JSON.stringify({ error: "authentication required" }), {
-        status: 401, headers: { "content-type": "application/json" },
-      });
-    }
-
     // Trusted internal call (no request context) or admin agent — unfiltered.
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.search(query);
-    }
+    // Non-admin agent: scoped below. Dispatch shape shared via
+    // record-type-kit.ts's resolveAuthGate — same three-way branch
+    // Relationship.ts/WorkspaceState.ts's search() use.
+    const gate = await resolveAuthGate(ctx, UNAUTH());
+    if (gate.kind === "denied") return gate.response;
+    if (gate.kind === "unfiltered") return super.search(query);
 
     // Non-admin agent: scope to own (any visibility) + granted owners' SHARED
     // memories only (Layer 1 private-exclusion). Centralized in
-    // resolveReadScope() so get() above and search() here cannot drift.
-    const authAgent = auth.agentId;
-    const scope = await resolveReadScope(authAgent);
+    // memoryReadScope (record-type-kit.ts's makeReadScope("open-within-org"),
+    // delegating to memory-read-scope.ts's resolveReadScope() unchanged) so
+    // get() above and search() here cannot drift.
+    const scope = await memoryReadScope(gate.agentId);
     const agentIdCondition: any = scope.condition;
 
     // Harper passes `query` as a RequestTarget (extends URLSearchParams) or a
@@ -552,9 +540,11 @@ export class Memory extends (databases as any).flair.Memory {
       if (auth.kind === "anonymous") {
         return UNAUTH();
       }
-      if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
-        return FORBIDDEN("forbidden: cannot write memory owned by another agent");
-      }
+      // No-forge attribution ("validate-truthy" — see record-type-kit.ts's
+      // stampAttribution doc): reject a PRESENT, mismatched agentId; never
+      // stamp when absent (the caller is expected to have set it).
+      const attr = stampAttribution(auth, content, "agentId", "validate-truthy", "forbidden: cannot write memory owned by another agent");
+      if (attr.denied) return attr.denied;
     }
 
     content.durability ||= "standard";
@@ -705,9 +695,10 @@ export class Memory extends (databases as any).flair.Memory {
       if (auth.kind === "anonymous") {
         return UNAUTH();
       }
-      if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
-        return FORBIDDEN("forbidden: cannot write memory owned by another agent");
-      }
+      // No-forge attribution ("validate-truthy" — see record-type-kit.ts's
+      // stampAttribution doc), same rule as post().
+      const attr = stampAttribution(auth, content, "agentId", "validate-truthy", "forbidden: cannot write memory owned by another agent");
+      if (attr.denied) return attr.denied;
     }
 
     const now = new Date().toISOString();

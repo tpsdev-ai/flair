@@ -1,11 +1,7 @@
 import { databases } from "@harperfast/harper";
-import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { localInstanceId } from "./instance-identity.js";
-
-const FORBIDDEN = (msg: string) =>
-  new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
-const UNAUTH = () =>
-  new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
+import { makeAuthGate, stampAttribution, UNAUTH } from "./record-type-kit.js";
 
 /**
  * Deny anonymous; enforce per-agent write ownership for non-admin agents.
@@ -13,15 +9,22 @@ const UNAUTH = () =>
  * x-tps-agent), so an anonymous request — which carries no x-tps-agent — slipped
  * through. With the non-rejecting gate, each write path self-enforces (resolveAgentAuth
  * distinguishes internal/agent/anonymous). Mirrors the WorkspaceState pattern.
+ *
+ * No-forge attribution uses "validate-truthy" (see record-type-kit.ts's
+ * stampAttribution doc) — rejects a PRESENT, mismatched agentId; passes
+ * through untouched when absent. Same idiom as Memory.post()/put().
  */
 async function enforceWriteAuth(self: any, data: any): Promise<Response | null> {
-  const auth = await resolveAgentAuth((self as any).getContext?.());
+  const auth: AgentAuthVerdict = await resolveAgentAuth((self as any).getContext?.());
   if (auth.kind === "anonymous") return UNAUTH();
-  if (auth.kind === "agent" && !auth.isAdmin && data?.agentId && data.agentId !== auth.agentId) {
-    return FORBIDDEN("forbidden: agentId must match authenticated agent");
-  }
-  return null;
+  const attr = stampAttribution(auth, data, "agentId", "validate-truthy", "forbidden: agentId must match authenticated agent");
+  return attr.denied ?? null;
 }
+
+// See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
+// prototype method below, never a class-field assignment — Harper's
+// relationship-traversal RBAC path reads allowRead off the prototype.
+const soulAuthGate = makeAuthGate();
 
 export class Soul extends (databases as any).flair.Soul {
   /**
@@ -34,7 +37,7 @@ export class Soul extends (databases as any).flair.Soul {
    * verified agent — same posture as Agent.ts's allowRead. Write ownership
    * is unaffected — enforceWriteAuth() below already gates post()/put().
    */
-  allowRead() { return allowVerified((this as any).getContext?.()); }
+  allowRead() { return soulAuthGate.call(this); }
 
   async post(content: any, context?: any) {
     const denied = await enforceWriteAuth(this, content);
