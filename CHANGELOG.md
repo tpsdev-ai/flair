@@ -11,6 +11,12 @@
 - **`headroomFloor`** (the old fraction-of-total DI knob on `checkSpace`/`runMigrationCycle`) is removed — it was never wired from production config, only ever exercised by the fraction-based tests this fix rewrites, and the new rule has no fraction to override (the env var above is the operator-facing lever now).
 - **Failure message rewritten to be truthful and actionable**: no longer suggests pruning snapshots or `FLAIR_SNAPSHOT_DIR` (neither changes the `dataDir` volume's fraction and never could have helped this class of halt) — now states the human-readable bytes needed vs. available vs. the reserve, and names `FLAIR_MIGRATION_RESERVE_BYTES` as the remedy for constrained setups. All byte quantities in the message are formatted human-readable (e.g. `220.0 KB`, `17.37 GB`, `2.00 GB`) via a new `humanBytes()` export, never raw byte counts — structured fields (`SpaceCheckResult`) still carry raw numbers for machine consumers.
 
+### 🐛 `flair doctor --fix` reported issues found and exited 1 even after fixing everything (flair#721)
+
+`doctor --fix` tracked a single `issues` counter — every detected problem incremented it, and the summary/exit code read only that counter, with no record of which of those issues `--fix` actually resolved during the same run. A run that interactively fixed every issue it found (e.g. wiring an MCP client, adding the Claude Code SessionStart hook) still printed `N issues found — see fixes above` and exited 1, indistinguishable from a run that fixed nothing — breaking scripted use (`flair doctor --fix && ...`).
+
+`doctor` now tracks fixed-vs-remaining explicitly: each check that offers an in-run fix (port-drift config rewrite, dead-Harper restart, version-mismatch restart, stale PID-file removal, MCP client wiring, CLAUDE.md bootstrap line, SessionStart hook) counts toward a separate `fixed` total only when that fix actually succeeds, not merely attempted or declined. The summary now reads: all fixed → `N issues found, N fixed ✓` and exit 0; some remaining (declined prompts, unfixable checks, `--dry-run`) → `N issues found, M fixed, K remaining` and exit 1; zero issues → unchanged `No issues found` / exit 0. Without `--fix`, behavior is unchanged: `N issues found — see fixes above` / exit 1. The decision logic is extracted into a pure `summarizeDoctorRun(found, fixed, autoFix)` helper, unit-tested directly (`test/unit/doctor-summary.test.ts`).
+
 ## [0.22.0] - 2026-07-13
 
 ### ⬆️ Upgrade notes

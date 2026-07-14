@@ -8625,6 +8625,51 @@ see src/fleet-verify.ts's file header for the full caveat.`)
     process.exit(result.exitCode);
   });
 
+// ─── flair doctor — pure summary/exit helper ─────────────────────────────────
+// Extracted for testability (flair#721), same pattern as formatCandidateLine /
+// describeReflectError above: the action callback spawns process.exit and a
+// long sequence of console.log side effects, which makes it high-effort/
+// low-value to drive directly — this is the actual decision logic. Before
+// #721, doctor tracked only a single `issues` counter: every detected
+// problem incremented it, and the final summary/exit-code read that counter
+// alone, with no separate record of which of those issues `--fix` actually
+// resolved during the same run. So a `--fix` run that interactively fixed
+// every issue it found still printed "N issues found — see fixes above" and
+// exited 1 — indistinguishable from a run that fixed nothing. This helper
+// takes the accumulated found/fixed counts plus whether `--fix` was passed
+// at all, and decides the summary line + exit code:
+//   - 0 found                       → "No issues found", exit 0 (unchanged)
+//   - found, no --fix               → "N issues found — see fixes above", exit 1 (unchanged)
+//   - found, --fix, all fixed       → "N issues found, N fixed ✓", exit 0
+//   - found, --fix, some remaining  → "N issues found, M fixed, K remaining", exit 1
+export function summarizeDoctorRun(
+  found: number,
+  fixed: number,
+  autoFix: boolean,
+): { line: string; exitCode: number } {
+  const plural = (n: number) => `issue${n === 1 ? "" : "s"}`;
+  if (found === 0) {
+    return { line: `  ${render.icons.ok} ${render.wrap(render.c.green, "No issues found")}`, exitCode: 0 };
+  }
+  if (!autoFix) {
+    return {
+      line: `  ${render.icons.error} ${render.wrap(render.c.red, `${found} ${plural(found)} found`)} ${render.wrap(render.c.dim, "— see fixes above")}`,
+      exitCode: 1,
+    };
+  }
+  if (fixed >= found) {
+    return {
+      line: `  ${render.icons.ok} ${render.wrap(render.c.green, `${found} ${plural(found)} found, ${fixed} fixed ✓`)}`,
+      exitCode: 0,
+    };
+  }
+  const remaining = found - fixed;
+  return {
+    line: `  ${render.icons.error} ${render.wrap(render.c.red, `${found} ${plural(found)} found, ${fixed} fixed, ${remaining} remaining`)}`,
+    exitCode: 1,
+  };
+}
+
 // ─── flair doctor ─────────────────────────────────────────────────────────────
 
 program
@@ -8644,6 +8689,7 @@ program
     let effectivePort = port;
     let baseUrl = `http://127.0.0.1:${port}`;
     let issues = 0;
+    let fixed = 0; // issues that --fix successfully resolved during this run (flair#721)
     let harperResponding = false;
 
     console.log(`\n${render.wrap(render.c.bold, "🩺 Flair Doctor")}\n`);
@@ -8720,6 +8766,7 @@ program
             } else {
               writeConfig(discoveredPort);
               console.log(`     ${render.icons.ok} Updated config to port ${discoveredPort}`);
+              fixed++;
             }
           } else {
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(updates config to match running port)")}`);
@@ -8757,6 +8804,7 @@ program
                 const { execSync } = await import("node:child_process");
                 execSync(`${process.argv[0]} ${process.argv[1]} restart --port ${port}`, { stdio: "inherit" });
                 console.log(`     ${render.icons.ok} Restart attempted`);
+                fixed++;
               } catch {
                 console.log(`     ${render.icons.error} Restart failed — try: flair init --agent-id <your-agent>`);
               }
@@ -8797,6 +8845,7 @@ program
               const { execSync } = await import("node:child_process");
               execSync(`${process.argv[0]} ${process.argv[1]} restart --port ${effectivePort}`, { stdio: "inherit" });
               console.log(`     ${render.icons.ok} Restarted onto ${__pkgVersion}`);
+              fixed++;
             } catch {
               console.log(`     ${render.icons.error} Restart failed — try: flair restart`);
             }
@@ -8891,6 +8940,7 @@ program
           } else {
             (await import("node:fs")).unlinkSync(pidFile);
             console.log(`     ${render.icons.ok} Removed stale PID file`);
+            fixed++;
           }
         } else {
           console.log(`     ${render.wrap(render.c.dim, "Fix:")} rm ${pidFile} && flair restart`);
@@ -8970,6 +9020,7 @@ program
                     client.id === "gemini" ? wireGemini(wireEnv) :
                     wireCursor(wireEnv);
                   console.log(`     ${wireResult.ok ? render.icons.ok : render.icons.warn} ${wireResult.message}`);
+                  if (wireResult.ok) fixed++;
                 }
               }
             }
@@ -9019,6 +9070,7 @@ program
               } else {
                 const fixRes = fixClaudeMdBootstrap(process.cwd());
                 console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
+                if (fixRes.ok) fixed++;
               }
             }
           } else {
@@ -9043,6 +9095,7 @@ program
                 const fixAgentId = claudeCodeAgentId || opts.agent || process.env.FLAIR_AGENT_ID;
                 const fixRes = fixSessionStartHook(homedir(), fixAgentId);
                 console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
+                if (fixRes.ok) fixed++;
               }
             }
           } else {
@@ -9186,16 +9239,14 @@ program
       }
     }
 
-    // Summary
+    // Summary — see summarizeDoctorRun above (flair#721): distinguishes
+    // issues --fix actually resolved this run from ones still outstanding.
     console.log("");
-    if (issues === 0) {
-      console.log(`  ${render.icons.ok} ${render.wrap(render.c.green, "No issues found")}`);
-    } else {
-      console.log(`  ${render.icons.error} ${render.wrap(render.c.red, `${issues} issue${issues > 1 ? "s" : ""} found`)} ${render.wrap(render.c.dim, "— see fixes above")}`);
-    }
+    const summary = summarizeDoctorRun(issues, fixed, autoFix);
+    console.log(summary.line);
     console.log("");
 
-    if (issues > 0) process.exit(1);
+    if (summary.exitCode !== 0) process.exit(summary.exitCode);
   });
 
 // ─── flair session snapshot ──────────────────────────────────────────────────
