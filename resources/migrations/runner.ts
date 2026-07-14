@@ -72,13 +72,11 @@ export interface RunnerDeps {
   ledgerDeps?: LedgerDeps;
   batchDelayMs?: number;
   initiator?: "auto" | "operator";
-  headroomFloor?: number;
 }
 
-interface ResolvedDeps extends Required<Omit<RunnerDeps, "spaceProbe" | "ledgerDeps" | "headroomFloor">> {
+interface ResolvedDeps extends Required<Omit<RunnerDeps, "spaceProbe" | "ledgerDeps">> {
   spaceProbe: SpaceProbe;
   ledgerDeps: LedgerDeps;
-  headroomFloor: number | undefined;
 }
 
 function resolveDeps(deps: RunnerDeps): ResolvedDeps {
@@ -98,7 +96,6 @@ function resolveDeps(deps: RunnerDeps): ResolvedDeps {
     ledgerDeps: deps.ledgerDeps ?? {},
     batchDelayMs: deps.batchDelayMs ?? resolveTestBatchDelayMs() ?? 100,
     initiator: deps.initiator ?? "auto",
-    headroomFloor: deps.headroomFloor,
   };
 }
 
@@ -310,7 +307,7 @@ async function runOneMigration(
   const estSnapshot = estimateSnapshotBytes(posture.snapshotScope, initialRemaining);
   const estWorkingSet = estimateWorkingSetBytes(migration.riskClass, initialRemaining);
   let space = checkSpace(
-    { dataDir: deps.dataDir, estimatedSnapshotBytes: estSnapshot, estimatedWorkingSetBytes: estWorkingSet, headroomFloor: deps.headroomFloor },
+    { dataDir: deps.dataDir, estimatedSnapshotBytes: estSnapshot, estimatedWorkingSetBytes: estWorkingSet },
     deps.spaceProbe,
   );
 
@@ -318,7 +315,7 @@ async function runOneMigration(
     // ── Ladder step 2: prune snapshots, then retry ──
     pruneMigrationSnapshots(deps.snapshotRoot);
     space = checkSpace(
-      { dataDir: deps.dataDir, estimatedSnapshotBytes: estSnapshot, estimatedWorkingSetBytes: estWorkingSet, headroomFloor: deps.headroomFloor },
+      { dataDir: deps.dataDir, estimatedSnapshotBytes: estSnapshot, estimatedWorkingSetBytes: estWorkingSet },
       deps.spaceProbe,
     );
   }
