@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### 🐛 `flair doctor`'s Codex wiring printed a broken FLAIR_URL and needlessly forced manual mode on an existing config.toml (flair#727)
+
+Two defects in doctor's Codex client-integration fix path, found on a real 0.22.1 dogfood run against a second machine.
+
+- **Broken `FLAIR_URL`.** When a stale/malformed value was scraped from an existing (partially-wired) `~/.codex/config.toml` — e.g. a bare host with no scheme or port, left over from an older Flair version or a hand-edited file — `doctor --fix` reused it verbatim in the freshly suggested block: `FLAIR_URL = "127.0.0.1"`, unusable if pasted. New `resolveWireFlairUrl()` (`src/doctor-client.ts`) only trusts an existing value when it parses as an absolute `http(s)://` URL; otherwise it falls back to the live, authoritative URL doctor already computed from the same port source as its `Config: ... (port: NNNNN)` line. This call site is shared by all four clients (Claude Code, Codex, Gemini, Cursor), so the fix applies uniformly — the other three clients' JSON templates were checked for the same class of bug and found clean (they always rendered the URL they were given; the bad value only ever originated at this one construction site).
+- **Existing `config.toml` no longer forces manual wiring unconditionally.** `_wireCodex` (`src/install/clients.ts`) used to refuse to touch any pre-existing file, regardless of content. Appending a `[mcp_servers.flair]` table at EOF is safe TOML when that exact header isn't already present, so it now greps for the header (`codexConfigHasFlairSection`) and appends (`appendCodexFlairBlock`, with the same blank-line separator convention as `fixClaudeMdBootstrap`) when missing, or reports `already wired` (idempotent, no write) when present — matching the JSON clients' existing idempotency contract. The manual-print fallback is now reserved for the genuinely unreadable/unwritable case (permissions, I/O error) — and that fallback's block renders the same corrected, always-authoritative URL.
+
 ## [0.22.1] - 2026-07-14
 
 ### 🐛 Migration disk-headroom pre-flight blocked trivially-small migrations on normally-full personal disks (flair#720)

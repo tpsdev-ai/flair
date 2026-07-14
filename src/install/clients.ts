@@ -122,8 +122,9 @@ function jsonSnippet(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): string
   return JSON.stringify({ mcpServers: { flair: flairMcpEntry(env) } }, null, 2);
 }
 
-/** TOML `[mcp_servers.flair]` snippet (Codex format). */
-function tomlSnippet(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): string {
+/** TOML `[mcp_servers.flair]` snippet (Codex format). Exported for tests
+ * (flair#727 — asserts the rendered template carries a full scheme+port URL). */
+export function tomlSnippet(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): string {
   return [
     `[mcp_servers.flair]`,
     `command = "npx"`,
@@ -133,6 +134,30 @@ function tomlSnippet(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): string
     `FLAIR_AGENT_ID = "${env.FLAIR_AGENT_ID}"`,
     `FLAIR_URL = "${env.FLAIR_URL}"`,
   ].join("\n");
+}
+
+/**
+ * True when `raw` TOML content already has a `[mcp_servers.flair]` header —
+ * the same detection scanCodexFlairBlock (src/doctor-client.ts) uses to
+ * decide whether the block is present. Pure string scan; no TOML parser
+ * (see the comment on _wireCodex below for why).
+ */
+export function codexConfigHasFlairSection(raw: string): boolean {
+  return /^\[mcp_servers\.flair\]\s*$/m.test(raw);
+}
+
+/**
+ * Pure merge: append the Flair TOML snippet to existing raw config.toml
+ * content. Callers MUST first confirm codexConfigHasFlairSection(raw) is
+ * false — appending a second `[mcp_servers.flair]` table would shadow/
+ * duplicate the first (TOML doesn't merge repeated table headers), so this
+ * function does not re-check; it just appends safely with a newline
+ * separator (mirrors fixClaudeMdBootstrap's separator logic in
+ * src/doctor-client.ts — never runs the new block into the prior line).
+ */
+export function appendCodexFlairBlock(raw: string, env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): string {
+  const separator = raw.length === 0 ? "" : raw.endsWith("\n\n") ? "" : raw.endsWith("\n") ? "\n" : "\n\n";
+  return raw + separator + tomlSnippet(env) + "\n";
 }
 
 /**
@@ -228,18 +253,22 @@ function _wireClaudeCode(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { 
 
 function _wireCodex(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
   // Codex uses TOML with a [mcp_servers.flair] table. We don't carry a TOML
-  // parser, and blind text-appending risks corrupting/duplicating an existing
-  // table — so we only auto-write when the file does NOT yet exist (clean
-  // create), otherwise emit the exact TOML block to paste.
+  // parser, but appending a new top-level table at EOF is safe TOML when the
+  // exact header isn't already present (flair#727) — so an existing file only
+  // forces the manual-print fallback when it's genuinely unreadable/
+  // unwritable (permissions, I/O error), never merely "exists". A file that
+  // already has the section is reported already-wired, matching the JSON
+  // clients' idempotency (wireJsonMcp above).
   const path = codexConfigPath();
   const display = "~/.codex/config.toml";
   try {
     if (existsSync(path)) {
-      return {
-        ok: false,
-        message: `Codex: manual wiring needed — ${display} already exists.\n` +
-          `   Add this block to ${display}:\n${indent(tomlSnippet(env))}`,
-      };
+      const raw = readFileSync(path, "utf-8");
+      if (codexConfigHasFlairSection(raw)) {
+        return { ok: true, message: `Codex: already wired in ${display}` };
+      }
+      writeFileSync(path, appendCodexFlairBlock(raw, env));
+      return { ok: true, message: `Codex: wired ${display} (restart Codex to pick it up)` };
     }
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, tomlSnippet(env) + "\n");
