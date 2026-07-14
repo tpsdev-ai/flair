@@ -88,13 +88,9 @@ jobs:
       # in-band HuggingFace download (the #463/#465 429-flake class) and any
       # re-download after the swap.
       - name: Pre-download embedding model (shared by baseline + PR build)
-        run: |
-          set -euo pipefail
-          mkdir -p models
-          curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
-            "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
-            -o models/nomic-embed-text-v1.5.Q4_K_M.gguf
-          echo "Model downloaded ($(du -sh models/*.gguf | cut -f1))"
+        # Resolves cache → first-party GitHub release mirror → HuggingFace
+        # (last), with sha256 verification regardless of source (flair#715).
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
 
       - name: Pack HEAD (PR build)
         id: pack
@@ -374,12 +370,9 @@ jobs:
       - run: bun run build && bun run build:cli
 
       - name: Pre-download embedding model
-        run: |
-          set -euo pipefail
-          mkdir -p models
-          curl -fSL --retry 5 --retry-delay 10 --retry-all-errors --connect-timeout 30 \
-            "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf" \
-            -o models/nomic-embed-text-v1.5.Q4_K_M.gguf
+        # Resolves cache → first-party GitHub release mirror → HuggingFace
+        # (last), with sha256 verification regardless of source (flair#715).
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
 
       - name: Pack HEAD (PR build)
         id: pack

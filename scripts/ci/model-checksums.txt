@@ -1,0 +1,13 @@
+# model-checksums.txt — pinned sha256 checksums for CI-fetched embedding
+# model GGUFs (flair#715). Single source of truth for
+# scripts/ci/fetch-model.sh — do not duplicate these hashes inline in any
+# workflow or Dockerfile; add a line here and reference it by filename
+# instead.
+#
+# Format: <filename> <sha256> [# comment]
+#
+# Mirrored as first-party release assets on the `ci-models` tag of this repo
+# (https://github.com/tpsdev-ai/flair/releases/tag/ci-models), sourced
+# originally from nomic-ai/nomic-embed-text-v1.5-GGUF on HuggingFace.
+nomic-embed-text-v1.5.Q4_K_M.gguf d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac # 84106624 bytes
+nomic-embed-text-v1.5.Q8_0.gguf 3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7 # 146146432 bytes

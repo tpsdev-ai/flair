@@ -49,6 +49,19 @@ flair doctor                                  # should now report semantic searc
 
 **Other causes:** a missing native llama.cpp addon for your platform, or a corrupted/partial model download. `flair doctor` prints the underlying init error; `flair reembed` re-downloads the model and regenerates embeddings once the component loads.
 
+**HuggingFace outage:** the model normally resolves from HuggingFace (`nomic-ai/nomic-embed-text-v1.5-GGUF`). If HF is down or 403/429-ing, point `FLAIR_MODELS_DIR` at a directory containing your own copy of `nomic-embed-text-v1.5.Q4_K_M.gguf` instead of waiting it out:
+```bash
+mkdir -p ~/models
+curl -fSL -o ~/models/nomic-embed-text-v1.5.Q4_K_M.gguf \
+  https://github.com/tpsdev-ai/flair/releases/download/ci-models/nomic-embed-text-v1.5.Q4_K_M.gguf
+sha256sum ~/models/nomic-embed-text-v1.5.Q4_K_M.gguf
+# expect: d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac
+
+export FLAIR_MODELS_DIR=~/models   # add to your shell rc to persist
+flair restart
+```
+The `ci-models` release above is a first-party mirror of the same file (public, no auth required) that flair's own CI falls back to for the same reason — same-origin with GitHub, no dependency on HF's availability. Always verify the sha256 against the value printed here (or in `scripts/ci/model-checksums.txt` in the repo) before pointing Harper at a manually-downloaded file.
+
 ### "Embeddings: hash-fallback (512-dim)"
 
 **Symptoms:** `flair status` shows hash-fallback instead of nomic. Search returns poor results.
