@@ -146,6 +146,37 @@ function scanCodexFlairBlock(raw: string): { present: boolean; agentId?: string;
   return { present: !!agentId && !!flairUrl, agentId, flairUrl };
 }
 
+// ── check 2: FLAIR_URL to use when (re-)wiring a client (flair#727) ────────
+
+/**
+ * Pick the FLAIR_URL to feed a wire() call when `doctor --fix` re-wires a
+ * client whose block was judged "not present" (readClientMcpBlock — missing
+ * FLAIR_AGENT_ID and/or FLAIR_URL). A pre-existing config can still carry a
+ * `flairUrl` fragment (e.g. `present:false` because FLAIR_AGENT_ID is empty,
+ * but FLAIR_URL scanned fine) — and that fragment can itself be malformed: a
+ * bare host with no scheme/port (`"127.0.0.1"`), left over from an older
+ * Flair version or a hand-edited config. Blindly reusing it perpetuates the
+ * corruption into the freshly suggested block (flair#727 — a real dogfood
+ * run printed exactly `FLAIR_URL = "127.0.0.1"`, unusable if pasted).
+ *
+ * Only trust `existingFlairUrl` when it parses as an absolute http(s) URL;
+ * otherwise fall back to `baseUrl` — the live, authoritative URL `doctor`
+ * already computed from the same port source as its "Config: ... (port:
+ * NNNNN)" line (resolveHttpPort / readPortFromConfig, with live-port
+ * discovery layered on top).
+ */
+export function resolveWireFlairUrl(existingFlairUrl: string | undefined, baseUrl: string): string {
+  if (existingFlairUrl) {
+    try {
+      const parsed = new URL(existingFlairUrl);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") return existingFlairUrl;
+    } catch {
+      // Not an absolute URL (e.g. a bare host like "127.0.0.1") — fall through.
+    }
+  }
+  return baseUrl;
+}
+
 // ── check 3: CLAUDE.md bootstrap instruction (claude-code only) ────────────
 
 export interface ClaudeMdCheckResult {

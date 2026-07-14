@@ -58,6 +58,7 @@ import {
   fixSessionStartHook,
   applyOrReportClaudeMdBootstrap,
   applyOrReportSessionStartHook,
+  resolveWireFlairUrl,
 } from "./doctor-client.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
@@ -9013,7 +9014,7 @@ program
                 if (!fixAgentId) {
                   console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: no agent id known — pass --agent <id>`);
                 } else {
-                  const wireEnv = { FLAIR_AGENT_ID: fixAgentId, FLAIR_URL: block.flairUrl || baseUrl };
+                  const wireEnv = { FLAIR_AGENT_ID: fixAgentId, FLAIR_URL: resolveWireFlairUrl(block.flairUrl, baseUrl) };
                   const wireResult =
                     client.id === "claude-code" ? wireClaudeCode(wireEnv) :
                     client.id === "codex" ? wireCodex(wireEnv) :
