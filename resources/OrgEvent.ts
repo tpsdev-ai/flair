@@ -12,16 +12,23 @@
  */
 
 import { databases } from "@harperfast/harper";
-import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
+import { resolveAgentAuth } from "./agent-auth.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
+import {
+  makeAuthGate,
+  resolveAuthGate,
+  stampAttribution,
+  FORBIDDEN,
+  UNAUTH,
+} from "./record-type-kit.js";
 
-const FORBIDDEN = (msg: string) =>
-  new Response(JSON.stringify({ error: msg }), { status: 403, headers: { "Content-Type": "application/json" } });
-const UNAUTH = () =>
-  new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
+// See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
+// prototype method below, never a class-field assignment — Harper's
+// relationship-traversal RBAC path reads allowRead off the prototype.
+const orgEventAuthGate = makeAuthGate();
 
 export class OrgEvent extends (databases as any).flair.OrgEvent {
-  allowRead() { return allowVerified((this as any).getContext?.()); }
+  allowRead() { return orgEventAuthGate.call(this); }
 
   private _auth() {
     return resolveAgentAuth((this as any).getContext?.());
@@ -31,18 +38,20 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
 
-    // No-forge attribution: a non-admin agent's events are ALWAYS attributed to
-    // its authenticated identity (from the Ed25519 signature), never the body —
-    // an agent can only publish AS itself. We overwrite `authorId` rather than
-    // 403'ing a mismatch so a CLI client never has to echo its own id into the
-    // body (mirrors A2A message/send's "sender must match params.agentId" guard
-    // and Presence's "agentId from signature, NOT from body"). Admin agents may
-    // publish on behalf of another agent (body authorId honored, else their own).
-    if (auth.kind === "agent" && !auth.isAdmin) {
-      content.authorId = auth.agentId;
-    } else if (auth.kind === "agent" && auth.isAdmin) {
-      content.authorId ||= auth.agentId;
-    }
+    // No-forge attribution ("stamp-default" — see record-type-kit.ts's
+    // stampAttribution doc): a non-admin agent's events are ALWAYS
+    // attributed to its authenticated identity (from the Ed25519
+    // signature), never the body — an agent can only publish AS itself. We
+    // overwrite `authorId` rather than 403'ing a mismatch so a CLI client
+    // never has to echo its own id into the body (mirrors A2A
+    // message/send's "sender must match params.agentId" guard and
+    // Presence's "agentId from signature, NOT from body"). Admin agents may
+    // publish on behalf of another agent (body authorId honored, else their
+    // own).
+    // "stamp-default" never denies (no rejection branch for non-admin) —
+    // the forbiddenMessage arg is dead for this mode, passed for signature
+    // completeness only.
+    stampAttribution(auth, content, "authorId", "stamp-default", "forbidden: unreachable for stamp-default");
 
     if (!content.id) content.id = `${content.authorId}-${new Date().toISOString()}`;
     content.createdAt = new Date().toISOString();
@@ -60,9 +69,11 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   async put(content: any) {
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
-    if (auth.kind === "agent" && !auth.isAdmin && content.authorId !== auth.agentId) {
-      return FORBIDDEN("forbidden: authorId must match authenticated agent");
-    }
+    // No-forge attribution ("validate-strict" — see record-type-kit.ts's
+    // stampAttribution doc): rejects a mismatch INCLUDING when authorId is
+    // absent (a bare `!==` compare, no truthy guard).
+    const attr = stampAttribution(auth, content, "authorId", "validate-strict", "forbidden: authorId must match authenticated agent");
+    if (attr.denied) return attr.denied;
 
     // attention-plane vocabulary gate (flair#675) — same as post() above.
     const entitiesError = invalidEntitiesResponse(content.entities);
@@ -72,14 +83,15 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   }
 
   async delete(id: any, context?: any) {
-    const auth = await this._auth();
-    if (auth.kind === "anonymous") return UNAUTH();
-    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
-      return super.delete(id, context);
-    }
+    // Dispatch shape shared via record-type-kit.ts's resolveAuthGate — same
+    // three-way branch Memory.ts/Relationship.ts/WorkspaceState.ts use.
+    const gate = await resolveAuthGate((this as any).getContext?.(), UNAUTH());
+    if (gate.kind === "denied") return gate.response;
+    if (gate.kind === "unfiltered") return super.delete(id, context);
+
     const record = await this.get(id);
     if (!record) return super.delete(id, context);
-    if (record.authorId !== auth.agentId) {
+    if (record.authorId !== gate.agentId) {
       return FORBIDDEN("forbidden: cannot delete events authored by another agent");
     }
     return super.delete(id, context);
