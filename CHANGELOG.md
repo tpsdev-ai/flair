@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-07-14
+
 ### 🐛 Migration disk-headroom pre-flight blocked trivially-small migrations on normally-full personal disks (flair#720)
 
 `checkSpace()` (`resources/migrations/space.ts`) required a migration's needed bytes to fit AND that spending them not push disk usage past 90% of TOTAL disk size — a rule designed for a flair-dedicated volume. On a general-purpose machine (a personal Mac especially, where APFS purgeable space makes `statfs.bavail` understate real availability) the system volume routinely sits above 90% used already, so every migration halted regardless of its own footprint: the first 0.22.0 boot on such a disk halted the `embedding-stamp` migration needing 220 KB with 18.6 GB free.
