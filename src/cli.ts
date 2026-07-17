@@ -9266,7 +9266,14 @@ program
     //
     // flair#722: iterated per agent (agentGates above), same as Fleet
     // presence — each subsection's finding is found-only (no per-agent
-    // --fix here beyond the existing restart-on-halt story).
+    // --fix here beyond the existing restart-on-halt story). Gate FINDINGS
+    // are rendered in full under Fleet presence only (the first
+    // verified-read section); re-printing the identical per-agent finding
+    // here doubled the noise on real multi-key machines (a 27-key dogfood
+    // box printed 15 not-registered findings twice each), so this section
+    // iterates only the gate-passed agents and rolls the rest into one
+    // aggregate skip line. The issue COUNT is unaffected either way — gate
+    // findings are counted exactly once, at gate-resolution time (step 7a).
     async function fetchAndRenderMigrations(headers: Record<string, string>, indent: string): Promise<void> {
       try {
         const migRes = await fetch(`${baseUrl}/HealthDetail`, { headers, signal: AbortSignal.timeout(5000) });
@@ -9305,12 +9312,16 @@ program
       if (agentGates.length === 0) {
         console.log(`  ${render.icons.info} Pass --agent <id> (with a matching key in ~/.flair/keys) to see migration state — requires a verified read, same as Fleet presence above.`);
       } else {
-        for (const gate of agentGates) {
-          const registered = renderAgentGateHeader(gate);
-          if (!registered) continue;
+        const passedGates = agentGates.filter((g) => describeAgentGateFinding(g.id, g.state, g.detail) === null);
+        for (const gate of passedGates) {
+          renderAgentGateHeader(gate);
           const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
           const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", "/HealthDetail", keyPath) };
           await fetchAndRenderMigrations(headers, "      ");
+        }
+        const skipped = agentGates.length - passedGates.length;
+        if (skipped > 0) {
+          console.log(`  ${render.icons.info} ${skipped} agent(s) skipped — registration-gate findings reported under Fleet presence above`);
         }
       }
     }

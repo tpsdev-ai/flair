@@ -176,6 +176,11 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
       // AGENT_A's own subsection must still render, unaffected.
       expect(out).toContain(`Agent: ${AGENT_A}`);
       expect(out).toContain(`v${REAL_FLAIR_VERSION}`);
+      // The gate finding renders in FULL exactly once (under Fleet
+      // presence); the Migrations section rolls failed gates into one
+      // aggregate skip line instead of duplicating each finding.
+      expect(out).toContain("1 agent(s) skipped — registration-gate findings reported under Fleet presence above");
+      expect(out.split("NOT registered").length - 1).toBe(1);
     } finally {
       await unlink(join(keysDir, `${BOGUS_ID}.key`)).catch(() => {});
     }
