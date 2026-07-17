@@ -17,10 +17,11 @@
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, unlink } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
@@ -117,14 +118,67 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(out).not.toContain("hidden");
   }, 40_000);
 
-  test("doctor without --agent: fleet identities still show, but versions are hidden (verified-reader gate)", async () => {
+  test("doctor without --agent: auto-iterates the local key (flair#722) — versions are NOT hidden", async () => {
+    // cliHome already has AGENT_A's key on disk from the "agent add" call
+    // above — flair#722's whole point is that doctor no longer needs --agent
+    // to use it. This replaces the pre-#722 "hidden"/"Pass --agent" contract
+    // this same scenario used to assert (that gate is now the ZERO-keys
+    // fallback, covered by the fresh-HOME test below).
     const doctor = await runCli(["doctor", "--port", httpPort()]);
     const out = `${doctor.stdout}${doctor.stderr}`;
     expect(out).toContain("Fleet presence");
-    // Roster identity (agentId) is public regardless of the gate.
+    expect(out).toContain(`Agent: ${AGENT_A}`);
     expect(out).toContain(AGENT_A);
-    expect(out).toContain("hidden");
-    expect(out).toContain("Pass --agent");
+    expect(out).toContain(`v${REAL_FLAIR_VERSION}`);
+    expect(out).not.toContain("hidden");
+    expect(out).not.toContain("Pass --agent");
+  }, 40_000);
+
+  test("doctor without --agent, zero local keys: fleet identities still show, but versions are hidden (verified-reader gate)", async () => {
+    // A totally separate, empty HOME (no `agent add` ever ran here) —
+    // exercises the flair#722 zero-keys fallback: planAgentIterations()
+    // returns an empty list, so doctor falls back to exactly the pre-#722
+    // single unauthenticated read.
+    const emptyHome = await mkdtemp(join(tmpdir(), "flair-fleet-doctor-empty-home-"));
+    try {
+      const doctor = await runCli(["doctor", "--port", httpPort()], { HOME: emptyHome });
+      const out = `${doctor.stdout}${doctor.stderr}`;
+      expect(out).toContain("Fleet presence");
+      // Roster identity (agentId) is public regardless of the gate.
+      expect(out).toContain(AGENT_A);
+      expect(out).toContain("hidden");
+      expect(out).toContain("Pass --agent");
+      expect(out).not.toContain("Agent: ");
+    } finally {
+      await rm(emptyHome, { recursive: true, force: true, maxRetries: 4 });
+    }
+  }, 40_000);
+
+  test("failure isolation (flair#722): an unregistered local key reports its own finding without hiding the registered agent's subsection", async () => {
+    // Plant a second, bogus key directly in cliHome/.flair/keys — same shape
+    // `agent add` writes (raw 32-byte Ed25519 seed), but never registered on
+    // the server via the ops API. Both AGENT_A and this bogus id are now
+    // enumerated by planAgentIterations(); the bogus one must render its own
+    // "not registered" finding and the loop must still reach AGENT_A's
+    // subsection afterward — that's the failure-isolation contract.
+    const BOGUS_ID = "fleet-doctor-agent-unregistered";
+    const keysDir = join(cliHome, ".flair", "keys");
+    await mkdir(keysDir, { recursive: true });
+    const kp = nacl.sign.keyPair();
+    await writeFile(join(keysDir, `${BOGUS_ID}.key`), Buffer.from(kp.secretKey.slice(0, 32)), { mode: 0o600 });
+
+    try {
+      const doctor = await runCli(["doctor", "--port", httpPort()]);
+      const out = `${doctor.stdout}${doctor.stderr}`;
+      expect(out).toContain(`Agent: ${BOGUS_ID}`);
+      expect(out).toContain("NOT registered");
+      expect(out).toContain(`flair agent add ${BOGUS_ID}`);
+      // AGENT_A's own subsection must still render, unaffected.
+      expect(out).toContain(`Agent: ${AGENT_A}`);
+      expect(out).toContain(`v${REAL_FLAIR_VERSION}`);
+    } finally {
+      await unlink(join(keysDir, `${BOGUS_ID}.key`)).catch(() => {});
+    }
   }, 40_000);
 
   test("an older-version instance is flagged stale and sorted ahead of the current one", async () => {
@@ -158,10 +212,13 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(out).toContain(`fleet newest is v${REAL_FLAIR_VERSION}`);
 
     // Sort oldest-version-first: the 0.0.1 row's line precedes the current
-    // (real-version) agent's line within the Fleet presence section.
+    // (real-version) agent's line within the Fleet presence section. Skip
+    // past the "Agent: <id>" subsection header (flair#722) first — AGENT_A's
+    // id appears there too, before the roster rows it introduces.
     const sectionStart = out.indexOf("Fleet presence");
-    const oldIdx = out.indexOf(LEGACY_STALE_ID, sectionStart);
-    const currentIdx = out.indexOf(AGENT_A, sectionStart);
+    const rosterStart = out.indexOf(`Agent: ${AGENT_A}`, sectionStart) + `Agent: ${AGENT_A}`.length;
+    const oldIdx = out.indexOf(LEGACY_STALE_ID, rosterStart);
+    const currentIdx = out.indexOf(AGENT_A, rosterStart);
     expect(oldIdx).toBeGreaterThan(-1);
     expect(currentIdx).toBeGreaterThan(-1);
     expect(oldIdx).toBeLessThan(currentIdx);
