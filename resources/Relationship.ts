@@ -12,8 +12,16 @@ import {
   FORBIDDEN,
   UNAUTH,
 } from "./record-type-kit.js";
+import { RECORD_TYPES } from "./record-types.js";
 
-const relationshipReadScope = makeReadScope("owner-only");
+// Parameterized from RECORD_TYPES.Relationship (record-types slice 2,
+// flair#520) rather than a hand-typed "owner-only" literal — the registry is
+// now the single source of truth this class draws its read-scope mode from.
+// Exported solely so test/unit/record-types-registry.test.ts's drift
+// tripwire can introspect the composed resolver's tagged `.mode`/
+// `.ownerField` against RECORD_TYPES.Relationship — not for any other
+// runtime consumer.
+export const relationshipReadScope = makeReadScope(RECORD_TYPES.Relationship.readScope, RECORD_TYPES.Relationship.ownerField);
 const relationshipByIdReadGate = makeByIdReadGate(relationshipReadScope);
 // See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
 // prototype method below, never a class-field assignment — Harper's
@@ -134,11 +142,13 @@ export class Relationship extends (databases as any).flair.Relationship {
       return UNAUTH();
     }
 
-    // No-forge attribution ("stamp-strict" — see record-type-kit.ts's
-    // stampAttribution doc): reject a PRESENT, mismatched agentId, else
-    // unconditionally stamp with the verified identity. Admin/internal:
-    // content.agentId left as provided (unfiltered) — see doc above.
-    const attr = stampAttribution(auth, content, "agentId", "stamp-strict", "cannot write a relationship owned by another agent");
+    // No-forge attribution — mode/field drawn from RECORD_TYPES.Relationship
+    // (record-types slice 2, flair#520) rather than a hand-typed literal.
+    // "stamp-strict" (see record-type-kit.ts's stampAttribution doc): reject
+    // a PRESENT, mismatched agentId, else unconditionally stamp with the
+    // verified identity. Admin/internal: content.agentId left as provided
+    // (unfiltered) — see doc above.
+    const attr = stampAttribution(auth, content, RECORD_TYPES.Relationship.ownerField, RECORD_TYPES.Relationship.attribution.put, "cannot write a relationship owned by another agent");
     if (attr.denied) return attr.denied;
 
     if (!content.agentId || typeof content.agentId !== "string") {
