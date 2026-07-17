@@ -59,6 +59,9 @@ import {
   applyOrReportClaudeMdBootstrap,
   applyOrReportSessionStartHook,
   resolveWireFlairUrl,
+  planAgentIterations,
+  describeAgentGateFinding,
+  type AgentGateState,
 } from "./doctor-client.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
@@ -8692,6 +8695,7 @@ program
     let issues = 0;
     let fixed = 0; // issues that --fix successfully resolved during this run (flair#721)
     let harperResponding = false;
+    let keyAgentIds: string[] = []; // populated by step 2 (Keys directory) below; feeds the flair#722 per-agent iteration
 
     console.log(`\n${render.wrap(render.c.bold, "🩺 Flair Doctor")}\n`);
 
@@ -8867,6 +8871,7 @@ program
     if (existsSync(keysDir)) {
       const keyFiles = (await import("node:fs")).readdirSync(keysDir).filter((f: string) => f.endsWith(".key"));
       if (keyFiles.length > 0) {
+        keyAgentIds = keyFiles.map((f: string) => f.replace(/\.key$/, ""));
         console.log(`  ${render.icons.ok} Keys found: ${render.wrap(render.c.bold, String(keyFiles.length))} agent(s) in ${render.wrap(render.c.dim, keysDir)}`);
       } else {
         console.log(`  ${render.icons.error} Keys directory exists but no .key files found`);
@@ -9107,6 +9112,53 @@ program
       }
     }
 
+    // 7a. Resolve which agent identities the two verified-read sections below
+    // (Fleet presence, Migrations) iterate (flair#722). Previously both
+    // sections required --agent explicitly; doctor already enumerates every
+    // key in ~/.flair/keys (step 2 above), so by default it now runs the
+    // signed read AS EACH of those agents instead of hiding behind a flag —
+    // a real dogfood run found the #720 halted-migration warning visible via
+    // `flair status --agent local` but invisible in the default `doctor` run
+    // the same user ran minutes later. --agent <id> narrows this to exactly
+    // that one identity (planAgentIterations — same pre-#722 semantics: a
+    // single signed identity, just no longer widened to "every key").
+    //
+    // The registration gate (checkAgentRegistered — same signed GET
+    // /Agent/:id used by the Client integration section above) is resolved
+    // ONCE here per agent and shared by both sections, so a bad/unregistered
+    // key doesn't cost two network round-trips, and its "found" count isn't
+    // double-counted by each section re-discovering the same finding
+    // (flair#721 found/fixed/remaining summary — these are found-only, no
+    // --fix action exists for a bad local key). A gate failure for one agent
+    // never aborts the others — that's the failure isolation flair#722 asks
+    // for; describeAgentGateFinding (src/doctor-client.ts) is pure decision
+    // logic so it's unit-tested without a real Harper.
+    const verifiedReadAgentIds = harperResponding
+      ? planAgentIterations(keyAgentIds, opts.agent || process.env.FLAIR_AGENT_ID)
+      : [];
+    const agentGates: Array<{ id: string; state: AgentGateState; detail?: string }> = [];
+    for (const id of verifiedReadAgentIds) {
+      const reg = await checkAgentRegistered(baseUrl, id, defaultKeysDir());
+      agentGates.push({ id, state: reg.state, detail: reg.detail });
+      const finding = describeAgentGateFinding(id, reg.state, reg.detail);
+      if (finding?.isIssue) issues++;
+    }
+
+    // Shared renderer for one agent's registration-gate outcome — prints the
+    // "Agent: <id>" subsection header, and if the gate isn't clean, the
+    // finding (never re-counted here; already counted once above) and
+    // returns false so the caller skips its own verified fetch for this
+    // agent and moves on to the next (failure isolation).
+    function renderAgentGateHeader(gate: { id: string; state: AgentGateState; detail?: string }): boolean {
+      console.log(`    ${render.wrap(render.c.dim, `Agent: ${gate.id}`)}`);
+      const finding = describeAgentGateFinding(gate.id, gate.state, gate.detail);
+      if (!finding) return true;
+      const icon = finding.icon === "error" ? render.icons.error : render.icons.warn;
+      console.log(`      ${icon} ${finding.message}`);
+      if (finding.fixHint) console.log(`         ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
+      return false;
+    }
+
     // 8. Fleet presence (flair#639) — known instances via /Presence heartbeats.
     //
     // "Instance" here means each AGENT's heartbeat row — Presence is keyed by
@@ -9127,67 +9179,80 @@ program
     // `doctor` unless those agents also heartbeat straight to the hub. Not
     // fixed here — flair#639's fix list is version-stamping + a doctor
     // listing, not widening federation sync scope.
-    if (harperResponding) {
-      console.log(`\n  ${render.wrap(render.c.bold, "Fleet presence")}`);
+    //
+    // flair#722: iterated per agent (agentGates above) instead of a single
+    // --agent-gated read. flairVersion/harperVersion are gated to verified
+    // readers on the server (resources/Presence.ts, same boundary as
+    // currentTask), so each agent subsection signs its own GET — a working
+    // key reveals versions for that subsection; roster IDENTITY is public
+    // either way. Zero local keys (and no --agent) falls back to exactly the
+    // pre-#722 single unauthenticated read (hidden versions, "Pass --agent"
+    // hint) — there's no agent to sign as, but remote agents may still have
+    // heartbeated onto this instance and identities are worth showing.
+    async function fetchAndRenderFleetPresence(headers: Record<string, string>, canSign: boolean, indent: string): Promise<void> {
       try {
-        // flairVersion/harperVersion are gated to verified readers on the
-        // server (resources/Presence.ts, same boundary as currentTask) — sign
-        // the GET when we have an agent + key so the fields aren't silently
-        // nulled out from under us.
-        const fleetAgentId: string | undefined = opts.agent || process.env.FLAIR_AGENT_ID;
-        const fleetKeyPath = fleetAgentId ? join(defaultKeysDir(), `${fleetAgentId}.key`) : undefined;
-        const canSign = !!(fleetAgentId && fleetKeyPath && existsSync(fleetKeyPath));
-        const headers: Record<string, string> = canSign
-          ? { Authorization: buildEd25519Auth(fleetAgentId!, "GET", "/Presence", fleetKeyPath!) }
-          : {};
-
         const presRes = await fetch(`${baseUrl}/Presence`, { headers, signal: AbortSignal.timeout(5000) });
         if (!presRes.ok) {
-          console.log(`  ${render.icons.warn} Could not fetch presence roster (HTTP ${presRes.status})`);
-        } else {
-          const roster = (await presRes.json()) as FleetPresenceRow[];
-          if (!Array.isArray(roster) || roster.length === 0) {
-            console.log(`  ${render.icons.info} No known instances yet — no /Presence heartbeats recorded on this instance`);
-          } else {
-            const rows = sortOldestVersionFirst(markStale(roster));
-            for (const row of rows) {
-              const lastSeen = typeof row.lastHeartbeatAt === "number"
-                ? render.relativeTime(new Date(row.lastHeartbeatAt).toISOString())
-                : "—";
-              const versionLabel = !canSign
-                ? render.wrap(render.c.dim, "hidden")
-                : row.flairVersion
-                  ? `v${row.flairVersion}`
-                  : render.wrap(render.c.dim, "no version reported");
-              const staleNote = row.stale && row.newestVersion
-                ? " " + render.wrap(render.c.yellow, `(stale — fleet newest is v${row.newestVersion})`)
-                : "";
-              const icon = row.stale ? render.icons.warn : render.icons.ok;
-              const statusSuffix = row.presenceStatus ? ` (${row.presenceStatus})` : "";
-              // Natural-presence: same staleness principle as the version
-              // column — a live activity is shown as current, a decayed one as
-              // "last-known". `activityFresh === false` (server verdict) plus a
-              // known lastActivity → "(was: X)"; a fresh, non-idle activity →
-              // "(X)". Skip entirely when there's nothing informative to say
-              // (no signal, or idle) so the line stays quiet for the common case.
-              const lastActivity = row.lastActivity ?? row.activity;
-              const activityNote = row.activityFresh === false
-                ? (lastActivity && lastActivity !== "idle"
-                    ? " " + render.wrap(render.c.dim, `(was: ${lastActivity})`)
-                    : "")
-                : (row.activity && row.activity !== "idle"
-                    ? " " + render.wrap(render.c.dim, `(${row.activity})`)
-                    : "");
-              console.log(`  ${icon} ${row.id} — ${versionLabel} — last seen ${lastSeen}${statusSuffix}${activityNote}${staleNote}`);
-            }
-            if (!canSign) {
-              console.log(`     ${render.wrap(render.c.dim, "Pass --agent <id> (with a matching key in ~/.flair/keys) to reveal versions — flairVersion/harperVersion require a verified signature, same as currentTask.")}`);
-            }
-            console.log(`     ${render.wrap(render.c.dim, "Staleness above is fleet-relative (newest version seen among these instances) — comparing against the latest PUBLISHED flair is the version check at the top of this report, not this section.")}`);
-          }
+          console.log(`${indent}${render.icons.warn} Could not fetch presence roster (HTTP ${presRes.status})`);
+          return;
         }
+        const roster = (await presRes.json()) as FleetPresenceRow[];
+        if (!Array.isArray(roster) || roster.length === 0) {
+          console.log(`${indent}${render.icons.info} No known instances yet — no /Presence heartbeats recorded on this instance`);
+          return;
+        }
+        const rows = sortOldestVersionFirst(markStale(roster));
+        for (const row of rows) {
+          const lastSeen = typeof row.lastHeartbeatAt === "number"
+            ? render.relativeTime(new Date(row.lastHeartbeatAt).toISOString())
+            : "—";
+          const versionLabel = !canSign
+            ? render.wrap(render.c.dim, "hidden")
+            : row.flairVersion
+              ? `v${row.flairVersion}`
+              : render.wrap(render.c.dim, "no version reported");
+          const staleNote = row.stale && row.newestVersion
+            ? " " + render.wrap(render.c.yellow, `(stale — fleet newest is v${row.newestVersion})`)
+            : "";
+          const icon = row.stale ? render.icons.warn : render.icons.ok;
+          const statusSuffix = row.presenceStatus ? ` (${row.presenceStatus})` : "";
+          // Natural-presence: same staleness principle as the version
+          // column — a live activity is shown as current, a decayed one as
+          // "last-known". `activityFresh === false` (server verdict) plus a
+          // known lastActivity → "(was: X)"; a fresh, non-idle activity →
+          // "(X)". Skip entirely when there's nothing informative to say
+          // (no signal, or idle) so the line stays quiet for the common case.
+          const lastActivity = row.lastActivity ?? row.activity;
+          const activityNote = row.activityFresh === false
+            ? (lastActivity && lastActivity !== "idle"
+                ? " " + render.wrap(render.c.dim, `(was: ${lastActivity})`)
+                : "")
+            : (row.activity && row.activity !== "idle"
+                ? " " + render.wrap(render.c.dim, `(${row.activity})`)
+                : "");
+          console.log(`${indent}${icon} ${row.id} — ${versionLabel} — last seen ${lastSeen}${statusSuffix}${activityNote}${staleNote}`);
+        }
+        if (!canSign) {
+          console.log(`${indent}   ${render.wrap(render.c.dim, "Pass --agent <id> (with a matching key in ~/.flair/keys) to reveal versions — flairVersion/harperVersion require a verified signature, same as currentTask.")}`);
+        }
+        console.log(`${indent}   ${render.wrap(render.c.dim, "Staleness above is fleet-relative (newest version seen among these instances) — comparing against the latest PUBLISHED flair is the version check at the top of this report, not this section.")}`);
       } catch (err: any) {
-        console.log(`  ${render.icons.warn} Fleet presence check failed: ${err?.message ?? err}`);
+        console.log(`${indent}${render.icons.warn} Fleet presence check failed: ${err?.message ?? err}`);
+      }
+    }
+
+    if (harperResponding) {
+      console.log(`\n  ${render.wrap(render.c.bold, "Fleet presence")}`);
+      if (agentGates.length === 0) {
+        await fetchAndRenderFleetPresence({}, false, "  ");
+      } else {
+        for (const gate of agentGates) {
+          const registered = renderAgentGateHeader(gate);
+          if (!registered) continue;
+          const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
+          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", "/Presence", keyPath) };
+          await fetchAndRenderFleetPresence(headers, true, "      ");
+        }
       }
     }
 
@@ -9198,45 +9263,55 @@ program
     // 1a above (a halted migration retries automatically on the next boot —
     // there's no separate "run the migration now" fix; the fix for
     // "blocked" is whatever the halt reason names, e.g. freeing disk).
-    if (harperResponding) {
-      console.log(`\n  ${render.wrap(render.c.bold, "Migrations")}`);
+    //
+    // flair#722: iterated per agent (agentGates above), same as Fleet
+    // presence — each subsection's finding is found-only (no per-agent
+    // --fix here beyond the existing restart-on-halt story).
+    async function fetchAndRenderMigrations(headers: Record<string, string>, indent: string): Promise<void> {
       try {
-        const migAgentId: string | undefined = opts.agent || process.env.FLAIR_AGENT_ID;
-        const migKeyPath = migAgentId ? join(defaultKeysDir(), `${migAgentId}.key`) : undefined;
-        const migCanSign = !!(migAgentId && migKeyPath && existsSync(migKeyPath));
-        if (!migCanSign) {
-          console.log(`  ${render.icons.info} Pass --agent <id> (with a matching key in ~/.flair/keys) to see migration state — requires a verified read, same as Fleet presence above.`);
-        } else {
-          const migHeaders: Record<string, string> = { Authorization: buildEd25519Auth(migAgentId!, "GET", "/HealthDetail", migKeyPath!) };
-          const migRes = await fetch(`${baseUrl}/HealthDetail`, { headers: migHeaders, signal: AbortSignal.timeout(5000) });
-          if (!migRes.ok) {
-            console.log(`  ${render.icons.warn} Could not fetch migration state (HTTP ${migRes.status})`);
+        const migRes = await fetch(`${baseUrl}/HealthDetail`, { headers, signal: AbortSignal.timeout(5000) });
+        if (!migRes.ok) {
+          console.log(`${indent}${render.icons.warn} Could not fetch migration state (HTTP ${migRes.status})`);
+          return;
+        }
+        const detail = (await migRes.json()) as { migrations?: { cyclePhase?: string; migrations?: Array<{ id: string; state: string; rowsDone: number; rowsRemaining: number; reason?: string }> } };
+        const migBlock = detail?.migrations;
+        if (!migBlock || !Array.isArray(migBlock.migrations) || migBlock.migrations.length === 0) {
+          console.log(`${indent}${render.icons.info} No migrations registered on this instance`);
+          return;
+        }
+        if (migBlock.cyclePhase === "pre-hash") {
+          console.log(`${indent}${render.icons.info} Pre-flight integrity check in progress — migrations deferred until it completes`);
+        }
+        for (const m of migBlock.migrations) {
+          if (m.state === "completed") {
+            console.log(`${indent}${render.icons.ok} ${m.id}: completed`);
+          } else if (m.state === "halted" || m.state === "failed") {
+            console.log(`${indent}${render.icons.error} ${m.id}: ${m.state}${m.reason ? ` — ${m.reason}` : ""}`);
+            issues++;
+          } else if (m.state === "running") {
+            console.log(`${indent}${render.icons.info} ${m.id}: in progress (${m.rowsDone} done, ${m.rowsRemaining} remaining)`);
           } else {
-            const detail = (await migRes.json()) as { migrations?: { cyclePhase?: string; migrations?: Array<{ id: string; state: string; rowsDone: number; rowsRemaining: number; reason?: string }> } };
-            const migBlock = detail?.migrations;
-            if (!migBlock || !Array.isArray(migBlock.migrations) || migBlock.migrations.length === 0) {
-              console.log(`  ${render.icons.info} No migrations registered on this instance`);
-            } else {
-              if (migBlock.cyclePhase === "pre-hash") {
-                console.log(`  ${render.icons.info} Pre-flight integrity check in progress — migrations deferred until it completes`);
-              }
-              for (const m of migBlock.migrations) {
-                if (m.state === "completed") {
-                  console.log(`  ${render.icons.ok} ${m.id}: completed`);
-                } else if (m.state === "halted" || m.state === "failed") {
-                  console.log(`  ${render.icons.error} ${m.id}: ${m.state}${m.reason ? ` — ${m.reason}` : ""}`);
-                  issues++;
-                } else if (m.state === "running") {
-                  console.log(`  ${render.icons.info} ${m.id}: in progress (${m.rowsDone} done, ${m.rowsRemaining} remaining)`);
-                } else {
-                  console.log(`  ${render.icons.info} ${m.id}: ${m.state}`);
-                }
-              }
-            }
+            console.log(`${indent}${render.icons.info} ${m.id}: ${m.state}`);
           }
         }
       } catch (err: any) {
-        console.log(`  ${render.icons.warn} Migration state check failed: ${err?.message ?? err}`);
+        console.log(`${indent}${render.icons.warn} Migration state check failed: ${err?.message ?? err}`);
+      }
+    }
+
+    if (harperResponding) {
+      console.log(`\n  ${render.wrap(render.c.bold, "Migrations")}`);
+      if (agentGates.length === 0) {
+        console.log(`  ${render.icons.info} Pass --agent <id> (with a matching key in ~/.flair/keys) to see migration state — requires a verified read, same as Fleet presence above.`);
+      } else {
+        for (const gate of agentGates) {
+          const registered = renderAgentGateHeader(gate);
+          if (!registered) continue;
+          const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);
+          const headers: Record<string, string> = { Authorization: buildEd25519Auth(gate.id, "GET", "/HealthDetail", keyPath) };
+          await fetchAndRenderMigrations(headers, "      ");
+        }
       }
     }
 

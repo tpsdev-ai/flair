@@ -412,3 +412,87 @@ export function applyOrReportSessionStartHook(homeDir: string, agentId: string, 
   const fix = fixSessionStartHook(homeDir, agentId);
   return { applied: fix.ok, ok: fix.ok, message: fix.message, hint: fix.ok ? undefined : hint };
 }
+
+// ── check 5: per-agent iteration for verified-read sections (flair#722) ────
+//
+// `doctor`'s Fleet presence and Migrations sections need a signed (Ed25519)
+// request to reveal server-verified fields (flairVersion/harperVersion,
+// migration state) — previously that meant passing --agent explicitly, even
+// though doctor already enumerates every key in ~/.flair/keys (the "Keys
+// found: N agent(s)" line above). A real dogfood run found the #720
+// halted-migration warning visible via `flair status --agent local` but
+// invisible in the default `doctor` run the same user ran minutes later.
+//
+// These two functions are the pure decision logic for iterating and
+// rendering per agent — no fs, no network, no crypto — so they're
+// unit-testable the same way as the rest of this module. The actual signed
+// fetches (which reuse authFetch/checkAgentRegistered, private to cli.ts)
+// stay in src/cli.ts and call these to decide who to iterate and how a given
+// agent's registration-gate outcome should render.
+
+/**
+ * Decide which agent ids the verified-read sections should iterate over.
+ *   - `agentFlag` given -> exactly that one id (a plain filter — unchanged
+ *     pre-#722 semantics: doctor still tries a single signed identity, it
+ *     just doesn't widen to "every key"). Doesn't require the id to already
+ *     have a key on disk; the registration gate reports "no local key" for
+ *     that case rather than silently expanding the search.
+ *   - no `agentFlag` -> every id in `keyAgentIds` (the ~/.flair/keys
+ *     enumeration doctor's own "Keys found" check already did), sorted for
+ *     deterministic, reproducible output across runs.
+ */
+export function planAgentIterations(keyAgentIds: string[], agentFlag: string | undefined): string[] {
+  if (agentFlag) return [agentFlag];
+  return [...keyAgentIds].sort();
+}
+
+/** checkAgentRegistered's (src/cli.ts) result states — duplicated here as a
+ *  type only (no import) to keep this module network/crypto-free. */
+export type AgentGateState = "registered" | "not-registered" | "unreachable" | "no-key";
+
+export interface AgentGateFinding {
+  icon: "warn" | "error";
+  message: string;
+  fixHint?: string;
+  /** Whether this finding counts toward doctor's found/fixed/remaining
+   *  summary (flair#721). True only for the actionable "not-registered"
+   *  state (fixable via `flair agent add <id>`) — a transient or missing-key
+   *  finding is surfaced but not counted, matching how doctor already treats
+   *  "could not verify agent registration" elsewhere (Client integration
+   *  section) — no --fix action exists for either non-issue case. */
+  isIssue: boolean;
+}
+
+/**
+ * Render decision for one agent's registration-gate outcome, ahead of a
+ * verified-read section (Fleet presence / Migrations). Returns null when the
+ * agent is registered — the caller should proceed with its actual signed
+ * read for that agent. Otherwise returns the finding to print for THAT
+ * agent's subsection; the caller must still move on to the next agent
+ * (failure isolation, flair#722) rather than aborting the whole section.
+ */
+export function describeAgentGateFinding(agentId: string, state: AgentGateState, detail?: string): AgentGateFinding | null {
+  switch (state) {
+    case "registered":
+      return null;
+    case "no-key":
+      return {
+        icon: "warn",
+        message: `no local key for '${agentId}' — skipping${detail ? ` (${detail})` : ""}`,
+        isIssue: false,
+      };
+    case "not-registered":
+      return {
+        icon: "error",
+        message: `agent '${agentId}' has a local key but is NOT registered on this Flair instance`,
+        fixHint: `flair agent add ${agentId}`,
+        isIssue: true,
+      };
+    case "unreachable":
+      return {
+        icon: "warn",
+        message: `could not verify agent '${agentId}' registration${detail ? ` (${detail})` : ""}`,
+        isIssue: false,
+      };
+  }
+}
