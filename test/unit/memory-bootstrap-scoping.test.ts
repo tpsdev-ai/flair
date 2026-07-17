@@ -19,6 +19,7 @@
  * mock+import exclusively (no other test/unit/ file imports it).
  */
 import { describe, it, expect, mock } from "bun:test";
+import { embeddingsProviderMock } from "./helpers/embeddings-provider-mock";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -44,14 +45,16 @@ const FAKE_EMBEDDING = [1, ...Array(127).fill(0)];
 // task-relevance query embed passes 'query' (currentTask is a search query
 // against stored memories, never stored content itself).
 let embedInputTypeCalls: (string | undefined)[] = [];
-mock.module("../../resources/embeddings-provider.ts", () => ({
-  getEmbedding: async (_text: string, inputType?: string) => {
-    embedInputTypeCalls.push(inputType);
-    return FAKE_EMBEDDING;
-  },
-  getModelId: () => "mock-embedding-model",
-  getMode: () => "local",
-}));
+mock.module("../../resources/embeddings-provider.ts", () =>
+  embeddingsProviderMock({
+    getEmbedding: async (_text: string, inputType?: string) => {
+      embedInputTypeCalls.push(inputType);
+      return FAKE_EMBEDDING;
+    },
+    getModelId: () => "mock-embedding-model",
+    getMode: () => "local",
+  }),
+);
 
 function matchesCondition(record: any, cond: any): boolean {
   if (cond.operator && Array.isArray(cond.conditions)) {

@@ -26,6 +26,7 @@
  * class-capture collision documented there.
  */
 import { describe, it, expect, mock } from "bun:test";
+import { embeddingsProviderMock } from "./helpers/embeddings-provider-mock";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -43,13 +44,15 @@ delete (process.env as any).FLAIR_HYBRID_RETRIEVAL;
 // 'document' (see embeddings-provider-input-type.test.ts for the value-
 // forwarding logic itself).
 let embedInputTypeCalls: (string | undefined)[] = [];
-mock.module("../../resources/embeddings-provider.ts", () => ({
-  getEmbedding: async (_text: string, inputType?: string) => {
-    embedInputTypeCalls.push(inputType);
-    return null;
-  },
-  getMode: () => "none",
-}));
+mock.module("../../resources/embeddings-provider.ts", () =>
+  embeddingsProviderMock({
+    getEmbedding: async (_text: string, inputType?: string) => {
+      embedInputTypeCalls.push(inputType);
+      return null;
+    },
+    getMode: () => "none",
+  }),
+);
 
 // ─── In-memory Harper Memory / MemoryGrant mock (search-only; SemanticSearch
 // never post()/put()s Memory directly, only patches retrievalCount via

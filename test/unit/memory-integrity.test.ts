@@ -20,6 +20,7 @@
  * jaccardSimilarity() implementations — nothing about that math is mocked.
  */
 import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
+import { embeddingsProviderMock } from "./helpers/embeddings-provider-mock";
 
 // Defensive: `bun test <dir>` runs every file in one process, and
 // resources/rate-limiter.ts reads process.env LAZILY (not cached at import
@@ -40,23 +41,20 @@ const FAKE_EMBEDDING = [1, 0, 0, 0];
 // together; the dedup-gate embedding IS the stored vector).
 let embedInputTypeCalls: (string | undefined)[] = [];
 
-mock.module("../../resources/embeddings-provider.ts", () => ({
-  getEmbedding: async (_text: string, inputType?: string) => {
-    embedInputTypeCalls.push(inputType);
-    return FAKE_EMBEDDING;
-  },
-  getModelId: () => "mock-embedding-model",
-  // getMode is unused by this file's own tests, but MUST still be exported —
-  // `bun test test/unit` runs every file in one process, and another file's
-  // dynamic import of a module that (transitively) imports embeddings-
-  // provider.ts can resolve to whichever mock reached the module cache
-  // first. An incomplete mock here previously broke
-  // test/unit/semantic-search-scoping.test.ts (SemanticSearch.ts imports
-  // getMode too) with "Export named 'getMode' not found" when run in the
-  // same process — keep this mock's export surface a superset of every
-  // consumer's named imports, not just this file's own.
-  getMode: () => "local",
-}));
+// The complete export surface (getModelId/getMode/buildEmbedOptions/
+// resolveModelsDir/getStatus/getEmbedding) comes from the shared helper —
+// see its header for why a partial stub poisons other files' real imports.
+// This file overrides only what its own tests assert on.
+mock.module("../../resources/embeddings-provider.ts", () =>
+  embeddingsProviderMock({
+    getEmbedding: async (_text: string, inputType?: string) => {
+      embedInputTypeCalls.push(inputType);
+      return FAKE_EMBEDDING;
+    },
+    getModelId: () => "mock-embedding-model",
+    getMode: () => "local",
+  }),
+);
 
 // ─── In-memory Harper Memory / MemoryGrant / Agent mock ─────────────────────
 

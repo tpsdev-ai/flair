@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### 🧪 Test infra: complete the embeddings-provider mock surface — latent `bun test` module-cache poisoning (flair#691)
+
+Three unit files `mock.module("resources/embeddings-provider.ts", ...)` with PARTIAL stubs. `bun test test/unit` runs all files in one process and `mock.module` is process-global/unrestored, so whichever mocking file ran first won the module cache for every later file in that worker — and a stub omitting an export (`getModelId`/`buildEmbedOptions`/`resolveModelsDir`) made real importers (migrations-embedding-stamp et al.) die with `SyntaxError: Export named ... not found` as an unhandled error between tests. Latent until file scheduling shifted: adding the 140th unit test file (any new PR) armed it, turning every subsequent PR red on a bug in none of their diffs.
+
+- New shared `test/unit/helpers/embeddings-provider-mock.ts` returns the COMPLETE export surface; the three files override only what they assert on.
+- New `embeddings-provider-mock-completeness.test.ts` pins the helper to the real module's named exports so it fails loudly at the source if an export is added without updating the stub.
+
+
 ### 🐛 `flair doctor`'s Codex wiring printed a broken FLAIR_URL and needlessly forced manual mode on an existing config.toml (flair#727)
 
 Two defects in doctor's Codex client-integration fix path, found on a real 0.22.1 dogfood run against a second machine.
