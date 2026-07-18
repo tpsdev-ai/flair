@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-18
+
 ### ⬆️ harper-fabric-embeddings 0.4.0 (flair's local-embedding engine)
 
 Bumps the pin from ^0.3.0 (which the caret does NOT extend to 0.4.0 on a 0.x major). Pulls in three upstream fixes flair consumers hit directly: the KV-cache clear between embeds (second embed on one engine instance no longer aborts), automatic Qwen3-class last-token pooling via GGUF metadata, and embedding templates as registry data. Dependency + lockfile only — no flair code change.
