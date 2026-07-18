@@ -162,7 +162,7 @@
  * the next entry.
  *
  * `mcp` — DECLARED AND ENFORCED as of slice 3 (flair#520 design review
- * round 2, issue comment 2026-07-13 — Kern APPROVE all four asks, Sherlock
+ * round 2, issue comment 2026-07-18 — Kern APPROVE all four asks, Sherlock
  * APPROVE with one refinement, both unanimous). This field is the reviewed
  * DECLARATION of the MCP surface, not a runtime generator: resources/
  * mcp-tools.ts's hand-written `TOOLS` map stays the actual dispatch table.
