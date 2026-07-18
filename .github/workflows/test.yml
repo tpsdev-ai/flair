@@ -78,6 +78,20 @@ jobs:
           mode: firewall-free
       - run: sfw bun install --frozen-lockfile
       - run: bun test test/unit/
+      # test/unit-isolated/ holds files that `mock.module` a process-global
+      # shared module (embeddings-provider). `mock.module` is first-wins and
+      # unrestored, so these files poison not only the real-importer files in
+      # test/unit/ above but EACH OTHER — one file per `bun test` process is
+      # the only fully-robust isolation (independent of any stub's export
+      # completeness). The mock-isolation tripwire test (in test/unit/) fails
+      # if a new mocker lands back in test/unit/. See flair#691.
+      - name: "Isolated module-mocking unit files (one process each)"
+        run: |
+          for f in test/unit-isolated/*.test.ts; do
+            echo "::group::$f"
+            bun test "$f" || exit 1
+            echo "::endgroup::"
+          done
       # packages/flair-mcp/test/*.test.ts (mcp.test.ts, mcp-node-preflight.test.ts,
       # session-start-hook.test.ts) weren't gated by CI — `bun test test/unit/`
       # above only covers the repo root (closes #491, follow-up to #490 per Kern's

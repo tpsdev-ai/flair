@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### 🧪 Test infra: process-isolate module-mocking unit files — fix latent `bun test` poisoning (flair#691)
+
+Three unit files `mock.module("resources/embeddings-provider.ts")`. `bun test` runs many files per process and `mock.module` is process-global and never restored, so a mocker poisoned that module for every later file in its process — real-importer files (directly, or transitively via Memory.ts) then got the stub. Latent until the unit-test file count shifted bun's multi-worker scheduling to co-locate a mocker before a victim, turning unrelated PRs red. Verified dead-ends: `mock.restore()` does not revert `mock.module` (bun 1.3.10); re-mocking in `afterAll` cannot fix an already-frozen static `import` binding.
+
+- Moved the three mockers to `test/unit-isolated/`; CI and `release.sh` run that directory as a SEPARATE `bun test` invocation (fresh process → no cross-file poisoning).
+- New `mock-isolation-tripwire.test.ts` fails if a file in `test/unit/` mocks an isolated shared module, so a future mocker can not silently re-arm the bug.
+
+
 ### 🐛 `flair doctor`'s Codex wiring printed a broken FLAIR_URL and needlessly forced manual mode on an existing config.toml (flair#727)
 
 Two defects in doctor's Codex client-integration fix path, found on a real 0.22.1 dogfood run against a second machine.
