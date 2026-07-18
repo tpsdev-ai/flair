@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### ⬆️ harper-fabric-embeddings 0.4.0 (flair's local-embedding engine)
+
+Bumps the pin from ^0.3.0 (which the caret does NOT extend to 0.4.0 on a 0.x major). Pulls in three upstream fixes flair consumers hit directly: the KV-cache clear between embeds (second embed on one engine instance no longer aborts), automatic Qwen3-class last-token pooling via GGUF metadata, and embedding templates as registry data. Dependency + lockfile only — no flair code change.
+
 ### 🐛 `flair upgrade` verification: credential pre-flight, agent-key fallback, honest failure classification (flair#741)
 
 A real 0.22.0→0.22.1 upgrade on a healthy personal machine (no `~/.flair/admin-pass`, no `FLAIR_ADMIN_PASS`) produced the scariest possible report for the mildest possible problem: `❌ post-restart verification failed: ... HTTP 403: no credentials sent`, then `❌❌ ROLLBACK ALSO FAILED VERIFICATION`, then `Instance state is UNKNOWN — do not assume data integrity`. The instance was up the entire time — the verifier simply had no credential material on that machine, a pre-existing condition the upgrade flow never checked. Three defects, all fixed together:
