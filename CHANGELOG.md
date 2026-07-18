@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### 🧪 Structural guard: `provenance.claimed.*` can never enter an authority decision (flair#735, follow-up to #718)
+
+flair#718's design review (Sherlock) noted that `claimed.model`/`claimed.client` grant zero authority by CONTRACT — never read for read-scope, attribution, dedup, or usage-count decisions — but that contract was enforced only by field naming and code review, not structurally. This is a pure test slice; no runtime code changed.
+
+- New `test/unit/claimed-zero-authority-tripwire.test.ts`: a source-scan test over the actual authority-decision modules — `resources/record-type-kit.ts` (shared read-scope + attribution), `resources/memory-read-scope.ts` (the one Memory read-scope resolver), `resources/Memory.ts`'s dedup gate (`findConservativeDedupMatch`/`runDedupGate`, function-scoped rather than whole-file so Memory.ts's legitimate write-time `claimedClient` stamp/strip in post()/put() isn't a false positive), `resources/RecordUsage.ts` (the real usage-count authority — `Memory.usageCount`'s only writer, feeding `scoring.ts`'s `usageBoost`), and `resources/mcp-handler.ts` (native `/mcp` auth resolution). Fails if any scanned region contains a `claimed.*` read (`claimedClient`, `claimedModel`, `claimed.client`, `claimed.model`, or a parsed-provenance `.claimed` access) — plain-string `includes()` checks, comments stripped first (doc comments legitimately mention the contract in prose), no dynamic `RegExp` (CodeQL js/regex-injection discipline this repo has been burned by twice).
+- Verified locally: planting `provenance.claimed.client` inside `record-type-kit.ts`'s `makeAuthGate()` makes the new test fail with an actionable message (file:line, offending token, and a pointer to move the read out of the authority module); reverted before commit.
+
 ### 🧹 MCP surface — declare-and-enforce, not runtime-derive; no behavior change (flair#520 slice 3)
 
 Slice 2 (#730) landed `resources/record-types.ts`'s `RECORD_TYPES` registry with an `mcp` field that was shape-only, consumed by nothing. Slice 3 backfills it and adds enforcement, per the design round on the #520 issue thread (Kern's DESIGN REVIEW — APPROVE all four asks; Sherlock's Security Review — APPROVE with one refinement, adopted).
