@@ -51,6 +51,8 @@
  *
  * Prod: first tool call loads the real classes against a fully-real Harper.
  */
+import type { RecordTypeName } from "./record-types.js";
+
 type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};
 
@@ -366,6 +368,42 @@ interface ToolEntry {
   impl: ToolImpl;
 }
 
+/**
+ * Verb→tool-name overrides — the three naming quirks where the shipped tool
+ * name isn't record-types.ts's default `${toolPrefix}_${verb}` shape (see
+ * that module's `mcp` header doc, and RECORD_TYPES.<Table>.mcp itself,
+ * record-types slice 3, flair#520). Keyed by table name + verb; consumed by
+ * `mcpToolName()` below and by test/unit/mcp-surface-tripwire.test.ts to
+ * compute the expected tool name for every declared registry verb.
+ *
+ * Placement here (not in record-types.ts) is deliberate — per Kern/
+ * Sherlock's unanimous slice-3 verdict, the registry declares WHAT is
+ * exposed (capability: toolPrefix + verbs); this map declares HOW that
+ * capability's tool is actually named (presentation). Coupling names into
+ * the registry would mix the policy layer with the presentation layer,
+ * exactly what the registry's separation is meant to avoid.
+ */
+export const TOOL_NAME_OVERRIDES: Partial<
+  Record<RecordTypeName, Partial<Record<"get" | "search" | "store" | "delete" | "update", string>>>
+> = {
+  Soul: { store: "soul_set" },
+  WorkspaceState: { store: "flair_workspace_set" },
+  OrgEvent: { store: "flair_orgevent" },
+};
+
+/**
+ * Resolve the actual `TOOLS` key for a declared (table, verb) pair: the
+ * `TOOL_NAME_OVERRIDES` entry if one exists, else the default
+ * `${toolPrefix}_${verb}` shape. `toolPrefix` is passed in (rather than
+ * looked up from RECORD_TYPES here) so this stays a pure naming function —
+ * both this module and the tripwire test call it with the registry's own
+ * `toolPrefix` value, keeping the naming rule in exactly one place.
+ */
+export function mcpToolName(table: RecordTypeName, toolPrefix: string, verb: string): string {
+  const override = TOOL_NAME_OVERRIDES[table]?.[verb as "get" | "search" | "store" | "delete" | "update"];
+  return override ?? `${toolPrefix}_${verb}`;
+}
+
 export const TOOLS: Record<string, ToolEntry> = {
   memory_search: {
     def: {
@@ -578,7 +616,7 @@ export const TOOLS: Record<string, ToolEntry> = {
   },
 };
 
-/** The tool definitions for a tools/list response (exactly the 9 curated tools). */
+/** The tool definitions for a tools/list response (exactly the 12 curated tools). */
 export function listToolDefs(): McpToolDef[] {
   return Object.values(TOOLS).map((t) => t.def);
 }

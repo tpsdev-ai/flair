@@ -161,19 +161,65 @@
  * field yet — see above); it is a review-time invariant for whoever adds
  * the next entry.
  *
- * `mcp` — SHAPE ONLY, consumed by nothing in this slice. Per Kern's DESIGN
- * REVIEW refinement (Sherlock's Q5, Kern concurring): NOT a flat `verbs`
- * array. `readVerbs` (get/search — same review bar as adding the type
- * itself, since they exercise the same `readScope` the REST surface already
- * exposes) is structurally separate from `writeVerbs` (store/delete — a new
- * write/delete surface over MCP, requiring its own explicit line-item
- * sign-off). None of the five core entries below set `mcp` — flair's
- * existing hand-written `/mcp` surface (resources/mcp-tools.ts's 12-tool
- * `TOOLS` registry) remains the sole, unrelated, authoritative MCP wiring
- * for these five tables in this slice; whether/how to backfill `mcp`
- * declarations onto Memory/Soul/WorkspaceState/OrgEvent (Relationship has
- * no MCP tool today at all) so that surface derives from this registry
- * instead is explicitly slice 3's call, not decided here.
+ * `mcp` — DECLARED AND ENFORCED as of slice 3 (flair#520 design review
+ * round 2, issue comment 2026-07-13 — Kern APPROVE all four asks, Sherlock
+ * APPROVE with one refinement, both unanimous). This field is the reviewed
+ * DECLARATION of the MCP surface, not a runtime generator: resources/
+ * mcp-tools.ts's hand-written `TOOLS` map stays the actual dispatch table.
+ * The slice-3 design round audited all 12 shipped tools and found only 5
+ * are simple table-verb wrappers (memory_get/store/delete, soul_get/set —
+ * and even the soul pair does bespoke `agentId:key` id synthesis); the rest
+ * are composite or bespoke (bootstrap, attention, memory_search,
+ * memory_update, record_usage) and cannot be generated from a registry
+ * entry without either losing schema/behavior specifics or duplicating the
+ * handler. Generating the 5 simple tools would also touch the
+ * security-critical `/mcp` dispatch path for zero behavior change, and
+ * runtime derivation from a registry is structurally the same failure
+ * flair#541 closed for cause (Harper's native-MCP auto-exposing every
+ * resource as a tool) one layer up. What declare-and-enforce buys instead:
+ * any PR that adds or removes an MCP tool must now also touch a policy
+ * chokepoint — either a `RECORD_TYPES.<Table>.mcp` declaration (table-verb
+ * tools) or the `COMPOSITE_MCP_TOOLS` allowlist below (everything else) —
+ * enforced bidirectionally by test/unit/mcp-surface-tripwire.test.ts, or CI
+ * fails. Declaring a verb here does not create a tool; it documents (and,
+ * via the tripwire, locks in) a tool resources/mcp-tools.ts already
+ * implements.
+ *
+ * Per Kern's DESIGN REVIEW refinement (Sherlock's Q5, Kern concurring): NOT
+ * a flat `verbs` array. `readVerbs` (get/search — same review bar as adding
+ * the type itself, since they exercise the same `readScope` the REST
+ * surface already exposes) is structurally separate from `writeVerbs`
+ * (store/delete/update — a write/delete/update surface over MCP, requiring
+ * its own explicit line-item sign-off). `"update"` was added to the
+ * `writeVerbs` union in slice 3 — APPROVED by both Kern and Sherlock as
+ * documenting `memory_update`'s already-shipped two-branch
+ * read-modify-write (in-place overwrite, or a `supersedes`-linked new
+ * version), not a new capability.
+ *
+ * Backfilled on FOUR of the five core entries below, documenting the
+ * CURRENT shipped surface exactly (slice-2 discipline: registration, not
+ * behavior change) — Memory (`get`/`search` reads; `store`/`delete`/
+ * `update` writes), Soul (`get` read; `store` write), WorkspaceState (no
+ * reads; `store` write), OrgEvent (no reads; `store` write). Relationship
+ * stays `mcp`-absent: it has no MCP tool today, and absent means no
+ * exposure, exactly as slice 2 defined.
+ *
+ * Verb→tool-name mapping (default `${toolPrefix}_${verb}`, with three
+ * overrides — `(Soul, store)` → `soul_set`, `(WorkspaceState, store)` →
+ * `flair_workspace_set`, `(OrgEvent, store)` → `flair_orgevent`) lives in
+ * resources/mcp-tools.ts's `TOOL_NAME_OVERRIDES`, not here. Per Kern/
+ * Sherlock's unanimous verdict: the registry declares WHAT is exposed
+ * (capability); mcp-tools.ts owns HOW (names, defaults, routing, input
+ * schema). Keeping presentation out of this file is what keeps
+ * `RecordTypeMcp` a pure capability declaration.
+ *
+ * See `COMPOSITE_MCP_TOOLS` below for the second — and only other —
+ * reviewed chokepoint: tools that are cross-table, aggregate, or otherwise
+ * cannot map to a single table + verb (`bootstrap`, `attention`,
+ * `record_usage`). Sherlock's slice-3 refinement (Kern concurring on the
+ * relocation) put that allowlist HERE, in record-types.ts, rather than in
+ * mcp-tools.ts — so the FULL MCP surface (table-verb tools and composites
+ * alike) is reviewable in this one file, not split across two.
  *
  * Design lineage: flair#520 design draft (issue comment, 2026-07-13) §4;
  * Sherlock's Security Review (readScope narrowing, mandatory-vs-optional
@@ -262,14 +308,20 @@ export type RecordTypeFederation = "excluded" | "included";
  * MCP tool-surface shape — see header doc's `mcp` section. Structurally
  * separates read-only verbs (reviewed at the "add a type" bar) from
  * mutating verbs (their own explicit line-item sign-off), per Sherlock's
- * Q5 / Kern's concurrence. SHAPE ONLY: nothing in this slice generates a
- * tool from this field. Absent (the default for all five core entries) =
- * no MCP exposure derived from this registry for that type.
+ * Q5 / Kern's concurrence. DECLARE-AND-ENFORCE as of slice 3: nothing
+ * generates a tool from this field — resources/mcp-tools.ts's hand-written
+ * `TOOLS` map remains the actual dispatch — but every verb declared here
+ * MUST resolve (via mcp-tools.ts's default naming or its
+ * `TOOL_NAME_OVERRIDES`) to a tool that exists in `TOOLS`, and every
+ * table-verb-shaped tool in `TOOLS` MUST be declared here, enforced
+ * bidirectionally by test/unit/mcp-surface-tripwire.test.ts. Absent
+ * (Relationship only, in this slice) = no MCP exposure for that type — the
+ * tripwire proves zero tools carry its toolPrefix-style prefix.
  */
 export interface RecordTypeMcp {
   toolPrefix: string;
   readVerbs: Array<"get" | "search">;
-  writeVerbs: Array<"store" | "delete">;
+  writeVerbs: Array<"store" | "delete" | "update">;
 }
 
 export interface RecordTypePolicy {
@@ -320,6 +372,7 @@ export const RECORD_TYPES = {
     embedding: { field: "content", exposedSearch: true },
     remEligible: false,
     federation: "included",
+    mcp: { toolPrefix: "memory", readVerbs: ["get", "search"], writeVerbs: ["store", "delete", "update"] },
   },
 
   Relationship: {
@@ -344,6 +397,7 @@ export const RECORD_TYPES = {
     provenance: false,
     remEligible: false,
     federation: "excluded",
+    mcp: { toolPrefix: "flair_workspace", readVerbs: [], writeVerbs: ["store"] },
   },
 
   OrgEvent: {
@@ -357,6 +411,7 @@ export const RECORD_TYPES = {
     provenance: false,
     remEligible: false,
     federation: "excluded",
+    mcp: { toolPrefix: "flair_orgevent", readVerbs: [], writeVerbs: ["store"] },
   },
 
   Soul: {
@@ -370,10 +425,33 @@ export const RECORD_TYPES = {
     provenance: false,
     remEligible: false,
     federation: "included",
+    mcp: { toolPrefix: "soul", readVerbs: ["get"], writeVerbs: ["store"] },
   },
 } as const satisfies Record<string, RecordTypePolicy>;
 
 export type RecordTypeName = keyof typeof RECORD_TYPES;
+
+// ─── Composite MCP tools (the second, and only other, reviewed chokepoint) ─
+//
+// Tools that do not map to a single table + verb — cross-table aggregates,
+// bespoke resources, or multi-source composites. These cannot be expressed
+// via `RECORD_TYPES.<Table>.mcp` (there is no single `table` to attach them
+// to), so slice 3's design round (Sherlock's refinement, Kern concurring —
+// see the `mcp` header doc above) makes this array the SECOND reviewed
+// chokepoint for the MCP surface: test/unit/mcp-surface-tripwire.test.ts
+// requires every tool name in resources/mcp-tools.ts's `TOOLS` map to be
+// either derived from a declared `RECORD_TYPES.<Table>.mcp` verb OR listed
+// here. A PR adding a new composite MCP tool (or renaming/removing one of
+// these three) must touch this array — same review bar as touching a
+// table's `mcp` field.
+//
+//   bootstrap    — Soul + Memory + predicted-context composite (BootstrapMemories)
+//   attention    — cross-table aggregate query (AttentionQuery.ts), not a table verb
+//   record_usage — usage-signal resource (RecordUsage.ts), not a table verb
+//
+export const COMPOSITE_MCP_TOOLS = ["bootstrap", "attention", "record_usage"] as const;
+
+export type CompositeMcpTool = (typeof COMPOSITE_MCP_TOOLS)[number];
 
 // ─── Runtime immutability ───────────────────────────────────────────────────
 // Belt-and-suspenders backstop for the "static, compiled" invariant (see
@@ -386,7 +464,10 @@ export type RecordTypeName = keyof typeof RECORD_TYPES;
 // sub-object (attribution/embedding/mcp) makes an attempted mutation throw
 // (every .ts file in this repo compiles as an ES module, which is always
 // strict mode) instead of silently desyncing the registry from what a
-// resource file already composed at its own module-load time.
+// resource file already composed at its own module-load time. Same
+// treatment for `COMPOSITE_MCP_TOOLS` — it is the second reviewed MCP-surface
+// chokepoint (see its own doc above) and gets the same static-registry
+// guarantee as RECORD_TYPES itself.
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
     for (const key of Object.getOwnPropertyNames(value)) {
@@ -397,3 +478,4 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 deepFreeze(RECORD_TYPES);
+deepFreeze(COMPOSITE_MCP_TOOLS);
