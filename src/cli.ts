@@ -453,6 +453,32 @@ function isLocalBase(base: string): boolean {
   }
 }
 
+/**
+ * Thrown by api() for an HTTP-level failure (as opposed to a network error,
+ * which fetch() itself throws before api() ever sees a status code).
+ * Data-carrying, not just a message string, so callers downstream can make
+ * decisions without re-parsing text (flair#741):
+ *   - `status`: the HTTP status code, so probeInstance (src/probe.ts) can
+ *     classify ProbeResult.authFailureKind (401/403 = credential failure,
+ *     duck-typed off this property — see probe.ts's authedGet doc).
+ *   - `noCredentials`: true only for the specific bare-403-no-auth-header
+ *     case (api()'s own hint-carrying branch below) — distinguishes "we had
+ *     nothing to send" from "we sent something and it was rejected" so
+ *     verifyAuthedGet (below) knows exactly when its agent-key fallback
+ *     applies (fix #2) versus when a real credential was tried and failed
+ *     (where guessing at other keys would be misleading, not helpful).
+ */
+class ApiHttpError extends Error {
+  readonly status: number;
+  readonly noCredentials: boolean;
+  constructor(status: number, message: string, noCredentials = false) {
+    super(message);
+    this.name = "ApiHttpError";
+    this.status = status;
+    this.noCredentials = noCredentials;
+  }
+}
+
 async function api(method: string, path: string, body?: any, options?: { baseUrl?: string }): Promise<any> {
   // Resolve port: FLAIR_URL env > ~/.flair/config.yaml > default 9926
   // When baseUrl is provided (--target), use it directly.
@@ -547,7 +573,7 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
   });
   // Handle 204 No Content (e.g., PUT upsert returns empty body)
   if (res.status === 204 || res.headers.get("content-length") === "0") {
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new ApiHttpError(res.status, `HTTP ${res.status}`);
     return { ok: true };
   }
   const text = await res.text();
@@ -560,9 +586,9 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
       const hint = isLocal
         ? "Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass."
         : "Set FLAIR_ADMIN_PASS (remote targets have no local admin-pass fallback).";
-      throw new Error(`HTTP 403: no credentials sent. ${hint}`);
+      throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
     }
-    throw new Error(text || `HTTP ${res.status}`);
+    throw new ApiHttpError(res.status, text || `HTTP ${res.status}`);
   }
   if (!text) return { ok: true };
   return JSON.parse(text);
@@ -625,6 +651,88 @@ async function authFetch(
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+}
+
+/**
+ * The authedGet `flair upgrade` verification (flair#635/#741) hands to
+ * probeInstance(): api()'s existing local-credential chain (FLAIR_TOKEN >
+ * FLAIR_ADMIN_PASS/HDB_ADMIN_PASSWORD > FLAIR_AGENT_ID+key > ~/.flair/admin-
+ * pass file), with an Ed25519 agent-key fallback layered on top (flair#741
+ * fix #2).
+ *
+ * The gap this closes: api()'s agent-key leg only fires when an agentId is
+ * ALREADY known (FLAIR_AGENT_ID env, or an agentId in the request body/query
+ * string) — none of which a bare `flair upgrade` ever sets. So on a machine
+ * with an agent key under ~/.flair/keys but no admin password anywhere,
+ * api() falls straight through to its no-credentials 403, even though
+ * `flair doctor`'s verified-read gate would happily use that same key. This
+ * wrapper is what actually reuses that path for verification.
+ *
+ * Auth requirement of the verification target itself: /HealthDetail
+ * (probeInstance's default versionPath) is NOT admin-gated — its
+ * `allowRead()` is `allowVerified()` (resources/health.ts, resources/agent-
+ * auth.ts), which permits ANY registered agent, not just admins. So a
+ * signed request from any registered agent's key is sufficient; there's no
+ * need to special-case a different, more-public endpoint.
+ *
+ * Only engages the fallback when api() reports NOTHING was available to
+ * send (`ApiHttpError.noCredentials`) — a wrong/rejected credential (bad
+ * admin-pass, unregistered FLAIR_AGENT_ID) is a different, more specific
+ * problem than "nothing to try"; guessing at unrelated keys on disk in that
+ * case would obscure the real error instead of explaining it.
+ *
+ * Selection rule when multiple keys exist in `keysDir` (mirrors doctor's
+ * planAgentIterations sort — doctor-client.ts): try them in sorted
+ * (deterministic) filename order, first one that authenticates wins. A
+ * liveness/verified-read check only needs ONE working identity, unlike
+ * doctor's per-agent registration report which needs to enumerate all of
+ * them.
+ */
+export async function verifyAuthedGet(baseUrl: string, path: string, keysDir: string): Promise<any> {
+  try {
+    return await api("GET", path, undefined, { baseUrl });
+  } catch (err: unknown) {
+    if (!(err instanceof ApiHttpError) || !err.noCredentials) throw err;
+
+    let keyFiles: string[] = [];
+    try {
+      keyFiles = readdirSync(keysDir).filter((f) => f.endsWith(".key")).sort();
+    } catch {
+      // No keys dir at all — nothing to fall back to.
+    }
+    for (const kf of keyFiles) {
+      const agentId = kf.replace(/\.key$/, "");
+      const keyPath = join(keysDir, kf);
+      try {
+        const res = await authFetch(baseUrl, agentId, keyPath, "GET", path);
+        if (res.ok) return await res.json();
+      } catch {
+        // This key didn't work (unregistered, bad signature, network blip
+        // on this one attempt) — try the next one.
+      }
+    }
+    // No local key authenticated either — surface api()'s original,
+    // actionable "no credentials sent" hint rather than a fallback-specific
+    // message; it already names both remedies (FLAIR_ADMIN_PASS / `flair init`).
+    throw err;
+  }
+}
+
+/**
+ * flair#741 fix #3: does this ProbeResult's failure mean "the server
+ * responded but rejected the verifier's credentials" — proof of liveness,
+ * NOT a data-integrity risk — as opposed to a genuine down/unreachable/5xx
+ * failure where the instance's real state can't be determined? Pure.
+ *
+ * This is the single predicate behind three call sites in the `upgrade`
+ * command: whether the pre-upgrade credential pre-flight aborts (fix #1),
+ * and whether the post-restart / post-rollback verification failure
+ * messages claim "instance state UNKNOWN — do not assume data integrity"
+ * (they must NOT, for this case — that's the flair#741 incident itself) or
+ * explain the real, much less scary situation instead.
+ */
+export function isCredentialOnlyFailure(result: ProbeResult): boolean {
+  return result.healthy === true && result.authFailureKind === "credentials";
 }
 
 async function waitForHealth(httpPort: number, adminUser: string, adminPass: string, timeoutMs: number): Promise<void> {
@@ -7736,6 +7844,67 @@ program
     const { restart: shouldRestart, verify: shouldVerify, deprecatedRestartFlagUsed } =
       resolveUpgradeRestartVerify(opts);
     const upgradePort = resolveHttpPort({});
+    // Hoisted so the pre-flight check (below) and the post-restart/rollback
+    // verification steps (further down) all target the same URL — upgrade
+    // never restarts Flair onto a different port.
+    const baseUrl = `http://127.0.0.1:${upgradePort}`;
+
+    // ── Credential pre-flight (flair#741 fix #1) ────────────────────────────
+    // Post-restart verification (below) needs to authenticate against the
+    // running instance. If it can't do that RIGHT NOW, against the CURRENT,
+    // pre-upgrade instance, every upgrade on this machine is structurally
+    // doomed before a single package is touched: post-restart verify fails
+    // for the exact same credential reason, the rollback fires, and the
+    // rollback's own re-verify fails identically — producing "ROLLBACK ALSO
+    // FAILED VERIFICATION / state UNKNOWN" for an instance that was healthy
+    // the entire time. That is exactly the flair#741 incident report (a
+    // real 0.22.0→0.22.1 upgrade, healthy Flair, no ~/.flair/admin-pass, no
+    // FLAIR_ADMIN_PASS). Catch it here, before any mutation, with a message
+    // that says plainly: nothing was touched.
+    //
+    // Runs the SAME verification call (probeInstance + the agent-key-aware
+    // verifyAuthedGet, fix #2) that post-restart verification uses below —
+    // just against the pre-upgrade instance, with no expectVersion (there's
+    // no target version to compare against yet; the question here is purely
+    // "does an authenticated read work at all").
+    //
+    // Gated on --verify (shouldVerify): this check exists ONLY to keep
+    // post-restart verification honest. A user who already opted out of
+    // that verification with --no-verify has no use for a pre-flight that
+    // protects it, and blocking their upgrade on a check they didn't ask
+    // for would be a new, surprising failure mode of its own.
+    //
+    // Deliberately does NOT abort when the pre-flight instance is merely
+    // UNREACHABLE (down/timeout) rather than reachable-but-unauthenticated.
+    // `flair upgrade` may be the user's way of FIXING a down instance (bad
+    // code on disk that a newer version resolves) — today's behavior
+    // (pre-flair#741, no pre-flight at all) already lets that proceed, and
+    // a new hard block here would take away a legitimate recovery path for
+    // a failure mode this issue was never about. Only the specific
+    // "server responded, credentials didn't work" case is structurally
+    // doomed in a way a fresh install/restart can't fix on its own — so
+    // only that case aborts. (If a down instance turns out to ALSO lack
+    // credentials, that surfaces the normal way: post-restart verification
+    // fails and rolls back, same as any other post-restart failure.)
+    if (shouldVerify) {
+      const preflight = await probeInstance(baseUrl, {
+        // A short, bounded budget — this instance is presumed already
+        // running (upgrade's normal case); doctor's probePort convention
+        // (probeFlairReachable's doc comment) uses the same ~3s ballpark
+        // for "is anything there at all" checks.
+        timeoutMs: 3000,
+        pollIntervalMs: 300,
+        authedGet: (path) => verifyAuthedGet(baseUrl, path, defaultKeysDir()),
+      });
+      if (isCredentialOnlyFailure(preflight)) {
+        console.error(`❌ pre-flight check failed: ${preflight.error}`);
+        console.error("   Nothing has been touched — no packages were installed, no restart happened.");
+        console.error("   The current instance is up and responded; the verifier just has no way to authenticate against it.");
+        console.error("   Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key — then re-run flair upgrade.");
+        console.error("   (--no-verify skips this check too, but post-restart verification would then fail the exact same way.)");
+        process.exit(1);
+      }
+    }
 
     // ── Pre-upgrade data snapshot (flair#637, opt-in as of the 2026-07-08 rewire) ──
     // Only an @tpsdev-ai/flair package swap touches the code that reads/
@@ -7888,7 +8057,7 @@ program
 
     console.log("\nRestarting Flair...");
     const port = upgradePort;
-    const baseUrl = `http://127.0.0.1:${port}`;
+    // baseUrl was hoisted above (pre-flight, fix #1) — same URL, no redeclaration.
     try {
       await restartFlair(port);
     } catch (err: any) {
@@ -7904,13 +8073,16 @@ program
     }
 
     console.log("\nVerifying...");
-    // The authenticated leg dogfoods api()'s local-credential resolution
-    // (flair#640: env > agent key > ~/.flair/admin-pass file) — probeInstance
-    // itself never resolves credentials, it just calls whatever's handed to it.
+    // The authenticated leg reuses verifyAuthedGet (flair#741 fix #2): api()'s
+    // local-credential resolution (flair#640: env > agent key when an agentId
+    // is already known > ~/.flair/admin-pass file), PLUS an Ed25519 agent-key
+    // fallback when none of that resolves anything — see verifyAuthedGet's
+    // doc comment. probeInstance itself never resolves credentials, it just
+    // calls whatever's handed to it.
     const verify = await probeInstance(baseUrl, {
       expectVersion: expectedFlairVersion ?? undefined,
       timeoutMs: STARTUP_TIMEOUT_MS,
-      authedGet: (path) => api("GET", path, undefined, { baseUrl }),
+      authedGet: (path) => verifyAuthedGet(baseUrl, path, defaultKeysDir()),
     });
 
     const verdict = decideAfterVerify(verify, previousFlairVersion);
@@ -7920,6 +8092,17 @@ program
     }
 
     console.error(`❌ post-restart verification failed: ${verdict.reason}`);
+    if (isCredentialOnlyFailure(verify)) {
+      // flair#741 fix #3: a responding server that rejects the verifier's
+      // credentials proves the instance is UP — it is not evidence the
+      // upgrade itself broke anything. Say so explicitly instead of leaving
+      // the reader to infer it from the raw error text. Rollback still
+      // proceeds below (a credential check that worked pre-upgrade — see
+      // the pre-flight above — and stopped working mid-run is an edge case
+      // ambiguous enough that "prefer the known-good version" is still the
+      // safer default), but the reason for it is now honest.
+      console.error("   The instance is up and responded — the verifier could not authenticate. This is not a sign the upgrade broke anything.");
+    }
 
     if (verdict.kind === "cannot-rollback") {
       console.error("   Cannot roll back automatically: the previously-installed @tpsdev-ai/flair version is unknown.");
@@ -7946,7 +8129,7 @@ program
     const rollbackVerify = await probeInstance(baseUrl, {
       expectVersion: verdict.toVersion,
       timeoutMs: STARTUP_TIMEOUT_MS,
-      authedGet: (path) => api("GET", path, undefined, { baseUrl }),
+      authedGet: (path) => verifyAuthedGet(baseUrl, path, defaultKeysDir()),
     });
     const rollbackVerdict = decideAfterRollbackVerify(rollbackVerify);
     if (rollbackVerdict.kind === "rolled-back") {
@@ -7956,7 +8139,21 @@ program
     }
 
     console.error(`❌❌ ROLLBACK ALSO FAILED VERIFICATION: ${rollbackVerdict.reason}`);
-    console.error("   Instance state is UNKNOWN — do not assume data integrity.");
+    // flair#741 fix #3: this is the exact incident report — a 403 from a
+    // responding, healthy server (credentials-only failure) was printed as
+    // "state UNKNOWN — do not assume data integrity" for BOTH the upgrade
+    // verify AND the rollback re-verify, because the same missing-auth-
+    // material condition rejects both. Reserve the UNKNOWN/do-not-assume
+    // text for failures where the instance's real state genuinely can't be
+    // determined (connection refused, timeout, 5xx) — a credential-only
+    // failure here means the rollback likely landed fine and the checker
+    // simply can't prove it.
+    if (isCredentialOnlyFailure(rollbackVerify)) {
+      console.error("   The instance is up and responding — the verifier could not authenticate (credentials, not the rollback, are the problem).");
+      console.error("   Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key, then check: flair doctor");
+    } else {
+      console.error("   Instance state is UNKNOWN — do not assume data integrity.");
+    }
     // This double-failure isn't auto-recoverable yet (flair#637) — but if a
     // pre-upgrade snapshot landed, point at the CONCRETE path instead of
     // just the issue number, so recovery doesn't start with a GitHub search.

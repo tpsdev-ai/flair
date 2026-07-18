@@ -45,6 +45,12 @@ export interface ProbeInstanceOptions {
    * / instance broken". Omit entirely to run a health-only probe: healthy
    * is still reported, but authenticated/version/versionMatch all come back
    * null (nothing to check without a way to authenticate).
+   *
+   * flair#741: if the thrown/rejected error carries a numeric `.status`
+   * property, probeInstance reads it to fill ProbeResult.authFailureKind
+   * (401/403 → "credentials", anything else → "server") — purely additive,
+   * duck-typed, optional. An authedGet that never sets `.status` still works
+   * exactly as before; it just always classifies as "server".
    */
   authedGet?: (path: string) => Promise<any>;
   /** Path to GET for the authenticated version/auth check. Default "/HealthDetail". */
@@ -64,6 +70,33 @@ export interface ProbeResult {
   ok: boolean;
   /** Human-readable reason. Present iff !ok. */
   error?: string;
+  /**
+   * Classifies WHY the authenticated leg failed, when it did (flair#741).
+   * Callers use this to tell "the server is up and responding, it just
+   * rejected our credentials" (not a data-integrity risk — the flair#741
+   * incident: a healthy instance, misreported as "state UNKNOWN" because
+   * the checker had no admin-pass/agent key on that machine) apart from a
+   * genuine "we can't tell what state this instance is in" failure.
+   *
+   *   - "credentials": `authedGet` rejected — and the rejection carried a
+   *     numeric `.status` of 401 or 403 on the thrown error (the convention
+   *     `api()` in src/cli.ts follows; any authedGet implementation can
+   *     opt in the same way). The server demonstrably answered; only the
+   *     credentials were the problem.
+   *   - "server": `authedGet` rejected for any other reason — a network
+   *     error/timeout reaching the authenticated endpoint, a non-401/403
+   *     HTTP status (5xx, etc.), or an error with no recognizable status.
+   *     Treated exactly like before flair#741: a real "can't confirm this
+   *     instance is OK" signal.
+   *   - null: authenticated !== false — either the authenticated call
+   *     succeeded, or it was never attempted (no authedGet given, or /Health
+   *     itself never answered).
+   *
+   * Optional (not just nullable) so pre-existing hand-built ProbeResult
+   * fixtures in tests keep compiling unchanged; probeInstance() itself
+   * always sets it explicitly (never leaves it undefined).
+   */
+  authFailureKind?: "credentials" | "server" | null;
 }
 
 export const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
@@ -108,22 +141,33 @@ export async function probeInstance(baseUrl: string, opts: ProbeInstanceOptions 
       version: null,
       versionMatch: null,
       ok: false,
+      authFailureKind: null,
       error: `instance did not answer ${base}/Health within ${timeoutMs}ms` +
         (lastHealthError ? ` (last error: ${lastHealthError})` : ""),
     };
   }
 
   if (!authedGet) {
-    return { healthy: true, authenticated: null, version: null, versionMatch: null, ok: true };
+    return { healthy: true, authenticated: null, version: null, versionMatch: null, ok: true, authFailureKind: null };
   }
 
   let version: string | null = null;
   let authError: string | undefined;
+  let authFailureKind: "credentials" | "server" | null = null;
   try {
     const body = await authedGet(versionPath);
     version = typeof body?.version === "string" ? body.version : null;
   } catch (err: any) {
     authError = err?.message ?? String(err);
+    // flair#741: classify the failure so callers can tell "server responded,
+    // credentials rejected" (liveness proven) from "can't tell what state
+    // this instance is in". Duck-typed on `.status` — any authedGet
+    // implementation can opt in by throwing an error with a numeric status;
+    // api() (src/cli.ts) does via ApiHttpError. No recognizable status (a
+    // plain network error, or an authedGet that doesn't set one) stays
+    // conservative and lands in "server".
+    const status = typeof err?.status === "number" ? err.status : null;
+    authFailureKind = status === 401 || status === 403 ? "credentials" : "server";
   }
 
   const authenticated = authError === undefined;
@@ -131,6 +175,7 @@ export async function probeInstance(baseUrl: string, opts: ProbeInstanceOptions 
   if (authenticated && expectVersion !== undefined) {
     versionMatch = version === expectVersion;
   }
+  if (authenticated) authFailureKind = null;
 
   const ok = healthy && authenticated && versionMatch !== false;
   let error: string | undefined;
@@ -140,5 +185,5 @@ export async function probeInstance(baseUrl: string, opts: ProbeInstanceOptions 
     error = `version mismatch: expected ${expectVersion}, instance reports ${version ?? "unknown"}`;
   }
 
-  return { healthy, authenticated, version, versionMatch, ok, error };
+  return { healthy, authenticated, version, versionMatch, ok, error, authFailureKind };
 }
