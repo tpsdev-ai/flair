@@ -28,9 +28,18 @@ describe("mock-isolation tripwire (flair#691)", () => {
       if (name === "mock-isolation-tripwire.test.ts") continue;
       const src = readFileSync(join(UNIT_DIR, name), "utf8");
       for (const mod of isolatedModules) {
-        // match `mock.module("...<mod>...` (any relative prefix / extension)
-        const re = new RegExp(`mock\\.module\\(\\s*["'][^"']*${mod.replace(/[/.]/g, "\\$&")}`);
-        if (re.test(src)) offenders.push(`${name} → ${mod}`);
+        // Plain string scan (no dynamic RegExp — avoids js/regex-injection,
+        // and a literal substring is all we need): does this file call
+        // `mock.module(...)` on a specifier containing the isolated module
+        // path? Check both tokens appear and the module path sits inside a
+        // mock.module() argument.
+        for (const call of src.split("mock.module(").slice(1)) {
+          const arg = call.slice(0, call.indexOf(")"));
+          if (arg.includes(mod)) {
+            offenders.push(`${name} → ${mod}`);
+            break;
+          }
+        }
       }
     }
     expect(offenders).toEqual([]);
