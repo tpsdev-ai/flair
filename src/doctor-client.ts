@@ -450,16 +450,24 @@ export function planAgentIterations(keyAgentIds: string[], agentFlag: string | u
  *  type only (no import) to keep this module network/crypto-free. */
 export type AgentGateState = "registered" | "not-registered" | "unreachable" | "no-key";
 
+/** AgentGateState minus "unreachable", for the parts of the surface (like
+ *  classifyKeyFile below) that only ever see it once instance reachability
+ *  is already settled — a caller that has confirmed the instance IS
+ *  reachable never has "unreachable" left to hand back here. */
+export type PruneRegistrationState = "registered" | "not-registered" | "no-key";
+
 export interface AgentGateFinding {
   icon: "warn" | "error";
   message: string;
   fixHint?: string;
   /** Whether this finding counts toward doctor's found/fixed/remaining
    *  summary (flair#721). True only for the actionable "not-registered"
-   *  state (fixable via `flair agent add <id>`) — a transient or missing-key
-   *  finding is surfaced but not counted, matching how doctor already treats
-   *  "could not verify agent registration" elsewhere (Client integration
-   *  section) — no --fix action exists for either non-issue case. */
+   *  state — fixable either by registering (`flair agent add <id>`) or, if
+   *  the key is a stale/leftover test artifact instead, by removing it
+   *  (`flair keys prune`, flair#734) — a transient or missing-key finding is
+   *  surfaced but not counted, matching how doctor already treats "could not
+   *  verify agent registration" elsewhere (Client integration section) — no
+   *  --fix action exists for either non-issue case. */
   isIssue: boolean;
 }
 
@@ -485,7 +493,11 @@ export function describeAgentGateFinding(agentId: string, state: AgentGateState,
       return {
         icon: "error",
         message: `agent '${agentId}' has a local key but is NOT registered on this Flair instance`,
-        fixHint: `flair agent add ${agentId}`,
+        // Two ways out, both actionable — register it if it should exist, or
+        // (flair#734) clean it up if it's a stale/leftover key. `flair keys
+        // prune` never touches a key that IS registered, so it's always a
+        // safe suggestion here even when the right fix is actually `agent add`.
+        fixHint: `flair agent add ${agentId} (if it should be registered) — or flair keys prune (if it's a stale/leftover key)`,
         isIssue: true,
       };
     case "unreachable":
@@ -495,4 +507,96 @@ export function describeAgentGateFinding(agentId: string, state: AgentGateState,
         isIssue: false,
       };
   }
+}
+
+// ── check 6: `flair keys prune` classification (flair#734) ─────────────────
+//
+// Follow-up to #731's doctor agent-iteration, which made previously-invisible
+// stale keys visible (each renders as a "not registered" gate finding, check
+// 5 above) but shipped no command to act on it — every doctor run just
+// re-reported the same noise. `flair keys prune` (src/cli.ts) walks the key
+// dir and moves anything it can positively classify as prunable into
+// `<keysDir>/.pruned/<date>/` — never deletes. The network-dependent half
+// (is this agentId actually registered?) reuses checkAgentRegistered
+// (src/cli.ts), the exact same signed GET /Agent/:id check 5's gate uses.
+// This module only owns the PURE decision — given a file's seed-validity and
+// (if checked) registration state, what class is it and why — plus two
+// path/naming helpers pure enough to live here (no crypto, no network).
+
+/** Name of the archive subdirectory prune moves prunable files into —
+ *  `<keysDir>/.pruned/<date>/`. Also the one directory name the scanner
+ *  itself must skip when walking the key dir (never re-classify prune's own
+ *  archive as a candidate). */
+export const PRUNED_DIR_NAME = ".pruned";
+
+/** `YYYY-MM-DD`, UTC — the `<date>` component of the archive path. UTC (not
+ *  local time) so a single prune run always lands in exactly one date
+ *  bucket regardless of the host's timezone. */
+export function pruneDateStamp(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
+/**
+ * Pick a collision-free destination filename for a move into an archive
+ * directory that may already hold a file of the same name (e.g. two prune
+ * runs on the same UTC day). Preserves the original name whenever possible;
+ * on collision appends `.2`, `.3`, ... until free. Pure — the caller supplies
+ * the set of names already present (or about to be present, within the same
+ * run) at the destination; no fs access happens here.
+ */
+export function resolveCollisionSafeName(existingNames: Iterable<string>, filename: string): string {
+  const existing = existingNames instanceof Set ? existingNames : new Set(existingNames);
+  if (!existing.has(filename)) return filename;
+  let n = 2;
+  while (existing.has(`${filename}.${n}`)) n++;
+  return `${filename}.${n}`;
+}
+
+export type KeyPruneClass = "keep" | "stale" | "invalid" | "ignored";
+
+export interface KeyPruneDecision {
+  class: KeyPruneClass;
+  /** Human-readable reason — rendered next to the filename in prune's report. */
+  reason: string;
+}
+
+/**
+ * Classify one `.key` file given whether its seed parsed (`seedValid`) and,
+ * if it did, the registration-gate result checkAgentRegistered (src/cli.ts)
+ * returned for it — the SAME check doctor's "not registered" finding above
+ * is built from. Pure — no fs/crypto/network; the caller (classifyKeysDir,
+ * src/cli.ts) does the actual file read, seed parse, and signed registration
+ * check, and only calls this to decide what the result means.
+ *
+ * `registration` is ignored (pass null) when `seedValid` is false — an
+ * unparseable seed can't be signed with, so it was never checked against the
+ * instance, regardless of what agentId its filename implies.
+ *
+ * Deliberately has no case for "unreachable": classifyKeysDir aborts the
+ * WHOLE run before classifying anything once the instance is confirmed
+ * unreachable (never classify offline) — this function is only ever called
+ * once that's already been ruled out.
+ */
+export function classifyKeyFile(
+  agentId: string,
+  seedValid: boolean,
+  registration: { state: PruneRegistrationState; detail?: string } | null,
+  baseUrl: string,
+): KeyPruneDecision {
+  if (!seedValid) {
+    return { class: "invalid", reason: "not a parseable Ed25519 private key seed" };
+  }
+  if (registration?.state === "registered") {
+    return { class: "keep", reason: `agent '${agentId}' is registered on ${baseUrl} — never pruned` };
+  }
+  // "not-registered", "no-key", or (defensively) no registration result at
+  // all — every one of those means we could not confirm this agent is
+  // registered, so it's prunable. "no-key" is not expected in practice here
+  // (the file we just parsed a valid seed FROM is itself the key
+  // checkAgentRegistered would sign with), but is handled the same way
+  // rather than left as an unclassified gap.
+  return {
+    class: "stale",
+    reason: `agent '${agentId}' is not registered on ${baseUrl}${registration?.detail ? ` (${registration.detail})` : ""}`,
+  };
 }

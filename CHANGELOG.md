@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### ✨ `flair keys prune` — recoverable cleanup of stale/unregistered keys (flair#734)
+
+Follow-up to #731's doctor agent-iteration, which made previously-invisible stale keys visible (each renders as a "not registered" gate finding) but shipped no command to act on it — every `flair doctor` run just re-reported the same noise, and a long-lived dogfood host's key dir kept accreting e2e-test leftovers. `agent remove <id>` already handles the registered case (agent + key together); `flair keys prune` fills the gap for keys with no agent behind them at all.
+
+- **`flair keys prune`** classifies every file in the key dir (`FLAIR_KEY_DIR` / `~/.flair/keys` / `--keys-dir`) into one of four classes: `keep` (registered on the configured instance — never touched, under any flag), `stale` (a valid Ed25519 seed for an agent that is NOT registered), `invalid` (a `.key` file that doesn't parse as an Ed25519 seed at all — reported as its own class, never lumped in with "unregistered"), or `ignored` (non-`.key` files, directories, and its own `.pruned` archive).
+- **Dry-run by default** — prints what would move and why, moves nothing. `--apply` actually moves.
+- **Never deletes.** Prunable files are MOVED to `<keysDir>/.pruned/<YYYY-MM-DD>/` (UTC date), preserving the original filename; a same-day collision (e.g. two prune runs) gets a numeric suffix (`agentId.key.2`) rather than overwriting the earlier archive.
+- **Conservative on reachability**: registration is checked only against the configured default instance (`--instance <url>` to target a different one); if that instance can't be confirmed reachable, the WHOLE run aborts immediately with a non-zero exit — nothing is classified or moved. Never guesses offline.
+- Registration checking reuses `checkAgentRegistered` (`src/cli.ts`) — the exact same signed `GET /Agent/:id` doctor's registration gate already uses, not a reimplementation.
+- **Doctor integration**: the existing "not registered" gate finding's fix hint (`src/doctor-client.ts` `describeAgentGateFinding`) now points at both remedies — `flair agent add <id>` if the key should be registered, or `flair keys prune` if it's a stale/leftover key. `flair doctor` itself stays read-only; no behavior change beyond the hint text.
+- New `test/unit/keys-prune.test.ts` (classification + move + CLI wiring, mocked-fetch + temp dirs, plus two subprocess acceptance checks for the process-exit-code bullets) and new `classifyKeyFile`/`resolveCollisionSafeName`/`pruneDateStamp` pure-logic tests in `test/unit/doctor-client.test.ts`.
+
 ### 🧪 Structural guard: `provenance.claimed.*` can never enter an authority decision (flair#735, follow-up to #718)
 
 flair#718's design review (Sherlock) noted that `claimed.model`/`claimed.client` grant zero authority by CONTRACT — never read for read-scope, attribution, dedup, or usage-count decisions — but that contract was enforced only by field naming and code review, not structurally. This is a pure test slice; no runtime code changed.
