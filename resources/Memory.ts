@@ -26,22 +26,33 @@ import {
   FORBIDDEN,
   UNAUTH,
 } from "./record-type-kit.js";
+import { RECORD_TYPES } from "./record-types.js";
 
 /**
  * Owner ids a non-admin agent may READ (resolveAllowedOwners) live in
  * ./memory-read-scope.ts — still exported/used elsewhere (admin tooling).
  * The full read-scope condition + private-exclusion predicate is now
- * consumed through ./record-type-kit.ts's makeReadScope("open-within-org"),
- * which delegates to that module's resolveReadScope() UNCHANGED — the ONE
- * centralized helper every cross-agent Memory read path (search()/get()
- * here, SemanticSearch.ts, MemoryBootstrap.ts, auth-middleware.ts's by-id
- * guard) resolves its scope through, so the scoping rule cannot drift
- * per-path again (a SemanticSearch inline `visibility === "office"`
- * OR-clause leaked office memories to any authenticated agent because the
- * rule had scattered). See memory-read-scope.ts's doc for the migration
- * invariant (no-visibility-field reads as "shared", never "private").
+ * consumed through ./record-type-kit.ts's makeReadScope(), parameterized
+ * from RECORD_TYPES.Memory (record-types slice 2, flair#520) rather than a
+ * hand-typed "open-within-org" literal — the registry is now the single
+ * source of truth this class draws its read-scope mode from. makeReadScope
+ * delegates "open-within-org" to ./memory-read-scope.ts's resolveReadScope()
+ * UNCHANGED — the ONE centralized helper every cross-agent Memory read path
+ * (search()/get() here, SemanticSearch.ts, MemoryBootstrap.ts, auth-
+ * middleware.ts's by-id guard) resolves its scope through, so the scoping
+ * rule cannot drift per-path again (a SemanticSearch inline
+ * `visibility === "office"` OR-clause leaked office memories to any
+ * authenticated agent because the rule had scattered). See memory-read-
+ * scope.ts's doc for the migration invariant (no-visibility-field reads as
+ * "shared", never "private").
+ *
+ * Exported (not just a module-local const) solely so
+ * test/unit/record-types-registry.test.ts's drift tripwire can introspect
+ * the composed resolver's tagged `.mode`/`.ownerField` (see makeReadScope's
+ * doc in record-type-kit.ts) against RECORD_TYPES.Memory — not for any
+ * other runtime consumer.
  */
-const memoryReadScope = makeReadScope("open-within-org");
+export const memoryReadScope = makeReadScope(RECORD_TYPES.Memory.readScope, RECORD_TYPES.Memory.ownerField);
 const memoryByIdReadGate = makeByIdReadGate(memoryReadScope);
 // See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
 // prototype method below, never a class-field assignment — Harper's
@@ -492,9 +503,10 @@ export class Memory extends (databases as any).flair.Memory {
 
     // Non-admin agent: scope to own (any visibility) + granted owners' SHARED
     // memories only (Layer 1 private-exclusion). Centralized in
-    // memoryReadScope (record-type-kit.ts's makeReadScope("open-within-org"),
-    // delegating to memory-read-scope.ts's resolveReadScope() unchanged) so
-    // get() above and search() here cannot drift.
+    // memoryReadScope (record-type-kit.ts's makeReadScope(), parameterized
+    // from RECORD_TYPES.Memory — see this file's header — delegating
+    // "open-within-org" to memory-read-scope.ts's resolveReadScope()
+    // unchanged) so get() above and search() here cannot drift.
     const scope = await memoryReadScope(gate.agentId);
     const agentIdCondition: any = scope.condition;
 
@@ -540,10 +552,12 @@ export class Memory extends (databases as any).flair.Memory {
       if (auth.kind === "anonymous") {
         return UNAUTH();
       }
-      // No-forge attribution ("validate-truthy" — see record-type-kit.ts's
-      // stampAttribution doc): reject a PRESENT, mismatched agentId; never
-      // stamp when absent (the caller is expected to have set it).
-      const attr = stampAttribution(auth, content, "agentId", "validate-truthy", "forbidden: cannot write memory owned by another agent");
+      // No-forge attribution — mode/field drawn from RECORD_TYPES.Memory
+      // (record-types slice 2, flair#520) rather than a hand-typed literal.
+      // "validate-truthy" (see record-type-kit.ts's stampAttribution doc):
+      // reject a PRESENT, mismatched agentId; never stamp when absent (the
+      // caller is expected to have set it).
+      const attr = stampAttribution(auth, content, RECORD_TYPES.Memory.ownerField, RECORD_TYPES.Memory.attribution.post, "forbidden: cannot write memory owned by another agent");
       if (attr.denied) return attr.denied;
     }
 
@@ -695,9 +709,10 @@ export class Memory extends (databases as any).flair.Memory {
       if (auth.kind === "anonymous") {
         return UNAUTH();
       }
-      // No-forge attribution ("validate-truthy" — see record-type-kit.ts's
-      // stampAttribution doc), same rule as post().
-      const attr = stampAttribution(auth, content, "agentId", "validate-truthy", "forbidden: cannot write memory owned by another agent");
+      // No-forge attribution — mode/field drawn from RECORD_TYPES.Memory,
+      // same rule as post(). "validate-truthy" (see record-type-kit.ts's
+      // stampAttribution doc).
+      const attr = stampAttribution(auth, content, RECORD_TYPES.Memory.ownerField, RECORD_TYPES.Memory.attribution.put, "forbidden: cannot write memory owned by another agent");
       if (attr.denied) return attr.denied;
     }
 

@@ -136,6 +136,43 @@ describe("makeReadScope('owner-only') — the Relationship.ts/WorkspaceState.ts 
   });
 });
 
+// ─── makeReadScope's .mode/.ownerField tagging (record-types slice 2, flair#520) ──
+//
+// Pins the returned resolver's own construction parameters as introspectable
+// own-properties, independent of any resource class or registry. See
+// makeReadScope's doc in record-type-kit.ts for why this exists: it lets a
+// future single-resource-file test assert `<table>ReadScope.mode ===
+// RECORD_TYPES.<Table>.readScope` directly. test/unit/record-types-
+// registry.test.ts's own drift tripwire uses a source-text scan instead (see
+// that file's header) to avoid a cross-file Harper-mock module-cache
+// collision, so this tagging is exercised here at the primitive level only.
+
+describe("makeReadScope() — returned resolver is tagged with .mode/.ownerField", () => {
+  it("'owner-only' tags .mode and the (defaulted) .ownerField", () => {
+    const readScope = makeReadScope("owner-only");
+    expect(readScope.mode).toBe("owner-only");
+    expect(readScope.ownerField).toBe("agentId");
+  });
+
+  it("'owner-only' with an explicit ownerField tags that field (e.g. OrgEvent's authorId)", () => {
+    const readScope = makeReadScope("owner-only", "authorId");
+    expect(readScope.mode).toBe("owner-only");
+    expect(readScope.ownerField).toBe("authorId");
+  });
+
+  it("'open-within-org' tags .mode; .ownerField reflects the passed-in value even though the resolver ignores it functionally", () => {
+    const readScope = makeReadScope("open-within-org");
+    expect(readScope.mode).toBe("open-within-org");
+    expect(readScope.ownerField).toBe("agentId");
+  });
+
+  it("the tagged resolver is still callable — tagging never changes runtime behavior", async () => {
+    const readScope = makeReadScope("owner-only", "authorId");
+    const scope = await readScope("agent-1");
+    expect(scope.condition).toEqual({ attribute: "authorId", comparator: "equals", value: "agent-1" });
+  });
+});
+
 describe("makeReadScope('open-within-org') — delegates to the EXACT memory-read-scope.ts resolveReadScope", () => {
   it("condition is the OR(own agentId, visibility != private) shape", async () => {
     const readScope = makeReadScope("open-within-org");

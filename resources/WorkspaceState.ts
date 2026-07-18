@@ -20,8 +20,16 @@ import {
   FORBIDDEN,
   UNAUTH,
 } from "./record-type-kit.js";
+import { RECORD_TYPES } from "./record-types.js";
 
-const workspaceReadScope = makeReadScope("owner-only");
+// Parameterized from RECORD_TYPES.WorkspaceState (record-types slice 2,
+// flair#520) rather than a hand-typed "owner-only" literal — the registry is
+// now the single source of truth this class draws its read-scope mode from.
+// Exported solely so test/unit/record-types-registry.test.ts's drift
+// tripwire can introspect the composed resolver's tagged `.mode`/
+// `.ownerField` against RECORD_TYPES.WorkspaceState — not for any other
+// runtime consumer.
+export const workspaceReadScope = makeReadScope(RECORD_TYPES.WorkspaceState.readScope, RECORD_TYPES.WorkspaceState.ownerField);
 const workspaceByIdReadGate = makeByIdReadGate(workspaceReadScope);
 // See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
 // prototype method below, never a class-field assignment — Harper's
@@ -108,19 +116,20 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
     // there was no authenticated agent, so anonymous could write any record).
     if (auth.kind === "anonymous") return UNAUTH();
 
-    // No-forge attribution ("stamp-default" — see record-type-kit.ts's
-    // stampAttribution doc): a non-admin agent's workspace record is ALWAYS
-    // attributed to the authenticated identity (from the Ed25519 signature),
-    // never the body. We do NOT trust `content.agentId` — overwriting it
-    // (rather than 403'ing a mismatch) mirrors Presence.post(): "agentId
-    // from signature, NOT from body". An admin may write on behalf of
-    // another agent (content.agentId honored if present, else defaults to
-    // the admin's own id). Internal in-process callers keep whatever
-    // agentId they pass.
+    // No-forge attribution — mode/field drawn from RECORD_TYPES.WorkspaceState
+    // (record-types slice 2, flair#520) rather than hand-typed literals.
+    // "stamp-default" (see record-type-kit.ts's stampAttribution doc): a
+    // non-admin agent's workspace record is ALWAYS attributed to the
+    // authenticated identity (from the Ed25519 signature), never the body.
+    // We do NOT trust `content.agentId` — overwriting it (rather than
+    // 403'ing a mismatch) mirrors Presence.post(): "agentId from signature,
+    // NOT from body". An admin may write on behalf of another agent
+    // (content.agentId honored if present, else defaults to the admin's own
+    // id). Internal in-process callers keep whatever agentId they pass.
     // "stamp-default" never denies (no rejection branch for non-admin) —
     // the forbiddenMessage arg is dead for this mode, passed for signature
     // completeness only.
-    stampAttribution(auth, content, "agentId", "stamp-default", "forbidden: unreachable for stamp-default");
+    stampAttribution(auth, content, RECORD_TYPES.WorkspaceState.ownerField, RECORD_TYPES.WorkspaceState.attribution.post, "forbidden: unreachable for stamp-default");
 
     content.createdAt = new Date().toISOString();
     content.timestamp ||= content.createdAt;
@@ -137,10 +146,11 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
   async put(content: any) {
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
-    // No-forge attribution ("validate-strict" — see record-type-kit.ts's
-    // stampAttribution doc): rejects a mismatch INCLUDING when agentId is
-    // absent (a bare `!==` compare, no truthy guard).
-    const attr = stampAttribution(auth, content, "agentId", "validate-strict", "forbidden: cannot write workspace state for another agent");
+    // No-forge attribution — mode/field drawn from RECORD_TYPES.WorkspaceState.
+    // "validate-strict" (see record-type-kit.ts's stampAttribution doc):
+    // rejects a mismatch INCLUDING when agentId is absent (a bare `!==`
+    // compare, no truthy guard).
+    const attr = stampAttribution(auth, content, RECORD_TYPES.WorkspaceState.ownerField, RECORD_TYPES.WorkspaceState.attribution.put, "forbidden: cannot write workspace state for another agent");
     if (attr.denied) return attr.denied;
 
     // attention-plane vocabulary gate (flair#675) — same as post() above.

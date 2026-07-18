@@ -201,12 +201,30 @@ function ownerOnlyReadScope(ownerField: string): (authAgentId: string) => Promis
  *     uses this mode today), matching the task's instruction to delegate to
  *     that module "as the exact existing" implementation rather than
  *     generalizing it in this slice.
+ *
+ * The returned resolver is tagged with its own `.mode`/`.ownerField` (record-
+ * types slice 2, flair#520) — harmless own-properties on the function object,
+ * never read by any caller of the resolver itself in production. Pinned by
+ * test/unit/record-type-kit.test.ts directly (mock-free — this primitive
+ * touches no `databases` mock). The registry's own drift tripwire
+ * (test/unit/record-types-registry.test.ts) verifies the five resource files
+ * draw their kit parameters from RECORD_TYPES via a source-text scan instead
+ * of importing them (see that test file's header for why — importing
+ * multiple of Memory.ts/Relationship.ts/WorkspaceState.ts together risks a
+ * cross-file Harper-mock module-cache collision); this tagging exists so a
+ * FUTURE single-resource-file behavior test (the pattern every existing
+ * table's own read-gate test already uses in isolation) can also assert
+ * `<table>ReadScope.mode === RECORD_TYPES.<Table>.readScope` directly against
+ * a live, exported resolver without re-deriving it.
  */
 export function makeReadScope(
   mode: ReadScopeMode,
   ownerField: string = "agentId",
-): (authAgentId: string) => Promise<RecordTypeReadScope> {
-  return mode === "open-within-org" ? resolveReadScope : ownerOnlyReadScope(ownerField);
+): ((authAgentId: string) => Promise<RecordTypeReadScope>) & { readonly mode: ReadScopeMode; readonly ownerField: string } {
+  const resolve = mode === "open-within-org"
+    ? (authAgentId: string) => resolveReadScope(authAgentId)
+    : ownerOnlyReadScope(ownerField);
+  return Object.assign(resolve, { mode, ownerField } as const);
 }
 
 /**

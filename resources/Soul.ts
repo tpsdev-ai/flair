@@ -2,6 +2,7 @@ import { databases } from "@harperfast/harper";
 import { resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { localInstanceId } from "./instance-identity.js";
 import { makeAuthGate, stampAttribution, UNAUTH } from "./record-type-kit.js";
+import { RECORD_TYPES } from "./record-types.js";
 
 /**
  * Deny anonymous; enforce per-agent write ownership for non-admin agents.
@@ -10,14 +11,16 @@ import { makeAuthGate, stampAttribution, UNAUTH } from "./record-type-kit.js";
  * through. With the non-rejecting gate, each write path self-enforces (resolveAgentAuth
  * distinguishes internal/agent/anonymous). Mirrors the WorkspaceState pattern.
  *
- * No-forge attribution uses "validate-truthy" (see record-type-kit.ts's
- * stampAttribution doc) — rejects a PRESENT, mismatched agentId; passes
- * through untouched when absent. Same idiom as Memory.post()/put().
+ * No-forge attribution — mode/field drawn from RECORD_TYPES.Soul (record-
+ * types slice 2, flair#520) rather than hand-typed literals. "validate-
+ * truthy" (see record-type-kit.ts's stampAttribution doc) — rejects a
+ * PRESENT, mismatched agentId; passes through untouched when absent. Same
+ * idiom as Memory.post()/put().
  */
 async function enforceWriteAuth(self: any, data: any): Promise<Response | null> {
   const auth: AgentAuthVerdict = await resolveAgentAuth((self as any).getContext?.());
   if (auth.kind === "anonymous") return UNAUTH();
-  const attr = stampAttribution(auth, data, "agentId", "validate-truthy", "forbidden: agentId must match authenticated agent");
+  const attr = stampAttribution(auth, data, RECORD_TYPES.Soul.ownerField, RECORD_TYPES.Soul.attribution.post, "forbidden: agentId must match authenticated agent");
   return attr.denied ?? null;
 }
 

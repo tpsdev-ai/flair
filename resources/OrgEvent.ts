@@ -21,6 +21,7 @@ import {
   FORBIDDEN,
   UNAUTH,
 } from "./record-type-kit.js";
+import { RECORD_TYPES } from "./record-types.js";
 
 // See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
 // prototype method below, never a class-field assignment — Harper's
@@ -38,20 +39,21 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
 
-    // No-forge attribution ("stamp-default" — see record-type-kit.ts's
-    // stampAttribution doc): a non-admin agent's events are ALWAYS
-    // attributed to its authenticated identity (from the Ed25519
-    // signature), never the body — an agent can only publish AS itself. We
-    // overwrite `authorId` rather than 403'ing a mismatch so a CLI client
-    // never has to echo its own id into the body (mirrors A2A
-    // message/send's "sender must match params.agentId" guard and
-    // Presence's "agentId from signature, NOT from body"). Admin agents may
-    // publish on behalf of another agent (body authorId honored, else their
-    // own).
+    // No-forge attribution — mode/field drawn from RECORD_TYPES.OrgEvent
+    // (record-types slice 2, flair#520) rather than hand-typed literals.
+    // "stamp-default" (see record-type-kit.ts's stampAttribution doc): a
+    // non-admin agent's events are ALWAYS attributed to its authenticated
+    // identity (from the Ed25519 signature), never the body — an agent can
+    // only publish AS itself. We overwrite `authorId` rather than 403'ing a
+    // mismatch so a CLI client never has to echo its own id into the body
+    // (mirrors A2A message/send's "sender must match params.agentId" guard
+    // and Presence's "agentId from signature, NOT from body"). Admin agents
+    // may publish on behalf of another agent (body authorId honored, else
+    // their own).
     // "stamp-default" never denies (no rejection branch for non-admin) —
     // the forbiddenMessage arg is dead for this mode, passed for signature
     // completeness only.
-    stampAttribution(auth, content, "authorId", "stamp-default", "forbidden: unreachable for stamp-default");
+    stampAttribution(auth, content, RECORD_TYPES.OrgEvent.ownerField, RECORD_TYPES.OrgEvent.attribution.post, "forbidden: unreachable for stamp-default");
 
     if (!content.id) content.id = `${content.authorId}-${new Date().toISOString()}`;
     content.createdAt = new Date().toISOString();
@@ -69,10 +71,11 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   async put(content: any) {
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
-    // No-forge attribution ("validate-strict" — see record-type-kit.ts's
-    // stampAttribution doc): rejects a mismatch INCLUDING when authorId is
-    // absent (a bare `!==` compare, no truthy guard).
-    const attr = stampAttribution(auth, content, "authorId", "validate-strict", "forbidden: authorId must match authenticated agent");
+    // No-forge attribution — mode/field drawn from RECORD_TYPES.OrgEvent.
+    // "validate-strict" (see record-type-kit.ts's stampAttribution doc):
+    // rejects a mismatch INCLUDING when authorId is absent (a bare `!==`
+    // compare, no truthy guard).
+    const attr = stampAttribution(auth, content, RECORD_TYPES.OrgEvent.ownerField, RECORD_TYPES.OrgEvent.attribution.put, "forbidden: authorId must match authenticated agent");
     if (attr.denied) return attr.denied;
 
     // attention-plane vocabulary gate (flair#675) — same as post() above.
