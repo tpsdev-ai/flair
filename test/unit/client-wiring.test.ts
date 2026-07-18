@@ -173,6 +173,70 @@ describe("client wiring (FIX 4: 'wired' means a file was written)", () => {
   });
 });
 
+// ─── flair#718 authorship-provenance: FLAIR_CLIENT per-client wiring ────────
+// FLAIR_CLIENT is OPTIONAL and additive on the wire env — absent (as every
+// test above uses ENV, with no FLAIR_CLIENT) writes byte-identical config to
+// before this field existed. These tests confirm it's written into the
+// client's real config file, per-client-labeled, when the caller sets it.
+describe("FLAIR_CLIENT wiring (flair#718 authorship-provenance)", () => {
+  it("Gemini: writes FLAIR_CLIENT into the env block when set", () => {
+    const res = wireGemini({ ...ENV, FLAIR_CLIENT: "gemini" });
+    expect(res.ok).toBe(true);
+    const cfgPath = join(isoHome, ".gemini", "settings.json");
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+    expect(cfg.mcpServers.flair.env.FLAIR_CLIENT).toBe("gemini");
+    // Base fields are untouched by the addition.
+    expect(cfg.mcpServers.flair.env.FLAIR_AGENT_ID).toBe("wirebot");
+    expect(cfg.mcpServers.flair.env.FLAIR_URL).toBe(ENV.FLAIR_URL);
+  });
+
+  it("Gemini: no FLAIR_CLIENT set → omitted from the written env block entirely (not written as null/undefined)", () => {
+    const res = wireGemini(ENV);
+    expect(res.ok).toBe(true);
+    const cfgPath = join(isoHome, ".gemini", "settings.json");
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+    expect("FLAIR_CLIENT" in cfg.mcpServers.flair.env).toBe(false);
+  });
+
+  it("Cursor: writes FLAIR_CLIENT into the env block when set", () => {
+    const res = wireCursor({ ...ENV, FLAIR_CLIENT: "cursor" });
+    expect(res.ok).toBe(true);
+    const cfgPath = join(isoHome, ".cursor", "mcp.json");
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+    expect(cfg.mcpServers.flair.env.FLAIR_CLIENT).toBe("cursor");
+  });
+
+  it("Codex: writes FLAIR_CLIENT = \"codex\" into the TOML env table when set", () => {
+    const res = wireCodex({ ...ENV, FLAIR_CLIENT: "codex" });
+    expect(res.ok).toBe(true);
+    const cfgPath = join(isoHome, ".codex", "config.toml");
+    const toml = readFileSync(cfgPath, "utf-8");
+    expect(toml).toContain(`FLAIR_CLIENT = "codex"`);
+  });
+
+  it("Codex: no FLAIR_CLIENT set → the TOML env table omits the line entirely", () => {
+    const res = wireCodex(ENV);
+    expect(res.ok).toBe(true);
+    const cfgPath = join(isoHome, ".codex", "config.toml");
+    const toml = readFileSync(cfgPath, "utf-8");
+    expect(toml).not.toContain("FLAIR_CLIENT");
+  });
+
+  it("re-running with a DIFFERENT FLAIR_CLIENT after an already-wired install is a no-op (idempotency check doesn't compare FLAIR_CLIENT) — documents current behavior, not a requirement", () => {
+    // First wire without FLAIR_CLIENT (simulates a pre-flair#718 install).
+    wireGemini(ENV);
+    // Re-running with FLAIR_CLIENT set matches on FLAIR_URL/FLAIR_AGENT_ID and
+    // reports already-wired without adding FLAIR_CLIENT retroactively — no
+    // backfill, per flair#718's explicit scope (existing installs need a
+    // fresh `flair init` re-run to pick up the new field).
+    const res = wireGemini({ ...ENV, FLAIR_CLIENT: "gemini" });
+    expect(res.message).toContain("already wired");
+    const cfgPath = join(isoHome, ".gemini", "settings.json");
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+    expect("FLAIR_CLIENT" in cfg.mcpServers.flair.env).toBe(false);
+  });
+});
+
 // flair#727 bug 1 — resolveWireFlairUrl (src/doctor-client.ts) decides which
 // FLAIR_URL doctor's client-integration --fix feeds into wire*(): a
 // pre-existing but malformed value (bare host, no scheme/port) must never

@@ -1451,3 +1451,92 @@ describe("federation-edge-hardening slice 1 — migration-equivalence (no-origin
     expect(after.originatorInstanceId).toBe("flair_local_test"); // additively gains the stamp on this write
   });
 });
+
+// ─── flair#718 authorship-provenance: claimedClient is folded into
+// provenance.claimed.client and STRIPPED from the row itself ───────────────
+//
+// Reuses this file's existing mock/import (see the memory-soul-read-gate
+// collision-avoidance comment above): a second file mock.module-ing
+// "@harperfast/harper" + importing "../../resources/Memory.ts" would race
+// this file's Memory class singleton.
+describe("flair#718 authorship-provenance — Memory.post()/put() claimedClient handling", () => {
+  it("post(): a claimedClient on the write body is folded into provenance.claimed.client, and NEVER persisted as a top-level row field", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r: any = await m.post({
+      agentId: "agent-1",
+      content: "A memory written via the claude-code MCP client, long enough for the gate.",
+      claimedClient: "claude-code",
+    });
+    expect(r.written).toBe(true);
+
+    const stored = await BaseMemory.get(r.id);
+    // Row-level: claimedClient must NEVER appear on the persisted record.
+    expect(stored.claimedClient).toBeUndefined();
+    expect("claimedClient" in stored).toBe(false);
+    // Provenance JSON: the SAME value lands in claimed.client.
+    expect(typeof stored.provenance).toBe("string");
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.claimed.client).toBe("claude-code");
+  });
+
+  it("put() (fresh create via explicit id): same fold + strip behavior as post()", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r: any = await m.put({
+      id: "agent-1-put-claimed-client",
+      agentId: "agent-1",
+      content: "A fresh PUT-created memory carrying claimedClient, long enough for the gate.",
+      claimedClient: "codex",
+    });
+    expect(r.written).toBe(true);
+
+    const stored = await BaseMemory.get("agent-1-put-claimed-client");
+    expect("claimedClient" in stored).toBe(false);
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.claimed.client).toBe("codex");
+  });
+
+  it("put() (update of an existing record): a fresh claimedClient on the update is stamped into the NEW provenance and still never persisted as a row field", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const created: any = await m.post({ agentId: "agent-1", content: "Original content, long enough for the gate.", claimedClient: "claude-code" });
+
+    const existing = await BaseMemory.get(created.id);
+    const merged = { ...existing, content: "Updated via a different client, long enough for the gate.", updatedAt: new Date().toISOString(), claimedClient: "gemini" };
+    delete (merged as any).embedding;
+    delete (merged as any).embeddingModel;
+
+    const mUpdate = makeMemory(agentCtx("agent-1"));
+    await mUpdate.put(merged);
+
+    const after = await BaseMemory.get(created.id);
+    expect("claimedClient" in after).toBe(false);
+    const prov = JSON.parse(after.provenance);
+    expect(prov.claimed.client).toBe("gemini"); // reflects the CURRENT write, not the original post()
+  });
+
+  it("absent claimedClient → provenance has no `claimed` key at all (never invented, never stamped as empty)", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r: any = await m.post({ agentId: "agent-1", content: "A plain memory with no client label, long enough for the gate." });
+    const stored = await BaseMemory.get(r.id);
+    const prov = JSON.parse(stored.provenance);
+    expect("claimed" in prov).toBe(false);
+  });
+
+  it("claimedClient is dropped from the row EVEN when the write is otherwise denied's opposite case — a successful cross-write scenario (supersede) also strips it", async () => {
+    const mOwner = makeMemory(agentCtx("agent-1"));
+    const owned: any = await mOwner.post({ agentId: "agent-1", content: "Original finding, long enough for the gate.", claimedClient: "cursor" });
+
+    const mNew = makeMemory(agentCtx("agent-1"));
+    const res: any = await mNew.post({
+      agentId: "agent-1",
+      content: "Replacement finding via supersede, long enough for the gate.",
+      supersedes: owned.id,
+      claimedClient: "codex",
+    });
+    expect(res.written).toBe(true);
+
+    const stored = await BaseMemory.get(res.id);
+    expect("claimedClient" in stored).toBe(false);
+    const prov = JSON.parse(stored.provenance);
+    expect(prov.claimed.client).toBe("codex");
+  });
+});

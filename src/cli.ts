@@ -2487,7 +2487,12 @@ program
               type: "stdio" as const,
               command: "npx",
               args: ["-y", "@tpsdev-ai/flair-mcp"] as string[],
-              env: mcpEnv,
+              // flair#718 authorship-provenance: each client's wired env block
+              // gets its OWN FLAIR_CLIENT label (never the shared mcpEnv
+              // object directly — that would stamp the same label into every
+              // client's config) so writes from THIS client's proxy stamp
+              // provenance.claimed.client = "claude-code".
+              env: { ...mcpEnv, FLAIR_CLIENT: "claude-code" },
             };
             try {
               if (existsSync(claudeJsonPath)) {
@@ -2539,10 +2544,13 @@ program
             }
           } else {
             let result: { ok: boolean; message: string };
+            // flair#718 authorship-provenance — see the claude-code branch's
+            // identical comment above: FLAIR_CLIENT is per-client, so it's
+            // added at each call site rather than baked into the shared mcpEnv.
             switch (clientId) {
-              case "codex": result = wireCodex(mcpEnv); break;
-              case "gemini": result = wireGemini(mcpEnv); break;
-              case "cursor": result = wireCursor(mcpEnv); break;
+              case "codex": result = wireCodex({ ...mcpEnv, FLAIR_CLIENT: "codex" }); break;
+              case "gemini": result = wireGemini({ ...mcpEnv, FLAIR_CLIENT: "gemini" }); break;
+              case "cursor": result = wireCursor({ ...mcpEnv, FLAIR_CLIENT: "cursor" }); break;
               default: result = { ok: false, message: `Unknown client: ${clientId}` };
             }
             wiringResults.push({ client: clientId, message: result.message });

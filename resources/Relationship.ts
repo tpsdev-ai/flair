@@ -204,6 +204,11 @@ export class Relationship extends (databases as any).flair.Relationship {
     // pre-existing row with no provenance field reads back `undefined`,
     // unchanged behavior (migration-equivalence gate).
     content.provenance = buildProvenance(auth, content.createdAt, content);
+    // flair#718 authorship-provenance — same contract as resources/Memory.ts's
+    // post()/put(): `claimedClient` is a write-body-only passthrough, already
+    // folded into `provenance.claimed.client` above. Strip it so it is NEVER
+    // persisted as a row field.
+    delete content.claimedClient;
 
     // Write-time originatorInstanceId stamp (federation-edge-hardening slice
     // 1) — see resources/Memory.ts's stampOriginatorInstanceId doc for the

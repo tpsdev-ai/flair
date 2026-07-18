@@ -32,6 +32,10 @@ export class FlairClient {
   readonly memory: MemoryApi;
   readonly relationship: RelationshipApi;
   readonly soul: SoulApi;
+  /** flair#718 authorship-provenance — see FlairClientConfig.claimedClient's
+   *  doc (types.ts). `undefined` when neither config nor FLAIR_CLIENT is set;
+   *  MemoryApi reads this to (optionally) stamp memory write payloads. */
+  readonly claimedClient: string | undefined;
 
   private privateKey: KeyObject | null = null;
   private keyResolved = false;
@@ -47,6 +51,7 @@ export class FlairClient {
     if (config.privateKey !== undefined) {
       this.rawPrivateKey = config.privateKey;
     }
+    this.claimedClient = config.claimedClient || process.env.FLAIR_CLIENT || undefined;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT;
     // Basic auth fallback for standalone deployments without Ed25519 keys
     const adminUser = config.adminUser ?? process.env.FLAIR_ADMIN_USER;
@@ -185,6 +190,11 @@ class MemoryApi {
     // never stored on the record itself.
     if (opts.dedup !== undefined) record.dedup = opts.dedup;
     if (opts.dedupThreshold !== undefined) record.dedupThreshold = opts.dedupThreshold;
+    // flair#718 authorship-provenance: forward this process's claimed client
+    // label (config.claimedClient / FLAIR_CLIENT env) only when set — the
+    // server folds it into provenance.claimed.client and strips it from the
+    // row (resources/Memory.ts). Absent = omitted, zero behavior change.
+    if (this.client.claimedClient) record.claimedClient = this.client.claimedClient;
 
     const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, record);
     // Merge the server response (deduplicated/matchedId/matchConfidence/
@@ -236,6 +246,8 @@ class MemoryApi {
       delete record.validTo;
       delete record.archivedAt;
       delete record.deduped;
+      // flair#718 authorship-provenance — see write()'s identical comment above.
+      if (this.client.claimedClient) record.claimedClient = this.client.claimedClient;
       // The Memory schema does not expose a working HTTP POST route (see
       // resources/Memory.ts) — Memory.post() is only reachable in-process
       // (resources/mcp-tools.ts). So the supersede-link write goes through
@@ -254,6 +266,8 @@ class MemoryApi {
     delete merged.embedding;
     delete merged.embeddingModel;
     delete merged.deduped;
+    // flair#718 authorship-provenance — see write()'s identical comment above.
+    if (this.client.claimedClient) merged.claimedClient = this.client.claimedClient;
     const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, merged);
     return { ...merged, id, ...(response ?? {}) } as unknown as Memory;
   }

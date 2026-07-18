@@ -41,6 +41,33 @@ describe("FlairClient", () => {
     const client = new FlairClient({ agentId: "mybot" });
     expect(client.agentId).toBe("mybot");
   });
+
+  // ─── flair#718 authorship-provenance ───────────────────────────────────────
+  describe("claimedClient (flair#718 authorship-provenance)", () => {
+    test("absent by default — neither config nor FLAIR_CLIENT set", () => {
+      const client = new FlairClient({ agentId: "test" });
+      expect(client.claimedClient).toBeUndefined();
+    });
+
+    test("set from the explicit config field", () => {
+      const client = new FlairClient({ agentId: "test", claimedClient: "claude-code" });
+      expect(client.claimedClient).toBe("claude-code");
+    });
+
+    test("set from the FLAIR_CLIENT env var when config omits it", () => {
+      process.env.FLAIR_CLIENT = "codex";
+      const client = new FlairClient({ agentId: "test" });
+      expect(client.claimedClient).toBe("codex");
+      delete process.env.FLAIR_CLIENT;
+    });
+
+    test("explicit config field wins over FLAIR_CLIENT env", () => {
+      process.env.FLAIR_CLIENT = "codex";
+      const client = new FlairClient({ agentId: "test", claimedClient: "gemini" });
+      expect(client.claimedClient).toBe("gemini");
+      delete process.env.FLAIR_CLIENT;
+    });
+  });
 });
 
 describe("MemoryApi", () => {
@@ -293,6 +320,85 @@ describe("MemoryApi", () => {
     await expect(client.memory.update("nonexistent", "x")).rejects.toThrow();
     // Only the GET happened — no PUT was attempted.
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── flair#718 authorship-provenance — claimedClient forwarding on memory writes ──
+  describe("claimedClient forwarding (flair#718 authorship-provenance)", () => {
+    test("write(): claimedClient is included in the PUT body when the client has one configured", async () => {
+      mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+      globalThis.fetch = mockFetch as any;
+
+      const client = new FlairClient({ agentId: "test", claimedClient: "claude-code" });
+      await client.memory.write("hello world");
+
+      const call = (mockFetch as any).mock.calls[0];
+      const body = JSON.parse(call[1].body);
+      expect(body.claimedClient).toBe("claude-code");
+    });
+
+    test("write(): claimedClient is OMITTED from the body entirely when the client has none configured", async () => {
+      mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+      globalThis.fetch = mockFetch as any;
+
+      const client = new FlairClient({ agentId: "test" });
+      await client.memory.write("hello world");
+
+      const call = (mockFetch as any).mock.calls[0];
+      const body = JSON.parse(call[1].body);
+      expect("claimedClient" in body).toBe(false);
+    });
+
+    test("write(): FLAIR_CLIENT env var (no explicit config field) also forwards", async () => {
+      mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+      globalThis.fetch = mockFetch as any;
+      process.env.FLAIR_CLIENT = "cursor";
+
+      const client = new FlairClient({ agentId: "test" });
+      await client.memory.write("hello world");
+      delete process.env.FLAIR_CLIENT;
+
+      const call = (mockFetch as any).mock.calls[0];
+      const body = JSON.parse(call[1].body);
+      expect(body.claimedClient).toBe("cursor");
+    });
+
+    test("update() (default mode): claimedClient is included in the merged PUT body", async () => {
+      const existing = {
+        id: "mem-1", agentId: "test", content: "old content", type: "session",
+        durability: "standard", tags: [], createdAt: "2026-01-01T00:00:00Z",
+      };
+      mockFetch = mock((_url: string, init?: any) => {
+        if (init?.method === "GET") return Promise.resolve(new Response(JSON.stringify(existing), { status: 200 }));
+        return Promise.resolve(new Response(JSON.stringify({ written: true }), { status: 200 }));
+      });
+      globalThis.fetch = mockFetch as any;
+
+      const client = new FlairClient({ agentId: "test", claimedClient: "gemini" });
+      await client.memory.update("mem-1", "new content");
+
+      const putCall = (mockFetch as any).mock.calls.find((c: any) => c[1].method === "PUT");
+      const putBody = JSON.parse(putCall[1].body);
+      expect(putBody.claimedClient).toBe("gemini");
+    });
+
+    test("update() (preserveHistory mode): claimedClient is included on the new-version write", async () => {
+      const existing = {
+        id: "mem-1", agentId: "test", content: "old content", type: "session",
+        durability: "standard", tags: [], createdAt: "2026-01-01T00:00:00Z",
+      };
+      mockFetch = mock((_url: string, init?: any) => {
+        if (init?.method === "GET") return Promise.resolve(new Response(JSON.stringify(existing), { status: 200 }));
+        return Promise.resolve(new Response(JSON.stringify({ written: true }), { status: 200 }));
+      });
+      globalThis.fetch = mockFetch as any;
+
+      const client = new FlairClient({ agentId: "test", claimedClient: "codex" });
+      await client.memory.update("mem-1", "new version", { preserveHistory: true });
+
+      const putCall = (mockFetch as any).mock.calls.find((c: any) => c[1].method === "PUT");
+      const putBody = JSON.parse(putCall[1].body);
+      expect(putBody.claimedClient).toBe("codex");
+    });
   });
 
   test("list POSTs conditions body with agentId scope", async () => {

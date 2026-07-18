@@ -379,3 +379,30 @@ describe("relationship-write-path — Relationship.put() write-time provenance s
     expect(ids).toEqual(["legacy-no-prov-2", "new-with-prov"].sort());
   });
 });
+
+// ─── flair#718 authorship-provenance — Relationship.put() claimedClient ────
+describe("flair#718 authorship-provenance — Relationship.put() claimedClient handling", () => {
+  it("a claimedClient on the write body is folded into provenance.claimed.client, and NEVER persisted as a top-level row field", async () => {
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({
+      id: "rel-claimed-client-1",
+      subject: "nathan",
+      predicate: "manages",
+      object: "flint",
+      claimedClient: "codex",
+    });
+    expect("claimedClient" in res).toBe(false);
+    const prov = JSON.parse(res.provenance);
+    expect(prov.claimed.client).toBe("codex");
+
+    const stored = relationshipStore.get("rel-claimed-client-1");
+    expect("claimedClient" in stored).toBe(false);
+  });
+
+  it("absent claimedClient → provenance has no `claimed` key at all", async () => {
+    const r = makeRelationship(agentCtx("agent-1"));
+    const res: any = await r.put({ id: "rel-claimed-client-2", subject: "a", predicate: "b", object: "c" });
+    const prov = JSON.parse(res.provenance);
+    expect("claimed" in prov).toBe(false);
+  });
+});

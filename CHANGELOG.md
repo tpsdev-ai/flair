@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### ✨ Authorship provenance — `claimed.client` records which client wrote a row (flair#718)
+
+An audit of the identity machinery reframed this from "add a personal-vs-org deployment mode" to a narrower, cheaper fix: the personal shape (one shared principal across every AI client, via `flair init`) already ships and is correct — what's missing is recording *which client* authored a write once several clients share one principal. K&S-approved design (issue #718): no new config key (deployment shape stays emergent from provisioning, now documented in `docs/auth.md`), authorship recorded in the existing `claimed` (self-reported, unverified) provenance slot rather than a first-class row field.
+
+- **`resources/provenance.ts`**: `buildProvenance` gains `claimed.client`, sourced from a write-body-only `claimedClient` field (deliberately distinct from the stamped output key). Shares a new `sanitizeClaim()` helper with `claimed.model` — both now get the SAME discipline: string-only, control-character-stripped, trimmed, length-capped at 200 chars, dropped if empty after sanitizing (Sherlock flair#718 refinement: `claimed.model` previously had only a truthiness check).
+- **Write paths** (`resources/Memory.ts` post()/put(), `resources/Relationship.ts` put()): thread `claimedClient` into `buildProvenance`, then strip it from the row before persisting — authorship lives in the `provenance` JSON only, never as a second top-level field.
+- **Native `/mcp` OAuth path** (`resources/mcp-handler.ts`, `resources/mcp-tools.ts`): the handler stamps `claimed.client` from the verified token's `client_id` claim (the server-generated `flair_cl_...` machine id) — **never** `client_name` (user-controlled at Dynamic Client Registration), per Sherlock's binding refinement. `ResolvedAgent` gains an optional `clientId`, threaded into `memory_store`/`memory_update`'s write bodies; no client-side cooperation needed for this surface.
+- **`packages/flair-client`**: `FlairClientConfig.claimedClient` (or the `FLAIR_CLIENT` env var) is forwarded on `memory.write()`/`memory.update()` payloads when set; absent by default — zero behavior change for existing installs. **`packages/flair-mcp`** forwards its own `FLAIR_CLIENT` env into the client it constructs.
+- **`flair init`**: each client's wired env block (Claude Code, Codex, Gemini, Cursor) gains `FLAIR_CLIENT` set to that client's own id. Optional/additive — `flair doctor --fix`'s re-wiring path is unchanged (no FLAIR_CLIENT, deferred).
+- **Zero authority, by construction**: `claimed.client` is self-reported, unverified metadata — it is never read for access control, read-scope, attribution weighting, or dedup decisions anywhere in the codebase. `docs/auth.md` gets a new "Deployment shapes: personal vs org" section documenting the existing personal/org provisioning distinction and this field's role in it.
+
+Out of scope for this slice (explicitly, per the design record): new config keys, per-client credentials, row backfill, trust scoring, `flair doctor` rendering changes, and provenance stamping for Soul/WorkspaceState/OrgEvent (neither stamps provenance today).
+
 ### ✨ `flair doctor` now iterates every identifiable agent for its verified-read sections, instead of hiding them behind `--agent` (flair#722)
 
 `doctor`'s "Fleet presence" and "Migrations" sections need a signed (Ed25519) request to reveal server-verified fields (flairVersion/harperVersion, migration state) — previously that meant passing `--agent <id>` explicitly, even though doctor already enumerates every key in `~/.flair/keys` (the `Keys found: N agent(s)` line). A real 0.22.0 dogfood run found the flair#720 halted-migration warning visible via `flair status --agent local` but invisible in the default `doctor` run the same user ran minutes later.

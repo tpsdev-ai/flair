@@ -39,6 +39,23 @@ flair agent add myagent
 
 This is the default and recommended auth for single-instance deployments.
 
+## Deployment shapes: personal vs org
+
+Flair has no `mode`/`shape` config setting — the shape you get is emergent from *how you provision principals*, not something you declare:
+
+- **Personal (the default).** `flair init` mints ONE agent identity and wires that same `FLAIR_AGENT_ID` into every MCP client it configures (Claude Code, Codex, Gemini, Cursor). One human driving several AI clients ends up with one canonical principal and one Ed25519 keypair — all clients share ownership of the same memory. This is intentional, not a limitation: all clients see each other's private rows (one human's memory, one view), a fact re-asserted from two different clients dedups to one memory, and usage counting treats the principal as one contributor.
+- **Org (multiple real agents).** `flair agent add <id>` mints a distinct principal — its own keypair, its own ownership boundary — for each real agent that should be a separate identity. Wire each principal's own `FLAIR_AGENT_ID` into its own client(s).
+
+Nothing in flair validates which shape you're in; a personal install that later grows into an org just runs `flair agent add` for the new distinct identities it needs.
+
+### Authorship: which client wrote a row
+
+The personal shape's one shared principal means `agentId` alone can't answer "was this written by Claude Code or Codex?" — every write it receives has the same owner. `flair init`'s per-client wiring closes that gap by setting an additional env var per client: `FLAIR_CLIENT` (`"claude-code"` / `"codex"` / `"gemini"` / `"cursor"`). `flair-client` and `flair-mcp` forward it on memory writes as `claimedClient`, and the server folds it into the write's `provenance` blob as `claimed.client` — self-reported, unverified metadata recording *which tool* authored a row, alongside the existing `claimed.model`.
+
+This is deliberately in `claimed`, never `verified`: it carries **zero authority**. It is never read for access control, read-scope, attribution weighting, or dedup decisions — it exists purely for audit/analysis. Absent on any install that predates this field (no backfill, no migration) and absent whenever a client doesn't set `FLAIR_CLIENT`.
+
+The native `/mcp` OAuth surface (see below) doesn't need any client-side wiring at all: the handler stamps `claimed.client` directly from the OAuth token's verified `client_id` claim — the server-generated `flair_cl_...` machine id assigned at Dynamic Client Registration, **not** the user-supplied `client_name` (which the registering client fully controls and could set to anything). Using `client_id` keeps the stamp a stable, server-verified label even though it still only carries `claimed`-level (unverified-by-content) authority.
+
 ## OAuth 2.1
 
 Flair includes a built-in OAuth 2.1 authorization server for client integrations (e.g., Claude connecting to Flair as an MCP server).
