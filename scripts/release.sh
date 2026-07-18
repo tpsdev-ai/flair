@@ -263,7 +263,10 @@ echo "  ✓ All packages built"
 # e2e specs live under test/e2e/ and fail to load under bun — they're run via
 # `bunx playwright test` against a live server in CI, not locally here.
 echo "🧪 Running tests..."
-(cd "$ROOT" && bun test test/unit/ test/integration/) || { echo "❌ Tests failed"; exit 1; }
+# test/unit-isolated/ MUST run as its own `bun test` process — its files
+# mock.module a process-global shared module and would poison the real-
+# importer files if run in the same process (flair#691).
+(cd "$ROOT" && bun test test/unit/ test/integration/ && bun test test/unit-isolated/) || { echo "❌ Tests failed"; exit 1; }
 echo "  ✓ Tests passed"
 
 # 6. Commit version bump (explicit paths — no -A)
