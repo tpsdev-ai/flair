@@ -73,12 +73,17 @@ describe("describeAgentGateFinding", () => {
     expect(f!.message).toContain("no local key for 'ci-bot'");
   });
 
-  test("not-registered → error finding, IS an issue, carries the `flair agent add` fix hint", () => {
+  // flair#734: the fix hint now points at BOTH remedies — register it
+  // (`flair agent add`) if it should exist, or clean it up (`flair keys
+  // prune`) if it's a stale/leftover key. `.toContain` rather than an exact
+  // `.toBe` match so the wording can evolve without re-breaking this test.
+  test("not-registered → error finding, IS an issue, carries fix hints for both `flair agent add` and `flair keys prune` (flair#734)", () => {
     const f = describeAgentGateFinding("stray", "not-registered");
     expect(f).not.toBeNull();
     expect(f!.icon).toBe("error");
     expect(f!.isIssue).toBe(true);
-    expect(f!.fixHint).toBe("flair agent add stray");
+    expect(f!.fixHint).toContain("flair agent add stray");
+    expect(f!.fixHint).toContain("flair keys prune");
     expect(f!.message).toContain("stray");
     expect(f!.message).toContain("NOT registered");
   });

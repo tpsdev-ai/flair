@@ -11,6 +11,10 @@ import {
   fixSessionStartHook,
   CLAUDE_MD_BOOTSTRAP_MARKER,
   SESSION_START_HOOK_MARKER,
+  classifyKeyFile,
+  resolveCollisionSafeName,
+  pruneDateStamp,
+  PRUNED_DIR_NAME,
 } from "../../src/doctor-client.ts";
 
 /**
@@ -341,5 +345,99 @@ describe("fixSessionStartHook", () => {
     fixSessionStartHook(isoHome, "me");
     const res = checkSessionStartHook(isoHome);
     expect(res.present).toBe(true);
+  });
+});
+
+/**
+ * flair#734 — pure decision logic behind `flair keys prune`. No fs, no
+ * network, no crypto: the actual file reads, seed parsing, and signed
+ * registration checks live in src/cli.ts's classifyKeysDir (see
+ * test/unit/keys-prune.test.ts for those, mirroring how checkAgentRegistered
+ * is unit-tested with a mocked fetch rather than a real Harper).
+ */
+describe("classifyKeyFile", () => {
+  const BASE_URL = "http://127.0.0.1:19926";
+
+  it("invalid seed → class 'invalid', regardless of any registration result", () => {
+    const d = classifyKeyFile("stray", false, null, BASE_URL);
+    expect(d.class).toBe("invalid");
+    expect(d.reason).toContain("not a parseable Ed25519");
+  });
+
+  it("valid seed + registered → class 'keep'", () => {
+    const d = classifyKeyFile("local", true, { state: "registered" }, BASE_URL);
+    expect(d.class).toBe("keep");
+    expect(d.reason).toContain("local");
+    expect(d.reason).toContain(BASE_URL);
+  });
+
+  it("valid seed + not-registered → class 'stale', reason names the agent and instance", () => {
+    const d = classifyKeyFile("stray", true, { state: "not-registered" }, BASE_URL);
+    expect(d.class).toBe("stale");
+    expect(d.reason).toContain("stray");
+    expect(d.reason).toContain(BASE_URL);
+  });
+
+  it("valid seed + not-registered carries the detail string when given", () => {
+    const d = classifyKeyFile("stray", true, { state: "not-registered", detail: "HTTP 401 unknown_agent" }, BASE_URL);
+    expect(d.reason).toContain("HTTP 401 unknown_agent");
+  });
+
+  it("valid seed + no-key (defensive edge case) still classifies as 'stale', not a crash", () => {
+    const d = classifyKeyFile("stray", true, { state: "no-key" }, BASE_URL);
+    expect(d.class).toBe("stale");
+  });
+
+  it("valid seed + null registration (defensive edge case) still classifies as 'stale'", () => {
+    const d = classifyKeyFile("stray", true, null, BASE_URL);
+    expect(d.class).toBe("stale");
+  });
+
+  it("a registered agent's key is NEVER classified as prunable", () => {
+    const d = classifyKeyFile("local", true, { state: "registered" }, BASE_URL);
+    expect(d.class).not.toBe("stale");
+    expect(d.class).not.toBe("invalid");
+  });
+});
+
+describe("pruneDateStamp", () => {
+  it("formats as YYYY-MM-DD in UTC", () => {
+    const d = new Date("2026-07-18T23:45:00.000Z");
+    expect(pruneDateStamp(d)).toBe("2026-07-18");
+  });
+
+  it("uses UTC, not local time — a date that would roll over in a negative-offset zone stays UTC's day", () => {
+    // 2026-01-01T00:30:00Z is still Dec 31 in e.g. US Pacific, but the stamp
+    // must be the UTC day so prune's archive bucketing is host-timezone-independent.
+    const d = new Date("2026-01-01T00:30:00.000Z");
+    expect(pruneDateStamp(d)).toBe("2026-01-01");
+  });
+
+  it("defaults to now() when no date is given", () => {
+    const stamp = pruneDateStamp();
+    expect(stamp).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});
+
+describe("resolveCollisionSafeName", () => {
+  it("returns the original filename when nothing exists yet", () => {
+    expect(resolveCollisionSafeName([], "stray.key")).toBe("stray.key");
+    expect(resolveCollisionSafeName(new Set(), "stray.key")).toBe("stray.key");
+  });
+
+  it("appends .2 on a single collision", () => {
+    expect(resolveCollisionSafeName(["stray.key"], "stray.key")).toBe("stray.key.2");
+  });
+
+  it("keeps incrementing past existing numbered collisions", () => {
+    expect(resolveCollisionSafeName(["stray.key", "stray.key.2", "stray.key.3"], "stray.key")).toBe("stray.key.4");
+  });
+
+  it("is unaffected by unrelated filenames in the existing set", () => {
+    expect(resolveCollisionSafeName(["other.key", "another.key"], "stray.key")).toBe("stray.key");
+  });
+
+  it("PRUNED_DIR_NAME is the literal '.pruned' the scanner must skip", () => {
+    expect(PRUNED_DIR_NAME).toBe(".pruned");
   });
 });
