@@ -53,7 +53,7 @@ type Memory @table(database: "flair") {
   validFrom: String @indexed   # ISO timestamp — when this fact became true
   validTo: String @indexed     # ISO timestamp — when this fact stopped being true (null = still valid)
   _safetyFlags: [String]       # content safety flags from scanContent()
-  provenance: String           # JSON blob (memory-provenance slice 1): { v, verified: { agentId, timestamp }, claimed?: { model } }
+  provenance: String           # JSON blob (memory-provenance slice 1; claimed.client added by flair#718): { v, verified: { agentId, timestamp }, claimed?: { model, client } }
                                # Nullable by design — existing rows read back provenance = null, unchanged behavior (clean-upgrade-path gate).
                                # Same idiom as Soul.metadata below. Stamped server-side in resources/Memory.ts; never client-writable.
   originatorInstanceId: String @indexed  # federation-edge-hardening slice 1: WRITE-TIME instance identity, stamped server-side in
@@ -99,7 +99,7 @@ type Relationship @table(database: "flair") {
                                     # for the full contract (write-time stamp, nullable, preserved across sync merges).
                                     # Stamped server-side in resources/Relationship.ts's put().
   provenance: String                # JSON blob (relationship-write-path, folded K&S refinement): SAME shape as
-                                    # Memory.provenance above — { v, verified: { agentId, timestamp }, claimed?: { model } }
+                                    # Memory.provenance above — { v, verified: { agentId, timestamp }, claimed?: { model, client } }
                                     # — via the shared resources/provenance.ts buildProvenance(), never a
                                     # Relationship-specific format. Nullable by design — pre-existing rows read back
                                     # provenance = null, unchanged behavior (migration-equivalence gate, same

@@ -220,6 +220,26 @@ describe("resolveAgentFromSub", () => {
   it("empty sub → null", async () => {
     expect(await resolveAgentFromSub("")).toBeNull();
   });
+
+  // ─── flair#718 authorship-provenance: clientId threading ──────────────────
+  it("no clientId passed → resolved agent has NO clientId property at all (not stamped as undefined)", async () => {
+    credentials = [{ principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" }];
+    const agent = await resolveAgentFromSub("sub-alice");
+    expect(agent).toEqual({ agentId: "agt_alice", isAdmin: false });
+    expect("clientId" in (agent as any)).toBe(false);
+  });
+
+  it("clientId passed → copied onto the resolved agent unchanged (existing-credential path)", async () => {
+    credentials = [{ principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" }];
+    const agent = await resolveAgentFromSub("sub-alice", "flair_cl_abc123");
+    expect(agent).toEqual({ agentId: "agt_alice", isAdmin: false, clientId: "flair_cl_abc123" });
+  });
+
+  it("clientId passed on the JIT-provision path is also copied onto the resolved agent", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    const agent = await resolveAgentFromSub("fresh-sub-2", "flair_cl_jit");
+    expect(agent?.clientId).toBe("flair_cl_jit");
+  });
 });
 
 // ─── tools/call scoping ──────────────────────────────────────────────────────
@@ -249,6 +269,69 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
     expect(lastCall?.resource).toBe("Memory.post");
     expect(lastCall?.args.agentId).toBe("agt_bob");
     expect(lastCall?.ctx.request.tpsAgent).toBe("agt_bob");
+  });
+
+  // ─── flair#718 authorship-provenance: OAuth client_id → claimedClient ──────
+  describe("flair#718 authorship-provenance — claimedClient stamped from the OAuth token's client_id", () => {
+    it("memory_store: request.mcp.client_id flows into the body as claimedClient", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: "hi" } } },
+        { sub: "sub-bob", client_id: "flair_cl_abc123" },
+      ));
+      expect(lastCall?.resource).toBe("Memory.post");
+      expect(lastCall?.args.claimedClient).toBe("flair_cl_abc123");
+    });
+
+    it("memory_store: NO client_id on the token → claimedClient is absent from the body entirely (not undefined)", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: "hi" } } },
+        { sub: "sub-bob" },
+      ));
+      expect(lastCall?.resource).toBe("Memory.post");
+      expect(lastCall?.args).not.toHaveProperty("claimedClient");
+    });
+
+    it("memory_store: `client_name` on the token is NEVER used — only `client_id` (Sherlock flair#718 binding refinement)", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: "hi" } } },
+        { sub: "sub-bob", client_name: "My Pretty Claude Desktop" },
+      ));
+      expect(lastCall?.args).not.toHaveProperty("claimedClient");
+    });
+
+    it("memory_store: a non-string client_id on the token is ignored, not coerced/forwarded", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: "hi" } } },
+        { sub: "sub-bob", client_id: 12345 },
+      ));
+      expect(lastCall?.args).not.toHaveProperty("claimedClient");
+    });
+
+    it("memory_update (default mode): client_id flows into the PUT body as claimedClient", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_update", arguments: { id: "mem-1", content: "updated" } } },
+        { sub: "sub-bob", client_id: "flair_cl_def456" },
+      ));
+      expect(lastCall?.resource).toBe("Memory.put");
+      expect(lastCall?.args.claimedClient).toBe("flair_cl_def456");
+    });
+
+    it("memory_update (preserveHistory mode): client_id flows into the new-version POST body as claimedClient", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_update", arguments: { id: "mem-1", content: "new version", preserveHistory: true } } },
+        { sub: "sub-bob", client_id: "flair_cl_ghi789" },
+      ));
+      expect(lastCall?.resource).toBe("Memory.post");
+      expect(lastCall?.args.claimedClient).toBe("flair_cl_ghi789");
+    });
+
+    it("a body-supplied claimedClient argument (forgery attempt) is ignored — only the resolved token's client_id is used", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: "hi", claimedClient: "forged-client" } } },
+        { sub: "sub-bob", client_id: "flair_cl_real" },
+      ));
+      expect(lastCall?.args.claimedClient).toBe("flair_cl_real");
+    });
   });
 
   it("memory_update (default) reads then PUTs the same id, merging new content", async () => {

@@ -392,8 +392,9 @@ function defaultVisibilityForDurability(durability: unknown): "private" | "share
  * "reuse buildProvenance as-is" contract) instead of a hand-copied format
  * that could drift. See that module for the full field-by-field rationale
  * (verified.agentId from the auth verdict never the body, verified.timestamp
- * = the server-computed createdAt, optional unverified claimed.model
- * passthrough). Deliberately NOT implemented in this slice: a
+ * = the server-computed createdAt, optional unverified claimed.model /
+ * claimed.client passthroughs — the latter added by flair#718 authorship-
+ * provenance). Deliberately NOT implemented in this slice: a
  * context-fingerprint field — bootstrap doesn't return the IDs a fingerprint
  * would need, so it requires client cooperation that's out of scope here.
  */
@@ -656,6 +657,12 @@ export class Memory extends (databases as any).flair.Memory {
     // buildProvenance's doc above. Stamped last, right before persist, so it
     // reflects the final resolved `content.createdAt`.
     content.provenance = buildProvenance(auth, content.createdAt, content);
+    // flair#718 authorship-provenance: `claimedClient` is a WRITE-BODY-ONLY
+    // passthrough — buildProvenance above already folded it into
+    // `provenance.claimed.client` (sanitized/capped). Strip it from the row
+    // itself so it is NEVER persisted as a second, undeclared/unsanitized
+    // top-level field — authorship lives in the provenance JSON only.
+    delete content.claimedClient;
 
     // Write-time originatorInstanceId stamp (federation-edge-hardening slice
     // 1) — see stampOriginatorInstanceId's doc above. No-op if already set
@@ -833,6 +840,10 @@ export class Memory extends (databases as any).flair.Memory {
     // always gets a freshly-stamped provenance reflecting the CURRENT
     // authenticated actor performing this write.
     content.provenance = buildProvenance(auth, content.createdAt, content);
+    // flair#718 authorship-provenance — see post()'s identical comment above:
+    // strip the write-body-only `claimedClient` passthrough now that it's
+    // folded into `provenance.claimed.client`. Never persisted as a row field.
+    delete content.claimedClient;
 
     // Write-time originatorInstanceId stamp (federation-edge-hardening slice
     // 1) — see stampOriginatorInstanceId's doc above post(). No-op if

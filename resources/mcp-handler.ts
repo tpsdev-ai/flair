@@ -74,12 +74,21 @@ function jitProvisionEnabled(): boolean {
  * XAA's ID-JAG path uses (resources/XAA.ts resolveOrCreatePrincipal) — one
  * identity model, keyed on the IdP subject.
  *
+ * `clientId` (flair#718 authorship-provenance) is NOT part of sub resolution —
+ * it rides along from the verified token's `client_id` claim (see
+ * handleToolCall's stamp-site comment for why `client_id` and never
+ * `client_name`) and is copied onto the resolved agent unchanged so downstream
+ * write tools (memory_store/memory_update) can thread it into `claimedClient`.
+ * Omitted from the returned object entirely when absent — never stamped as
+ * `undefined` — so existing callers/tests that don't pass one see the exact
+ * same `{ agentId, isAdmin }` shape as before this field existed.
+ *
  * Returns:
- *   - `{ agentId, isAdmin }` when a Credential maps the sub to an Agent.
+ *   - `{ agentId, isAdmin, clientId? }` when a Credential maps the sub to an Agent.
  *   - null when no Credential maps the sub AND JIT-provisioning is disabled or
  *     failed → the handler denies the tool call (sub is unresolvable).
  */
-export async function resolveAgentFromSub(sub: string): Promise<ResolvedAgent | null> {
+export async function resolveAgentFromSub(sub: string, clientId?: string): Promise<ResolvedAgent | null> {
   if (!sub) return null;
 
   // 1. Existing IdP credential → its principalId is the Agent id.
@@ -95,7 +104,9 @@ export async function resolveAgentFromSub(sub: string): Promise<ResolvedAgent | 
         try {
           await (databases as any).flair.Credential.put({ ...cred, lastUsedAt: new Date().toISOString() });
         } catch { /* non-fatal */ }
-        return { agentId: String(cred.principalId), isAdmin: await isAgentAdmin(cred.principalId) };
+        const resolved: ResolvedAgent = { agentId: String(cred.principalId), isAdmin: await isAgentAdmin(cred.principalId) };
+        if (clientId) resolved.clientId = clientId;
+        return resolved;
       }
     }
   } catch { /* Credential table empty / search error → fall through to JIT/deny */ }
@@ -106,7 +117,9 @@ export async function resolveAgentFromSub(sub: string): Promise<ResolvedAgent | 
   try {
     const principalId = await jitProvisionPrincipal(sub);
     // A JIT-provisioned principal is a fresh, non-admin agent by construction.
-    return { agentId: principalId, isAdmin: false };
+    const resolved: ResolvedAgent = { agentId: principalId, isAdmin: false };
+    if (clientId) resolved.clientId = clientId;
+    return resolved;
   } catch {
     return null;
   }
@@ -245,7 +258,17 @@ async function handleToolCall(request: any, id: any, params: any): Promise<any> 
     return rpcError(id, -32001, "unauthorized: no verified token subject");
   }
 
-  const agent = await resolveAgentFromSub(String(sub));
+  // flair#718 authorship-provenance, Sherlock's binding refinement: source
+  // the authorship stamp from `client_id` (the server-generated
+  // `flair_cl_...` machine id — resources/OAuth.ts, an RS256-verified JWT
+  // claim, not a secret) — NEVER `client_name` (a free-text label the client
+  // supplied at Dynamic Client Registration time and fully controls). Do NOT
+  // "helpfully" switch this to `client_name` for a prettier label; that would
+  // turn a server-verified, stable id into caller-forgeable data landing in
+  // stored provenance. Absent/non-string client_id → omitted, not invented.
+  const clientId = typeof request?.mcp?.client_id === "string" ? request.mcp.client_id : undefined;
+
+  const agent = await resolveAgentFromSub(String(sub), clientId);
   if (!agent) {
     // Sub verified by the AS but not mapped to a flair Agent (and JIT disabled /
     // failed). Deny — do NOT fall back to anonymous or admin.

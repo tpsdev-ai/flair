@@ -80,7 +80,7 @@ export interface Relationship {
   createdAt: string;
   updatedAt?: string;
   /** JSON blob, same shape as Memory.provenance — { v, verified: { agentId,
-   *  timestamp }, claimed?: { model } }. Absent on rows written before this
+   *  timestamp }, claimed?: { model, client } }. Absent on rows written before this
    *  field existed (migration-equivalence: additive/nullable). */
   provenance?: string;
   /** Always true after a successful write() — the server never suppresses a
@@ -144,4 +144,15 @@ export interface FlairClientConfig {
   adminUser?: string;
   /** Admin password for Basic auth fallback (standalone deployments). Falls back to FLAIR_ADMIN_PASSWORD env var. */
   adminPassword?: string;
+  /**
+   * flair#718 authorship-provenance: a label identifying WHICH CLIENT this
+   * process is (e.g. "claude-code", "codex", "gemini", "cursor") — recorded
+   * as unverified `provenance.claimed.client` on memory writes, distinct from
+   * `agentId` (ownership) and ungoverned by any authority (never enters
+   * read-scope, attribution, or dedup decisions — server-enforced in
+   * resources/provenance.ts). Falls back to the `FLAIR_CLIENT` env var.
+   * Absent (both here and in the env) = omitted entirely; zero behavior
+   * change for existing installs.
+   */
+  claimedClient?: string;
 }

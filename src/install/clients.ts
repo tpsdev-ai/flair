@@ -16,11 +16,24 @@
 
 export type ClientId = "claude-code" | "codex" | "gemini" | "cursor";
 
+/**
+ * The env block every wire function writes into a client's MCP server config.
+ * `FLAIR_CLIENT` (flair#718 authorship-provenance) is OPTIONAL and additive —
+ * when the caller sets it (flair init's per-client wiring sets it to the
+ * client's own id, e.g. "codex"), the written env block records WHICH CLIENT
+ * this config wires, so writes forwarded through it stamp
+ * `provenance.claimed.client` server-side (resources/provenance.ts). Absent
+ * entirely on an un-set call = omitted from the written config, byte-for-byte
+ * the same output as before this field existed (flair doctor's --fix
+ * re-wiring path deliberately does not set it — out of scope for this slice).
+ */
+export type WireEnv = { FLAIR_AGENT_ID: string; FLAIR_URL: string; FLAIR_CLIENT?: string };
+
 export interface Client {
   id: ClientId;
   label: string;
   detected: boolean;
-  wire: (env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }) => { ok: boolean; message: string };
+  wire: (env: WireEnv) => { ok: boolean; message: string };
 }
 
 // ---- Detection helpers ----------------------------------------------------------
@@ -109,22 +122,28 @@ function cursorDetect(): boolean {
 // ---- Shared config shapes -------------------------------------------------------
 
 /** The standard MCP stdio server entry every client (except Codex TOML) uses. */
-function flairMcpEntry(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }) {
+function flairMcpEntry(env: WireEnv) {
   return {
     command: "npx",
     args: ["-y", "@tpsdev-ai/flair-mcp"],
-    env: { FLAIR_AGENT_ID: env.FLAIR_AGENT_ID, FLAIR_URL: env.FLAIR_URL },
+    env: {
+      FLAIR_AGENT_ID: env.FLAIR_AGENT_ID,
+      FLAIR_URL: env.FLAIR_URL,
+      // flair#718 — only present when the caller set it; absent = omitted,
+      // not written as FLAIR_CLIENT: undefined.
+      ...(env.FLAIR_CLIENT ? { FLAIR_CLIENT: env.FLAIR_CLIENT } : {}),
+    },
   };
 }
 
 /** Pretty-printed JSON `mcpServers.flair` snippet for copy-paste fallbacks. */
-function jsonSnippet(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): string {
+function jsonSnippet(env: WireEnv): string {
   return JSON.stringify({ mcpServers: { flair: flairMcpEntry(env) } }, null, 2);
 }
 
 /** TOML `[mcp_servers.flair]` snippet (Codex format). Exported for tests
  * (flair#727 — asserts the rendered template carries a full scheme+port URL). */
-export function tomlSnippet(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): string {
+export function tomlSnippet(env: WireEnv): string {
   return [
     `[mcp_servers.flair]`,
     `command = "npx"`,
@@ -133,6 +152,8 @@ export function tomlSnippet(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }):
     `[mcp_servers.flair.env]`,
     `FLAIR_AGENT_ID = "${env.FLAIR_AGENT_ID}"`,
     `FLAIR_URL = "${env.FLAIR_URL}"`,
+    // flair#718 — only present when the caller set it (same rule as flairMcpEntry above).
+    ...(env.FLAIR_CLIENT ? [`FLAIR_CLIENT = "${env.FLAIR_CLIENT}"`] : []),
   ].join("\n");
 }
 
@@ -155,7 +176,7 @@ export function codexConfigHasFlairSection(raw: string): boolean {
  * separator (mirrors fixClaudeMdBootstrap's separator logic in
  * src/doctor-client.ts — never runs the new block into the prior line).
  */
-export function appendCodexFlairBlock(raw: string, env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): string {
+export function appendCodexFlairBlock(raw: string, env: WireEnv): string {
   const separator = raw.length === 0 ? "" : raw.endsWith("\n\n") ? "" : raw.endsWith("\n") ? "\n" : "\n\n";
   return raw + separator + tomlSnippet(env) + "\n";
 }
@@ -168,7 +189,7 @@ export function appendCodexFlairBlock(raw: string, env: { FLAIR_AGENT_ID: string
 function wireJsonMcp(
   configPath: string,
   label: string,
-  env: { FLAIR_AGENT_ID: string; FLAIR_URL: string },
+  env: WireEnv,
 ): { ok: boolean; message: string } {
   const home = resolveHome();
   const display = configPath.startsWith(home) ? "~" + configPath.slice(home.length) : configPath;
@@ -244,14 +265,14 @@ export function clientConfigPath(id: ClientId): string {
 // fallback used when something calls the array form; it returns the snippet for
 // ~/.claude.json so the message is unambiguous and correct on every OS.
 
-function _wireClaudeCode(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
+function _wireClaudeCode(env: WireEnv): { ok: boolean; message: string } {
   // The real auto-wire is inline in cli.ts. If reached via the array, point at
   // the correct cross-platform path (~/.claude.json — same on macOS/Linux/Win)
   // and give the exact snippet. Never emit macOS-only paths here.
   return wireJsonMcp(join(resolveHome(), ".claude.json"), "Claude Code", env);
 }
 
-function _wireCodex(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
+function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
   // Codex uses TOML with a [mcp_servers.flair] table. We don't carry a TOML
   // parser, but appending a new top-level table at EOF is safe TOML when the
   // exact header isn't already present (flair#727) — so an existing file only
@@ -283,11 +304,11 @@ function _wireCodex(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: b
   }
 }
 
-function _wireGemini(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
+function _wireGemini(env: WireEnv): { ok: boolean; message: string } {
   return wireJsonMcp(geminiConfigPath(), "Gemini", env);
 }
 
-function _wireCursor(env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }): { ok: boolean; message: string } {
+function _wireCursor(env: WireEnv): { ok: boolean; message: string } {
   return wireJsonMcp(cursorConfigPath(), "Cursor", env);
 }
 
@@ -333,25 +354,25 @@ export function detectClients(): Client[] {
 }
 
 export function wireClaudeCode(
-  env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }
+  env: WireEnv
 ): { ok: boolean; message: string } {
   return _wireClaudeCode(env);
 }
 
 export function wireCodex(
-  env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }
+  env: WireEnv
 ): { ok: boolean; message: string } {
   return _wireCodex(env);
 }
 
 export function wireGemini(
-  env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }
+  env: WireEnv
 ): { ok: boolean; message: string } {
   return _wireGemini(env);
 }
 
 export function wireCursor(
-  env: { FLAIR_AGENT_ID: string; FLAIR_URL: string }
+  env: WireEnv
 ): { ok: boolean; message: string } {
   return _wireCursor(env);
 }

@@ -160,6 +160,13 @@ export async function runMcp(): Promise<void> {
     agentId,
     url: process.env.FLAIR_URL,
     keyPath: process.env.FLAIR_KEY_PATH,
+    // flair#718 authorship-provenance: forward this stdio proxy's own
+    // FLAIR_CLIENT env (set by `flair init`'s per-client wiring, e.g.
+    // "claude-code"/"codex"/"gemini"/"cursor") into the client it constructs
+    // — explicit here rather than relying solely on FlairClient's own
+    // process.env fallback, so the forwarding is visible at this call site.
+    // Absent = omitted, zero behavior change for un-wired installs.
+    claimedClient: process.env.FLAIR_CLIENT,
   });
 
   // ─── Auto-presence (flair#598) ────────────────────────────────────────────────

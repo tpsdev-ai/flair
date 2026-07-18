@@ -87,6 +87,17 @@ export function __setHandlers(overrides: Partial<Record<HandlerKey, any>>): () =
 export interface ResolvedAgent {
   agentId: string;
   isAdmin: boolean;
+  /**
+   * flair#718 authorship-provenance: the OAuth token's verified `client_id`
+   * claim (resources/mcp-handler.ts's handleToolCall — sourced from
+   * `client_id`, NEVER `client_name`; see that stamp site for why). Optional
+   * and absent when the token carries none. Threaded into the write tools
+   * below as `claimedClient` on the POST/PUT body, which
+   * resources/provenance.ts's buildProvenance folds into
+   * `provenance.claimed.client` — records WHICH CLIENT authored the write,
+   * grants ZERO authority, never read for access control/attribution/dedup.
+   */
+  clientId?: string;
 }
 
 /** MCP tool descriptor as returned by tools/list. */
@@ -159,13 +170,19 @@ async function memoryStore(agent: ResolvedAgent, args: any) {
   // agentId is the RESOLVED agent — Memory.post also re-checks ownership via
   // resolveAgentAuth, so a mismatched body agentId would 403 anyway; we set it
   // to the verified id so the write is correctly owned.
-  return unwrap(await h.post({
+  const body: Record<string, unknown> = {
     agentId: agent.agentId,
     content: args?.content,
     type: args?.type ?? "session",
     durability: args?.durability ?? "standard",
     tags: args?.tags,
-  }));
+  };
+  // flair#718 authorship-provenance: forward the resolved OAuth client_id
+  // (never a tool argument — no forging) as claimedClient; Memory.post()
+  // folds it into provenance.claimed.client and strips it from the row.
+  // Omitted entirely when the token carried no client_id.
+  if (agent.clientId) body.claimedClient = agent.clientId;
+  return unwrap(await h.post(body));
 }
 
 /**
@@ -214,6 +231,10 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
     delete record.validFrom;
     delete record.validTo;
     delete record.archivedAt;
+    // flair#718 authorship-provenance — see memoryStore's comment: forward
+    // the resolved OAuth client_id (never forgeable via args) so the NEW
+    // version's provenance records which client authored this update.
+    if (agent.clientId) record.claimedClient = agent.clientId;
     (h as any).isCollection = true;
     return unwrap(await h.post(record));
   }
@@ -221,6 +242,8 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
   const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
   delete merged.embedding;
   delete merged.embeddingModel;
+  // flair#718 authorship-provenance — see memoryStore's comment above.
+  if (agent.clientId) merged.claimedClient = agent.clientId;
   return unwrap(await h.put(merged));
 }
 
