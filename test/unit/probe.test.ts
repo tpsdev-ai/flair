@@ -131,6 +131,14 @@ describe("probeInstance — authenticated version check", () => {
     expect(result.error).toContain("403 forbidden");
   });
 
+  test("authenticated success → authFailureKind is null (nothing failed)", async () => {
+    const result = await probeInstance("http://127.0.0.1:9999", {
+      fetchImpl: healthyFetch(),
+      authedGet: async () => ({ version: "1.0.0" }),
+    });
+    expect(result.authFailureKind).toBeNull();
+  });
+
   test("authedGet succeeds but the body carries no version field → version null, mismatch if one was expected", async () => {
     const result = await probeInstance("http://127.0.0.1:9999", {
       fetchImpl: healthyFetch(),
@@ -169,5 +177,81 @@ describe("probeInstance — authenticated version check", () => {
     const fetchImpl = (async (url: any) => { seenUrl = String(url); return { ok: true, status: 200 } as Response; }) as unknown as typeof fetch;
     await probeInstance("http://127.0.0.1:9999/", { fetchImpl });
     expect(seenUrl).toBe("http://127.0.0.1:9999/Health");
+  });
+});
+
+// ─── authFailureKind classification (flair#741 fix #3) ────────────────────
+//
+// A responding server that rejects the verifier's credentials (401/403)
+// proves liveness — it must be distinguishable from a genuine "can't tell
+// what state this instance is in" failure (network error, timeout, 5xx).
+// probeInstance reads a numeric `.status` off whatever authedGet throws
+// (duck-typed — no dependency on a concrete error class) to make that call.
+
+class StatusError extends Error {
+  constructor(readonly status: number, message = "boom") {
+    super(message);
+  }
+}
+
+describe("probeInstance — authFailureKind classification (flair#741)", () => {
+  test("authedGet throws with .status = 403 → authFailureKind 'credentials'", async () => {
+    const result = await probeInstance("http://127.0.0.1:9999", {
+      fetchImpl: healthyFetch(),
+      authedGet: async () => { throw new StatusError(403, "HTTP 403: no credentials sent"); },
+    });
+    expect(result.healthy).toBe(true);
+    expect(result.authenticated).toBe(false);
+    expect(result.authFailureKind).toBe("credentials");
+  });
+
+  test("authedGet throws with .status = 401 → authFailureKind 'credentials'", async () => {
+    const result = await probeInstance("http://127.0.0.1:9999", {
+      fetchImpl: healthyFetch(),
+      authedGet: async () => { throw new StatusError(401, "unauthorized"); },
+    });
+    expect(result.authFailureKind).toBe("credentials");
+  });
+
+  test("authedGet throws with .status = 500 → authFailureKind 'server' (not credential-shaped)", async () => {
+    const result = await probeInstance("http://127.0.0.1:9999", {
+      fetchImpl: healthyFetch(),
+      authedGet: async () => { throw new StatusError(500, "internal error"); },
+    });
+    expect(result.authFailureKind).toBe("server");
+  });
+
+  test("authedGet throws a plain network error with no .status → authFailureKind 'server' (conservative default)", async () => {
+    const result = await probeInstance("http://127.0.0.1:9999", {
+      fetchImpl: healthyFetch(),
+      authedGet: async () => { throw new Error("ECONNREFUSED"); },
+    });
+    expect(result.authFailureKind).toBe("server");
+  });
+
+  test("unhealthy instance (never reaches authedGet) → authFailureKind null, not 'server'", async () => {
+    const result = await probeInstance("http://127.0.0.1:9999", {
+      fetchImpl: fakeFetch([{ ok: false, status: 500 }]),
+      timeoutMs: 10,
+      pollIntervalMs: 5,
+      authedGet: async () => ({ version: "1.0.0" }),
+    });
+    expect(result.healthy).toBe(false);
+    expect(result.authFailureKind).toBeNull();
+  });
+
+  test("no authedGet given (health-only probe) → authFailureKind null", async () => {
+    const result = await probeInstance("http://127.0.0.1:9999", { fetchImpl: healthyFetch() });
+    expect(result.authFailureKind).toBeNull();
+  });
+
+  test("authenticated but version mismatch → authFailureKind stays null (not an auth failure at all)", async () => {
+    const result = await probeInstance("http://127.0.0.1:9999", {
+      fetchImpl: healthyFetch(),
+      expectVersion: "1.2.3",
+      authedGet: async () => ({ version: "1.2.2" }),
+    });
+    expect(result.versionMatch).toBe(false);
+    expect(result.authFailureKind).toBeNull();
   });
 });

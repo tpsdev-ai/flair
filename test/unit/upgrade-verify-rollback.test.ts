@@ -8,6 +8,7 @@ import {
   resolveUpgradeRestartVerify,
   decideAfterVerify,
   decideAfterRollbackVerify,
+  isCredentialOnlyFailure,
 } from "../../src/cli";
 import type { ProbeResult } from "../../src/probe";
 
@@ -32,6 +33,21 @@ const unhealthy: ProbeResult = {
 const authFailed: ProbeResult = {
   healthy: true, authenticated: false, version: null, versionMatch: null, ok: false,
   error: "authenticated request to http://127.0.0.1:19926/HealthDetail failed: 403 forbidden",
+};
+// The flair#741 incident shape: server up, verifier rejected on credentials
+// specifically (bare 403/401 from a responding instance).
+const credentialOnlyFailure: ProbeResult = {
+  healthy: true, authenticated: false, version: null, versionMatch: null, ok: false,
+  authFailureKind: "credentials",
+  error: "authenticated request to http://127.0.0.1:19926/HealthDetail failed: HTTP 403: no credentials sent. Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass.",
+};
+// A genuine server-side auth-leg failure (5xx / network error reaching the
+// authenticated endpoint) — NOT credential-shaped, must NOT be treated like
+// credentialOnlyFailure above.
+const serverAuthFailure: ProbeResult = {
+  healthy: true, authenticated: false, version: null, versionMatch: null, ok: false,
+  authFailureKind: "server",
+  error: "authenticated request to http://127.0.0.1:19926/HealthDetail failed: HTTP 500",
 };
 
 // ─── Commander wiring: --restart / --no-restart / --no-verify ────────────────
@@ -156,5 +172,51 @@ describe("decideAfterRollbackVerify", () => {
     if (decision.kind === "rollback-failed") {
       expect(decision.reason.length).toBeGreaterThan(0);
     }
+  });
+
+  // flair#741: a credential-only failure still rolls back (decideAfterRollbackVerify's
+  // kind/reason are unchanged) — only the MESSAGE the cli.ts action prints around
+  // this decision changes (see isCredentialOnlyFailure below), never the decision itself.
+  test("credential-only rollback re-verify failure still decides 'rollback-failed' (decision logic unchanged by flair#741)", () => {
+    const decision = decideAfterRollbackVerify(credentialOnlyFailure);
+    expect(decision.kind).toBe("rollback-failed");
+    if (decision.kind === "rollback-failed") {
+      expect(decision.reason).toBe(credentialOnlyFailure.error);
+    }
+  });
+});
+
+// ─── isCredentialOnlyFailure: failure classification (flair#741 fix #3) ───────
+//
+// The predicate behind (a) the pre-upgrade credential pre-flight's abort
+// decision and (b) whether the post-restart/post-rollback failure messages
+// print the "instance state UNKNOWN — do not assume data integrity" text.
+// It must be true ONLY for "server responded, credentials rejected" and
+// false for every other failure shape — including ones that superficially
+// look similar (unhealthy, or a non-credential auth-leg failure).
+
+describe("isCredentialOnlyFailure", () => {
+  test("healthy instance, authFailureKind 'credentials' (the flair#741 incident shape) → true", () => {
+    expect(isCredentialOnlyFailure(credentialOnlyFailure)).toBe(true);
+  });
+
+  test("healthy instance, authFailureKind 'server' (5xx/network error on the auth leg) → false", () => {
+    expect(isCredentialOnlyFailure(serverAuthFailure)).toBe(false);
+  });
+
+  test("unhealthy/unreachable instance → false, even though authenticated is also falsy-ish (null)", () => {
+    expect(isCredentialOnlyFailure(unhealthy)).toBe(false);
+  });
+
+  test("a fully passing probe → false (nothing failed)", () => {
+    expect(isCredentialOnlyFailure(ok)).toBe(false);
+  });
+
+  test("version mismatch (authenticated fine, wrong version) → false — not a credential problem at all", () => {
+    expect(isCredentialOnlyFailure(mismatch)).toBe(false);
+  });
+
+  test("a ProbeResult with authFailureKind omitted entirely (older/hand-built fixture) → false, never throws", () => {
+    expect(isCredentialOnlyFailure(authFailed)).toBe(false);
   });
 });
