@@ -49,6 +49,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   RECORD_TYPES,
+  COMPOSITE_MCP_TOOLS,
   type RecordTypePolicy,
   type RecordTypeReadScopeMode,
   type RecordTypeIdentityMode,
@@ -61,7 +62,7 @@ const VALID_READ_SCOPE: RecordTypeReadScopeMode[] = ["owner-only", "open-within-
 const VALID_ATTRIBUTION_MODES = ["validate-truthy", "validate-strict", "stamp-default", "stamp-strict"];
 const VALID_FEDERATION: RecordTypeFederation[] = ["excluded", "included"];
 const VALID_MCP_READ_VERBS = ["get", "search"];
-const VALID_MCP_WRITE_VERBS = ["store", "delete"];
+const VALID_MCP_WRITE_VERBS = ["store", "delete", "update"];
 
 // ─── 1. Shape / exhaustiveness ─────────────────────────────────────────────
 
@@ -125,8 +126,8 @@ describe("RECORD_TYPES — shape and exhaustiveness", () => {
     for (const v of policy.mcp.writeVerbs) expect(VALID_MCP_WRITE_VERBS).toContain(v);
   });
 
-  it("no entry sets mcp in this slice (MCP derivation is slice 3 — shape only)", () => {
-    for (const [, policy] of entries) expect(policy.mcp).toBeUndefined();
+  it("Relationship has no mcp field (no MCP tool today — absent means no exposure)", () => {
+    expect(RECORD_TYPES.Relationship.mcp).toBeUndefined();
   });
 });
 
@@ -167,6 +168,7 @@ describe("RECORD_TYPES — golden values (must match each table's current shippe
       embedding: { field: "content", exposedSearch: true },
       remEligible: false,
       federation: "included",
+      mcp: { toolPrefix: "memory", readVerbs: ["get", "search"], writeVerbs: ["store", "delete", "update"] },
     });
   });
 
@@ -193,6 +195,7 @@ describe("RECORD_TYPES — golden values (must match each table's current shippe
       provenance: false,
       remEligible: false,
       federation: "excluded",
+      mcp: { toolPrefix: "flair_workspace", readVerbs: [], writeVerbs: ["store"] },
     });
   });
 
@@ -206,6 +209,7 @@ describe("RECORD_TYPES — golden values (must match each table's current shippe
       provenance: false,
       remEligible: false,
       federation: "excluded",
+      mcp: { toolPrefix: "flair_orgevent", readVerbs: [], writeVerbs: ["store"] },
     });
   });
 
@@ -219,7 +223,67 @@ describe("RECORD_TYPES — golden values (must match each table's current shippe
       provenance: false,
       remEligible: false,
       federation: "included",
+      mcp: { toolPrefix: "soul", readVerbs: ["get"], writeVerbs: ["store"] },
     });
+  });
+});
+
+// ─── 3b. MCP surface — golden-value pins (slice 3, flair#520) ─────────────
+//
+// The "no entry sets mcp" shape-only assertion from slice 2 is gone — slice
+// 3's design round (Kern APPROVE all four asks, Sherlock APPROVE with the
+// COMPOSITE_MCP_TOOLS-relocation refinement) backfilled `mcp` on four of the
+// five entries and added the composite allowlist. These pins are the same
+// discipline as section 3 above: hardcoded independently of
+// resources/record-types.ts, so a registry edit that drifts from the
+// reviewed, shipped MCP surface fails here even though the bidirectional
+// enforcement lives in test/unit/mcp-surface-tripwire.test.ts, not this file.
+
+describe("RECORD_TYPES.<Table>.mcp — golden values (backfilled surface, slice 3)", () => {
+  it("Memory: get/search reads, store/delete/update writes", () => {
+    expect(RECORD_TYPES.Memory.mcp).toEqual({
+      toolPrefix: "memory",
+      readVerbs: ["get", "search"],
+      writeVerbs: ["store", "delete", "update"],
+    });
+  });
+
+  it("Soul: get read, store write", () => {
+    expect(RECORD_TYPES.Soul.mcp).toEqual({
+      toolPrefix: "soul",
+      readVerbs: ["get"],
+      writeVerbs: ["store"],
+    });
+  });
+
+  it("WorkspaceState: no reads, store write", () => {
+    expect(RECORD_TYPES.WorkspaceState.mcp).toEqual({
+      toolPrefix: "flair_workspace",
+      readVerbs: [],
+      writeVerbs: ["store"],
+    });
+  });
+
+  it("OrgEvent: no reads, store write", () => {
+    expect(RECORD_TYPES.OrgEvent.mcp).toEqual({
+      toolPrefix: "flair_orgevent",
+      readVerbs: [],
+      writeVerbs: ["store"],
+    });
+  });
+
+  it("Relationship: mcp absent (no MCP tool today)", () => {
+    expect(RECORD_TYPES.Relationship.mcp).toBeUndefined();
+  });
+});
+
+describe("COMPOSITE_MCP_TOOLS — golden-value pin (slice 3, flair#520)", () => {
+  it("pins the exact three composite tool names, in order", () => {
+    expect(COMPOSITE_MCP_TOOLS).toEqual(["bootstrap", "attention", "record_usage"]);
+  });
+
+  it("is deep-frozen (static-registry invariant, same as RECORD_TYPES)", () => {
+    expect(Object.isFrozen(COMPOSITE_MCP_TOOLS)).toBe(true);
   });
 });
 

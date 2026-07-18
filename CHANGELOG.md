@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### 🧹 MCP surface — declare-and-enforce, not runtime-derive; no behavior change (flair#520 slice 3)
+
+Slice 2 (#730) landed `resources/record-types.ts`'s `RECORD_TYPES` registry with an `mcp` field that was shape-only, consumed by nothing. Slice 3 backfills it and adds enforcement, per the design round on the #520 issue thread (Kern's DESIGN REVIEW — APPROVE all four asks; Sherlock's Security Review — APPROVE with one refinement, adopted).
+
+An audit of the 12 shipped `/mcp` tools (`resources/mcp-tools.ts`) found only 5 are simple table-verb wrappers (`memory_get/store/delete`, `soul_get/set`); the rest are composite or bespoke (`bootstrap`, `attention`, `memory_search`, `memory_update`, `record_usage`) and can't be generated from a registry entry without either losing schema/behavior specifics or duplicating the handler. So the registry does not generate tools — it DECLARES the reviewed MCP surface, and a new bidirectional test enforces that declaration and reality never drift:
+
+- `RECORD_TYPES.<Table>.mcp` backfilled on four of the five core entries, documenting the CURRENT shipped surface exactly (registration, not behavior change): Memory (`get`/`search` reads, `store`/`delete`/`update` writes), Soul (`get` read, `store` write), WorkspaceState (no reads, `store` write), OrgEvent (no reads, `store` write). Relationship stays `mcp`-absent — it has no MCP tool today.
+- `RecordTypeMcp.writeVerbs` gains `"update"` (additive), documenting `memory_update`'s already-shipped two-branch read-modify-write — not a new capability.
+- New top-level `COMPOSITE_MCP_TOOLS` export in `record-types.ts` (deep-frozen, `["bootstrap", "attention", "record_usage"]`) — the second and only other reviewed chokepoint, for tools that don't map to a single table + verb. Per Sherlock's refinement (Kern concurring): this lives in `record-types.ts`, not `mcp-tools.ts`, so the FULL MCP surface is reviewable in one file.
+- New `TOOL_NAME_OVERRIDES` in `resources/mcp-tools.ts` covers the three naming quirks where the shipped tool name isn't the default `${toolPrefix}_${verb}` shape: `(Soul, store)` → `soul_set`, `(WorkspaceState, store)` → `flair_workspace_set`, `(OrgEvent, store)` → `flair_orgevent`. Registry declares WHAT is exposed; `mcp-tools.ts` owns HOW (names, defaults, routing).
+- New `test/unit/mcp-surface-tripwire.test.ts`: bidirectional CI enforcement — every declared registry verb must resolve to a tool that exists in `TOOLS`, every tool in `TOOLS` must be either derived from a declared verb or listed in `COMPOSITE_MCP_TOOLS`, a table with no `mcp` field contributes zero tools carrying its prefix, and the full 12-tool `tools/list` surface is pinned as a golden value. Any future PR that adds or removes an MCP tool must now also touch one of the two reviewed chokepoints, or CI fails.
+- `test/unit/record-types-registry.test.ts`'s slice-2 "no entry sets mcp" assertion flips to golden-value pins of the four backfilled declarations plus a pin of `COMPOSITE_MCP_TOOLS`'s contents.
+- Fixed a stale comment in `mcp-tools.ts`'s `listToolDefs` ("exactly the 9 curated tools" — actual: 12, wrong since `attention`/`record_usage` were added).
+
+Zero runtime behavior change: `tools/list` output is byte-identical, `resources/mcp-tools.ts`'s `TOOLS` dispatch table is untouched apart from the name-override structure and the comment fix, and every existing `mcp-handler.test.ts` assertion passes unchanged. The diff is registry data + tests + two comment fixes.
+
 ### ✨ Authorship provenance — `claimed.client` records which client wrote a row (flair#718)
 
 An audit of the identity machinery reframed this from "add a personal-vs-org deployment mode" to a narrower, cheaper fix: the personal shape (one shared principal across every AI client, via `flair init`) already ships and is correct — what's missing is recording *which client* authored a write once several clients share one principal. K&S-approved design (issue #718): no new config key (deployment shape stays emergent from provisioning, now documented in `docs/auth.md`), authorship recorded in the existing `claimed` (self-reported, unverified) provenance slot rather than a first-class row field.
