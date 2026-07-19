@@ -73,9 +73,9 @@
  * contract from this one module so neither drifts from the other.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 // ─── Token-location contract ────────────────────────────────────────────────
 
@@ -152,6 +152,22 @@ export function requireDcrToken(opts: { filePath?: string } = {}): DcrTokenResul
     throw new DcrTokenNotFoundError(opts.filePath ?? defaultDcrTokenFilePath());
   }
   return result;
+}
+
+/**
+ * Write the DCR gate token to the 0600 file location — the write half of the
+ * token-location contract this module's header documents. `flair mcp enable`
+ * (this module's first WRITER) is the only command that should call this;
+ * `grant`/`revoke` only ever read via `requireDcrToken`. Refuses to silently
+ * widen permissions on an existing file — always (re)writes 0600.
+ */
+export function writeDcrTokenFile(token: string, filePath?: string): string {
+  const path = filePath ?? defaultDcrTokenFilePath();
+  if (!token) throw new Error("writeDcrTokenFile: token must be a non-empty string");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${token}\n`, { mode: 0o600 });
+  chmodSync(path, 0o600);
+  return path;
 }
 
 // ─── RFC 7591 DCR HTTP client (for the future `enable` builder) ────────────
