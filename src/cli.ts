@@ -48,8 +48,10 @@ import {
   defaultMcpClientId,
   defaultMcpTokenEndpoint,
   defaultMcpResource,
+  defaultMcpIssuer,
   MAX_ASSERTION_LIFETIME_SECONDS,
 } from "./mcp-client-assertion.js";
+import { requireDcrToken, DCR_TOKEN_ENV } from "./lib/dcr-client.js";
 import {
   readClientMcpBlock,
   checkClaudeMdBootstrap,
@@ -3666,6 +3668,495 @@ mcp
       }
       process.exit(1);
     }
+  });
+
+// ─── flair mcp grant / revoke / list ───────────────────────────────────────
+// flair#746 — named, individually-revocable machine clients for the Model-2
+// `/mcp` OAuth surface, completing the #663 client_credentials consumer arc
+// with a paved provisioning path ("I have an agent" → "it has credentials
+// and an mcp config block").
+//
+// GROUND TRUTH (see src/lib/dcr-client.ts's module header for the full
+// citation trail against the published @harperfast/oauth@2.2.0 source):
+// the #719/#746 design round described `grant` as minting a client via the
+// gated DCR endpoint's client_credentials grant. The published plugin does
+// not support that — DCR only registers authorization_code/refresh_token
+// clients, and client_credentials tokens are minted ONLY for CIMD-resolved
+// clients ("A stored (DCR) record must never mint here" — token.js). CIMD
+// (oauth#161, already shipped, consumed here via #663's
+// src/mcp-client-assertion.ts) is the machine-client registration path that
+// REPLACED DCR for this exact use case — a flair Agent + Ed25519 keypair IS
+// the registration; resources/MCPClientMetadata.ts serves its CIMD document
+// live, statelessly, on every fetch. `grantMcpClient` below therefore
+// provisions an Agent (mirrors `agent add`'s seedAgentViaOpsApi shape), not
+// a DCR client. `requireDcrToken()` is still enforced as the command's gate
+// — proof `flair mcp enable` has run — layered on Harper's own admin-pass
+// boundary, exactly as Sherlock's #719 verdict asked for, just pointed at
+// the real mechanism instead of the assumed one.
+//
+// Local bookkeeping (the manifest below) is the ONLY place "named machine
+// clients" are enumerable at all: CIMD is deliberately stateless (no
+// server-side registration row exists to list — see MCPClientMetadata.ts's
+// own header), so `flair mcp list` reads local state by construction, not
+// by convenience. `flair mcp revoke`'s actual credential-kill IS server-side
+// (DELETE the backing Agent record via the admin-authenticated ops API,
+// requiring the server's ack), matching Sherlock's binding condition: local
+// key-file cleanup happens ONLY after that ack succeeds, never before, and
+// never at all if the server call fails.
+
+export interface McpClientManifestEntry {
+  name: string;
+  /** Same as `name` today — the Agent id this machine client's identity is
+   *  rooted in. Kept as a separate field so a future re-keying scheme
+   *  doesn't have to renegotiate the manifest shape. */
+  agentId: string;
+  /** The CIMD URL: `${issuer}/MCPClientMetadata/${name}` — this IS the
+   *  client_id an AS resolves for the client_credentials grant. */
+  clientId: string;
+  keyFile: string;
+  pubKeyFile: string;
+  issuer: string;
+  createdAt: string;
+  status: "active";
+}
+
+/** Default manifest path: `~/.flair/mcp-clients.json`, sibling to
+ *  admin-pass/config.yaml — independent of --keys-dir (a custom keys dir
+ *  doesn't imply a custom manifest location, and vice versa). */
+export function defaultMcpClientManifestPath(): string {
+  return join(homedir(), ".flair", "mcp-clients.json");
+}
+
+/** Read the manifest; a missing file is "no clients granted yet", not an
+ *  error. Malformed JSON is also treated as empty (defensive — a corrupt
+ *  manifest must never crash `list`), never partially parsed. */
+export function readMcpClientManifest(manifestPath: string): McpClientManifestEntry[] {
+  if (!existsSync(manifestPath)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Write the manifest, 0600 — it names every granted machine client's
+ *  key-file path, which is operationally sensitive even though it carries
+ *  no key material itself. */
+function writeMcpClientManifest(manifestPath: string, entries: McpClientManifestEntry[]): void {
+  mkdirSync(dirname(manifestPath), { recursive: true });
+  writeFileSync(manifestPath, JSON.stringify(entries, null, 2) + "\n", { mode: 0o600 });
+  chmodSync(manifestPath, 0o600);
+}
+
+/** Machine-readable "ready-to-paste" MCP config block for `grant`'s output.
+ *  Pure — no I/O — so it's independently unit-testable. Mirrors the
+ *  `mcpServers` top-level key src/install/clients.ts's jsonSnippet already
+ *  established as this codebase's paste-target convention, pointed at the
+ *  Model-2 OAuth `/mcp` HTTP surface (not that stdio-bridge path).
+ *
+ *  The Authorization header CANNOT be a static, working value: a
+ *  client_credentials access token is short-lived (default 300s TTL,
+ *  server-side — see token.js's DEFAULT_CLIENT_CREDENTIALS_TTL) and this
+ *  grant issues no refresh token by design. Printing a real-looking-but-
+ *  dead token would be actively misleading, so the placeholder says exactly
+ *  what to run instead — never a fabricated "it just works" static header.
+ */
+export function buildMcpGrantConfig(params: {
+  name: string;
+  resource: string;
+  keyFile: string;
+}): Record<string, unknown> {
+  return {
+    mcpServers: {
+      [params.name]: {
+        type: "http",
+        url: params.resource,
+        headers: {
+          Authorization:
+            `Bearer <mint before each session: ` +
+            `flair mcp token --agent-id ${params.name} --json — copy .access_token here; ` +
+            `expires in minutes, not a long-lived credential>`,
+        },
+      },
+    },
+    note:
+      `Key material lives at ${params.keyFile} (0600, never printed). ` +
+      `The Bearer token above is a placeholder — mint a fresh one with ` +
+      `\`flair mcp token --agent-id ${params.name}\` at connection time.`,
+  };
+}
+
+export class McpClientNameExistsError extends Error {
+  constructor(name: string) {
+    super(`Machine client '${name}' already exists — use \`flair mcp revoke ${name}\` first or pick a different name.`);
+    this.name = "McpClientNameExistsError";
+  }
+}
+
+export class McpClientAgentIdCollisionError extends Error {
+  constructor(name: string) {
+    super(
+      `An agent named '${name}' already exists in Flair but is not an mcp-granted machine client ` +
+        `— pick a different name (or \`flair agent remove ${name}\` first if that's intentional).`,
+    );
+    this.name = "McpClientAgentIdCollisionError";
+  }
+}
+
+export class McpClientNotFoundError extends Error {
+  constructor(name: string) {
+    super(`No granted machine client named '${name}' (see \`flair mcp list\`).`);
+    this.name = "McpClientNotFoundError";
+  }
+}
+
+const MCP_CLIENT_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+export interface McpGrantParams {
+  name: string;
+  keysDir: string;
+  manifestPath: string;
+  issuer: string;
+  opsPortOrUrl: number | string;
+  adminUser: string;
+  adminPass: string;
+}
+
+export interface McpGrantDeps {
+  fetchImpl?: typeof fetch;
+  now?: () => string;
+  /** Injectable Ed25519 keypair generator (tests only; defaults to tweetnacl). */
+  generateKeyPair?: () => { publicKey: Uint8Array; secretKey: Uint8Array };
+}
+
+export interface McpGrantResult {
+  entry: McpClientManifestEntry;
+  config: Record<string, unknown>;
+}
+
+/**
+ * Core, testable `flair mcp grant` orchestration — no process.exit, no
+ * console output, so it's directly unit-testable with a mocked fetch and a
+ * temp dir (same split as classifyKeysDir/applyKeyPrune above). Throws
+ * typed errors; the CLI action below catches and formats them.
+ */
+export async function grantMcpClient(params: McpGrantParams, deps: McpGrantDeps = {}): Promise<McpGrantResult> {
+  const { name, keysDir, manifestPath, issuer, opsPortOrUrl, adminUser, adminPass } = params;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const now = deps.now ?? (() => new Date().toISOString());
+  const generateKeyPair = deps.generateKeyPair ?? (() => nacl.sign.keyPair());
+
+  if (!MCP_CLIENT_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `Invalid machine client name '${name}' — must be 1-64 chars, start alphanumeric, ` +
+        `and contain only letters, digits, '_', '-' (it becomes an Agent id, a key filename, and a URL path segment).`,
+    );
+  }
+
+  const manifest = readMcpClientManifest(manifestPath);
+  if (manifest.some((e) => e.name === name)) {
+    throw new McpClientNameExistsError(name);
+  }
+
+  // Defense-in-depth: refuse to silently reuse/clobber an unrelated
+  // pre-existing Agent id (e.g. a human-run principal sharing this name).
+  const opsUrl = typeof opsPortOrUrl === "number" ? `http://127.0.0.1:${opsPortOrUrl}/` : `${opsPortOrUrl.replace(/\/$/, "")}/`;
+  const authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+  const existingRes = await fetchImpl(opsUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: authHeader },
+    body: JSON.stringify({
+      operation: "search_by_value",
+      database: "flair",
+      table: "Agent",
+      search_attribute: "id",
+      search_value: name,
+      get_attributes: ["id"],
+    }),
+  });
+  if (existingRes.ok) {
+    const existing = await existingRes.json().catch(() => []);
+    if (Array.isArray(existing) && existing.length > 0) {
+      throw new McpClientAgentIdCollisionError(name);
+    }
+  }
+
+  mkdirSync(keysDir, { recursive: true });
+  const privPath = privKeyPath(name, keysDir);
+  const pubPath = pubKeyPath(name, keysDir);
+  const kp = generateKeyPair();
+  const seed = kp.secretKey.slice(0, 32);
+  const pubKeyB64url = b64url(kp.publicKey);
+
+  writeFileSync(privPath, Buffer.from(seed), { mode: 0o600 });
+  chmodSync(privPath, 0o600);
+  writeFileSync(pubPath, Buffer.from(kp.publicKey));
+
+  const nowIso = now();
+  const insertRes = await fetchImpl(opsUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: authHeader },
+    body: JSON.stringify({
+      operation: "insert",
+      database: "flair",
+      table: "Agent",
+      records: [{
+        id: name,
+        name,
+        type: "agent",
+        kind: "agent",
+        status: "active",
+        displayName: name,
+        admin: false,
+        defaultTrustTier: "unverified",
+        runtime: "headless",
+        publicKey: pubKeyB64url,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      }],
+    }),
+  });
+  if (!insertRes.ok) {
+    // Roll back the key files we just wrote — nothing left behind locally
+    // on a failed grant.
+    for (const p of [privPath, pubPath]) {
+      try { const { unlinkSync } = await import("node:fs"); unlinkSync(p); } catch { /* best effort */ }
+    }
+    const text = await insertRes.text().catch(() => "");
+    throw new Error(`Failed to create Agent '${name}' via operations API (${insertRes.status}): ${text}`);
+  }
+
+  const clientId = `${issuer.replace(/\/+$/, "")}/MCPClientMetadata/${name}`;
+  const entry: McpClientManifestEntry = {
+    name,
+    agentId: name,
+    clientId,
+    keyFile: privPath,
+    pubKeyFile: pubPath,
+    issuer,
+    createdAt: nowIso,
+    status: "active",
+  };
+  writeMcpClientManifest(manifestPath, [...manifest, entry]);
+
+  const resource = `${issuer.replace(/\/+$/, "")}/mcp`;
+  const config = buildMcpGrantConfig({ name, resource, keyFile: privPath });
+  return { entry, config };
+}
+
+export interface McpRevokeParams {
+  name: string;
+  manifestPath: string;
+  opsPortOrUrl: number | string;
+  adminUser: string;
+  adminPass: string;
+  keepKeys?: boolean;
+}
+
+export interface McpRevokeDeps {
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Core, testable `flair mcp revoke` orchestration. SERVER-SIDE ack is
+ * mandatory before any local mutation: the Agent record backing this
+ * client's CIMD identity is DELETEd via the admin-authenticated ops API
+ * first; only a 2xx response ("ack") triggers local key-file deletion and
+ * manifest cleanup. A network error or non-2xx leaves everything local
+ * untouched and throws — the caller (CLI action) reports a clear failure
+ * and exits non-zero. This mirrors `agent remove`'s existing
+ * delete-then-cleanup ordering.
+ */
+export async function revokeMcpClient(params: McpRevokeParams, deps: McpRevokeDeps = {}): Promise<McpClientManifestEntry> {
+  const { name, manifestPath, opsPortOrUrl, adminUser, adminPass, keepKeys } = params;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+
+  const manifest = readMcpClientManifest(manifestPath);
+  const entry = manifest.find((e) => e.name === name);
+  if (!entry) {
+    throw new McpClientNotFoundError(name);
+  }
+
+  const opsUrl = typeof opsPortOrUrl === "number" ? `http://127.0.0.1:${opsPortOrUrl}/` : `${opsPortOrUrl.replace(/\/$/, "")}/`;
+  const authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
+
+  let delRes: Response;
+  try {
+    delRes = await fetchImpl(opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: authHeader },
+      body: JSON.stringify({ operation: "delete", database: "flair", table: "Agent", ids: [entry.agentId] }),
+    });
+  } catch (err: any) {
+    throw new Error(
+      `Server-side revoke failed: could not reach the operations API to delete Agent '${entry.agentId}' ` +
+        `(${err?.message ?? err}). Nothing was deleted locally — retry once the instance is reachable.`,
+    );
+  }
+  if (!delRes.ok) {
+    const text = await delRes.text().catch(() => "");
+    throw new Error(
+      `Server-side revoke failed (HTTP ${delRes.status}) deleting Agent '${entry.agentId}': ${text}. ` +
+        `Nothing was deleted locally.`,
+    );
+  }
+
+  // Server ack received — now safe to clean up locally.
+  if (!keepKeys) {
+    const { unlinkSync } = await import("node:fs");
+    for (const p of [entry.keyFile, entry.pubKeyFile]) {
+      if (p && existsSync(p)) {
+        try { unlinkSync(p); } catch { /* best effort */ }
+      }
+    }
+  }
+  writeMcpClientManifest(manifestPath, manifest.filter((e) => e.name !== name));
+
+  return entry;
+}
+
+mcp
+  .command("grant <name>")
+  .description(
+    "Provision a named, individually-revocable machine client for the /mcp OAuth surface " +
+      "(flair Agent + Ed25519 keypair; the existing CIMD path — see `flair mcp token` — makes it usable).",
+  )
+  .option("--issuer <url>", "Public origin for the CIMD client_id (defaults to FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)")
+  .option("--keys-dir <dir>", "Directory to write the new key pair into (else FLAIR_KEY_DIR, ~/.flair/keys)")
+  .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  .option("--dcr-token-file <path>", `DCR gate token file (else ${DCR_TOKEN_ENV} env, else ~/.flair/mcp-dcr-token)`)
+  .option("--port <port>", "Harper HTTP port")
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--json", "Print machine-readable JSON instead of a human summary")
+  .action(async (name: string, opts) => {
+    try {
+      requireDcrToken({ filePath: opts.dcrTokenFile });
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+
+    const adminPass = resolveLocalAdminPass(opts.adminPass);
+    if (!adminPass) {
+      console.error(
+        "Error: --admin-pass or FLAIR_ADMIN_PASS required for `flair mcp grant` (needed to insert into the Agent table). " +
+          "Set FLAIR_ADMIN_PASS, or make sure ~/.flair/admin-pass exists (created by `flair init`).",
+      );
+      process.exit(1);
+    }
+
+    const issuer: string | undefined = opts.issuer ?? defaultMcpIssuer();
+    if (!issuer) {
+      console.error(
+        "Error: --issuer is required (or set FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL) — the CIMD client_id " +
+          "must be a stable, publicly-resolvable URL.",
+      );
+      process.exit(1);
+    }
+
+    const keysDir: string = opts.keysDir ?? defaultKeysDir();
+    const manifestPath: string = opts.manifest ?? defaultMcpClientManifestPath();
+    const opsPort = resolveOpsPort(opts);
+
+    try {
+      const { entry, config } = await grantMcpClient({
+        name,
+        keysDir,
+        manifestPath,
+        issuer,
+        opsPortOrUrl: opsPort,
+        adminUser: DEFAULT_ADMIN_USER,
+        adminPass,
+      });
+
+      if (opts.json) {
+        console.log(render.asJSON({ entry, config }));
+        return;
+      }
+
+      console.log(`\n${render.wrap(render.c.bold, `✅ Machine client '${name}' granted`)}\n`);
+      console.log(render.kv("client_id", entry.clientId));
+      console.log(render.kv("key file", render.wrap(render.c.dim, entry.keyFile)));
+      console.log(render.kv("issuer", entry.issuer));
+      console.log(`\n${render.wrap(render.c.dim, "Ready-to-paste MCP config (references the key file, never inline key material):")}\n`);
+      console.log(render.asJSON(config));
+      console.log("");
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+mcp
+  .command("revoke <name>")
+  .description("Server-side revoke a granted machine client (deletes its backing Agent record), then clean up locally.")
+  .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
+  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  .option("--dcr-token-file <path>", `DCR gate token file (else ${DCR_TOKEN_ENV} env, else ~/.flair/mcp-dcr-token)`)
+  .option("--ops-port <port>", "Harper operations API port")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--keep-keys", "Do not delete local key files after a successful server-side revoke")
+  .action(async (name: string, opts) => {
+    try {
+      requireDcrToken({ filePath: opts.dcrTokenFile });
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+
+    const adminPass = resolveLocalAdminPass(opts.adminPass);
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for `flair mcp revoke`.");
+      process.exit(1);
+    }
+
+    const manifestPath: string = opts.manifest ?? defaultMcpClientManifestPath();
+    const opsPort = resolveOpsPort(opts);
+
+    try {
+      await revokeMcpClient({
+        name,
+        manifestPath,
+        opsPortOrUrl: opsPort,
+        adminUser: DEFAULT_ADMIN_USER,
+        adminPass,
+        keepKeys: !!opts.keepKeys,
+      });
+      console.log(`${render.icons.ok} Machine client '${name}' revoked (server-side Agent record deleted${opts.keepKeys ? "; local keys kept" : " and local keys removed"}).`);
+    } catch (err: any) {
+      console.error(`${render.icons.error} ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+mcp
+  .command("list")
+  .description("List granted machine clients (name, client_id, status, created).")
+  .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
+  .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
+  .action((opts) => {
+    const manifestPath: string = opts.manifest ?? defaultMcpClientManifestPath();
+    const entries = readMcpClientManifest(manifestPath);
+    const mode = render.resolveOutputMode(opts);
+
+    if (mode === "json") {
+      console.log(render.asJSON(entries));
+      return;
+    }
+    if (entries.length === 0) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, "no machine clients granted (see `flair mcp grant <name>`)")}`);
+      return;
+    }
+    console.log(`${render.wrap(render.c.bold, String(entries.length))} machine client(s)\n`);
+    const cols: render.TableColumn[] = [
+      { label: "name", key: "name", format: (v) => render.wrap(render.c.bold, String(v ?? "—")) },
+      { label: "client_id", key: "clientId", format: (v) => render.wrap(render.c.dim, String(v ?? "—")) },
+      { label: "status", key: "status", format: (v) => (v === "active" ? render.wrap(render.c.green, String(v)) : String(v ?? "—")) },
+      { label: "created", key: "createdAt", format: (v) => render.relativeTime(v as string) },
+    ];
+    console.log(render.table(cols, entries as unknown as Array<Record<string, unknown>>));
   });
 
 // ─── flair principal ─────────────────────────────────────────────────────────
