@@ -90,6 +90,42 @@ const LOGICAL_NAME = "default";
 const MODEL_NAME = "nomic-embed-text";
 
 /**
+ * Pooling declaration (HFE 0.5.0+, harper-fabric-embeddings' `init()`
+ * `pooling` option). Verification, not override: the native addon has no
+ * pooling knob of its own — llama.cpp always pools by whatever the GGUF's
+ * own `<arch>.pooling_type` metadata says. Declaring the expectation makes
+ * HFE assert it at init and fail loudly on absent/mismatched metadata,
+ * instead of a metadata-less or mismatched conversion silently pooling the
+ * wrong way (see node_modules/harper-fabric-embeddings/README.md's `init()`
+ * table for the exact contract this PR bumps to).
+ *
+ * "mean" is nomic-embed-text-v1.5's actual pooling type — NOT assumed from
+ * the model's reputation, directly confirmed against the shipped GGUF:
+ * `node_modules/.bin/node-llama-cpp inspect gguf
+ * ~/.flair/data/models/nomic-embed-text-v1.5.Q4_K_M.gguf` reports
+ * `"nomic-bert": { pooling_type: 1 }`, and llama.cpp's
+ * `enum llama_pooling_type` maps 1 -> `LLAMA_POOLING_TYPE_MEAN` (0 = none,
+ * 1 = mean, 2 = cls, 3 = last, 4 = rank). nomic-embed-text is a
+ * NomicBertModel architecture, not Qwen3 (last-token) — flair registers no
+ * Qwen3-class embedding model today (the Qwen3-Reranker-0.6B in
+ * resources/rerank-provider.ts is a SEPARATE code path that calls
+ * node-llama-cpp directly for generative yes/no scoring, never goes through
+ * HFE's register()/init(), and has no embedding-pooling context at all — see
+ * that file's header). If a Qwen3-class (last-token-pooling) embedding model
+ * is ever registered here, it must declare `pooling: "last"`, not "mean".
+ *
+ * Applies to the bench-only `modelPath` override too (`benchModelPathOverride()`
+ * below): `FLAIR_RECALL_HARNESS_MODEL_PATH` lets an operator point this
+ * registration at an arbitrary GGUF for a Q4/Q8 bakeoff, and this constant
+ * assumes whatever file lands there is still nomic-family (mean-pooling) —
+ * true for every bakeoff run to date (same base model, different quant).
+ * HFE 0.5.0's verification is exactly the safety net that turns "someone
+ * points --model-file at a non-nomic, non-mean-pooling GGUF" into a loud
+ * boot-time failure instead of a silently-wrong pooling pass.
+ */
+const EMBEDDING_POOLING = "mean";
+
+/**
  * BENCH-ONLY escape hatch — NOT a production feature flag, never documented
  * as an operator setting, and never read anywhere else in this codebase.
  * Mirrors `embeddings-provider.ts`'s `FLAIR_RECALL_HARNESS_FORCE_PREFIX`
@@ -134,7 +170,9 @@ export async function registerEmbeddingsBackend(): Promise<void> {
     await register({
       logicalName: LOGICAL_NAME,
       kind: "embedding",
-      config: modelPath ? { modelPath } : { modelName: MODEL_NAME, modelsDir: resolveModelsDir() },
+      config: modelPath
+        ? { modelPath, pooling: EMBEDDING_POOLING }
+        : { modelName: MODEL_NAME, modelsDir: resolveModelsDir(), pooling: EMBEDDING_POOLING },
     });
   } catch (err) {
     // Not installed, or globalThis.models isn't ready (module loaded outside
