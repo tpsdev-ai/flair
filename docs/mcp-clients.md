@@ -80,7 +80,22 @@ register Flair's `SessionStart` hook. It's a separate bin shipped in the same
 package and is entirely optional — it complements the MCP server, it doesn't
 replace it.
 
-Add a `SessionStart` hook to `~/.claude/settings.json`:
+The one-command way (recommended — idempotent, `--dry-run`-able, and
+symmetric with `flair hook uninstall`/`flair hook status`):
+
+```bash
+flair hook install               # wires ~/.claude/settings.json for FLAIR_AGENT_ID/FLAIR_URL
+flair hook install --dry-run     # prints the exact JSON delta, writes nothing
+flair hook status                # wired? correct shape? which agent/instance?
+flair hook uninstall             # removes only Flair's hook entry
+```
+
+`--harness claude-code` is the only supported value today (it's also the
+default) — the flag exists so a future harness is an additive registry entry,
+not a breaking change. `flair doctor` already checks for this same hook (see
+below) and recognizes anything `flair hook install` writes.
+
+Or wire it by hand — add a `SessionStart` hook to `~/.claude/settings.json`:
 
 ```json
 {

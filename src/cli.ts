@@ -68,6 +68,14 @@ import {
   type AgentGateState,
   type KeyPruneClass,
 } from "./doctor-client.js";
+import {
+  installHook,
+  uninstallHook,
+  hookStatus,
+  isSupportedHarness,
+  SUPPORTED_HARNESSES,
+  type Harness,
+} from "./hook-install.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
 // src/ into resources/, which don't survive npm packaging (see also
@@ -3397,6 +3405,141 @@ keys
       console.log(`  ${render.icons.ok} moved ${m.name} -> ${m.movedTo}`);
     }
     console.log(`\n  ${render.wrap(render.c.bold, String(moved.length))} moved, ${kept.length} kept, ${ignored.length} ignored\n`);
+  });
+
+// ─── flair hook ──────────────────────────────────────────────────────────────
+// Ambient memory via harness SessionStart hooks (flair#745, design record
+// #719 — the "Paved-paths" round). `flair doctor --fix`/`flair init` already
+// wire the same SessionStart hook as a side effect of a bigger flow; this is
+// the standalone, symmetric command family (install/uninstall/status) an
+// operator or a headless/scheduled setup script can run on its own. All the
+// mutation logic (fail-closed on malformed settings.json, idempotent merge,
+// dry-run delta, symmetric removal) lives in src/hook-install.ts — this
+// section is pure CLI plumbing: option parsing, default resolution, and
+// rendering the pure functions' results.
+
+function resolveHookAgentId(opts: { agent?: string; agentId?: string }, homeDir: string): string | undefined {
+  return (
+    opts.agent ||
+    opts.agentId ||
+    process.env.FLAIR_AGENT_ID ||
+    readClientMcpBlock("claude-code", homeDir).agentId ||
+    undefined
+  );
+}
+
+function resolveHookFlairUrl(opts: { url?: string }, homeDir: string): string {
+  return (
+    opts.url ||
+    process.env.FLAIR_TARGET ||
+    process.env.FLAIR_URL ||
+    readClientMcpBlock("claude-code", homeDir).flairUrl ||
+    resolveBaseUrl({})
+  );
+}
+
+function requireSupportedHarness(raw: string | undefined): Harness {
+  const name = raw || "claude-code";
+  if (!isSupportedHarness(name)) {
+    console.error(`Unknown harness '${name}'. Supported: ${SUPPORTED_HARNESSES.join(", ")}`);
+    process.exit(1);
+  }
+  return name;
+}
+
+const hook = program.command("hook").description("Manage ambient-memory harness SessionStart hooks (flair#745)");
+
+hook
+  .command("install")
+  .description("Wire the Flair SessionStart hook into the harness config so memory loads automatically at session start")
+  .option("--harness <name>", `Target harness (${SUPPORTED_HARNESSES.join(", ")})`, "claude-code")
+  .option("--dry-run", "Print the exact JSON delta without writing")
+  .option("--agent <id>", "Agent ID to wire (else FLAIR_AGENT_ID, else the agent already wired for the claude-code MCP client)")
+  .option("--agent-id <id>", "Alias for --agent")
+  .option("--url <url>", "Flair URL to wire (else FLAIR_TARGET/FLAIR_URL, else the existing claude-code MCP wiring, else the local default)")
+  .action((opts) => {
+    const harness = requireSupportedHarness(opts.harness);
+    const home = homedir();
+    const agentId = resolveHookAgentId(opts, home);
+    if (!agentId) {
+      console.error(
+        "No agent id known — pass --agent <id>, set FLAIR_AGENT_ID, or run `flair init` / `flair agent add` first.",
+      );
+      process.exit(1);
+    }
+    const flairUrl = resolveHookFlairUrl(opts, home);
+    const dryRun = !!opts.dryRun;
+
+    const result = installHook({ homeDir: home, harness, agentId, flairUrl, dryRun });
+
+    console.log(`\n${render.wrap(render.c.bold, "🪝 flair hook install")}${dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
+    console.log(`  ${result.ok ? render.icons.ok : render.icons.error} ${result.message}`);
+    if (result.backupPath) {
+      console.log(`     ${render.wrap(render.c.dim, `backup: ${result.backupPath}`)}`);
+    }
+    if (result.delta) {
+      console.log(`\n  ${render.wrap(render.c.dim, `${dryRun ? "would apply" : "applied"} (${result.delta.action}):`)}`);
+      console.log(render.asJSON(result.delta));
+    }
+    console.log("");
+    if (!result.ok) process.exit(1);
+  });
+
+hook
+  .command("uninstall")
+  .description("Remove the Flair SessionStart hook entry — only ours, everything else in the file is left untouched")
+  .option("--harness <name>", `Target harness (${SUPPORTED_HARNESSES.join(", ")})`, "claude-code")
+  .option("--dry-run", "Print the exact JSON delta without writing")
+  .action((opts) => {
+    const harness = requireSupportedHarness(opts.harness);
+    const home = homedir();
+    const dryRun = !!opts.dryRun;
+
+    const result = uninstallHook({ homeDir: home, harness, dryRun });
+
+    console.log(`\n${render.wrap(render.c.bold, "🪝 flair hook uninstall")}${dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
+    console.log(`  ${result.ok ? render.icons.ok : render.icons.error} ${result.message}`);
+    if (result.backupPath) {
+      console.log(`     ${render.wrap(render.c.dim, `backup: ${result.backupPath}`)}`);
+    }
+    if (result.delta) {
+      console.log(`\n  ${render.wrap(render.c.dim, `${dryRun ? "would apply" : "applied"} (${result.delta.action}):`)}`);
+      console.log(render.asJSON(result.delta));
+    }
+    console.log("");
+    if (!result.ok) process.exit(1);
+  });
+
+hook
+  .command("status")
+  .description("Show whether the SessionStart hook is wired, its shape, and which Flair instance it targets")
+  .option("--harness <name>", `Target harness (${SUPPORTED_HARNESSES.join(", ")})`, "claude-code")
+  .action((opts) => {
+    const harness = requireSupportedHarness(opts.harness);
+    const home = homedir();
+    const status = hookStatus(home, harness);
+
+    console.log(`\n${render.wrap(render.c.bold, "🪝 flair hook status")}\n`);
+    console.log(`  ${render.wrap(render.c.dim, "Harness:")} ${status.harness}`);
+    console.log(`  ${render.wrap(render.c.dim, "Config:")}  ${status.path}`);
+
+    if (status.parseError) {
+      console.log(`  ${render.icons.error} ${status.parseError}`);
+      console.log("");
+      process.exit(1);
+    }
+
+    if (!status.wired) {
+      console.log(`  ${render.icons.error} not wired`);
+      console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install`);
+      console.log("");
+      process.exit(1);
+    }
+
+    console.log(`  ${status.correctShape ? render.icons.ok : render.icons.warn} wired${status.correctShape ? "" : " (unexpected shape — was it hand-edited?)"}`);
+    console.log(`     ${render.wrap(render.c.dim, "Agent:")}     ${status.agentId ?? render.wrap(render.c.dim, "(unknown — could not parse command)")}`);
+    console.log(`     ${render.wrap(render.c.dim, "Flair URL:")} ${status.flairUrl ?? render.wrap(render.c.dim, "(unknown — could not parse command)")}`);
+    console.log("");
   });
 
 // ─── flair mcp ───────────────────────────────────────────────────────────────
