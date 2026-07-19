@@ -1,28 +1,31 @@
 /**
- * Tests for `flair mcp enable/disable/status` (flair#719) — src/lib/mcp-enable.ts.
+ * Tests for `flair mcp enable/disable/status` (flair#719, corrected by
+ * flair#756) — src/lib/mcp-enable.ts.
  *
- * House style matches test/unit/mcp-grant-family.test.ts and
- * test/unit/dcr-client.test.ts: mock global/injected `fetch`, write/read
- * real files under a mkdtemp temp dir, never touch ~/.flair or a real
- * Harper instance, never make a real network call.
+ * House style matches test/unit/mcp-grant-family.test.ts: mock global/
+ * injected `fetch`, write/read real files under a mkdtemp temp dir, never
+ * touch ~/.flair or a real Harper instance, never make a real network call.
  *
- * Design record: https://github.com/tpsdev-ai/flair/issues/719 — Flint's
- * "Paved-paths design round" (the 8-step checklist), Kern's + Sherlock's
- * verdicts, the scenario addendum (binding: hosted-shape only, local-origin
- * refusal), and the CIMD design-record correction (DCR is for interactive
- * clients only). Coverage mapped to those conditions:
- *   - the 8-step orchestration order (dry-run stops after the local/pure
- *     steps; the live path executes config+restart BEFORE DCR pre-register,
- *     per the module header's documented reordering)
+ * flair#756 (2026-07-19): CIMD-only, DCR removed entirely. #754 shipped
+ * `enable`'s default flow pre-registering claude.ai via DCR + a DCR gate
+ * token. That contradicted the strategic direction (Nathan, on the record):
+ * CIMD-only looking forward, DCR is not the path — and the scope was
+ * amended same-day from "CIMD-first with a --with-dcr legacy hatch" to full
+ * removal. This file replaces the DCR-era tests: no DCR calls anywhere in
+ * the default flow (structural assertion), the config block explicitly
+ * disables `dynamicClientRegistration` and never writes gate-token fields,
+ * and self-verify/status confirm CIMD is actually advertised. Coverage:
+ *   - the orchestration order (dry-run stops after the local/pure steps;
+ *     the live path ends at self-verify — no DCR call after restart)
  *   - local-origin refusal (the exact addendum message, zero fetch calls)
- *   - dry-run (no remote calls, keys/token still materialize on disk)
+ *   - dry-run (no remote calls, signing key still materializes on disk)
  *   - self-verify failure names the step to re-run, never reports success
- *     on hope
+ *     on hope — including the new CIMD-not-advertised failure mode
  *   - disable symmetry (flag-off confirmation gate, then restart only)
  *   - no secret VALUES ever appear in an EnableMcpResult/DisableMcpResult/
  *     McpStatusResult (paths/mechanism/counts only)
- *   - dcr-client.ts consumption: a structural source-text scan proving
- *     mcp-enable.ts never inlines its own POST to /oauth/mcp/register
+ *   - structural: buildMcpOAuthConfigBlock always disables DCR explicitly
+ *     and never writes initialAccessToken/allowedRedirectUriHosts
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from "node:fs";
@@ -35,9 +38,7 @@ import {
   isFabricOrigin,
   selectSecretsMechanism,
   generateRsaSigningKeyPair,
-  generateDcrGateToken,
   ensureSigningKeyFile,
-  ensureDcrGateToken,
   buildMcpOAuthConfigBlock,
   idpCallbackUrl,
   buildSecretsBundle,
@@ -46,32 +47,25 @@ import {
   provisionIdpIdentityMapping,
   applyRemoteConfigAndRestart,
   triggerRemoteRestart,
-  preRegisterClaudeViaDcr,
   selfVerifyMcpMetadata,
   buildClaudePasteBlock,
   enableMcp,
   disableMcp,
   mcpStatus,
   REQUIRED_ACCESS_TOKEN_TTL,
-  CLAUDE_DCR_REDIRECT_URI,
-  DEFAULT_REDIRECT_URI_HOSTS,
+  DEFAULT_CIMD_ALLOWED_HOSTS,
   type EnableMcpResult,
 } from "../../src/lib/mcp-enable.ts";
-import { DCR_TOKEN_ENV } from "../../src/lib/dcr-client.ts";
 
 let dir: string;
 const ISSUER = "https://flair.example.com";
-const originalDcrEnv = process.env[DCR_TOKEN_ENV];
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "flair-mcp-enable-"));
-  delete process.env[DCR_TOKEN_ENV];
 });
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
-  if (originalDcrEnv === undefined) delete process.env[DCR_TOKEN_ENV];
-  else process.env[DCR_TOKEN_ENV] = originalDcrEnv;
 });
 
 // ─── local-origin detection (scenario addendum, binding) ────────────────────
@@ -133,7 +127,7 @@ describe("isFabricOrigin / selectSecretsMechanism", () => {
   });
 });
 
-// ─── RS256 keypair + DCR gate token (Sherlock: generateKeyPairSync, not a PRNG shortcut)
+// ─── RS256 keypair (Sherlock: generateKeyPairSync, not a PRNG shortcut) ─────
 
 describe("generateRsaSigningKeyPair / ensureSigningKeyFile", () => {
   test("produces a real RSA keypair via crypto.generateKeyPairSync (PEM-shaped, 2048-bit)", () => {
@@ -161,39 +155,11 @@ describe("generateRsaSigningKeyPair / ensureSigningKeyFile", () => {
   });
 });
 
-describe("generateDcrGateToken / ensureDcrGateToken", () => {
-  test("generates a non-trivial random token", () => {
-    const a = generateDcrGateToken();
-    const b = generateDcrGateToken();
-    expect(a).not.toBe(b);
-    expect(a.length).toBeGreaterThan(20);
-  });
-
-  test("generates + writes 0600 on first call, reuses on second", () => {
-    const path = join(dir, "dcr-token");
-    const first = ensureDcrGateToken(path);
-    expect(first.reused).toBe(false);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-
-    const second = ensureDcrGateToken(path);
-    expect(second.reused).toBe(true);
-    expect(second.token).toBe(first.token);
-  });
-
-  test("env var takes precedence over the file (dcr-client.ts's contract)", () => {
-    process.env[DCR_TOKEN_ENV] = "env-token-value";
-    const path = join(dir, "dcr-token");
-    const result = ensureDcrGateToken(path);
-    expect(result.reused).toBe(true);
-    expect(result.token).toBe("env-token-value");
-    expect(existsSync(path)).toBe(false);
-  });
-});
-
-// ─── config block (Sherlock: accessTokenTtl must be explicit 900) ───────────
+// ─── config block (Sherlock: accessTokenTtl must be explicit 900; flair#756:
+// DCR must be explicitly disabled, CIMD allowedHosts must be set) ───────────
 
 describe("buildMcpOAuthConfigBlock", () => {
-  test("matches docs/notes/mcp-oauth-model2.md's documented shape", () => {
+  test("matches the installed @harperfast/oauth 2.2.0 field names, CIMD-only shape", () => {
     const block = buildMcpOAuthConfigBlock({ idpProvider: "github" });
     const oauth = block["@harperfast/oauth"] as any;
     expect(oauth.package).toBe("@harperfast/oauth");
@@ -202,28 +168,47 @@ describe("buildMcpOAuthConfigBlock", () => {
     expect(oauth.mcp.enabled).toBe(true);
     expect(oauth.mcp.accessTokenTtl).toBe(REQUIRED_ACCESS_TOKEN_TTL);
     expect(oauth.mcp.accessTokenTtl).toBe(900);
-    expect(oauth.mcp.dynamicClientRegistration.initialAccessToken).toBe("${FLAIR_MCP_DCR_TOKEN}");
-    expect(oauth.mcp.dynamicClientRegistration.allowedRedirectUriHosts).toEqual(DEFAULT_REDIRECT_URI_HOSTS);
+    expect(oauth.mcp.clientIdMetadataDocuments.allowedHosts).toEqual(DEFAULT_CIMD_ALLOWED_HOSTS);
     expect(oauth.mcp.signingKeyPem).toBe("${FLAIR_MCP_SIGNING_KEY_PEM}");
+  });
+
+  test("flair#756: dynamicClientRegistration is ALWAYS explicitly disabled — never omitted", () => {
+    // Ground truth (see mcp-enable.ts's module header + dcr.js:161-167): an
+    // ABSENT dynamicClientRegistration block leaves DCR's own default
+    // (open, ungated registration) live. Only an explicit `enabled: false`
+    // actually 404s /oauth/mcp/register. This is the load-bearing assertion
+    // that the config we write can never accidentally re-enable DCR.
+    const block = buildMcpOAuthConfigBlock({ idpProvider: "github" });
+    const mcp = (block["@harperfast/oauth"] as any).mcp;
+    expect(mcp.dynamicClientRegistration).toBeDefined();
+    expect(mcp.dynamicClientRegistration.enabled).toBe(false);
+  });
+
+  test("flair#756: never writes initialAccessToken or allowedRedirectUriHosts — there is no gate-token machinery left", () => {
+    const block = buildMcpOAuthConfigBlock({ idpProvider: "github" });
+    const mcp = (block["@harperfast/oauth"] as any).mcp;
+    expect(mcp.dynamicClientRegistration.initialAccessToken).toBeUndefined();
+    expect(mcp.dynamicClientRegistration.allowedRedirectUriHosts).toBeUndefined();
+    expect(Object.keys(mcp.dynamicClientRegistration)).toEqual(["enabled"]);
+    const text = JSON.stringify(block);
+    expect(text).not.toContain("FLAIR_MCP_DCR_TOKEN");
+    expect(text).not.toContain("initialAccessToken");
   });
 
   test("no literal secret material — every sensitive field is an ${ENV_VAR} placeholder", () => {
     const block = buildMcpOAuthConfigBlock({ idpProvider: "github" });
     const text = JSON.stringify(block);
-    // Every value is either a placeholder string or a structural literal
-    // (numbers/arrays/booleans) — never something that looks like real key
-    // material or a real token (a real DCR token/PEM would never match this
-    // ${...} shape).
-    expect(text).toContain("${FLAIR_MCP_DCR_TOKEN}");
     expect(text).toContain("${FLAIR_MCP_SIGNING_KEY_PEM}");
     expect(text).not.toContain("BEGIN PRIVATE KEY");
   });
 
-  test("respects a custom idp provider and redirect host list", () => {
-    const block = buildMcpOAuthConfigBlock({ idpProvider: "google", redirectUriHosts: ["example.com"] });
+  test("respects a custom idp provider and CIMD allowed-hosts list", () => {
+    const block = buildMcpOAuthConfigBlock({ idpProvider: "google", cimdAllowedHosts: ["example.com"] });
     const oauth = block["@harperfast/oauth"] as any;
     expect(oauth.providers.google.clientId).toBe("${OAUTH_GOOGLE_CLIENT_ID}");
-    expect(oauth.mcp.dynamicClientRegistration.allowedRedirectUriHosts).toEqual(["example.com"]);
+    expect(oauth.mcp.clientIdMetadataDocuments.allowedHosts).toEqual(["example.com"]);
+    // Disabling DCR is never conditional on the CIMD override.
+    expect(oauth.mcp.dynamicClientRegistration.enabled).toBe(false);
   });
 });
 
@@ -237,10 +222,9 @@ describe("idpCallbackUrl", () => {
 // ─── secrets bundle + staging file ───────────────────────────────────────────
 
 describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () => {
-  test("bundle includes the flag, issuer, DCR token, signing key, and IdP creds", () => {
+  test("bundle includes the flag, issuer, signing key, and IdP creds — no DCR token field", () => {
     const bundle = buildSecretsBundle({
       issuer: ISSUER,
-      dcrToken: "dcr-token-value",
       signingKeyPem: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----",
       idpProvider: "github",
       idpClientId: "client-id-value",
@@ -248,10 +232,11 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
     });
     expect(bundle.FLAIR_MCP_OAUTH).toBe("1");
     expect(bundle.FLAIR_MCP_ISSUER).toBe(ISSUER);
-    expect(bundle.FLAIR_MCP_DCR_TOKEN).toBe("dcr-token-value");
     expect(bundle.FLAIR_MCP_SIGNING_KEY_PEM).toContain("BEGIN PRIVATE KEY");
     expect(bundle.OAUTH_GITHUB_CLIENT_ID).toBe("client-id-value");
     expect(bundle.OAUTH_GITHUB_CLIENT_SECRET).toBe("client-secret-value");
+    expect(bundle.FLAIR_MCP_DCR_TOKEN).toBeUndefined();
+    expect(Object.keys(bundle)).not.toContain("FLAIR_MCP_DCR_TOKEN");
   });
 
   test("staging file is written 0600 and contains the values (this file IS meant to carry secret material)", () => {
@@ -263,10 +248,10 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
 
   test("provisionSecrets never returns raw values — only mechanism/path/varNames/instructions", () => {
     const path = join(dir, "secrets.env");
-    const result = provisionSecrets(ISSUER, { FLAIR_MCP_DCR_TOKEN: "super-secret-value" }, { stagingPath: path });
+    const result = provisionSecrets(ISSUER, { FLAIR_MCP_SIGNING_KEY_PEM: "super-secret-value" }, { stagingPath: path });
     expect(result.mechanism).toBe("env-file");
     expect(result.path).toBe(path);
-    expect(result.varNames).toEqual(["FLAIR_MCP_DCR_TOKEN"]);
+    expect(result.varNames).toEqual(["FLAIR_MCP_SIGNING_KEY_PEM"]);
     expect(JSON.stringify(result)).not.toContain("super-secret-value");
     // The value legitimately lives in the staged file, just not in the result.
     expect(readFileSync(path, "utf-8")).toContain("super-secret-value");
@@ -407,48 +392,26 @@ describe("triggerRemoteRestart", () => {
   });
 });
 
-// ─── DCR pre-registration (Kern: must consume dcr-client.ts, never inline) ──
+// ─── self-verify (never reports success on hope; flair#756 adds the CIMD
+// advertisement check) ────────────────────────────────────────────────────
 
-describe("preRegisterClaudeViaDcr", () => {
-  test("POSTs to <issuer>/oauth/mcp/register via registerDcrClient's own URL derivation", async () => {
-    let capturedUrl: string | undefined;
-    let capturedInit: RequestInit | undefined;
-    const fetchImpl = (async (url: any, init?: RequestInit) => {
-      capturedUrl = String(url);
-      capturedInit = init;
-      return new Response(JSON.stringify({ client_id: "flair_cl_abc123" }), { status: 201 });
-    }) as typeof fetch;
-
-    const result = await preRegisterClaudeViaDcr({ issuer: ISSUER, dcrToken: "dcr-token" }, { fetchImpl });
-    expect(result.client_id).toBe("flair_cl_abc123");
-    expect(capturedUrl).toBe(`${ISSUER}/oauth/mcp/register`);
-    const headers = capturedInit?.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer dcr-token");
-    const body = JSON.parse(String(capturedInit?.body));
-    expect(body.redirect_uris).toEqual([CLAUDE_DCR_REDIRECT_URI]);
-    expect(body.client_name).toBe("claude.ai");
-  });
-
-  test("propagates registerDcrClient's typed error on a 401", async () => {
-    const fetchImpl = (async () =>
-      new Response(JSON.stringify({ error: "invalid_token" }), { status: 401 })) as typeof fetch;
-    await expect(preRegisterClaudeViaDcr({ issuer: ISSUER, dcrToken: "wrong" }, { fetchImpl })).rejects.toThrow();
-  });
-});
-
-// ─── self-verify (never reports success on hope) ────────────────────────────
+const CIMD_METADATA = {
+  issuer: ISSUER,
+  registration_endpoint: `${ISSUER}/oauth/mcp/register`,
+  token_endpoint: `${ISSUER}/oauth/mcp/token`,
+  client_id_metadata_document_supported: true,
+  token_endpoint_auth_methods_supported: ["none", "client_secret_basic"],
+};
 
 describe("selfVerifyMcpMetadata", () => {
-  test("ok:true on a well-formed metadata response", async () => {
+  test("ok:true, cimdSupported:true on a well-formed metadata response advertising CIMD", async () => {
     const fetchImpl = (async (url: any) => {
       expect(String(url)).toBe(`${ISSUER}/.well-known/oauth-authorization-server`);
-      return new Response(
-        JSON.stringify({ issuer: ISSUER, registration_endpoint: `${ISSUER}/oauth/mcp/register`, token_endpoint: `${ISSUER}/oauth/mcp/token` }),
-        { status: 200 },
-      );
+      return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
     }) as typeof fetch;
     const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
     expect(result.ok).toBe(true);
+    expect(result.cimdSupported).toBe(true);
     expect(result.registrationEndpoint).toBe(`${ISSUER}/oauth/mcp/register`);
   });
 
@@ -481,34 +444,56 @@ describe("selfVerifyMcpMetadata", () => {
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("did not return JSON");
   });
+
+  test("flair#756: ok:false, cimdSupported:false when client_id_metadata_document_supported is missing", async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({ issuer: ISSUER, registration_endpoint: `${ISSUER}/oauth/mcp/register`, token_endpoint: `${ISSUER}/oauth/mcp/token` }),
+        { status: 200 },
+      )) as typeof fetch;
+    const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
+    expect(result.ok).toBe(false);
+    expect(result.cimdSupported).toBe(false);
+    expect(result.detail).toContain("CIMD");
+  });
+
+  test("flair#756: ok:false when token_endpoint_auth_methods_supported doesn't include \"none\"", async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          issuer: ISSUER,
+          registration_endpoint: `${ISSUER}/oauth/mcp/register`,
+          token_endpoint: `${ISSUER}/oauth/mcp/token`,
+          client_id_metadata_document_supported: true,
+          token_endpoint_auth_methods_supported: ["client_secret_basic"],
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
+    expect(result.ok).toBe(false);
+    expect(result.cimdSupported).toBe(false);
+  });
 });
 
 describe("buildClaudePasteBlock", () => {
-  test("includes the resource URL and client id", () => {
-    const block = buildClaudePasteBlock(`${ISSUER}/mcp`, "flair_cl_abc");
+  test("includes the resource URL, and explicitly says no client ID is needed", () => {
+    const block = buildClaudePasteBlock(`${ISSUER}/mcp`);
     expect(block).toContain(`${ISSUER}/mcp`);
-    expect(block).toContain("flair_cl_abc");
     expect(block).toContain("Settings");
+    expect(block).toContain("no client ID");
   });
 });
 
 // ─── enableMcp orchestration ──────────────────────────────────────────────────
 
-function fullMockFetch(overrides: { dcrStatus?: number; verifyStatus?: number; verifyBody?: any } = {}): { fetchImpl: typeof fetch; calls: string[] } {
+function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any } = {}): { fetchImpl: typeof fetch; calls: string[] } {
   const calls: string[] = [];
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const urlStr = String(url);
-    if (urlStr === `${ISSUER}/oauth/mcp/register`) {
-      calls.push("dcr-register");
-      if (overrides.dcrStatus && overrides.dcrStatus >= 400) {
-        return new Response(JSON.stringify({ error: "server_error" }), { status: overrides.dcrStatus });
-      }
-      return new Response(JSON.stringify({ client_id: "flair_cl_claude" }), { status: 201 });
-    }
     if (urlStr === `${ISSUER}/.well-known/oauth-authorization-server`) {
       calls.push("self-verify");
       const status = overrides.verifyStatus ?? 200;
-      const body = overrides.verifyBody ?? { issuer: ISSUER, registration_endpoint: `${ISSUER}/oauth/mcp/register`, token_endpoint: `${ISSUER}/oauth/mcp/token` };
+      const body = overrides.verifyBody ?? CIMD_METADATA;
       return new Response(JSON.stringify(body), { status });
     }
     // Ops API (identity mapping + set_configuration + restart)
@@ -532,7 +517,6 @@ const BASE_PARAMS = {
 
 function tempPaths() {
   return {
-    dcrTokenFilePath: join(dir, "dcr-token"),
     signingKeyFilePath: join(dir, "signing-key.pem"),
     secretsStagingPath: join(dir, "secrets.env"),
   };
@@ -553,7 +537,7 @@ describe("enableMcp — local-origin refusal", () => {
 });
 
 describe("enableMcp — dry-run", () => {
-  test("generates keys/token on disk and stops before any remote call", async () => {
+  test("generates the signing key on disk and stops before any remote call", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const paths = tempPaths();
     const result = await enableMcp({ ...BASE_PARAMS, ...paths, dryRun: true }, { fetchImpl });
@@ -561,7 +545,6 @@ describe("enableMcp — dry-run", () => {
     expect(result.ok).toBe(true);
     expect(result.dryRun).toBe(true);
     expect(calls).toHaveLength(0);
-    expect(existsSync(paths.dcrTokenFilePath)).toBe(true);
     expect(existsSync(paths.signingKeyFilePath)).toBe(true);
     expect(result.issuer).toBe(ISSUER);
     expect(result.resource).toBe(`${ISSUER}/mcp`);
@@ -588,7 +571,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("apply-config-and-restart");
     expect(calls.filter((c) => c === "ops:set_configuration" || c === "ops:restart")).toHaveLength(0);
-    // Identity mapping DOES run before the gate (it's step 5, before the gate).
+    // Identity mapping DOES run before the gate.
     expect(calls).toContain("ops:search_by_value");
   });
 
@@ -604,7 +587,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
 });
 
 describe("enableMcp — full happy path", () => {
-  test("runs all 8 steps in dependency order and returns a working paste block", async () => {
+  test("runs every step in order and returns a working paste block with no DCR call anywhere", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const result = await enableMcp(
       { ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true },
@@ -615,29 +598,26 @@ describe("enableMcp — full happy path", () => {
     expect(result.steps.every((s) => s.ok)).toBe(true);
     expect(result.steps.map((s) => s.step)).toEqual([
       "local-origin-check",
-      "keypair-and-dcr-token",
+      "signing-key",
       "config-block",
       "idp-credentials",
       "secrets-provisioning",
       "identity-mapping",
       "apply-config-and-restart",
-      "dcr-preregister-claude",
       "self-verify",
     ]);
-    expect(result.claudeClientId).toBe("flair_cl_claude");
     expect(result.pasteBlock).toContain(`${ISSUER}/mcp`);
-    expect(result.pasteBlock).toContain("flair_cl_claude");
+    expect(result.pasteBlock).not.toContain("Client ID:");
     expect(result.secretsMechanism).toBe("env-file");
 
-    // Real dependency order: config+restart happens BEFORE the DCR call
-    // (the DCR endpoint only exists once the instance restarts with the new
-    // config live) — the module header's documented reordering.
+    // flair#756: no DCR call anywhere in the flow — the only calls after
+    // restart are the ops API restart itself and self-verify.
+    expect(calls).not.toContain("dcr-register");
+    expect(calls.some((c) => c.includes("oauth/mcp/register"))).toBe(false);
     const restartIdx = calls.indexOf("ops:restart");
-    const dcrIdx = calls.indexOf("dcr-register");
     const verifyIdx = calls.indexOf("self-verify");
     expect(restartIdx).toBeGreaterThan(-1);
-    expect(dcrIdx).toBeGreaterThan(restartIdx);
-    expect(verifyIdx).toBeGreaterThan(dcrIdx);
+    expect(verifyIdx).toBeGreaterThan(restartIdx);
   });
 
   test("no secret VALUES ever appear anywhere in the result object", async () => {
@@ -670,7 +650,7 @@ describe("enableMcp — full happy path", () => {
 });
 
 describe("enableMcp — self-verify failure names the step to re-run", () => {
-  test("ok:false, failedStep 'self-verify', but the restart + DCR steps already succeeded", async () => {
+  test("ok:false, failedStep 'self-verify', but the restart step already succeeded", async () => {
     const { fetchImpl } = fullMockFetch({ verifyStatus: 404 });
     const result = await enableMcp(
       { ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true },
@@ -680,22 +660,27 @@ describe("enableMcp — self-verify failure names the step to re-run", () => {
     expect(result.failedStep).toBe("self-verify");
     const byStep = Object.fromEntries(result.steps.map((s) => [s.step, s.ok]));
     expect(byStep["apply-config-and-restart"]).toBe(true);
-    expect(byStep["dcr-preregister-claude"]).toBe(true);
     expect(byStep["self-verify"]).toBe(false);
     // Never reports success on hope.
     expect(result.ok).not.toBe(true);
   });
-});
 
-describe("enableMcp — DCR pre-register failure", () => {
-  test("names 'dcr-preregister-claude' as the failed step", async () => {
-    const { fetchImpl } = fullMockFetch({ dcrStatus: 500 });
+  test("flair#756: self-verify also fails when the restarted instance doesn't advertise CIMD", async () => {
+    const { fetchImpl } = fullMockFetch({
+      verifyBody: {
+        issuer: ISSUER,
+        registration_endpoint: `${ISSUER}/oauth/mcp/register`,
+        token_endpoint: `${ISSUER}/oauth/mcp/token`,
+        // client_id_metadata_document_supported omitted — CIMD not advertised.
+        token_endpoint_auth_methods_supported: ["client_secret_basic"],
+      },
+    });
     const result = await enableMcp(
       { ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true },
       { fetchImpl },
     );
     expect(result.ok).toBe(false);
-    expect(result.failedStep).toBe("dcr-preregister-claude");
+    expect(result.failedStep).toBe("self-verify");
   });
 });
 
@@ -735,13 +720,12 @@ describe("disableMcp", () => {
 // ─── mcpStatus ────────────────────────────────────────────────────────────────
 
 describe("mcpStatus", () => {
-  test("enabled:true when the metadata endpoint answers correctly", async () => {
-    const fetchImpl = (async () =>
-      new Response(JSON.stringify({ issuer: ISSUER, registration_endpoint: "x", token_endpoint: "y" }), { status: 200 })) as typeof fetch;
-    const result = await mcpStatus({ instance: ISSUER, dcrTokenFilePath: join(dir, "no-token-here") }, { fetchImpl, countMachineClients: () => 3 });
+  test("enabled:true, cimdSupported:true when the metadata endpoint advertises CIMD", async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify(CIMD_METADATA), { status: 200 })) as typeof fetch;
+    const result = await mcpStatus({ instance: ISSUER }, { fetchImpl, countMachineClients: () => 3 });
     expect(result.enabled).toBe(true);
+    expect(result.cimdSupported).toBe(true);
     expect(result.machineClientCount).toBe(3);
-    expect(result.dcrTokenProvisionedLocally).toBe(false);
   });
 
   test("enabled:false when the endpoint is unreachable/disabled", async () => {
@@ -750,40 +734,14 @@ describe("mcpStatus", () => {
     expect(result.enabled).toBe(false);
   });
 
-  test("dcrTokenProvisionedLocally reflects a real local token file", async () => {
-    const fetchImpl = (async () => new Response("nope", { status: 404 })) as typeof fetch;
-    const tokenPath = join(dir, "dcr-token");
-    ensureDcrGateToken(tokenPath);
-    const result = await mcpStatus({ instance: ISSUER, dcrTokenFilePath: tokenPath }, { fetchImpl });
-    expect(result.dcrTokenProvisionedLocally).toBe(true);
-  });
-});
-
-// ─── structural: enable CONSUMES dcr-client.ts, never inlines its own DCR call
-
-describe("structural: src/lib/mcp-enable.ts consumes dcr-client.ts (Kern's binding condition)", () => {
-  const source = readFileSync(join(import.meta.dir, "..", "..", "src", "lib", "mcp-enable.ts"), "utf-8");
-  // Strip /* */ block comments and // line comments (plain string scanning,
-  // no dynamic RegExp built from a runtime string — matches this repo's
-  // CodeQL js/regex-injection discipline, see mcp-surface-tripwire.test.ts)
-  // so the design-record prose ABOUT the DCR endpoint (which legitimately
-  // names the path) doesn't false-positive this check. Only real CODE is
-  // scanned for an inlined call.
-  const codeOnly = source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .split("\n")
-    .map((line) => line.replace(/\/\/.*$/, ""))
-    .join("\n");
-
-  test("imports registerDcrClient from ./dcr-client.js", () => {
-    expect(source).toMatch(/import\s*\{[^}]*registerDcrClient[^}]*\}\s*from\s*["']\.\/dcr-client\.js["']/);
-  });
-
-  test("calls registerDcrClient(...) at least once", () => {
-    expect(source).toMatch(/registerDcrClient\(/);
-  });
-
-  test("never inlines a raw POST to /oauth/mcp/register in actual code (comments may document it)", () => {
-    expect(codeOnly).not.toContain("/oauth/mcp/register");
+  test("enabled:false when the endpoint answers but doesn't advertise CIMD", async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({ issuer: ISSUER, registration_endpoint: "x", token_endpoint: "y" }),
+        { status: 200 },
+      )) as typeof fetch;
+    const result = await mcpStatus({ instance: ISSUER }, { fetchImpl });
+    expect(result.enabled).toBe(false);
+    expect(result.cimdSupported).toBe(false);
   });
 });

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### 🐛 `flair mcp enable` goes CIMD-only — DCR removed entirely, not just from the default flow (flair#756)
+
+Corrects flair#754's default before any real-world `enable` run against a live instance. #754 shipped `enable` pre-registering claude.ai via DCR (RFC 7591) and provisioning a DCR gate token as part of its DEFAULT flow. That contradicted the strategic direction (Nathan, on the record, same-day): CIMD-only looking forward, DCR is not the path. The fix was scoped twice in one day — first to "CIMD-first with a `--with-dcr` legacy hatch," then amended to full removal: DCR is UNSUPPORTED on this surface, not legacy, and there is no flag to bring it back.
+
+- **`flair mcp enable`'s default (and only) flow**: no DCR pre-registration, no gate-token generation, anywhere. Instead it writes `clientIdMetadataDocuments.allowedHosts: [claude.ai, claude.com]` alongside the existing `@harperfast/oauth` config block. The post-enable summary reflects CIMD (a URL to paste into claude.ai's connector settings — no client ID, since Claude presents its own CIMD document URL as its client_id).
+- **Ground-truth fix, load-bearing**: leaving `dynamicClientRegistration` unset does NOT disable DCR — the installed `@harperfast/oauth@2.2.0` defaults it to ENABLED with OPEN (ungated) registration (`dist/types.d.ts:131-144`, `dist/lib/mcp/dcr.js:161-167,16-24`). `enable` now writes `dynamicClientRegistration: { enabled: false }` EXPLICITLY — the one config shape that actually 404s `/oauth/mcp/register` — and never writes `initialAccessToken`/`allowedRedirectUriHosts`. A structural test (`test/unit/mcp-enable.test.ts`) asserts the config block always carries this exact shape.
+- **`src/lib/dcr-client.ts` is deleted** — the DCR gate-token contract and RFC 7591 HTTP client it owned have no remaining consumer.
+- **`flair mcp grant`/`revoke`'s workflow gate** no longer requires the DCR gate token's local presence as proof `flair mcp enable` ran (a CIMD-only instance legitimately has no such token). Replaced with a live probe of the target instance's OAuth metadata endpoint, reusing `enable`'s own `selfVerifyMcpMetadata` — the same check `enable` and `flair mcp status` use, so all four commands agree on what "enabled" means.
+- **Self-verify extended**: `selfVerifyMcpMetadata` now also confirms the metadata endpoint advertises CIMD support (`client_id_metadata_document_supported: true` AND `"none"` present in `token_endpoint_auth_methods_supported` — the exact pair Anthropic's docs say Claude's client checks before using CIMD instead of DCR). `flair mcp status` surfaces this as a `CIMD: advertised/not advertised` line.
+- **Docs**: `docs/notes/mcp-oauth-model2.md`'s config example is CIMD-only; DCR moves to a one-line "Legacy clients" note ("DCR is not supported; clients connect via CIMD").
+
+Closes #756.
+
 ### ✨ `flair mcp enable/disable/status` — one-command hosted-shape Claude-connector enablement (flair#719)
 
 The final piece of the paved-paths command family: automates docs/notes/mcp-oauth-model2.md's 8-step operator checklist (RS256 keypair + DCR gate token, `@harperfast/oauth` config block, IdP OAuth-app credential intake, shape-aware secrets provisioning, identity mapping, claude.ai pre-registration, flag + restart, self-verification) into one command.

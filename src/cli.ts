@@ -51,12 +51,12 @@ import {
   defaultMcpIssuer,
   MAX_ASSERTION_LIFETIME_SECONDS,
 } from "./mcp-client-assertion.js";
-import { requireDcrToken, DCR_TOKEN_ENV } from "./lib/dcr-client.js";
 import {
   enableMcp,
   disableMcp,
   mcpStatus,
   checkLocalOriginRefusal,
+  selfVerifyMcpMetadata,
   type EnableMcpResult,
   type SecretsMechanism,
 } from "./lib/mcp-enable.js";
@@ -3684,23 +3684,31 @@ mcp
 // with a paved provisioning path ("I have an agent" → "it has credentials
 // and an mcp config block").
 //
-// GROUND TRUTH (see src/lib/dcr-client.ts's module header for the full
-// citation trail against the published @harperfast/oauth@2.2.0 source):
-// the #719/#746 design round described `grant` as minting a client via the
-// gated DCR endpoint's client_credentials grant. The published plugin does
-// not support that — DCR only registers authorization_code/refresh_token
-// clients, and client_credentials tokens are minted ONLY for CIMD-resolved
-// clients ("A stored (DCR) record must never mint here" — token.js). CIMD
-// (oauth#161, already shipped, consumed here via #663's
-// src/mcp-client-assertion.ts) is the machine-client registration path that
-// REPLACED DCR for this exact use case — a flair Agent + Ed25519 keypair IS
-// the registration; resources/MCPClientMetadata.ts serves its CIMD document
-// live, statelessly, on every fetch. `grantMcpClient` below therefore
-// provisions an Agent (mirrors `agent add`'s seedAgentViaOpsApi shape), not
-// a DCR client. `requireDcrToken()` is still enforced as the command's gate
-// — proof `flair mcp enable` has run — layered on Harper's own admin-pass
-// boundary, exactly as Sherlock's #719 verdict asked for, just pointed at
-// the real mechanism instead of the assumed one.
+// GROUND TRUTH: the #719/#746 design round described `grant` as minting a
+// client via the gated DCR endpoint's client_credentials grant. The
+// published plugin does not support that — DCR only registers
+// authorization_code/refresh_token clients, and client_credentials tokens
+// are minted ONLY for CIMD-resolved clients ("A stored (DCR) record must
+// never mint here" — token.js). CIMD (oauth#161, already shipped, consumed
+// here via #663's src/mcp-client-assertion.ts) is the machine-client
+// registration path that REPLACED DCR for this exact use case — a flair
+// Agent + Ed25519 keypair IS the registration; resources/MCPClientMetadata.ts
+// serves its CIMD document live, statelessly, on every fetch. `grantMcpClient`
+// below therefore provisions an Agent (mirrors `agent add`'s
+// seedAgentViaOpsApi shape), not a DCR client.
+//
+// flair#756 (CIMD-only, DCR removed entirely): `grant`/`revoke`'s workflow
+// gate used to require the local presence of a DCR gate token as proof
+// `flair mcp enable` had run. That token — and `src/lib/dcr-client.ts`, the
+// module that owned it — no longer exist: a CIMD-only instance legitimately
+// has no such token, so presence-of-a-file was never the right proof. The
+// gate is now a LIVE probe of the target instance's OAuth metadata endpoint
+// (`selfVerifyMcpMetadata`, reused from `./lib/mcp-enable.js` — the exact
+// same check `enable`'s own self-verify step and `flair mcp status` use),
+// layered on top of Harper's own admin-pass boundary exactly as Sherlock's
+// #719 verdict asked for, just pointed at a mechanism that actually proves
+// the surface is live instead of a local artifact that can go stale or
+// simply not exist.
 //
 // Local bookkeeping (the manifest below) is the ONLY place "named machine
 // clients" are enumerable at all: CIMD is deliberately stateless (no
@@ -4034,15 +4042,26 @@ mcp
   .option("--keys-dir <dir>", "Directory to write the new key pair into (else FLAIR_KEY_DIR, ~/.flair/keys)")
   .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
-  .option("--dcr-token-file <path>", `DCR gate token file (else ${DCR_TOKEN_ENV} env, else ~/.flair/mcp-dcr-token)`)
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--json", "Print machine-readable JSON instead of a human summary")
   .action(async (name: string, opts) => {
-    try {
-      requireDcrToken({ filePath: opts.dcrTokenFile });
-    } catch (err: any) {
-      console.error(`Error: ${err.message}`);
+    const issuer: string | undefined = opts.issuer ?? defaultMcpIssuer();
+    if (!issuer) {
+      console.error(
+        "Error: --issuer is required (or set FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL) — the CIMD client_id " +
+          "must be a stable, publicly-resolvable URL.",
+      );
+      process.exit(1);
+    }
+
+    // Workflow gate: proof `flair mcp enable` has actually run against this
+    // instance — a live probe of the OAuth metadata endpoint (flair#756;
+    // replaces the old DCR-gate-token presence check, which a CIMD-only
+    // instance legitimately can't satisfy).
+    const gate = await selfVerifyMcpMetadata(issuer);
+    if (!gate.ok) {
+      console.error(`Error: the /mcp OAuth surface isn't answering at ${issuer} (${gate.detail}). Run \`flair mcp enable\` first.`);
       process.exit(1);
     }
 
@@ -4051,15 +4070,6 @@ mcp
       console.error(
         "Error: --admin-pass or FLAIR_ADMIN_PASS required for `flair mcp grant` (needed to insert into the Agent table). " +
           "Set FLAIR_ADMIN_PASS, or make sure ~/.flair/admin-pass exists (created by `flair init`).",
-      );
-      process.exit(1);
-    }
-
-    const issuer: string | undefined = opts.issuer ?? defaultMcpIssuer();
-    if (!issuer) {
-      console.error(
-        "Error: --issuer is required (or set FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL) — the CIMD client_id " +
-          "must be a stable, publicly-resolvable URL.",
       );
       process.exit(1);
     }
@@ -4102,15 +4112,21 @@ mcp
   .description("Server-side revoke a granted machine client (deletes its backing Agent record), then clean up locally.")
   .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
-  .option("--dcr-token-file <path>", `DCR gate token file (else ${DCR_TOKEN_ENV} env, else ~/.flair/mcp-dcr-token)`)
+  .option("--issuer <url>", "Public origin of the /mcp OAuth surface — used only for the enable-gate probe (defaults to FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--port <port>", "Harper HTTP port")
   .option("--keep-keys", "Do not delete local key files after a successful server-side revoke")
   .action(async (name: string, opts) => {
-    try {
-      requireDcrToken({ filePath: opts.dcrTokenFile });
-    } catch (err: any) {
-      console.error(`Error: ${err.message}`);
+    const issuer: string | undefined = opts.issuer ?? defaultMcpIssuer();
+    if (!issuer) {
+      console.error("Error: --issuer is required (or set FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL) to verify the /mcp OAuth surface before revoking.");
+      process.exit(1);
+    }
+
+    // Workflow gate — see the matching comment on `grant` above.
+    const gate = await selfVerifyMcpMetadata(issuer);
+    if (!gate.ok) {
+      console.error(`Error: the /mcp OAuth surface isn't answering at ${issuer} (${gate.detail}). Run \`flair mcp enable\` first.`);
       process.exit(1);
     }
 
@@ -4227,7 +4243,7 @@ mcp
   .option("--principal-kind <human|agent>", "Kind for a newly-created principal", "human")
   .option("--secrets-mechanism <fabric-env-secrets|env-file>", "Override the shape-aware secrets mechanism (else auto-detected from --instance)")
   .option("--secrets-path <path>", "Override the secrets staging file path")
-  .option("--dcr-token-file <path>", `DCR gate token file (else ${DCR_TOKEN_ENV} env, else ~/.flair/mcp-dcr-token)`)
+  .option("--cimd-allowed-hosts <hosts>", "Comma-separated clientIdMetadataDocuments.allowedHosts override (else claude.ai,claude.com)")
   .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
   .option("--admin-pass <pass>", "Admin password for the target instance (or FLAIR_ADMIN_PASS)")
   .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
@@ -4278,6 +4294,10 @@ mcp
       process.exit(1);
     }
 
+    const cimdAllowedHosts: string[] | undefined = opts.cimdAllowedHosts
+      ? String(opts.cimdAllowedHosts).split(",").map((h: string) => h.trim()).filter(Boolean)
+      : undefined;
+
     const result = await enableMcp(
       {
         instance,
@@ -4290,10 +4310,10 @@ mcp
         principalKind: opts.principalKind,
         adminUser: DEFAULT_ADMIN_USER,
         adminPass,
-        dcrTokenFilePath: opts.dcrTokenFile,
         signingKeyFilePath: opts.signingKeyFile,
         secretsMechanism,
         secretsStagingPath: opts.secretsPath,
+        cimdAllowedHosts,
         dryRun,
         confirmSecretsApplied: Boolean(opts.confirmSecretsApplied),
       },
@@ -4361,9 +4381,8 @@ mcp
 
 mcp
   .command("status")
-  .description("Surface the /mcp OAuth surface's live state: enabled? metadata answering? granted machine-client count.")
+  .description("Surface the /mcp OAuth surface's live state: enabled? CIMD advertised? granted machine-client count.")
   .option("--instance <url>", "Remote flair instance to check (else FLAIR_URL)")
-  .option("--dcr-token-file <path>", `DCR gate token file (else ${DCR_TOKEN_ENV} env, else ~/.flair/mcp-dcr-token)`)
   .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
   .option("--json", "Print machine-readable JSON instead of a human summary")
   .action(async (opts) => {
@@ -4375,7 +4394,7 @@ mcp
     const manifestPath: string = opts.manifest ?? defaultMcpClientManifestPath();
 
     const result = await mcpStatus(
-      { instance, dcrTokenFilePath: opts.dcrTokenFile },
+      { instance },
       { countMachineClients: () => readMcpClientManifest(manifestPath).length },
     );
 
@@ -4388,8 +4407,10 @@ mcp
     console.log(render.kv("instance", result.instance));
     console.log(render.kv("enabled", result.enabled ? render.wrap(render.c.green, "yes") : render.wrap(render.c.yellow, "no")));
     console.log(render.kv("metadata", result.detail));
-    if (result.registrationEndpoint) console.log(render.kv("register at", render.wrap(render.c.dim, result.registrationEndpoint)));
-    console.log(render.kv("DCR token", result.dcrTokenProvisionedLocally ? "provisioned locally" : render.wrap(render.c.dim, "not found locally — see `flair mcp enable`")));
+    // flair#756: CIMD is the only supported client-registration path — this
+    // reflects clientIdMetadataDocuments config presence on the target
+    // instance, the only signal `status` can see without admin credentials.
+    console.log(render.kv("CIMD", result.cimdSupported ? render.wrap(render.c.green, "advertised") : render.wrap(render.c.yellow, "not advertised")));
     console.log(render.kv("machine clients", String(result.machineClientCount ?? 0)));
     console.log("");
   });

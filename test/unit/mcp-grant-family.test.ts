@@ -12,8 +12,6 @@
  *   - revoke requires a server ack; a server error leaves the local key file
  *     (and manifest entry) untouched
  *   - list output (name + client_id + status + created)
- *   - the DCR token-location contract (delegated to dcr-client.test.ts;
- *     re-exercised here at the CLI-gate level)
  *   - 0600 mode on both the private key file and the manifest file
  *   - no key material ever reaches stdout/console output
  */
@@ -33,7 +31,6 @@ import {
   McpClientNotFoundError,
   type McpClientManifestEntry,
 } from "../../src/cli.ts";
-import { requireDcrToken, DcrTokenNotFoundError, DCR_TOKEN_ENV } from "../../src/lib/dcr-client.ts";
 
 let dir: string;
 let keysDir: string;
@@ -380,17 +377,5 @@ describe("grant — no key material ever reaches console output", () => {
     for (const line of logs) {
       expect(line).not.toContain(rawKeyBase64);
     }
-  });
-});
-
-// ─── DCR token gate, exercised at the contract level (full CLI-gate coverage
-// lives in dcr-client.test.ts; this confirms grant/revoke's own option wiring
-// reads the same contract) ───────────────────────────────────────────────────
-
-describe("requireDcrToken — the gate flair mcp grant/revoke enforce before touching anything", () => {
-  test("a missing DCR token surfaces the same actionable error grant/revoke would see", () => {
-    const filePath = join(dir, "no-token-here");
-    delete process.env[DCR_TOKEN_ENV];
-    expect(() => requireDcrToken({ filePath })).toThrow(DcrTokenNotFoundError);
   });
 });
