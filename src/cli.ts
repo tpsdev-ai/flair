@@ -53,6 +53,14 @@ import {
 } from "./mcp-client-assertion.js";
 import { requireDcrToken, DCR_TOKEN_ENV } from "./lib/dcr-client.js";
 import {
+  enableMcp,
+  disableMcp,
+  mcpStatus,
+  checkLocalOriginRefusal,
+  type EnableMcpResult,
+  type SecretsMechanism,
+} from "./lib/mcp-enable.js";
+import {
   readClientMcpBlock,
   checkClaudeMdBootstrap,
   checkSessionStartHook,
@@ -4157,6 +4165,233 @@ mcp
       { label: "created", key: "createdAt", format: (v) => render.relativeTime(v as string) },
     ];
     console.log(render.table(cols, entries as unknown as Array<Record<string, unknown>>));
+  });
+
+// ─── flair mcp enable / disable / status ────────────────────────────────────
+// flair#719 — the last piece of the paved-paths command family. Automates
+// docs/notes/mcp-oauth-model2.md's 8-step operator checklist into one
+// command, per the design record + K&S verdicts on #719's thread (see
+// src/lib/mcp-enable.ts's module header for the full binding design record,
+// including the scenario addendum: `enable` targets the HOSTED shape only —
+// it runs on the OPERATOR's machine, against a REMOTE instance, and refuses
+// honestly against a local-origin instance rather than walking eight steps
+// toward a connector that can never connect).
+
+/** Simple y/N confirmation over readline — TTY-only, mirrors the existing
+ *  restore-confirmation pattern (`flair snapshot restore`) above. */
+async function confirmYesNo(question: string): Promise<boolean> {
+  if (!process.stdin.isTTY) return false;
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer: string = await new Promise((res) =>
+    rl.question(`${question} [y/N] `, (a) => { rl.close(); res(a); }),
+  );
+  return /^y(es)?$/i.test(answer.trim());
+}
+
+/** Plain-text readline prompt (tests never exercise this — CLI-only). Used
+ *  for --idp-client-id/--idp-client-secret/--idp-subject when a flag is
+ *  omitted and stdin is a TTY. */
+async function promptText(question: string): Promise<string> {
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer: string = await new Promise((res) =>
+    rl.question(question, (a) => { rl.close(); res(a); }),
+  );
+  return answer.trim();
+}
+
+function printEnableSteps(result: EnableMcpResult): void {
+  console.log(`\n${render.wrap(render.c.bold, "flair mcp enable")}${result.dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
+  for (const s of result.steps) {
+    console.log(`  ${s.ok ? render.icons.ok : render.icons.error} ${render.wrap(render.c.dim, s.step)}`);
+    console.log(`     ${s.detail}`);
+  }
+  console.log("");
+}
+
+mcp
+  .command("enable")
+  .description(
+    "One-command hosted-shape enablement of the OAuth /mcp surface for claude.ai — automates the " +
+      "docs/notes/mcp-oauth-model2.md checklist. Targets a REMOTE instance with a public HTTPS origin; " +
+      "refuses honestly against a local-origin instance.",
+  )
+  .option("--instance <url>", "Remote flair instance to enable against (else FLAIR_URL)")
+  .option("--issuer <url>", "Public origin claude.ai will use (else --instance)")
+  .option("--idp-provider <name>", "Upstream IdP provider", "github")
+  .option("--idp-client-id <id>", "IdP OAuth app client id (else prompted interactively)")
+  .option("--idp-client-secret <secret>", "IdP OAuth app client secret (else prompted interactively — prefer the prompt; an inline flag leaks to shell history)")
+  .option("--idp-subject <value>", "Your expected `sub`/login at the IdP (GitHub: your username; else prompted interactively)")
+  .option("--principal <id>", "Principal (Agent) to map your IdP identity to — personal-shape default", "self")
+  .option("--principal-kind <human|agent>", "Kind for a newly-created principal", "human")
+  .option("--secrets-mechanism <fabric-env-secrets|env-file>", "Override the shape-aware secrets mechanism (else auto-detected from --instance)")
+  .option("--secrets-path <path>", "Override the secrets staging file path")
+  .option("--dcr-token-file <path>", `DCR gate token file (else ${DCR_TOKEN_ENV} env, else ~/.flair/mcp-dcr-token)`)
+  .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
+  .option("--admin-pass <pass>", "Admin password for the target instance (or FLAIR_ADMIN_PASS)")
+  .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
+  .option("--dry-run", "Generate keys/tokens/config and validate inputs; skip every remote call")
+  .option("--json", "Print machine-readable JSON instead of a human summary")
+  .action(async (opts) => {
+    const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
+    if (!instance) {
+      console.error("Error: --instance is required (or set FLAIR_URL) — `flair mcp enable` targets a specific remote instance.");
+      process.exit(1);
+    }
+
+    // Local-origin refusal short-circuits before we ask for anything else —
+    // never walk the operator through IdP app creation for a connector that
+    // can never connect.
+    const localCheck = checkLocalOriginRefusal(instance);
+    if (localCheck.refused) {
+      console.error(`${render.icons.error} ${localCheck.message}`);
+      process.exit(1);
+    }
+
+    const dryRun = Boolean(opts.dryRun);
+    // --instance is ALWAYS remote for this command (local is refused above)
+    // — isRemoteTarget=true so a missing --admin-pass/FLAIR_ADMIN_PASS never
+    // silently falls back to THIS machine's local ~/.flair/admin-pass file
+    // against someone else's instance (see resolveLocalAdminPass's doc comment).
+    const adminPass = dryRun ? (opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "") : resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
+    if (!dryRun && !adminPass) {
+      console.error(
+        "Error: --admin-pass or FLAIR_ADMIN_PASS required (the operations API on the target instance needs it " +
+          "for identity mapping + set_configuration + restart).",
+      );
+      process.exit(1);
+    }
+
+    let idpClientId: string | undefined = opts.idpClientId;
+    let idpClientSecret: string | undefined = opts.idpClientSecret;
+    let idpSubject: string | undefined = opts.idpSubject;
+    if (!dryRun && process.stdin.isTTY) {
+      if (!idpClientId) idpClientId = await promptText(`${opts.idpProvider} OAuth app client id: `);
+      if (!idpClientSecret) idpClientSecret = await promptText(`${opts.idpProvider} OAuth app client secret: `);
+      if (!idpSubject) idpSubject = await promptText(`Your expected ${opts.idpProvider} login/sub: `);
+    }
+
+    const secretsMechanism = opts.secretsMechanism as SecretsMechanism | undefined;
+    if (secretsMechanism && secretsMechanism !== "fabric-env-secrets" && secretsMechanism !== "env-file") {
+      console.error(`Error: --secrets-mechanism must be "fabric-env-secrets" or "env-file", got "${secretsMechanism}"`);
+      process.exit(1);
+    }
+
+    const result = await enableMcp(
+      {
+        instance,
+        issuer: opts.issuer,
+        idpProvider: opts.idpProvider,
+        idpClientId,
+        idpClientSecret,
+        idpSubject,
+        principal: opts.principal,
+        principalKind: opts.principalKind,
+        adminUser: DEFAULT_ADMIN_USER,
+        adminPass,
+        dcrTokenFilePath: opts.dcrTokenFile,
+        signingKeyFilePath: opts.signingKeyFile,
+        secretsMechanism,
+        secretsStagingPath: opts.secretsPath,
+        dryRun,
+        confirmSecretsApplied: Boolean(opts.confirmSecretsApplied),
+      },
+      { confirmPrompt: dryRun ? undefined : confirmYesNo },
+    );
+
+    if (opts.json) {
+      console.log(render.asJSON(result));
+      if (!result.ok) process.exit(1);
+      return;
+    }
+
+    printEnableSteps(result);
+    if (result.refused) {
+      process.exit(1);
+    }
+    if (!result.ok) {
+      console.error(`${render.icons.error} enable failed at step "${result.failedStep}" — see detail above for the exact fix, then re-run \`flair mcp enable\` (earlier steps are idempotent and will be reused).`);
+      process.exit(1);
+    }
+    if (result.dryRun) {
+      console.log(`${render.icons.info} ${render.wrap(render.c.dim, "dry-run: no remote calls were made.")}`);
+      return;
+    }
+
+    console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "claude.ai can now connect.")}\n`);
+    console.log(result.pasteBlock ?? "");
+    console.log("");
+  });
+
+mcp
+  .command("disable")
+  .description("Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp OAuth surface.")
+  .option("--instance <url>", "Remote flair instance to disable against (else FLAIR_URL)")
+  .option("--admin-pass <pass>", "Admin password for the target instance (or FLAIR_ADMIN_PASS)")
+  .option("--confirm-flag-off", "Confirm FLAIR_MCP_OAUTH is already unset on the target instance's environment (skips the interactive confirm)")
+  .option("--json", "Print machine-readable JSON instead of a human summary")
+  .action(async (opts) => {
+    const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
+    if (!instance) {
+      console.error("Error: --instance is required (or set FLAIR_URL).");
+      process.exit(1);
+    }
+    // --instance is always remote for this command — see the matching
+    // comment in `mcp enable` above.
+    const adminPass = resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
+    if (!adminPass) {
+      console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required.");
+      process.exit(1);
+    }
+
+    const result = await disableMcp(
+      { instance, adminUser: DEFAULT_ADMIN_USER, adminPass, confirmFlagOff: Boolean(opts.confirmFlagOff) },
+      { confirmPrompt: confirmYesNo },
+    );
+
+    if (opts.json) {
+      console.log(render.asJSON(result));
+      if (!result.ok) process.exit(1);
+      return;
+    }
+    console.log(`${result.ok ? render.icons.ok : render.icons.error} ${result.detail}`);
+    if (!result.ok) process.exit(1);
+  });
+
+mcp
+  .command("status")
+  .description("Surface the /mcp OAuth surface's live state: enabled? metadata answering? granted machine-client count.")
+  .option("--instance <url>", "Remote flair instance to check (else FLAIR_URL)")
+  .option("--dcr-token-file <path>", `DCR gate token file (else ${DCR_TOKEN_ENV} env, else ~/.flair/mcp-dcr-token)`)
+  .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
+  .option("--json", "Print machine-readable JSON instead of a human summary")
+  .action(async (opts) => {
+    const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
+    if (!instance) {
+      console.error("Error: --instance is required (or set FLAIR_URL).");
+      process.exit(1);
+    }
+    const manifestPath: string = opts.manifest ?? defaultMcpClientManifestPath();
+
+    const result = await mcpStatus(
+      { instance, dcrTokenFilePath: opts.dcrTokenFile },
+      { countMachineClients: () => readMcpClientManifest(manifestPath).length },
+    );
+
+    if (opts.json) {
+      console.log(render.asJSON(result));
+      return;
+    }
+
+    console.log(`\n${render.wrap(render.c.bold, "flair mcp status")}\n`);
+    console.log(render.kv("instance", result.instance));
+    console.log(render.kv("enabled", result.enabled ? render.wrap(render.c.green, "yes") : render.wrap(render.c.yellow, "no")));
+    console.log(render.kv("metadata", result.detail));
+    if (result.registrationEndpoint) console.log(render.kv("register at", render.wrap(render.c.dim, result.registrationEndpoint)));
+    console.log(render.kv("DCR token", result.dcrTokenProvisionedLocally ? "provisioned locally" : render.wrap(render.c.dim, "not found locally — see `flair mcp enable`")));
+    console.log(render.kv("machine clients", String(result.machineClientCount ?? 0)));
+    console.log("");
   });
 
 // ─── flair principal ─────────────────────────────────────────────────────────
