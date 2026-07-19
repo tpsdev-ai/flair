@@ -85,6 +85,37 @@ describe("session-start hook", () => {
       const parsed = JSON.parse(out);
       expect(parsed.hookSpecificOutput.hookEventName).toBe("SessionStart");
     });
+
+    // flair#745 (`flair hook install`) design round, Sherlock condition 5:
+    // "instance down/unreachable at session start = hook exits fast (hard
+    // timeout, a few seconds max) and quiet". This is the "mock the fetch"
+    // test that binding condition asks for — a bootstrap() call that hangs
+    // forever (simulating a dead/unreachable Flair daemon, indistinguishable
+    // from a real network hang) must still resolve to NOOP within the
+    // configured FLAIR_HOOK_TIMEOUT_MS, never left waiting on the promise.
+    describe("degradation timeout (flair#745 Sherlock condition 5)", () => {
+      const ORIGINAL_TIMEOUT = process.env.FLAIR_HOOK_TIMEOUT_MS;
+
+      afterEach(() => {
+        if (ORIGINAL_TIMEOUT === undefined) delete process.env.FLAIR_HOOK_TIMEOUT_MS;
+        else process.env.FLAIR_HOOK_TIMEOUT_MS = ORIGINAL_TIMEOUT;
+      });
+
+      test("a hanging bootstrap call still no-ops within the configured hard timeout, never hangs the session", async () => {
+        process.env.FLAIR_AGENT_ID = "test-agent";
+        process.env.FLAIR_HOOK_TIMEOUT_MS = "500"; // floor value — fast test, still exercises the real clamp/race path
+        const start = Date.now();
+        const out = await runHook(SAMPLE_INPUT, () => ({
+          bootstrap: () => new Promise(() => {}), // never resolves — simulates a dead/hung Flair daemon
+        }));
+        const elapsed = Date.now() - start;
+
+        expect(out).toBe(NOOP); // silent-fast degradation: no-op, not an error wall
+        // Bounded well under the default 8s — proves the hard timeout actually
+        // fired rather than the promise eventually resolving on its own.
+        expect(elapsed).toBeLessThan(3000);
+      });
+    });
   });
 
   describe("happy path output shape", () => {
