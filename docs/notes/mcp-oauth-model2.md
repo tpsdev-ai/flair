@@ -64,11 +64,17 @@ never from the tool arguments (no forging of agentId / authorId).
        resource: ${FLAIR_MCP_ISSUER}/mcp     # RFC-8707 audience the /mcp token binds to
        accessTokenTtl: 900                    # 5–15 min (Sherlock req 1) — short-lived
        dynamicClientRegistration:
-         initialAccessToken: ${FLAIR_MCP_DCR_TOKEN}   # gate DCR (Sherlock req 4)
-         allowedRedirectUriHosts:
+         enabled: false                       # DCR is NOT SUPPORTED (flair#756) — explicit, not omitted (an absent block leaves DCR OPEN by the plugin's own default)
+       clientIdMetadataDocuments:
+         allowedHosts:                        # CIMD is the only supported client-registration path
+           - claude.ai
            - claude.com
        signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}    # pin in clusters
    ```
+
+   **DCR is not supported; clients connect via CIMD (Client ID Metadata
+   Documents).** `flair mcp enable` (flair#756) writes exactly this shape —
+   see "Legacy clients" below.
 
    The `config.yaml` block is intentionally NOT committed to the live config in
    this slice — adding it changes boot behavior, which would break the
@@ -98,10 +104,23 @@ never from the tool arguments (no forging of agentId / authorId).
    never reaches the default chain. They cannot collide on the same request —
    `/mcp` sees only the token, every other path sees only Ed25519/Basic. There is
    no path that carries both.
-4. **DCR authentication.** `mcp.dynamicClientRegistration.initialAccessToken`
-   gates `/oauth/mcp/register` — open DCR would let an attacker register as any
-   agent. On the resolution side, JIT-provisioning of an unknown sub is itself
-   gated (`FLAIR_MCP_JIT_PROVISION`, default OFF) — a second explicit trust anchor.
+4. **Client registration.** DCR is not supported; clients connect via CIMD
+   (Client ID Metadata Documents) — `mcp.dynamicClientRegistration.enabled:
+   false` explicitly closes RFC 7591 registration (open DCR would let an
+   attacker register as any agent; leaving the block unset does NOT close it —
+   see `src/lib/mcp-enable.ts`'s module header for the ground-truth citation),
+   and `mcp.clientIdMetadataDocuments.allowedHosts` restricts which hosts may
+   present a CIMD client_id URL. On the resolution side, JIT-provisioning of
+   an unknown sub is itself gated (`FLAIR_MCP_JIT_PROVISION`, default OFF) —
+   a second explicit trust anchor.
+
+## Legacy clients
+
+DCR (RFC 7591 Dynamic Client Registration) is UNSUPPORTED on this surface —
+not a fallback, not a flag. `flair mcp enable` (flair#756) writes
+`dynamicClientRegistration: { enabled: false }`, which 404s
+`/oauth/mcp/register`. A client that cannot present a CIMD client_id URL
+cannot connect to this surface.
 
 ## Deferred (not in this slice)
 

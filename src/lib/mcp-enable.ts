@@ -1,27 +1,58 @@
 /**
  * mcp-enable.ts — flair#719: `flair mcp enable/disable/status`, the last
- * piece of the paved-paths command family. Automates the 8-step operator
- * checklist documented in docs/notes/mcp-oauth-model2.md into one command.
+ * piece of the paved-paths command family. Automates the operator checklist
+ * documented in docs/notes/mcp-oauth-model2.md into one command.
  *
- * ── Design record (BINDING) ─────────────────────────────────────────────────
- * flair#719 issue comments: Flint's "Paved-paths design round" (the 8-step
- * checklist), Kern's + Sherlock's K&S verdicts (approved, with conditions —
- * see below), the scenario addendum (binding), and the CIMD design-record
- * correction (DCR is for INTERACTIVE clients only).
+ * ── flair#756 (2026-07-19): CIMD-only, DCR removed entirely ──────────────────
+ * #754 shipped `enable`'s default flow pre-registering claude.ai via DCR
+ * (RFC 7591 Dynamic Client Registration) + provisioning a DCR gate token.
+ * That contradicted the strategic direction (Nathan, on the record,
+ * 2026-07-19): CIMD-only looking forward, DCR is not the path — and the
+ * scope was amended same-day from "CIMD-first with a --with-dcr legacy
+ * hatch" to full removal: DCR is UNSUPPORTED on this surface, not legacy.
+ * There is no `--with-dcr` flag, no gate-token machinery, and
+ * `src/lib/dcr-client.ts` (the module that used to own the gate-token
+ * contract + the RFC 7591 HTTP client) is deleted.
  *
- * **The scenario addendum is binding on this implementation**: `enable`
- * targets the HOSTED shape only — it runs on the OPERATOR's machine, against
- * a REMOTE instance (`--instance <url>` / FLAIR_URL). A local-origin instance
- * (claude.ai's servers cannot dial into localhost) gets an honest refusal —
- * never eight steps toward a connector that can never connect. Secrets
- * provisioning treats the remote path as primary. Self-verification runs
- * from the operator's machine against the PUBLIC origin — success means
- * "claude.ai could connect to this," not "localhost answered."
+ * Ground truth (verified in installed @harperfast/oauth@2.2.0 source): the
+ * plugin fully supports CIMD for the interactive authorization_code flow —
+ * `authorize.js` resolves URL-shaped client_ids via `cimd.js`'s
+ * `resolveClient` (metadata-document fetch, rate-limited,
+ * `clientIdMetadataDocuments.allowedHosts` gate, redirect-URI-host
+ * validation baked into the fetched document itself). A CIMD-capable client
+ * like claude.ai needs ZERO pre-registration — there is no client_id for
+ * `enable` to hand back, because Claude presents its OWN CIMD document URL
+ * as its client_id (Anthropic docs: claude.com/docs/connectors/building/
+ * authentication — "Claude uses an HTTPS URL as its client_id, and your
+ * authorization server fetches the metadata document from that URL").
  *
- * ── K&S conditions honored here ──────────────────────────────────────────────
- *   - Kern (binding): `enable` CONSUMES `src/lib/dcr-client.ts`'s
- *     `registerDcrClient` for its DCR interaction — it never inlines its own
- *     POST to `/oauth/mcp/register`. See `preRegisterClaudeViaDcr` below.
+ * **Leaving `dynamicClientRegistration` unset does NOT disable DCR** — this
+ * is the load-bearing ground-truth fact this rewrite is built on. Read
+ * directly from the installed package:
+ *   - `node_modules/@harperfast/oauth/dist/types.d.ts:131-144` (the
+ *     `MCPDynamicClientRegistrationConfig` doc comment): "Defaults to
+ *     enabled because Claude Desktop, Cursor, and mcp-remote all register at
+ *     runtime with no pre-baked client_id. Restricting registration is
+ *     opt-in via initialAccessToken or allowedRedirectUriHosts."
+ *   - `node_modules/@harperfast/oauth/dist/lib/mcp/dcr.js:161-167`
+ *     (`handleRegister`): `if (dcrConfig?.enabled === false) return 404`.
+ *     An ABSENT `dynamicClientRegistration` block leaves `dcrConfig`
+ *     `undefined`, so `dcrConfig?.enabled === false` is `false` — the
+ *     endpoint stays live.
+ *   - `dcr.js:16-24` (`checkInitialAccessToken`): "Returns null when no
+ *     token is configured (open registration per RFC 7591)." — an absent
+ *     `initialAccessToken` means the endpoint accepts ANY registration,
+ *     unauthenticated.
+ *   So simply never writing the block would leave `/oauth/mcp/register`
+ *   OPEN, not inert — the opposite of "DCR removed." `buildMcpOAuthConfigBlock`
+ *   below therefore writes an EXPLICIT `dynamicClientRegistration: { enabled:
+ *   false }` — the one config shape that is verifiably fail-closed
+ *   (dcr.js:165-167's 404 branch) — and never writes `initialAccessToken` or
+ *   `allowedRedirectUriHosts` (there is no gate-token machinery to configure
+ *   them with). A structural test in test/unit/mcp-enable.test.ts asserts
+ *   this shape directly.
+ *
+ * ── K&S conditions from #719, still honored ──────────────────────────────────
  *   - Sherlock: `accessTokenTtl` is explicitly 900 in the written config
  *     block, never left at the plugin's 1h default (see
  *     `buildMcpOAuthConfigBlock`).
@@ -29,7 +60,10 @@
  *     (see `generateRsaSigningKeyPair`), never a PRNG shortcut.
  *   - Sherlock (the #741 lesson): self-verification is the exit criterion.
  *     On failure, the result names which step to re-run — never reports
- *     success on hope (see `EnableMcpResult.failedStep`).
+ *     success on hope (see `EnableMcpResult.failedStep`). flair#756 extends
+ *     this: self-verify now also confirms the metadata endpoint advertises
+ *     CIMD support (the exact pair Claude's client checks — see
+ *     `selfVerifyMcpMetadata` below), not just that the endpoint answers.
  *   - Secrets provisioning is shape-aware but never silent: every result
  *     names the mechanism chosen and where the material lives (paths only —
  *     values never appear in `EnableMcpResult` or on stdout).
@@ -49,62 +83,71 @@
  *     this slice.
  *   - `FLAIR_MCP_OAUTH` (resources/mcp-oauth-flag.ts) is read from
  *     `process.env` ONLY — never YAML config — so it (and the OAuth secrets:
- *     the DCR gate token, the signing key PEM, the IdP client secret) cannot
- *     be set via `set_configuration`. Those are delivered through the
- *     shape-aware secrets-provisioning step below (a 0600 staging file the
- *     operator applies via Fabric Studio's environment panel, or their own
+ *     the signing key PEM, the IdP client secret) cannot be set via
+ *     `set_configuration`. Those are delivered through the shape-aware
+ *     secrets-provisioning step below (a 0600 staging file the operator
+ *     applies via Fabric Studio's environment panel, or their own
  *     process-manager env). `enable` requires the operator to confirm
  *     application (`confirmSecretsApplied`, or an interactive prompt) before
  *     it calls `restart` — otherwise the restart would just bounce back to
  *     the flag-OFF byte-identical boot with the new config.yaml block inert.
  *   - `@harperfast/oauth`'s config field names (`mcp.issuer`, `mcp.resource`,
- *     `mcp.accessTokenTtl`, `mcp.dynamicClientRegistration.{initialAccessToken,
- *     allowedRedirectUriHosts}`, `mcp.signingKeyPem`) are confirmed against
- *     the installed 2.2.0 package's source (dist/lib/mcp/{dcr,keyStore,
- *     token}.js) and match docs/notes/mcp-oauth-model2.md exactly.
+ *     `mcp.accessTokenTtl`, `mcp.dynamicClientRegistration.enabled`,
+ *     `mcp.clientIdMetadataDocuments.allowedHosts`, `mcp.signingKeyPem`) are
+ *     confirmed against the installed 2.2.0 package's source
+ *     (dist/types.d.ts:38-229, dist/lib/mcp/{dcr,cimd,keyStore,token}.js).
  *   - The self-verification target, `${issuer}/.well-known/oauth-
- *     authorization-server` (RFC 8414), is served by dist/lib/mcp/
- *     wellKnown.js and advertises `registration_endpoint`/`token_endpoint`.
+ *     authorization-server` (RFC 8414), is served by
+ *     `dist/lib/mcp/wellKnown.js`'s `buildAuthorizationServerMetadata`
+ *     (lines 129-166), which advertises `registration_endpoint`/
+ *     `token_endpoint` unconditionally (NOTE: `registration_endpoint` is
+ *     advertised even though DCR is disabled — the plugin doesn't condition
+ *     that field on `dynamicClientRegistration.enabled`; a POST there still
+ *     404s per dcr.js:165-167, this is just a metadata-completeness quirk of
+ *     the installed package, not a gap in our config) and
+ *     `client_id_metadata_document_supported: true` whenever
+ *     `clientIdMetadataDocuments.enabled !== false` (wellKnown.js:164 — true
+ *     by default, which is what our config relies on), and
+ *     `token_endpoint_auth_methods_supported` always includes `"none"`
+ *     (wellKnown.js:148-149) — together the exact pair Anthropic's docs say
+ *     Claude checks before it will use CIMD instead of DCR (claude.com/docs/
+ *     connectors/building/authentication: "Claude selects CIMD only when
+ *     your authorization server metadata advertises both
+ *     client_id_metadata_document_supported: true and none in
+ *     token_endpoint_auth_methods_supported").
  *   - The GitHub OAuth-app callback URL, `${issuer}/oauth/github/callback`,
  *     is the plugin's own README "Configure OAuth Callback" convention
  *     (`https://your-domain/oauth/<provider>/callback`).
- *   - The claude.ai/claude.com DCR redirect URI, `https://claude.com/api/mcp/
- *     auth_callback`, matches the constant already shipped in
- *     resources/OAuth.ts (`ALLOWED_REDIRECT_URI`) for the 1.0 opaque-token AS
- *     — the same value claude.ai's connector flow uses.
- *
- * ── Execution order vs. the design's numbered checklist ──────────────────────
- * The design record's 8 steps are a CONCEPTUAL checklist (ported from the
- * manual runbook); the automated command must respect real dependencies.
- * Steps 6 ("pre-register claude.ai via DCR") and 8 ("self-verify") both make
- * LIVE calls against the OAuth surface, which only exists once the instance
- * has restarted with `FLAIR_MCP_OAUTH=1` and the new config live. So this
- * module executes step 7 ("set the flag, restart") BEFORE step 6, and runs
- * step 6 immediately after the restart succeeds — the checklist's numbering
- * is preserved in the STEP NAMES and messaging, but not in wall-clock order.
- * Named explicitly here (not silently reordered) per this repo's "no
- * vibe-claims" / ground-truth-over-assumed-ordering discipline.
+ *   - The claude.ai CIMD/redirect-URI allowlist hosts: Anthropic's current
+ *     docs (claude.com/docs/connectors/building/authentication, "Callback
+ *     URLs" — fetched 2026-07-19) name `https://claude.ai/api/mcp/
+ *     auth_callback` as the redirect URI for the hosted Claude surfaces
+ *     (Claude.ai web, Desktop, mobile, Cowork), and the lazy-authentication
+ *     doc's CIMD section notes "the listed redirect_uris should be required
+ *     to be same-origin with the client_id URL" — so claude.ai is the
+ *     confirmed CIMD client_id host for that surface. `claude.com` is kept
+ *     alongside it because it's this repo's own pre-existing allowlist value
+ *     (`resources/OAuth.ts:24`'s `ALLOWED_REDIRECT_URI` for the 1.0
+ *     opaque-token AS, and this module's own prior `DEFAULT_REDIRECT_URI_HOSTS`
+ *     constant) — carried forward defensively, not newly invented; CIMD
+ *     `allowedHosts` only widens which hosts MAY present a client_id URL,
+ *     every resolution still runs the full SSRF/document-validation pipeline
+ *     in `cimd.js`, so listing an extra host is not a meaningful risk
+ *     expansion.
  */
 
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import {
-  registerDcrClient,
-  readDcrToken,
-  writeDcrTokenFile,
-  type DcrRegisterResult,
-} from "./dcr-client.js";
 
-// ─── Claude connector constants ─────────────────────────────────────────────
+// ─── CIMD constants ──────────────────────────────────────────────────────────
 
-/** The redirect URI claude.ai's connector flow uses — matches the constant
- *  already shipped for the 1.0 opaque-token AS (resources/OAuth.ts). */
-export const CLAUDE_DCR_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
-
-/** Default DCR-allowed redirect-host allowlist (mcp-oauth-model2.md). */
-export const DEFAULT_REDIRECT_URI_HOSTS = ["claude.ai", "claude.com"];
+/** Default `clientIdMetadataDocuments.allowedHosts` allowlist — see the
+ *  module header's "claude.ai CIMD/redirect-URI allowlist hosts" note for
+ *  the citation trail. Schema: node_modules/@harperfast/oauth/dist/
+ *  types.d.ts:211-229 (`MCPClientIdMetadataDocumentsConfig.allowedHosts`). */
+export const DEFAULT_CIMD_ALLOWED_HOSTS = ["claude.ai", "claude.com"];
 
 /** Required TTL per Sherlock's Model-2 requirement 1 — never the plugin's 1h default. */
 export const REQUIRED_ACCESS_TOKEN_TTL = 900;
@@ -180,7 +223,7 @@ export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMe
   return isFabricOrigin(instanceUrl) ? "fabric-env-secrets" : "env-file";
 }
 
-// ─── Step 1: RS256 keypair + DCR gate token ─────────────────────────────────
+// ─── RS256 signing keypair ───────────────────────────────────────────────────
 
 export interface RsaKeyPairPem {
   publicKey: string;
@@ -196,12 +239,6 @@ export function generateRsaSigningKeyPair(): RsaKeyPairPem {
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
   });
   return { publicKey, privateKey };
-}
-
-/** A fresh DCR gate token — 32 random bytes, base64url (same shape as any
- *  other flair-minted bearer credential). */
-export function generateDcrGateToken(): string {
-  return randomBytes(32).toString("base64url");
 }
 
 export function defaultSigningKeyFilePath(): string {
@@ -229,43 +266,36 @@ export function readSigningKeyFile(path: string): string {
   return readFileSync(path, "utf-8");
 }
 
-/** Reuse an existing DCR gate token (env or 0600 file) if one is already
- *  provisioned; otherwise generate + write a fresh one. Idempotent re-runs
- *  of `enable` don't rotate a token that's already live in a remote config. */
-export function ensureDcrGateToken(
-  filePath?: string,
-  deps: { generate?: () => string } = {},
-): { token: string; path: string; reused: boolean } {
-  const path = filePath ?? undefined;
-  const existing = readDcrToken(path ? { filePath: path } : {});
-  if (existing) {
-    return { token: existing.token, path: existing.path ?? path ?? "(env)", reused: true };
-  }
-  const generate = deps.generate ?? generateDcrGateToken;
-  const token = generate();
-  const writtenPath = writeDcrTokenFile(token, path);
-  return { token, path: writtenPath, reused: false };
-}
-
-// ─── Step 2: @harperfast/oauth config block ─────────────────────────────────
+// ─── @harperfast/oauth config block ──────────────────────────────────────────
 
 export interface McpOAuthConfigBlockParams {
   idpProvider: string;
-  redirectUriHosts?: string[];
+  /** `clientIdMetadataDocuments.allowedHosts` override — defaults to
+   *  `DEFAULT_CIMD_ALLOWED_HOSTS`. */
+  cimdAllowedHosts?: string[];
 }
 
 /**
- * The `@harperfast/oauth` config block, exactly matching docs/notes/
- * mcp-oauth-model2.md's documented shape and the installed 2.2.0 package's
- * field names. Secrets are `${ENV_VAR}` placeholders — never literal values
- * — so this block is safe to write to harperdb-config.yaml via
- * `set_configuration` (the config file itself carries no secret material;
- * see the secrets-provisioning step for how the referenced env vars land).
+ * The `@harperfast/oauth` config block, matching the installed 2.2.0
+ * package's field names (node_modules/@harperfast/oauth/dist/types.d.ts).
+ * Secrets are `${ENV_VAR}` placeholders — never literal values — so this
+ * block is safe to write to harperdb-config.yaml via `set_configuration`
+ * (the config file itself carries no secret material; see the
+ * secrets-provisioning step for how the referenced env vars land).
+ *
+ * flair#756: `dynamicClientRegistration: { enabled: false }` is written
+ * EXPLICITLY — never omitted. See the module header's "Leaving
+ * `dynamicClientRegistration` unset does NOT disable DCR" note: an absent
+ * block leaves the plugin's own default (OPEN, ungated registration) live
+ * (dcr.js:161-167, types.d.ts:131-144). `enabled: false` is the one shape
+ * that actually 404s the endpoint (dcr.js:165-167). No `initialAccessToken`
+ * / `allowedRedirectUriHosts` are ever written — there is no gate-token
+ * machinery left to populate them with.
  */
 export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Record<string, unknown> {
   const provider = params.idpProvider;
   const envPrefix = `OAUTH_${provider.toUpperCase()}`;
-  const redirectUriHosts = params.redirectUriHosts ?? DEFAULT_REDIRECT_URI_HOSTS;
+  const cimdAllowedHosts = params.cimdAllowedHosts ?? DEFAULT_CIMD_ALLOWED_HOSTS;
   return {
     "@harperfast/oauth": {
       package: "@harperfast/oauth",
@@ -280,10 +310,15 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         issuer: "${FLAIR_MCP_ISSUER}",
         resource: "${FLAIR_MCP_ISSUER}/mcp",
         accessTokenTtl: REQUIRED_ACCESS_TOKEN_TTL,
-        dynamicClientRegistration: {
-          initialAccessToken: "${FLAIR_MCP_DCR_TOKEN}",
-          allowedRedirectUriHosts: redirectUriHosts,
-        },
+        // Explicit fail-closed disable — see the doc comment above and the
+        // module header for why an omitted block is NOT equivalent to this.
+        dynamicClientRegistration: { enabled: false },
+        // CIMD is the only supported client-registration path. `allowedHosts`
+        // restricts which hosts may present a CIMD client_id URL — schema at
+        // node_modules/@harperfast/oauth/dist/types.d.ts:211-229. Every
+        // resolution still runs cimd.js's full SSRF/document-validation
+        // pipeline regardless of this list.
+        clientIdMetadataDocuments: { allowedHosts: cimdAllowedHosts },
         signingKeyPem: "${FLAIR_MCP_SIGNING_KEY_PEM}",
       },
     },
@@ -291,16 +326,15 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
 }
 
 /** The exact callback URL to hand the operator when they create the IdP
- *  OAuth app (design step 3: "with the exact GitHub callback URL printed"). */
+ *  OAuth app ("with the exact GitHub callback URL printed"). */
 export function idpCallbackUrl(issuer: string, idpProvider: string): string {
   return `${issuer.replace(/\/+$/, "")}/oauth/${idpProvider}/callback`;
 }
 
-// ─── Step 4: secrets bundle ──────────────────────────────────────────────────
+// ─── Secrets bundle ──────────────────────────────────────────────────────────
 
 export interface SecretsBundleParams {
   issuer: string;
-  dcrToken: string;
   signingKeyPem: string;
   idpProvider: string;
   idpClientId: string;
@@ -315,7 +349,6 @@ export function buildSecretsBundle(params: SecretsBundleParams): Record<string, 
   return {
     FLAIR_MCP_OAUTH: "1",
     FLAIR_MCP_ISSUER: params.issuer.replace(/\/+$/, ""),
-    FLAIR_MCP_DCR_TOKEN: params.dcrToken,
     FLAIR_MCP_SIGNING_KEY_PEM: params.signingKeyPem,
     [`${envPrefix}_CLIENT_ID`]: params.idpClientId,
     [`${envPrefix}_CLIENT_SECRET`]: params.idpClientSecret,
@@ -372,7 +405,7 @@ export function provisionSecrets(
   return { mechanism, path, varNames, instructions };
 }
 
-// ─── Step 5: identity mapping (Credential kind:idp) ─────────────────────────
+// ─── Identity mapping (Credential kind:idp) ─────────────────────────────────
 
 function opsBaseUrl(opsPortOrUrl: number | string): string {
   return typeof opsPortOrUrl === "number" ? `http://127.0.0.1:${opsPortOrUrl}/` : `${opsPortOrUrl.replace(/\/$/, "")}/`;
@@ -516,7 +549,7 @@ export async function provisionIdpIdentityMapping(
   return { principalCreated, credentialId, credentialReused: Boolean(existing) };
 }
 
-// ─── Step 7 (executed before step 6 — see module header): apply config + restart
+// ─── Apply config + restart ──────────────────────────────────────────────────
 
 export interface ApplyConfigAndRestartParams {
   opsPortOrUrl: number | string;
@@ -581,34 +614,21 @@ export async function triggerRemoteRestart(
   }
 }
 
-// ─── Step 6: pre-register claude.ai via DCR (via dcr-client.ts — NEVER inlined)
-
-/**
- * Pre-register claude.ai as an interactive OAuth client through the gated
- * DCR endpoint. Consumes `registerDcrClient` from `./dcr-client.js` — per
- * Kern's binding #719 verdict condition, `enable` never inlines its own POST
- * to `/oauth/mcp/register`.
- */
-export async function preRegisterClaudeViaDcr(
-  params: { issuer: string; dcrToken: string; redirectUris?: string[] },
-  deps: { fetchImpl?: typeof fetch } = {},
-): Promise<DcrRegisterResult> {
-  return registerDcrClient({
-    issuer: params.issuer,
-    dcrToken: params.dcrToken,
-    redirectUris: params.redirectUris ?? [CLAUDE_DCR_REDIRECT_URI],
-    clientName: "claude.ai",
-    fetchImpl: deps.fetchImpl,
-  });
-}
-
-// ─── Step 8: self-verify ─────────────────────────────────────────────────────
+// ─── Self-verify ─────────────────────────────────────────────────────────────
 
 export interface SelfVerifyResult {
   ok: boolean;
   issuer?: string;
   registrationEndpoint?: string;
   tokenEndpoint?: string;
+  /** Does the AS metadata advertise CIMD support? Requires BOTH
+   *  `client_id_metadata_document_supported === true` AND `"none"` present
+   *  in `token_endpoint_auth_methods_supported` — the exact pair Anthropic's
+   *  docs say Claude's client checks before it will use CIMD instead of
+   *  falling back to DCR (see the module header's citation). Populated
+   *  whenever the response body parses far enough to check; `undefined`
+   *  only when the fetch itself failed or returned non-JSON. */
+  cimdSupported?: boolean;
   detail: string;
 }
 
@@ -616,8 +636,14 @@ export interface SelfVerifyResult {
  * Hit the OAuth metadata endpoint from the operator's machine against the
  * PUBLIC origin — the verification that matters is the one claude.ai's
  * perspective sees (scenario addendum). Never reports success on hope: any
- * unreachable/malformed/mismatched response is `ok: false` with a specific
- * `detail`.
+ * unreachable/malformed/mismatched response, OR a response that doesn't
+ * advertise CIMD support, is `ok: false` with a specific `detail`.
+ *
+ * flair#756: since CIMD is the only supported client-registration path now,
+ * "the /mcp OAuth surface is properly enabled" means "and a CIMD client can
+ * actually use it" — this single check is reused by `enable`'s own
+ * self-verify step, `grant`/`revoke`'s workflow gate (src/cli.ts), and
+ * `flair mcp status`, so all four commands agree on what "enabled" means.
  */
 export async function selfVerifyMcpMetadata(
   issuer: string,
@@ -655,21 +681,46 @@ export async function selfVerifyMcpMetadata(
       detail: `${url} responded but the metadata shape is unexpected (issuer/registration_endpoint/token_endpoint) — got issuer=${JSON.stringify(body?.issuer)}`,
     };
   }
+
+  // flair#756: confirm CIMD is actually advertised (node_modules/@harperfast/
+  // oauth/dist/lib/mcp/wellKnown.js:129-165's buildAuthorizationServerMetadata:
+  // `client_id_metadata_document_supported` is set only when
+  // clientIdMetadataDocuments.enabled !== false; `token_endpoint_auth_methods_
+  // supported` always includes "none"). Both are required per Anthropic's docs
+  // before Claude will use CIMD (see module header).
+  const cimdSupported =
+    body?.client_id_metadata_document_supported === true &&
+    Array.isArray(body?.token_endpoint_auth_methods_supported) &&
+    body.token_endpoint_auth_methods_supported.includes("none");
+  if (!cimdSupported) {
+    return {
+      ok: false,
+      issuer: body.issuer,
+      registrationEndpoint: body.registration_endpoint,
+      tokenEndpoint: body.token_endpoint,
+      cimdSupported: false,
+      detail: `${url} answered but does not advertise CIMD support (client_id_metadata_document_supported / "none" in token_endpoint_auth_methods_supported) — is clientIdMetadataDocuments.enabled explicitly false?`,
+    };
+  }
+
   return {
     ok: true,
     issuer: body.issuer,
     registrationEndpoint: body.registration_endpoint,
     tokenEndpoint: body.token_endpoint,
-    detail: "OAuth metadata endpoint answering on the public origin",
+    cimdSupported: true,
+    detail: "OAuth metadata endpoint answering on the public origin, advertising CIMD support",
   };
 }
 
-/** The exact block to paste into claude.ai → Settings → Connectors. */
-export function buildClaudePasteBlock(resource: string, clientId: string): string {
+/** The exact block to paste into claude.ai → Settings → Connectors. No
+ *  client ID to hand over — CIMD-based connectors have Claude present its
+ *  OWN client_id (a URL it hosts), never one this server issues. */
+export function buildClaudePasteBlock(resource: string): string {
   return [
     "claude.ai → Settings → Connectors → Add custom connector",
-    `  URL:       ${resource}`,
-    `  Client ID: ${clientId}`,
+    `  URL: ${resource}`,
+    "  (no client ID to enter — Claude presents its own Client ID Metadata Document URL automatically)",
   ].join("\n");
 }
 
@@ -677,13 +728,12 @@ export function buildClaudePasteBlock(resource: string, clientId: string): strin
 
 export type EnableStepName =
   | "local-origin-check"
-  | "keypair-and-dcr-token"
+  | "signing-key"
   | "config-block"
   | "idp-credentials"
   | "secrets-provisioning"
   | "identity-mapping"
   | "apply-config-and-restart"
-  | "dcr-preregister-claude"
   | "self-verify";
 
 export interface EnableStepResult {
@@ -709,11 +759,12 @@ export interface EnableMcpParams {
   principalKind?: "human" | "agent";
   adminUser: string;
   adminPass: string;
-  dcrTokenFilePath?: string;
   signingKeyFilePath?: string;
   secretsMechanism?: SecretsMechanism;
   secretsStagingPath?: string;
-  redirectUriHosts?: string[];
+  /** `clientIdMetadataDocuments.allowedHosts` override — defaults to
+   *  `DEFAULT_CIMD_ALLOWED_HOSTS`. */
+  cimdAllowedHosts?: string[];
   dryRun?: boolean;
   /** Operator confirms the staged secrets are live in the target's process
    *  environment. Required (or an interactive `prompt` confirmation) before
@@ -725,7 +776,6 @@ export interface EnableMcpDeps {
   fetchImpl?: typeof fetch;
   now?: () => string;
   generateRsaKeyPair?: () => RsaKeyPairPem;
-  generateDcrToken?: () => string;
   /** Interactive confirmation (CLI wires readline; tests inject a stub).
    *  Only consulted when `confirmSecretsApplied` is not already true and
    *  this is not a dry run. */
@@ -740,11 +790,9 @@ export interface EnableMcpResult {
   failedStep?: EnableStepName;
   issuer?: string;
   resource?: string;
-  claudeClientId?: string;
   pasteBlock?: string;
   secretsMechanism?: SecretsMechanism;
   secretsPath?: string;
-  dcrTokenFilePath?: string;
   signingKeyFilePath?: string;
   callbackUrl?: string;
 }
@@ -755,6 +803,11 @@ export interface EnableMcpResult {
  * split as `grantMcpClient`/`revokeMcpClient`. Returns a step-by-step log so
  * a failure names exactly which step to re-run (never reports success on
  * hope).
+ *
+ * flair#756: no DCR step anywhere in this flow — CIMD needs no
+ * pre-registration, so there is nothing to do after the restart besides
+ * self-verify. `self-verify` is now the ONLY live call that happens after
+ * `apply-config-and-restart`.
  */
 export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {}): Promise<EnableMcpResult> {
   const steps: EnableStepResult[] = [];
@@ -775,21 +828,21 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const principalKind = params.principalKind ?? "human";
 
   try {
-    // ── Design step 1: RS256 keypair + DCR gate token ────────────────────────
+    // ── RS256 signing keypair ─────────────────────────────────────────────────
     const keyResult = ensureSigningKeyFile(params.signingKeyFilePath, { generate: deps.generateRsaKeyPair });
-    const dcrResult = ensureDcrGateToken(params.dcrTokenFilePath, { generate: deps.generateDcrToken });
+    push("signing-key", true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
+
+    // ── @harperfast/oauth config block (CIMD-only; DCR explicitly disabled) ──
+    const cimdAllowedHosts = params.cimdAllowedHosts ?? DEFAULT_CIMD_ALLOWED_HOSTS;
+    const configBlock = buildMcpOAuthConfigBlock({ idpProvider, cimdAllowedHosts });
     push(
-      "keypair-and-dcr-token",
+      "config-block",
       true,
-      `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600); ` +
-        `DCR gate token ${dcrResult.reused ? "reused from" : "generated and written to"} ${dcrResult.path}`,
+      `built the @harperfast/oauth mcp config block (accessTokenTtl=${REQUIRED_ACCESS_TOKEN_TTL}, ` +
+        `dynamicClientRegistration.enabled=false, clientIdMetadataDocuments.allowedHosts=${JSON.stringify(cimdAllowedHosts)})`,
     );
 
-    // ── Design step 2: @harperfast/oauth config block ────────────────────────
-    const configBlock = buildMcpOAuthConfigBlock({ idpProvider, redirectUriHosts: params.redirectUriHosts });
-    push("config-block", true, `built the @harperfast/oauth mcp config block (accessTokenTtl=${REQUIRED_ACCESS_TOKEN_TTL})`);
-
-    // ── Design step 3: IdP OAuth-app credential intake ───────────────────────
+    // ── IdP OAuth-app credential intake ───────────────────────────────────────
     const callbackUrl = idpCallbackUrl(issuer, idpProvider);
     if (!params.idpClientId || !params.idpClientSecret || !params.idpSubject) {
       const missing = [
@@ -817,16 +870,14 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         issuer,
         resource: `${issuer}/mcp`,
         callbackUrl,
-        dcrTokenFilePath: dcrResult.path,
         signingKeyFilePath: keyResult.path,
       };
     }
 
-    // ── Design step 4: secrets provisioning (shape-aware, never silent) ──────
+    // ── Secrets provisioning (shape-aware, never silent) ──────────────────────
     const signingKeyPem = readSigningKeyFile(keyResult.path);
     const bundle = buildSecretsBundle({
       issuer,
-      dcrToken: dcrResult.token,
       signingKeyPem,
       idpProvider,
       idpClientId: params.idpClientId,
@@ -842,7 +893,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       `mechanism: ${secretsResult.mechanism}; ${secretsResult.varNames.length} vars staged at ${secretsResult.path} (0600). ${secretsResult.instructions}`,
     );
 
-    // ── Design step 5: identity mapping (Credential kind:idp) ────────────────
+    // ── Identity mapping (Credential kind:idp) ────────────────────────────────
     const mapping = await provisionIdpIdentityMapping(
       {
         opsPortOrUrl: params.instance,
@@ -873,32 +924,19 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       push(
         "apply-config-and-restart",
         false,
-        `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (steps 1-5 are idempotent and will reuse what's already provisioned).`,
+        `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
       );
       return { ok: false, dryRun, steps, failedStep: "apply-config-and-restart", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
     }
 
-    // ── Design step 7 (executed here — see module header): config + restart ──
+    // ── Apply config + restart ────────────────────────────────────────────────
     await applyRemoteConfigAndRestart(
       { opsPortOrUrl: params.instance, adminUser: params.adminUser, adminPass: params.adminPass, configBlock },
       { fetchImpl: deps.fetchImpl },
     );
     push("apply-config-and-restart", true, `set_configuration + restart succeeded against ${params.instance}`);
 
-    // ── Design step 6 (executed after restart — see module header): DCR ──────
-    let dcrRegistration: DcrRegisterResult;
-    try {
-      dcrRegistration = await preRegisterClaudeViaDcr(
-        { issuer, dcrToken: dcrResult.token, redirectUris: [CLAUDE_DCR_REDIRECT_URI] },
-        { fetchImpl: deps.fetchImpl },
-      );
-    } catch (err: any) {
-      push("dcr-preregister-claude", false, `${err?.message ?? err} — re-run \`flair mcp enable\` once the restarted instance is reachable; steps 1-5 will be reused.`);
-      return { ok: false, dryRun, steps, failedStep: "dcr-preregister-claude", issuer, resource: `${issuer}/mcp` };
-    }
-    push("dcr-preregister-claude", true, `claude.ai pre-registered (client_id: ${dcrRegistration.client_id})`);
-
-    // ── Design step 8: self-verify from the operator's machine, public origin
+    // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
     const verify = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
     if (!verify.ok) {
       push("self-verify", false, `${verify.detail} — re-run \`flair mcp status\` to check current state, or \`flair mcp enable\` to retry the apply-config-and-restart step.`);
@@ -909,7 +947,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         failedStep: "self-verify",
         issuer,
         resource: `${issuer}/mcp`,
-        claudeClientId: dcrRegistration.client_id,
       };
     }
     push("self-verify", true, verify.detail);
@@ -921,16 +958,14 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       steps,
       issuer,
       resource,
-      claudeClientId: dcrRegistration.client_id,
-      pasteBlock: buildClaudePasteBlock(resource, dcrRegistration.client_id),
+      pasteBlock: buildClaudePasteBlock(resource),
       secretsMechanism: secretsResult.mechanism,
       secretsPath: secretsResult.path,
-      dcrTokenFilePath: dcrResult.path,
       signingKeyFilePath: keyResult.path,
       callbackUrl,
     };
   } catch (err: any) {
-    const lastStep = steps.length > 0 ? steps[steps.length - 1].step : "keypair-and-dcr-token";
+    const lastStep = steps.length > 0 ? steps[steps.length - 1].step : "signing-key";
     push(lastStep, false, `unexpected error: ${err?.message ?? err}`);
     return { ok: false, dryRun, steps, failedStep: lastStep };
   }
@@ -994,7 +1029,6 @@ export async function disableMcp(params: DisableMcpParams, deps: DisableMcpDeps 
 
 export interface McpStatusParams {
   instance: string;
-  dcrTokenFilePath?: string;
 }
 
 export interface McpStatusDeps {
@@ -1013,22 +1047,25 @@ export interface McpStatusResult {
   issuer?: string;
   registrationEndpoint?: string;
   tokenEndpoint?: string;
+  /** flair#756: does the live metadata endpoint advertise CIMD support
+   *  (allowedHosts config presence, from the operator's perspective — the
+   *  only signal `status` can see WITHOUT admin credentials; see
+   *  `selfVerifyMcpMetadata`'s doc comment for the exact check)? */
+  cimdSupported?: boolean;
   detail: string;
-  dcrTokenProvisionedLocally: boolean;
   machineClientCount?: number;
 }
 
 /**
  * Surfaces LIVE state (not a stale local marker): hits the same well-known
  * metadata endpoint `enable`'s self-verify step checks. A 200 with the
- * expected shape means the surface is enabled and answering; anything else
- * means disabled/unreachable — `status` never guesses from local files
- * alone (this is the same "never report success on hope" posture as
- * self-verify).
+ * expected shape AND CIMD advertised means the surface is enabled and
+ * usable by a CIMD client; anything else means disabled/unreachable/
+ * misconfigured — `status` never guesses from local files alone (this is
+ * the same "never report success on hope" posture as self-verify).
  */
 export async function mcpStatus(params: McpStatusParams, deps: McpStatusDeps = {}): Promise<McpStatusResult> {
   const verify = await selfVerifyMcpMetadata(params.instance, { fetchImpl: deps.fetchImpl });
-  const dcrToken = readDcrToken({ filePath: params.dcrTokenFilePath });
   const machineClientCount = deps.countMachineClients?.();
 
   return {
@@ -1038,8 +1075,8 @@ export async function mcpStatus(params: McpStatusParams, deps: McpStatusDeps = {
     issuer: verify.issuer,
     registrationEndpoint: verify.registrationEndpoint,
     tokenEndpoint: verify.tokenEndpoint,
+    cimdSupported: verify.cimdSupported,
     detail: verify.detail,
-    dcrTokenProvisionedLocally: Boolean(dcrToken),
     machineClientCount,
   };
 }
