@@ -323,6 +323,21 @@ interface HarperSpawnResult {
 // the previous stdio:"inherit" passthrough, which gave no way to inspect
 // harper's output. stdin stays "inherit" — harper's deploy never reads
 // from it, so there's nothing to tee there.
+//
+// Resolves on "close", NOT "exit" (flair#699). Node's child_process fires
+// "exit" as soon as the process terminates, but the piped stdout/stderr
+// streams can still have buffered `data` events in flight at that instant —
+// "exit" makes no promise that every chunk already written by the child has
+// been delivered to our listeners yet. "close" is the event Node guarantees
+// fires only after all stdio streams have ended, i.e. every `data` chunk has
+// already been pushed into `chunks`. Resolving on "exit" was a real
+// output-capture race, not just a test artifact: under scheduler pressure
+// (e.g. loaded CI runners) the process could exit and this promise could
+// resolve before the final stderr chunk — often exactly the line carrying
+// the replication-failure signature, since callers naturally console.error
+// their last message immediately before process.exit() — had been received,
+// so REPLICATION_FAILURE_RE silently missed a match it should have made and
+// runHarperDeploy fell through to the generic "exited with code N" error.
 function spawnHarperCaptured(
   bin: string,
   args: string[],
@@ -345,7 +360,7 @@ function spawnHarperCaptured(
       chunks.push(d.toString("utf8"));
     });
     p.on("error", rejectP);
-    p.on("exit", (code) => resolveP({ code, output: chunks.join("") }));
+    p.on("close", (code) => resolveP({ code, output: chunks.join("") }));
   });
 }
 
