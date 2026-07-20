@@ -1,0 +1,431 @@
+/**
+ * auth-resolve.ts — the ONE shared CLI credential resolver (flair#747).
+ *
+ * Before this file existed, every auth-requiring CLI surface hand-rolled its
+ * own version of "how do I authenticate this request against a Flair
+ * instance" — `api()`, `fetchHealthDetail()`, and `bootstrap` in src/cli.ts
+ * each carried a slightly different, independently-maintained chain. The
+ * worst gap: several of them never tried an Ed25519 agent key at all unless
+ * an agentId was ALREADY known by some OTHER means, so a machine with a
+ * perfectly good `~/.flair/keys/<agentId>.key` and nothing else (the normal
+ * shape for a headless/agent machine) silently fell through to "no
+ * credentials" on surfaces that a human operator's `~/.flair/admin-pass`
+ * machine sailed through without noticing. flair#741/#742 fixed exactly
+ * this for `flair upgrade`'s verification calls only (`verifyAuthedGet`,
+ * still exported from src/cli.ts as a thin wrapper over `api()` below).
+ * This module generalizes that fix into the floor every surface gets.
+ *
+ * ── Resolution order ─────────────────────────────────────────────────────
+ *
+ *   1. EXPLICIT — a caller-supplied credential: `explicitAdminPass` (e.g. a
+ *      resolved `--admin-pass` flag) or `explicitKeyPath` (e.g. `--key`,
+ *      paired with `agentId`). Always wins; this is the operator saying
+ *      "use exactly this."
+ *   2. ENV — `FLAIR_TOKEN` (Bearer) or `FLAIR_ADMIN_PASS` / `HDB_ADMIN_
+ *      PASSWORD` (Basic admin auth). Ambient but still an explicit
+ *      operator/CI choice.
+ *   3. A PINNED agent identity — `agentId` was already known (an --agent
+ *      flag, FLAIR_AGENT_ID env, or an id the caller extracted from its own
+ *      request body/query string) — signed with THAT agent's key via the
+ *      standard `resolveKeyPath` lookup. Deliberately ABOVE the admin-pass
+ *      file: naming a specific agent identity is a deliberate choice that
+ *      should win over the ambient convenience file (flair#634 precedent —
+ *      preserved bit-for-bit; see test/unit/local-no-auth.test.ts).
+ *   4. The secure `~/.flair/admin-pass` file `flair init` writes (LOCAL
+ *      TARGETS ONLY — never sent to a --target/FLAIR_URL/FLAIR_TARGET
+ *      remote instance; see `resolveLocalAdminPass`).
+ *   5. THE FLOOR (flair#747, generalizing flair#742's upgrade-only
+ *      fallback) — when NOTHING above resolved to anything sendable at
+ *      all, sign the SAME request with every registered key under
+ *      `~/.flair/keys` (sorted, deterministic order), first one the server
+ *      accepts wins. This is the credential every headless/agent machine
+ *      actually has, and is exactly the flair#741 incident's fix: an agent
+ *      key existed the whole time, nothing tried it.
+ *
+ * Tier 5 ONLY ever engages when the primary attempt fails with
+ * `ApiHttpError.noCredentials` — i.e. truly nothing was sent (a bare 403
+ * with no Authorization header at all). A credential that WAS sent and got
+ * rejected (bad admin pass, unregistered FLAIR_AGENT_ID) is a different,
+ * more specific failure; guessing at unrelated keys on disk in that case
+ * would obscure the real error instead of explaining it (the flair#741 fix
+ * #3 lesson, applied here — see `sendJsonRequest`'s 403 branch).
+ */
+
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { createPrivateKey, randomUUID, sign as nodeCryptoSign } from "node:crypto";
+
+// ─── Failure classification ─────────────────────────────────────────────────
+
+/**
+ * Thrown by `sendJsonRequest` for an HTTP-level failure (as opposed to a
+ * network error, which fetch() itself throws before a status code ever
+ * exists). Data-carrying, not just a message string, so callers downstream
+ * can make decisions without re-parsing text (flair#741):
+ *   - `status`: the HTTP status code, so probeInstance (src/probe.ts) can
+ *     classify ProbeResult.authFailureKind (401/403 = credential failure,
+ *     duck-typed off this property).
+ *   - `noCredentials`: true only for the specific bare-403-no-auth-header
+ *     case — distinguishes "we had nothing to send" from "we sent
+ *     something and it was rejected", which is exactly the signal
+ *     `authedRequest` uses to decide whether tier 5 (the floor) applies.
+ */
+export class ApiHttpError extends Error {
+  readonly status: number;
+  readonly noCredentials: boolean;
+  constructor(status: number, message: string, noCredentials = false) {
+    super(message);
+    this.name = "ApiHttpError";
+    this.status = status;
+    this.noCredentials = noCredentials;
+  }
+}
+
+// ─── Admin-pass file handling ───────────────────────────────────────────────
+
+/**
+ * Read a secret (admin password, Fabric password, ...) from a file, refusing
+ * if the file is world/group readable.
+ *
+ * Secret files (default ~/.flair/admin-pass; also used for
+ * --fabric-password-file) are short-lived values generated by `openssl
+ * rand` — mode 0600 keeps them out of reach of other local users + most
+ * backup tooling. A 0644 file silently leaks the secret to anyone with read
+ * access to the user's home (multi-user hosts, NFS, time-machine snapshots,
+ * etc.).
+ *
+ * Throws with an actionable error if the file isn't owner-only, otherwise
+ * returns the trimmed file content (values generated by `openssl rand
+ * -base64` conventionally end in a newline). `flagName` is only used to
+ * personalize the error text (e.g. "--admin-pass-file" vs
+ * "--fabric-password-file") — the check itself is identical either way.
+ */
+export function readSecretFileSecure(path: string, flagName: string): string {
+  if (!existsSync(path)) {
+    throw new Error(`${flagName} path does not exist: ${path}`);
+  }
+  const st = statSync(path);
+  if (st.mode & 0o077) {
+    const modeOctal = (st.mode & 0o777).toString(8).padStart(3, "0");
+    throw new Error(
+      `Refusing to read ${flagName} at ${path}: permissions ${modeOctal} are too open. ` +
+        `Run \`chmod 600 ${path}\` to restrict to owner-only.`
+    );
+  }
+  const content = readFileSync(path, "utf-8").replace(/\s+$/, "");
+  if (!content) {
+    throw new Error(`${flagName}: file is empty or contains only whitespace: ${path}`);
+  }
+  return content;
+}
+
+/** `readSecretFileSecure` specialized for --admin-pass-file (see that function for the shared check). */
+export function readAdminPassFileSecure(path: string): string {
+  return readSecretFileSecure(path, "--admin-pass-file");
+}
+
+export function defaultAdminPassPath(): string {
+  return join(homedir(), ".flair", "admin-pass");
+}
+
+export function defaultKeysDir(): string {
+  return join(homedir(), ".flair", "keys");
+}
+
+/**
+ * Resolve an admin password for LOCAL-only CLI convenience (`agent add`,
+ * `principal add`) without requiring `--admin-pass` on every call (#590).
+ * Also reused by `authedRequest`'s tier 4 (local-target file fallback,
+ * flair#634) — called there as `resolveLocalAdminPass(undefined,
+ * !isLocal)`, so only its file leg ever fires (the env leg is already
+ * handled by tier 2 first).
+ *
+ * Resolution order: explicit value (the `--admin-pass` flag) → `FLAIR_ADMIN_PASS`
+ * env → the secure `~/.flair/admin-pass` file `flair init` already writes with
+ * mode 0600 (read via `readAdminPassFileSecure`, which enforces that mode).
+ *
+ * When `isRemoteTarget` is true, ONLY the explicit value is honored — the env
+ * and file legs are skipped entirely. This is the security-critical guard: a
+ * `--target`/`--ops-target` deploy must never silently reuse THIS machine's
+ * local admin secret against someone else's Harper instance. Remote callers
+ * keep requiring an explicit `--admin-pass`.
+ *
+ * Throws (via readAdminPassFileSecure) if the file exists but has unsafe
+ * permissions, so a misconfigured file surfaces as an actionable chmod error
+ * instead of a generic "admin pass required" message.
+ */
+export function resolveLocalAdminPass(
+  explicit: string | undefined,
+  isRemoteTarget = false,
+  adminPassPath: string = defaultAdminPassPath(),
+): string | undefined {
+  if (explicit) return explicit;
+  if (isRemoteTarget) return undefined;
+  if (process.env.FLAIR_ADMIN_PASS) return process.env.FLAIR_ADMIN_PASS;
+  if (!existsSync(adminPassPath)) return undefined;
+  return readAdminPassFileSecure(adminPassPath);
+}
+
+// ─── Ed25519 agent-key signing ──────────────────────────────────────────────
+
+/** Find the agent's private key file from standard locations. */
+export function resolveKeyPath(agentId: string): string | null {
+  const candidates = [
+    process.env.FLAIR_KEY_DIR ? join(process.env.FLAIR_KEY_DIR, `${agentId}.key`) : null,
+    join(homedir(), ".flair", "keys", `${agentId}.key`),
+    join(homedir(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
+  ].filter(Boolean) as string[];
+  return candidates.find((p) => existsSync(p)) ?? null;
+}
+
+/** Build a TPS-Ed25519 auth header from a raw 32-byte seed on disk. */
+export function buildEd25519Auth(agentId: string, method: string, path: string, keyPath: string): string {
+  const raw = readFileSync(keyPath);
+  const pkcs8Header = Buffer.from("302e020100300506032b657004220420", "hex");
+  let privKey: ReturnType<typeof createPrivateKey>;
+  if (raw.length === 32) {
+    // Raw 32-byte seed
+    privKey = createPrivateKey({ key: Buffer.concat([pkcs8Header, raw]), format: "der", type: "pkcs8" });
+  } else {
+    // Try as base64-encoded PKCS8 DER (standard Flair key format)
+    const decoded = Buffer.from(raw.toString("utf-8").trim(), "base64");
+    if (decoded.length === 32) {
+      // Base64-encoded raw seed
+      privKey = createPrivateKey({ key: Buffer.concat([pkcs8Header, decoded]), format: "der", type: "pkcs8" });
+    } else {
+      // Full PKCS8 DER or PEM
+      try {
+        privKey = createPrivateKey({ key: decoded, format: "der", type: "pkcs8" });
+      } catch {
+        privKey = createPrivateKey(raw);
+      }
+    }
+  }
+  const ts = Date.now().toString();
+  const nonce = randomUUID();
+  const payload = `${agentId}:${ts}:${nonce}:${method}:${path}`;
+  const sig = nodeCryptoSign(null, Buffer.from(payload), privKey).toString("base64");
+  return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sig}`;
+}
+
+/** Authenticated fetch against Flair using Ed25519. */
+export async function authFetch(
+  baseUrl: string,
+  agentId: string,
+  keyPath: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<Response> {
+  const auth = buildEd25519Auth(agentId, method, path, keyPath);
+  const headers: Record<string, string> = { Authorization: auth };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  return fetch(`${baseUrl}${path}`, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+}
+
+export function isLocalBase(base: string): boolean {
+  try {
+    const url = new URL(base);
+    return url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
+  } catch {
+    return !base;
+  }
+}
+
+// ─── HTTP + response handling ───────────────────────────────────────────────
+
+/**
+ * Perform the actual Flair REST call with an already-resolved Authorization
+ * header (or none) and classify the response. Shared by the primary
+ * (tiers 1-4) attempt and each tier-5 floor attempt below, so both paths
+ * agree on 204/empty-body handling, JSON parsing, and the no-credentials
+ * 403 hint text.
+ */
+export async function sendJsonRequest(
+  baseUrl: string,
+  method: string,
+  path: string,
+  body: unknown,
+  authHeader: string | undefined,
+  isLocal: boolean,
+): Promise<any> {
+  const res = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: {
+      "content-type": "application/json",
+      ...(authHeader ? { authorization: authHeader } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  // Handle 204 No Content (e.g., PUT upsert returns empty body)
+  if (res.status === 204 || res.headers.get("content-length") === "0") {
+    if (!res.ok) throw new ApiHttpError(res.status, `HTTP ${res.status}`);
+    return { ok: true };
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    // 403 with no credentials sent at all is the flair#634 case: a gated
+    // resource rejected a credential-less call. Name the fix instead of
+    // surfacing the raw "forbidden" body — never a stack trace.
+    if (res.status === 403 && !authHeader) {
+      const hint = isLocal
+        ? "Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key."
+        : "Set FLAIR_ADMIN_PASS (remote targets have no local admin-pass fallback).";
+      throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
+    }
+    throw new ApiHttpError(res.status, text || `HTTP ${res.status}`);
+  }
+  if (!text) return { ok: true };
+  return JSON.parse(text);
+}
+
+/**
+ * Tier 5, the floor (flair#747, generalizing flair#742's `verifyAuthedGet`
+ * GET-only fallback to any method/body): try every registered key in
+ * `keysDir` in sorted (deterministic) filename order, first one that
+ * authenticates wins. Returns `undefined` — never throws — when every key
+ * fails or none exist, so the caller can rethrow its ORIGINAL
+ * no-credentials error rather than a floor-specific one.
+ */
+export async function tryAgentKeyFloor(
+  baseUrl: string,
+  method: string,
+  path: string,
+  body: unknown,
+  keysDir: string,
+): Promise<any> {
+  let keyFiles: string[] = [];
+  try {
+    keyFiles = readdirSync(keysDir).filter((f) => f.endsWith(".key")).sort();
+  } catch {
+    // No keys dir at all — nothing to fall back to.
+  }
+  const isLocal = isLocalBase(baseUrl);
+  for (const kf of keyFiles) {
+    const agentId = kf.replace(/\.key$/, "");
+    const keyPath = join(keysDir, kf);
+    try {
+      const authHeader = buildEd25519Auth(agentId, method, path, keyPath);
+      return await sendJsonRequest(baseUrl, method, path, body, authHeader, isLocal);
+    } catch {
+      // This key didn't work (unregistered, bad signature, network blip on
+      // this one attempt) — try the next one.
+    }
+  }
+  return undefined;
+}
+
+// ─── The unified resolver ───────────────────────────────────────────────────
+
+export interface AuthedRequestOptions {
+  /** Base URL of the Flair instance (e.g. http://127.0.0.1:19926). */
+  baseUrl: string;
+  /** Pre-computed isLocal; derived from baseUrl via isLocalBase when omitted. */
+  isLocal?: boolean;
+  /** Tier 1 — an already-resolved explicit admin credential (e.g. a
+   *  --admin-pass flag the caller checked before its own env fallback). */
+  explicitAdminPass?: string;
+  /** Tier 1 — an explicit key file path (e.g. --key). Requires `agentId`;
+   *  wins over env and the standard resolveKeyPath(agentId) lookup. */
+  explicitKeyPath?: string;
+  /** An agentId already pinned for this call — an --agent flag,
+   *  FLAIR_AGENT_ID env, or an id the caller extracted from its own
+   *  request body/query string. Used by both the explicit-key tier (the
+   *  identity `explicitKeyPath` signs for) and tier 3's standard
+   *  resolveKeyPath(agentId) lookup. */
+  agentId?: string;
+  /** Directory scanned for tier 5, the floor. Default ~/.flair/keys. */
+  keysDir?: string;
+}
+
+/**
+ * The shared resolver: given a Flair REST call and whatever credential
+ * material the caller already knows about, resolve auth across all 5 tiers
+ * (see module header) and perform the request. Throws `ApiHttpError` on
+ * any non-2xx response (after the tier-5 floor has also been exhausted).
+ */
+export async function authedRequest(
+  method: string,
+  path: string,
+  body: unknown,
+  opts: AuthedRequestOptions,
+): Promise<any> {
+  const isLocal = opts.isLocal ?? isLocalBase(opts.baseUrl);
+  const keysDir = opts.keysDir ?? defaultKeysDir();
+  let authHeader: string | undefined;
+
+  // Tier 1: explicit — caller-resolved flag material always wins.
+  if (opts.explicitAdminPass) {
+    authHeader = `Basic ${Buffer.from(`admin:${opts.explicitAdminPass}`).toString("base64")}`;
+  } else if (opts.explicitKeyPath && opts.agentId) {
+    try {
+      authHeader = buildEd25519Auth(opts.agentId, method, path, opts.explicitKeyPath);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`Warning: Ed25519 auth failed for agent '${opts.agentId}': ${message}`);
+    }
+  }
+
+  // Tier 2: env — FLAIR_TOKEN (Bearer), else FLAIR_ADMIN_PASS/HDB_ADMIN_PASSWORD (Basic).
+  if (!authHeader) {
+    if (process.env.FLAIR_TOKEN) {
+      authHeader = `Bearer ${process.env.FLAIR_TOKEN}`;
+    } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
+      const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD!;
+      authHeader = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
+    }
+  }
+
+  // Tier 3: a PINNED agent identity — sign specifically as this agent via
+  // the standard key lookup (skipped if tier 1 already signed as this
+  // agent via an explicit key path).
+  if (!authHeader && opts.agentId) {
+    const keyPath = resolveKeyPath(opts.agentId);
+    if (keyPath) {
+      try {
+        authHeader = buildEd25519Auth(opts.agentId, method, path, keyPath);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`Warning: Ed25519 auth failed for agent '${opts.agentId}': ${message}`);
+      }
+    }
+  }
+
+  // Tier 4: LOCAL TARGETS ONLY — the secure ~/.flair/admin-pass file.
+  if (!authHeader) {
+    try {
+      const filePass = resolveLocalAdminPass(undefined, !isLocal);
+      if (filePass) {
+        authHeader = `Basic ${Buffer.from(`admin:${filePass}`).toString("base64")}`;
+      }
+    } catch (err: unknown) {
+      // File exists but has unsafe permissions — warn (never the secret
+      // itself) and fall through to no-auth / the floor.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`Warning: ~/.flair/admin-pass unusable: ${message}`);
+    }
+  }
+
+  try {
+    return await sendJsonRequest(opts.baseUrl, method, path, body, authHeader, isLocal);
+  } catch (err: unknown) {
+    // Tier 5 — the floor. Only engages when NOTHING above resolved to
+    // anything sendable (see module header for why a rejected credential
+    // does not retry here).
+    if (err instanceof ApiHttpError && err.noCredentials) {
+      const floorResult = await tryAgentKeyFloor(opts.baseUrl, method, path, body, keysDir);
+      if (floorResult !== undefined) return floorResult;
+    }
+    throw err;
+  }
+}
