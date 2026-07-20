@@ -606,6 +606,101 @@ describe("supersede auth (memory_update preserveHistory mode)", () => {
   });
 });
 
+// ─── flair#704: explicit `supersedes: null` treated as absent ──────────────
+// JSON writers that serialize optional fields as null (e.g.
+// `JSON.stringify({supersedes: x ?? null})`) previously hit the same "must
+// be a string" 400 that a genuinely malformed value would — even though
+// OMITTING the key entirely worked fine. Fixed in
+// validateAndAuthorizeSupersedes (additive-schema convention, flair#695: an
+// explicit null on an optional/nullable field reads as absent). These tests
+// prove: (1) null succeeds and the stored row has NO supersedes key at all
+// — not a literal null, genuinely absent, matching the omitted-key case
+// byte-for-byte — for both post() and put(); (2) a valid string value is
+// completely unaffected; (3) a genuinely malformed (non-string, non-null)
+// value is STILL rejected with 400 on both post() and put() — the leniency
+// is null-specific, not a general type-check weakening.
+describe("flair#704: Memory.put/post — explicit supersedes: null treated as absent", () => {
+  it("Memory.post: supersedes: null succeeds; stored row has no supersedes key (byte-for-byte matches the omitted-key case)", async () => {
+    const mNull = makeMemory(agentCtx("agent-1"));
+    const rNull = await mNull.post({ agentId: "agent-1", content: "Null-supersedes write, long enough for the gate.", supersedes: null });
+    expect(rNull instanceof Response).toBe(false);
+    expect((rNull as any).written).toBe(true);
+    const storedNull = await BaseMemory.get((rNull as any).id);
+    expect("supersedes" in storedNull).toBe(false);
+    expect(storedNull.supersedes).toBeUndefined();
+
+    const mOmit = makeMemory(agentCtx("agent-1"));
+    const rOmit = await mOmit.post({ agentId: "agent-1", content: "Omitted-supersedes write, long enough for the gate." });
+    const storedOmit = await BaseMemory.get((rOmit as any).id);
+    expect("supersedes" in storedOmit).toBe(false);
+
+    // Byte-for-byte: identical key SET on both stored rows (id/content/embedding
+    // differ by design — those aren't the field under test).
+    expect(Object.keys(storedNull).sort()).toEqual(Object.keys(storedOmit).sort());
+  });
+
+  it("Memory.put (fresh id): supersedes: null succeeds; stored row has no supersedes key (matches the omitted-key create case)", async () => {
+    const mNull = makeMemory(agentCtx("agent-1"));
+    const rNull = await mNull.put({ id: "agent-1-put-null-supersedes", agentId: "agent-1", content: "Fresh PUT with null supersedes, long enough for the gate.", supersedes: null });
+    expect(rNull instanceof Response).toBe(false);
+    const storedNull = await BaseMemory.get("agent-1-put-null-supersedes");
+    expect("supersedes" in storedNull).toBe(false);
+
+    const mOmit = makeMemory(agentCtx("agent-1"));
+    const rOmit = await mOmit.put({ id: "agent-1-put-omit-supersedes", agentId: "agent-1", content: "Fresh PUT with supersedes omitted, long enough for the gate." });
+    const storedOmit = await BaseMemory.get("agent-1-put-omit-supersedes");
+    expect("supersedes" in storedOmit).toBe(false);
+    expect(Object.keys(storedNull).sort()).toEqual(Object.keys(storedOmit).sort());
+  });
+
+  it("Memory.put on an EXISTING record: an explicit supersedes: null in the merged payload clears a previously-set value (never persists literal null)", async () => {
+    const mOwner = makeMemory(agentCtx("agent-1"));
+    const target = await mOwner.post({ agentId: "agent-1", content: "Target record for the clear-via-null test, long enough for the gate." });
+    const mCreate = makeMemory(agentCtx("agent-1"));
+    const created = await mCreate.post({ agentId: "agent-1", content: "Record that starts out superseding target.", supersedes: target.id });
+    expect((await BaseMemory.get(created.id)).supersedes).toBe(target.id);
+
+    // Simulate a JSON writer's merge-and-clear: read existing, overwrite
+    // supersedes with an explicit null, PUT back (full-record replacement).
+    const existing = await BaseMemory.get(created.id);
+    const merged = { ...existing, supersedes: null, updatedAt: new Date().toISOString() };
+    const mUpdate = makeMemory(agentCtx("agent-1"));
+    const res = await mUpdate.put(merged);
+    expect(res instanceof Response).toBe(false);
+
+    const after = await BaseMemory.get(created.id);
+    expect("supersedes" in after).toBe(false);
+    expect(after.supersedes).toBeUndefined();
+  });
+
+  it("supersedes with a valid string id is completely unaffected by the null-leniency fix (post and put)", async () => {
+    const mOwner = makeMemory(agentCtx("agent-1"));
+    const owned = await mOwner.post({ agentId: "agent-1", content: "Original, long enough for the gate." });
+
+    const mPost = makeMemory(agentCtx("agent-1"));
+    const rPost = await mPost.post({ agentId: "agent-1", content: "New version via post, long enough for the gate.", supersedes: owned.id });
+    expect(rPost instanceof Response).toBe(false);
+    expect((await BaseMemory.get((rPost as any).id)).supersedes).toBe(owned.id);
+
+    const mPut = makeMemory(agentCtx("agent-1"));
+    const rPut = await mPut.put({ id: "agent-1-put-valid-supersedes", agentId: "agent-1", content: "New version via put, long enough for the gate.", supersedes: owned.id });
+    expect(rPut instanceof Response).toBe(false);
+    expect((await BaseMemory.get("agent-1-put-valid-supersedes")).supersedes).toBe(owned.id);
+  });
+
+  it("a genuinely malformed (non-string, non-null) supersedes is still rejected with 400 on both post() and put() — leniency is null-specific, not a general weakening", async () => {
+    const mPost = makeMemory(agentCtx("agent-1"));
+    const resPost = await mPost.post({ agentId: "agent-1", content: "Bad supersedes via post, long enough for the gate.", supersedes: 12345 });
+    expect(resPost instanceof Response).toBe(true);
+    expect((resPost as Response).status).toBe(400);
+
+    const mPut = makeMemory(agentCtx("agent-1"));
+    const resPut = await mPut.put({ id: "agent-1-put-bad-supersedes", agentId: "agent-1", content: "Bad supersedes via put, long enough for the gate.", supersedes: 12345 });
+    expect(resPut instanceof Response).toBe(true);
+    expect((resPut as Response).status).toBe(400);
+  });
+});
+
 // ─── Supersede transaction — write-new BEFORE close-old, observable failure ──
 describe("supersede transaction (write-new-before-close-old fix)", () => {
   it("write-new happens BEFORE close-old (call order)", async () => {

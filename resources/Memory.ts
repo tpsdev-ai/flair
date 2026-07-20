@@ -322,8 +322,26 @@ async function hasWriteGrant(granteeId: string, ownerId: string): Promise<boolea
  * requires a "write" MemoryGrant from the target's owner (reuses the existing
  * agent-auth/grant machinery — no parallel auth logic). Returns a Response to
  * short-circuit with (400/403), or null to continue.
+ *
+ * flair#704: an explicit `supersedes: null` — the shape most JSON writers
+ * produce for an unset optional field (`JSON.stringify({supersedes: undefined})`
+ * drops the key, but plenty of writers instead do `{supersedes: x ?? null}`)
+ * — must be treated identically to the key being OMITTED, per the
+ * additive-schema convention (flair#695: an explicit null on an
+ * optional/nullable field reads as absent, not as a distinct value). Fixed by
+ * deleting the key BEFORE the type check below, so (a) the check never
+ * rejects it, and (b) `super.put()`/`super.post()` — Harper full-record
+ * replacement, see table-helpers.ts's header comment — never persists a
+ * literal `null` where "absent" was intended: the stored row ends up
+ * byte-for-byte identical to the omitted-key case, so every downstream
+ * `!content.supersedes` / `content.supersedes &&` check below (and in
+ * closeSupersededIfNeeded) already treats it as unset with no further
+ * changes needed.
  */
 async function validateAndAuthorizeSupersedes(content: any, auth: AgentAuthVerdict): Promise<Response | null> {
+  if (content.supersedes === null) {
+    delete content.supersedes;
+  }
   if (content.supersedes !== undefined && typeof content.supersedes !== "string") {
     return new Response(JSON.stringify({ error: "supersedes must be a string (memory ID)" }), {
       status: 400, headers: { "Content-Type": "application/json" },
