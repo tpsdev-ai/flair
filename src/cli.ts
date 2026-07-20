@@ -17,6 +17,7 @@ import {
   statSync,
   lstatSync,
   realpathSync,
+  unlinkSync,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname } from "node:path";
@@ -219,6 +220,124 @@ const HEALTH_POLL_INTERVAL_MS = 500;
 
 function defaultDataDir(): string {
   return join(homedir(), ".flair", "data");
+}
+
+// ─── launchd label (flair#693) ─────────────────────────────────────────────
+// A bare "ai.tpsdev.flair" label is global to the current macOS user's
+// launchd session. A second Flair instance on one host (dev + prod, a
+// second user, the Harper-app embedded-component shape) used to collide on
+// that SAME label — `flair start`/`stop`/`restart` from either instance
+// could silently unload/replace the OTHER instance's daemon (see
+// test/unit/upgrade-data-snapshot.test.ts's header for the exact hazard
+// this caused, pre-fix).
+//
+// The label now incorporates instance identity: a short deterministic hash
+// of the RESOLVED data dir. Same data dir -> same label every run
+// (idempotent init/start/stop); different data dirs -> different labels,
+// so two instances can never collide. Every code path that touches the
+// label goes through the helpers below — no scattered label string
+// literals — and resolveLaunchdLabel()/migrateLegacyLaunchdLabel() handle
+// finding + cleanly migrating a pre-flair#693 install off the bare legacy
+// label so it is never orphaned.
+const LEGACY_LAUNCHD_LABEL = "ai.tpsdev.flair";
+
+function defaultLaunchAgentsDir(): string {
+  return join(homedir(), "Library", "LaunchAgents");
+}
+
+/** Instance-scoped launchd label for `dataDir`: ai.tpsdev.flair.<8-hex-char sha256 of the resolved data dir>. */
+function launchdLabel(dataDir: string): string {
+  const hash = createHash("sha256").update(resolve(dataDir), "utf8").digest("hex").slice(0, 8);
+  return `${LEGACY_LAUNCHD_LABEL}.${hash}`;
+}
+
+function launchdPlistPath(label: string, launchAgentsDir: string = defaultLaunchAgentsDir()): string {
+  return join(launchAgentsDir, `${label}.plist`);
+}
+
+/**
+ * Which launchd label an existing installation for `dataDir` is actually
+ * registered under right now. Prefers the new instance-scoped label if its
+ * plist is present; falls back to the pre-flair#693 bare
+ * LEGACY_LAUNCHD_LABEL if only THAT plist is present (so start/stop/
+ * uninstall against an old install still find and manage it instead of
+ * silently no-op'ing and orphaning it); otherwise returns the new label
+ * with nothing registered yet (e.g. before the first `init`).
+ * `launchAgentsDir` is injectable so tests can point this at a temp dir
+ * instead of the real ~/Library/LaunchAgents.
+ */
+function resolveLaunchdLabel(
+  dataDir: string,
+  launchAgentsDir: string = defaultLaunchAgentsDir(),
+): { label: string; plistPath: string; isLegacy: boolean } {
+  const newLabel = launchdLabel(dataDir);
+  const newPlistPath = launchdPlistPath(newLabel, launchAgentsDir);
+  if (existsSync(newPlistPath)) return { label: newLabel, plistPath: newPlistPath, isLegacy: false };
+
+  const legacyPlistPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+  if (existsSync(legacyPlistPath)) return { label: LEGACY_LAUNCHD_LABEL, plistPath: legacyPlistPath, isLegacy: true };
+
+  return { label: newLabel, plistPath: newPlistPath, isLegacy: false };
+}
+
+/** Runs one `launchctl ...` shell command; injected so tests can record/mock without touching real launchd. */
+type LaunchctlRunner = (cmd: string) => void;
+
+/**
+ * Migrate a pre-flair#693 legacy-labeled launchd service to the new
+ * instance-scoped label for `dataDir`: unload the legacy service FIRST,
+ * then rewrite its plist content under the new label/path (same content,
+ * only the <Label> value and filename change) and remove the legacy plist
+ * file. There is never a moment where both the legacy and new labels are
+ * registered for the same data dir. No-op (migrated: false) if there's
+ * nothing legacy to migrate, or the new label is already registered.
+ */
+function migrateLegacyLaunchdLabel(
+  dataDir: string,
+  runLaunchctl: LaunchctlRunner,
+  launchAgentsDir: string = defaultLaunchAgentsDir(),
+): { migrated: boolean; label: string; plistPath: string } {
+  const resolved = resolveLaunchdLabel(dataDir, launchAgentsDir);
+  if (!resolved.isLegacy) {
+    return { migrated: false, label: resolved.label, plistPath: resolved.plistPath };
+  }
+
+  const newLabel = launchdLabel(dataDir);
+  const newPlistPath = launchdPlistPath(newLabel, launchAgentsDir);
+
+  try { runLaunchctl(`launchctl unload "${resolved.plistPath}"`); } catch { /* best effort */ }
+
+  const legacyContent = readFileSync(resolved.plistPath, "utf-8");
+  const newContent = legacyContent.replace(
+    `<key>Label</key><string>${LEGACY_LAUNCHD_LABEL}</string>`,
+    `<key>Label</key><string>${newLabel}</string>`,
+  );
+  writeFileSync(newPlistPath, newContent);
+  try { unlinkSync(resolved.plistPath); } catch { /* best effort */ }
+
+  return { migrated: true, label: newLabel, plistPath: newPlistPath };
+}
+
+/**
+ * Load + start `dataDir`'s launchd service, migrating off a pre-flair#693
+ * legacy registration FIRST if one is found (migrateLegacyLaunchdLabel
+ * above). Call order is load-bearing — unload legacy -> load new -> start
+ * new, never a window with both registered — and pinned by
+ * test/unit/launchd-label.test.ts. `load` failure is tolerated (e.g.
+ * "already loaded" is a common, harmless nonzero exit); `start` failure
+ * propagates so callers can fall back to a direct (non-launchd) start.
+ * Shared by the `start` command and startFlairProcess() (used by restart/
+ * upgrade/snapshot) so this sequence is expressed in exactly one place.
+ */
+function ensureLaunchdServiceLoaded(
+  dataDir: string,
+  runLaunchctl: LaunchctlRunner,
+  launchAgentsDir: string = defaultLaunchAgentsDir(),
+): { label: string; plistPath: string; migrated: boolean } {
+  const migration = migrateLegacyLaunchdLabel(dataDir, runLaunchctl, launchAgentsDir);
+  try { runLaunchctl(`launchctl load "${migration.plistPath}"`); } catch { /* already loaded, etc. — best effort */ }
+  runLaunchctl(`launchctl start ${migration.label}`);
+  return migration;
 }
 
 function configPath(): string {
@@ -2122,10 +2241,27 @@ program
       if (process.platform === "darwin") {
         const harperBinPath = harperBin();
         if (harperBinPath) {
-          const label = "ai.tpsdev.flair";
-          const plistDir = join(homedir(), "Library", "LaunchAgents");
+          const label = launchdLabel(dataDir);
+          const plistDir = defaultLaunchAgentsDir();
           mkdirSync(plistDir, { recursive: true });
-          const plistPath = join(plistDir, `${label}.plist`);
+          const plistPath = launchdPlistPath(label, plistDir);
+
+          // flair#693 migration: a pre-flair#693 install registered under
+          // the bare LEGACY_LAUNCHD_LABEL. init always writes fresh plist
+          // content below (it has the current ports/creds in hand), so
+          // migration here is just "clean up the old registration" —
+          // unload + remove it BEFORE writing the new one, so re-running
+          // init never leaves two services behind for this data dir.
+          const legacyPlistPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, plistDir);
+          if (existsSync(legacyPlistPath)) {
+            try {
+              const { execSync } = await import("node:child_process");
+              execSync(`launchctl unload "${legacyPlistPath}"`, { stdio: "pipe" });
+            } catch { /* best effort */ }
+            try { unlinkSync(legacyPlistPath); } catch { /* best effort */ }
+            console.log(`Migrated off legacy launchd label (${LEGACY_LAUNCHD_LABEL}) ✓`);
+          }
+
           const opsSocket = join(dataDir, "operations-server");
           // authorizeLocal: false (flair#654) — same posture as the initial spawn
           // above; the launchd-managed process must not diverge from it.
@@ -8782,9 +8918,10 @@ program
     const platform = process.platform;
 
     if (platform === "darwin") {
-      // macOS: try launchd first
-      const label = "ai.tpsdev.flair";
-      const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+      // macOS: try launchd first. resolveLaunchdLabel (flair#693) finds
+      // whichever label this data dir is actually registered under —
+      // the new instance-scoped one, or a pre-flair#693 legacy install.
+      const { plistPath } = resolveLaunchdLabel(defaultDataDir());
       if (existsSync(plistPath)) {
         try {
           const { execSync } = await import("node:child_process");
@@ -8841,13 +8978,16 @@ program
 
     const platform = process.platform;
     if (platform === "darwin") {
-      const label = "ai.tpsdev.flair";
-      const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+      // resolveLaunchdLabel (flair#693) finds whichever label this data
+      // dir is currently registered under (new instance-scoped, or a
+      // pre-flair#693 legacy install) so the existsSync gate below is
+      // accurate before we attempt anything.
+      const { plistPath } = resolveLaunchdLabel(dataDir);
       if (existsSync(plistPath)) {
         try {
           const { execSync } = await import("node:child_process");
-          try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
-          execSync(`launchctl start ${label}`, { stdio: "pipe" });
+          const { label, migrated } = ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
+          if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
           await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
           console.log("✅ Flair started (launchd)");
           return;
@@ -8916,8 +9056,12 @@ program
  */
 async function stopFlairProcess(port: number): Promise<void> {
   if (process.platform === "darwin") {
-    const label = "ai.tpsdev.flair";
-    const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+    const dataDir = defaultDataDir();
+    // resolveLaunchdLabel (flair#693) finds whichever label this data dir
+    // is currently registered under (new instance-scoped, or a
+    // pre-flair#693 legacy install) — stop only needs to operate on
+    // whichever exists, no migration.
+    const { label, plistPath } = resolveLaunchdLabel(dataDir);
     if (existsSync(plistPath)) {
       try {
         const { execSync } = await import("node:child_process");
@@ -8927,7 +9071,7 @@ async function stopFlairProcess(port: number): Promise<void> {
         // immediately restart can verify exit. Without this, waitForHealth
         // can race against the still-shutting-down old process and return
         // success before KeepAlive brings the new one up.
-        const oldPid = readHarperPid(defaultDataDir());
+        const oldPid = readHarperPid(dataDir);
         try { execSync(`launchctl stop ${label}`, { stdio: "pipe" }); } catch {}
         if (oldPid) await waitForProcessExit(oldPid, STARTUP_TIMEOUT_MS);
         return;
@@ -8958,14 +9102,15 @@ async function stopFlairProcess(port: number): Promise<void> {
  * Counterpart to `stopFlairProcess`; see that function's doc comment.
  */
 async function startFlairProcess(port: number): Promise<void> {
+  const dataDir = defaultDataDir();
   if (process.platform === "darwin") {
-    const label = "ai.tpsdev.flair";
-    const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+    // resolveLaunchdLabel (flair#693) finds whichever label this data dir
+    // is currently registered under before we attempt anything.
+    const { plistPath } = resolveLaunchdLabel(dataDir);
     if (existsSync(plistPath)) {
       try {
         const { execSync } = await import("node:child_process");
-        try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
-        try { execSync(`launchctl start ${label}`, { stdio: "pipe" }); } catch {}
+        ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
         await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
         return;
       } catch (err: any) {
@@ -8980,7 +9125,6 @@ async function startFlairProcess(port: number): Promise<void> {
     throw new Error("Harper binary not found. Run 'flair init' first.");
   }
 
-  const dataDir = defaultDataDir();
   // Match `flair start`: accept either HDB_ADMIN_PASSWORD or FLAIR_ADMIN_PASS.
   // Without this, `flair init --admin-pass X` (which only exports HDB_*
   // to the initial Harper spawn) followed by `flair restart` would silently
@@ -9053,19 +9197,26 @@ program
     const platform = process.platform;
     const port = readPortFromConfig() ?? DEFAULT_PORT;
 
-    // Stop first: remove launchd service on macOS, then kill by port on all platforms
+    // Stop first: remove launchd service(s) on macOS, then kill by port on
+    // all platforms. Removes BOTH the new instance-scoped plist and a
+    // pre-flair#693 legacy plist if present — uninstall's job is to purge
+    // everything for this data dir, so it doesn't rely on resolveLaunchdLabel's
+    // "prefer new" pick alone (which would skip a stray legacy leftover).
     if (platform === "darwin") {
-      const label = "ai.tpsdev.flair";
-      const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
-      if (existsSync(plistPath)) {
-        try {
-          const { execSync } = await import("node:child_process");
-          execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" });
-        } catch { /* best effort */ }
-        const { unlinkSync } = await import("node:fs");
-        unlinkSync(plistPath);
-        console.log("✅ Launchd service removed");
+      const dataDir = defaultDataDir();
+      const candidatePlists = [launchdPlistPath(launchdLabel(dataDir)), launchdPlistPath(LEGACY_LAUNCHD_LABEL)];
+      let removedAny = false;
+      for (const plistPath of candidatePlists) {
+        if (existsSync(plistPath)) {
+          try {
+            const { execSync } = await import("node:child_process");
+            execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" });
+          } catch { /* best effort */ }
+          unlinkSync(plistPath);
+          removedAny = true;
+        }
       }
+      if (removedAny) console.log("✅ Launchd service removed");
     }
     // Kill any process still on the port (covers direct-start, no-service, or failed unload)
     try {
@@ -13133,4 +13284,12 @@ export {
   parseTokenFromFile,
   resolveLocalAdminPass,
   readAdminPassFileSecure,
+
+  // launchd label (flair#693)
+  LEGACY_LAUNCHD_LABEL,
+  launchdLabel,
+  launchdPlistPath,
+  resolveLaunchdLabel,
+  migrateLegacyLaunchdLabel,
+  ensureLaunchdServiceLoaded,
 };
