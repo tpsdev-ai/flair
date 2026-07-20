@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### ⬆️ @harperfast/oauth 2.2.0 → 2.4.0 — inherits the callback session-binding + DCR-default-disabled security fixes
+
+Bumps the exact pin two minors. 2.3.0 added the backward-compatible `onLogin` outcome hook (plain/undefined returns unchanged — flair uses none). 2.4.0 ships two security fixes flair benefits from directly: **OAuth callbacks are now bound to the initiating browser session** (#181/#183 — rejects a state token minted in a different session, the RFC 6749 §10.12 login-CSRF class), and **MCP DCR now defaults to disabled when the `dynamicClientRegistration` block is absent** (#182/#184 — the pre-2.4.0 default was open, ungated registration). The latter makes flair#757's explicit `dynamicClientRegistration: { enabled: false }` belt-and-suspenders rather than load-bearing, and closes the exposure for any flair instance that enabled the OAuth surface without writing the block. flair's CIMD-only config surface (`clientIdMetadataDocuments.allowedHosts`) is unchanged and verified against 2.4.0 — the mcp-enable/handler/grant suites and the full unit suite pass green. Dependency + lockfile only, no flair code change.
+
 ### 🐛 Instance-scoped launchd label — a second instance no longer silently replaces the first (flair#693)
 
 Found the hard way during CI-lane validation on a shared host: `flair init`/`start`/`stop` registered their macOS launchd service under the hardcoded label `ai.tpsdev.flair`, independent of HOME or data dir. A second Flair instance on the same host — a dev checkout next to prod, a second user, the Harper-app embedded-component shape — collided with and could unload/replace the production daemon.
