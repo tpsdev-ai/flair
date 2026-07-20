@@ -16,6 +16,16 @@ Found the hard way during CI-lane validation on a shared host: `flair init`/`sta
 
 Closes #693.
 
+### 🐛 Deterministic deploy child-process output capture — kills the #699 CI flake
+
+`deploy.test.ts`'s "--deploy-retries 0 disables retry" (and the rest of the replication-flake suite) intermittently failed under loaded CI runners with the generic `"harper deploy exited with code 1"` instead of the parsed `/peer replication failed after 1 attempt/` signature — a real output-capture race in production code, not a test-only artifact.
+
+- **Root cause** (`src/deploy.ts`'s `spawnHarperCaptured`): the promise resolved on the child process's `"exit"` event, which Node's own docs warn can fire while the piped stdout/stderr streams are still delivering buffered `data` events. Under scheduler pressure, `exit` could win the race against the final stderr chunk — often exactly the line carrying the replication-failure signature, since it's written immediately before `process.exit()` — so `REPLICATION_FAILURE_RE` silently missed a match it should have made, and `runHarperDeploy` fell through to the generic exit-code error. This affects real `harper deploy` invocations too, not just the test's scripted fake binary.
+- **Fix**: resolve on `"close"` instead — the event Node guarantees fires only after all stdio streams have ended, i.e. every `data` chunk has already been delivered to the listeners before the promise resolves. No retry, no sleep, no skip — the deploy code now waits on the correct completion signal.
+- **Verify**: `deploy.test.ts`'s "disables retry" test looped 50x clean (0 failures), then 50x again under genuine concurrent load (8 CPU-bound hogs at ~97% each on a 10-core box, plus 6-way concurrent `bun test` invocations racing for CPU/pipe I/O) — 0 failures. Full `deploy.test.ts` looped 30x in isolation — 0 failures. Full `test/unit/` suite green (2614 pass). The exact race window is narrow enough that it could not be forced locally even under heavy synthetic load or a standalone spawn-concurrency probe (consistent with the issue's own report that all 37 deploy tests passed locally and it only manifested on loaded CI runners) — the fix is a structural guarantee from Node's documented `close`-vs-`exit` API contract, not a probabilistic mitigation.
+
+Closes #699.
+
 ### ✨ Ed25519 agent key as the universal CLI auth floor (flair#747)
 
 Generalizes flair#741/#742's upgrade-only agent-key fallback into ONE shared resolver adopted across every auth-requiring CLI surface. Before this, CLI auth resolved through per-command admin-pass chains that mostly ignored `~/.flair/keys/<agentId>.key` — the credential a headless/agent machine actually has — unless an agentId was already known some other way. That mismatch is exactly what produced flair#741's false "instance state UNKNOWN" terror on `flair upgrade`; this closes the same gap everywhere else it existed.
