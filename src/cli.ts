@@ -213,6 +213,13 @@ const DEFAULT_ADMIN_USER = "admin";
 const STARTUP_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 
+// flair#670 — single-host default for the Harper ops API bind address.
+// Loopback-only (+ the domain socket, always provisioned) shrinks the
+// network-exposure surface: single-host installs don't need :9925 reachable
+// from any interface but the box itself, so an accidentally-exposed port
+// (misconfigured firewall/container networking) can't be reached remotely.
+const DEFAULT_OPS_BIND_HOST = "127.0.0.1";
+
 // readSecretFileSecure / readAdminPassFileSecure / defaultAdminPassPath /
 // resolveLocalAdminPass / defaultKeysDir now live in src/lib/auth-resolve.ts
 // (flair#747) — imported above, re-exported at the bottom of this file so
@@ -417,6 +424,76 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
   } catch { /* ignore */ }
   // Default: httpPort - 1
   return resolveHttpPort(opts) - 1;
+}
+
+// Ops API bind-host resolution (flair#670): --ops-bind flag > FLAIR_OPS_BIND
+// env > loopback default. This is the escape hatch — deployments that
+// genuinely need remote ops access (multi-host / Fabric) pass an explicit
+// wider address (e.g. `--ops-bind 0.0.0.0`) to opt back in; everything else
+// gets the loopback-only single-host default. FLAIR_OPS_BIND (not just the
+// flag) matters for `flair start`'s non-launchd fallback spawn, which has no
+// --ops-bind flag of its own — see the comment at its OPERATIONSAPI_NETWORK_PORT
+// assignment for why it re-resolves this on every start instead of trusting
+// the persisted config alone.
+function resolveOpsBindHost(opts: { opsBind?: string }): string {
+  if (opts.opsBind !== undefined && opts.opsBind !== null && String(opts.opsBind).trim() !== "") {
+    return String(opts.opsBind).trim();
+  }
+  const envBind = process.env.FLAIR_OPS_BIND;
+  if (envBind && envBind.trim() !== "") return envBind.trim();
+  return DEFAULT_OPS_BIND_HOST;
+}
+
+/**
+ * Build the `operationsApi` block for Harper's HARPER_SET_CONFIG (flair#670).
+ *
+ * `network.port` uses Harper's "host:port" string form — Harper's server
+ * bootstrap (@harperfast/harper dist/server/threads/threadServer.js,
+ * listenOnPorts/listenOnPortsBun) splits a config port value on its last
+ * `:` into an explicit bind host + port when present, and falls back to
+ * binding all interfaces (0.0.0.0 / ::) when given a bare number. A colon-free
+ * numeric port is exactly the pre-#670 behavior (all-interfaces); prefixing
+ * it with a host is the only config-level way to narrow the bind.
+ *
+ * `domainSocket` lives under `network` per Harper's own config schema
+ * (@harperfast/harper/config-root.schema.json → properties.operationsApi
+ * .properties.network.properties.domainSocket, and
+ * dist/validation/configValidator.js's `operationsApi.network.domainSocket`
+ * Joi path) — nested here, not as a sibling of `network`.
+ */
+export function buildOperationsApiConfig(
+  opsPort: number,
+  opsSocket: string,
+  opsBindHost: string,
+): { network: { port: string; cors: boolean; domainSocket: string } } {
+  return {
+    network: { port: `${opsBindHost}:${opsPort}`, cors: true, domainSocket: opsSocket },
+  };
+}
+
+/**
+ * Decide whether a persisted `operationsApi.network.port` value (read back
+ * from harper-config.yaml) indicates an all-interfaces ops-API bind
+ * (flair#670 doctor finding — report-only, no --fix: rebinding a live
+ * production instance is a restart-worthy change, not something `doctor`
+ * should do silently on an unrelated command).
+ *
+ * A bare port number/numeric string is Harper's all-interfaces default (the
+ * pre-#670 behavior, or an install that predates it and hasn't been
+ * re-`init`ed). A "host:port" string means something upstream — a `flair
+ * init` since #670, or manual config — already narrowed the bind.
+ */
+export function detectOpsApiAllInterfacesBind(
+  portValue: unknown,
+): { allInterfaces: boolean; boundHost: string | null } {
+  if (portValue === undefined || portValue === null) return { allInterfaces: false, boundHost: null };
+  const str = String(portValue).trim();
+  if (str === "") return { allInterfaces: false, boundHost: null };
+  const lastColon = str.lastIndexOf(":");
+  if (lastColon > 0) {
+    return { allInterfaces: false, boundHost: str.slice(0, lastColon).replace(/[[\]]/g, "") };
+  }
+  return { allInterfaces: true, boundHost: null };
 }
 
 // ─── Target resolution (remote Flair instance) ─────────────────────────────────
@@ -1832,6 +1909,7 @@ program
   .option("--agent <id>", "Alias for --agent-id")
   .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
   .option("--ops-port <port>", "Harper operations API port")
+  .option("--ops-bind <addr>", "Harper ops API bind address (env: FLAIR_OPS_BIND; default: 127.0.0.1 loopback-only for single-host — pass e.g. 0.0.0.0 for multi-host/Fabric remote admin)")
   .option("--admin-pass <pass>", "Admin password (generated if omitted)")
   .option("--admin-pass-file <path>", "Read admin password from file (chmod 600 recommended)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
@@ -2039,6 +2117,7 @@ program
     // ── Local init (full one-command setup) ──
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
+    const opsBindHost = resolveOpsBindHost(opts);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     const dataDir: string = opts.dataDir ?? defaultDataDir();
 
@@ -2157,10 +2236,13 @@ program
         // request is no longer auto-authorized as super_user. Every ops-API
         // seed call below (seedAgentViaOpsApi et al.) already passes a real
         // adminPass via Basic auth, so this does not change local-init behavior.
+        // operationsApi (flair#670): loopback-only by default (buildOperationsApiConfig
+        // — see its doc comment for the "host:port" bind mechanism and the
+        // domainSocket schema path), escape hatch via --ops-bind/FLAIR_OPS_BIND.
         const harperSetConfig = JSON.stringify({
           rootPath: dataDir,
           http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
-          operationsApi: { network: { port: opsPort, cors: true }, domainSocket: opsSocket },
+          operationsApi: buildOperationsApiConfig(opsPort, opsSocket, opsBindHost),
           mqtt: { network: { port: null }, webSocket: false },
           localStudio: { enabled: false },
           authentication: { authorizeLocal: false, enableSessions: true },
@@ -2265,10 +2347,12 @@ program
           const opsSocket = join(dataDir, "operations-server");
           // authorizeLocal: false (flair#654) — same posture as the initial spawn
           // above; the launchd-managed process must not diverge from it.
+          // operationsApi (flair#670): same buildOperationsApiConfig posture as the
+          // initial spawn above — the launchd-managed process must not diverge.
           const setConfig = JSON.stringify({
             rootPath: dataDir,
             http: { port: httpPort, cors: true, corsAccessList: [`http://127.0.0.1:${httpPort}`, `http://localhost:${httpPort}`] },
-            operationsApi: { network: { port: opsPort, cors: true }, domainSocket: opsSocket },
+            operationsApi: buildOperationsApiConfig(opsPort, opsSocket, opsBindHost),
             mqtt: { network: { port: null }, webSocket: false },
             localStudio: { enabled: false },
             authentication: { authorizeLocal: false, enableSessions: true },
@@ -9006,6 +9090,14 @@ program
 
     const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
     const opsPort = resolveOpsPort(opts);
+    // flair#670: this fallback path (no launchd plist) sets no HARPER_SET_CONFIG,
+    // so OPERATIONSAPI_NETWORK_PORT applies unfiltered on top of whatever init
+    // persisted to harper-config.yaml. A bare port number here would silently
+    // strip a loopback (or escape-hatch) bind host back to all-interfaces on
+    // every plain `flair start`. Re-resolving the same host:port form init uses
+    // keeps this re-assertion consistent instead of regressing it — the
+    // escape hatch on this path is FLAIR_OPS_BIND (no --ops-bind flag on `start`).
+    const opsBindHost = resolveOpsBindHost({});
     const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
@@ -9015,7 +9107,7 @@ program
       DEFAULTS_MODE: "dev",
       HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
       HTTP_PORT: String(port),
-      OPERATIONSAPI_NETWORK_PORT: String(opsPort),
+      OPERATIONSAPI_NETWORK_PORT: `${opsBindHost}:${opsPort}`,
       LOCAL_STUDIO: "false",
     };
     // Only set HDB_ADMIN_PASSWORD if we have a real value — empty string
@@ -10070,6 +10162,24 @@ program
     } else {
       console.log(`  ${render.icons.warn} No config file at ${render.wrap(render.c.dim, cfgPath)} — using defaults`);
     }
+
+    // 3b. Ops API bind (flair#670) — report-only finding, never auto-fixed.
+    // Rebinding the ops API requires a Harper restart to take effect, so
+    // `doctor --fix` deliberately does not touch it here; the fix is
+    // `flair init` (re-run) or a manual harper-config.yaml edit + restart.
+    try {
+      const harperConfigPath = join(defaultDataDir(), "harper-config.yaml");
+      if (existsSync(harperConfigPath)) {
+        const harperConfig: any = parseYaml(readFileSync(harperConfigPath, "utf-8")) || {};
+        const opsPortValue = harperConfig?.operationsApi?.network?.port;
+        const bind = detectOpsApiAllInterfacesBind(opsPortValue);
+        if (bind.allInterfaces) {
+          console.log(`  ${render.icons.error} Ops API bound to ${render.wrap(render.c.bold, "all interfaces")} (${render.wrap(render.c.dim, String(opsPortValue))})`);
+          console.log(`     ${render.wrap(render.c.dim, "Single-host installs don't need this reachable off-box. Fix:")} flair init ${render.wrap(render.c.dim, "(rebinds to loopback + domain socket on next start; pass --ops-bind for deliberate remote admin)")}`);
+          issues++;
+        }
+      }
+    } catch { /* best-effort — don't fail doctor over a malformed harper-config.yaml */ }
 
     // 4. Embeddings check — REAL semantic round-trip (only if Harper is responding).
     //
@@ -13263,6 +13373,7 @@ export {
   readPortFromConfig,
   resolveHttpPort,
   resolveOpsPort,
+  resolveOpsBindHost,
   resolveTarget,
   resolveOpsTarget,
   resolveEffectiveOpsUrl,
