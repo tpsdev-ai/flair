@@ -27,6 +27,7 @@ import { hybridEnabled } from "./bm25.js";
 // resources/semantic-retrieval-core.ts's module doc for the full boundary.
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
 import { attachTrust } from "./trust-block.js";
+import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 
 // Candidate multiplier: fetch more candidates than needed from the HNSW index
 // so composite re-ranking has enough headroom to reorder results.
@@ -72,7 +73,7 @@ export class SemanticSearch extends Resource {
     // recall-harness (test/bench/recall-harness/run.ts) and `recall-eval.mjs`
     // before reconsidering this default if the compositeScore formula or
     // corpus changes.
-    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false } = data || {};
+    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, abstain = false } = data || {};
 
     // Authenticated identity lives on the Harper Resource context (getContext().request).
     // `this.request` is NOT populated on Harper v5 Resources — prior reads here
@@ -240,7 +241,33 @@ export class SemanticSearch extends Resource {
       // in — passing undefined otherwise keeps the default (no `provenance`)
       // so a non-trust recall response stays byte-identical.
       select: includeTrust ? [...DEFAULT_SELECT, "provenance"] : undefined,
+      // flair#744 slice 2: attach the absolute per-result cosine confidence
+      // ONLY when the caller opts into abstention — off ⇒ result objects stay
+      // byte-identical (no `_semSimilarity`).
+      withSemSimilarity: abstain,
     });
+
+    // ─── flair#744 slice 2 — first-class abstention ("no memory covers this")
+    // Opt-in only. Evaluated on the RETRIEVED candidate pool, BEFORE the
+    // reranker / final slice / hit-tracking, so an abstaining recall does no
+    // rerank work and never bumps retrievalCount for memories it declines to
+    // surface. The decision reads ONLY the best absolute semantic similarity
+    // (never any principal/authority signal — abstention.ts is pure and
+    // authority-free), against the single GLOBAL threshold. Default OFF ⇒ this
+    // whole block is skipped and the response is byte-identical to pre-slice-2.
+    let abstention: ReturnType<typeof evaluateAbstention> | null = null;
+    if (abstain) {
+      abstention = evaluateAbstention(bestSemanticSimilarity(filteredResults));
+      if (abstention.abstained) {
+        return {
+          abstained: true,
+          reason: abstention.reason,
+          bestScore: abstention.bestScore,
+          threshold: abstention.threshold,
+          results: [],
+        };
+      }
+    }
 
     // ─── Cross-encoder rerank (best-effort, fail-open to vector order) ───────
     // Re-scores query+candidate TOGETHER (cross-attention the pooled embedding
@@ -282,10 +309,24 @@ export class SemanticSearch extends Resource {
     // decision (the #735-spirit zero-authority invariant; structurally guarded
     // by test/unit/trust-block-zero-authority-tripwire.test.ts). Default OFF ⇒
     // `results` is the untouched `topResults`, byte-identical to pre-slice-1.
-    const results = includeTrust ? topResults.map((r: any) => attachTrust(r, true)) : topResults;
+    // flair#744 slice 2: when abstention was requested but the pool cleared the
+    // threshold, strip the internal `_semSimilarity` confidence field so the
+    // returned results keep the normal shape (it exists only to feed the
+    // abstention decision above). A no-op when abstain is off (never attached).
+    const baseResults = abstain ? topResults.map(({ _semSimilarity, ...r }: any) => r) : topResults;
+    const results = includeTrust ? baseResults.map((r: any) => attachTrust(r, true)) : baseResults;
 
     // Surface degradation warning when semantic search was unavailable
     const response: any = { results };
+    // flair#744 slice 2: in opt-in abstain mode that did NOT abstain, carry the
+    // (negative) verdict so a consumer building against the abstention shape
+    // always reads a stable `abstained`/`bestScore`/`threshold`. Absent when
+    // abstain is off ⇒ byte-identical to pre-slice-2.
+    if (abstention) {
+      response.abstained = abstention.abstained;
+      response.bestScore = abstention.bestScore;
+      response.threshold = abstention.threshold;
+    }
     if (!qEmb && q && getMode() === "none") {
       response._warning = "semantic search unavailable — results are keyword-only";
     }

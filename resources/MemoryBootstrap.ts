@@ -22,6 +22,7 @@ import {
 // semantic-retrieval-core.ts's module doc for the full boundary).
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
 import { buildTrustBlock } from "./trust-block.js";
+import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 
 /**
  * POST /MemoryBootstrap
@@ -164,6 +165,7 @@ export class BootstrapMemories extends Resource {
       surface,     // e.g., "tps-build", "tps-review", "cli-session"
       subjects,    // e.g., ["flair", "auth"] — entities to preload context for
       includeTrust = false,  // flair#744 slice 1 — opt-in per-memory trust block
+      abstain = false,       // flair#744 slice 2 — opt-in task-relevance abstention
     } = data || {};
 
     // Authenticated identity lives on getContext().request — `this.request` is
@@ -393,6 +395,14 @@ export class BootstrapMemories extends Resource {
     // self-contained block per included memory. Stays empty (and unused) when
     // includeTrust is off.
     const includedTrustMemories: any[] = [];
+
+    // flair#744 slice 2 — the best absolute semantic similarity seen while
+    // scoring the task-relevant candidate pool (section 4). Drives the opt-in
+    // abstention verdict on the *task-relevance* surface only (bootstrap always
+    // returns identity/permanent/recent regardless — abstention is about "does
+    // any memory cover your current task", not the whole session load). Stays
+    // null when there's no currentTask / no embedding ⇒ never abstains.
+    let taskBestSimilarity: number | null = null;
 
     // --- 2. Permanent memories (always included, highest priority) ---
     // Own-scoped pushdown: `agentId==self` + `durability==permanent`, both
@@ -666,7 +676,22 @@ export class BootstrapMemories extends Resource {
           // the block's provenance fields are populated for teammate/relevant
           // records without changing a non-trust bootstrap's fetch.
           select: includeTrust ? [...DEFAULT_SELECT, "provenance"] : undefined,
+          // flair#744 slice 2: attach the absolute cosine confidence (HNSW-leg,
+          // pre keyword bump) ONLY when abstention is requested, so the verdict
+          // below reads a real best-match confidence. Off ⇒ candidates carry no
+          // `_semSimilarity` and the bootstrap response is unchanged.
+          withSemSimilarity: abstain,
         });
+
+        // flair#744 slice 2: the best-match confidence for the abstention
+        // decision — the max absolute cosine across the retrieved pool, read
+        // ONLY from `_semSimilarity` (never any principal/authority field). Note
+        // this floor (ABSTENTION_THRESHOLD ≈ 0.15) sits BELOW bootstrap's own
+        // long-standing TASK_RELEVANCE_FLOOR (0.3) that gates `scored` below, so
+        // an abstaining task (bestSim < 0.15) already has no candidate passing
+        // the floor — abstention only ADDS an explicit "nothing covered this"
+        // signal, it never removes a memory the reader would otherwise have seen.
+        if (abstain) taskBestSimilarity = bestSemanticSimilarity(candidates);
 
         // Preserve the ORIGINAL score > 0.3 floor exactly (bootstrap's own
         // historical relevance floor — distinct from SemanticSearch's
@@ -934,9 +959,18 @@ export class BootstrapMemories extends Resource {
       ? includedTrustMemories.map((m) => ({ id: m.id, ...buildTrustBlock(m) }))
       : undefined;
 
+    // flair#744 slice 2 — opt-in abstention verdict for the task-relevance
+    // surface. Present ONLY when `abstain` is requested (byte-identical to
+    // pre-slice-2 otherwise); scoped to whether any memory covered
+    // `currentTask` (bestScore null ⇒ no task/embedding ⇒ abstained:false). The
+    // decision reads only the confidence number — never a principal — against
+    // the single GLOBAL threshold.
+    const abstention = abstain ? evaluateAbstention(taskBestSimilarity) : undefined;
+
     return {
       context,
       ...(trust ? { trust } : {}),
+      ...(abstention ? { abstention } : {}),
       sections: {
         soul: sections.soul.length,
         skills: sections.skills.length,

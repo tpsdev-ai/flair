@@ -142,6 +142,21 @@ export interface RetrieveCandidatesParams {
   /** Request context, for withDetachedTxn — both SemanticSearch and
    *  MemoryBootstrap are Resources with their own ctx. */
   ctx?: any;
+  /**
+   * flair#744 slice 2 (abstention): attach an absolute semantic similarity
+   * (`_semSimilarity`, cosine in [0,1]) to each embedding-leg result so the
+   * ABSTENTION decision in the wrapper can read the best-match *confidence*.
+   * This is the raw cosine, NOT the ranking `_score` — the hybrid path
+   * RRF-normalizes `_score` so the top result is always ~1.0 regardless of how
+   * weak the real match is, which is unusable as a confidence floor.
+   *
+   * DEFAULT false (and passed false by every non-abstain caller) ⇒ result
+   * objects are byte-identical to pre-slice-2: the `_semSimilarity` field is
+   * NEVER added unless requested. The value is derived ONLY from the embedding
+   * cosine — never from any principal / tier / authority field — so surfacing
+   * it cannot turn abstention into an authority side-channel.
+   */
+  withSemSimilarity?: boolean;
 }
 
 export async function retrieveCandidates(params: RetrieveCandidatesParams): Promise<any[]> {
@@ -158,6 +173,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
     isAllowed,
     hybrid,
     ctx,
+    withSemSimilarity = false,
   } = params;
 
   const passesAllowed = (record: any) => !isAllowed || isAllowed(record);
@@ -177,6 +193,11 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
     // ── (a) Semantic candidate records (best-first) ──────────────────────
     const semRecords: any[] = [];
     const semIds: string[] = [];
+    // flair#744 slice 2: absolute cosine similarity per semantic candidate
+    // (from the HNSW `$distance`), captured HERE before `$distance` is stripped
+    // downstream — the confidence signal the abstention decision reads (only
+    // when `withSemSimilarity`; empty/unused otherwise).
+    const semSimById = new Map<string, number>();
     if (qEmb) {
       const semQuery: any = {
         sort: { attribute: "embedding", target: qEmb, distance: "cosine" },
@@ -199,6 +220,9 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         // record with no validTo, or a future validTo, is unaffected.
         if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
         if (!passesAllowed(record)) continue;
+        if (withSemSimilarity && record.$distance !== undefined) {
+          semSimById.set(record.id, distanceToSimilarity(record.$distance));
+        }
         semRecords.push(record);
         semIds.push(record.id);
       }
@@ -269,12 +293,17 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
 
         const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
         const source = record.agentId !== agentId ? record.agentId : undefined;
+        // flair#744 slice 2: absolute cosine confidence for the abstention
+        // decision — only for records that had a semantic (HNSW) candidate; a
+        // BM25-lexical-only match carries no cosine and contributes none.
+        const semSim = withSemSimilarity ? semSimById.get(id) : undefined;
         results.push({
           ...record,
           content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
           _source: source,
+          ...(semSim !== undefined ? { _semSimilarity: semSim } : {}),
         });
       }
     }
@@ -328,12 +357,16 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       const { $distance, ...rest } = record;
       const isFlagged = rest._safetyFlags && Array.isArray(rest._safetyFlags) && rest._safetyFlags.length > 0;
       const source = record.agentId !== agentId ? record.agentId : undefined;
+      // flair#744 slice 2: the absolute cosine (`semanticScore`, pre keyword
+      // bump) is the abstention confidence signal on this legacy/bootstrap
+      // (HNSW-leg-only) path.
       results.push({
         ...rest,
         content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
         _source: source,
+        ...(withSemSimilarity ? { _semSimilarity: semanticScore } : {}),
       });
     }
   } else {
