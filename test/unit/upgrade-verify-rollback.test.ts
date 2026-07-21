@@ -132,6 +132,30 @@ describe("decideAfterVerify", () => {
     expect(decision.kind).toBe("rollback");
   });
 
+  // flair#741 follow-through: a healthy instance whose ONLY failure is that the
+  // verifier couldn't authenticate (credentials-only) must NOT roll back — the
+  // server is provably up (public /Health passed AND it responded to the authed
+  // probe), and rolling it back is exactly the destructive false-alarm the
+  // incident report described (rollback re-verify fails identically → false
+  // "state UNKNOWN").
+  test("credentials-only failure on a healthy instance → healthy-unverified, NEVER rollback", () => {
+    const decision = decideAfterVerify(credentialOnlyFailure, "1.2.2");
+    expect(decision.kind).toBe("healthy-unverified");
+    if (decision.kind === "healthy-unverified") {
+      expect(decision.reason).toContain("no credentials sent");
+    }
+  });
+
+  test("credentials-only failure → healthy-unverified even when previous version is unknown (a running instance is never rolled back)", () => {
+    const decision = decideAfterVerify(credentialOnlyFailure, null);
+    expect(decision.kind).toBe("healthy-unverified");
+  });
+
+  test("server-side auth-leg failure (5xx/network, not credentials) still rolls back — the fix is scoped to credentials only", () => {
+    const decision = decideAfterVerify(serverAuthFailure, "1.2.2");
+    expect(decision.kind).toBe("rollback");
+  });
+
   test("failing ProbeResult but previous version is unknown (null) → cannot-rollback, never guesses a target", () => {
     const decision = decideAfterVerify(mismatch, null);
     expect(decision.kind).toBe("cannot-rollback");

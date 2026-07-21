@@ -1934,12 +1934,29 @@ export function shouldRunFleetVerify(opts: { fleetVerify?: boolean }): boolean {
  */
 export type UpgradeVerifyAction =
   | { kind: "ok" }
+  | { kind: "healthy-unverified"; reason: string }
   | { kind: "rollback"; reason: string; toVersion: string }
   | { kind: "cannot-rollback"; reason: string };
 
 export function decideAfterVerify(result: ProbeResult, previousVersion: string | null): UpgradeVerifyAction {
   if (result.ok) return { kind: "ok" };
   const reason = result.error ?? "post-restart verification failed";
+  // A HEALTHY instance whose ONLY failure was that the verifier couldn't
+  // authenticate (401/403) is demonstrably UP: the public /Health answered
+  // 2xx AND the server responded to the authenticated probe — it rejected our
+  // credentials, it did not fail to respond. A version we couldn't READ is not
+  // grounds to roll back a RUNNING instance. Rolling back here is destructive
+  // AND self-defeating — the rollback's own re-verify hits the identical
+  // missing-credential wall, producing the false "ROLLBACK ALSO FAILED / state
+  // UNKNOWN" for an instance that was healthy the whole time. (The real
+  // incident: /HealthDetail became a verified-read in flair#747, so a machine
+  // with no admin-pass/agent key authenticates fine against the pre-upgrade
+  // version but not post-restart — the pre-flight credential check can't
+  // anticipate a version that changes /HealthDetail's auth requirement.)
+  // Report it as up-but-unverified and NEVER roll back. This supersedes
+  // flair#741 fix #3's "prefer the known-good version" default, which the
+  // incident proved wrong for a healthy instance.
+  if (isCredentialOnlyFailure(result)) return { kind: "healthy-unverified", reason };
   if (!previousVersion) return { kind: "cannot-rollback", reason };
   return { kind: "rollback", reason, toVersion: previousVersion };
 }
@@ -9205,18 +9222,23 @@ program
       return;
     }
 
-    console.error(`❌ post-restart verification failed: ${verdict.reason}`);
-    if (isCredentialOnlyFailure(verify)) {
-      // flair#741 fix #3: a responding server that rejects the verifier's
-      // credentials proves the instance is UP — it is not evidence the
-      // upgrade itself broke anything. Say so explicitly instead of leaving
-      // the reader to infer it from the raw error text. Rollback still
-      // proceeds below (a credential check that worked pre-upgrade — see
-      // the pre-flight above — and stopped working mid-run is an edge case
-      // ambiguous enough that "prefer the known-good version" is still the
-      // safer default), but the reason for it is now honest.
-      console.error("   The instance is up and responded — the verifier could not authenticate. This is not a sign the upgrade broke anything.");
+    // flair#741 follow-through: a healthy instance the verifier just couldn't
+    // authenticate against. The upgrade SUCCEEDED — the new version's server is
+    // up (public /Health passed); we simply couldn't read its version over the
+    // authenticated /HealthDetail. Report the caveat and STOP — never roll back
+    // a running instance over a credentials gap. (decideAfterVerify only
+    // returns this for isCredentialOnlyFailure(verify), so the old
+    // "print an honest note but roll back anyway" branch that used to sit below
+    // is gone — that credentials case can no longer reach the rollback path.)
+    if (verdict.kind === "healthy-unverified") {
+      console.log(`✅ upgrade complete: the instance is up and healthy${expectedFlairVersion ? ` on @tpsdev-ai/flair@${expectedFlairVersion}` : ""}.`);
+      console.log(`   The version could not be verified — the checker couldn't authenticate to /HealthDetail (${verdict.reason}).`);
+      console.log("   The server is confirmed running (public /Health passed); this is a verification gap, not an upgrade failure — nothing was rolled back.");
+      console.log("   To enable full post-upgrade verification: set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key.");
+      return;
     }
+
+    console.error(`❌ post-restart verification failed: ${verdict.reason}`);
 
     if (verdict.kind === "cannot-rollback") {
       console.error("   Cannot roll back automatically: the previously-installed @tpsdev-ai/flair version is unknown.");
