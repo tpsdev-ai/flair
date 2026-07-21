@@ -137,8 +137,12 @@ export interface TrustBlock {
    */
   hasClaimedProvenance: boolean;
 
-  /** Verified-USE signal (flair#683 `usageCount`). Absent reads as 0. */
-  usageCount: number;
+  /**
+   * Verified-USE signal (flair#683 `usageCount`). `null` when no usage has
+   * been recorded — never a false `0`, so a reader can tell "no usage
+   * signal" apart from "recorded, zero uses".
+   */
+  usageCount: number | null;
 
   /**
    * Freshness / validity from the record's temporal window:
@@ -254,7 +258,7 @@ export function buildTrustBlock(record: TrustableRecord, now: number = Date.now(
     verifiedAuthor,
     verifiedAt,
     hasClaimedProvenance,
-    usageCount: typeof record.usageCount === "number" ? record.usageCount : 0,
+    usageCount: typeof record.usageCount === "number" ? record.usageCount : null,
     validityStatus,
     validFrom,
     validTo,

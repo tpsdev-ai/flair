@@ -11,6 +11,14 @@
  * REPLACES `retrievalBoost` in `compositeScore` outright (see that
  * function's doc).
  *
+ * flair#744 slice A: the actual ledger-write core below (formerly this
+ * class's private `_recordOne()`) has moved to ./usage-recording.ts's
+ * `recordUsageContribution()` — a shared, single-implementation extraction
+ * also used by citation-on-write (resources/Memory.ts's post()/put()) so
+ * there is exactly ONE place the (agentId, memoryId) ledger logic lives.
+ * This endpoint's own request handling (auth, rate limit, batch validation,
+ * the no-enumeration response) is unchanged.
+ *
  * WHY THIS IS ITS OWN ENDPOINT, NOT `Memory.put()` (Sherlock, K&S verdict —
  * FLAIR-USAGE-FEEDBACK-SIGNAL.md): usage feedback is fundamentally a
  * CROSS-AGENT write — agent B reports using agent A's memory, so the write
@@ -21,10 +29,10 @@
  * memory through this surface — not just the count. So this endpoint does
  * the narrowest possible thing instead: a TARGETED `usageCount`-only
  * bump (read-full-record, merge just this one field, write — see
- * _recordOne() below) against the RAW `Memory` table object, entirely
- * bypassing the `Memory` RESOURCE class (and its ownership gate) — its own
- * auth model is verified-agent + within-org + explicitly NO ownership
- * requirement.
+ * ./usage-recording.ts's recordUsageContribution()) against the RAW
+ * `Memory` table object, entirely bypassing the `Memory` RESOURCE class
+ * (and its ownership gate) — its own auth model is verified-agent +
+ * within-org + explicitly NO ownership requirement.
  *
  * WHY THIS ISN'T A @table-BACKED RESOURCE: the actual dedup ledger (one row
  * per (agentId, memoryId) contribution) lives in the `MemoryUsage` table
@@ -37,13 +45,14 @@
  * SAME class of gotcha resources/Memory.ts documents for a raw HTTP POST to
  * `/Memory`, but here it bites even an in-process call). So the ledger row
  * itself is written via `.put()` (upsert with the deterministic composite
- * id — see _recordOne()), and this endpoint's OWN HTTP surface lives on a
- * plain action `Resource` (same shape as resources/MemoryReflect.ts /
- * resources/SemanticSearch.ts) rather than extending a @table class, so POST
- * actually routes here. It talks to BOTH `Memory` and `MemoryUsage` via
- * their raw table objects (bypassing each resource class's own auth
- * wrapper — the same "call the other table directly" pattern
- * resources/Memory.ts already uses for `MemoryGrant` in hasWriteGrant()).
+ * id — see ./usage-recording.ts's recordUsageContribution()), and this
+ * endpoint's OWN HTTP surface lives on a plain action `Resource` (same shape
+ * as resources/MemoryReflect.ts / resources/SemanticSearch.ts) rather than
+ * extending a @table class, so POST actually routes here. It talks to BOTH
+ * `Memory` and `MemoryUsage` via their raw table objects (bypassing each
+ * resource class's own auth wrapper — the same "call the other table
+ * directly" pattern resources/Memory.ts already uses for `MemoryGrant` in
+ * hasWriteGrant()).
  *
  * ANTI-GAMING (Sherlock): usage feedback is a write that affects RANKING —
  * an abuse surface (inflate usageCount to boost a memory). Three-layer
@@ -73,17 +82,20 @@
  * sanitized (control-character-stripped, length-capped) and stored as-is,
  * for audit/analytics only. Treat it as untrusted data, always.
  */
-import { Resource, databases } from "@harperfast/harper";
+import { Resource } from "@harperfast/harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
-import { withDetachedTxn } from "./table-helpers.js";
+import { recordUsageContribution, MAX_USAGE_IDS_PER_CALL } from "./usage-recording.js";
 
 const UNAUTH = () =>
   new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
 const BAD_REQUEST = (msg: string) =>
   new Response(JSON.stringify({ error: msg }), { status: 400, headers: { "Content-Type": "application/json" } });
 
-const MAX_IDS_PER_CALL = 20;
+// flair#744 slice A: sourced from the shared module (./usage-recording.ts)
+// so RecordUsage.post()'s validated-batch cap and citation-on-write's
+// advisory-batch cap can never drift apart.
+const MAX_IDS_PER_CALL = MAX_USAGE_IDS_PER_CALL;
 const MAX_ATTRIBUTION_LENGTH = 500;
 
 /**
@@ -157,7 +169,12 @@ export class RecordUsage extends Resource {
 
     for (const memoryId of memoryIds) {
       try {
-        await this._recordOne(ctx, agentId, memoryId, attribution, now);
+        // flair#744 slice A: the ledger-write core now lives in
+        // ./usage-recording.ts's recordUsageContribution() — a shared,
+        // single-implementation extraction (also used by citation-on-write,
+        // resources/Memory.ts's post()/put()). Byte-identical behavior to
+        // the former private _recordOne() this replaced.
+        await recordUsageContribution(ctx, agentId, memoryId, attribution, now);
       } catch (err) {
         // Never let one bad id fail the whole batch, and never let an
         // internal error leak existence information either — log
@@ -170,81 +187,5 @@ export class RecordUsage extends Resource {
     // Deliberately does NOT report which ids succeeded / were already
     // counted / were not found — see RECORDED_RESPONSE's doc.
     return RECORDED_RESPONSE;
-  }
-
-  /**
-   * One (agentId, memoryId) contribution.
-   *
-   * Ledger-row-create FIRST, THEN the Memory.usageCount bump — so a crash
-   * between the two leaves the SAFE failure state (ledger row exists, count
-   * not yet bumped: a later retry just re-checks and no-ops) rather than the
-   * reverse (count bumped, no ledger row → a retry would double-count).
-   *
-   * Every discrete Harper call is wrapped INDIVIDUALLY in its own
-   * withDetachedTxn — never one wrap around a multi-step helper. A request
-   * that reads/writes MULTIPLE tables (or the same table twice) in sequence
-   * can otherwise inherit a closed transaction from a prior call's drained
-   * chain (table-helpers.ts's withDetachedTxn doc); resources/Memory.ts's
-   * closeSupersededRecord documents exactly why a single wrap around a
-   * multi-await async function does NOT protect a later call inside it —
-   * this mirrors that function's literal shape (get wrapped, then a
-   * SEPARATE put wrapped) rather than delegating to the generic
-   * patchRecord() helper, which would combine both into one un-safe wrap.
-   *
-   * The final get-then-put for the increment is a best-effort (non-atomic)
-   * read-modify-write, same class of race already accepted elsewhere in
-   * this codebase for count fields (e.g. retrievalCount's bump in
-   * SemanticSearch.ts) — a concurrent contribution from a DIFFERENT agent
-   * landing between this call's read and write could lose one increment.
-   * Re-fetching immediately before the write (rather than reusing the
-   * earlier existence-check read) narrows, without eliminating, that
-   * window. Not solved here: bounded, low-severity (an undercount, never an
-   * inflation), and orthogonal to the anti-gaming properties the cap/floor
-   * and dedup ledger actually defend.
-   */
-  private async _recordOne(
-    ctx: any,
-    agentId: string,
-    memoryId: string,
-    attribution: string | undefined,
-    now: string,
-  ): Promise<void> {
-    const ledgerId = `${agentId}:${memoryId}`;
-
-    // Bypasses resources/MemoryUsage.ts's own auth wrapper by design — this
-    // IS the trusted internal caller that resource's module doc describes
-    // (same "raw table object" pattern resources/Memory.ts uses for
-    // MemoryGrant).
-    const existingContribution = await withDetachedTxn(ctx, () =>
-      (databases as any).flair.MemoryUsage.get(ledgerId),
-    ).catch(() => null);
-    if (existingContribution) return; // already counted by this agent — silent no-op
-
-    const memoryExists = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(memoryId)).catch(() => null);
-    if (!memoryExists) return; // no such memory — silent no-op (no enumeration)
-
-    const ledgerRecord: Record<string, unknown> = { id: ledgerId, agentId, memoryId, createdAt: now };
-    if (attribution) ledgerRecord.attribution = attribution;
-    // .put(), not .post(): Harper's raw TableResource has no default post()
-    // implementation for a static-style (non-`isCollection`-instantiated)
-    // call — confirmed live ("The MemoryUsage does not have a post method
-    // implemented", statusCode 405) — the SAME class of gotcha
-    // resources/Memory.ts documents for HTTP POST, but here it bites even
-    // this in-process call. Irrelevant anyway: ledgerId is already a
-    // deterministic composite key, so this is a create-with-explicit-id —
-    // exactly what PUT (upsert) is for, not an auto-generated-id insert.
-    await withDetachedTxn(ctx, () => (databases as any).flair.MemoryUsage.put(ledgerRecord));
-
-    // Targeted usageCount-ONLY bump: read-full-record, merge just this one
-    // field, write — against the RAW Memory table, NEVER Memory.put() (the
-    // resource class): that would 403 this cross-agent write via its
-    // ownership check, and bypassing that check directly would risk letting
-    // this endpoint smuggle OTHER field changes through instead of just the
-    // count (module doc's "WHY THIS IS ITS OWN ENDPOINT").
-    const fresh = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(memoryId)).catch(() => null);
-    if (!fresh) return; // deleted between the checks above and now — no-op
-    await withDetachedTxn(ctx, () =>
-      (databases as any).flair.Memory.put({ ...fresh, usageCount: (fresh.usageCount ?? 0) + 1 }),
-    );
   }
 }

@@ -98,12 +98,15 @@ describe("buildTrustBlock — provenance status (verified vs claimed)", () => {
   });
 });
 
-describe("buildTrustBlock — usage signal", () => {
-  it("maps usageCount", () => {
-    expect(buildTrustBlock({ agentId: "a", usageCount: 7 }, NOW).usageCount).toBe(7);
+describe("buildTrustBlock — usage signal (flair#744 slice A: absent-vs-0 fix)", () => {
+  it("maps a positive usageCount", () => {
+    expect(buildTrustBlock({ agentId: "a", usageCount: 3 }, NOW).usageCount).toBe(3);
   });
-  it("absent usageCount reads as 0", () => {
-    expect(buildTrustBlock({ agentId: "a" }, NOW).usageCount).toBe(0);
+  it("maps an explicit usageCount: 0 (recorded, zero uses) as 0, NOT null", () => {
+    expect(buildTrustBlock({ agentId: "a", usageCount: 0 }, NOW).usageCount).toBe(0);
+  });
+  it("absent usageCount reads as null — never a false 0 — so a reader can tell 'no usage signal' apart from 'recorded, zero uses'", () => {
+    expect(buildTrustBlock({ agentId: "a" }, NOW).usageCount).toBeNull();
   });
 });
 
