@@ -349,7 +349,7 @@ Add to your `CLAUDE.md`:
 
     At the start of every session, run mcp__flair__bootstrap before responding.
 
-Your agent's memory **follows it across CLIs** — same Flair instance, same agent identity, switch from Claude Code to Gemini CLI to Codex CLI without losing state. The MCP server exposes `memory_store`, `memory_search`, `memory_update`, `memory_get`, `memory_delete`, `relationship_store`, `bootstrap`, `soul_set`, `soul_get`, `flair_workspace_set`, and `flair_orgevent`.
+Your agent's memory **follows it across CLIs** — same Flair instance, same agent identity, switch from Claude Code to Gemini CLI to Codex CLI without losing state. The `flair-mcp` server — the bridge these CLIs connect to — exposes `memory_store`, `memory_search`, `memory_update`, `memory_get`, `memory_delete`, `relationship_store`, `bootstrap`, `soul_set`, `soul_get`, `flair_workspace_set`, and `flair_orgevent`. (Flair's in-Harper native `/mcp` surface is a separate, still-experimental tool set with `attention` + `record_usage` — see Trust-Graded Recall above.)
 
 For per-CLI config snippets (Gemini CLI's `~/.gemini/settings.json`, Codex CLI's `~/.codex/config.toml`, etc.), see **[docs/mcp-clients.md](docs/mcp-clients.md)**. For a deeper Claude Code walk-through with `CLAUDE.md` patterns, see [docs/claude-code.md](docs/claude-code.md).
 
