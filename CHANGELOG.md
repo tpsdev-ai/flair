@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### ⬆️ @harperfast/harper 5.1.17 → 5.1.22 — dependency currency + upstream fixes
+
+@harperfast/harper 5.1.17 → 5.1.22 (dependency currency; pulls upstream config-validator + platform fixes). Exact-pin bump within the same minor — dependency + lockfile only, no flair code change. Resolved tree confirmed at 5.1.22. The full unit suite, the process-isolated module-mocking files, and the Harper-touching auth / resource / schema / mcp suites all pass green; the `test/integration/` Harper-runtime suite is the authoritative gate for a runtime-dependency bump and runs in CI. The transitive `harper` peer pulled in by @harperfast/oauth is unchanged (pre-existing, tracked in flair#750).
+
 ## [0.24.0] - 2026-07-21
 
 ### Harden TPS-Ed25519 auth-header parsing — bound length + disjoint capture classes for linear-time parsing

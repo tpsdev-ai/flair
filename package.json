@@ -54,7 +54,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@harperfast/harper": "5.1.17",
+    "@harperfast/harper": "5.1.22",
     "@harperfast/oauth": "2.4.0",
     "@types/js-yaml": "4.0.9",
     "commander": "14.0.3",
