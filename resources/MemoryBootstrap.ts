@@ -676,11 +676,21 @@ export class BootstrapMemories extends Resource {
           // the block's provenance fields are populated for teammate/relevant
           // records without changing a non-trust bootstrap's fetch.
           select: includeTrust ? [...DEFAULT_SELECT, "provenance"] : undefined,
-          // flair#744 slice 2: attach the absolute cosine confidence (HNSW-leg,
-          // pre keyword bump) ONLY when abstention is requested, so the verdict
-          // below reads a real best-match confidence. Off ⇒ candidates carry no
-          // `_semSimilarity` and the bootstrap response is unchanged.
-          withSemSimilarity: abstain,
+          // flair#744 slice 2 + confidence-band refinement: attach the absolute
+          // cosine confidence (HNSW-leg, pre keyword bump) when abstention OR
+          // the trust block is requested — abstention reads the best of it for
+          // its verdict, and the per-memory trust block classifies each
+          // task-relevant candidate's into a `matchQuality` band (Kern BINDING
+          // condition 2: matchQuality needs `_semSimilarity`, so includeTrust
+          // must turn this on too). Only the task-relevant candidates get a
+          // similarity — permanent/recent/predicted come from raw own-scoped
+          // reads with no retrieval score, so their block's matchQuality is
+          // null (honest: those are lifecycle-window loads, not a retrieval
+          // surface — confidence bands are a retrieval-surface feature). The
+          // field is never returned raw (bootstrap renders memories as text
+          // lines + a trust array), so no strip is needed here. Neither flag ⇒
+          // candidates carry no `_semSimilarity` and the response is unchanged.
+          withSemSimilarity: abstain || includeTrust,
         });
 
         // flair#744 slice 2: the best-match confidence for the abstention

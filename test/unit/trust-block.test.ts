@@ -16,7 +16,8 @@
  *     copy carrying the block.
  */
 import { describe, it, expect } from "bun:test";
-import { buildTrustBlock, attachTrust } from "../../resources/trust-block.ts";
+import { buildTrustBlock, attachTrust, classifyMatchQuality } from "../../resources/trust-block.ts";
+import { ABSTENTION_THRESHOLD, MODERATE_BAND, STRONG_BAND } from "../../resources/abstention.ts";
 
 // A fixed clock so validity/age assertions are deterministic.
 const NOW = Date.parse("2026-07-21T00:00:00.000Z");
@@ -179,6 +180,93 @@ describe("buildTrustBlock — purity (never mutates the input)", () => {
   });
 });
 
+describe("classifyMatchQuality — confidence bands (flair#744 refinement)", () => {
+  it("strong: sim >= STRONG_BAND", () => {
+    expect(classifyMatchQuality(STRONG_BAND)).toBe("strong"); // exact boundary (>=)
+    expect(classifyMatchQuality(0.62)).toBe("strong");
+    expect(classifyMatchQuality(1.0)).toBe("strong");
+  });
+
+  it("moderate: MODERATE_BAND <= sim < STRONG_BAND", () => {
+    expect(classifyMatchQuality(MODERATE_BAND)).toBe("moderate"); // exact lower boundary (>=)
+    expect(classifyMatchQuality(0.45)).toBe("moderate");
+    // Just below the strong floor is still moderate (< is exclusive).
+    expect(classifyMatchQuality(STRONG_BAND - 1e-9)).toBe("moderate");
+  });
+
+  it("breadcrumb: ABSTENTION_THRESHOLD <= sim < MODERATE_BAND", () => {
+    expect(classifyMatchQuality(ABSTENTION_THRESHOLD)).toBe("breadcrumb"); // exact floor (>=)
+    expect(classifyMatchQuality(0.25)).toBe("breadcrumb");
+    // Just below the moderate floor is still breadcrumb (< is exclusive).
+    expect(classifyMatchQuality(MODERATE_BAND - 1e-9)).toBe("breadcrumb");
+  });
+
+  it("breadcrumb: a result present BELOW the abstention floor is still the weakest present band (NO 4th band)", () => {
+    // Abstention off (or a straggler): a present sub-floor result is labeled the
+    // weakest present band, never a distinct 4th band.
+    expect(classifyMatchQuality(ABSTENTION_THRESHOLD - 1e-9)).toBe("breadcrumb");
+    expect(classifyMatchQuality(0.05)).toBe("breadcrumb");
+    expect(classifyMatchQuality(0)).toBe("breadcrumb");
+  });
+
+  it("null: no similarity signal to judge ⇒ null, NOT a false label", () => {
+    expect(classifyMatchQuality(null)).toBeNull();
+    expect(classifyMatchQuality(undefined)).toBeNull();
+    expect(classifyMatchQuality(Number.NaN)).toBeNull();
+    expect(classifyMatchQuality(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
+  it("takes exactly ONE numeric input (global, never per-principal)", () => {
+    // Arity 1: there is no principal/tier parameter the band could branch on —
+    // the band is a pure function of the similarity number (Sherlock spine).
+    expect(classifyMatchQuality.length).toBe(1);
+  });
+});
+
+describe("classifyMatchQuality — breadcrumb floor IS ABSTENTION_THRESHOLD (Kern BINDING condition 1)", () => {
+  it("the breadcrumb band's floor is the SAME shared ABSTENTION_THRESHOLD constant — not a duplicate literal", () => {
+    // The bottom of breadcrumb is exactly the top of abstention: a result AT the
+    // abstention floor is a breadcrumb, and the value just below it is the point
+    // opt-in abstention would fire. Because classifyMatchQuality references the
+    // imported ABSTENTION_THRESHOLD (single source of truth), if recall-bench
+    // moves that floor this band boundary moves with it — this test tracks the
+    // constant, not a hard-coded 0.15, so it stays true after any recalibration.
+    expect(classifyMatchQuality(ABSTENTION_THRESHOLD)).toBe("breadcrumb");
+    // The whole breadcrumb band [ABSTENTION_THRESHOLD, MODERATE_BAND) classifies
+    // as breadcrumb, anchored on the shared constants (not literals).
+    const mid = (ABSTENTION_THRESHOLD + MODERATE_BAND) / 2;
+    expect(classifyMatchQuality(mid)).toBe("breadcrumb");
+  });
+
+  it("the band cut-points are ordered and finite (ABSTENTION_THRESHOLD < MODERATE_BAND < STRONG_BAND)", () => {
+    expect(Number.isFinite(ABSTENTION_THRESHOLD)).toBe(true);
+    expect(Number.isFinite(MODERATE_BAND)).toBe(true);
+    expect(Number.isFinite(STRONG_BAND)).toBe(true);
+    expect(ABSTENTION_THRESHOLD).toBeLessThan(MODERATE_BAND);
+    expect(MODERATE_BAND).toBeLessThan(STRONG_BAND);
+  });
+});
+
+describe("buildTrustBlock — matchQuality (flair#744 refinement)", () => {
+  it("classifies the record's `_semSimilarity` into a band", () => {
+    expect(buildTrustBlock({ agentId: "a", _semSimilarity: 0.7 }, NOW).matchQuality).toBe("strong");
+    expect(buildTrustBlock({ agentId: "a", _semSimilarity: 0.4 }, NOW).matchQuality).toBe("moderate");
+    expect(buildTrustBlock({ agentId: "a", _semSimilarity: 0.2 }, NOW).matchQuality).toBe("breadcrumb");
+  });
+
+  it("matchQuality is null when the record carries no `_semSimilarity` (by-id get / keyword-only)", () => {
+    expect(buildTrustBlock({ agentId: "a" }, NOW).matchQuality).toBeNull();
+    expect(buildTrustBlock({ agentId: "a", _semSimilarity: null }, NOW).matchQuality).toBeNull();
+  });
+
+  it("does NOT surface the raw `_semSimilarity` number — only its band classification", () => {
+    const b = buildTrustBlock({ agentId: "a", _semSimilarity: 0.42 }, NOW);
+    expect(b.matchQuality).toBe("moderate");
+    expect((b as any)._semSimilarity).toBeUndefined();
+    expect(JSON.stringify(b)).not.toContain("0.42");
+  });
+});
+
 describe("attachTrust — opt-in wrapper", () => {
   const record = { id: "m1", agentId: "agt_alice", content: "hi", usageCount: 4, createdAt: "2026-07-01T00:00:00.000Z" };
 
@@ -199,5 +287,18 @@ describe("attachTrust — opt-in wrapper", () => {
     expect(out.content).toBe("hi");
     // Original record is not mutated.
     expect("trust" in record).toBe(false);
+  });
+
+  it("ON ⇒ the block carries matchQuality classified from the record's `_semSimilarity`", () => {
+    const withSim = { id: "m2", agentId: "agt_alice", content: "hi", _semSimilarity: 0.62 };
+    const out: any = attachTrust(withSim, true, NOW);
+    expect(out.trust.matchQuality).toBe("strong");
+    // The raw internal signal is not surfaced in the block.
+    expect(out.trust._semSimilarity).toBeUndefined();
+  });
+
+  it("ON ⇒ matchQuality is null when the record has no `_semSimilarity` (by-id get)", () => {
+    const out: any = attachTrust(record, true, NOW);
+    expect(out.trust.matchQuality).toBeNull();
   });
 });

@@ -241,10 +241,14 @@ export class SemanticSearch extends Resource {
       // in — passing undefined otherwise keeps the default (no `provenance`)
       // so a non-trust recall response stays byte-identical.
       select: includeTrust ? [...DEFAULT_SELECT, "provenance"] : undefined,
-      // flair#744 slice 2: attach the absolute per-result cosine confidence
-      // ONLY when the caller opts into abstention — off ⇒ result objects stay
-      // byte-identical (no `_semSimilarity`).
-      withSemSimilarity: abstain,
+      // flair#744 slice 2 + confidence-band refinement: attach the absolute
+      // per-result cosine confidence when the caller opts into abstention OR
+      // the trust block — abstention reads the best of it for its verdict, and
+      // the trust block classifies each result's into a `matchQuality` band
+      // (Kern BINDING condition 2: matchQuality needs `_semSimilarity`, so
+      // includeTrust must also turn this on). Neither flag ⇒ result objects stay
+      // byte-identical (no `_semSimilarity` attached).
+      withSemSimilarity: abstain || includeTrust,
     });
 
     // ─── flair#744 slice 2 — first-class abstention ("no memory covers this")
@@ -309,12 +313,22 @@ export class SemanticSearch extends Resource {
     // decision (the #735-spirit zero-authority invariant; structurally guarded
     // by test/unit/trust-block-zero-authority-tripwire.test.ts). Default OFF ⇒
     // `results` is the untouched `topResults`, byte-identical to pre-slice-1.
-    // flair#744 slice 2: when abstention was requested but the pool cleared the
-    // threshold, strip the internal `_semSimilarity` confidence field so the
-    // returned results keep the normal shape (it exists only to feed the
-    // abstention decision above). A no-op when abstain is off (never attached).
-    const baseResults = abstain ? topResults.map(({ _semSimilarity, ...r }: any) => r) : topResults;
-    const results = includeTrust ? baseResults.map((r: any) => attachTrust(r, true)) : baseResults;
+    //
+    // Order matters (confidence-band refinement): attachTrust must run BEFORE
+    // the `_semSimilarity` strip below, because buildTrustBlock reads that field
+    // off the record to classify `matchQuality`. attachTrust returns a shallow
+    // copy carrying `trust` (and still-present `_semSimilarity`); the strip then
+    // drops the internal field from the copy.
+    const trusted = includeTrust ? topResults.map((r: any) => attachTrust(r, true)) : topResults;
+    // flair#744 slice 2 + refinement: strip the internal `_semSimilarity`
+    // confidence field from the consumer-facing results — it exists ONLY to feed
+    // the abstention decision and the matchQuality classification, never the
+    // response shape. Attached whenever abstain OR includeTrust turned
+    // withSemSimilarity on, so strip in both cases. A no-op (and byte-identical)
+    // when neither flag is set (the field was never attached).
+    const results = (abstain || includeTrust)
+      ? trusted.map(({ _semSimilarity, ...r }: any) => r)
+      : trusted;
 
     // Surface degradation warning when semantic search was unavailable
     const response: any = { results };
