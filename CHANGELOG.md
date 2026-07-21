@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-07-21
+
 ### Docs — README refresh (trust-graded recall + accuracy fixes)
 
 - Added a **Trust-Graded Recall** feature section documenting the 0.25.0 arc — the trust-evidence block, `matchQuality` confidence bands, first-class `abstain` verdict, and citation-on-write / `record_usage` — with an honest note on which surfaces expose it today (authenticated HTTP API + native `/mcp`) versus what's follow-up (`flair` CLI, `@tpsdev-ai/flair-client`, the `flair-mcp` bridge).
