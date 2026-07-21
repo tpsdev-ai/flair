@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-07-21
+
 ### Trust-graded recall — citation-on-write (flair#744 slice A)
 
 Memory usage feedback (`record_usage`, flair#683) required a separate call after the fact. Now a write can cite the memories that informed it inline: an optional `usedMemoryIds?: string[]` on the memory write surfaces (`Memory.post`/`Memory.put`, the `memory_store` MCP tool, `flair-client.mjs write --used <csv>`) credits each cited memory through the exact SAME deduped, principal-bound usage ledger `record_usage` writes to — no separate call, no duplicated ledger logic (`resources/usage-recording.ts` extracts the shared ledger-write core so RecordUsage and citation-on-write share one implementation).

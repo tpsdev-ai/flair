@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/flair-bench",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "Standalone embedding recall benchmark for flair — run real recall numbers (p@3/MRR) against any GGUF embedding model, batch-compare, get a host-aware recommendation, and share redacted results. No flair install required.",
   "type": "module",
   "main": "dist/index.js",
