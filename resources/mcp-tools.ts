@@ -166,6 +166,9 @@ async function memorySearch(agent: ResolvedAgent, args: any) {
   // flair#744 slice 1 — opt-in inline trust block per result. Forwarded ONLY
   // when requested so a plain search delegates a byte-identical body.
   if (args?.includeTrust === true) body.includeTrust = true;
+  // flair#744 slice 2 — opt-in abstention verdict. Forwarded ONLY when
+  // requested so a plain search delegates a byte-identical body.
+  if (args?.abstain === true) body.abstain = true;
   return unwrap(await h.post(body));
 }
 
@@ -286,6 +289,9 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
   // flair#744 slice 1 — opt-in per-memory trust block array. Forwarded ONLY
   // when requested so a plain bootstrap delegates a byte-identical body.
   if (args?.includeTrust === true) body.includeTrust = true;
+  // flair#744 slice 2 — opt-in task-relevance abstention verdict. Forwarded
+  // ONLY when requested so a plain bootstrap delegates a byte-identical body.
+  if (args?.abstain === true) body.abstain = true;
   return unwrap(await h.post(body));
 }
 
@@ -431,6 +437,7 @@ export const TOOLS: Record<string, ToolEntry> = {
           query: { type: "string", description: "Search query — natural language, semantic matching" },
           limit: { type: "number", description: "Max results (default 5)" },
           includeTrust: { type: "boolean", description: "Attach a per-result trust-evidence block (provenance, author, usage, freshness, supersession). Default false." },
+          abstain: { type: "boolean", description: "Opt into first-class abstention: when the best match is below a global confidence threshold, return { abstained: true, reason, bestScore } with no weak matches instead of the N weakest results. Default false." },
         },
         required: ["query"],
       },
@@ -524,6 +531,7 @@ export const TOOLS: Record<string, ToolEntry> = {
               "Your declared attention-plane vocabulary strings (e.g. \"issue:owner/repo#123\") for collision surfacing's 'Others in the room' block — teammates with overlapping active work. Falls back to your own most-recent workspace-state entities when omitted.",
           },
           includeTrust: { type: "boolean", description: "Also return a `trust` array with a per-included-memory trust-evidence block (provenance, author, usage, freshness, supersession). Default false." },
+          abstain: { type: "boolean", description: "Opt into a task-relevance abstention verdict: also return an `abstention` object ({ abstained, bestScore, threshold }) reporting whether any memory covered `currentTask` above a global confidence threshold. Default false." },
         },
       },
     },
