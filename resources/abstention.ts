@@ -59,6 +59,45 @@
 export const ABSTENTION_THRESHOLD = 0.15;
 
 /**
+ * Confidence-band cut-points for `matchQuality` (flair#744 confidence-band
+ * refinement — "breadcrumbs, labeled"). Recall shouldn't be binary
+ * confident-match / nothing: a weak-but-present match is valuable if the agent
+ * KNOWS it's weak. The band classifier (resources/trust-block.ts's
+ * `classifyMatchQuality`) labels each result's absolute `_semSimilarity` as
+ * strong / moderate / breadcrumb against these two floors plus the abstention
+ * floor below:
+ *
+ *   sim >= STRONG_BAND (0.55)                    → "strong"
+ *   MODERATE_BAND (0.35) <= sim < STRONG_BAND    → "moderate"
+ *   ABSTENTION_THRESHOLD (0.15) <= sim < 0.35    → "breadcrumb"
+ *   sim < ABSTENTION_THRESHOLD (present anyway,  → "breadcrumb" (weakest present
+ *     abstention off)                                band — NO 4th band)
+ *
+ * ─── SINGLE SOURCE OF TRUTH (Kern BINDING condition 1) ──────────────────────
+ * These two band floors live HERE, in the SAME module as ABSTENTION_THRESHOLD,
+ * so the band cut-points and the abstention floor are one source of truth and
+ * cannot drift. The classifier's breadcrumb floor is ABSTENTION_THRESHOLD
+ * ITSELF (imported, never a duplicate `0.15` literal) — the bottom of the
+ * breadcrumb band is exactly the top of abstention: below it, opt-in abstention
+ * returns "no memory covers this" instead. If recall-bench moves
+ * ABSTENTION_THRESHOLD, breadcrumb's floor moves with it, automatically.
+ *
+ * ─── CONSERVATIVE hand-set placeholders (same posture as ABSTENTION_THRESHOLD)
+ * 0.35 / 0.55 are reasonable hand-set cuts for cosine similarity on common
+ * embedding models, but the point is they're REPLACEABLE without an API change.
+ * The real cut-points come from recall-bench (which similarity band correlates
+ * with "the agent found this useful") — that calibration is a SEPARATE
+ * follow-up (see flair#744), exactly like promoting abstention to the default.
+ * The field and its API shape ship now; the numbers get tuned independently.
+ *
+ * GLOBAL constants, NEVER per-principal (Sherlock): the classifier takes exactly
+ * one numeric input and references no principal/tier — structurally guarded by
+ * test/unit/abstention-no-per-principal-tripwire.test.ts.
+ */
+export const MODERATE_BAND = 0.35;
+export const STRONG_BAND = 0.55;
+
+/**
  * The abstention verdict returned to the reader. Stable shape a consumer builds
  * against in opt-in mode: `abstained` is always present; `reason` only when it
  * abstained; `bestScore` is the best-match confidence the decision saw (null

@@ -51,9 +51,65 @@
  * deferred whole — the scope-gate ships WITH it, when it ships. Everything
  * else in the block (provenance, author principal, usage, freshness,
  * supersession) is on the Memory record itself and ships now.
+ *
+ * ─── `matchQuality` confidence band (flair#744 refinement) ──────────────────
+ * When the recall path attached an absolute semantic similarity to the result
+ * (`_semSimilarity`, cosine in [0,1] — attached only on the retrieval surface,
+ * when the caller opts into the block or into abstention), the block labels it
+ * with a confidence band — strong / moderate / breadcrumb — so a weak-but-
+ * present match is TAKEN FOR WHAT IT IS, not mistaken for a confident one (the
+ * hallucination risk is undifferentiated weak matches, not weak matches per se).
+ * Derived PURELY from that one number against the global band cut-points in
+ * resources/abstention.ts (single source of truth with the abstention floor —
+ * see classifyMatchQuality). When there is no similarity to judge (a by-id
+ * `get`, or a keyword-only degraded search — no `_semSimilarity`), the band is
+ * `null`: an honest "we couldn't classify this one", never a false label.
  */
+import { ABSTENTION_THRESHOLD, MODERATE_BAND, STRONG_BAND } from "./abstention.js";
 
 const MS_PER_DAY = 86_400_000;
+
+/**
+ * The confidence band a recall result's absolute similarity falls in. `null`
+ * when there is no similarity signal to judge (see classifyMatchQuality).
+ */
+export type MatchQuality = "strong" | "moderate" | "breadcrumb";
+
+/**
+ * Classify a result's absolute semantic similarity (`_semSimilarity`, cosine in
+ * [0,1]) into a confidence band. PURE: its ONLY input is that one number — no
+ * principal / agentId / tier / scope — so the band is GLOBAL and can never be
+ * varied per principal (Sherlock; structurally guarded by
+ * test/unit/abstention-no-per-principal-tripwire.test.ts, same spine as the
+ * abstention decision).
+ *
+ *   sim >= STRONG_BAND            → "strong"
+ *   MODERATE_BAND <= sim < STRONG → "moderate"
+ *   ABSTENTION_THRESHOLD <= sim   → "breadcrumb"  (bottom of breadcrumb IS the
+ *                                                   abstention floor — one
+ *                                                   shared constant, no dup)
+ *   sim < ABSTENTION_THRESHOLD    → "breadcrumb"  (a result present below the
+ *                                                   abstention floor — abstention
+ *                                                   off, or it slipped in — is
+ *                                                   still the WEAKEST present
+ *                                                   band; there is NO 4th band)
+ *   not a finite number (null/undefined/NaN) → null  (no signal to classify;
+ *                                                      never a false label)
+ *
+ * The breadcrumb floor references ABSTENTION_THRESHOLD directly (Kern BINDING
+ * condition 1): the band cut-points and the abstention floor are one source of
+ * truth (resources/abstention.ts) and cannot drift — if recall-bench moves the
+ * abstention floor, breadcrumb's floor moves with it.
+ */
+export function classifyMatchQuality(semSimilarity: number | null | undefined): MatchQuality | null {
+  if (typeof semSimilarity !== "number" || !Number.isFinite(semSimilarity)) return null;
+  if (semSimilarity >= STRONG_BAND) return "strong";
+  if (semSimilarity >= MODERATE_BAND) return "moderate";
+  if (semSimilarity >= ABSTENTION_THRESHOLD) return "breadcrumb";
+  // Present below the abstention floor (abstention off, or a straggler): still
+  // the weakest present band — breadcrumb, never a 4th band.
+  return "breadcrumb";
+}
 
 export interface TrustBlock {
   /**
@@ -110,6 +166,16 @@ export interface TrustBlock {
    * validTo instead.
    */
   supersedes: string | null;
+
+  /**
+   * Confidence band (flair#744 refinement) — the result's absolute
+   * `_semSimilarity` classified strong / moderate / breadcrumb, or `null` when
+   * there was no similarity signal to judge (a by-id `get`, or a keyword-only
+   * degraded search — see classifyMatchQuality). Advisory, reader-facing, and —
+   * like the whole block — derived from a single number, never any authority
+   * signal, never re-entering an access/scope/attribution/dedup decision.
+   */
+  matchQuality: MatchQuality | null;
 }
 
 /** A record shape narrow enough for the assembler — callers pass whatever
@@ -122,6 +188,14 @@ export interface TrustableRecord {
   validTo?: string | null;
   createdAt?: string | null;
   supersedes?: string | null;
+  /**
+   * Absolute semantic similarity (cosine in [0,1]) the retrieval core attaches
+   * to a result WHEN the caller opts into the trust block or abstention. Drives
+   * `matchQuality`. Absent (null/undefined) on a by-id `get` or a keyword-only
+   * degraded search ⇒ `matchQuality: null`. Read only — never surfaced raw in
+   * the block (only its band classification is).
+   */
+  _semSimilarity?: number | null;
 }
 
 function parseTime(value: string | null | undefined): number {
@@ -187,6 +261,10 @@ export function buildTrustBlock(record: TrustableRecord, now: number = Date.now(
     createdAt,
     ageDays,
     supersedes: typeof record.supersedes === "string" ? record.supersedes : null,
+    // flair#744 refinement — confidence band from the result's absolute
+    // similarity (null when there is no signal to judge). Pure, global,
+    // score-only: classifyMatchQuality sees ONLY the number.
+    matchQuality: classifyMatchQuality(record._semSimilarity),
   };
 }
 
