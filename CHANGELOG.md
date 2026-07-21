@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Harden TPS-Ed25519 auth-header parsing — bound length + disjoint capture classes for linear-time parsing
+
+Robustness hardening for the `Authorization: TPS-Ed25519 …` header parser shared by the three auth call sites (`auth-middleware.ts`, `agent-auth.ts`, `Presence.ts`). The header is untrusted client input; the parser is now bounded and always linear-time.
+
+- **Disjoint capture classes.** The two colon-delimited text captures now use `[^:\s]+` instead of `[^:]+`, so they no longer overlap the preceding `\s+`. With no character shared between adjacent quantifiers there is a single unambiguous split, keeping the match strictly linear on any input. Behavior-preserving for well-formed headers — a real agentId / nonce / signature never contains whitespace.
+- **Length bound before the regex.** Inputs longer than `MAX_AUTH_HEADER_LEN` (4096; a valid header is a few hundred chars) are rejected up front and treated exactly like a non-matching header (no valid agent auth).
+- **Single shared parser.** Extracted `parseTpsEd25519Header` + the grammar/bound constants into `resources/ed25519-auth.ts` (already the shared home for the nonce store and key import), replacing three in-line copies of the regex so the grammar and its bounds can't drift.
+- New tests in `test/unit/ed25519-auth.test.ts`: a valid header parses correctly, a long degenerate input parses in linear time (well under bound), over-length headers are rejected, and a header sized exactly at the bound still parses.
+
 ### 🔒 Ops-API domain-socket permission posture — 0600 default / 0660+group opt-in with a directory gate (flair#763)
 
 Split from flair#670 (the network-bind slice shipped in #762); same local-admin-surface axis as #654 (`authorizeLocal` off). Ground-truthing a live macOS install reshaped the original "socket is 0666" framing: Harper sets no mode, so the socket lands at `0777 & ~umask` (0755 here) — real, but umask-luck — and `~/.flair` was already `0700`, making the *directory* the effective gate by accident. Harper exposes no socket-permission knob (`operationsApi.network.domainSocket` is a path string only; no `chmod` in `dist/server`), so flair sets the posture itself around the socket the start path creates.

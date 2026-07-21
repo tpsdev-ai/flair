@@ -21,6 +21,9 @@ import {
   recordNonce,
   importEd25519Key,
   b64ToArrayBuffer,
+  parseTpsEd25519Header,
+  TPS_ED25519_HEADER_RE,
+  MAX_AUTH_HEADER_LEN,
   __clearNoncesForTest,
 } from "../../resources/ed25519-auth.ts";
 
@@ -137,6 +140,69 @@ describe("importEd25519Key", () => {
 
     const ok = await crypto.subtle.verify({ name: "Ed25519" } as any, key1, sigFromKp2, message);
     expect(ok).toBe(false);
+  });
+});
+
+describe("parseTpsEd25519Header — bounded, linear-time header parsing", () => {
+  it("accepts a valid header and extracts every field", () => {
+    const parsed = parseTpsEd25519Header(
+      "TPS-Ed25519 agent-42:1721000000000:nonce-abc:c2lnbmF0dXJlLWJ5dGVz",
+    );
+    expect(parsed).toEqual({
+      agentId: "agent-42",
+      tsRaw: "1721000000000",
+      nonce: "nonce-abc",
+      signatureB64: "c2lnbmF0dXJlLWJ5dGVz",
+    });
+  });
+
+  it("returns null for empty and non-matching headers", () => {
+    expect(parseTpsEd25519Header("")).toBeNull();
+    expect(parseTpsEd25519Header("Basic dXNlcjpwYXNz")).toBeNull();
+    expect(parseTpsEd25519Header("TPS-Ed25519 no-colons-here")).toBeNull();
+  });
+
+  it("parses long/degenerate headers in linear time", () => {
+    // A long whitespace run with no colon is the worst case for a grammar whose
+    // whitespace and text character classes overlap. With disjoint classes
+    // ([^:\s]) there is a single unambiguous split, so the match is linear and
+    // completes in linear time regardless of input length.
+    const degenerate = "TPS-Ed25519 " + " ".repeat(200_000);
+    const start = performance.now();
+    const parsed = parseTpsEd25519Header(degenerate);
+    const elapsed = performance.now() - start;
+    expect(parsed).toBeNull();
+    expect(elapsed).toBeLessThan(200);
+  });
+
+  it("the header grammar itself matches a long degenerate input in linear time", () => {
+    // Exercises the regex directly (bypassing the length guard) to prove the
+    // grammar alone stays linear on a long degenerate input.
+    const degenerate = "TPS-Ed25519 " + " ".repeat(200_000);
+    const start = performance.now();
+    const m = TPS_ED25519_HEADER_RE.exec(degenerate);
+    const elapsed = performance.now() - start;
+    expect(m).toBeNull();
+    expect(elapsed).toBeLessThan(200);
+  });
+
+  it("rejects over-length headers", () => {
+    const tooLong = "TPS-Ed25519 " + "a".repeat(MAX_AUTH_HEADER_LEN);
+    expect(tooLong.length).toBeGreaterThan(MAX_AUTH_HEADER_LEN);
+    expect(parseTpsEd25519Header(tooLong)).toBeNull();
+  });
+
+  it("accepts a valid header sized exactly at the length bound (guard is inclusive)", () => {
+    const prefix = "TPS-Ed25519 a:1:n:";
+    const sig = "x".repeat(MAX_AUTH_HEADER_LEN - prefix.length);
+    const header = prefix + sig;
+    expect(header.length).toBe(MAX_AUTH_HEADER_LEN);
+    expect(parseTpsEd25519Header(header)).toEqual({
+      agentId: "a",
+      tsRaw: "1",
+      nonce: "n",
+      signatureB64: sig,
+    });
   });
 });
 

@@ -16,7 +16,7 @@
  * 30s timestamp window + a per-(agent,nonce) seen-set pruned to that window.
  */
 import { databases } from "@harperfast/harper";
-import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer } from "./ed25519-auth.js";
+import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 
 /**
  * Shared Harper user that verified Ed25519 agents resolve to (least-privilege
@@ -66,17 +66,15 @@ export interface AgentAuth {
   isAdmin: boolean;
 }
 
-const HEADER_RE = /^TPS-Ed25519\s+([^:]+):(\d+):([^:]+):(.+)$/;
-
 async function doVerify(request: any): Promise<AgentAuth | null> {
   const header: string =
     request?.headers?.get?.("authorization") ??
     request?.headers?.asObject?.authorization ??
     "";
-  const m = HEADER_RE.exec(header);
-  if (!m) return null;
+  const parsed = parseTpsEd25519Header(header);
+  if (!parsed) return null;
 
-  const [, agentId, tsRaw, nonce, signatureB64] = m;
+  const { agentId, tsRaw, nonce, signatureB64 } = parsed;
   const ts = Number(tsRaw);
   const now = Date.now();
   if (!Number.isFinite(ts) || Math.abs(now - ts) > WINDOW_MS) return null;

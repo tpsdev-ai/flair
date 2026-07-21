@@ -45,6 +45,53 @@ export { b64ToArrayBuffer };
  */
 export const WINDOW_MS = Number(process.env.FLAIR_AGENT_AUTH_WINDOW_MS) || 30_000;
 
+// ─── Auth header parsing (single shared implementation) ────────────────────
+//
+// One parser for the `Authorization: TPS-Ed25519 <id>:<ts>:<nonce>:<sig>`
+// header, used by all 3 call sites (auth-middleware.ts, agent-auth.ts,
+// Presence.ts) so the grammar and its input bounds can't drift.
+
+/**
+ * Upper bound on the accepted Authorization header length. A well-formed
+ * TPS-Ed25519 header (`TPS-Ed25519 <id>:<ts>:<nonce>:<sig>`) is a few hundred
+ * chars at most; anything materially larger is malformed. The header is
+ * untrusted client input, so we cap its length before running the regex,
+ * keeping parse cost bounded regardless of the input's shape.
+ */
+export const MAX_AUTH_HEADER_LEN = 4096;
+
+/**
+ * TPS-Ed25519 auth header grammar.
+ *
+ * The two colon-delimited text captures use `[^:\s]+` (not `[^:]+`) so they are
+ * disjoint from the preceding `\s+`: with no character shared between the two
+ * adjacent quantifiers there is exactly one way to split any input, so matching
+ * is linear-time on every input (including long, degenerate ones). A real
+ * agentId / nonce / signature never contains whitespace, so excluding it is
+ * behavior-preserving for well-formed headers.
+ */
+export const TPS_ED25519_HEADER_RE =
+  /^TPS-Ed25519\s+([^:\s]+):(\d+):([^:\s]+):(.+)$/;
+
+export interface ParsedAuthHeader {
+  agentId: string;
+  tsRaw: string;
+  nonce: string;
+  signatureB64: string;
+}
+
+/**
+ * Parse a TPS-Ed25519 `Authorization` header value into its fields, or return
+ * null if it is over `MAX_AUTH_HEADER_LEN` or doesn't match the grammar.
+ * Callers treat null exactly as a header that carries no valid agent auth.
+ */
+export function parseTpsEd25519Header(header: string): ParsedAuthHeader | null {
+  if (!header || header.length > MAX_AUTH_HEADER_LEN) return null;
+  const m = TPS_ED25519_HEADER_RE.exec(header);
+  if (!m) return null;
+  return { agentId: m[1], tsRaw: m[2], nonce: m[3], signatureB64: m[4] };
+}
+
 // ─── Replay guard (single shared instance) ─────────────────────────────────
 //
 // nonceSeen is the ONE module-level singleton — the whole point of this
