@@ -162,7 +162,11 @@ async function unwrap(value: any): Promise<any> {
 async function memorySearch(agent: ResolvedAgent, args: any) {
   const Cls = await handler("SemanticSearch");
   const h = new Cls(undefined, delegationContext(agent));
-  return unwrap(await h.post({ q: args?.query, limit: args?.limit ?? 5 }));
+  const body: Record<string, unknown> = { q: args?.query, limit: args?.limit ?? 5 };
+  // flair#744 slice 1 — opt-in inline trust block per result. Forwarded ONLY
+  // when requested so a plain search delegates a byte-identical body.
+  if (args?.includeTrust === true) body.includeTrust = true;
+  return unwrap(await h.post(body));
 }
 
 async function memoryStore(agent: ResolvedAgent, args: any) {
@@ -252,7 +256,13 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
 async function memoryGet(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Memory");
   const h = new Cls(undefined, delegationContext(agent));
-  return unwrap(await h.get(args?.id));
+  // flair#744 slice 1 — opt-in inline trust block on the returned record.
+  // Pass the opts arg ONLY when requested so a plain get() call is unchanged.
+  return unwrap(
+    args?.includeTrust === true
+      ? await h.get(args?.id, { includeTrust: true })
+      : await h.get(args?.id),
+  );
 }
 
 async function memoryDelete(agent: ResolvedAgent, args: any) {
@@ -264,7 +274,7 @@ async function memoryDelete(agent: ResolvedAgent, args: any) {
 async function bootstrap(agent: ResolvedAgent, args: any) {
   const Cls = await handler("BootstrapMemories");
   const h = new Cls(undefined, delegationContext(agent));
-  return unwrap(await h.post({
+  const body: Record<string, unknown> = {
     agentId: agent.agentId,
     maxTokens: args?.maxTokens ?? 4000,
     currentTask: args?.currentTask,
@@ -272,7 +282,11 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
     surface: args?.surface,
     subjects: args?.subjects,
     entities: args?.entities,
-  }));
+  };
+  // flair#744 slice 1 — opt-in per-memory trust block array. Forwarded ONLY
+  // when requested so a plain bootstrap delegates a byte-identical body.
+  if (args?.includeTrust === true) body.includeTrust = true;
+  return unwrap(await h.post(body));
 }
 
 async function soulSet(agent: ResolvedAgent, args: any) {
@@ -416,6 +430,7 @@ export const TOOLS: Record<string, ToolEntry> = {
         properties: {
           query: { type: "string", description: "Search query — natural language, semantic matching" },
           limit: { type: "number", description: "Max results (default 5)" },
+          includeTrust: { type: "boolean", description: "Attach a per-result trust-evidence block (provenance, author, usage, freshness, supersession). Default false." },
         },
         required: ["query"],
       },
@@ -466,7 +481,10 @@ export const TOOLS: Record<string, ToolEntry> = {
       annotations: { readOnlyHint: true },
       inputSchema: {
         type: "object",
-        properties: { id: { type: "string", description: "Memory ID" } },
+        properties: {
+          id: { type: "string", description: "Memory ID" },
+          includeTrust: { type: "boolean", description: "Attach a trust-evidence block (provenance, author, usage, freshness, supersession) to the record. Default false." },
+        },
         required: ["id"],
       },
     },
@@ -505,6 +523,7 @@ export const TOOLS: Record<string, ToolEntry> = {
             description:
               "Your declared attention-plane vocabulary strings (e.g. \"issue:owner/repo#123\") for collision surfacing's 'Others in the room' block — teammates with overlapping active work. Falls back to your own most-recent workspace-state entities when omitted.",
           },
+          includeTrust: { type: "boolean", description: "Also return a `trust` array with a per-included-memory trust-evidence block (provenance, author, usage, freshness, supersession). Default false." },
         },
       },
     },

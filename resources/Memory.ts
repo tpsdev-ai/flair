@@ -27,6 +27,24 @@ import {
   UNAUTH,
 } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
+import { attachTrust } from "./trust-block.js";
+
+/**
+ * flair#744 slice 1 — read the opt-in `includeTrust` flag for a by-id get.
+ * Two entry shapes: an in-process caller (resources/mcp-tools.ts's memory_get)
+ * passes it explicitly via the `opts` arg; an HTTP `GET /Memory/<id>?includeTrust=true`
+ * carries it as a query param on the RequestTarget. Defensive across the
+ * RequestTarget/URLSearchParams shapes Harper may hand us; anything other than
+ * a literal "true" reads as off, so the default response stays byte-identical.
+ */
+function wantsTrust(target: any, opts: { includeTrust?: boolean } | undefined): boolean {
+  if (opts?.includeTrust === true) return true;
+  const raw =
+    target?.get?.("includeTrust") ??
+    target?.searchParams?.get?.("includeTrust") ??
+    undefined;
+  return raw === "true" || raw === true;
+}
 
 /**
  * Owner ids a non-admin agent may READ (resolveAllowedOwners) live in
@@ -477,7 +495,7 @@ export class Memory extends (databases as any).flair.Memory {
    * with Memory's own "open-within-org" read-scope resolver above — same
    * dispatch shape Relationship.ts/WorkspaceState.ts's get() overrides use.
    */
-  async get(target?: any) {
+  async get(target?: any, opts?: { includeTrust?: boolean }) {
     // Collection / query reads — the `GET /Memory/?<query>` form and the bare
     // collection — arrive as a RequestTarget with `isCollection === true`, and
     // are governed by search() (same owner/grant scoping). Only a genuine by-id
@@ -489,11 +507,24 @@ export class Memory extends (databases as any).flair.Memory {
     // get (RequestTarget with isCollection false, or a bare id) falls through.
     // makeByIdReadGate re-applies this same guard internally (delegating to
     // this.search via `.call(this, ...)`) — kept here too as documentation of
-    // the invariant at the call site, harmless no-op double-check.
+    // the invariant at the call site, harmless no-op double-check. The trust
+    // block (flair#744) is NOT attached on the collection path — that routes to
+    // search(), which is out of this slice's by-id `get` surface.
     if (!target || (typeof target === "object" && target.isCollection)) {
       return this.search(target);
     }
-    return memoryByIdReadGate.call(this, target, (t: any) => super.get(t));
+    const result = await memoryByIdReadGate.call(this, target, (t: any) => super.get(t));
+    // flair#744 slice 1 — opt-in inline trust-evidence block, attached ONLY to
+    // a genuine by-id record (never a NOT_FOUND `Response`, never null), and
+    // ONLY after the ownership/read-scope gate above has already resolved. The
+    // block informs the reader; it never re-enters an authority decision
+    // (#735-spirit zero-authority invariant). Default OFF ⇒ the record is
+    // returned untouched (attachTrust returns the same reference) ⇒
+    // byte-identical to pre-slice-1.
+    if (result && typeof result === "object" && !(result instanceof Response) && typeof (result as any).agentId === "string") {
+      return attachTrust(result as any, wantsTrust(target, opts));
+    }
+    return result;
   }
 
   /**

@@ -20,7 +20,8 @@ import {
 // bootstrap call never trips SemanticSearch's rate-limit/reranker/
 // retrievalCount hit-tracking side effects (see resources/
 // semantic-retrieval-core.ts's module doc for the full boundary).
-import { retrieveCandidates } from "./semantic-retrieval-core.js";
+import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
+import { buildTrustBlock } from "./trust-block.js";
 
 /**
  * POST /MemoryBootstrap
@@ -162,6 +163,7 @@ export class BootstrapMemories extends Resource {
       channel,     // e.g., "discord", "tps-mail", "claude-code"
       surface,     // e.g., "tps-build", "tps-review", "cli-session"
       subjects,    // e.g., ["flair", "auth"] — entities to preload context for
+      includeTrust = false,  // flair#744 slice 1 — opt-in per-memory trust block
     } = data || {};
 
     // Authenticated identity lives on getContext().request — `this.request` is
@@ -375,8 +377,22 @@ export class BootstrapMemories extends Resource {
 
     // Fields every own-scoped lifecycle slice below needs — explicit (no raw
     // `embedding`), matching the "select, no raw embedding" pushdown
-    // requirement.
-    const OWN_SELECT = ["id", "agentId", "content", "durability", "createdAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags"];
+    // requirement. flair#744 slice 1: when the caller opts into the per-memory
+    // trust block, widen the projection with the extra stored fields the block
+    // reads (`provenance`, `usageCount`, `validFrom`) — additive, and only when
+    // requested, so a non-trust bootstrap fetches (and returns) exactly what it
+    // did before. These records are never returned raw when the block is off,
+    // so widening the select cannot change the off-path response bytes.
+    const OWN_SELECT = includeTrust
+      ? ["id", "agentId", "content", "durability", "createdAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags", "provenance", "usageCount", "validFrom"]
+      : ["id", "agentId", "content", "durability", "createdAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags"];
+
+    // flair#744 slice 1 — the Memory records that became visible lines in the
+    // memory-bearing sections (permanent/recent/predicted/relevant/teammate),
+    // collected as they're added so the opt-in `trust` array below can carry a
+    // self-contained block per included memory. Stays empty (and unused) when
+    // includeTrust is off.
+    const includedTrustMemories: any[] = [];
 
     // --- 2. Permanent memories (always included, highest priority) ---
     // Own-scoped pushdown: `agentId==self` + `durability==permanent`, both
@@ -423,6 +439,7 @@ export class BootstrapMemories extends Resource {
       const cost = estimateTokens(line);
       if (cost <= tokenBudget) {
         sections.permanent.push(line);
+        if (includeTrust) includedTrustMemories.push(m);
         tokenBudget -= cost;
         memoriesIncluded++;
       } else {
@@ -492,6 +509,7 @@ export class BootstrapMemories extends Resource {
         continue;
       }
       sections.recent.push(line);
+      if (includeTrust) includedTrustMemories.push(m);
       recentSpent += cost;
       tokenBudget -= cost;
       memoriesIncluded++;
@@ -537,6 +555,7 @@ export class BootstrapMemories extends Resource {
           continue;
         }
         sections.predicted.push(line);
+        if (includeTrust) includedTrustMemories.push(m);
         predictedSpent += cost;
         tokenBudget -= cost;
         memoriesIncluded++;
@@ -642,6 +661,11 @@ export class BootstrapMemories extends Resource {
           // even though `conditions` already scoped the query.
           isAllowed: scope.isAllowed,
           ctx,
+          // flair#744 slice 1: widen the projection with `provenance` (omitted
+          // by the default select) ONLY when the trust block was requested, so
+          // the block's provenance fields are populated for teammate/relevant
+          // records without changing a non-trust bootstrap's fetch.
+          select: includeTrust ? [...DEFAULT_SELECT, "provenance"] : undefined,
         });
 
         // Preserve the ORIGINAL score > 0.3 floor exactly (bootstrap's own
@@ -688,6 +712,7 @@ export class BootstrapMemories extends Resource {
           } else {
             sections.relevant.push(line);
           }
+          if (includeTrust) includedTrustMemories.push(m);
           tokenBudget -= cost;
           memoriesIncluded++;
         }
@@ -897,8 +922,21 @@ export class BootstrapMemories extends Resource {
     const soulTokens = sections.soul.reduce((sum, line) => sum + estimateTokens(line), 0);
     const memoryTokens = maxTokens - tokenBudget;
 
+    // flair#744 slice 1 — opt-in per-memory trust block. Bootstrap renders
+    // memories as text lines rather than result objects, so the block is
+    // surfaced as a `trust` array of self-contained entries (each carries its
+    // own `id` to correlate to a rendered line), one per INCLUDED memory. Built
+    // HERE, in the response tail, strictly after all read-scope resolution and
+    // purely for the response — never consulted for any authority decision
+    // (#735-spirit zero-authority invariant). Default OFF ⇒ the `trust` key is
+    // absent ⇒ the response is byte-identical to pre-slice-1.
+    const trust = includeTrust
+      ? includedTrustMemories.map((m) => ({ id: m.id, ...buildTrustBlock(m) }))
+      : undefined;
+
     return {
       context,
+      ...(trust ? { trust } : {}),
       sections: {
         soul: sections.soul.length,
         skills: sections.skills.length,
