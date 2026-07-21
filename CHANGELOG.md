@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-21
+
 ### Harden TPS-Ed25519 auth-header parsing — bound length + disjoint capture classes for linear-time parsing
 
 Robustness hardening for the `Authorization: TPS-Ed25519 …` header parser shared by the three auth call sites (`auth-middleware.ts`, `agent-auth.ts`, `Presence.ts`). The header is untrusted client input; the parser is now bounded and always linear-time.
