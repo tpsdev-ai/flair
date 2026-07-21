@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Docs — README refresh (trust-graded recall + accuracy fixes)
+
+- Added a **Trust-Graded Recall** feature section documenting the 0.25.0 arc — the trust-evidence block, `matchQuality` confidence bands, first-class `abstain` verdict, and citation-on-write / `record_usage` — with an honest note on which surfaces expose it today (authenticated HTTP API + native `/mcp`) versus what's follow-up (`flair` CLI, `@tpsdev-ai/flair-client`, the `flair-mcp` bridge).
+- Corrected the advertised MCP tool list (7 → the 11 the bridge actually exposes), the n8n node count (2 → 3, incl. Flair Write), moved the shipped first-run soul wizard out of "What's next", and reconciled the MCP client list.
+
 ### Fixed — `flair upgrade` no longer rolls back a healthy instance it just can't authenticate to
 
 `flair upgrade`'s post-restart verification treated "the server responded but the verifier couldn't authenticate" (a 401/403 on the authenticated `/HealthDetail`) the same as "the upgrade broke the instance" — it triggered a rollback, whose own re-verify hit the identical missing-credential wall, leaving the operator with a false `ROLLBACK ALSO FAILED VERIFICATION — instance state is UNKNOWN` for an instance that was healthy the entire time. This bit a real `0.22.1 → 0.25.0` upgrade on a machine with no admin-pass/agent key: `/HealthDetail` became a *verified-read* (flair#747), so the verifier authenticated fine against the pre-upgrade version but not post-restart, and the pre-flight credential check can't anticipate a version that changes `/HealthDetail`'s auth requirement.

@@ -134,6 +134,15 @@ flair memory search "native addon loading in sandboxed runtimes"
 # → [0.67] Harper v5 sandbox blocks node:module but process.dlopen works
 ```
 
+### Trust-Graded Recall
+Recall can carry an opt-in **trust-evidence block** per result — provenance (verified vs claimed author), usage signal, freshness/validity, supersession — so an agent weighs *what to trust*, not just *what matched*. On top of it:
+
+- **Confidence bands** (`matchQuality`): each result is labeled `strong` / `moderate` / `breadcrumb` from its absolute similarity — a weak-but-relevant hit is taken for what it is, not mistaken for a confident one.
+- **First-class abstention** (`abstain`): when nothing clears a confidence floor, recall returns an honest "no memory covers this" verdict instead of the N weakest matches.
+- **Citation-on-write** (`usedMemoryIds`) + **`record_usage`**: report which memories actually grounded an answer — a deduped, principal-bound usage signal (honest evidence, never retrieval-popularity) that strengthens future recall.
+
+Opt-in and additive (`includeTrust` / `abstain` on the recall path) — off by default, byte-identical when unused. Reachable today via the authenticated HTTP API and the native `/mcp` tools; first-class exposure in the `flair` CLI, `@tpsdev-ai/flair-client`, and the `flair-mcp` bridge is a follow-up. Full arc in the [CHANGELOG](CHANGELOG.md) (flair#744).
+
 ### Tiered Durability
 Not all memories are equal:
 
@@ -340,7 +349,7 @@ Add to your `CLAUDE.md`:
 
     At the start of every session, run mcp__flair__bootstrap before responding.
 
-Your agent's memory **follows it across CLIs** — same Flair instance, same agent identity, switch from Claude Code to Gemini CLI to Codex CLI without losing state. The MCP server exposes `memory_store`, `memory_search`, `memory_get`, `memory_delete`, `bootstrap`, `soul_set`, `soul_get`.
+Your agent's memory **follows it across CLIs** — same Flair instance, same agent identity, switch from Claude Code to Gemini CLI to Codex CLI without losing state. The `flair-mcp` server — the bridge these CLIs connect to — exposes `memory_store`, `memory_search`, `memory_update`, `memory_get`, `memory_delete`, `relationship_store`, `bootstrap`, `soul_set`, `soul_get`, `flair_workspace_set`, and `flair_orgevent`. (Flair's in-Harper native `/mcp` surface is a separate, still-experimental tool set with `attention` + `record_usage` — see Trust-Graded Recall above.)
 
 For per-CLI config snippets (Gemini CLI's `~/.gemini/settings.json`, Codex CLI's `~/.codex/config.toml`, etc.), see **[docs/mcp-clients.md](docs/mcp-clients.md)**. For a deeper Claude Code walk-through with `CLAUDE.md` patterns, see [docs/claude-code.md](docs/claude-code.md).
 
@@ -353,7 +362,7 @@ Use Flair as the memory backend for n8n's AI Agent. Same memories readable from 
 @tpsdev-ai/n8n-nodes-flair
 ```
 
-Two nodes ship: **Flair Chat Memory** (Memory port, conversation buffer) and **Flair Search** (Tool port, semantic search + get-by-subject). Setup walkthrough, subject/sessionId patterns, and security guidance in **[docs/n8n.md](docs/n8n.md)**.
+Three nodes ship: **Flair Chat Memory** (Memory port, conversation buffer), **Flair Search** (Tool port, semantic search + get-by-subject), and **Flair Write** (Tool port, store memories). Setup walkthrough, subject/sessionId patterns, and security guidance in **[docs/n8n.md](docs/n8n.md)**.
 
 ### JavaScript / TypeScript (Client Library)
 
@@ -541,13 +550,13 @@ Flair is in active development and daily use. We dogfood it — the agents that 
 - ✅ Web admin UI (principals, connectors, IdPs, instance config)
 - ✅ Federation (hub-and-spoke sync with signed requests and pairing tokens)
 - ✅ OpenClaw memory plugin
-- ✅ MCP server for Claude Code / Cursor / Windsurf
+- ✅ MCP server for Claude Code / Cursor / Codex / Gemini CLI
 - ✅ Lightweight client library (`@tpsdev-ai/flair-client`)
 - ✅ Portable agent identity (export/import between instances)
 - ✅ `flair --version`, `flair upgrade`
+- ✅ First-run soul wizard (interactive personality setup)
 
 **What's next:**
-- [ ] First-run soul wizard (interactive personality setup)
 - [ ] Git-backed memory sync
 - [ ] Encryption at rest (opt-in AES-256-GCM per memory)
 - [ ] Harper Fabric deployment (managed multi-office)
