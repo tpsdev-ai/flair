@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed — `flair upgrade` no longer rolls back a healthy instance it just can't authenticate to
+
+`flair upgrade`'s post-restart verification treated "the server responded but the verifier couldn't authenticate" (a 401/403 on the authenticated `/HealthDetail`) the same as "the upgrade broke the instance" — it triggered a rollback, whose own re-verify hit the identical missing-credential wall, leaving the operator with a false `ROLLBACK ALSO FAILED VERIFICATION — instance state is UNKNOWN` for an instance that was healthy the entire time. This bit a real `0.22.1 → 0.25.0` upgrade on a machine with no admin-pass/agent key: `/HealthDetail` became a *verified-read* (flair#747), so the verifier authenticated fine against the pre-upgrade version but not post-restart, and the pre-flight credential check can't anticipate a version that changes `/HealthDetail`'s auth requirement.
+
+- A credentials-only failure (`isCredentialOnlyFailure`: healthy instance, authenticated-leg rejected with 401/403) on the post-restart verification now resolves to a new **`healthy-unverified`** outcome — the upgrade is reported **complete**, with a clear note that the version couldn't be verified and how to enable full verification (`FLAIR_ADMIN_PASS` / `flair init`). It **never rolls back**: the public `/Health` already proved the server is up, and a version we can't *read* is not grounds to roll back a *running* instance. This supersedes flair#741 fix #3's "prefer the known-good version" default, which the incident proved wrong for a healthy instance.
+- Scoped strictly to credentials: a genuine server-side failure (unhealthy `/Health`, a 5xx, or a network error on the authenticated leg) still rolls back exactly as before.
+
 ## [0.25.0] - 2026-07-21
 
 ### Trust-graded recall — citation-on-write (flair#744 slice A)
