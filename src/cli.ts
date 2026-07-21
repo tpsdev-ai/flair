@@ -18,10 +18,11 @@ import {
   lstatSync,
   realpathSync,
   unlinkSync,
+  chownSync,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
@@ -494,6 +495,283 @@ export function detectOpsApiAllInterfacesBind(
     return { allInterfaces: false, boundHost: str.slice(0, lastColon).replace(/[[\]]/g, "") };
   }
   return { allInterfaces: true, boundHost: null };
+}
+
+// ─── Ops-socket permission posture (flair#763) ─────────────────────────────────
+//
+// The ops API domain socket (dataDir/operations-server) is protected by a
+// two-layer posture, with the socket's IMMEDIATE PARENT DIRECTORY as the
+// primary, load-bearing gate (resolved from the socket path — never a
+// hardcoded ~/.flair, so custom --data-dir installs get the same gate):
+//
+//   FLAIR_SOCKET_GROUP unset → parent dir 0700, socket 0600 (owner-only).
+//   FLAIR_SOCKET_GROUP set    → parent dir 0750 (owner+group traverse — else
+//                               the group grant is unreachable behind the dir
+//                               gate), socket 0660 + chgrp to that group.
+//
+// The two layers move in lockstep BOTH directions: a later UNSET returns the
+// dir to 0700 and the socket to 0600. The directory gate is race-free
+// (checked on every connect(2) traversal), umask-independent (explicit
+// chmod), and cross-platform (VFS-level, unlike socket-file permission
+// enforcement on connect(2) which varies across BSD lineage); the socket-file
+// mode is defense-in-depth within it. Split from #670 (network bind shipped
+// in #762); same local-admin-surface axis as #654 (authorizeLocal off).
+
+/** Group names allowed for FLAIR_SOCKET_GROUP — validated BEFORE existence
+ *  resolution (Sherlock #763): rejects path-traversal / whitespace / any
+ *  weird-but-"valid" name before it reaches getgrnam/chgrp. */
+export const SOCKET_GROUP_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9._-]*$/;
+
+export function isValidSocketGroupName(name: string): boolean {
+  return SOCKET_GROUP_NAME_RE.test(name);
+}
+
+/** System groups broad enough that opting the ops socket into them silently
+ *  grants access to a wide set of accounts (macOS `staff` = every human user
+ *  on the box). Not a gate — a warning (Sherlock #763). */
+const BROAD_SYSTEM_GROUPS = new Set(["staff", "wheel", "users", "admin", "everyone", "adm"]);
+
+/** The posture (parent-dir + socket file modes) for a given FLAIR_SOCKET_GROUP
+ *  value. Pure — the single source of truth for the two lockstep states. */
+export function resolveSocketPosture(group: string | undefined | null): {
+  dirMode: number;
+  socketMode: number;
+  group: string | null;
+} {
+  const g = (group ?? "").trim();
+  if (g.length > 0) return { dirMode: 0o750, socketMode: 0o660, group: g };
+  return { dirMode: 0o700, socketMode: 0o600, group: null };
+}
+
+export interface OpsSocketPostureFs {
+  chmodSync(path: string, mode: number): void;
+  statSync(path: string): { mode: number; uid: number; gid: number };
+  existsSync(path: string): boolean;
+  chownSync(path: string, uid: number, gid: number): void;
+}
+
+const NODE_SOCKET_FS: OpsSocketPostureFs = {
+  chmodSync,
+  statSync: (p) => {
+    const s = statSync(p);
+    return { mode: s.mode, uid: s.uid, gid: s.gid };
+  },
+  existsSync,
+  chownSync,
+};
+
+/** Resolve a group NAME to its numeric gid, cross-platform, or null if the
+ *  group does not exist. Uses execFileSync (arg vector — no shell) and the
+ *  name is regex-validated by the caller before it gets here. */
+function resolveGroupGid(name: string): number | null {
+  try {
+    if (process.platform === "darwin") {
+      // dscl reads Directory Services (macOS groups don't live in /etc/group).
+      const out = execFileSync("dscl", [".", "-read", `/Groups/${name}`, "PrimaryGroupID"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const m = out.match(/PrimaryGroupID:\s*(\d+)/);
+      return m ? Number(m[1]) : null;
+    }
+    // Linux / other POSIX: getent resolves NSS (files, LDAP, …).
+    const out = execFileSync("getent", ["group", name], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const parts = out.trim().split(":");
+    return parts.length >= 3 && parts[2] !== "" ? Number(parts[2]) : null;
+  } catch {
+    return null; // command failed / group not found → treated as missing
+  }
+}
+
+export interface ApplyOpsSocketPostureOptions {
+  socketPath: string;
+  group?: string | null;
+  fs?: OpsSocketPostureFs;
+  resolveGid?: (name: string) => number | null;
+}
+
+export interface OpsSocketPostureResult {
+  dirMode: number;
+  socketMode: number;
+  group: string | null;
+  gid: number | null;
+  dirApplied: boolean;
+  socketApplied: boolean; // false when the socket didn't exist yet (pre-boot)
+  broadGroup: boolean;
+}
+
+/**
+ * Apply the ops-socket permission posture (flair#763). Idempotent: safe to
+ * call before Harper spawns (dir gate only — socket not present yet) and again
+ * after the socket appears (socket mode + optional chgrp). fs and resolveGid
+ * are injectable for unit tests (temp dirs / mocked group resolution).
+ *
+ * Fail-closed: an invalid OR missing FLAIR_SOCKET_GROUP is a hard error — NEVER
+ * a silent fallback to 0600. The group name is regex-validated BEFORE
+ * existence resolution.
+ */
+export function applyOpsSocketPosture(opts: ApplyOpsSocketPostureOptions): OpsSocketPostureResult {
+  const fs = opts.fs ?? NODE_SOCKET_FS;
+  const resolveGid = opts.resolveGid ?? resolveGroupGid;
+  const posture = resolveSocketPosture(opts.group);
+
+  let gid: number | null = null;
+  let broadGroup = false;
+  if (posture.group !== null) {
+    if (!isValidSocketGroupName(posture.group)) {
+      throw new Error(
+        `Invalid FLAIR_SOCKET_GROUP '${posture.group}': group names must match ${SOCKET_GROUP_NAME_RE.source}.`,
+      );
+    }
+    gid = resolveGid(posture.group);
+    if (gid === null) {
+      throw new Error(
+        `FLAIR_SOCKET_GROUP '${posture.group}' does not exist on this system. ` +
+          `Create the group first, or unset FLAIR_SOCKET_GROUP to use the owner-only default (dir 0700 / socket 0600).`,
+      );
+    }
+    broadGroup = BROAD_SYSTEM_GROUPS.has(posture.group);
+  }
+
+  const parentDir = dirname(opts.socketPath);
+  // Directory gate — the race-free primary control. Applied whether or not the
+  // socket exists yet, so it is in place BEFORE Harper creates the socket.
+  fs.chmodSync(parentDir, posture.dirMode);
+
+  // Socket file: defense-in-depth mode + optional chgrp — only once it exists.
+  let socketApplied = false;
+  if (fs.existsSync(opts.socketPath)) {
+    fs.chmodSync(opts.socketPath, posture.socketMode);
+    if (gid !== null) {
+      const st = fs.statSync(opts.socketPath);
+      try {
+        // uid unchanged (we own it); only the group moves.
+        fs.chownSync(opts.socketPath, st.uid, gid);
+      } catch (err: any) {
+        throw new Error(
+          `Failed to chgrp the ops socket to group '${posture.group}' (gid ${gid}): ${err?.code ?? err?.message ?? err}. ` +
+            `chgrp requires membership in the target group — join '${posture.group}' or pick a different FLAIR_SOCKET_GROUP.`,
+        );
+      }
+    }
+    socketApplied = true;
+  }
+
+  return {
+    dirMode: posture.dirMode,
+    socketMode: posture.socketMode,
+    group: posture.group,
+    gid,
+    dirApplied: true,
+    socketApplied,
+    broadGroup,
+  };
+}
+
+/**
+ * Resolve + apply the ops-socket posture for a data dir, with the right
+ * fatal-vs-warn handling. A broken FLAIR_SOCKET_GROUP opt-in is a hard error
+ * (fail closed, no silent fallback); a failure of the owner-only default is
+ * non-fatal defense-in-depth (warn — the dir gate remains the load-bearing
+ * control). Returns the applied posture, or null on a non-fatal default-path
+ * failure. The socket path is derived from dataDir so a --data-dir install is
+ * gated at its own root, never a hardcoded ~/.flair.
+ */
+function readyOpsSocketPosture(dataDir: string): OpsSocketPostureResult | null {
+  const socketPath = join(dataDir, "operations-server");
+  const group = process.env.FLAIR_SOCKET_GROUP;
+  const optedIn = !!(group && group.trim().length > 0);
+  try {
+    const res = applyOpsSocketPosture({ socketPath, group });
+    if (res.broadGroup) {
+      console.error(
+        `warning: FLAIR_SOCKET_GROUP='${res.group}' is a broad system group — every member gets ops-socket access. Prefer a dedicated group.`,
+      );
+    }
+    return res;
+  } catch (err: any) {
+    if (optedIn) throw err; // opt-in misconfiguration — fail closed
+    console.error(
+      `warning: could not tighten ops-socket permissions (${err?.message ?? err}); ` +
+        `the ${dataDir} directory gate remains the primary control.`,
+    );
+    return null;
+  }
+}
+
+/**
+ * The `flair doctor` detection matrix for the ops-socket posture (flair#763,
+ * Sherlock's exact six rows). Report-only — never auto-remediated (changing a
+ * live socket's mode needs a restart). Pure: takes the parent-dir mode, the
+ * socket mode, and whether FLAIR_SOCKET_GROUP is set (the opt-in signal).
+ */
+export function classifyOpsSocketPosture(
+  dirMode: number,
+  socketMode: number,
+  groupOptIn: boolean,
+): { flagged: boolean; row: string; reason: string } {
+  const dm = dirMode & 0o777;
+  const sm = socketMode & 0o777;
+  const dirWorld = (dm & 0o007) !== 0;
+  const sockWorld = (sm & 0o007) !== 0;
+  const dirGroup = (dm & 0o070) !== 0;
+  const sockGroup = (sm & 0o070) !== 0;
+
+  if (groupOptIn) {
+    // Deliberate multi-user posture (dir 0750 / socket 0660). Clean as long as
+    // no WORLD access leaked onto either — a world bit means a regressed mode.
+    if (!dirWorld && !sockWorld) {
+      return {
+        flagged: false,
+        row: "deliberate-group-clean",
+        reason: "deliberate FLAIR_SOCKET_GROUP posture (dir 0750 / socket 0660) — no world access",
+      };
+    }
+    return {
+      flagged: true,
+      row: "group-opt-in-world-open",
+      reason: "FLAIR_SOCKET_GROUP is set but the parent directory or socket is world-accessible",
+    };
+  }
+
+  // No opt-in. World access is the worst and takes precedence.
+  if (dirWorld && sockWorld) {
+    return {
+      flagged: true,
+      row: "both-open",
+      reason: "both the socket's parent directory and the socket itself are group/world-accessible",
+    };
+  }
+  if (dirWorld) {
+    return {
+      flagged: true,
+      row: "root-open",
+      reason: "the socket's parent directory is group/world-traversable — the primary access gate is breached",
+    };
+  }
+  if (sockWorld) {
+    return {
+      flagged: true,
+      row: "socket-open",
+      reason: "the ops socket is group/world-accessible",
+    };
+  }
+  // No world bits, but group bits present without the opt-in.
+  if (dirGroup || sockGroup) {
+    return {
+      flagged: true,
+      row: "group-mode-without-opt-in",
+      reason: "the socket carries group permissions but FLAIR_SOCKET_GROUP is not set (unintended group access)",
+    };
+  }
+  return {
+    flagged: false,
+    row: "default-clean",
+    reason: "owner-only posture (dir 0700 / socket 0600)",
+  };
 }
 
 // ─── Target resolution (remote Flair instance) ─────────────────────────────────
@@ -2211,6 +2489,14 @@ program
     // when Harper was already running and the fresh-spawn branch was skipped.
     const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
 
+    // flair#763: put the ops-socket directory gate in place BEFORE Harper
+    // spawns, so the socket is never reachable during the create→chmod window
+    // (the dir gate is the race-free primary control). This also validates
+    // FLAIR_SOCKET_GROUP early — a bad group fails fast, before a full boot.
+    // The socket doesn't exist yet, so only the parent-dir mode is applied here.
+    mkdirSync(dataDir, { recursive: true });
+    readyOpsSocketPosture(dataDir);
+
     if (!opts.skipStart) {
       // Check if already running
       try {
@@ -2317,6 +2603,10 @@ program
       console.log("Waiting for Harper health check...");
       await waitForHealth(httpPort, adminUser, adminPass, STARTUP_TIMEOUT_MS);
       console.log("Harper is healthy ✓");
+
+      // flair#763: the socket now exists — apply its file mode (+ chgrp for the
+      // FLAIR_SOCKET_GROUP opt-in). The dir gate above is re-asserted idempotently.
+      readyOpsSocketPosture(dataDir);
 
       // Register launchd service on macOS so Harper survives reboots
       // and `flair restart` / `flair stop` work via launchctl.
@@ -9073,6 +9363,7 @@ program
           const { label, migrated } = ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
           if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
           await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+          readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
           console.log("✅ Flair started (launchd)");
           return;
         } catch (err: any) {
@@ -9125,6 +9416,7 @@ program
 
     try {
       await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
+      readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
       console.log(`✅ Flair started on port ${port}`);
     } catch {
       console.error("❌ Flair failed to start within timeout. Check logs in " + join(dataDir, "harper.log"));
@@ -9204,6 +9496,7 @@ async function startFlairProcess(port: number): Promise<void> {
         const { execSync } = await import("node:child_process");
         ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
         await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
+        readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture across restart/upgrade
         return;
       } catch (err: any) {
         console.error(`launchd start failed, falling back to direct start: ${err.message}`);
@@ -9245,6 +9538,7 @@ async function startFlairProcess(port: number): Promise<void> {
   proc.unref();
 
   await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
+  readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture across restart/upgrade
 }
 
 /**
@@ -10180,6 +10474,25 @@ program
         }
       }
     } catch { /* best-effort — don't fail doctor over a malformed harper-config.yaml */ }
+
+    // 3c. Ops-socket permission posture (flair#763) — report-only, never
+    // auto-fixed. Re-tightening a live socket needs a restart, so the remedy is
+    // `flair init`/restart (which re-applies the posture), not a `doctor --fix`.
+    // Only assessed when the socket exists (Harper has booted at least once).
+    try {
+      const socketPath = join(defaultDataDir(), "operations-server");
+      if (existsSync(socketPath)) {
+        const dirMode = statSync(dirname(socketPath)).mode;
+        const socketMode = statSync(socketPath).mode;
+        const groupOptIn = !!(process.env.FLAIR_SOCKET_GROUP && process.env.FLAIR_SOCKET_GROUP.trim().length > 0);
+        const verdict = classifyOpsSocketPosture(dirMode, socketMode, groupOptIn);
+        if (verdict.flagged) {
+          console.log(`  ${render.icons.error} Ops socket permissions: ${verdict.reason}`);
+          console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init ${render.wrap(render.c.dim, "(re-applies the 0700 dir / 0600 socket posture on next start; set FLAIR_SOCKET_GROUP for deliberate multi-user access)")}`);
+          issues++;
+        }
+      }
+    } catch { /* best-effort — a stat failure shouldn't fail doctor */ }
 
     // 4. Embeddings check — REAL semantic round-trip (only if Harper is responding).
     //

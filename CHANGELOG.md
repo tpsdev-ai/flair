@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### 🔒 Ops-API domain-socket permission posture — 0600 default / 0660+group opt-in with a directory gate (flair#763)
+
+Split from flair#670 (the network-bind slice shipped in #762); same local-admin-surface axis as #654 (`authorizeLocal` off). Ground-truthing a live macOS install reshaped the original "socket is 0666" framing: Harper sets no mode, so the socket lands at `0777 & ~umask` (0755 here) — real, but umask-luck — and `~/.flair` was already `0700`, making the *directory* the effective gate by accident. Harper exposes no socket-permission knob (`operationsApi.network.domainSocket` is a path string only; no `chmod` in `dist/server`), so flair sets the posture itself around the socket the start path creates.
+
+- **Primary gate = the socket's immediate parent directory, made policy.** Resolved from the configured socket path — never a hardcoded `~/.flair`, so a custom `--data-dir` install is gated at its own root. The directory gate is the load-bearing control: race-free (checked on every `connect(2)` traversal — no create→chmod window), umask-independent (explicit `chmod`), and cross-platform (VFS-level, unlike socket-file permission enforcement on `connect(2)` which varies across BSD lineage). The socket file mode is defense-in-depth within it.
+- **Posture, kept in lockstep both directions:**
+  - `FLAIR_SOCKET_GROUP` unset → parent dir `0700`, socket `0600` (owner-only — the 99% single-user case; strictly tighter than `0660`+`staff`, which on macOS is shared by every human account on the box).
+  - `FLAIR_SOCKET_GROUP` set → parent dir `0750` (owner+group traverse — else the group grant is unreachable behind the dir gate), socket `0660` + `chgrp` to that group.
+  - A later **unset returns** the dir to `0700` and the socket to `0600` — the two layers widen and tighten together.
+- **Fail-closed group handling.** The group name is regex-validated (`^[a-zA-Z_][a-zA-Z0-9._-]*$`) **before** existence resolution; an invalid **or** missing group is a hard error — never a silent fallback to `0600`. A `chgrp` that fails because the user isn't a member gives a clear "requires membership" message (distinct from "does not exist"), and a broad system group (`staff`/`wheel`/`users`/`admin`/…) emits a warning (not a block).
+- **Applied in `init` and every start readiness path.** `init` puts the directory gate in place **before** Harper spawns (closing the create→chmod window) and applies the socket mode once the socket appears; `flair start` and the internal restart/upgrade start path re-assert the posture on the freshly-created socket. The default-posture path is non-fatal defense-in-depth (warn — the dir gate is the primary control); a broken `FLAIR_SOCKET_GROUP` opt-in fails loud.
+- **`flair doctor` finding (report-only, no `--fix`).** Re-tightening a live socket needs a restart, so the remedy is `flair init`/restart, not an auto-fix. Implements the exact six-row detection matrix: dir `0700`+socket `0600` → clean; dir `0755`+socket `0600` → flag (root gate breached); dir `0700`+socket `0755` → flag (socket mode breached); both open → flag; dir `0750`+socket `0660` with `FLAIR_SOCKET_GROUP` set → clean (deliberate multi-user); dir `0750`+socket `0660` without the opt-in → flag (unintended group access).
+- New `test/unit/ops-socket-posture.test.ts`: the posture helper in both postures, lockstep both directions, group-name validation (valid/invalid/missing + not-a-member + broad-group), and all six doctor matrix rows — in-memory fs and mocked group resolution, no real socket or `~/.flair` touched.
+
+Closes #763. References #670 (parent — network bind shipped in #762) and #654 (lineage — same local-admin-surface axis).
+
 ### 🔒 Bind the Harper ops API to loopback + domain socket for single-host installs (flair#670)
 
 Defense-in-depth follow-up to flair#654 (K&S concurrence 2026-07-09): #654 closed the unauthenticated-loopback-admin hole by disabling `authorizeLocal`; this shrinks the *network* surface. The ops API (`:9925`-equivalent) bound all interfaces unconditionally — single-host installs don't need remote admin, so an accidentally-exposed port (misconfigured firewall, container networking) could be reached off-box even with #654's auth fix in place.
