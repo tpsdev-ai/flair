@@ -166,7 +166,7 @@ describe("parseTpsEd25519Header — bounded, linear-time header parsing", () => 
     // A long whitespace run with no colon is the worst case for a grammar whose
     // whitespace and text character classes overlap. With disjoint classes
     // ([^:\s]) there is a single unambiguous split, so the match is linear and
-    // completes near-instantly instead of exploring O(n^2) backtracks.
+    // completes in linear time regardless of input length.
     const degenerate = "TPS-Ed25519 " + " ".repeat(200_000);
     const start = performance.now();
     const parsed = parseTpsEd25519Header(degenerate);
@@ -177,7 +177,7 @@ describe("parseTpsEd25519Header — bounded, linear-time header parsing", () => 
 
   it("the header grammar itself matches a long degenerate input in linear time", () => {
     // Exercises the regex directly (bypassing the length guard) to prove the
-    // grammar alone stays linear on a long whitespace-only, colon-free input.
+    // grammar alone stays linear on a long degenerate input.
     const degenerate = "TPS-Ed25519 " + " ".repeat(200_000);
     const start = performance.now();
     const m = TPS_ED25519_HEADER_RE.exec(degenerate);
