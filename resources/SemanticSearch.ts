@@ -25,7 +25,8 @@ import { hybridEnabled } from "./bm25.js";
 // extraction) — MemoryBootstrap.ts calls the SAME core bare, without
 // tripping this file's rate-limit/reranker/hit-tracking side effects. See
 // resources/semantic-retrieval-core.ts's module doc for the full boundary.
-import { retrieveCandidates } from "./semantic-retrieval-core.js";
+import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
+import { attachTrust } from "./trust-block.js";
 
 // Candidate multiplier: fetch more candidates than needed from the HNSW index
 // so composite re-ranking has enough headroom to reorder results.
@@ -71,7 +72,7 @@ export class SemanticSearch extends Resource {
     // recall-harness (test/bench/recall-harness/run.ts) and `recall-eval.mjs`
     // before reconsidering this default if the compositeScore formula or
     // corpus changes.
-    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf } = data || {};
+    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false } = data || {};
 
     // Authenticated identity lives on the Harper Resource context (getContext().request).
     // `this.request` is NOT populated on Harper v5 Resources — prior reads here
@@ -234,6 +235,11 @@ export class SemanticSearch extends Resource {
       isAllowed: scope?.isAllowed,
       hybrid,
       ctx,
+      // flair#744 slice 1: the trust block needs `provenance`, which the
+      // default projection omits. Widen the select ONLY when the caller opts
+      // in — passing undefined otherwise keeps the default (no `provenance`)
+      // so a non-trust recall response stays byte-identical.
+      select: includeTrust ? [...DEFAULT_SELECT, "provenance"] : undefined,
     });
 
     // ─── Cross-encoder rerank (best-effort, fail-open to vector order) ───────
@@ -269,8 +275,17 @@ export class SemanticSearch extends Resource {
       }).catch(() => {});
     }
 
+    // flair#744 slice 1 — opt-in inline trust-evidence block. Assembled HERE,
+    // in the response tail, strictly AFTER read-scope resolution
+    // (retrieveCandidates + scope.isAllowed already ran) and purely for the
+    // response — it never feeds back into any authority/scope/attribution/dedup
+    // decision (the #735-spirit zero-authority invariant; structurally guarded
+    // by test/unit/trust-block-zero-authority-tripwire.test.ts). Default OFF ⇒
+    // `results` is the untouched `topResults`, byte-identical to pre-slice-1.
+    const results = includeTrust ? topResults.map((r: any) => attachTrust(r, true)) : topResults;
+
     // Surface degradation warning when semantic search was unavailable
-    const response: any = { results: topResults };
+    const response: any = { results };
     if (!qEmb && q && getMode() === "none") {
       response._warning = "semantic search unavailable — results are keyword-only";
     }

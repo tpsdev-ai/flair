@@ -60,7 +60,12 @@ function distanceToSimilarity(distance: number): number {
 // m.content`, so dropping it here would silently regress bootstrap's
 // "Others in the room" surface even though SemanticSearch never asserts on
 // its absence.
-const DEFAULT_SELECT = ["id", "agentId", "content", "contentHash", "visibility", "tags", "durability",
+// Exported so the opt-in trust-block path (flair#744 slice 1) can widen it with
+// `provenance` ONLY when a caller requests the block — the default projection
+// deliberately omits `provenance` (it's only needed for the trust block), and
+// adding it unconditionally would change every existing recall response's
+// bytes. See SemanticSearch.ts / MemoryBootstrap.ts's `includeTrust` handling.
+export const DEFAULT_SELECT = ["id", "agentId", "content", "contentHash", "visibility", "tags", "durability",
   "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "usageCount", "lastRetrieved",
   "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
   "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject", "summary",
