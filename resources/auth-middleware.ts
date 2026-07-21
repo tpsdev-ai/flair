@@ -2,7 +2,7 @@ import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "@harperfast/harper";
 import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
-import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer } from "./ed25519-auth.js";
+import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 
 // --- Admin credentials ---
@@ -236,9 +236,9 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   // ── Ed25519 agent auth ────────────────────────────────────────────────────
-  const m = header.match(/^TPS-Ed25519\s+([^:]+):(\d+):([^:]+):(.+)$/);
+  const parsed = parseTpsEd25519Header(header);
 
-  if (!m) {
+  if (!parsed) {
     // For browser-accessible admin pages, emit `WWW-Authenticate: Basic` so
     // the browser shows a native auth dialog instead of a bare 401 page.
     // JSON API endpoints don't get this — they should keep the structured
@@ -266,7 +266,7 @@ server.http(async (request: any, nextLayer: any) => {
     return nextLayer(request);
   }
 
-  const [, agentId, tsRaw, nonce, signatureB64] = m;
+  const { agentId, tsRaw, nonce, signatureB64 } = parsed;
   const ts = Number(tsRaw);
   const now = Date.now();
 

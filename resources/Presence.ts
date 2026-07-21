@@ -33,7 +33,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { resolveAgentAuth, verifyAgentRequest } from "./agent-auth.js";
-import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer } from "./ed25519-auth.js";
+import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -459,15 +459,15 @@ export class Presence extends (databases as any).flair.Presence {
     if (middlewareAgent) {
       agentId = middlewareAgent;
     } else {
-      const m = authHeader.match(/^TPS-Ed25519\s+([^:]+):(\d+):([^:]+):(.+)$/);
-      if (!m) {
+      const parsed = parseTpsEd25519Header(authHeader);
+      if (!parsed) {
         return new Response(
           JSON.stringify({ error: "Ed25519 agent auth required for heartbeat" }),
           { status: 401, headers: { "Content-Type": "application/json" } },
         );
       }
 
-      const [, headerAgentId, tsRaw, nonce, sigB64] = m;
+      const { agentId: headerAgentId, tsRaw, nonce, signatureB64: sigB64 } = parsed;
       const ts = Number(tsRaw);
       const now = Date.now();
 
