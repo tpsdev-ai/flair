@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Trust-graded recall — citation-on-write (flair#744 slice A)
+
+Memory usage feedback (`record_usage`, flair#683) required a separate call after the fact. Now a write can cite the memories that informed it inline: an optional `usedMemoryIds?: string[]` on the memory write surfaces (`Memory.post`/`Memory.put`, the `memory_store` MCP tool, `flair-client.mjs write --used <csv>`) credits each cited memory through the exact SAME deduped, principal-bound usage ledger `record_usage` writes to — no separate call, no duplicated ledger logic (`resources/usage-recording.ts` extracts the shared ledger-write core so RecordUsage and citation-on-write share one implementation).
+
+- **Post-commit, non-blocking.** Citation recording runs strictly AFTER the memory write commits. A recording failure is logged server-side and swallowed — it never changes the write's response, never rolls back or retries the write.
+- **Silent drop for anything outside read scope.** Reusing `record_usage`'s existing ledger path means a cited id that doesn't exist (or isn't visible to the writer) is a quiet no-op, exactly like `record_usage` — no error, no observable difference between "not found" and "already credited".
+- **agentId always from the resolved auth context.** The ledger key is `{writerAgentId}:{citedMemoryId}`, where `writerAgentId` comes from the same auth resolution `Memory.post`/`put` already perform — never from the request body. A caller cannot credit a contribution on behalf of another identity.
+- **Opt-in, additive, clean migration.** `usedMemoryIds` is consumed-and-stripped from the write body before the row is persisted (same discipline as `claimedClient`) — it is never stored on the Memory record itself. Omitted entirely ⇒ zero new calls, byte-identical to before.
+- **Trust-block absent-vs-0 fix.** The trust block's `usageCount` field is now `number | null`: `null` when no usage has ever been recorded, a real `0`/`3`/etc. when it has — so a reader can tell "no usage signal yet" apart from "recorded, zero uses" instead of both reading as a false `0`.
+- New pure unit coverage in `test/unit/usage-recording.test.ts` (auth gating, cap/dedup, per-id failure isolation, agentId provenance) and `test/unit/trust-block.test.ts` (the absent-vs-0 cases); new integration coverage in `test/integration/citation-on-write-e2e.test.ts` (ledger-sharing dedup parity with `record_usage`, cross-agent isolation, out-of-scope/nonexistent-id silent drop, post-commit write-success isolation).
+- Consumer wiring (openclaw-flair / flair-mcp actually passing `usedMemoryIds` on real writes) is a follow-up slice, out of scope here.
+
 ### Trust-graded recall — `matchQuality` confidence bands on the trust block ("breadcrumbs, labeled") (flair#744)
 
 Recall shouldn't be binary confident-match / nothing. A weak, fuzzy match is *valuable* if the agent knows it's weak — a breadcrumb taken for what it is. The hallucination risk isn't returning weak matches; it's returning them **undifferentiated** from strong ones. Abstention (slice 2) already returns breadcrumbs (it only abstains at a near-zero floor); this adds the **label** that says "this is a breadcrumb, not a fact." Each recall result's trust block now carries a **`matchQuality: "strong" | "moderate" | "breadcrumb" | null`** field, derived purely from the result's absolute semantic similarity.

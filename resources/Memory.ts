@@ -28,6 +28,7 @@ import {
 } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
 import { attachTrust } from "./trust-block.js";
+import { recordCitations } from "./usage-recording.js";
 
 /**
  * flair#744 slice 1 — read the opt-in `includeTrust` flag for a by-id get.
@@ -611,6 +612,16 @@ export class Memory extends (databases as any).flair.Memory {
       if (attr.denied) return attr.denied;
     }
 
+    // flair#744 slice A: citation-on-write — consume-and-strip, same
+    // discipline as `claimedClient` below. Pull the optional
+    // `usedMemoryIds` off the write body now, BEFORE anything else touches
+    // `content`, so it is NEVER persisted on the Memory record itself.
+    // Recording happens POST-COMMIT, only when this was present (see the
+    // failure-isolated recordCitations() call near the return below) —
+    // omitted ⇒ `undefined` ⇒ zero new calls, byte-identical behavior.
+    const usedMemoryIds = content?.usedMemoryIds;
+    if (content && typeof content === "object") delete content.usedMemoryIds;
+
     content.durability ||= "standard";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
@@ -729,6 +740,20 @@ export class Memory extends (databases as any).flair.Memory {
     // a lost write — and the failure is logged, never silently swallowed.
     await closeSupersededIfNeeded(ctx, content, "post");
 
+    // flair#744 slice A: citation-on-write — POST-COMMIT, fully
+    // failure-isolated. The write above already succeeded and `result` is
+    // final; crediting each cited memory through the shared usage ledger
+    // (same path as POST /RecordUsage) must never affect this response —
+    // any failure here is logged server-side and swallowed, never surfaced
+    // to the caller, never rolls back or retries the write.
+    if (usedMemoryIds !== undefined) {
+      try {
+        await recordCitations(ctx, auth, usedMemoryIds, new Date().toISOString());
+      } catch (err) {
+        console.error("Memory.post: citation recording failed (write already committed)", err);
+      }
+    }
+
     return buildWriteResponse(content, result, dedupMatch);
   }
 
@@ -771,6 +796,13 @@ export class Memory extends (databases as any).flair.Memory {
       const attr = stampAttribution(auth, content, RECORD_TYPES.Memory.ownerField, RECORD_TYPES.Memory.attribution.put, "forbidden: cannot write memory owned by another agent");
       if (attr.denied) return attr.denied;
     }
+
+    // flair#744 slice A: citation-on-write — same consume-and-strip
+    // discipline as post() above. Strip BEFORE anything else touches
+    // `content` so it is never persisted on the row; recorded post-commit
+    // below only when present.
+    const usedMemoryIds = content?.usedMemoryIds;
+    if (content && typeof content === "object") delete content.usedMemoryIds;
 
     const now = new Date().toISOString();
     content.updatedAt = now;
@@ -908,6 +940,16 @@ export class Memory extends (databases as any).flair.Memory {
 
     // ── THEN close the superseded record (see post()) ───────────────────────
     await closeSupersededIfNeeded(ctx, content, "put");
+
+    // flair#744 slice A: citation-on-write — POST-COMMIT, fully
+    // failure-isolated (see post()'s identical comment above).
+    if (usedMemoryIds !== undefined) {
+      try {
+        await recordCitations(ctx, auth, usedMemoryIds, new Date().toISOString());
+      } catch (err) {
+        console.error("Memory.put: citation recording failed (write already committed)", err);
+      }
+    }
 
     return buildWriteResponse(content, result, dedupMatch);
   }

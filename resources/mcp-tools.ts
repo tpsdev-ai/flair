@@ -191,6 +191,12 @@ async function memoryStore(agent: ResolvedAgent, args: any) {
   // folds it into provenance.claimed.client and strips it from the row.
   // Omitted entirely when the token carried no client_id.
   if (agent.clientId) body.claimedClient = agent.clientId;
+  // flair#744 slice A: citation-on-write — forward the optional
+  // usedMemoryIds array only when the caller actually supplied it, so an
+  // omitted citation list delegates a byte-identical body (Memory.post()
+  // consumes-and-strips this before the row is written, then credits each
+  // id post-commit through the shared usage ledger).
+  if (Array.isArray(args?.usedMemoryIds)) body.usedMemoryIds = args.usedMemoryIds;
   return unwrap(await h.post(body));
 }
 
@@ -456,6 +462,7 @@ export const TOOLS: Record<string, ToolEntry> = {
           type: { type: "string", enum: ["session", "lesson", "decision", "preference", "fact", "goal"], description: "Memory type (default session)" },
           durability: { type: "string", enum: ["permanent", "persistent", "standard", "ephemeral"], description: "permanent > persistent > standard > ephemeral (default standard)" },
           tags: { type: "array", items: { type: "string" }, description: "Tag strings" },
+          usedMemoryIds: { type: "array", items: { type: "string" }, description: "IDs of memories that informed this write (citation-on-write). Credited via the same deduped usage ledger as record_usage. Optional." },
         },
         required: ["content"],
       },

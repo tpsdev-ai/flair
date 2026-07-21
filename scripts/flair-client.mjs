@@ -47,19 +47,24 @@ try {
       result = await flairFetch('GET', `/${table}/${rest[0]}`);
       break;
     case 'write': {
-      // Support --durability <level> and --supersedes <id> flags
+      // Support --durability <level>, --supersedes <id>, and --used <csv> flags
       const filteredRest = [];
       let durability = 'standard';
       let supersedes;
+      let usedMemoryIds;
       for (let i = 0; i < rest.length; i++) {
         if (rest[i] === '--durability' && rest[i + 1]) { durability = rest[++i]; }
         else if (rest[i] === '--supersedes' && rest[i + 1]) { supersedes = rest[++i]; }
+        else if (rest[i] === '--used' && rest[i + 1]) { usedMemoryIds = rest[++i].split(',').map(s => s.trim()).filter(Boolean); }
         else filteredRest.push(rest[i]);
       }
       const content = filteredRest.join(' ');
       const id = `${AGENT_ID}-${Date.now()}`;
       const body = { id, agentId: AGENT_ID, content, durability, createdAt: new Date().toISOString() };
       if (supersedes) body.supersedes = supersedes;
+      // flair#744 slice A: citation-on-write — only set when --used was
+      // given, so omitting the flag is byte-identical to before.
+      if (usedMemoryIds) body.usedMemoryIds = usedMemoryIds;
       result = await flairFetch('PUT', `/${table}/${id}`, body);
       break;
     }
