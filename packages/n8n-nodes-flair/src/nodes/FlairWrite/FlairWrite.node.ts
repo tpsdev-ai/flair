@@ -140,7 +140,7 @@ export class FlairWrite implements INodeType {
           { name: "Standard (default)", value: "standard" },
           { name: "Persistent (key decisions)", value: "persistent" },
           { name: "Permanent (inviolable)", value: "permanent" },
-          { name: "Ephemeral (auto-expires 72h)", value: "ephemeral" },
+          { name: "Ephemeral (auto-expires 24h)", value: "ephemeral" },
         ],
         default: "standard",
         description:

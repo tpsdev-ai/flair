@@ -29,8 +29,8 @@ import { create as tarCreate, extract as tarExtract, list as tarList } from "tar
 import { keystore } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
-import { checkVersion, formatVersionNudge } from "./version-check.js";
-import { checkServerHandshake, formatHandshakeNudge } from "./version-handshake.js";
+import { checkVersion, formatVersionNudge, primeVersionCheckCache, FLAIR_PKG_NAME } from "./version-check.js";
+import { checkServerHandshake, formatHandshakeNudge, invalidateHandshakeCache } from "./version-handshake.js";
 import { probeInstance, type ProbeResult } from "./probe.js";
 import {
   sweepFleet,
@@ -8897,6 +8897,9 @@ program
         if (!res.ok) continue;
         const data = await res.json() as { version?: string };
         const latest = data.version ?? "unknown";
+        if (name === FLAIR_PKG_NAME && latest !== "unknown") {
+          try { primeVersionCheckCache(latest); } catch { /* best-effort */ }
+        }
 
         const installed = probe();
         let status: Status;
@@ -9578,6 +9581,14 @@ async function startFlairProcess(port: number): Promise<void> {
 async function restartFlair(port: number): Promise<void> {
   await stopFlairProcess(port);
   await startFlairProcess(port);
+  // Bust the version-handshake cache so the next preAction nudge re-fetches
+  // the LIVE version instead of the pre-restart cached one (the false
+  // "server is running <old>" users hit for up to 60s post-upgrade+restart).
+  // Same (rootPath, serverUrl) key the preAction hook computes (~line 2189)
+  // — must match exactly, or this busts the wrong cache file.
+  try {
+    invalidateHandshakeCache(process.env.ROOTPATH ?? defaultDataDir(), `http://127.0.0.1:${port}`);
+  } catch { /* best-effort — never fail a restart over cache cleanup */ }
 }
 
 program

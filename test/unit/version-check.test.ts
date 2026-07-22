@@ -17,6 +17,7 @@ import {
   checkVersion,
   classifyGap,
   formatVersionNudge,
+  primeVersionCheckCache,
   defaultVersionCheckDeps,
   FLAIR_PKG_NAME,
   type VersionCheckDeps,
@@ -263,5 +264,47 @@ describe("checkVersion", () => {
     });
     expect(result.source).toBe("network");
     expect(existsSync(cachePath)).toBe(true);
+  }));
+});
+
+// ─── primeVersionCheckCache — `flair upgrade` writing the freshly-fetched
+// latest into the SAME cache `checkVersion` (status/doctor) reads from ─────
+
+describe("primeVersionCheckCache", () => {
+  let dir: string;
+  const cachePathFor = (d: string) => join(d, ".version-check-cache.json");
+
+  function withTmpDir<T>(fn: () => T): T {
+    dir = mkdtempSync(join(tmpdir(), "flair-version-check-prime-"));
+    try {
+      return fn();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("writes the cache such that a subsequent checkVersion returns the primed latest without a network fetch", async () => withTmpDir(async () => {
+    const cachePath = cachePathFor(dir);
+    primeVersionCheckCache("0.25.2", { cachePath, now: () => 1000 });
+
+    let fetchCalls = 0;
+    const { readCache, writeCache } = defaultVersionCheckDeps();
+    const result = await checkVersion("0.25.1", {
+      cachePath, readCache, writeCache,
+      fetchLatest: async () => { fetchCalls++; return "0.99.0"; },
+      now: () => 1000 + 60_000, // shortly after — well within the 12h TTL
+      ttlMs: 12 * 60 * 60 * 1000,
+    });
+
+    expect(fetchCalls).toBe(0);
+    expect(result).toEqual({ installed: "0.25.1", latest: "0.25.2", source: "cache" });
+  }));
+
+  test("writes real JSON at the module default cache-file shape (latest + checkedAt)", async () => withTmpDir(async () => {
+    const cachePath = cachePathFor(dir);
+    primeVersionCheckCache("0.25.2", { cachePath, now: () => 1234 });
+
+    expect(existsSync(cachePath)).toBe(true);
+    expect(JSON.parse(readFileSync(cachePath, "utf-8"))).toEqual({ latest: "0.25.2", checkedAt: 1234 });
   }));
 });

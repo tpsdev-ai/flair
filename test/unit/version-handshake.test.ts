@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import {
   checkServerHandshake,
   formatHandshakeNudge,
+  invalidateHandshakeCache,
   DEFAULT_HANDSHAKE_TTL_MS,
   type HandshakeDeps,
 } from "../../src/version-handshake.ts";
@@ -148,6 +149,42 @@ describe("checkServerHandshake — cache isolation per (rootPath, serverUrl)", (
     await checkServerHandshake("1.2.3", "/root-a", "http://x", d);
     await checkServerHandshake("1.2.3", "/root-a", "http://x", d);
     expect(calls).toBe(1);
+  });
+});
+
+describe("invalidateHandshakeCache", () => {
+  it("deletes the cache file for a (rootPath, serverUrl) pair, forcing the next check back to the network (flair restart/upgrade cache-bust)", async () => {
+    let calls = 0;
+    const countingFetch: typeof fetch = (async () => {
+      calls++;
+      return { ok: true, status: 200, json: async () => ({ version: "0.22.1" }) } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const d = deps({ fetchImpl: countingFetch, now: () => 1_000_000 });
+    const first = await checkServerHandshake("0.25.1", "/root", "http://x", d);
+    expect(first.source).toBe("network");
+    expect(calls).toBe(1);
+
+    // Still well within the TTL — without invalidation this would be a cache hit.
+    const stillCached = await checkServerHandshake("0.25.1", "/root", "http://x", d);
+    expect(stillCached.source).toBe("cache");
+    expect(calls).toBe(1);
+
+    invalidateHandshakeCache("/root", "http://x", { cacheDir });
+
+    const afterInvalidate = await checkServerHandshake("0.25.1", "/root", "http://x", d);
+    expect(afterInvalidate.source).toBe("network");
+    expect(calls).toBe(2);
+  });
+
+  it("is a silent no-op when there's no cache file for that key (never throws)", () => {
+    expect(() => invalidateHandshakeCache("/never-cached", "http://x", { cacheDir })).not.toThrow();
+  });
+
+  it("never throws even when the cache directory itself doesn't exist", () => {
+    expect(() =>
+      invalidateHandshakeCache("/root", "http://x", { cacheDir: join(cacheDir, "does-not-exist") }),
+    ).not.toThrow();
   });
 });
 
