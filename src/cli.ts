@@ -13701,6 +13701,14 @@ program
 // its Node-version check passes. The shim imports this module, so import.meta.main
 // is false there — without this explicit entry point the CLI would load but never run.
 async function runCli(): Promise<void> {
+  // A bare `flair` (no command) is a help request, not a usage error — show
+  // help and exit 0, rather than commander's default (help + exit 1). Flags
+  // like -h/--help/-v have argv beyond the binary and fall through to
+  // commander, which already exits 0 for them.
+  if (process.argv.length <= 2) {
+    program.outputHelp();
+    process.exit(0);
+  }
   await program.parseAsync();
 }
 
