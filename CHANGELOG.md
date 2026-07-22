@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **README's quickstart used a command that doesn't exist.** The "Semantic Memory" example wrote memories with `flair memory write "..."` — but the CLI command is `flair memory add` (`write` was never a subcommand). Corrected to `flair memory add --agent <id> "..."` / `flair memory search --agent <id> "..."` (the actual, working forms). Every new user following the quickstart hit "unknown command 'write'" on their first write. Found by the Canary DevEx dogfooder on a clean-box run.
+- **`flair` with no command now exits 0.** A bare `flair` prints help and exits 0 (it was exit 1 — a bare invocation is a help request, not a usage error). `-h`/`--help`/`-v` are unaffected.
+
 ## [0.25.2] - 2026-07-22
 
 ### Fixed

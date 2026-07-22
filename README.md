@@ -126,11 +126,11 @@ Every agent has an Ed25519 key pair. Requests are signed with `agentId:timestamp
 Memories are automatically embedded on write using [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) (768 dimensions). Search by meaning:
 
 ```bash
-# Write a memory
-flair memory write "Harper v5 sandbox blocks node:module but process.dlopen works"
+# Write a memory (--agent is your registered agent id)
+flair memory add --agent myagent "Harper v5 sandbox blocks node:module but process.dlopen works"
 
 # Find it later by concept, not exact words
-flair memory search "native addon loading in sandboxed runtimes"
+flair memory search --agent myagent "native addon loading in sandboxed runtimes"
 # → [0.67] Harper v5 sandbox blocks node:module but process.dlopen works
 ```
 
