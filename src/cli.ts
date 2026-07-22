@@ -10978,6 +10978,350 @@ program
     if (summary.exitCode !== 0) process.exit(summary.exitCode);
   });
 
+// ─── flair quality — pure metric computation ─────────────────────────────────
+// Slice 1a of the memory-quality-observability arc (ops/proposals/
+// flair-quality-slice1-spec.md, K&S design-approved). Same "extract the pure
+// decision logic" idiom as summarizeDoctorRun above (flair#721) and
+// derivePresenceStatus (resources/Presence.ts): the CLI action spawns a
+// network fetch + a long console.log sequence, which is high-effort/
+// low-value to drive directly in a test — this is the actual metric math,
+// fed a fixture-shaped /HealthDetail body.
+//
+// ZERO new server surface. Every field this reads already exists in
+// resources/health.ts's response (the same one `flair status`/`flair doctor`
+// consume) — no new query pattern, no new endpoint. That's what makes the
+// Sherlock "read-scope holds by construction" argument hold: quality can
+// never see anything status/doctor couldn't already see, because it reads
+// the identical payload.
+//
+// Two metrics from the design doc are deliberately NOT computed at full
+// fidelity here — both degrade gracefully into `gaps` entries instead of
+// failing:
+//   - staleness: /HealthDetail's `memories.expired` count is instance-wide
+//     only (resources/health.ts never buckets it per agent), so --agent
+//     does not scope this metric. The "old + never-recalled" variant isn't
+//     computed at all — no read API exposes per-memory last-recalled data.
+//   - signal density: the design doc named `usageCount` (citation rate) as
+//     the signal, but /HealthDetail's per-agent rows carry only
+//     memoryCount/hashFallback/writes24h/lastWriteAt — no usage/citation
+//     aggregate. Memory.usageCount DOES exist (resources/scoring.ts,
+//     resources/RecordUsage.ts) and IS returned by `GET /Memory?agentId=`
+//     (what `flair memory list` calls), but pulling it in here would add a
+//     query pattern doctor/status never use, widening quality's read
+//     footprint past the payload K&S actually reviewed. Ships write-volume
+//     + last-active only (still real, still useful — "writes exploratory
+//     content" is a legitimate usage pattern) and notes the gap rather than
+//     quietly relabeling write-count as a citation signal.
+//
+// Naming (Sherlock security finding on the design round): "signal density" /
+// "citation rate" describes a USAGE PATTERN, never a trust/quality verdict.
+// A low citation rate means "writes exploratory content", not "noisy" or
+// "untrustworthy" — same for "quiet agents": an ops fact (days since last
+// write), not a trust signal. Keep that framing in any copy touching this
+// code.
+
+/** First-pass default, same "documented heuristic, not derived from data we
+ *  don't have" spirit as health.ts's own 10%-hash-fallback threshold below.
+ *  Tunable later if a real fleet shows this is too loud/quiet. */
+export const QUALITY_QUIET_THRESHOLD_DAYS = 7;
+
+/** Mirrors resources/health.ts's own hash-fallback warning threshold (kept as
+ *  a literal constant here rather than imported — health.ts computes its
+ *  warning string server-side, this recomputes the same judgment CLI-side
+ *  from the raw counts so quality doesn't depend on parsing warning text). */
+export const QUALITY_HASH_FALLBACK_DEGRADED_PCT = 10;
+
+export interface QualityMetricGap {
+  metric: string;
+  reason: string;
+}
+
+export interface QualityAgentActivity {
+  id: string;
+  memoryCount: number;
+  writes24h: number;
+  lastWriteAt: string | null;
+  /** null when the agent has never written (nothing to measure "days since" from). */
+  daysSinceLastWrite: number | null;
+  /** true if daysSinceLastWrite >= QUALITY_QUIET_THRESHOLD_DAYS, or the agent has never written. */
+  quiet: boolean;
+}
+
+export interface QualityReport {
+  agentFilter: string | null;
+  instance: {
+    up: boolean;
+    /** null when /HealthDetail returned no migrations block at all. */
+    migrationsClean: boolean | null;
+    haltedMigrations: Array<{ id: string; state: string; reason?: string }>;
+    embeddingsStatus: "ok" | "degraded" | "unknown";
+    embeddingsDetail: string;
+  };
+  embeddingCoverage: {
+    total: number;
+    withEmbeddings: number;
+    hashFallback: number;
+    coveragePct: number;
+  } | null;
+  staleness: {
+    scope: "instance";
+    total: number;
+    expired: number;
+    stalePct: number;
+  } | null;
+  signalDensity: {
+    scope: "write-volume";
+    perAgent: Array<{ id: string; memoryCount: number; writes24h: number; lastWriteAt: string | null }>;
+  } | null;
+  quietAgents: {
+    thresholdDays: number;
+    perAgent: QualityAgentActivity[];
+    quietCount: number;
+  } | null;
+  gaps: QualityMetricGap[];
+}
+
+/**
+ * Pure computation: /HealthDetail response (+ reachability) → quality report.
+ * Never throws — every missing data source degrades to a null section + a
+ * `gaps` entry (same graceful-degradation contract as `flair doctor`), so a
+ * partially-populated instance still gets a partial, honest report instead
+ * of a crash.
+ */
+export function computeQualityReport(
+  healthy: boolean,
+  healthData: any,
+  opts: { agentId?: string | null; now?: number } = {},
+): QualityReport {
+  const now = opts.now ?? Date.now();
+  const agentFilter = opts.agentId ?? null;
+  const gaps: QualityMetricGap[] = [];
+
+  // ── Instance health: migrations ──
+  let migrationsClean: boolean | null = null;
+  let haltedMigrations: Array<{ id: string; state: string; reason?: string }> = [];
+  const migList = healthData?.migrations?.migrations;
+  if (Array.isArray(migList)) {
+    haltedMigrations = migList
+      .filter((m: any) => m?.state === "halted" || m?.state === "failed")
+      .map((m: any) => ({ id: m.id, state: m.state, reason: m.reason }));
+    migrationsClean = haltedMigrations.length === 0;
+  } else {
+    gaps.push({ metric: "instance.migrationsClean", reason: "no migrations block in /HealthDetail response" });
+  }
+
+  // ── Instance health: embeddings operational ──
+  // Inferred from stored coverage stats (hash-fallback %, mixed embedding
+  // models) — NOT a live semantic round-trip like `flair doctor` runs
+  // (verifySemanticSearch writes a probe memory to verify recall-by-meaning,
+  // which this read-only command must not do).
+  let embeddingsStatus: "ok" | "degraded" | "unknown" = "unknown";
+  let embeddingsDetail = "no memory stats available";
+  const memories = healthData?.memories;
+  if (memories && typeof memories.total === "number") {
+    if (memories.total === 0) {
+      embeddingsDetail = "no memories written yet";
+    } else {
+      const hashFallback = memories.hashFallback ?? 0;
+      const pct = Math.round((hashFallback / memories.total) * 100);
+      const modelCounts = (memories.modelCounts ?? {}) as Record<string, number>;
+      const realModels = Object.keys(modelCounts).filter((k) => k !== "hash-512d" && modelCounts[k] > 0);
+      if (pct >= QUALITY_HASH_FALLBACK_DEGRADED_PCT) {
+        embeddingsStatus = "degraded";
+        embeddingsDetail = `${hashFallback}/${memories.total} (${pct}%) memories are hash-fallback`;
+      } else if (realModels.length > 1) {
+        embeddingsStatus = "degraded";
+        embeddingsDetail = `multiple embedding models in use (${realModels.join(", ")}) — cross-model search unreliable`;
+      } else {
+        embeddingsStatus = "ok";
+        embeddingsDetail = `${memories.total - hashFallback}/${memories.total} memories have real embeddings`;
+      }
+    }
+  }
+
+  // ── Embedding coverage ──
+  let embeddingCoverage: QualityReport["embeddingCoverage"] = null;
+  if (memories && typeof memories.total === "number") {
+    const total = memories.total;
+    const hashFallback = memories.hashFallback ?? 0;
+    const withEmbeddings = typeof memories.withEmbeddings === "number" ? memories.withEmbeddings : Math.max(0, total - hashFallback);
+    const coveragePct = total > 0 ? Math.round((withEmbeddings / total) * 100) : 0;
+    embeddingCoverage = { total, withEmbeddings, hashFallback, coveragePct };
+  } else {
+    gaps.push({ metric: "embeddingCoverage", reason: "no memory stats available in /HealthDetail response" });
+  }
+
+  // ── Staleness (instance-wide only — see module doc above) ──
+  let staleness: QualityReport["staleness"] = null;
+  if (memories && typeof memories.total === "number" && typeof memories.expired === "number") {
+    const total = memories.total;
+    const expired = memories.expired;
+    const stalePct = total > 0 ? Math.round((expired / total) * 100) : 0;
+    staleness = { scope: "instance", total, expired, stalePct };
+    gaps.push({
+      metric: "staleness",
+      reason: "instance-wide only — /HealthDetail's `expired` count isn't broken down per agent, so --agent doesn't scope this metric; the \"old + never-recalled\" dead-weight variant also isn't computed (no read API exposes per-memory last-recalled data)",
+    });
+  } else {
+    gaps.push({ metric: "staleness", reason: "no expired-memory count available in /HealthDetail response" });
+  }
+
+  // ── Per-agent rows (shared source for signal density + quiet agents) ──
+  const perAgentAll: Array<{ id: string; memoryCount: number; hashFallback: number; writes24h: number; lastWriteAt: string | null }> =
+    Array.isArray(healthData?.agents?.perAgent) ? healthData.agents.perAgent : [];
+  const havePerAgent = Array.isArray(healthData?.agents?.perAgent);
+  const scopedAgents = agentFilter ? perAgentAll.filter((r) => r.id === agentFilter) : perAgentAll;
+
+  // ── Signal density (write-volume only — see module doc above) ──
+  let signalDensity: QualityReport["signalDensity"] = null;
+  if (havePerAgent) {
+    signalDensity = {
+      scope: "write-volume",
+      perAgent: scopedAgents.map((r) => ({ id: r.id, memoryCount: r.memoryCount, writes24h: r.writes24h, lastWriteAt: r.lastWriteAt })),
+    };
+    gaps.push({
+      metric: "signalDensity",
+      reason: "citation rate not computed — /HealthDetail's per-agent stats carry no usage/citation aggregate (Memory.usageCount exists but isn't exposed there); shipped write-volume + last-active only",
+    });
+  } else {
+    gaps.push({ metric: "signalDensity", reason: "no per-agent stats available in /HealthDetail response" });
+  }
+
+  // ── Quiet agents (ops fact — not a trust signal) ──
+  let quietAgents: QualityReport["quietAgents"] = null;
+  if (havePerAgent) {
+    const rows: QualityAgentActivity[] = scopedAgents.map((r) => {
+      const daysSinceLastWrite = r.lastWriteAt ? Math.floor((now - new Date(r.lastWriteAt).getTime()) / 86_400_000) : null;
+      const quiet = daysSinceLastWrite === null ? true : daysSinceLastWrite >= QUALITY_QUIET_THRESHOLD_DAYS;
+      return { id: r.id, memoryCount: r.memoryCount, writes24h: r.writes24h, lastWriteAt: r.lastWriteAt, daysSinceLastWrite, quiet };
+    });
+    quietAgents = { thresholdDays: QUALITY_QUIET_THRESHOLD_DAYS, perAgent: rows, quietCount: rows.filter((r) => r.quiet).length };
+  } else {
+    gaps.push({ metric: "quietAgents", reason: "no per-agent stats available in /HealthDetail response" });
+  }
+
+  return {
+    agentFilter,
+    instance: { up: healthy, migrationsClean, haltedMigrations, embeddingsStatus, embeddingsDetail },
+    embeddingCoverage,
+    staleness,
+    signalDensity,
+    quietAgents,
+    gaps,
+  };
+}
+
+// ─── flair quality ────────────────────────────────────────────────────────────
+program
+  .command("quality")
+  .description("Memory-quality report: embedding coverage, staleness, signal density, quiet agents (read-only)")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--url <url>", "Flair base URL (overrides --port)")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
+  .option("--json", "Output as JSON")
+  .option("--agent <id>", "Scope per-agent metrics to one agent id (or set FLAIR_AGENT_ID); default = all agents")
+  .action(async (opts) => {
+    const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
+    const agentId: string | null = opts.agent || process.env.FLAIR_AGENT_ID || null;
+    const report = computeQualityReport(healthy, healthData, { agentId });
+    const mode = render.resolveOutputMode(opts);
+
+    if (mode === "json") {
+      const out: any = { healthy, url: baseUrl, flairVersion: __pkgVersion, ...report };
+      console.log(render.asJSON(out));
+      if (!healthy) process.exit(1);
+      return;
+    }
+
+    if (!healthy) {
+      console.log(`Flair v${__pkgVersion} — 🔴 unreachable`);
+      console.log(`  URL:  ${baseUrl}`);
+      console.log(`\n  Run: flair start  or  flair doctor`);
+      process.exit(1);
+    }
+
+    const scopeLabel = agentId ? ` ${render.wrap(render.c.dim, `(agent: ${agentId})`)}` : "";
+    console.log(`${render.wrap(render.c.bold, "Flair quality report")}${scopeLabel}`);
+    console.log(render.kv("URL", baseUrl));
+
+    // Instance health
+    console.log(`\n${render.wrap(render.c.bold, "Instance health")}`);
+    console.log(render.kv("Up", report.instance.up ? `${render.icons.ok} yes` : `${render.icons.error} no`));
+    if (report.instance.migrationsClean === null) {
+      console.log(render.kv("Migrations", `${render.icons.info} unknown ${render.wrap(render.c.dim, "(no data)")}`));
+    } else if (report.instance.migrationsClean) {
+      console.log(render.kv("Migrations", `${render.icons.ok} clean`));
+    } else {
+      console.log(render.kv("Migrations", `${render.icons.error} ${report.instance.haltedMigrations.length} halted/failed`));
+      for (const m of report.instance.haltedMigrations) {
+        console.log(`    ${render.icons.error} ${m.id}: ${m.state}${m.reason ? ` — ${m.reason}` : ""}`);
+      }
+    }
+    const embIcon =
+      report.instance.embeddingsStatus === "ok" ? render.icons.ok :
+      report.instance.embeddingsStatus === "degraded" ? render.icons.error :
+      render.icons.info;
+    console.log(render.kv("Embeddings", `${embIcon} ${report.instance.embeddingsStatus} ${render.wrap(render.c.dim, `(${report.instance.embeddingsDetail})`)}`));
+
+    // Embedding coverage
+    if (report.embeddingCoverage) {
+      const ec = report.embeddingCoverage;
+      console.log(`\n${render.wrap(render.c.bold, "Embedding coverage")}`);
+      console.log(render.kv("Coverage", `${render.wrap(render.c.bold, `${ec.coveragePct}%`)} ${render.wrap(render.c.dim, `(${ec.withEmbeddings}/${ec.total} real, ${ec.hashFallback} hash-fallback)`)}`));
+    }
+
+    // Staleness
+    if (report.staleness) {
+      const st = report.staleness;
+      console.log(`\n${render.wrap(render.c.bold, "Staleness")}`);
+      console.log(render.kv("Past validTo", `${render.wrap(render.c.bold, `${st.stalePct}%`)} ${render.wrap(render.c.dim, `(${st.expired}/${st.total}, instance-wide)`)}`));
+    }
+
+    // Signal density
+    if (report.signalDensity) {
+      console.log(`\n${render.wrap(render.c.bold, "Signal density")} ${render.wrap(render.c.dim, "(write activity — a usage pattern, not a trust signal)")}`);
+      if (agentId && report.signalDensity.perAgent.length === 0) {
+        console.log(`  ${render.icons.info} no data for agent '${agentId}'`);
+      } else {
+        const cols: render.TableColumn[] = [
+          { label: "id", key: "id" },
+          { label: "memories", key: "memoryCount", align: "right" },
+          { label: "writes_24h", key: "writes24h", align: "right" },
+          { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
+        ];
+        console.log(render.table(cols, report.signalDensity.perAgent as unknown as Array<Record<string, unknown>>));
+        console.log(`  ${render.wrap(render.c.dim, "citation rate not shown — usage/citation counts aren't exposed by /HealthDetail; low write volume means \"writes exploratory content\", not \"noisy\"")}`);
+      }
+    }
+
+    // Quiet agents
+    if (report.quietAgents) {
+      console.log(`\n${render.wrap(render.c.bold, "Quiet agents")} ${render.wrap(render.c.dim, `(no write in ${report.quietAgents.thresholdDays}+ days — an ops fact, not a trust signal)`)}`);
+      if (agentId && report.quietAgents.perAgent.length === 0) {
+        console.log(`  ${render.icons.info} no data for agent '${agentId}'`);
+      } else {
+        const quiet = report.quietAgents.perAgent.filter((r) => r.quiet);
+        if (quiet.length === 0) {
+          console.log(`  ${render.icons.ok} none`);
+        } else {
+          for (const r of quiet) {
+            const label = r.daysSinceLastWrite == null ? "never written" : `quiet for ${r.daysSinceLastWrite}d`;
+            console.log(`  ${render.icons.warn} ${r.id} — ${label}`);
+          }
+        }
+      }
+    }
+
+    // Gaps
+    if (report.gaps.length > 0) {
+      console.log(`\n${render.wrap(render.c.bold, "Gaps")} ${render.wrap(render.c.dim, "(degraded or unavailable from existing read APIs)")}`);
+      for (const g of report.gaps) {
+        console.log(`  ${render.icons.info} ${g.metric}: ${g.reason}`);
+      }
+    }
+    console.log("");
+  });
+
 // ─── flair session snapshot ──────────────────────────────────────────────────
 // Slice 2 of FLAIR-AGENT-CONTEXT-TIERS-B. Snapshot a
 // session jsonl + label metadata into a tar.gz under ~/.flair/snapshots/<agent>/sessions/.
