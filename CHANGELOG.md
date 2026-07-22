@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`openclaw-flair`'s `autoCapture` never fired in long-lived persistent gateway sessions.** It only hooked `agent_end`, which fires at the true end of a discrete agent run — a persistent session's "run" never ends, so `agent_end` never fired and auto-capture was dead code in that deployment shape. Real-world: an agent ran May→July with the plugin registered on every boot and zero auto-captures, ever (#798). Auto-capture now also evaluates the same trigger regex live, per turn, on the `llm_input`/`llm_output` hooks (the user-facing prompt and the model's response) — these fire on every model call regardless of how the host bounds a "run", so persistent sessions capture in real time instead of waiting on an event that never comes. The existing `agent_end` path is unchanged for discrete runs. Both paths share one per-session cap (still 3 by default, now tunable via `autoCaptureMaxPerSession`) and dedup by content hash, so a phrase captured live isn't captured again when `agent_end` later rescans the same run's full history.
+
 ## [0.26.0] - 2026-07-22
 
 ### Added

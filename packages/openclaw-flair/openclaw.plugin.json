@@ -29,6 +29,11 @@
     "autoRecall": {
       "label": "Auto-Recall",
       "help": "Automatically inject relevant memories into context at session start"
+    },
+    "autoCaptureMaxPerSession": {
+      "label": "Auto-Capture Max Per Session",
+      "help": "Cap on trigger-based auto-captures per session (default 3). For a long-lived persistent session, this is the cap for the session's whole lifetime, not per calendar day.",
+      "advanced": true
     }
   },
   "configSchema": {
@@ -41,7 +46,8 @@
       "autoCapture": { "type": "boolean" },
       "autoRecall": { "type": "boolean" },
       "maxRecallResults": { "type": "number", "minimum": 1, "maximum": 20 },
-      "maxBootstrapTokens": { "type": "number", "minimum": 500, "maximum": 8000 }
+      "maxBootstrapTokens": { "type": "number", "minimum": 500, "maximum": 8000 },
+      "autoCaptureMaxPerSession": { "type": "number", "minimum": 1, "maximum": 50 }
     },
     "required": []
   },

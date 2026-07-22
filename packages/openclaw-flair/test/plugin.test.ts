@@ -707,3 +707,281 @@ describe("memory_store supersede — write-then-close ordering", () => {
     expect(writePut!.body.dedup).toBe(true);
   });
 });
+
+// ─── evaluateAutoCapture — pure trigger/cap/dedup decision logic (#798) ──────
+// Pure function: no I/O, no plugin registration. Mirrors shouldCapture's
+// regex gate + MIN_CAPTURE_LENGTH, plus the per-session cap and the
+// hash-based dedup guard that lets the agent_end path and the new live-turn
+// (llm_input/llm_output) path share one capture budget without double-
+// writing the same content.
+
+import { evaluateAutoCapture } from "../index.ts";
+
+function freshCaptureState() {
+  return { count: 0, hashes: new Set<string>() };
+}
+
+describe("evaluateAutoCapture — pure trigger/cap/dedup logic", () => {
+  test("returns null for text with no trigger phrase", () => {
+    const state = freshCaptureState();
+    const text = "just a normal message with nothing special about it at all, really";
+    expect(evaluateAutoCapture(text, state)).toBeNull();
+  });
+
+  test("returns null for a trigger phrase shorter than MIN_CAPTURE_LENGTH (30 chars)", () => {
+    const state = freshCaptureState();
+    expect(evaluateAutoCapture("call me Bob", state)).toBeNull(); // 11 chars
+  });
+
+  test("returns an excerpt + hash for text matching a trigger", () => {
+    const state = freshCaptureState();
+    const text = "remember this: the deploy window is Tuesdays only, no exceptions";
+    const decision = evaluateAutoCapture(text, state);
+    expect(decision).not.toBeNull();
+    expect(decision!.excerpt).toBe(text);
+    expect(typeof decision!.hash).toBe("string");
+    expect(decision!.hash.length).toBe(16);
+  });
+
+  test("matches each trigger category (name, decision, note-for-record)", () => {
+    const state = freshCaptureState();
+    expect(evaluateAutoCapture("my name is Nathan and I run this company", state)).not.toBeNull();
+    expect(evaluateAutoCapture("we decided to ship the fix today instead of waiting", freshCaptureState())).not.toBeNull();
+    expect(evaluateAutoCapture("note for future: always check the CHANGELOG first", freshCaptureState())).not.toBeNull();
+  });
+
+  test("does not mutate state — caller must call recordCapture-equivalent separately", () => {
+    const state = freshCaptureState();
+    const text = "key decision: we are migrating off the old queue by Friday";
+    evaluateAutoCapture(text, state);
+    expect(state.count).toBe(0);
+    expect(state.hashes.size).toBe(0);
+  });
+
+  test("returns null once the per-session cap is reached", () => {
+    const state = freshCaptureState();
+    state.count = 3; // default cap
+    const text = "remember this: the cap should block further captures this session";
+    expect(evaluateAutoCapture(text, state)).toBeNull();
+  });
+
+  test("respects a custom maxPerSession", () => {
+    const state = freshCaptureState();
+    state.count = 1;
+    const text = "remember this: a lower cap should also block at count 1";
+    expect(evaluateAutoCapture(text, state, 1)).toBeNull();
+    expect(evaluateAutoCapture(text, state, 2)).not.toBeNull();
+  });
+
+  test("dedup: returns null for content whose hash was already captured", () => {
+    const state = freshCaptureState();
+    const text = "remember this: identical content should only ever be captured once";
+    const first = evaluateAutoCapture(text, state);
+    expect(first).not.toBeNull();
+    state.hashes.add(first!.hash);
+    state.count++;
+    // Same text seen again (e.g. live turn already captured it, agent_end
+    // rescans the same run's history at the end) — must be skipped.
+    expect(evaluateAutoCapture(text, state)).toBeNull();
+  });
+
+  test("distinct content is still capturable after a prior capture", () => {
+    const state = freshCaptureState();
+    const first = evaluateAutoCapture("remember this: first distinct fact worth keeping around", state);
+    state.hashes.add(first!.hash);
+    state.count++;
+    const second = evaluateAutoCapture("remember this: second distinct fact, unrelated to the first", state);
+    expect(second).not.toBeNull();
+    expect(second!.hash).not.toBe(first!.hash);
+  });
+
+  test("excerpt is truncated for very long text (matches excerptForCapture behavior)", () => {
+    const state = freshCaptureState();
+    const longText = "remember this: " + "x".repeat(600);
+    const decision = evaluateAutoCapture(longText, state);
+    expect(decision).not.toBeNull();
+    expect(decision!.excerpt.length).toBeLessThan(longText.length);
+    expect(decision!.excerpt.endsWith("…")).toBe(true);
+  });
+});
+
+// ─── Live-turn auto-capture (#798) — llm_input/llm_output hooks ─────────────
+// agent_end never fires in a long-lived persistent gateway session (the
+// "run" never ends), so autoCapture was dead code in that deployment shape.
+// These hooks fire on every model request/response instead, independent of
+// how the host bounds a run — proving capture now works without ever
+// firing agent_end at all.
+
+describe("live-turn auto-capture (#798) — llm_input/llm_output hooks", () => {
+  const originalRequest = FlairClient.prototype.request;
+
+  afterEach(() => {
+    FlairClient.prototype.request = originalRequest;
+  });
+
+  test("registers llm_input and llm_output hooks when autoCapture is enabled", async () => {
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi({ autoCapture: true });
+    plugin.register(api as any);
+
+    expect((api._hooks.get("llm_input") ?? []).length).toBeGreaterThanOrEqual(1);
+    expect((api._hooks.get("llm_output") ?? []).length).toBeGreaterThanOrEqual(1);
+    expect((api._hooks.get("agent_end") ?? []).length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("does NOT register llm_input/llm_output/agent_end hooks when autoCapture is disabled", async () => {
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi({ autoCapture: false });
+    plugin.register(api as any);
+
+    expect(api._hooks.get("llm_input") ?? []).toHaveLength(0);
+    expect(api._hooks.get("llm_output") ?? []).toHaveLength(0);
+    expect(api._hooks.get("agent_end") ?? []).toHaveLength(0);
+  });
+
+  test("captures a memory from llm_output alone — agent_end is never fired (persistent-session simulation)", async () => {
+    const calls: Array<{ method: string; path: string; body?: any }> = [];
+    (FlairClient.prototype as any).request = async function (method: string, path: string, body?: any) {
+      calls.push({ method, path, body });
+      return { written: true };
+    };
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi({ autoCapture: true });
+    plugin.register(api as any);
+
+    const [llmOutputHook] = api._hooks.get("llm_output") ?? [];
+    expect(llmOutputHook).toBeDefined();
+
+    await llmOutputHook(
+      { assistantTexts: ["note for future: always deploy behind the feature flag first"] },
+      { agentId: "test-agent" },
+    );
+
+    const writes = calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/"));
+    expect(writes.length).toBe(1);
+    expect(writes[0].body.content).toContain("note for future");
+    expect(writes[0].body.tags).toContain("auto-captured");
+  });
+
+  test("captures a memory from llm_input (user-side trigger text)", async () => {
+    const calls: Array<{ method: string; path: string; body?: any }> = [];
+    (FlairClient.prototype as any).request = async function (method: string, path: string, body?: any) {
+      calls.push({ method, path, body });
+      return { written: true };
+    };
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi({ autoCapture: true });
+    plugin.register(api as any);
+
+    const [llmInputHook] = api._hooks.get("llm_input") ?? [];
+    expect(llmInputHook).toBeDefined();
+
+    await llmInputHook(
+      { prompt: "by the way, my name is Nathan — please use that going forward" },
+      { agentId: "test-agent" },
+    );
+
+    const writes = calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/"));
+    expect(writes.length).toBe(1);
+    expect(writes[0].body.content).toContain("my name is Nathan");
+  });
+
+  test("caps live captures at the per-session default of 3", async () => {
+    const calls: Array<{ method: string; path: string; body?: any }> = [];
+    (FlairClient.prototype as any).request = async function (method: string, path: string, body?: any) {
+      calls.push({ method, path, body });
+      return { written: true };
+    };
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi({ autoCapture: true });
+    plugin.register(api as any);
+
+    const [llmOutputHook] = api._hooks.get("llm_output") ?? [];
+    for (let i = 0; i < 6; i++) {
+      await llmOutputHook(
+        { assistantTexts: [`key decision: distinct fact number ${i} worth remembering forever`] },
+        { agentId: "test-agent" },
+      );
+    }
+
+    const writes = calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/"));
+    expect(writes.length).toBe(3);
+  });
+
+  test("does not double-capture identical content seen via both llm_output and agent_end", async () => {
+    const calls: Array<{ method: string; path: string; body?: any }> = [];
+    (FlairClient.prototype as any).request = async function (method: string, path: string, body?: any) {
+      calls.push({ method, path, body });
+      return { written: true };
+    };
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi({ autoCapture: true });
+    plugin.register(api as any);
+
+    const [llmOutputHook] = api._hooks.get("llm_output") ?? [];
+    const [agentEndHook] = api._hooks.get("agent_end") ?? [];
+    const text = "final decision: we are keeping the current pricing model as-is";
+
+    // Captured live, mid-run.
+    await llmOutputHook({ assistantTexts: [text] }, { agentId: "test-agent" });
+    // agent_end rescans the FULL run history at the end, including the same
+    // message already captured live — must be deduped, not written twice.
+    await agentEndHook(
+      { messages: [{ role: "assistant", content: text }] },
+      { agentId: "test-agent" },
+    );
+
+    const writes = calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/"));
+    expect(writes.length).toBe(1);
+  });
+
+  test("agent_end resets the capture budget for the next run", async () => {
+    const calls: Array<{ method: string; path: string; body?: any }> = [];
+    (FlairClient.prototype as any).request = async function (method: string, path: string, body?: any) {
+      calls.push({ method, path, body });
+      return { written: true };
+    };
+
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi({ autoCapture: true });
+    plugin.register(api as any);
+
+    const [llmOutputHook] = api._hooks.get("llm_output") ?? [];
+    const [agentEndHook] = api._hooks.get("agent_end") ?? [];
+
+    // Run 1: spend the whole budget live, then the run ends.
+    for (let i = 0; i < 3; i++) {
+      await llmOutputHook(
+        { assistantTexts: [`we decided: run-one fact number ${i} for the record`] },
+        { agentId: "test-agent" },
+      );
+    }
+    await agentEndHook({ messages: [] }, { agentId: "test-agent" });
+
+    // Run 2: a fresh persistent-session-style run — budget should be reset.
+    await llmOutputHook(
+      { assistantTexts: ["we decided: run-two fact, budget should be fresh again"] },
+      { agentId: "test-agent" },
+    );
+
+    const writes = calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/"));
+    expect(writes.length).toBe(4); // 3 from run 1 + 1 from run 2
+  });
+
+  test("live capture is silently skipped (no throw) when agentId cannot be resolved", async () => {
+    const plugin = (await import("../index.ts")).default;
+    const api = createMockApi({ agentId: "auto", autoCapture: true });
+    delete process.env.FLAIR_AGENT_ID;
+    plugin.register(api as any);
+
+    const [llmOutputHook] = api._hooks.get("llm_output") ?? [];
+    // No before_agent_start ever fired, so currentAgentId is unresolved.
+    await expect(
+      llmOutputHook({ assistantTexts: ["note for future: this should not crash the host"] }, {}),
+    ).resolves.toBeUndefined();
+  });
+});
