@@ -297,7 +297,7 @@ flair restore < ~/flair-backup-<date>.json
 "Upgrade is a transaction" above. This section is for doing it by hand, e.g. after
 `--no-verify`, or after problems surface later than the automatic check catches.
 
-### Known issue — upgrading *from* a pre-0.25.1 version can still report a false rollback
+### Known issue — upgrading *from* an older version can still report a false rollback
 
 The 0.25.1 fix (see [`CHANGELOG.md`](../CHANGELOG.md)) makes `flair upgrade` resolve a
 credentials-only post-restart-verification failure to `healthy-unverified` instead of
