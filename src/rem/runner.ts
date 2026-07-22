@@ -8,7 +8,13 @@
  *   4. Trust-tier filter on input memories — permanently deferred (see below).
  *   5. Distillation — call /ReflectMemories with execute:true, persist staged
  *      candidate ids to the audit row.
- *   6. Append a row to ~/.flair/logs/rem-nightly.jsonl.
+ *   6. Instance-wide dedup-cluster stat — call /MemoryDedupStats (flair-
+ *      quality Slice 1c). NOT part of FLAIR-NIGHTLY-REM's original per-agent
+ *      § 4 list — added because a near-duplicate cluster count is inherently
+ *      instance-wide (dupes across agents matter), so it runs once per cycle
+ *      after the per-agent passes above, rather than being scoped to
+ *      opts.agentId like everything else in this file.
+ *   7. Append a row to ~/.flair/logs/rem-nightly.jsonl.
  *
  * Status today:
  *   - Steps 1, 2 shipped in slice-1 PR-1 (#414).
@@ -23,7 +29,14 @@
  *   - Step 5 (distillation) ships in this PR: calls `/ReflectMemories` with
  *     `execute: true` after maintenance succeeds. `dryRun` skips the call
  *     entirely (staging rows + spending model tokens are side effects).
- *   - Step 6 shipped in slice-1 PR-1.
+ *   - Step 6 (dedup-cluster stat, flair-quality Slice 1c): calls
+ *     `/MemoryDedupStats` after distillation. `dryRun` skips it (persisting
+ *     the stat file is a side effect); failure (e.g. the caller isn't admin
+ *     — the resource is admin-gated) is recorded in `errors` and does not
+ *     fail the cycle. See resources/MemoryDedupStats.ts for the server-side
+ *     computation and resources/dedup-cluster.ts for the stat's canonical
+ *     storage location (NOT this log — see those files' module docs for why).
+ *   - Step 7 shipped in slice-1 PR-1 (was step 6 before this PR).
  *
  * The audit row's `slice` field tells readers which steps populated which
  * counts: `slice: "1"` rows have `archived`/`expired` undefined; `slice:
@@ -96,6 +109,25 @@ export interface RunnerLogRow {
   expired?: number;
   consolidated?: number;
   candidates?: string[];
+  /**
+   * flair-quality Slice 1c: instance-wide near-duplicate CLUSTER count,
+   * populated when the POST /MemoryDedupStats step (below) succeeds this
+   * cycle. Unlike every other field on this row, this is NOT scoped to
+   * `agentId` — it's a whole-instance stat, mirrored here for audit-log
+   * convenience. The CANONICAL copy `/HealthDetail` reads lives server-side
+   * at REM_DEDUP_STATS_PATH (resources/dedup-cluster.ts), written directly
+   * by the resource — see resources/MemoryDedupStats.ts's module doc for
+   * why the runner's own log copy is NOT the source of truth (remote/
+   * federated flairUrl deployments would leave HealthDetail with nothing to
+   * read otherwise). Absent when dry-run skipped the step, the call failed
+   * (see `errors`), or the response didn't carry the expected shape.
+   */
+  dedup?: {
+    clusterCount: number;
+    largestClusterSize: number;
+    totalMemoriesInClusters: number;
+    computedAt: string;
+  };
 }
 
 export interface RunnerResult {
@@ -338,7 +370,51 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     }
   }
 
-  // Step 6: log
+  // Step 6 (flair-quality Slice 1c): instance-wide dedup-cluster stat.
+  // Distinct from every step above — NOT scoped to opts.agentId. Runs ONCE
+  // per cycle, after the per-agent passes (spec: "a new instance-wide step
+  // in the REM nightly runner... runs once per cycle, after the per-agent
+  // passes"). Skipped in dry-run for the same reason distillation is:
+  // persisting the stat file is a side effect. Non-fatal on failure — e.g.
+  // POST /MemoryDedupStats is admin-gated (resources/MemoryDedupStats.ts),
+  // so a non-admin agent's nightly cycle records a `dedup:` error here and
+  // otherwise completes normally; maintenance + distillation already stand.
+  //
+  // NOTE (flagged for review): if MULTIPLE agents on the same instance each
+  // run their own nightly cycle, each cycle triggers this same instance-wide
+  // sweep independently — the stat is recomputed N times a night rather than
+  // once. No cross-process guard was added (kept the smallest surface); the
+  // recomputation is idempotent (same inputs → same aggregate, just wasted
+  // work), not incorrect.
+  let dedup: RunnerLogRow["dedup"];
+
+  if (!opts.dryRun) {
+    try {
+      const dedupRaw = await opts.apiCall("POST", "/MemoryDedupStats", {});
+      const obj = (dedupRaw && typeof dedupRaw === "object") ? (dedupRaw as Record<string, unknown>) : {};
+      if (obj.error) {
+        errors.push(`dedup: ${describeApiError(obj.error)}`);
+      } else if (
+        typeof obj.clusterCount === "number" &&
+        typeof obj.largestClusterSize === "number" &&
+        typeof obj.totalMemoriesInClusters === "number" &&
+        typeof obj.computedAt === "string"
+      ) {
+        dedup = {
+          clusterCount: obj.clusterCount,
+          largestClusterSize: obj.largestClusterSize,
+          totalMemoriesInClusters: obj.totalMemoriesInClusters,
+          computedAt: obj.computedAt,
+        };
+      } else {
+        errors.push("dedup: unexpected /MemoryDedupStats response shape");
+      }
+    } catch (err: any) {
+      errors.push(`dedup: ${describeApiError(err?.message ?? err)}`);
+    }
+  }
+
+  // Step 7: log
   const row: RunnerLogRow = {
     ...baseRow,
     slice: sliceLabel,
@@ -351,6 +427,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     archived,
     expired,
     candidates,
+    dedup,
     durationMs: Date.now() - startedMs,
     errors,
     // `consolidated` remains undefined — this runner has no consolidation

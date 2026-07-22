@@ -67,6 +67,7 @@ function baseOpts(overrides: Partial<RunnerOpts> = {}): RunnerOpts {
       "POST:/MemoryCandidate/search_by_conditions": () => [],
       "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
       "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+      "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
     }),
     snapshotRoot,
     logPath,
@@ -131,6 +132,7 @@ describe("happy path", () => {
         ],
         "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
     expect(r.logRow.pendingCandidates).toBe(3);
@@ -144,6 +146,7 @@ describe("happy path", () => {
         "POST:/MemoryCandidate/search_by_conditions": () => [],
         "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
     expect(r.status).toBe("completed");
@@ -159,6 +162,7 @@ describe("happy path", () => {
         "POST:/MemoryCandidate/search_by_conditions": () => [],
         "POST:/MemoryMaintenance": () => ({ expired: 5, archived: 12, total: 200, errors: 0 }),
         "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
     expect(r.status).toBe("completed");
@@ -206,6 +210,7 @@ describe("step 5: distillation", () => {
           count: 2,
           model: "llama3",
         }),
+        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
     expect(r.status).toBe("completed");
@@ -222,6 +227,7 @@ describe("step 5: distillation", () => {
         "POST:/MemoryCandidate/search_by_conditions": () => [],
         "POST:/MemoryMaintenance": () => ({ expired: 5, archived: 12, total: 200, errors: 0 }),
         "POST:/ReflectMemories": () => { throw new Error("fetch failed: connection reset"); },
+        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
     expect(r.status).toBe("completed");
@@ -246,6 +252,7 @@ describe("step 5: distillation", () => {
         "POST:/ReflectMemories": () => {
           throw new Error(JSON.stringify({ error: "No generative backend configured. See the models configuration docs." }));
         },
+        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
     expect(r.status).toBe("completed");
@@ -264,11 +271,96 @@ describe("step 5: distillation", () => {
         "POST:/ReflectMemories": () => {
           throw new Error(JSON.stringify({ error: "distillation_failed", detail: "model output did not validate after one retry" }));
         },
+        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
     expect(r.status).toBe("completed");
     expect(r.logRow.errors.length).toBe(1);
     expect(r.logRow.errors[0]).toBe("distillation: distillation_failed: model output did not validate after one retry");
+  });
+});
+
+describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", () => {
+  it("success — populates row.dedup from the /MemoryDedupStats response", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+        "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/MemoryDedupStats": () => ({
+          clusterCount: 3,
+          largestClusterSize: 5,
+          totalMemoriesInClusters: 11,
+          computedAt: "2026-07-22T03:00:00.000Z",
+        }),
+      }),
+    }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.dedup).toEqual({
+      clusterCount: 3,
+      largestClusterSize: 5,
+      totalMemoriesInClusters: 11,
+      computedAt: "2026-07-22T03:00:00.000Z",
+    });
+  });
+
+  it("failure (e.g. non-admin caller — the resource is admin-gated) is recorded, not fatal", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+        "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/MemoryDedupStats": () => { throw new Error(JSON.stringify({ error: "forbidden: admin required" })); },
+      }),
+    }));
+    // Maintenance + distillation already succeeded — the cycle still completes.
+    expect(r.status).toBe("completed");
+    expect(r.logRow.dedup).toBeUndefined();
+    expect(r.logRow.errors.length).toBe(1);
+    expect(r.logRow.errors[0]).toBe("dedup: forbidden: admin required");
+  });
+
+  it("unexpected response shape is recorded as an error, never a silently-accepted false stat", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+        "POST:/MemoryCandidate/search_by_conditions": () => [],
+        "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/MemoryDedupStats": () => ({ ok: true }), // missing the expected fields
+      }),
+    }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.dedup).toBeUndefined();
+    expect(r.logRow.errors).toEqual(["dedup: unexpected /MemoryDedupStats response shape"]);
+  });
+
+  it("dry-run skips the /MemoryDedupStats call entirely — persisting the stat is a side effect", async () => {
+    const calls: string[] = [];
+    const r = await runNightlyCycle(baseOpts({
+      dryRun: true,
+      apiCall: async (method, path, body) => {
+        calls.push(`${method}:${path.split("?")[0]}`);
+        if (method === "POST" && path === "/MemoryMaintenance") return { expired: 0, archived: 0, total: 0, errors: 0 };
+        if (method === "GET" && path.startsWith("/Memory?")) return sampleMemories;
+        if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
+        if (method === "POST" && path === "/MemoryCandidate/search_by_conditions") return [];
+        if (method === "POST" && path === "/MemoryDedupStats") {
+          throw new Error("must not be called in dry-run mode");
+        }
+        throw new Error(`unexpected api: ${method}:${path}`);
+      },
+    }));
+    expect(r.status).toBe("dry-run");
+    expect(calls).not.toContain("POST:/MemoryDedupStats");
+    expect(r.logRow.dedup).toBeUndefined();
+    expect(r.logRow.errors).toEqual([]);
   });
 });
 
@@ -351,6 +443,7 @@ describe("failure modes", () => {
         "POST:/MemoryCandidate/search_by_conditions": () => { throw new Error("candidate table missing"); },
         "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
         "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
+        "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
       }),
     }));
     // Candidate count is a non-fatal signal — the cycle still completes.

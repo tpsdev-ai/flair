@@ -15,7 +15,7 @@ import { join } from "node:path";
 
 const SRC = (f: string) => readFileSync(join(import.meta.dir, "..", "..", "resources", f), "utf8");
 
-const ADMIN_ONLY = ["AgentSeed.ts", "MemoryReindex.ts", "OrgEventMaintenance.ts"];
+const ADMIN_ONLY = ["AgentSeed.ts", "MemoryReindex.ts", "OrgEventMaintenance.ts", "MemoryDedupStats.ts"];
 const AGENT_FACING = [
   "MemoryBootstrap.ts", "MemoryFeed.ts", "MemoryReflect.ts", "MemoryConsolidate.ts",
   "SoulFeed.ts", "OrgEventCatchup.ts", "SemanticSearch.ts", "WorkspaceLatest.ts",

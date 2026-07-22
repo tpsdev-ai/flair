@@ -7150,6 +7150,12 @@ remNightly
       if (row.candidates) {
         console.log(`Staged:     ${row.candidates.length} candidate${row.candidates.length === 1 ? "" : "s"}`);
       }
+      // row.dedup populates when step 6 (instance-wide dedup-cluster stat,
+      // flair-quality Slice 1c) succeeded this cycle. Absent on dry-run skip
+      // or a non-fatal failure (see Errors below — e.g. non-admin caller).
+      if (row.dedup) {
+        console.log(`Dedup:      ${row.dedup.clusterCount} cluster${row.dedup.clusterCount === 1 ? "" : "s"} (${row.dedup.totalMemoriesInClusters} memories, largest ${row.dedup.largestClusterSize})`);
+      }
       console.log(`Duration:   ${row.durationMs}ms`);
       if (row.errors.length > 0) {
         console.log(`Errors:`);
@@ -11025,6 +11031,25 @@ program
 // exploratory content that's rarely cited", not "noisy" or "untrustworthy"
 // — same for "quiet agents": an ops fact (days since last write), not a
 // trust signal. Keep that framing in any copy touching this code.
+//
+// Slice 1c (flair-quality-slice1c-dedup-spec.md, K&S-resolved to "Option C,
+// server-side"): dedup-cluster count — how many near-duplicate memory
+// CLUSTERS exist instance-wide. Sherlock's hard security line: embeddings
+// are the most sensitive data in the system and must never leave the
+// server, so — unlike every other metric in this file — the computation
+// does NOT happen here. A nightly server-side REM step
+// (resources/MemoryDedupStats.ts, wired into src/rem/runner.ts) computes it
+// server-side via a bounded-k ANN sweep (reusing the HNSW-backed retrieval
+// core) and persists ONLY the aggregate `{clusterCount, largestClusterSize,
+// totalMemoriesInClusters, computedAt}` to a small server-side stat file.
+// /HealthDetail does a CHEAP read of that file (resources/health.ts) —
+// still zero new query pattern from the CLI's perspective, same "quality
+// reads a precomputed number from /HealthDetail" contract as every other
+// metric here. Nightly-stale by construction (only as fresh as the last
+// REM cycle) — that's an accepted trade-off, not a bug: it's a "silting up"
+// trend signal, not a real-time alert. Absent (fresh instance, REM never
+// run, or an older server) degrades to `null` + a `gaps` entry, never a
+// false zero.
 
 /** First-pass default, same "documented heuristic, not derived from data we
  *  don't have" spirit as health.ts's own 10%-hash-fallback threshold below.
@@ -11097,6 +11122,27 @@ export interface QualityReport {
     thresholdDays: number;
     perAgent: QualityAgentActivity[];
     quietCount: number;
+  } | null;
+  /**
+   * flair-quality Slice 1c: instance-wide near-duplicate CLUSTER count,
+   * read from /HealthDetail's `dedup` field (resources/health.ts), which in
+   * turn is a cheap read of a small stat file a nightly server-side REM
+   * step computes (resources/MemoryDedupStats.ts) — see that file + Slice
+   * 1c's spec for why the computation is server-side (embeddings never
+   * leave the server) and why storage is NOT this field's own new endpoint.
+   * `null` when the server hasn't computed one yet (fresh instance, REM
+   * nightly not yet run, or an older server that predates this field) —
+   * NEVER a false zero; always paired with a `gaps` entry in that case.
+   * An ops/health signal ("is memory silting up with duplicates"), never a
+   * trust judgment — same framing discipline as signalDensity/quietAgents.
+   */
+  dedupClusters: {
+    clusterCount: number;
+    largestClusterSize: number;
+    totalMemoriesInClusters: number;
+    /** ISO timestamp of the REM nightly cycle that computed this — the
+     *  stat is only ever as fresh as the last nightly run. */
+    computedAt: string;
   } | null;
   gaps: QualityMetricGap[];
 }
@@ -11242,6 +11288,35 @@ export function computeQualityReport(
     gaps.push({ metric: "quietAgents", reason: "no per-agent stats available in /HealthDetail response" });
   }
 
+  // ── Dedup clusters (instance-wide near-duplicate count — flair-quality
+  // Slice 1c) — an ops/health signal, not a trust judgment (see module doc
+  // and QualityReport['dedupClusters'] doc above). Always instance-wide;
+  // --agent does not scope it (matches staleness's precedent — the
+  // underlying stat has no per-agent breakdown, by design: per-memory
+  // cluster membership is a disclosure surface Sherlock's review explicitly
+  // ruled out storing at all).
+  let dedupClusters: QualityReport["dedupClusters"] = null;
+  const dedup = healthData?.dedup;
+  if (
+    dedup &&
+    typeof dedup.clusterCount === "number" &&
+    typeof dedup.largestClusterSize === "number" &&
+    typeof dedup.totalMemoriesInClusters === "number" &&
+    typeof dedup.computedAt === "string"
+  ) {
+    dedupClusters = {
+      clusterCount: dedup.clusterCount,
+      largestClusterSize: dedup.largestClusterSize,
+      totalMemoriesInClusters: dedup.totalMemoriesInClusters,
+      computedAt: dedup.computedAt,
+    };
+  } else {
+    gaps.push({
+      metric: "dedupClusters",
+      reason: "no dedup-cluster stat yet — computed nightly by REM (see `flair rem nightly enable`); run `flair rem nightly run-once` or wait for the first scheduled cycle",
+    });
+  }
+
   return {
     agentFilter,
     instance: { up: healthy, migrationsClean, haltedMigrations, embeddingsStatus, embeddingsDetail },
@@ -11249,6 +11324,7 @@ export function computeQualityReport(
     staleness,
     signalDensity,
     quietAgents,
+    dedupClusters,
     gaps,
   };
 }
@@ -11363,6 +11439,16 @@ program
           }
         }
       }
+    }
+
+    // Dedup clusters (flair-quality Slice 1c) — an ops/health signal, not a
+    // trust judgment. Labeled with the nightly REM run that produced it, per
+    // spec, since it's only ever as fresh as the last nightly cycle.
+    if (report.dedupClusters) {
+      const dc = report.dedupClusters;
+      console.log(`\n${render.wrap(render.c.bold, "Dedup clusters")} ${render.wrap(render.c.dim, `(as of last REM run ${render.relativeTime(dc.computedAt)}, ${dc.computedAt})`)}`);
+      console.log(render.kv("Clusters", `${render.wrap(render.c.bold, String(dc.clusterCount))} ${render.wrap(render.c.dim, `(${dc.totalMemoriesInClusters} memories, largest cluster ${dc.largestClusterSize})`)}`));
+      console.log(`  ${render.wrap(render.c.dim, "an ops signal — near-duplicate memories piling up, not a trust judgment")}`);
     }
 
     // Gaps
