@@ -20,7 +20,15 @@
 
 import * as harper from "@harperfast/harper";
 import { mcpOAuthEnabled, mcpAuthConfig } from "./mcp-oauth-flag.js";
-import { mcpHandler } from "./mcp-handler.js";
+// NOTE: mcpHandler is intentionally NOT statically imported here — it's resolved
+// lazily (deps.mcpHandler ?? dynamic import) inside registerMcpOAuthRoute, same
+// as loadWithMCPAuth below. A static `import { mcpHandler } from "./mcp-handler.js"`
+// forced any test that wanted to mock this module to `mock.module(...)` it — a
+// process-global, unrestored bun mock (bun test runs all files in one process)
+// that raced mcp-handler.test.ts's own real `await import("./mcp-handler.js")`
+// and intermittently poisoned it (undefined resolveAgentFromSub → 35 tests fail
+// together). See resources/mcp-tools.ts's LOADERS/__setHandlers doc for the same
+// "inject, don't mock.module shared resources/*.ts" rationale.
 
 /**
  * Register the guarded /mcp route iff the flag is on. Called once at module load
@@ -38,6 +46,9 @@ export interface RegisterDeps {
   server?: { http: (handler: any, options: any) => void };
   /** Loader for withMCPAuth (injectable for tests; defaults to the real plugin). */
   loadWithMCPAuth?: () => Promise<(handler: any, options?: any) => any>;
+  /** The /mcp request handler (injectable for tests; defaults to a lazy import
+   *  of ./mcp-handler.js — never statically imported, see the note at the top). */
+  mcpHandler?: any;
 }
 
 async function defaultLoadWithMCPAuth(): Promise<(handler: any, options?: any) => any> {
@@ -76,6 +87,10 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
     return false;
   }
 
+  // Resolve the handler lazily (injected in tests; real module otherwise) — see
+  // the top-of-file note on why it isn't a static import.
+  const handler = deps.mcpHandler ?? (await import("./mcp-handler.js")).mcpHandler;
+
   // Read `server` lazily off the namespace (it's a runtime global on the Harper
   // module, not a static named export) so this module links cleanly even where a
   // stub build of @harperfast/harper lacks the export.
@@ -87,7 +102,7 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
   // resolves a different node_modules copy of the plugin (docs/mcp-oauth.md
   // §"Using withMCPAuth from a different component").
   srv.http(
-    withMCPAuth(mcpHandler, {
+    withMCPAuth(handler, {
       getConfig: () => mcpAuthConfig(),
     }),
     { urlPath: "/mcp" },

@@ -32,9 +32,13 @@ mock.module("@harperfast/harper", () => ({
   Resource: NoopBase,
   databases: { flair: dbStub },
 }));
-// mcp-handler.ts (imported by mcp-oauth.ts) pulls in the resource handlers +
-// databases; stub so the import graph loads outside a Harper runtime.
-mock.module("../../resources/mcp-handler.ts", () => ({ mcpHandler: () => ({ status: 200 }) }));
+// NO mock.module for ./mcp-handler.ts: mcp-oauth.ts no longer statically imports
+// it (it's resolved lazily / via deps.mcpHandler), so loading mcp-oauth.ts here
+// doesn't pull in the resource graph and there's nothing to stub for link-time.
+// The handler is injected via deps.mcpHandler in makeDeps() below. Crucially,
+// this file must NOT process-globally mock a module that mcp-handler.test.ts
+// legitimately `await import(...)`s for real — that was the source of the
+// intermittent "35 tests failed" flake in mcp-handler.test.ts.
 
 const { registerMcpOAuthRoute } = await import("../../resources/mcp-oauth.ts");
 
@@ -58,6 +62,9 @@ function makeDeps() {
         return { __wrapped: true, handler, options };
       };
     },
+    // Inject the /mcp handler directly (replaces the old process-global
+    // mock.module of ./mcp-handler.ts) — same shape the mock used to return.
+    mcpHandler: () => ({ status: 200 }),
   };
 }
 
