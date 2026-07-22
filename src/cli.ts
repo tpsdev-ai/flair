@@ -8860,7 +8860,15 @@ program
       {
         name: "@tpsdev-ai/flair",
         kind: "bin",
-        probe: () => probeBinVersion(execFileSync,"flair"),
+        // Same PATH-independence fix as flair-mcp below: when `flair` isn't on
+        // PATH (a custom npm prefix — mise/fnm/nvm/volta, or the sudo-less
+        // user-prefix install the README recommends), the bin probe returns
+        // null even though the package IS globally installed, and `flair
+        // upgrade` mis-reports "not detected → run npm install -g". Fall back
+        // to the lib probe, which require.resolves the package.json regardless
+        // of PATH or `--version` support. (Canary's 0.25.3 dogfooding caught
+        // this — the fallback existed for flair-mcp but not for flair itself.)
+        probe: () => probeBinVersion(execFileSync, "flair") ?? probeLibVersion("@tpsdev-ai/flair"),
       },
       {
         name: "@tpsdev-ai/flair-mcp",

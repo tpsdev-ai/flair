@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`flair upgrade` couldn't detect a globally-installed flair when `flair` isn't on PATH.** For a custom npm prefix (mise/fnm/nvm/volta, or the sudo-less user-prefix install the README recommends), `flair upgrade` reported `not detected → run npm install -g` even though the package was installed, so the one-command upgrade never ran. The flair package probe now falls back to a `require.resolve`-based lookup — the same PATH-independent fallback `flair-mcp` already had. Found by the Canary dogfooder validating the 0.25.3 upgrade flow.
+
 ## [0.25.3] - 2026-07-22
 
 ### Fixed
