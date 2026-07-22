@@ -10,7 +10,9 @@
  *   - memory_store   → PUT  /Memory/<id>  (write + embed)
  *   - memory_get     → GET  /Memory/<id>  (fetch by id)
  *   - before_agent_start hook → inject recent/relevant memories
- *   - agent_end hook → auto-capture from conversation
+ *   - agent_end hook → auto-capture from conversation (discrete runs)
+ *   - llm_input/llm_output hooks → auto-capture from live turns
+ *     (long-lived/persistent sessions — see "Auto-capture" below, #798)
  */
 
 import { createHash } from "node:crypto";
@@ -54,11 +56,21 @@ interface FlairMemoryConfig {
   autoRecall?: boolean;
   maxRecallResults?: number;
   maxBootstrapTokens?: number;
+  /**
+   * Cap on trigger-based auto-captures per "session" — where a session is
+   * bounded by before_agent_start (start) / agent_end (end). For discrete
+   * runs that's one run; for a long-lived persistent session that never
+   * fires agent_end (#798), it's the whole life of the session, since there
+   * is no other reliable reset signal. Raise this for persistent deployments
+   * that want more than the discrete-run default over their lifetime.
+   */
+  autoCaptureMaxPerSession?: number;
 }
 
 const DEFAULT_URL = "http://127.0.0.1:19926";
 const DEFAULT_MAX_RECALL = 5;
 const DEFAULT_MAX_BOOTSTRAP_TOKENS = 4000;
+const DEFAULT_AUTO_CAPTURE_MAX_PER_SESSION = 3;
 
 // ─── Workspace sync helpers ───────────────────────────────────────────────────
 
@@ -128,6 +140,54 @@ function shouldCapture(text: string): boolean {
 
 function excerptForCapture(text: string, maxChars = 500): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+
+// ─── Auto-capture: shared trigger evaluation + cap/dedup state ───────────────
+// Two independent paths feed the same capture logic:
+//   1. agent_end     — full-session message scan (discrete runs; fires once
+//                       at the true end of a run).
+//   2. llm_input/llm_output — per-call live-turn scan (fires on every model
+//                       request/response, so it also covers persistent
+//                       sessions where agent_end never fires — #798).
+// Both paths share one CaptureState per agentId so the "N per session" cap
+// and the duplicate-content guard apply across paths, not per-path — a
+// phrase captured live during a run isn't re-captured when agent_end
+// rescans the same run's full history at the end.
+
+interface CaptureState {
+  count: number;
+  hashes: Set<string>;
+}
+
+function createCaptureState(): CaptureState {
+  return { count: 0, hashes: new Set() };
+}
+
+/**
+ * Pure decision: given a candidate text and the current per-session capture
+ * state, decide whether it should be captured. Returns the excerpt + content
+ * hash to write, or null if the text doesn't match a trigger, the session
+ * cap is already spent, or this exact excerpt was already captured (via
+ * either path). Does not mutate state or perform I/O — callers apply the
+ * decision (write the memory, then call recordCapture).
+ */
+export function evaluateAutoCapture(
+  text: string,
+  state: Pick<CaptureState, "count" | "hashes">,
+  maxPerSession: number = DEFAULT_AUTO_CAPTURE_MAX_PER_SESSION,
+): { excerpt: string; hash: string } | null {
+  if (!shouldCapture(text)) return null;
+  if (state.count >= maxPerSession) return null;
+  const excerpt = excerptForCapture(text);
+  const hash = hashContent(excerpt);
+  if (state.hashes.has(hash)) return null;
+  return { excerpt, hash };
+}
+
+/** Records a capture decision against state — call after the write succeeds. */
+function recordCapture(state: CaptureState, hash: string): void {
+  state.count++;
+  state.hashes.add(hash);
 }
 
 // ─── Entity detection ────────────────────────────────────────────────────────
@@ -449,6 +509,47 @@ export default {
     const maxRecall = cfg.maxRecallResults ?? DEFAULT_MAX_RECALL;
     const autoCapture = cfg.autoCapture ?? false; // opt-in — trust the LLM to use memory_store
     const autoRecall = cfg.autoRecall ?? true;
+    const autoCaptureMaxPerSession = Math.max(1, cfg.autoCaptureMaxPerSession ?? DEFAULT_AUTO_CAPTURE_MAX_PER_SESSION);
+
+    // Auto-capture state, one per agentId — shared across the agent_end path
+    // and the live-turn (llm_input/llm_output) path so the cap and the
+    // duplicate-content guard apply across both (see evaluateAutoCapture).
+    const captureStatePool = new Map<string, CaptureState>();
+    function getCaptureState(agentId: string): CaptureState {
+      let state = captureStatePool.get(agentId);
+      if (!state) {
+        state = createCaptureState();
+        captureStatePool.set(agentId, state);
+      }
+      return state;
+    }
+    // Fresh budget for the next run. Only ever called from agent_end, which
+    // is the one reliable "this run/session is over" signal we have — for a
+    // persistent session that never fires agent_end (#798), this simply
+    // never runs, so the cap holds for the session's whole lifetime.
+    function resetCaptureState(agentId: string): void {
+      captureStatePool.delete(agentId);
+    }
+
+    /**
+     * Evaluate + (if triggered) write a single auto-captured memory. Shared
+     * by the agent_end path and the live-turn path — same regex gate, same
+     * per-session cap, same dedup-by-content-hash guard.
+     */
+    async function tryAutoCapture(client: FlairClient, agentId: string, text: string): Promise<boolean> {
+      const state = getCaptureState(agentId);
+      const decision = evaluateAutoCapture(text, state, autoCaptureMaxPerSession);
+      if (!decision) return false;
+      const entities = detectEntities(text);
+      const subject = entities.length > 0 ? entities[0].name.toLowerCase() : undefined;
+      await client.memory.write(decision.excerpt, {
+        type: "session",
+        tags: ["auto-captured"],
+        subject,
+      });
+      recordCapture(state, decision.hash);
+      return true;
+    }
 
     // Per-session agentId — resolved from session context at runtime.
     // In auto mode, each session gets its own agentId from before_agent_start.
@@ -692,12 +793,33 @@ export default {
       });
     }
 
-    // ── Lifecycle: auto-capture on session end ────────────────────────────
+    // ── Lifecycle: auto-capture ─────────────────────────────────────────────
+    // Two paths, same trigger regex + cap + dedup (see tryAutoCapture above):
+    //
+    //  1. agent_end — full-session message scan + entity/relationship
+    //     detection. Reliable for discrete runs (agent_end fires at the true
+    //     end of each run). Also resets the per-agentId capture budget for
+    //     the next run.
+    //
+    //  2. llm_input/llm_output — live, per-call scan. agent_end never fires
+    //     in a long-lived persistent gateway session (the "run" never ends,
+    //     so autoCapture was dead code there — #798). llm_input/llm_output
+    //     fire on every model request/response regardless of how the host
+    //     bounds a "run" or "session", so they cover that deployment shape
+    //     without needing a session-end signal at all. Entity/relationship
+    //     detection stays exclusive to agent_end (full-history pass is a
+    //     better fit for that than re-running it on every single call).
+    //
+    // Both paths write through the same getClient()/getCaptureState(agentId)
+    // pool, so a phrase captured live isn't re-captured when agent_end
+    // rescans the same run's history at the end (hash-deduped).
 
     if (autoCapture) {
-      api.on("agent_end", async (event) => {
+      api.on("agent_end", async (event, ctx: any) => {
+        const agentId = ctx?.agentId || currentAgentId || fallbackAgentId || undefined;
+        if (!agentId) return;
         try {
-          const client = getCurrentClient();
+          const client = getClient(agentId);
           const messages = (event.messages ?? []) as Array<{ role: string; content?: string }>;
           let stored = 0;
           const allEntities = new Map<string, DetectedEntity>();
@@ -708,19 +830,10 @@ export default {
             const text = typeof msg.content === "string" ? msg.content : "";
             if (!text || text.length < MIN_CAPTURE_LENGTH) continue;
 
-            // Traditional trigger-based capture
-            if (shouldCapture(text) && stored < 3) {
-              const excerpt = excerptForCapture(text);
-              // Tag with detected subject if available
-              const entities = detectEntities(text);
-              const subject = entities.length > 0 ? entities[0].name.toLowerCase() : undefined;
-              await client.memory.write(excerpt, {
-                type: "session",
-                tags: ["auto-captured"],
-                subject,
-              });
-              stored++;
-            }
+            // Traditional trigger-based capture (dedup guards against
+            // re-capturing something the live llm_input/llm_output path
+            // already wrote earlier in this same run).
+            if (await tryAutoCapture(client, agentId, text)) stored++;
 
             // Entity detection — accumulate across all messages
             for (const entity of detectEntities(text)) {
@@ -763,6 +876,45 @@ export default {
           }
         } catch (err: any) {
           api.logger.warn(`openclaw-flair: auto-capture failed: ${err.message}`);
+        } finally {
+          // Run is over — fresh capture budget for the next one. Never
+          // reached for a persistent session (that's the whole bug), so the
+          // budget correctly holds for that session's entire lifetime.
+          resetCaptureState(agentId);
+        }
+      });
+
+      // Live-turn capture: fires on every LLM call/response, independent of
+      // whatever the host considers a "run" or "session" boundary — the
+      // fix for #798. Evaluates the exact same shouldCapture() regex against
+      // each side of the exchange as it happens, instead of waiting for a
+      // session-end event that a persistent session never produces.
+      api.on("llm_input", async (event: any, ctx: any) => {
+        const agentId = ctx?.agentId || currentAgentId || fallbackAgentId || undefined;
+        if (!agentId) return;
+        const text = typeof event?.prompt === "string" ? event.prompt : "";
+        if (!text) return;
+        try {
+          const client = getClient(agentId);
+          const captured = await tryAutoCapture(client, agentId, text);
+          if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_input)");
+        } catch (err: any) {
+          api.logger.warn(`openclaw-flair: live auto-capture (llm_input) failed: ${err.message}`);
+        }
+      });
+
+      api.on("llm_output", async (event: any, ctx: any) => {
+        const agentId = ctx?.agentId || currentAgentId || fallbackAgentId || undefined;
+        if (!agentId) return;
+        const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
+        const text = texts.filter((t: unknown) => typeof t === "string").join("\n");
+        if (!text) return;
+        try {
+          const client = getClient(agentId);
+          const captured = await tryAutoCapture(client, agentId, text);
+          if (captured) api.logger.info("openclaw-flair: auto-captured 1 memory from live turn (llm_output)");
+        } catch (err: any) {
+          api.logger.warn(`openclaw-flair: live auto-capture (llm_output) failed: ${err.message}`);
         }
       });
     }

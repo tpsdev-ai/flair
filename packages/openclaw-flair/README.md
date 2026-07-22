@@ -10,7 +10,7 @@ Uses Flair's native Harper vector embeddings — no OpenAI API key required.
 - **Persistent storage** via `memory_store` → Ed25519-authenticated writes
 - **Memory retrieval** via `memory_get` → fetch by ID
 - **Auto-bootstrap** — injects relevant memories into context at session start
-- **Auto-capture** — automatically stores important information from conversations
+- **Auto-capture** — automatically stores important information from conversations, live, on every turn — works in both discrete runs and long-lived persistent gateway sessions (#798)
 - **Multi-agent** — `agentId: "auto"` resolves per-session for shared gateways
 - **Durability levels** — permanent, persistent, standard, ephemeral
 - **Memory versioning** — `supersedes` field creates version chains
@@ -70,6 +70,16 @@ In your OpenClaw config (`openclaw.json`):
 | `autoCapture` | boolean | `true` | Auto-capture important info from conversations |
 | `autoRecall` | boolean | `true` | Inject relevant memories at session start |
 | `maxRecallResults` | number | `5` | Max results for `memory_search` |
+| `autoCaptureMaxPerSession` | number | `3` | Cap on trigger-based auto-captures per session (see below) |
+
+### Auto-capture
+
+Auto-capture scans conversation text for a small set of conservative trigger phrases (e.g. "remember this", "we decided", "my name is") and writes a matching excerpt to Flair. It runs on two hooks:
+
+- **`agent_end`** — scans the full conversation once, at the true end of a discrete run. Also detects entities/relationships from the same pass.
+- **`llm_input`/`llm_output`** — scans the live prompt/response on every model call. This is what makes auto-capture work in a long-lived, persistent gateway session, where `agent_end` never fires because the "run" never ends (#798).
+
+Both hooks share one capture budget per agent session (`autoCaptureMaxPerSession`, default 3) and dedup by content hash, so a phrase captured live during a run isn't captured again when `agent_end` rescans that same run's history at the end. For a persistent session that never fires `agent_end`, the budget is never reset — it's a cap for the session's whole lifetime, not per calendar day. Raise `autoCaptureMaxPerSession` if a long-lived deployment needs more than 3 auto-captures over its life.
 
 ## Tool naming
 
