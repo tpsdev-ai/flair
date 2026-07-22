@@ -187,17 +187,21 @@ If you see (a) the agent calling the `bootstrap` tool returning soul + recent me
 
 ## What the MCP server exposes
 
-Seven tools, kept deliberately small:
+Eleven tools, kept deliberately small:
 
 | Tool | What it does |
 |---|---|
 | `memory_search` | Semantic search across your agent's memories |
 | `memory_store` | Save a memory with type, durability, tags. Auto-dedups near-duplicates |
+| `memory_update` | Update an existing memory by ID — overwrite in place, or version it with `preserveHistory` |
 | `memory_get` | Fetch a specific memory by ID |
 | `memory_delete` | Remove a memory |
+| `relationship_store` | Record a subject-predicate-object relationship triple (e.g. "nathan manages flair") |
 | `bootstrap` | Get session-start context: soul + recent memories + predicted-relevant context |
 | `soul_set` | Set a personality/project/standards entry — included in every bootstrap |
 | `soul_get` | Get a soul entry |
+| `flair_workspace_set` | Set your agent's current workspace state (ref/branch, phase, task) in the Office Space |
+| `flair_orgevent` | Publish an org-wide coordination event (claim/release/status) to the Office Space |
 
 Writes are scoped per-agent (your `FLAIR_AGENT_ID`) and enforced by Flair's server, not by client convention — you can't write as another agent. Reads are more open by design: any agent on the same Flair instance can read any other agent's non-private memories (open-within-org read; see [SECURITY.md](../SECURITY.md)). Mark a memory `visibility: private` to keep it owner-only.
 

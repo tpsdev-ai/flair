@@ -46,12 +46,13 @@ Click **Test** — if the test request to `/Memory` returns 200, the credential 
 
 ### 4. Wire the nodes
 
-Two nodes ship in the package:
+Three nodes ship in the package:
 
 - **Flair Chat Memory** — connects to an AI Agent's `Memory` socket. Stores chat history in Flair, scoped by Subject. Defaults to per-workflow memory; set the optional Session Sub-Key to `={{ $execution.id }}` for per-run isolation.
 - **Flair Search** — connects to an AI Agent's `Tool` socket. Two operations:
   - *Semantic Search* — agent calls `flair_search({ query })`, gets memories ranked by similarity.
   - *Get By Subject* — agent calls `flair_get_by_subject()`, gets memories under a config-time-bound subject.
+- **Flair Write** — a regular Main-input/Main-output pipeline node (not wired to the AI Agent's Tool socket). Takes an incoming item and writes its content as a Flair memory, with Subject, Tags, and Durability fields. For operator-driven capture-and-archive flows (mail → memory, webhook → memory, parsed-doc → memory) where the write is the workflow author's choice, not the LLM's.
 
 A typical workflow:
 

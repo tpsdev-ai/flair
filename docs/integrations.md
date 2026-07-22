@@ -55,16 +55,17 @@ env = { FLAIR_AGENT_ID = "claude-code" }
 }
 ```
 
-**Codex CLI** (`~/.codex/config.json`):
-```json
-{
-  "mcpServers": {
-    "flair": { "command": "npx", "args": ["-y", "@tpsdev-ai/flair-mcp"], "env": { "FLAIR_AGENT_ID": "codex" } }
-  }
-}
+**Codex CLI** (`~/.codex/config.toml`):
+```toml
+[mcp_servers.flair]
+command = "npx"
+args = ["-y", "@tpsdev-ai/flair-mcp"]
+
+[mcp_servers.flair.env]
+FLAIR_AGENT_ID = "codex"
 ```
 
-**Gemini CLI** (`~/.gemini/config.json`): same shape as Codex.
+**Gemini CLI** (`~/.gemini/settings.json`): same shape as Cursor.
 
 **Continue.dev** (`~/.continue/config.json`):
 ```json

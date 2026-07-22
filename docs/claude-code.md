@@ -71,7 +71,7 @@ Copy this into your project's `CLAUDE.md` (or `.claude/settings.md`, `AGENTS.md`
 
     - persistent — survives indefinitely. Use for lessons, decisions, preferences.
     - standard — default. Good for session context, observations.
-    - ephemeral — auto-expires after 72h. Use for temporary notes.
+    - ephemeral — auto-expires after 24h. Use for temporary notes.
 
 > **End of CLAUDE.md snippet.**
 

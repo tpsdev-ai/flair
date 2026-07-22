@@ -297,6 +297,34 @@ flair restore < ~/flair-backup-<date>.json
 "Upgrade is a transaction" above. This section is for doing it by hand, e.g. after
 `--no-verify`, or after problems surface later than the automatic check catches.
 
+### Known issue — upgrading *from* a pre-0.25.1 version can still report a false rollback
+
+The 0.25.1 fix (see [`CHANGELOG.md`](../CHANGELOG.md)) makes `flair upgrade` resolve a
+credentials-only post-restart-verification failure to `healthy-unverified` instead of
+rolling back. That fix is **forward-only**: it lives in the *new* CLI code, but an
+upgrade's post-restart verification is run by the CLI that was already installed
+*before* the upgrade — the old code, which doesn't have the fix.
+
+So on a machine upgrading **from** a version older than 0.25.1, with no
+`~/.flair/admin-pass` and no agent key on disk, the old verifier still can't
+authenticate to the authenticated `/HealthDetail` check. It reports a false
+`post-restart verification failed … 403: no credentials sent`, triggers an automatic
+rollback, and that rollback's own re-verify hits the identical missing-credential
+wall — leaving you with `ROLLBACK ALSO FAILED VERIFICATION — instance state is
+UNKNOWN`, even though the instance was healthy the entire time (a 403 means the server
+answered).
+
+**Workarounds:**
+
+- Skip verification for this one upgrade: `flair upgrade --no-verify` — safe as long
+  as you've confirmed the instance is reachable first (`flair status`).
+- Or provision credentials before upgrading, so the verifier can authenticate:
+  `flair init`, or export `FLAIR_ADMIN_PASS`.
+
+This gap only exists while crossing into 0.25.1. Once you're running 0.25.1 or later,
+the verifier itself resolves a credentials-only failure to `healthy-unverified`
+instead of rolling back, so it cannot recur on subsequent upgrades.
+
 ## Downgrade
 
 Rolling back the **package** (above) assumes the data on disk is fine — only the new
