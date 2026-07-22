@@ -205,9 +205,15 @@ export class HealthDetail extends Resource {
         hashFallback: number;
         writes24h: number;
         lastWriteAt: string | null;
+        // Slice 1b (flair-quality-slice1b): sum of Memory.usageCount across an
+        // agent's memories — the citation-rate signal `flair quality` needs.
+        // `memoriesList` (below) comes from `db.flair.Memory.search({})` with
+        // NO `select` projection, so it's already full records; usageCount
+        // rides along for free — no new query, no new field to project.
+        usageCount: number;
       };
       const blank = (id: string): AgentRow => ({
-        id, memoryCount: 0, hashFallback: 0, writes24h: 0, lastWriteAt: null,
+        id, memoryCount: 0, hashFallback: 0, writes24h: 0, lastWriteAt: null, usageCount: 0,
       });
       const perAgentMap = new Map<string, AgentRow>();
       for (const a of agents) {
@@ -218,6 +224,7 @@ export class HealthDetail extends Resource {
         if (!m.agentId) continue;
         const row = perAgentMap.get(m.agentId) ?? blank(m.agentId);
         row.memoryCount++;
+        row.usageCount += (m.usageCount ?? 0);
         if (!m.embeddingModel || m.embeddingModel === "hash-512d") row.hashFallback++;
         if (m.createdAt) {
           const ts = new Date(m.createdAt).getTime();

@@ -180,7 +180,7 @@ describe("computeQualityReport", () => {
     });
   });
 
-  describe("signal density (write-volume, per agent)", () => {
+  describe("signal density — degrades to write-volume-only when the server predates per-agent usageCount (Slice 1a shape)", () => {
     test("all agents by default", () => {
       const r = computeQualityReport(true, fixture(), { now: NOW });
       expect(r.signalDensity?.scope).toBe("write-volume");
@@ -189,8 +189,23 @@ describe("computeQualityReport", () => {
         { id: "anvil", memoryCount: 30, writes24h: 0, lastWriteAt: daysAgo(3) },
         { id: "pulse", memoryCount: 10, writes24h: 0, lastWriteAt: daysAgo(30) },
       ]);
-      // Citation-rate gap always noted (usageCount isn't in /HealthDetail's perAgent rows).
-      expect(r.gaps.some((g) => g.metric === "signalDensity" && g.reason.includes("citation rate"))).toBe(true);
+      // No row carries `usageCount` — fixture() is a Slice-1a-shaped /HealthDetail
+      // payload — so citationRate/usageCount must not appear on any row at all
+      // (never a silent 0 masquerading as real data).
+      for (const row of r.signalDensity?.perAgent ?? []) {
+        expect((row as any).usageCount).toBeUndefined();
+        expect((row as any).citationRate).toBeUndefined();
+      }
+      // Citation-rate gap always noted, with the "upgrade the server" framing.
+      expect(
+        r.gaps.some(
+          (g) =>
+            g.metric === "signalDensity" &&
+            g.reason.includes("citation rate unavailable") &&
+            g.reason.includes("predates") &&
+            g.reason.includes("usageCount"),
+        ),
+      ).toBe(true);
     });
 
     test("--agent scopes to exactly that agent's row", () => {
@@ -209,6 +224,82 @@ describe("computeQualityReport", () => {
       const r = computeQualityReport(true, data, { now: NOW });
       expect(r.signalDensity).toBeNull();
       expect(r.gaps.some((g) => g.metric === "signalDensity" && g.reason.includes("no per-agent stats"))).toBe(true);
+    });
+
+    test("MIXED presence (some rows have usageCount, some don't) still degrades — a server either supports the aggregate for all agents or none", () => {
+      const data = fixture({
+        agents: {
+          count: 2,
+          perAgent: [
+            { id: "flint", memoryCount: 60, hashFallback: 2, writes24h: 5, lastWriteAt: daysAgo(0), usageCount: 30 },
+            { id: "anvil", memoryCount: 30, hashFallback: 5, writes24h: 0, lastWriteAt: daysAgo(3) }, // no usageCount
+          ],
+        },
+      });
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.signalDensity?.scope).toBe("write-volume");
+      expect((r.signalDensity?.perAgent[0] as any).citationRate).toBeUndefined();
+    });
+  });
+
+  describe("signal density — write-and-citation (server reports per-agent usageCount, Slice 1b)", () => {
+    function fixtureWithUsage(usageByAgent: Record<string, number>) {
+      return fixture({
+        agents: {
+          count: 3,
+          names: ["flint", "anvil", "pulse"],
+          perAgent: [
+            { id: "flint", memoryCount: 60, hashFallback: 2, writes24h: 5, lastWriteAt: daysAgo(0), usageCount: usageByAgent.flint ?? 0 },
+            { id: "anvil", memoryCount: 30, hashFallback: 5, writes24h: 0, lastWriteAt: daysAgo(3), usageCount: usageByAgent.anvil ?? 0 },
+            { id: "pulse", memoryCount: 10, hashFallback: 3, writes24h: 0, lastWriteAt: daysAgo(30), usageCount: usageByAgent.pulse ?? 0 },
+          ],
+        },
+      });
+    }
+
+    test("computes citationRate = round(usageCount / memoryCount, 2) per agent and flips scope", () => {
+      const data = fixtureWithUsage({ flint: 30, anvil: 3, pulse: 0 });
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.signalDensity?.scope).toBe("write-and-citation");
+      expect(r.signalDensity?.perAgent).toEqual([
+        { id: "flint", memoryCount: 60, writes24h: 5, lastWriteAt: daysAgo(0), usageCount: 30, citationRate: 0.5 },
+        { id: "anvil", memoryCount: 30, writes24h: 0, lastWriteAt: daysAgo(3), usageCount: 3, citationRate: 0.1 },
+        { id: "pulse", memoryCount: 10, writes24h: 0, lastWriteAt: daysAgo(30), usageCount: 0, citationRate: 0 },
+      ]);
+    });
+
+    test("drops the old 'citation rate unavailable' gap entry once the server supplies usageCount", () => {
+      const data = fixtureWithUsage({ flint: 30, anvil: 3, pulse: 0 });
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.gaps.some((g) => g.metric === "signalDensity")).toBe(false);
+    });
+
+    test("citationRate rounds to 2 decimal places, not a long float", () => {
+      const data = fixtureWithUsage({ flint: 1, anvil: 0, pulse: 0 }); // 1/60 = 0.016666...
+      const r = computeQualityReport(true, data, { now: NOW });
+      const flintRow = r.signalDensity?.perAgent.find((r) => r.id === "flint");
+      expect(flintRow?.citationRate).toBe(0.02);
+    });
+
+    test("memoryCount 0 → citationRate 0, not NaN/Infinity (division-by-zero guard)", () => {
+      const data = fixture({
+        agents: {
+          count: 1,
+          perAgent: [{ id: "fresh", memoryCount: 0, hashFallback: 0, writes24h: 0, lastWriteAt: null, usageCount: 0 }],
+        },
+      });
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.signalDensity?.perAgent[0]).toEqual({
+        id: "fresh", memoryCount: 0, writes24h: 0, lastWriteAt: null, usageCount: 0, citationRate: 0,
+      });
+    });
+
+    test("--agent scopes to exactly that agent's row, citationRate included", () => {
+      const data = fixtureWithUsage({ flint: 30, anvil: 3, pulse: 0 });
+      const r = computeQualityReport(true, data, { now: NOW, agentId: "anvil" });
+      expect(r.signalDensity?.perAgent).toEqual([
+        { id: "anvil", memoryCount: 30, writes24h: 0, lastWriteAt: daysAgo(3), usageCount: 3, citationRate: 0.1 },
+      ]);
     });
   });
 
