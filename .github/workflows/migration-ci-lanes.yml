@@ -246,7 +246,21 @@ jobs:
           # && flair restart`), no re-init, no touching the files by hand.
           # Back to $BASE_DIR so the baseline spawns ITS OWN Harper. ──
           cd "$BASE_DIR"
-          unset FLAIR_ENABLE_TEST_MIGRATIONS FLAIR_MIGRATION_TEST_BATCH_DELAY_MS FLAIR_EMBEDDING_MODEL
+          # Keep FLAIR_EMBEDDING_MODEL pinned across the baseline restart too
+          # (do NOT unset it here). The always-registered embedding-stamp
+          # migration runs on every boot and flags any row whose embeddingModel
+          # != getModelId(); getModelId() reads FLAIR_EMBEDDING_MODEL live. If we
+          # unset it, the baseline's getModelId() returns the real default, so
+          # all seeded rows (carrying the PINNED stamp) look stale — the baseline
+          # then genuinely re-embeds them, racing this script's post-downgrade
+          # read and rewriting embeddingModel on a nondeterministic few rows
+          # (the "N rows lost the pinned embeddingModel stamp — isolation broken"
+          # flake). Keeping the pin means the baseline's embedding-stamp finds
+          # nothing pending, so no re-embed runs. Zero effect on invariant I
+          # (byte-identical content, real partial-migration state, clean old-binary
+          # boot). The other two vars stay unset — the baseline doesn't know the
+          # synthetic-migration gate anyway.
+          unset FLAIR_ENABLE_TEST_MIGRATIONS FLAIR_MIGRATION_TEST_BATCH_DELAY_MS
           $BASE_FLAIR start --port $PORT
           wait_for_http_ok "${BASE_URL}/Health" 90 "baseline Harper (post-downgrade)"
           # Version-safe on the baseline: 0.21.0's `flair status` probes the
