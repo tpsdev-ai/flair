@@ -28,6 +28,13 @@ jobs:
 
           mode: firewall-free
 
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
       - name: Install (sfw — retry on intermittent Socket-firewall hang, ops-fumh)
         run: |
           for attempt in 1 2 3; do
