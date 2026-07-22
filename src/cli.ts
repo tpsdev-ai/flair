@@ -11050,6 +11050,35 @@ program
 // trend signal, not a real-time alert. Absent (fresh instance, REM never
 // run, or an older server) degrades to `null` + a `gaps` entry, never a
 // false zero.
+//
+// Slice 1d (memory-quality arc, self-referential design — no hardcoded canned
+// queries): recall SPOT-CHECK. Unlike every metric above, this ISN'T read
+// from /HealthDetail at all — it's the one metric in this file that requires
+// live QUERIES, because it's checking whether querying itself still works.
+// For a sample of the querying agent's OWN memories (fetchRecallSpotCheckData
+// below, GET /Memory?agentId=<self>), a CUE is derived from each memory
+// (deriveRecallCue — its `subject` if present, else the leading ~8 words /
+// first sentence of `content`; a PARTIAL cue, never the full content) and
+// searched for through the EXACT SAME authenticated read path `flair memory
+// search` uses: `api("POST", "/SemanticSearch", ...)`, which resolves auth
+// via the shared authedRequest() 5-tier resolver (src/lib/auth-resolve.ts) —
+// identical code path, so read-scope holds by construction (no new
+// endpoint, no cross-agent/private data, scoped to the querying agent's own
+// memories same as `flair memory search` always was). computeRecallSpotCheck
+// (below) is the pure scorer: recall@k = fraction of sampled memories whose
+// own id appears in its search's top-k; MRR = mean reciprocal rank (0 if
+// not found within k).
+//
+// Framing — this is a HEALTH SPOT-CHECK, not a benchmark and not a trust
+// judgment. Querying by a cue derived FROM the target memory is easier than
+// a real user query, so a high score means "recall is functioning", not
+// "recall is optimal". Its job is to catch recall CRATERING (embeddings
+// down, index busted) — the score collapsing toward 0 is the signal, not
+// fine-grained precision grading. Requires an actual agent identity to
+// query AS (semantic search is agent-scoped) — no identity, fewer than the
+// sample-size memories to sample, or a search error all degrade to `null` +
+// a `gaps` entry, same graceful-degradation contract as every metric here —
+// NEVER a false 0.0 masquerading as a real (broken) score.
 
 /** First-pass default, same "documented heuristic, not derived from data we
  *  don't have" spirit as health.ts's own 10%-hash-fallback threshold below.
@@ -11062,9 +11091,102 @@ export const QUALITY_QUIET_THRESHOLD_DAYS = 7;
  *  from the raw counts so quality doesn't depend on parsing warning text). */
 export const QUALITY_HASH_FALLBACK_DEGRADED_PCT = 10;
 
+/** Recall spot-check (Slice 1d) defaults — how many of the querying agent's
+ *  own memories to sample, and the top-k depth each is searched at. Same
+ *  "first-pass default, tunable later" spirit as the thresholds above. */
+export const QUALITY_RECALL_SAMPLE_SIZE = 10;
+export const QUALITY_RECALL_K = 5;
+
 export interface QualityMetricGap {
   metric: string;
   reason: string;
+}
+
+/**
+ * Derive a PARTIAL search cue from a memory — used by the recall spot-check
+ * (Slice 1d) to query for a memory without handing back its full content.
+ * Prefers `subject` when present and non-trivial (a real word or phrase, not
+ * empty/whitespace-only padding); otherwise falls back to the first sentence
+ * of `content`, capped to the leading ~8 words so the cue stays a genuine
+ * partial cue rather than the whole memory. Pure — no I/O.
+ */
+export function deriveRecallCue(memory: { subject?: string | null; content?: string | null }): string {
+  const subject = (memory.subject ?? "").trim();
+  if (subject.length >= 3) return subject;
+  const content = (memory.content ?? "").trim();
+  if (!content) return "";
+  const sentenceMatch = content.match(/^[^.!?\n]+[.!?]?/);
+  const firstSentence = (sentenceMatch ? sentenceMatch[0] : content).trim();
+  const words = firstSentence.split(/\s+/).filter(Boolean);
+  const cueWordLimit = 8;
+  return words.length <= cueWordLimit ? firstSentence : words.slice(0, cueWordLimit).join(" ");
+}
+
+export interface RecallSpotCheckScore {
+  /** Fraction of sampled memories whose own id appeared in its search's top-k. */
+  recallAtK: number;
+  /** Mean reciprocal rank of the target memory across the sample (0 for a miss). */
+  mrr: number;
+  sampleSize: number;
+  k: number;
+}
+
+/**
+ * Pure scorer for the recall spot-check (Slice 1d): given the ids of the
+ * sampled memories and, for each, the list of memory ids its derived-cue
+ * search returned (already agent-scoped via the same read path `flair
+ * memory search` uses), compute recall@k + MRR. `perQueryResultIds[i]` is
+ * truncated to the first `k` entries here (not assumed pre-truncated by the
+ * caller) so a caller that over-fetches still gets a correct top-k score.
+ * Never throws; an empty sample scores 0/0 rather than dividing by zero —
+ * callers are expected to treat an empty sample as a `gaps` case, not a
+ * real 0.0 score (see fetchRecallSpotCheckData / computeQualityReport).
+ */
+export function computeRecallSpotCheck(
+  sampledIds: string[],
+  perQueryResultIds: string[][],
+  k: number,
+): RecallSpotCheckScore {
+  const sampleSize = sampledIds.length;
+  if (sampleSize === 0) {
+    return { recallAtK: 0, mrr: 0, sampleSize: 0, k };
+  }
+  let hits = 0;
+  let reciprocalSum = 0;
+  for (let i = 0; i < sampleSize; i++) {
+    const targetId = sampledIds[i];
+    const topK = (perQueryResultIds[i] ?? []).slice(0, k);
+    const rank = topK.indexOf(targetId);
+    if (rank !== -1) {
+      hits += 1;
+      reciprocalSum += 1 / (rank + 1);
+    }
+  }
+  return {
+    recallAtK: Math.round((hits / sampleSize) * 100) / 100,
+    mrr: Math.round((reciprocalSum / sampleSize) * 100) / 100,
+    sampleSize,
+    k,
+  };
+}
+
+/**
+ * The I/O ↔ pure boundary for the recall spot-check: what
+ * fetchRecallSpotCheckData (below) hands to computeQualityReport.
+ * `ok: false` covers every graceful-degradation case (no agent identity,
+ * too few memories to sample, a search error) — always via `skipReason`,
+ * never a partial/malformed `ok: true`.
+ */
+export interface RecallSpotCheckFetchResult {
+  ok: boolean;
+  agentId?: string;
+  /** ids of the sampled memories, in sample order. */
+  sampledIds?: string[];
+  /** perQueryResultIds[i] = the ids returned by searching sampledIds[i]'s derived cue. */
+  perQueryResultIds?: string[][];
+  k?: number;
+  /** Present when ok is false — why the spot-check was skipped. */
+  skipReason?: string;
 }
 
 export interface QualityAgentActivity {
@@ -11144,6 +11266,30 @@ export interface QualityReport {
      *  stat is only ever as fresh as the last nightly run. */
     computedAt: string;
   } | null;
+  /**
+   * flair-quality Slice 1d: recall SPOT-CHECK — is semantic search actually
+   * functioning right now, or has it quietly broken (embeddings down, index
+   * busted)? A cheap, instance-agnostic HEALTH SIGNAL, NOT a benchmark and
+   * NOT a trust judgment (see computeRecallSpotCheck + fetchRecallSpotCheckData
+   * doc above for the full framing). For a sample of the querying agent's
+   * own memories, each is searched for via a cue DERIVED from itself,
+   * through the exact same authenticated read path `flair memory search`
+   * uses (api() → authedRequest, POST /SemanticSearch) — no new endpoint.
+   * `agentId` is the identity the spot-check queried AS (the --agent value,
+   * or FLAIR_AGENT_ID). `null` when there's no agent identity to query as,
+   * too few memories to sample, or a search errored — NEVER a false 0.0
+   * masquerading as a real (broken) score; always paired with a `gaps`
+   * entry in that case.
+   */
+  recallSpotCheck: {
+    agentId: string | null;
+    /** Fraction of sampled memories whose own id appeared in its search's top-k. */
+    recallAtK: number;
+    /** Mean reciprocal rank of the target memory across the sample (0 if not in top-k). */
+    mrr: number;
+    sampleSize: number;
+    k: number;
+  } | null;
   gaps: QualityMetricGap[];
 }
 
@@ -11153,11 +11299,18 @@ export interface QualityReport {
  * `gaps` entry (same graceful-degradation contract as `flair doctor`), so a
  * partially-populated instance still gets a partial, honest report instead
  * of a crash.
+ *
+ * `opts.recallSpotCheckData` is the ONE exception to "fed purely from
+ * /HealthDetail": the recall spot-check (Slice 1d) requires live queries
+ * (fetchRecallSpotCheckData, run by the `quality` command BEFORE calling
+ * here, same "I/O happens outside, this function only computes" split as
+ * fetchHealthDetail/computeQualityReport itself). Passing nothing degrades
+ * to a `gaps` entry, same as every other metric.
  */
 export function computeQualityReport(
   healthy: boolean,
   healthData: any,
-  opts: { agentId?: string | null; now?: number } = {},
+  opts: { agentId?: string | null; now?: number; recallSpotCheckData?: RecallSpotCheckFetchResult } = {},
 ): QualityReport {
   const now = opts.now ?? Date.now();
   const agentFilter = opts.agentId ?? null;
@@ -11317,6 +11470,23 @@ export function computeQualityReport(
     });
   }
 
+  // ── Recall spot-check (flair-quality Slice 1d) — see module doc above and
+  // QualityReport['recallSpotCheck'] doc for the full framing. Fed by
+  // fetchRecallSpotCheckData's already-fetched raw ids (not by healthData —
+  // this is the one metric here that needed a live query, not a
+  // /HealthDetail read); scored by the pure computeRecallSpotCheck.
+  let recallSpotCheck: QualityReport["recallSpotCheck"] = null;
+  const rsc = opts.recallSpotCheckData;
+  if (rsc?.ok && rsc.sampledIds && rsc.perQueryResultIds && typeof rsc.k === "number") {
+    const scored = computeRecallSpotCheck(rsc.sampledIds, rsc.perQueryResultIds, rsc.k);
+    recallSpotCheck = { agentId: rsc.agentId ?? agentFilter ?? null, ...scored };
+  } else {
+    gaps.push({
+      metric: "recallSpotCheck",
+      reason: rsc?.skipReason ?? "recall spot-check not attempted — no data passed to computeQualityReport",
+    });
+  }
+
   return {
     agentFilter,
     instance: { up: healthy, migrationsClean, haltedMigrations, embeddingsStatus, embeddingsDetail },
@@ -11325,14 +11495,83 @@ export function computeQualityReport(
     signalDensity,
     quietAgents,
     dedupClusters,
+    recallSpotCheck,
     gaps,
   };
+}
+
+/**
+ * The I/O half of the recall spot-check (Slice 1d): fetch a sample of
+ * `agentId`'s own memories and, for each, search for a cue derived from it.
+ * Reuses the EXACT read path `flair memory search` / `flair memory list`
+ * use — `api()` (→ authedRequest's 5-tier resolver) for both the
+ * `GET /Memory?agentId=...` sample fetch and the `POST /SemanticSearch`
+ * queries — so this has zero new endpoint and zero new auth mechanism; it
+ * is scoped to `agentId`'s own memories exactly as those commands already
+ * are. Never throws: every failure mode (no agentId, fewer than
+ * `sampleSize` memories, a fetch/search error) returns `{ ok: false,
+ * skipReason }` for computeQualityReport to turn into a `gaps` entry.
+ */
+async function fetchRecallSpotCheckData(
+  agentId: string | null,
+  baseUrl: string,
+  opts: { sampleSize?: number; k?: number } = {},
+): Promise<RecallSpotCheckFetchResult> {
+  const sampleSize = opts.sampleSize ?? QUALITY_RECALL_SAMPLE_SIZE;
+  const k = opts.k ?? QUALITY_RECALL_K;
+
+  if (!agentId) {
+    return { ok: false, skipReason: "no agent identity to query as — pass --agent or set FLAIR_AGENT_ID" };
+  }
+
+  let all: any[];
+  try {
+    const q = new URLSearchParams({ agentId }).toString();
+    const raw = await api("GET", `/Memory?${q}`, undefined, { baseUrl });
+    all = Array.isArray(raw) ? raw : (raw?.results ?? raw?.items ?? []);
+  } catch (err: any) {
+    return { ok: false, agentId, skipReason: `could not fetch memories to sample: ${err?.message ?? String(err)}` };
+  }
+
+  if (all.length < sampleSize) {
+    return {
+      ok: false,
+      agentId,
+      skipReason: `agent '${agentId}' has ${all.length} memories, fewer than the ${sampleSize} needed to sample`,
+    };
+  }
+
+  // Deterministic sample: the sampleSize most-recently-written memories.
+  const sorted = all.slice().sort((a: any, b: any) => {
+    const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return tb - ta;
+  });
+  const sampled = sorted.slice(0, sampleSize);
+
+  const sampledIds: string[] = [];
+  const perQueryResultIds: string[][] = [];
+  try {
+    for (const m of sampled) {
+      const id = String(m.id);
+      const cue = deriveRecallCue(m);
+      const body = { agentId, q: cue, limit: k };
+      const res = await api("POST", "/SemanticSearch", body, { baseUrl });
+      const results: any[] = Array.isArray(res) ? res : (res?.results ?? []);
+      sampledIds.push(id);
+      perQueryResultIds.push(results.map((r: any) => String(r.id)));
+    }
+  } catch (err: any) {
+    return { ok: false, agentId, skipReason: `recall spot-check search failed: ${err?.message ?? String(err)}` };
+  }
+
+  return { ok: true, agentId, sampledIds, perQueryResultIds, k };
 }
 
 // ─── flair quality ────────────────────────────────────────────────────────────
 program
   .command("quality")
-  .description("Memory-quality report: embedding coverage, staleness, signal density, quiet agents (read-only)")
+  .description("Memory-quality report: embedding coverage, staleness, signal density, quiet agents, recall spot-check (read-only)")
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
@@ -11341,7 +11580,13 @@ program
   .action(async (opts) => {
     const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
     const agentId: string | null = opts.agent || process.env.FLAIR_AGENT_ID || null;
-    const report = computeQualityReport(healthy, healthData, { agentId });
+    // Recall spot-check needs live queries (not just /HealthDetail), so only
+    // attempt it when the instance is actually reachable — no point probing
+    // memory reads against a server fetchHealthDetail already found down.
+    const recallSpotCheckData: RecallSpotCheckFetchResult = healthy
+      ? await fetchRecallSpotCheckData(agentId, baseUrl)
+      : { ok: false, skipReason: "instance unreachable" };
+    const report = computeQualityReport(healthy, healthData, { agentId, recallSpotCheckData });
     const mode = render.resolveOutputMode(opts);
 
     if (mode === "json") {
@@ -11449,6 +11694,17 @@ program
       console.log(`\n${render.wrap(render.c.bold, "Dedup clusters")} ${render.wrap(render.c.dim, `(as of last REM run ${render.relativeTime(dc.computedAt)}, ${dc.computedAt})`)}`);
       console.log(render.kv("Clusters", `${render.wrap(render.c.bold, String(dc.clusterCount))} ${render.wrap(render.c.dim, `(${dc.totalMemoriesInClusters} memories, largest cluster ${dc.largestClusterSize})`)}`));
       console.log(`  ${render.wrap(render.c.dim, "an ops signal — near-duplicate memories piling up, not a trust judgment")}`);
+    }
+
+    // Recall spot-check (flair-quality Slice 1d) — a health SPOT-CHECK, not
+    // a benchmark or trust judgment: catches recall cratering (embeddings/
+    // index down), not a quality grade. See QualityReport['recallSpotCheck']
+    // doc for the full framing.
+    if (report.recallSpotCheck) {
+      const rc = report.recallSpotCheck;
+      console.log(`\n${render.wrap(render.c.bold, "Recall spot-check")} ${render.wrap(render.c.dim, `(agent ${rc.agentId ?? "—"}, health signal — not a benchmark)`)}`);
+      console.log(render.kv(`recall@${rc.k}`, `${render.wrap(render.c.bold, rc.recallAtK.toFixed(2))} ${render.wrap(render.c.dim, `(MRR ${rc.mrr.toFixed(2)}, ${rc.sampleSize} sampled)`)}`));
+      console.log(`  ${render.wrap(render.c.dim, "catches recall cratering (embeddings/index down) — a high score means recall is functioning, not that it's optimal")}`);
     }
 
     // Gaps

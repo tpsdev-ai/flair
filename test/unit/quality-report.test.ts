@@ -13,6 +13,8 @@
 import { describe, test, expect } from "bun:test";
 import {
   computeQualityReport,
+  computeRecallSpotCheck,
+  deriveRecallCue,
   QUALITY_QUIET_THRESHOLD_DAYS,
   QUALITY_HASH_FALLBACK_DEGRADED_PCT,
 } from "../../src/cli.ts";
@@ -400,11 +402,168 @@ describe("computeQualityReport", () => {
     });
   });
 
+  describe("computeRecallSpotCheck (Slice 1d — pure recall@k + MRR scorer)", () => {
+    test("memory found at rank 1 → recall 1.0, MRR 1.0", () => {
+      const r = computeRecallSpotCheck(["a"], [["a", "b", "c"]], 5);
+      expect(r).toEqual({ recallAtK: 1, mrr: 1, sampleSize: 1, k: 5 });
+    });
+
+    test("memory found at rank 3 → recall 1.0, MRR ≈ 0.33 (1/3)", () => {
+      const r = computeRecallSpotCheck(["a"], [["x", "y", "a"]], 5);
+      expect(r.recallAtK).toBe(1);
+      expect(r.mrr).toBeCloseTo(0.33, 2);
+      expect(r.sampleSize).toBe(1);
+      expect(r.k).toBe(5);
+    });
+
+    test("memory not in top-k → recall 0, MRR 0 (a miss, not a crash)", () => {
+      const r = computeRecallSpotCheck(["a"], [["x", "y", "z"]], 5);
+      expect(r).toEqual({ recallAtK: 0, mrr: 0, sampleSize: 1, k: 5 });
+    });
+
+    test("k boundary — id present but beyond k is a miss (result list is truncated to k, not trusted as pre-truncated by the caller)", () => {
+      const r = computeRecallSpotCheck(["a"], [["x", "y", "z", "w", "v", "a"]], 5);
+      expect(r).toEqual({ recallAtK: 0, mrr: 0, sampleSize: 1, k: 5 });
+    });
+
+    test("k boundary — id at exactly rank k counts as a hit", () => {
+      const r = computeRecallSpotCheck(["a"], [["x", "y", "z", "w", "a"]], 5);
+      expect(r.recallAtK).toBe(1);
+      expect(r.mrr).toBe(0.2); // 1/5
+    });
+
+    test("aggregate over a mixed sample — mean recall@k + mean reciprocal rank", () => {
+      const sampledIds = ["a", "b", "c"];
+      const perQueryResultIds = [
+        ["a", "x", "y"], // rank 1 → 1.0
+        ["x", "y", "b"], // rank 3 → 0.333
+        ["x", "y", "z"], // miss → 0
+      ];
+      const r = computeRecallSpotCheck(sampledIds, perQueryResultIds, 5);
+      expect(r.recallAtK).toBeCloseTo(2 / 3, 2);
+      expect(r.mrr).toBeCloseTo((1 + 1 / 3 + 0) / 3, 2);
+      expect(r.sampleSize).toBe(3);
+      expect(r.k).toBe(5);
+    });
+
+    test("empty sample → 0/0 without throwing (degraded case; callers treat this as a gap, not a real score)", () => {
+      const r = computeRecallSpotCheck([], [], 5);
+      expect(r).toEqual({ recallAtK: 0, mrr: 0, sampleSize: 0, k: 5 });
+    });
+
+    test("missing per-query result list for a sampled id → treated as a miss, not a crash", () => {
+      const r = computeRecallSpotCheck(["a", "b"], [["a"]], 5);
+      expect(r.sampleSize).toBe(2);
+      expect(r.recallAtK).toBe(0.5);
+      expect(r.mrr).toBe(0.5);
+    });
+  });
+
+  describe("deriveRecallCue (Slice 1d — partial cue derivation)", () => {
+    test("prefers a non-trivial subject over content", () => {
+      const cue = deriveRecallCue({
+        subject: "Harper RBAC two-gate model",
+        content: "Some long content here that would otherwise be used as the fallback cue.",
+      });
+      expect(cue).toBe("Harper RBAC two-gate model");
+    });
+
+    test("falls back to content when subject is empty/whitespace-only", () => {
+      const cue = deriveRecallCue({
+        subject: "   ",
+        content: "Rotate the Harper admin password using the domain socket procedure documented in ops.",
+      });
+      expect(cue).toBe("Rotate the Harper admin password using the domain");
+    });
+
+    test("falls back to content when subject is absent, capped to the leading ~8 words of the first sentence", () => {
+      const cue = deriveRecallCue({
+        content: "Never dump or decode a secret file, use length-only probes instead.",
+      });
+      expect(cue).toBe("Never dump or decode a secret file, use");
+    });
+
+    test("very short/trivial subject falls back to content rather than being used as-is", () => {
+      const cue = deriveRecallCue({ subject: "x", content: "Full content sentence used as the fallback cue here." });
+      expect(cue).not.toBe("x");
+    });
+
+    test("short content (fits within the ~8-word cap) returns the whole first sentence unchanged", () => {
+      expect(deriveRecallCue({ content: "Ports rotated today." })).toBe("Ports rotated today.");
+    });
+
+    test("caps at the leading ~8 words — never returns the full content (a PARTIAL cue, not the memory itself)", () => {
+      const cue = deriveRecallCue({ content: "one two three four five six seven eight nine ten eleven twelve" });
+      expect(cue.split(/\s+/).length).toBeLessThanOrEqual(8);
+      expect(cue).not.toContain("twelve");
+    });
+
+    test("both subject and content absent/empty → empty cue, not a crash", () => {
+      expect(deriveRecallCue({})).toBe("");
+      expect(deriveRecallCue({ subject: "", content: "" })).toBe("");
+    });
+  });
+
+  describe("recall spot-check integration (flair-quality Slice 1d — computeQualityReport wiring)", () => {
+    test("no recallSpotCheckData passed at all → null + gap, never a crash (backward-compatible default)", () => {
+      const r = computeQualityReport(true, fixture(), { now: NOW });
+      expect(r.recallSpotCheck).toBeNull();
+      expect(r.gaps.some((g) => g.metric === "recallSpotCheck")).toBe(true);
+    });
+
+    test("ok:false (e.g. no agent identity) → null + gap carrying the skip reason", () => {
+      const r = computeQualityReport(true, fixture(), {
+        now: NOW,
+        recallSpotCheckData: {
+          ok: false,
+          skipReason: "no agent identity to query as — pass --agent or set FLAIR_AGENT_ID",
+        },
+      });
+      expect(r.recallSpotCheck).toBeNull();
+      const gap = r.gaps.find((g) => g.metric === "recallSpotCheck");
+      expect(gap?.reason).toContain("no agent identity");
+    });
+
+    test("ok:false (too few memories to sample) → null + gap carrying the skip reason, never a false 0.0", () => {
+      const r = computeQualityReport(true, fixture(), {
+        now: NOW,
+        recallSpotCheckData: { ok: false, agentId: "flint", skipReason: "agent 'flint' has 3 memories, fewer than the 10 needed to sample" },
+      });
+      expect(r.recallSpotCheck).toBeNull();
+      const gap = r.gaps.find((g) => g.metric === "recallSpotCheck");
+      expect(gap?.reason).toContain("fewer than the 10 needed");
+    });
+
+    test("ok:true with scored data → populated recallSpotCheck, no gap", () => {
+      const r = computeQualityReport(true, fixture(), {
+        now: NOW,
+        recallSpotCheckData: {
+          ok: true,
+          agentId: "flint",
+          sampledIds: ["m1", "m2"],
+          perQueryResultIds: [["m1", "x"], ["y", "z"]],
+          k: 5,
+        },
+      });
+      expect(r.recallSpotCheck).toEqual({ agentId: "flint", recallAtK: 0.5, mrr: 0.5, sampleSize: 2, k: 5 });
+      expect(r.gaps.some((g) => g.metric === "recallSpotCheck")).toBe(false);
+    });
+
+    test("malformed ok:true (missing sampledIds/perQueryResultIds/k) → degrades to null + gap, not a crash", () => {
+      const r = computeQualityReport(true, fixture(), {
+        now: NOW,
+        recallSpotCheckData: { ok: true, agentId: "flint" } as any,
+      });
+      expect(r.recallSpotCheck).toBeNull();
+      expect(r.gaps.some((g) => g.metric === "recallSpotCheck")).toBe(true);
+    });
+  });
+
   describe("--json output shape (the full report object)", () => {
-    test("top-level keys are stable — agentFilter, instance, embeddingCoverage, staleness, signalDensity, quietAgents, dedupClusters, gaps", () => {
+    test("top-level keys are stable — agentFilter, instance, embeddingCoverage, staleness, signalDensity, quietAgents, dedupClusters, recallSpotCheck, gaps", () => {
       const r = computeQualityReport(true, fixture(), { now: NOW });
       expect(Object.keys(r).sort()).toEqual(
-        ["agentFilter", "embeddingCoverage", "gaps", "instance", "quietAgents", "signalDensity", "staleness", "dedupClusters"].sort(),
+        ["agentFilter", "embeddingCoverage", "gaps", "instance", "quietAgents", "signalDensity", "staleness", "dedupClusters", "recallSpotCheck"].sort(),
       );
     });
 
