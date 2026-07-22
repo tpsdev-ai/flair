@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`flair quality` — a read-only memory-quality report.** New command (`flair quality [--agent <id>] [--json]`) that answers "is my agent's memory healthy, or silting up with noise and stale entries?" It mirrors `flair status`/`doctor` — fetches `/HealthDetail` and computes CLI-side — reporting instance health, embedding coverage (% real vs hash-fallback), staleness (% expired), per-agent signal density (write volume + last-active, framed as a usage pattern), and quiet-agent detection. Read-only and downstream of all authority — it never influences access, ranking, or trust. Unavailable metrics degrade gracefully to a noted `gaps` entry rather than crashing. First slice of the memory-quality observability arc.
+
 ## [0.25.4] - 2026-07-22
 
 ### Fixed
