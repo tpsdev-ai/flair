@@ -155,6 +155,23 @@ export async function checkVersion(
   return { installed, latest: null, source: "unavailable" };
 }
 
+/**
+ * Primes the version-check cache with an already-known `latest` — e.g. right
+ * after `flair upgrade` fetches the true latest fresh via its own direct
+ * registry call, so the NEXT `checkVersion` (from `flair status`/`doctor`)
+ * reflects it immediately instead of serving a stale cached value for up to
+ * `DEFAULT_TTL_MS`. Reuses `writeCacheFile`, which is already best-effort/
+ * never-throws — a failed cache write must never surface as a command error.
+ */
+export function primeVersionCheckCache(
+  latest: string,
+  injected: Partial<Pick<VersionCheckDeps, "cachePath" | "now">> = {},
+): void {
+  const cachePath = injected.cachePath ?? DEFAULT_CACHE_PATH;
+  const now = injected.now ?? (() => Date.now());
+  writeCacheFile(cachePath, { latest, checkedAt: now() });
+}
+
 // ─── Severity heuristic (no advisory data — gap-based, see module doc) ──────
 
 export type VersionGapSeverity = "none" | "yellow" | "red";

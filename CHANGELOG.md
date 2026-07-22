@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `flair restart`/`flair upgrade` now invalidate the version-handshake cache on a successful restart, so `flair status`'s preAction nudge doesn't falsely report the pre-restart server version for up to 60s after an upgrade+restart.
+- `flair upgrade` now primes the version-check cache with the latest version it just fetched fresh from the registry, so `flair status`/`doctor` immediately reflect it instead of a stale (up to 12h) cached value.
+- n8n `FlairWrite` node's ephemeral-durability option label corrected from "auto-expires 72h" to "auto-expires 24h" to match the actual default TTL.
+
 ### Docs
 
 - Fixed stale values found in a docs audit: `claude-code.md`'s ephemeral-durability TTL (72h → the actual 24h default), `system-requirements.md`'s embedding model (`Xenova/all-MiniLM-L6-v2`/384-dim/~85MB → the actual `nomic-embed-text-v1.5`/768-dim/~270MB), and `integrations.md`'s Codex/Gemini MCP config snippets (wrong file paths/formats → `~/.codex/config.toml` in TOML, `~/.gemini/settings.json`, matching `mcp-clients.md`). Also corrected `n8n.md`'s node count (two → the three actually shipped, adding Flair Write) and `mcp-clients.md`'s bridge tool count (seven → the eleven `flair-mcp` actually exposes). Added a known-issue note to `upgrade.md` documenting that the 0.25.1 post-restart-verify fix is forward-only: an upgrade *from* an older version is still verified by the old, unfixed CLI, so a credential-less verifier can report a false rollback on an instance that was healthy the whole time.

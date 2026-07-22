@@ -14,7 +14,7 @@
  * ROOTPATH, or a --target-switched remote), and a mismatch cached for one
  * must never bleed into a nudge about a different one.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -144,6 +144,28 @@ export async function checkServerHandshake(
     };
   }
   return { cliVersion, runningVersion: null, mismatch: false, source: "unavailable" };
+}
+
+/**
+ * Deletes the cached running-version entry for a given (rootPath, serverUrl)
+ * pair — e.g. after `flair restart`/`flair upgrade` bounces the server, so
+ * the NEXT `checkServerHandshake` call re-fetches the live version instead
+ * of returning the pre-restart one for up to `DEFAULT_HANDSHAKE_TTL_MS`.
+ * Best-effort, like the rest of this module: a failed cache delete (missing
+ * file, permissions, read-only $HOME) must never surface as an error.
+ */
+export function invalidateHandshakeCache(
+  rootPath: string,
+  serverUrl: string,
+  injected: Partial<Pick<HandshakeDeps, "cacheDir">> = {},
+): void {
+  const cacheDir = injected.cacheDir ?? DEFAULT_HANDSHAKE_CACHE_DIR;
+  try {
+    const path = cacheFilePath(cacheDir, rootPath, serverUrl);
+    if (existsSync(path)) rmSync(path);
+  } catch {
+    // Best-effort — a failed cache delete must never surface as an error.
+  }
 }
 
 /**
