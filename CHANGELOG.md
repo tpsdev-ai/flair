@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.25.2] - 2026-07-22
+
 ### Fixed
 
 - `flair restart`/`flair upgrade` now invalidate the version-handshake cache on a successful restart, so `flair status`'s preAction nudge doesn't falsely report the pre-restart server version for up to 60s after an upgrade+restart.
