@@ -10994,31 +10994,37 @@ program
 // never see anything status/doctor couldn't already see, because it reads
 // the identical payload.
 //
-// Two metrics from the design doc are deliberately NOT computed at full
-// fidelity here — both degrade gracefully into `gaps` entries instead of
+// One metric from the design doc is deliberately NOT computed at full
+// fidelity here — it degrades gracefully into a `gaps` entry instead of
 // failing:
 //   - staleness: /HealthDetail's `memories.expired` count is instance-wide
 //     only (resources/health.ts never buckets it per agent), so --agent
 //     does not scope this metric. The "old + never-recalled" variant isn't
 //     computed at all — no read API exposes per-memory last-recalled data.
-//   - signal density: the design doc named `usageCount` (citation rate) as
-//     the signal, but /HealthDetail's per-agent rows carry only
-//     memoryCount/hashFallback/writes24h/lastWriteAt — no usage/citation
-//     aggregate. Memory.usageCount DOES exist (resources/scoring.ts,
-//     resources/RecordUsage.ts) and IS returned by `GET /Memory?agentId=`
-//     (what `flair memory list` calls), but pulling it in here would add a
-//     query pattern doctor/status never use, widening quality's read
-//     footprint past the payload K&S actually reviewed. Ships write-volume
-//     + last-active only (still real, still useful — "writes exploratory
-//     content" is a legitimate usage pattern) and notes the gap rather than
-//     quietly relabeling write-count as a citation signal.
 //
-// Naming (Sherlock security finding on the design round): "signal density" /
-// "citation rate" describes a USAGE PATTERN, never a trust/quality verdict.
-// A low citation rate means "writes exploratory content", not "noisy" or
-// "untrustworthy" — same for "quiet agents": an ops fact (days since last
-// write), not a trust signal. Keep that framing in any copy touching this
-// code.
+// Slice 1b (flair-quality-slice1b): signal density now ALSO carries citation
+// rate. Kern's design nod: extend /HealthDetail's per-agent aggregation
+// server-side (resources/health.ts sums Memory.usageCount — a field already
+// loaded by the existing memory loop, no new query) rather than have the CLI
+// join against `GET /Memory` itself — keeps quality's read footprint
+// identical to status/doctor's by construction. `citationRate` here is
+// computed CLI-side from the two numbers the server hands back
+// (usageCount/memoryCount), same "server aggregates, CLI computes" split as
+// every other metric in this file.
+//
+// Backward compatibility: an OLDER server's /HealthDetail predates
+// per-agent `usageCount` entirely (field is `undefined` on the row, not
+// `0` — Slice 1a's payload literally didn't have the key). That's detected
+// per-row and the whole report degrades to the Slice-1a write-volume-only
+// shape + a gap note, rather than silently reporting citationRate 0 as if
+// it were real data from a server that never sent it.
+//
+// Naming (Sherlock security finding on the design round, reaffirmed for
+// citation rate): "signal density" / "citation rate" describes a USAGE
+// PATTERN, never a trust/quality verdict. A low citation rate means "writes
+// exploratory content that's rarely cited", not "noisy" or "untrustworthy"
+// — same for "quiet agents": an ops fact (days since last write), not a
+// trust signal. Keep that framing in any copy touching this code.
 
 /** First-pass default, same "documented heuristic, not derived from data we
  *  don't have" spirit as health.ts's own 10%-hash-fallback threshold below.
@@ -11070,8 +11076,22 @@ export interface QualityReport {
     stalePct: number;
   } | null;
   signalDensity: {
-    scope: "write-volume";
-    perAgent: Array<{ id: string; memoryCount: number; writes24h: number; lastWriteAt: string | null }>;
+    /** "write-and-citation" once /HealthDetail's per-agent rows carry
+     *  usageCount (current server); "write-volume" when talking to an older
+     *  server that predates it (degraded — see module doc above). */
+    scope: "write-volume" | "write-and-citation";
+    perAgent: Array<{
+      id: string;
+      memoryCount: number;
+      writes24h: number;
+      lastWriteAt: string | null;
+      /** Only present when scope === "write-and-citation". */
+      usageCount?: number;
+      /** Average uses per memory — memoryCount > 0 ? round(usageCount / memoryCount, 2) : 0.
+       *  Only present when scope === "write-and-citation". A usage-density
+       *  signal, not a trust/quality verdict — see module doc above. */
+      citationRate?: number;
+    }>;
   } | null;
   quietAgents: {
     thresholdDays: number;
@@ -11167,21 +11187,43 @@ export function computeQualityReport(
   }
 
   // ── Per-agent rows (shared source for signal density + quiet agents) ──
-  const perAgentAll: Array<{ id: string; memoryCount: number; hashFallback: number; writes24h: number; lastWriteAt: string | null }> =
-    Array.isArray(healthData?.agents?.perAgent) ? healthData.agents.perAgent : [];
+  const perAgentAll: Array<{
+    id: string;
+    memoryCount: number;
+    hashFallback: number;
+    writes24h: number;
+    lastWriteAt: string | null;
+    /** Absent (not 0) when talking to a server that predates Slice 1b's
+     *  /HealthDetail aggregation — see module doc above. */
+    usageCount?: number;
+  }> = Array.isArray(healthData?.agents?.perAgent) ? healthData.agents.perAgent : [];
   const havePerAgent = Array.isArray(healthData?.agents?.perAgent);
   const scopedAgents = agentFilter ? perAgentAll.filter((r) => r.id === agentFilter) : perAgentAll;
+  // Detected from the UNFILTERED rows (not scopedAgents) so `--agent` never
+  // masquerades server capability as data-scoping — vacuously true on an
+  // empty perAgent array (nothing to prove otherwise, and both scopes render
+  // identically empty either way).
+  const haveUsageCount = perAgentAll.every((r) => typeof r.usageCount === "number");
 
-  // ── Signal density (write-volume only — see module doc above) ──
+  // ── Signal density (write volume, + citation rate when the server supports it) ──
   let signalDensity: QualityReport["signalDensity"] = null;
-  if (havePerAgent) {
+  if (havePerAgent && haveUsageCount) {
+    signalDensity = {
+      scope: "write-and-citation",
+      perAgent: scopedAgents.map((r) => {
+        const usageCount = r.usageCount ?? 0;
+        const citationRate = r.memoryCount > 0 ? Math.round((usageCount / r.memoryCount) * 100) / 100 : 0;
+        return { id: r.id, memoryCount: r.memoryCount, writes24h: r.writes24h, lastWriteAt: r.lastWriteAt, usageCount, citationRate };
+      }),
+    };
+  } else if (havePerAgent) {
     signalDensity = {
       scope: "write-volume",
       perAgent: scopedAgents.map((r) => ({ id: r.id, memoryCount: r.memoryCount, writes24h: r.writes24h, lastWriteAt: r.lastWriteAt })),
     };
     gaps.push({
       metric: "signalDensity",
-      reason: "citation rate not computed — /HealthDetail's per-agent stats carry no usage/citation aggregate (Memory.usageCount exists but isn't exposed there); shipped write-volume + last-active only",
+      reason: "citation rate unavailable — server predates per-agent usageCount in /HealthDetail; upgrade the server",
     });
   } else {
     gaps.push({ metric: "signalDensity", reason: "no per-agent stats available in /HealthDetail response" });
@@ -11279,18 +11321,29 @@ program
 
     // Signal density
     if (report.signalDensity) {
-      console.log(`\n${render.wrap(render.c.bold, "Signal density")} ${render.wrap(render.c.dim, "(write activity — a usage pattern, not a trust signal)")}`);
+      console.log(`\n${render.wrap(render.c.bold, "Signal density")} ${render.wrap(render.c.dim, "(write + citation activity — a usage pattern, not a trust signal)")}`);
       if (agentId && report.signalDensity.perAgent.length === 0) {
         console.log(`  ${render.icons.info} no data for agent '${agentId}'`);
       } else {
+        const showCitation = report.signalDensity.scope === "write-and-citation";
         const cols: render.TableColumn[] = [
           { label: "id", key: "id" },
           { label: "memories", key: "memoryCount", align: "right" },
           { label: "writes_24h", key: "writes24h", align: "right" },
+          ...(showCitation
+            ? [
+                { label: "citations", key: "usageCount", align: "right" as const },
+                { label: "citation_rate", key: "citationRate", align: "right" as const },
+              ]
+            : []),
           { label: "last_write", key: "lastWriteAt", format: (v) => render.relativeTime(v as string | null) },
         ];
         console.log(render.table(cols, report.signalDensity.perAgent as unknown as Array<Record<string, unknown>>));
-        console.log(`  ${render.wrap(render.c.dim, "citation rate not shown — usage/citation counts aren't exposed by /HealthDetail; low write volume means \"writes exploratory content\", not \"noisy\"")}`);
+        if (showCitation) {
+          console.log(`  ${render.wrap(render.c.dim, "citation_rate = avg citations per memory; a low rate means \"writes exploratory content that's rarely cited\", not \"noisy\"")}`);
+        } else {
+          console.log(`  ${render.wrap(render.c.dim, "citation rate not shown — server predates per-agent usageCount in /HealthDetail (see Gaps); low write volume means \"writes exploratory content\", not \"noisy\"")}`);
+        }
       }
     }
 
