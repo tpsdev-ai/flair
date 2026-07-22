@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { getRerankStatus } from "./rerank-provider.js";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { getMigrationStatusSnapshot } from "./migrations/status.js";
+import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
 
 const db = databases as any;
 
@@ -449,6 +450,35 @@ export class HealthDetail extends Resource {
         }
       }
     } catch { stats.rem = null; }
+
+    // ── Dedup clusters (flair-quality Slice 1c) ──
+    // Cheap read: a single small stat file, not a recomputation. The
+    // computation itself is a nightly server-side sweep (POST
+    // /MemoryDedupStats, triggered once per REM nightly cycle — see
+    // src/rem/runner.ts + resources/MemoryDedupStats.ts's module doc) that
+    // NEVER runs inline with a GET /HealthDetail request. `null` covers both
+    // "REM hasn't computed it yet" (fresh instance) and "file unreadable" —
+    // `flair quality` renders either as an honest gap, never a false zero.
+    try {
+      const raw = await fsp.readFile(REM_DEDUP_STATS_PATH, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (
+        parsed &&
+        typeof parsed.clusterCount === "number" &&
+        typeof parsed.largestClusterSize === "number" &&
+        typeof parsed.totalMemoriesInClusters === "number" &&
+        typeof parsed.computedAt === "string"
+      ) {
+        stats.dedup = {
+          clusterCount: parsed.clusterCount,
+          largestClusterSize: parsed.largestClusterSize,
+          totalMemoriesInClusters: parsed.totalMemoriesInClusters,
+          computedAt: parsed.computedAt,
+        };
+      } else {
+        stats.dedup = null;
+      }
+    } catch { stats.dedup = null; }
 
     // ── Migrations (flair#695: zero-touch boot-keyed auto-migration) ──
     // `{ id, rowsDone, rowsRemaining, state }` per registered migration, per

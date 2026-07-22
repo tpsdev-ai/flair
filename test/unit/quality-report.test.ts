@@ -351,11 +351,60 @@ describe("computeQualityReport", () => {
     });
   });
 
+  describe("dedup clusters (flair-quality Slice 1c — instance-wide near-duplicate cluster count)", () => {
+    test("server reports a dedup stat → populated, no gap", () => {
+      const data = fixture({
+        dedup: { clusterCount: 3, largestClusterSize: 5, totalMemoriesInClusters: 11, computedAt: daysAgo(0) },
+      });
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.dedupClusters).toEqual({
+        clusterCount: 3,
+        largestClusterSize: 5,
+        totalMemoriesInClusters: 11,
+        computedAt: daysAgo(0),
+      });
+      expect(r.gaps.some((g) => g.metric === "dedupClusters")).toBe(false);
+    });
+
+    test("no dedup field at all (fresh instance / REM never ran the step / older server) → null + gap, never a false zero", () => {
+      const r = computeQualityReport(true, fixture(), { now: NOW });
+      expect(r.dedupClusters).toBeNull();
+      expect(r.gaps.some((g) => g.metric === "dedupClusters" && g.reason.includes("REM"))).toBe(true);
+    });
+
+    test("dedup field present but null (server computed HealthDetail's shape, REM hasn't run yet) → null + gap", () => {
+      const data = fixture({ dedup: null });
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.dedupClusters).toBeNull();
+      expect(r.gaps.some((g) => g.metric === "dedupClusters")).toBe(true);
+    });
+
+    test("malformed/partial dedup shape (missing a field) → null + gap, not a crash or partial object", () => {
+      const data = fixture({ dedup: { clusterCount: 3 } });
+      const r = computeQualityReport(true, data, { now: NOW });
+      expect(r.dedupClusters).toBeNull();
+      expect(r.gaps.some((g) => g.metric === "dedupClusters")).toBe(true);
+    });
+
+    test("--agent does not filter dedupClusters — it's instance-wide by construction (no per-memory cluster membership is ever exposed)", () => {
+      const data = fixture({
+        dedup: { clusterCount: 2, largestClusterSize: 3, totalMemoriesInClusters: 5, computedAt: daysAgo(1) },
+      });
+      const r = computeQualityReport(true, data, { now: NOW, agentId: "anvil" });
+      expect(r.dedupClusters).toEqual({
+        clusterCount: 2,
+        largestClusterSize: 3,
+        totalMemoriesInClusters: 5,
+        computedAt: daysAgo(1),
+      });
+    });
+  });
+
   describe("--json output shape (the full report object)", () => {
-    test("top-level keys are stable — agentFilter, instance, embeddingCoverage, staleness, signalDensity, quietAgents, gaps", () => {
+    test("top-level keys are stable — agentFilter, instance, embeddingCoverage, staleness, signalDensity, quietAgents, dedupClusters, gaps", () => {
       const r = computeQualityReport(true, fixture(), { now: NOW });
       expect(Object.keys(r).sort()).toEqual(
-        ["agentFilter", "embeddingCoverage", "gaps", "instance", "quietAgents", "signalDensity", "staleness"].sort(),
+        ["agentFilter", "embeddingCoverage", "gaps", "instance", "quietAgents", "signalDensity", "staleness", "dedupClusters"].sort(),
       );
     });
 
