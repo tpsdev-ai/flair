@@ -76,6 +76,9 @@
     "@node-llama-cpp/win-arm64": "3.18.1",
     "@node-llama-cpp/win-x64": "3.18.1"
   },
+  "overrides": {
+    "react-native-fs": "npm:empty-npm-package@1.0.0"
+  },
   "devDependencies": {
     "@playwright/test": "1.59.1",
     "@types/node": "24.11.0",
