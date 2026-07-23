@@ -446,6 +446,55 @@ export function planAgentIterations(keyAgentIds: string[], agentFlag: string | u
   return [...keyAgentIds].sort();
 }
 
+// ── `doctor --fix` agent-id inference (flair#802b) ─────────────────────────
+//
+// `doctor` suggested `flair doctor --fix` to auto-wire an unconfigured MCP
+// client, but running that exact command failed — "no agent id known — pass
+// --agent <id>" — whenever the client had never been wired before (so there
+// was no existing block to read an agent id from) and neither --agent nor
+// FLAIR_AGENT_ID was set. The suggested fix didn't work as suggested. Two
+// pure decisions fix that without adding any new network/crypto surface:
+//
+//   1. inferSoleAgentId — when exactly one locally-keyed agent exists (the
+//      same keyAgentIds pool planAgentIterations already draws from, i.e.
+//      doctor's own "Keys found" enumeration), --fix can use it without
+//      being told: there's no other candidate it could mean. Two or more
+//      keys, or zero, are genuinely ambiguous/unanswerable and still require
+//      an explicit --agent (or registering one first) — this never guesses
+//      in either of those cases.
+//   2. fixCommandAgentHint — the *printed suggestion* (before --fix ever
+//      runs) splices in a concrete `--agent <id>` so the command a user
+//      copy-pastes actually works, using the first (sorted) known key id as
+//      the example. Only relevant when the id isn't already resolvable some
+//      other way (explicit --agent, FLAIR_AGENT_ID, or an id read off an
+//      already-wired client) — the caller checks that before calling this.
+
+/**
+ * The one case `doctor --fix` can safely infer an agent id without being
+ * told: exactly one locally-keyed agent. Zero keys (nothing to infer) or two
+ * or more (genuinely ambiguous — which one?) both return undefined; the
+ * caller must fall back to an explicit error telling the user what to do
+ * (register one, or pass --agent).
+ */
+export function inferSoleAgentId(keyAgentIds: string[]): string | undefined {
+  return keyAgentIds.length === 1 ? keyAgentIds[0] : undefined;
+}
+
+/**
+ * Build the ` --agent <id>` fragment to splice into a suggested
+ * `flair doctor --fix ...` command so the printed suggestion is actually
+ * copy-pasteable rather than guaranteed to fail the moment nothing else
+ * (explicit --agent, FLAIR_AGENT_ID, an already-wired client's agent id) can
+ * supply one. Uses the first (sorted) known local key id as a concrete
+ * example. Returns "" when no agent id is known at all — the caller should
+ * tell the user to register one first rather than print a `--fix` suggestion
+ * that has nothing to work with either way.
+ */
+export function fixCommandAgentHint(keyAgentIds: string[]): string {
+  if (keyAgentIds.length === 0) return "";
+  return ` --agent ${[...keyAgentIds].sort()[0]}`;
+}
+
 /** checkAgentRegistered's (src/cli.ts) result states — duplicated here as a
  *  type only (no import) to keep this module network/crypto-free. */
 export type AgentGateState = "registered" | "not-registered" | "unreachable" | "no-key";
