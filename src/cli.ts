@@ -72,6 +72,8 @@ import {
   applyOrReportSessionStartHook,
   resolveWireFlairUrl,
   planAgentIterations,
+  inferSoleAgentId,
+  fixCommandAgentHint,
   describeAgentGateFinding,
   classifyKeyFile,
   resolveCollisionSafeName,
@@ -3020,6 +3022,18 @@ program
         console.log(`   └─────────────────────────────────────────────────┘`);
       }
       console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
+
+      // flair#802a: a non-interactive shell (CI, Docker, an unattended setup
+      // script) that omits --agent lands here with NO indication that agent
+      // registration, MCP client wiring, and the smoke test were all skipped
+      // — the run exits 0 and looks complete. In a real TTY the missing
+      // --agent is usually obvious from the command the user just typed;
+      // non-interactively it's easy to never notice until something that
+      // needed the agent (recall, an MCP client) mysteriously doesn't work.
+      if (!process.stdin.isTTY) {
+        console.log(`\n   ℹ Non-interactive shell: skipped agent registration, MCP client wiring, and the smoke test.`);
+        console.log(`     Complete setup with: flair init --agent <id> --client all`);
+      }
     }
 
     // All init work is genuinely done at this point: Harper is installed +
@@ -10673,9 +10687,17 @@ program
               if (!proceed) {
                 console.log(`     Skipped.`);
               } else {
-                const fixAgentId = opts.agent || process.env.FLAIR_AGENT_ID || anyKnownAgentId;
+                // flair#802b: fall back to the sole locally-keyed agent when
+                // nothing else identifies one — the only case doctor can
+                // infer without being told (see inferSoleAgentId's doc
+                // comment in doctor-client.ts for why 0/2+ keys don't guess).
+                const fixAgentId = opts.agent || process.env.FLAIR_AGENT_ID || anyKnownAgentId || inferSoleAgentId(keyAgentIds);
                 if (!fixAgentId) {
-                  console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: no agent id known — pass --agent <id>`);
+                  if (keyAgentIds.length > 1) {
+                    console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: multiple agents found (${[...keyAgentIds].sort().join(", ")}) — pass --agent <id> to choose which one`);
+                  } else {
+                    console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: no agent registered — run \`flair agent add <id>\` first, then re-run \`flair doctor --fix\``);
+                  }
                 } else {
                   const wireEnv = { FLAIR_AGENT_ID: fixAgentId, FLAIR_URL: resolveWireFlairUrl(block.flairUrl, baseUrl) };
                   const wireResult =
@@ -10689,7 +10711,13 @@ program
               }
             }
           } else {
-            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, `(wires ${client.label} automatically)`)}`);
+            // flair#802b: only splice in a concrete --agent if the id isn't
+            // already resolvable some other way — an explicit --agent /
+            // FLAIR_AGENT_ID / an already-wired client's agent id means bare
+            // `--fix` already works, so don't clutter the suggestion.
+            const knownAgentId = opts.agent || process.env.FLAIR_AGENT_ID || anyKnownAgentId;
+            const agentHint = knownAgentId ? "" : fixCommandAgentHint(keyAgentIds);
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix${agentHint} ${render.wrap(render.c.dim, `(wires ${client.label} automatically)`)}`);
           }
           issues++;
           continue;
@@ -11578,6 +11606,296 @@ async function fetchRecallSpotCheckData(
   return { ok: true, agentId, sampledIds, perQueryResultIds, k };
 }
 
+// ─── flair quality --emit (Slice 2 of the memory-quality-observability arc:
+// quality OrgEvents) ─────────────────────────────────────────────────────────
+//
+// Design (K&S-approved in the arc round, honored exactly here):
+//
+// - NO schema change, NO new table/resource. Events ride the existing
+//   OrgEvent surface (schemas/event.graphql: kind/scope/summary/detail/
+//   targetIds/refId — see `flair orgevent` above) via the exact same
+//   PUT /OrgEvent/{id} write shape, extracted into `publishOrgEvent()` below
+//   so both commands share one call site rather than two hand-rolled fetches.
+// - The threshold/diff DECISION is CLI-side (diffQualitySnapshots, pure,
+//   fixture-tested below); emission is a thin write via that existing
+//   surface. Kind is one of two: `quality.threshold_crossed` (an absolute
+//   line was crossed since the last snapshot) or `quality.regression` (a
+//   metric moved backward by more than its delta threshold since the last
+//   snapshot) — see QualityEventFinding.
+// - Snapshots are stored AS Flair memories (durability persistent, subject
+//   `quality-snapshot/<host>` — qualitySnapshotSubject() below) — free
+//   history + search, dogfoods the product, no new storage surface. Content
+//   is the COMPACT numeric core only (QualitySnapshotCore), never the full
+//   human report — see buildQualitySnapshot().
+// - Sherlock's constraint: events carry BEHAVIORAL FACTS only, never trust
+//   judgments — "embedding coverage dropped to 85% (threshold 90%)", never
+//   "agent X is low quality". Every summary string below is written to that
+//   discipline; keep it that way in any future edit here.
+// - Edge-triggered, not level-triggered: every threshold/regression check
+//   below fires only on the TRANSITION since the immediately-previous
+//   snapshot (e.g. quietAgents requires "was NOT quiet last snapshot, IS
+//   quiet now" — the spec's own "NEWLY quiet" wording), not on every run
+//   while a condition merely persists. Without this, a metric that stays
+//   below threshold across many `--emit` runs would re-emit an event every
+//   single run — pure noise. First run (no previous snapshot) therefore
+//   always emits nothing (diffQualitySnapshots(current, null) === []) — there
+//   is no prior state to diff against, so nothing can have "crossed" or
+//   "regressed" yet; that run only establishes the baseline.
+// - Missing data (a null/gap section on either side of the diff) never
+//   produces an event — absence of data is a gap, not a regression. Encoded
+//   by requiring BOTH current and previous to carry a given metric before
+//   diffing it at all.
+
+/** First-pass defaults for the Slice 2 diff/thresholds — same "documented
+ *  heuristic, tunable later against a real fleet" spirit as
+ *  QUALITY_QUIET_THRESHOLD_DAYS / QUALITY_HASH_FALLBACK_DEGRADED_PCT above.
+ *  Deliberately NOT exposed as CLI flags (per the arc design: the diff
+ *  decision stays CLI-side and legible in one place, not ad-hoc per
+ *  invocation) — change these constants and their fixture tests together. */
+export const QUALITY_EVENT_COVERAGE_ABS_THRESHOLD_PCT = 90;
+export const QUALITY_EVENT_COVERAGE_DROP_THRESHOLD_PCT = 5;
+export const QUALITY_EVENT_STALENESS_ABS_THRESHOLD_PCT = 10;
+export const QUALITY_EVENT_RECALL_DROP_THRESHOLD = 0.2;
+export const QUALITY_EVENT_DEDUP_GROWTH_PCT_THRESHOLD = 0.5; // >50%
+export const QUALITY_EVENT_DEDUP_GROWTH_ABS_THRESHOLD = 5; // AND by >= 5 clusters
+
+/** Schema for the compact snapshot stored as a memory's `content` (JSON).
+ *  Deliberately just the numeric/boolean core the diff needs — never the
+ *  full human report (no per-agent memory counts, no raw dedup/recall
+ *  detail beyond what threshold math requires). `schemaVersion` lets a
+ *  future slice evolve the shape without silently misreading an old
+ *  snapshot as the new one. */
+export interface QualitySnapshotCore {
+  schemaVersion: 1;
+  computedAt: string;
+  agentFilter: string | null;
+  embeddingCoverage: { coveragePct: number } | null;
+  staleness: { stalePct: number } | null;
+  recallSpotCheck: { recallAtK: number; mrr: number } | null;
+  quietAgents: { perAgent: Array<{ id: string; quiet: boolean; daysSinceLastWrite: number | null }> } | null;
+  dedupClusters: { clusterCount: number } | null;
+}
+
+/** Pure: full QualityReport → compact snapshot core. Any section that's
+ *  `null` in the report (a gap) stays `null` in the snapshot — the diff step
+ *  treats that as "no event", never a false 0. */
+export function buildQualitySnapshot(report: QualityReport, computedAt?: string): QualitySnapshotCore {
+  return {
+    schemaVersion: 1,
+    computedAt: computedAt ?? new Date().toISOString(),
+    agentFilter: report.agentFilter,
+    embeddingCoverage: report.embeddingCoverage ? { coveragePct: report.embeddingCoverage.coveragePct } : null,
+    staleness: report.staleness ? { stalePct: report.staleness.stalePct } : null,
+    recallSpotCheck: report.recallSpotCheck
+      ? { recallAtK: report.recallSpotCheck.recallAtK, mrr: report.recallSpotCheck.mrr }
+      : null,
+    quietAgents: report.quietAgents
+      ? { perAgent: report.quietAgents.perAgent.map((a) => ({ id: a.id, quiet: a.quiet, daysSinceLastWrite: a.daysSinceLastWrite })) }
+      : null,
+    dedupClusters: report.dedupClusters ? { clusterCount: report.dedupClusters.clusterCount } : null,
+  };
+}
+
+export type QualityEventKind = "quality.threshold_crossed" | "quality.regression";
+
+/** One finding from diffQualitySnapshots — maps 1:1 to one OrgEvent PUT.
+ *  `summary` is the exact behavioral-fact string that becomes the OrgEvent's
+ *  `summary` field (Sherlock's constraint: facts, never trust judgments).
+ *  `detail` becomes the OrgEvent's `detail` field, JSON-stringified.
+ *  `targetIds` is set only for per-agent findings (quietAgents). */
+export interface QualityEventFinding {
+  kind: QualityEventKind;
+  scope: "quality";
+  summary: string;
+  detail: { metric: string; before: number | boolean | null; after: number | boolean | null; threshold: number };
+  targetIds?: string[];
+}
+
+/**
+ * Pure diff: current snapshot + previous snapshot (or null on a first run)
+ * → the list of OrgEvent findings to emit. Never throws. See the module doc
+ * above for the edge-triggered / missing-data-means-no-event rules; fixture
+ * tests live in test/unit/quality-report.test.ts.
+ */
+export function diffQualitySnapshots(current: QualitySnapshotCore, previous: QualitySnapshotCore | null): QualityEventFinding[] {
+  const findings: QualityEventFinding[] = [];
+  if (!previous) return findings; // first run — nothing to diff against yet
+
+  // ── embedding coverage: absolute floor (edge-triggered) + delta drop ──
+  if (current.embeddingCoverage && previous.embeddingCoverage) {
+    const before = previous.embeddingCoverage.coveragePct;
+    const after = current.embeddingCoverage.coveragePct;
+    if (after < QUALITY_EVENT_COVERAGE_ABS_THRESHOLD_PCT && before >= QUALITY_EVENT_COVERAGE_ABS_THRESHOLD_PCT) {
+      findings.push({
+        kind: "quality.threshold_crossed",
+        scope: "quality",
+        summary: `embedding coverage dropped to ${after}% (threshold ${QUALITY_EVENT_COVERAGE_ABS_THRESHOLD_PCT}%)`,
+        detail: { metric: "embeddingCoverage.coveragePct", before, after, threshold: QUALITY_EVENT_COVERAGE_ABS_THRESHOLD_PCT },
+      });
+    }
+    if (before - after > QUALITY_EVENT_COVERAGE_DROP_THRESHOLD_PCT) {
+      findings.push({
+        kind: "quality.regression",
+        scope: "quality",
+        summary: `embedding coverage dropped ${before - after} points since last snapshot (${before}% → ${after}%)`,
+        detail: { metric: "embeddingCoverage.coveragePct", before, after, threshold: QUALITY_EVENT_COVERAGE_DROP_THRESHOLD_PCT },
+      });
+    }
+  }
+
+  // ── staleness: absolute ceiling only (edge-triggered) ──
+  if (current.staleness && previous.staleness) {
+    const before = previous.staleness.stalePct;
+    const after = current.staleness.stalePct;
+    if (after > QUALITY_EVENT_STALENESS_ABS_THRESHOLD_PCT && before <= QUALITY_EVENT_STALENESS_ABS_THRESHOLD_PCT) {
+      findings.push({
+        kind: "quality.threshold_crossed",
+        scope: "quality",
+        summary: `staleness rose to ${after}% past validTo (threshold ${QUALITY_EVENT_STALENESS_ABS_THRESHOLD_PCT}%)`,
+        detail: { metric: "staleness.stalePct", before, after, threshold: QUALITY_EVENT_STALENESS_ABS_THRESHOLD_PCT },
+      });
+    }
+  }
+
+  // ── recall spot-check: recall@k and MRR, same delta-drop threshold ──
+  if (current.recallSpotCheck && previous.recallSpotCheck) {
+    const beforeR = previous.recallSpotCheck.recallAtK;
+    const afterR = current.recallSpotCheck.recallAtK;
+    if (beforeR - afterR > QUALITY_EVENT_RECALL_DROP_THRESHOLD) {
+      findings.push({
+        kind: "quality.regression",
+        scope: "quality",
+        summary: `recall spot-check recall@k dropped from ${beforeR} to ${afterR} since last snapshot`,
+        detail: { metric: "recallSpotCheck.recallAtK", before: beforeR, after: afterR, threshold: QUALITY_EVENT_RECALL_DROP_THRESHOLD },
+      });
+    }
+    const beforeM = previous.recallSpotCheck.mrr;
+    const afterM = current.recallSpotCheck.mrr;
+    if (beforeM - afterM > QUALITY_EVENT_RECALL_DROP_THRESHOLD) {
+      findings.push({
+        kind: "quality.regression",
+        scope: "quality",
+        summary: `recall spot-check MRR dropped from ${beforeM} to ${afterM} since last snapshot`,
+        detail: { metric: "recallSpotCheck.mrr", before: beforeM, after: afterM, threshold: QUALITY_EVENT_RECALL_DROP_THRESHOLD },
+      });
+    }
+  }
+
+  // ── quiet agents: per-agent, NEWLY quiet only (was false last snapshot,
+  // true now) — never re-fires for an agent that was already quiet last
+  // snapshot, and never fires for an agent absent from the previous snapshot
+  // (a brand-new agent can't have "regressed" from a state we never saw). ──
+  if (current.quietAgents && previous.quietAgents) {
+    const prevQuietById = new Map(previous.quietAgents.perAgent.map((a) => [a.id, a.quiet]));
+    for (const a of current.quietAgents.perAgent) {
+      if (a.quiet && prevQuietById.get(a.id) === false) {
+        const days = a.daysSinceLastWrite;
+        findings.push({
+          kind: "quality.threshold_crossed",
+          scope: "quality",
+          summary: days == null ? `agent ${a.id} quiet — no recorded write` : `agent ${a.id} quiet for ${days}d (threshold ${QUALITY_QUIET_THRESHOLD_DAYS}d)`,
+          detail: { metric: "quietAgents", before: false, after: true, threshold: QUALITY_QUIET_THRESHOLD_DAYS },
+          targetIds: [a.id],
+        });
+      }
+    }
+  }
+
+  // ── dedup clusters: BOTH >50% relative growth AND >=5 absolute growth ──
+  if (current.dedupClusters && previous.dedupClusters) {
+    const before = previous.dedupClusters.clusterCount;
+    const after = current.dedupClusters.clusterCount;
+    const growth = after - before;
+    const growthPct = before > 0 ? growth / before : (after > 0 ? Infinity : 0);
+    if (growthPct > QUALITY_EVENT_DEDUP_GROWTH_PCT_THRESHOLD && growth >= QUALITY_EVENT_DEDUP_GROWTH_ABS_THRESHOLD) {
+      findings.push({
+        kind: "quality.regression",
+        scope: "quality",
+        summary: `dedup cluster count grew from ${before} to ${after} since last snapshot`,
+        detail: { metric: "dedupClusters.clusterCount", before, after, threshold: QUALITY_EVENT_DEDUP_GROWTH_PCT_THRESHOLD },
+      });
+    }
+  }
+
+  return findings;
+}
+
+/** Subject convention for quality snapshots stored as Flair memories: one
+ *  lineage per (agent, Flair instance) pair — an agent that runs
+ *  `quality --emit` against more than one target gets independent diff
+ *  baselines per target, keyed on HOST (not the full URL, so a bare port
+ *  change on the same box doesn't fork the lineage; a different host/instance
+ *  correctly starts its own). */
+export function qualitySnapshotSubject(baseUrl: string): string {
+  let host: string;
+  try {
+    host = new URL(baseUrl).host;
+  } catch {
+    host = baseUrl.replace(/^[a-zA-Z]+:\/\//, "").replace(/\/.*$/, "");
+  }
+  return `quality-snapshot/${host}`;
+}
+
+/** Fetch the most recent prior quality snapshot for `agentId` at `baseUrl`,
+ *  via the exact same read path fetchRecallSpotCheckData uses (`api("GET",
+ *  "/Memory?agentId=...")`, self-scoped by the signed request's own agent
+ *  identity — no new endpoint). Filters client-side by subject (the server's
+ *  `GET /Memory?...` doesn't translate query params into search conditions
+ *  beyond the signed agentId scope — see resources/Memory.ts's search()),
+ *  same client-side-filter pattern `memory list --hash-fallback` already
+ *  uses. Returns null on: no prior snapshot, a fetch error, or a snapshot row
+ *  whose content isn't parseable/versioned JSON (never throws — a corrupt or
+ *  foreign row degrades to "no snapshot", same as a genuine first run, rather
+ *  than crashing `--emit`). */
+async function fetchPreviousQualitySnapshot(agentId: string, baseUrl: string, subject: string): Promise<QualitySnapshotCore | null> {
+  let all: any[];
+  try {
+    const q = new URLSearchParams({ agentId }).toString();
+    const raw = await api("GET", `/Memory?${q}`, undefined, { baseUrl });
+    all = Array.isArray(raw) ? raw : (raw?.results ?? raw?.items ?? []);
+  } catch {
+    return null;
+  }
+  const matches = all.filter((m: any) => m?.subject === subject);
+  if (matches.length === 0) return null;
+  matches.sort((a: any, b: any) => {
+    const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return tb - ta;
+  });
+  try {
+    const parsed = JSON.parse(matches[0].content);
+    if (parsed && typeof parsed === "object" && parsed.schemaVersion === 1) return parsed as QualitySnapshotCore;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Store `snapshot` as a new persistent-durability memory (subject
+ *  `quality-snapshot/<host>`) — the diff baseline the NEXT `--emit` run reads
+ *  back via fetchPreviousQualitySnapshot. Content is the compact JSON core
+ *  only (buildQualitySnapshot's output), never the full human report. Same
+ *  `PUT /Memory/{id}` write shape `memory write-task-summary` already uses.
+ *  Throws on a write failure — the CLI action below is responsible for
+ *  surfacing that as a clear error, same as every other write path here. */
+async function storeQualitySnapshot(agentId: string, baseUrl: string, subject: string, snapshot: QualitySnapshotCore): Promise<string> {
+  const memId = `${agentId}-quality-snapshot-${Date.now()}`;
+  const body: Record<string, unknown> = {
+    id: memId,
+    agentId,
+    content: JSON.stringify(snapshot),
+    durability: "persistent",
+    tags: ["quality-snapshot"],
+    subject,
+    type: "quality-snapshot",
+    createdAt: new Date().toISOString(),
+  };
+  const out = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, body, { baseUrl });
+  if (out?.error) throw new Error(String(out.error));
+  return memId;
+}
+
 // ─── flair quality ────────────────────────────────────────────────────────────
 program
   .command("quality")
@@ -11587,9 +11905,19 @@ program
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET; alias for --url)")
   .option("--json", "Output as JSON")
   .option("--agent <id>", "Scope per-agent metrics to one agent id (or set FLAIR_AGENT_ID); default = all agents")
+  .option(
+    "--emit",
+    "Slice 2: snapshot this report, diff it against the previous quality-snapshot memory, and emit OrgEvents (quality.threshold_crossed / quality.regression) for any crossings/regressions found. Requires an agent identity (--agent or FLAIR_AGENT_ID) — the opt-in write boundary; without this flag `flair quality` remains fully read-only",
+  )
   .action(async (opts) => {
     const { healthy, baseUrl, healthData } = await fetchHealthDetail(opts);
     const agentId: string | null = opts.agent || process.env.FLAIR_AGENT_ID || null;
+
+    if (opts.emit && !agentId) {
+      console.error("Error: --emit requires an agent identity. Pass --agent <id> or set FLAIR_AGENT_ID.");
+      process.exit(1);
+    }
+
     // Recall spot-check needs live queries (not just /HealthDetail), so only
     // attempt it when the instance is actually reachable — no point probing
     // memory reads against a server fetchHealthDetail already found down.
@@ -11597,10 +11925,63 @@ program
       ? await fetchRecallSpotCheckData(agentId, baseUrl)
       : { ok: false, skipReason: "instance unreachable" };
     const report = computeQualityReport(healthy, healthData, { agentId, recallSpotCheckData });
+
+    // ── Slice 2: --emit is the opt-in write boundary. Everything above this
+    // point is unchanged from pre-Slice-2 behavior; everything in this block
+    // only runs when the flag is passed AND the instance is reachable (an
+    // unreachable instance has nothing to diff against and no live write
+    // target — it falls through to the existing "unreachable" exit(1) below,
+    // same as always). ──
+    let emitResult: {
+      firstRun: boolean;
+      emittedEvents: Array<QualityEventFinding & { orgEventId?: string }>;
+      snapshotId: string | null;
+      errors: string[];
+    } | null = null;
+    if (opts.emit && healthy && agentId) {
+      const subject = qualitySnapshotSubject(baseUrl);
+      const previous = await fetchPreviousQualitySnapshot(agentId, baseUrl, subject);
+      const current = buildQualitySnapshot(report);
+      const findings = diffQualitySnapshots(current, previous); // [] on a first run (previous === null)
+      emitResult = { firstRun: previous === null, emittedEvents: [], snapshotId: null, errors: [] };
+      for (const finding of findings) {
+        const published = await publishOrgEvent({
+          agentId,
+          baseUrl,
+          kind: finding.kind,
+          scope: finding.scope,
+          summary: finding.summary,
+          detail: JSON.stringify(finding.detail),
+          targetIds: finding.targetIds,
+        });
+        if (published.ok) {
+          emitResult.emittedEvents.push({ ...finding, orgEventId: published.id });
+        } else {
+          emitResult.errors.push(`${finding.kind} (${finding.detail.metric}): ${published.error}`);
+        }
+      }
+      try {
+        emitResult.snapshotId = await storeQualitySnapshot(agentId, baseUrl, subject, current);
+      } catch (err: any) {
+        emitResult.errors.push(`snapshot store failed: ${err?.message ?? String(err)}`);
+      }
+    }
+
     const mode = render.resolveOutputMode(opts);
 
     if (mode === "json") {
       const out: any = { healthy, url: baseUrl, flairVersion: __pkgVersion, ...report };
+      if (emitResult) {
+        out.emit = { firstRun: emitResult.firstRun, snapshotId: emitResult.snapshotId, errors: emitResult.errors };
+        out.emittedEvents = emitResult.emittedEvents.map((e) => ({
+          kind: e.kind,
+          scope: e.scope,
+          summary: e.summary,
+          detail: e.detail,
+          targetIds: e.targetIds,
+          orgEventId: e.orgEventId,
+        }));
+      }
       console.log(render.asJSON(out));
       if (!healthy) process.exit(1);
       return;
@@ -11722,6 +12103,28 @@ program
       console.log(`\n${render.wrap(render.c.bold, "Gaps")} ${render.wrap(render.c.dim, "(degraded or unavailable from existing read APIs)")}`);
       for (const g of report.gaps) {
         console.log(`  ${render.icons.info} ${g.metric}: ${g.reason}`);
+      }
+    }
+
+    // Events (flair-quality Slice 2 — only present when --emit was passed)
+    if (emitResult) {
+      console.log(`\n${render.wrap(render.c.bold, "Events")} ${render.wrap(render.c.dim, "(--emit: snapshot + diff against the previous quality-snapshot memory)")}`);
+      if (emitResult.firstRun) {
+        console.log(`  ${render.icons.info} first run — no prior snapshot to diff against; stored a baseline, emitted nothing`);
+      } else if (emitResult.emittedEvents.length === 0) {
+        console.log(`  ${render.icons.ok} no threshold crossings or regressions since the last snapshot`);
+      } else {
+        console.log(`  ${render.wrap(render.c.bold, String(emitResult.emittedEvents.length))} event(s) emitted:`);
+        for (const e of emitResult.emittedEvents) {
+          const icon = e.kind === "quality.regression" ? render.icons.warn : render.icons.info;
+          console.log(`    ${icon} [${e.kind}] ${e.summary}`);
+        }
+      }
+      if (emitResult.snapshotId) {
+        console.log(`  ${render.wrap(render.c.dim, `snapshot stored: ${emitResult.snapshotId}`)}`);
+      }
+      for (const err of emitResult.errors) {
+        console.log(`  ${render.icons.error} ${err}`);
       }
     }
     console.log("");
@@ -14261,6 +14664,86 @@ workspace
 const MAX_ORGEVENT_SUMMARY_LENGTH = 500;
 const MAX_ORGEVENT_DETAIL_LENGTH = 8000;
 
+interface PublishOrgEventParams {
+  agentId: string;
+  baseUrl: string;
+  kind: string;
+  summary: string;
+  detail?: string;
+  scope?: string;
+  targetIds?: string[];
+}
+// Flat `{ ok: boolean; ...optional }` shape — same convention
+// RecallSpotCheckFetchResult uses above, deliberately NOT a `{ok:true}|
+// {ok:false}` literal union: this file's tsconfig.cli.json runs with
+// `strict: false` (no strictNullChecks), under which TS's control-flow
+// narrowing on a boolean-literal discriminant doesn't reliably eliminate
+// the other union member (confirmed against this exact tsconfig — a real
+// TS behavior, not a hypothetical). `id`/`error` are optional instead;
+// callers branch on `ok` and read whichever field the contract guarantees
+// is set for that branch.
+interface PublishOrgEventResult {
+  ok: boolean;
+  id?: string;
+  error?: string;
+}
+
+/**
+ * The ONE write shape behind `flair orgevent` — signed PUT /OrgEvent/{id} —
+ * extracted so `flair quality --emit` (flair-quality Slice 2) reuses the
+ * exact same call, rather than hand-rolling a second one. Everything below
+ * mirrors what the `orgevent` command's action used to do inline: id
+ * convention (`${agentId}-${randomUUID()}`, matching flair-client's
+ * Memory.write()), the same Ed25519 signing (buildEd25519Auth), the same
+ * length guards (MAX_ORGEVENT_SUMMARY_LENGTH/MAX_ORGEVENT_DETAIL_LENGTH) so
+ * every caller — CLI flag or programmatic — gets them, and the same
+ * authorId self-declaration OrgEvent.put() verifies server-side against the
+ * signature (see the module doc above `orgevent`). Never throws — every
+ * failure mode (missing key, oversized field, non-2xx response) returns
+ * `{ ok: false, error }` for the caller to surface however fits its own UX.
+ */
+async function publishOrgEvent(params: PublishOrgEventParams): Promise<PublishOrgEventResult> {
+  if (params.summary.length > MAX_ORGEVENT_SUMMARY_LENGTH) {
+    return { ok: false, error: `summary exceeds ${MAX_ORGEVENT_SUMMARY_LENGTH} character limit (got ${params.summary.length})` };
+  }
+  if (params.detail && params.detail.length > MAX_ORGEVENT_DETAIL_LENGTH) {
+    return { ok: false, error: `detail exceeds ${MAX_ORGEVENT_DETAIL_LENGTH} character limit (got ${params.detail.length})` };
+  }
+
+  const keyPath = resolveKeyPath(params.agentId);
+  if (!keyPath) {
+    return { ok: false, error: `private key not found for agent '${params.agentId}'. Check ~/.flair/keys/ or set FLAIR_KEY_DIR.` };
+  }
+
+  const id = `${params.agentId}-${randomUUID()}`;
+  const auth = buildEd25519Auth(params.agentId, "PUT", `/OrgEvent/${id}`, keyPath);
+
+  const body: Record<string, unknown> = {
+    id,
+    authorId: params.agentId,
+    kind: params.kind,
+    summary: params.summary,
+    createdAt: new Date().toISOString(),
+  };
+  if (params.detail) body.detail = params.detail;
+  if (params.scope) body.scope = params.scope;
+  if (params.targetIds && params.targetIds.length > 0) body.targetIds = params.targetIds;
+
+  const res = await fetch(`${params.baseUrl}/OrgEvent/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: auth },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return { ok: false, error: `PUT /OrgEvent/${id} failed (${res.status}): ${text}` };
+  }
+
+  const data = await res.json().catch(() => null);
+  return { ok: true, id: data?.id ?? id };
+}
+
 program
   .command("orgevent")
   .description("Publish an org-wide coordination event attributed to your agent (PUT /OrgEvent/{id})")
@@ -14279,62 +14762,29 @@ program
       process.exit(1);
     }
 
-    if (opts.summary && String(opts.summary).length > MAX_ORGEVENT_SUMMARY_LENGTH) {
-      console.error(`Error: --summary exceeds ${MAX_ORGEVENT_SUMMARY_LENGTH} character limit (got ${String(opts.summary).length}).`);
-      process.exit(1);
-    }
-    if (opts.detail && String(opts.detail).length > MAX_ORGEVENT_DETAIL_LENGTH) {
-      console.error(`Error: --detail exceeds ${MAX_ORGEVENT_DETAIL_LENGTH} character limit (got ${String(opts.detail).length}).`);
-      process.exit(1);
-    }
-
-    const keyPath = resolveKeyPath(agentId);
-    if (!keyPath) {
-      console.error(`Error: private key not found for agent '${agentId}'. Check ~/.flair/keys/ or set FLAIR_KEY_DIR.`);
-      process.exit(1);
-    }
-
     // orgevent reuses --target for recipients, so the remote-URL override is
     // --target-url here (env FLAIR_TARGET still honored via resolveBaseUrl).
     const baseUrl = resolveBaseUrl({ target: opts.targetUrl, port: opts.port }).replace(/\/$/, "");
-    // id generation mirrors flair-client's Memory.write() convention
-    // (`${agentId}-${randomUUID()}`) — unique per publish, unlike OrgEvent's
-    // own (HTTP-unreachable) post() default of `${authorId}-${isoTimestamp}`,
-    // which can collide within the same millisecond.
-    const id = `${agentId}-${randomUUID()}`;
-    const auth = buildEd25519Auth(agentId, "PUT", `/OrgEvent/${id}`, keyPath);
+    const targetIds = Array.isArray(opts.target) && opts.target.length > 0 ? (opts.target as string[]) : undefined;
 
-    // authorId IS included in the body now — OrgEvent.put() (unlike post())
-    // does not auto-attribute from the signature, it 403s any mismatch. This
-    // is a self-declaration the server verifies against the signature, not a
-    // forgeable claim.
-    const body: Record<string, unknown> = {
-      id,
-      authorId: agentId,
+    const result = await publishOrgEvent({
+      agentId,
+      baseUrl,
       kind: opts.kind,
       summary: opts.summary,
-      createdAt: new Date().toISOString(),
-    };
-    if (opts.detail) body.detail = opts.detail;
-    if (opts.scope) body.scope = opts.scope;
-    if (Array.isArray(opts.target) && opts.target.length > 0) body.targetIds = opts.target;
-
-    const res = await fetch(`${baseUrl}/OrgEvent/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", Authorization: auth },
-      body: JSON.stringify(body),
+      detail: opts.detail,
+      scope: opts.scope,
+      targetIds,
     });
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      console.error(`Error: PUT /OrgEvent/${id} failed (${res.status}): ${text}`);
+    if (!result.ok) {
+      console.error(`Error: ${result.error}`);
       process.exit(1);
     }
 
-    const data = await res.json().catch(() => null);
-    const targets = Array.isArray(opts.target) && opts.target.length > 0 ? ` → ${opts.target.join(", ")}` : "";
+    const targets = targetIds ? ` → ${targetIds.join(", ")}` : "";
     console.log(`✓ OrgEvent published as '${agentId}': kind=${opts.kind}${targets}`);
-    console.log(`  id: ${data?.id ?? id}`);
+    console.log(`  id: ${result.id}`);
   });
 
 // ─── flair attention ─────────────────────────────────────────────────────────

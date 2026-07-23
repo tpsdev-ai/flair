@@ -11,10 +11,19 @@
  * counts toward doctor's found/fixed/remaining summary (flair#721). No fs,
  * no network, no crypto — the actual signed fetches (checkAgentRegistered,
  * authFetch) stay in src/cli.ts, same split as the rest of doctor-client.ts.
+ *
+ * Also covers inferSoleAgentId() and fixCommandAgentHint() (flair#802b) —
+ * the same keyAgentIds pool, used to make `doctor --fix`'s suggested wiring
+ * command actually work when nothing else identifies an agent.
  */
 
 import { describe, test, expect } from "bun:test";
-import { planAgentIterations, describeAgentGateFinding } from "../../src/doctor-client.ts";
+import {
+  planAgentIterations,
+  describeAgentGateFinding,
+  inferSoleAgentId,
+  fixCommandAgentHint,
+} from "../../src/doctor-client.ts";
 
 describe("planAgentIterations", () => {
   test("no --agent, no keys → empty list (the zero-keys fallback path)", () => {
@@ -109,5 +118,45 @@ describe("describeAgentGateFinding", () => {
       const f = describeAgentGateFinding("x", state);
       expect(f?.isIssue ?? false).toBe(expectIssue);
     }
+  });
+});
+
+// flair#802b: `doctor --fix` suggested wiring a client with a command that
+// then failed ("no agent id known") whenever nothing already identified an
+// agent — no --agent, no FLAIR_AGENT_ID, no id read off an already-wired
+// client. These two pure functions cover the fix: infer the one case that's
+// actually unambiguous (exactly one locally-keyed agent), and build a
+// suggestion string that's copy-pasteable instead of guaranteed to fail.
+describe("inferSoleAgentId", () => {
+  test("zero keys → undefined (nothing to infer)", () => {
+    expect(inferSoleAgentId([])).toBeUndefined();
+  });
+
+  test("exactly one key → that id (the unambiguous case --fix can safely use)", () => {
+    expect(inferSoleAgentId(["local"])).toBe("local");
+  });
+
+  test("two or more keys → undefined (ambiguous — must not guess)", () => {
+    expect(inferSoleAgentId(["local", "ci-bot"])).toBeUndefined();
+  });
+});
+
+describe("fixCommandAgentHint", () => {
+  test("zero keys → empty string (no example to offer)", () => {
+    expect(fixCommandAgentHint([])).toBe("");
+  });
+
+  test("one key → ` --agent <id>` fragment", () => {
+    expect(fixCommandAgentHint(["local"])).toBe(" --agent local");
+  });
+
+  test("multiple keys → first id after sorting, still just an example (multi-agent still needs the RIGHT id double-checked)", () => {
+    expect(fixCommandAgentHint(["zeta", "alpha"])).toBe(" --agent alpha");
+  });
+
+  test("does not mutate the input array", () => {
+    const input = ["b", "a"];
+    fixCommandAgentHint(input);
+    expect(input).toEqual(["b", "a"]);
   });
 });
