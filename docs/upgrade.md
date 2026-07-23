@@ -325,6 +325,26 @@ This gap only exists while crossing into 0.25.1. Once you're running 0.25.1 or l
 the verifier itself resolves a credentials-only failure to `healthy-unverified`
 instead of rolling back, so it cannot recur on subsequent upgrades.
 
+### Known issue — upgrading *from* 0.26.0 or older can leave the server stopped
+
+On Linux (and macOS without a launchd plist), versions up to and including 0.26.0
+had a bug in the upgrade path's port-based stop step: it matched *any* process
+with a socket on the Flair port — including the upgrading CLI's **own** keep-alive
+connections left by the credential pre-flight — and SIGTERM'd itself mid-restart.
+The visible symptom: `Restarting Flair... Stopping...` and then the command dies
+(SIGTERM, exit 143) before `Starting...`, leaving the server down even though the
+package upgraded fine (flair#800).
+
+The fix (listening-socket filter + self-PID guard) is **forward-only** for the same
+reason as above: the restart is performed by the *old*, already-installed CLI.
+
+**Workarounds when upgrading from ≤ 0.26.0:**
+
+- Prefer `flair upgrade --no-verify` — skips the credential pre-flight whose
+  keep-alive sockets trigger the self-kill (validated end-to-end).
+- If you already hit it (upgrade "finished" but the server is down): run
+  `flair start` — not `restart` — and you're on the new version. Nothing was lost.
+
 ## Downgrade
 
 Rolling back the **package** (above) assumes the data on disk is fine — only the new

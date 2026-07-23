@@ -9508,10 +9508,20 @@ async function stopFlairProcess(port: number): Promise<void> {
   console.log("Stopping...");
   try {
     const { execSync } = await import("node:child_process");
-    const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
+    // -sTCP:LISTEN: match the LISTENING server only — a bare `lsof -ti :port`
+    // also matches CLIENT sockets referencing the port, including THIS CLI's
+    // own keep-alive connections left by the credential pre-flight's
+    // probeInstance() HTTP calls (flair#741). Without the filter, the upgrade
+    // path SIGTERM'd its own process mid-restart — "Stopping..." then death
+    // (exit 143) before "Starting..." ever ran, leaving the server down
+    // (flair#800, deterministic on the Linux/non-launchd default path).
+    const lsof = execSync(`lsof -ti :${port} -sTCP:LISTEN`, { encoding: "utf-8" }).trim();
     if (lsof) {
       for (const pid of lsof.split("\n")) {
-        try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
+        const target = Number(pid.trim());
+        // Belt-and-suspenders: never SIGTERM ourselves, whatever lsof says.
+        if (!Number.isFinite(target) || target === process.pid) continue;
+        try { process.kill(target, "SIGTERM"); } catch {}
       }
       // Wait briefly for shutdown
       await new Promise(r => setTimeout(r, 2000));

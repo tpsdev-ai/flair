@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- **`flair upgrade` no longer kills itself mid-restart, leaving the server down (Linux / non-launchd macOS).** The port-based stop step ran a bare `lsof -ti :<port>`, which matches *any* process with a socket on the port — including the upgrading CLI's own keep-alive connections left open by the credential pre-flight's health probes. The CLI SIGTERM'd itself right after "Stopping…" and never reached "Starting…" (exit 143), so every default `flair upgrade` on the Linux path ended with the package upgraded but the server stopped. The stop now targets listening sockets only (`-sTCP:LISTEN`) and never signals its own PID. Forward-only (the restart runs on the *old* CLI): upgrading **from** ≤ 0.26.0, use `flair upgrade --no-verify`, or run `flair start` if you already hit it — see the known-issue note in `docs/upgrade.md`. Found by the Canary dogfooder on the 0.26.0 clean-box run; root-caused with a live socket-level repro.
+
+### Fixed
+
 - **`openclaw-flair`'s `autoCapture` never fired in long-lived persistent gateway sessions.** It only hooked `agent_end`, which fires at the true end of a discrete agent run — a persistent session's "run" never ends, so `agent_end` never fired and auto-capture was dead code in that deployment shape. Real-world: an agent ran May→July with the plugin registered on every boot and zero auto-captures, ever (#798). Auto-capture now also evaluates the same trigger regex live, per turn, on the `llm_input`/`llm_output` hooks (the user-facing prompt and the model's response) — these fire on every model call regardless of how the host bounds a "run", so persistent sessions capture in real time instead of waiting on an event that never comes. The existing `agent_end` path is unchanged for discrete runs. Both paths share one per-session cap (still 3 by default, now tunable via `autoCaptureMaxPerSession`) and dedup by content hash, so a phrase captured live isn't captured again when `agent_end` later rescans the same run's full history.
 
 ## [0.26.0] - 2026-07-22
