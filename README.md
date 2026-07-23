@@ -242,6 +242,8 @@ flair init --no-mcp                # instance + agent only, skip MCP wiring
 flair init --skip-smoke            # skip the MCP smoke test
 ```
 
+> Running in a non-interactive shell (CI, Docker, an unattended setup script)? Bare `flair init` with no `--agent` bootstraps the instance only and silently skips agent registration, MCP client wiring, and the smoke test. Pass the flags explicitly: `flair init --agent <id> --client all`.
+
 Lifecycle management:
 
 ```bash

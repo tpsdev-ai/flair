@@ -72,6 +72,8 @@ import {
   applyOrReportSessionStartHook,
   resolveWireFlairUrl,
   planAgentIterations,
+  inferSoleAgentId,
+  fixCommandAgentHint,
   describeAgentGateFinding,
   classifyKeyFile,
   resolveCollisionSafeName,
@@ -3020,6 +3022,18 @@ program
         console.log(`   └─────────────────────────────────────────────────┘`);
       }
       console.log(`\n   Export: FLAIR_URL=${httpUrl}`);
+
+      // flair#802a: a non-interactive shell (CI, Docker, an unattended setup
+      // script) that omits --agent lands here with NO indication that agent
+      // registration, MCP client wiring, and the smoke test were all skipped
+      // — the run exits 0 and looks complete. In a real TTY the missing
+      // --agent is usually obvious from the command the user just typed;
+      // non-interactively it's easy to never notice until something that
+      // needed the agent (recall, an MCP client) mysteriously doesn't work.
+      if (!process.stdin.isTTY) {
+        console.log(`\n   ℹ Non-interactive shell: skipped agent registration, MCP client wiring, and the smoke test.`);
+        console.log(`     Complete setup with: flair init --agent <id> --client all`);
+      }
     }
 
     // All init work is genuinely done at this point: Harper is installed +
@@ -10663,9 +10677,17 @@ program
               if (!proceed) {
                 console.log(`     Skipped.`);
               } else {
-                const fixAgentId = opts.agent || process.env.FLAIR_AGENT_ID || anyKnownAgentId;
+                // flair#802b: fall back to the sole locally-keyed agent when
+                // nothing else identifies one — the only case doctor can
+                // infer without being told (see inferSoleAgentId's doc
+                // comment in doctor-client.ts for why 0/2+ keys don't guess).
+                const fixAgentId = opts.agent || process.env.FLAIR_AGENT_ID || anyKnownAgentId || inferSoleAgentId(keyAgentIds);
                 if (!fixAgentId) {
-                  console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: no agent id known — pass --agent <id>`);
+                  if (keyAgentIds.length > 1) {
+                    console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: multiple agents found (${[...keyAgentIds].sort().join(", ")}) — pass --agent <id> to choose which one`);
+                  } else {
+                    console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: no agent registered — run \`flair agent add <id>\` first, then re-run \`flair doctor --fix\``);
+                  }
                 } else {
                   const wireEnv = { FLAIR_AGENT_ID: fixAgentId, FLAIR_URL: resolveWireFlairUrl(block.flairUrl, baseUrl) };
                   const wireResult =
@@ -10679,7 +10701,13 @@ program
               }
             }
           } else {
-            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, `(wires ${client.label} automatically)`)}`);
+            // flair#802b: only splice in a concrete --agent if the id isn't
+            // already resolvable some other way — an explicit --agent /
+            // FLAIR_AGENT_ID / an already-wired client's agent id means bare
+            // `--fix` already works, so don't clutter the suggestion.
+            const knownAgentId = opts.agent || process.env.FLAIR_AGENT_ID || anyKnownAgentId;
+            const agentHint = knownAgentId ? "" : fixCommandAgentHint(keyAgentIds);
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix${agentHint} ${render.wrap(render.c.dim, `(wires ${client.label} automatically)`)}`);
           }
           issues++;
           continue;
