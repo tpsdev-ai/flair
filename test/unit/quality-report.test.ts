@@ -17,6 +17,16 @@ import {
   deriveRecallCue,
   QUALITY_QUIET_THRESHOLD_DAYS,
   QUALITY_HASH_FALLBACK_DEGRADED_PCT,
+  buildQualitySnapshot,
+  diffQualitySnapshots,
+  qualitySnapshotSubject,
+  QUALITY_EVENT_COVERAGE_ABS_THRESHOLD_PCT,
+  QUALITY_EVENT_COVERAGE_DROP_THRESHOLD_PCT,
+  QUALITY_EVENT_STALENESS_ABS_THRESHOLD_PCT,
+  QUALITY_EVENT_RECALL_DROP_THRESHOLD,
+  QUALITY_EVENT_DEDUP_GROWTH_PCT_THRESHOLD,
+  QUALITY_EVENT_DEDUP_GROWTH_ABS_THRESHOLD,
+  type QualitySnapshotCore,
 } from "../../src/cli.ts";
 
 const NOW = new Date("2026-07-21T12:00:00.000Z").getTime();
@@ -577,6 +587,412 @@ describe("computeQualityReport", () => {
       expect(() => JSON.stringify(r)).not.toThrow();
       const round = JSON.parse(JSON.stringify(r));
       expect(round.instance.up).toBe(true);
+    });
+  });
+});
+
+/**
+ * flair-quality Slice 2 (quality OrgEvents): unit tests for the pure
+ * snapshot/diff/threshold core behind `flair quality --emit` —
+ * buildQualitySnapshot, diffQualitySnapshots, qualitySnapshotSubject. The
+ * I/O halves (fetchPreviousQualitySnapshot, storeQualitySnapshot,
+ * publishOrgEvent, and the `--emit` action wiring itself) are exercised the
+ * same way the report's own I/O boundary (fetchHealthDetail /
+ * fetchRecallSpotCheckData) is — not directly unit tested, same rationale as
+ * this file's header doc: network + console.log plumbing is high-effort,
+ * low-value to test directly; the decision logic underneath is what must be
+ * airtight, and that's what's covered here.
+ */
+describe("flair-quality Slice 2 — snapshot + diff + OrgEvent thresholds", () => {
+  function snap(overrides: Partial<QualitySnapshotCore> = {}): QualitySnapshotCore {
+    return {
+      schemaVersion: 1,
+      computedAt: "2026-07-20T00:00:00.000Z",
+      agentFilter: null,
+      embeddingCoverage: { coveragePct: 95 },
+      staleness: { stalePct: 5 },
+      recallSpotCheck: { recallAtK: 0.9, mrr: 0.8 },
+      quietAgents: { perAgent: [{ id: "anvil", quiet: false, daysSinceLastWrite: 1 }] },
+      dedupClusters: { clusterCount: 3 },
+      ...overrides,
+    };
+  }
+
+  describe("buildQualitySnapshot", () => {
+    test("extracts the compact numeric core from a full report", () => {
+      const report = computeQualityReport(true, fixture(), { now: NOW });
+      const s = buildQualitySnapshot(report, "2026-07-21T12:00:00.000Z");
+      expect(s).toEqual({
+        schemaVersion: 1,
+        computedAt: "2026-07-21T12:00:00.000Z",
+        agentFilter: null,
+        embeddingCoverage: { coveragePct: 95 },
+        staleness: { stalePct: 8 },
+        recallSpotCheck: null, // fixture() carries no recallSpotCheckData
+        quietAgents: {
+          perAgent: [
+            { id: "flint", quiet: false, daysSinceLastWrite: 0 },
+            { id: "anvil", quiet: false, daysSinceLastWrite: 3 },
+            { id: "pulse", quiet: true, daysSinceLastWrite: 30 },
+          ],
+        },
+        dedupClusters: null, // fixture() carries no dedup stat
+      });
+    });
+
+    test("a null/gap section in the report stays null in the snapshot — never a false 0", () => {
+      const data = fixture();
+      delete (data as any).memories;
+      const report = computeQualityReport(true, data, { now: NOW });
+      const s = buildQualitySnapshot(report, "2026-07-21T12:00:00.000Z");
+      expect(s.embeddingCoverage).toBeNull();
+      expect(s.staleness).toBeNull();
+    });
+
+    test("agentFilter carries through from the report", () => {
+      const report = computeQualityReport(true, fixture(), { now: NOW, agentId: "anvil" });
+      const s = buildQualitySnapshot(report, "2026-07-21T12:00:00.000Z");
+      expect(s.agentFilter).toBe("anvil");
+    });
+
+    test("defaults computedAt to an ISO timestamp when omitted", () => {
+      const report = computeQualityReport(true, fixture(), { now: NOW });
+      const s = buildQualitySnapshot(report);
+      expect(() => new Date(s.computedAt).toISOString()).not.toThrow();
+      expect(new Date(s.computedAt).toISOString()).toBe(s.computedAt);
+    });
+  });
+
+  describe("qualitySnapshotSubject", () => {
+    test("derives from the URL host (host:port)", () => {
+      expect(qualitySnapshotSubject("http://127.0.0.1:9926")).toBe("quality-snapshot/127.0.0.1:9926");
+    });
+
+    test("a trailing path doesn't leak into the subject", () => {
+      expect(qualitySnapshotSubject("http://127.0.0.1:9926/")).toBe("quality-snapshot/127.0.0.1:9926");
+    });
+
+    test("different hosts get independent subjects (independent diff lineages)", () => {
+      expect(qualitySnapshotSubject("https://tps.dtrt.harperfabric.com")).toBe("quality-snapshot/tps.dtrt.harperfabric.com");
+      expect(qualitySnapshotSubject("https://tps.dtrt.harperfabric.com")).not.toBe(qualitySnapshotSubject("http://127.0.0.1:9926"));
+    });
+
+    test("a malformed/schemeless base URL degrades gracefully instead of throwing", () => {
+      expect(() => qualitySnapshotSubject("127.0.0.1:9926")).not.toThrow();
+      expect(qualitySnapshotSubject("127.0.0.1:9926")).toBe("quality-snapshot/127.0.0.1:9926");
+    });
+  });
+
+  describe("diffQualitySnapshots — first run", () => {
+    test("no previous snapshot → no findings at all (nothing to diff against yet)", () => {
+      expect(diffQualitySnapshots(snap(), null)).toEqual([]);
+    });
+  });
+
+  describe("diffQualitySnapshots — embeddingCoverage", () => {
+    test("crosses below the absolute threshold, drop under the delta threshold → threshold_crossed only", () => {
+      const previous = snap({ embeddingCoverage: { coveragePct: 91 } });
+      const current = snap({ embeddingCoverage: { coveragePct: 89 } }); // drop of 2, not >5
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toEqual([
+        {
+          kind: "quality.threshold_crossed",
+          scope: "quality",
+          summary: "embedding coverage dropped to 89% (threshold 90%)",
+          detail: { metric: "embeddingCoverage.coveragePct", before: 91, after: 89, threshold: QUALITY_EVENT_COVERAGE_ABS_THRESHOLD_PCT },
+        },
+      ]);
+    });
+
+    test("crosses below threshold AND drops by more than the delta → both threshold_crossed and regression fire", () => {
+      const previous = snap({ embeddingCoverage: { coveragePct: 96 } });
+      const current = snap({ embeddingCoverage: { coveragePct: 80 } }); // drop of 16
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings.map((f) => f.kind).sort()).toEqual(["quality.regression", "quality.threshold_crossed"]);
+      const regression = findings.find((f) => f.kind === "quality.regression")!;
+      expect(regression.detail).toEqual({ metric: "embeddingCoverage.coveragePct", before: 96, after: 80, threshold: QUALITY_EVENT_COVERAGE_DROP_THRESHOLD_PCT });
+    });
+
+    test("stays above the absolute threshold but drops more than the delta → regression only, no threshold_crossed", () => {
+      const previous = snap({ embeddingCoverage: { coveragePct: 99 } });
+      const current = snap({ embeddingCoverage: { coveragePct: 92 } }); // drop of 7, both sides >=90
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toHaveLength(1);
+      expect(findings[0].kind).toBe("quality.regression");
+    });
+
+    test("exactly at both boundaries (drop of exactly 5, landing exactly on 90) → no event (thresholds are exclusive)", () => {
+      const previous = snap({ embeddingCoverage: { coveragePct: 95 } });
+      const current = snap({ embeddingCoverage: { coveragePct: 90 } }); // after == 90 (not < 90); drop == 5 (not > 5)
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("already below threshold in both snapshots → not a NEW crossing, no event", () => {
+      const previous = snap({ embeddingCoverage: { coveragePct: 85 } });
+      const current = snap({ embeddingCoverage: { coveragePct: 80 } }); // drop of 5, not >5; both already <90
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+  });
+
+  describe("diffQualitySnapshots — staleness", () => {
+    test("crosses above the absolute ceiling → threshold_crossed", () => {
+      const previous = snap({ staleness: { stalePct: 9 } });
+      const current = snap({ staleness: { stalePct: 11 } });
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toEqual([
+        {
+          kind: "quality.threshold_crossed",
+          scope: "quality",
+          summary: "staleness rose to 11% past validTo (threshold 10%)",
+          detail: { metric: "staleness.stalePct", before: 9, after: 11, threshold: QUALITY_EVENT_STALENESS_ABS_THRESHOLD_PCT },
+        },
+      ]);
+    });
+
+    test("exactly at the boundary (10 → 10) → no event", () => {
+      const previous = snap({ staleness: { stalePct: 10 } });
+      const current = snap({ staleness: { stalePct: 10 } });
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("already above the ceiling in both snapshots → not a NEW crossing, no event", () => {
+      const previous = snap({ staleness: { stalePct: 15 } });
+      const current = snap({ staleness: { stalePct: 20 } });
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+  });
+
+  describe("diffQualitySnapshots — recallSpotCheck (recall@k and MRR independently)", () => {
+    test("recall@k drops by more than the delta threshold → regression", () => {
+      const previous = snap({ recallSpotCheck: { recallAtK: 0.9, mrr: 0.8 } });
+      const current = snap({ recallSpotCheck: { recallAtK: 0.6, mrr: 0.8 } }); // drop 0.3
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toEqual([
+        {
+          kind: "quality.regression",
+          scope: "quality",
+          summary: "recall spot-check recall@k dropped from 0.9 to 0.6 since last snapshot",
+          detail: { metric: "recallSpotCheck.recallAtK", before: 0.9, after: 0.6, threshold: QUALITY_EVENT_RECALL_DROP_THRESHOLD },
+        },
+      ]);
+    });
+
+    test("MRR drops by more than the delta threshold, recall@k steady → regression on mrr only", () => {
+      const previous = snap({ recallSpotCheck: { recallAtK: 0.9, mrr: 0.8 } });
+      const current = snap({ recallSpotCheck: { recallAtK: 0.9, mrr: 0.5 } }); // drop 0.3
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toEqual([
+        {
+          kind: "quality.regression",
+          scope: "quality",
+          summary: "recall spot-check MRR dropped from 0.8 to 0.5 since last snapshot",
+          detail: { metric: "recallSpotCheck.mrr", before: 0.8, after: 0.5, threshold: QUALITY_EVENT_RECALL_DROP_THRESHOLD },
+        },
+      ]);
+    });
+
+    test("both recall@k and MRR drop → two independent findings", () => {
+      const previous = snap({ recallSpotCheck: { recallAtK: 0.9, mrr: 0.8 } });
+      const current = snap({ recallSpotCheck: { recallAtK: 0.5, mrr: 0.4 } });
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toHaveLength(2);
+      expect(findings.every((f) => f.kind === "quality.regression")).toBe(true);
+      expect(findings.map((f) => f.detail.metric).sort()).toEqual(["recallSpotCheck.mrr", "recallSpotCheck.recallAtK"]);
+    });
+
+    test("drop of exactly the threshold (0.2) → no event (exclusive boundary)", () => {
+      // 0.5 - 0.3 === 0.2 exactly in IEEE754 double (verified) — picked
+      // deliberately so this boundary test isn't at the mercy of float
+      // rounding noise the way e.g. 0.9 - 0.7 (> 0.2) would be.
+      const previous = snap({ recallSpotCheck: { recallAtK: 0.5, mrr: 0.8 } });
+      const current = snap({ recallSpotCheck: { recallAtK: 0.3, mrr: 0.8 } }); // drop exactly 0.2
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+  });
+
+  describe("diffQualitySnapshots — quietAgents (per-agent, NEWLY quiet only)", () => {
+    test("an agent that transitions not-quiet → quiet fires threshold_crossed, targeted at that agent", () => {
+      const previous = snap({ quietAgents: { perAgent: [{ id: "anvil", quiet: false, daysSinceLastWrite: 2 }] } });
+      const current = snap({ quietAgents: { perAgent: [{ id: "anvil", quiet: true, daysSinceLastWrite: 9 }] } });
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toEqual([
+        {
+          kind: "quality.threshold_crossed",
+          scope: "quality",
+          summary: `agent anvil quiet for 9d (threshold ${QUALITY_QUIET_THRESHOLD_DAYS}d)`,
+          detail: { metric: "quietAgents", before: false, after: true, threshold: QUALITY_QUIET_THRESHOLD_DAYS },
+          targetIds: ["anvil"],
+        },
+      ]);
+    });
+
+    test("an agent already quiet in both snapshots → no repeat event (would be noise on every run)", () => {
+      const previous = snap({ quietAgents: { perAgent: [{ id: "anvil", quiet: true, daysSinceLastWrite: 9 }] } });
+      const current = snap({ quietAgents: { perAgent: [{ id: "anvil", quiet: true, daysSinceLastWrite: 16 }] } });
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("an agent not quiet in either snapshot → no event", () => {
+      const previous = snap({ quietAgents: { perAgent: [{ id: "anvil", quiet: false, daysSinceLastWrite: 1 }] } });
+      const current = snap({ quietAgents: { perAgent: [{ id: "anvil", quiet: false, daysSinceLastWrite: 2 }] } });
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("a brand-new agent absent from the previous snapshot, quiet now → no event (nothing to regress FROM)", () => {
+      const previous = snap({ quietAgents: { perAgent: [{ id: "anvil", quiet: false, daysSinceLastWrite: 1 }] } });
+      const current = snap({
+        quietAgents: {
+          perAgent: [
+            { id: "anvil", quiet: false, daysSinceLastWrite: 1 },
+            { id: "brand-new", quiet: true, daysSinceLastWrite: null },
+          ],
+        },
+      });
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("multiple agents, only one transitions → exactly one finding, for that agent only", () => {
+      const previous = snap({
+        quietAgents: {
+          perAgent: [
+            { id: "anvil", quiet: false, daysSinceLastWrite: 1 },
+            { id: "pulse", quiet: true, daysSinceLastWrite: 30 },
+          ],
+        },
+      });
+      const current = snap({
+        quietAgents: {
+          perAgent: [
+            { id: "anvil", quiet: true, daysSinceLastWrite: 8 }, // newly quiet
+            { id: "pulse", quiet: true, daysSinceLastWrite: 37 }, // still quiet, not new
+          ],
+        },
+      });
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toHaveLength(1);
+      expect(findings[0].targetIds).toEqual(["anvil"]);
+    });
+
+    test("daysSinceLastWrite null on the newly-quiet side degrades the summary gracefully, never a crash", () => {
+      // Synthetic — a never-written agent is always quiet from its first
+      // appearance in practice, so this transition shouldn't occur for real,
+      // but the diff must not crash if it ever does (defensive coverage).
+      const previous = snap({ quietAgents: { perAgent: [{ id: "ghost", quiet: false, daysSinceLastWrite: null }] } });
+      const current = snap({ quietAgents: { perAgent: [{ id: "ghost", quiet: true, daysSinceLastWrite: null }] } });
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toHaveLength(1);
+      expect(findings[0].summary).toBe("agent ghost quiet — no recorded write");
+    });
+  });
+
+  describe("diffQualitySnapshots — dedupClusters (BOTH >50% relative AND >=5 absolute growth)", () => {
+    test("meets both conditions → regression", () => {
+      const previous = snap({ dedupClusters: { clusterCount: 4 } });
+      const current = snap({ dedupClusters: { clusterCount: 9 } }); // +5 (125% growth)
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toEqual([
+        {
+          kind: "quality.regression",
+          scope: "quality",
+          summary: "dedup cluster count grew from 4 to 9 since last snapshot",
+          detail: { metric: "dedupClusters.clusterCount", before: 4, after: 9, threshold: QUALITY_EVENT_DEDUP_GROWTH_PCT_THRESHOLD },
+        },
+      ]);
+    });
+
+    test("relative growth >50% but absolute growth under 5 → no event", () => {
+      const previous = snap({ dedupClusters: { clusterCount: 2 } });
+      const current = snap({ dedupClusters: { clusterCount: 4 } }); // +2 (100% growth, but <5 absolute)
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("absolute growth >=5 but relative growth under 50% → no event", () => {
+      const previous = snap({ dedupClusters: { clusterCount: 20 } });
+      const current = snap({ dedupClusters: { clusterCount: 26 } }); // +6 absolute, but only 30% relative
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("previous count of 0 → any growth is infinite % (division-by-zero guard), so the absolute floor decides", () => {
+      const zeroToFive = diffQualitySnapshots(snap({ dedupClusters: { clusterCount: 5 } }), snap({ dedupClusters: { clusterCount: 0 } }));
+      expect(zeroToFive).toHaveLength(1);
+      const zeroToFour = diffQualitySnapshots(snap({ dedupClusters: { clusterCount: 4 } }), snap({ dedupClusters: { clusterCount: 0 } }));
+      expect(zeroToFour).toEqual([]);
+    });
+
+    test("shrinking cluster count → no event (regression only fires on growth)", () => {
+      const previous = snap({ dedupClusters: { clusterCount: 10 } });
+      const current = snap({ dedupClusters: { clusterCount: 5 } });
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("sanity: the exported constants match the documented '>50% AND by >=5' rule", () => {
+      expect(QUALITY_EVENT_DEDUP_GROWTH_PCT_THRESHOLD).toBe(0.5);
+      expect(QUALITY_EVENT_DEDUP_GROWTH_ABS_THRESHOLD).toBe(5);
+    });
+  });
+
+  describe("diffQualitySnapshots — missing data (gaps) never produces an event", () => {
+    test("current section is null (a gap) while previous has data → skipped, no event", () => {
+      const previous = snap({ embeddingCoverage: { coveragePct: 96 } });
+      const current = snap({ embeddingCoverage: null });
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("previous section is null (metric appeared for the first time) → skipped, no event", () => {
+      const previous = snap({ embeddingCoverage: null });
+      const current = snap({ embeddingCoverage: { coveragePct: 40 } }); // would otherwise cross the threshold hard
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("one metric gapped on both sides doesn't block other metrics from diffing normally in the same call", () => {
+      const previous = snap({ dedupClusters: null, staleness: { stalePct: 9 } });
+      const current = snap({ dedupClusters: null, staleness: { stalePct: 12 } });
+      const findings = diffQualitySnapshots(current, previous);
+      expect(findings).toEqual([
+        {
+          kind: "quality.threshold_crossed",
+          scope: "quality",
+          summary: "staleness rose to 12% past validTo (threshold 10%)",
+          detail: { metric: "staleness.stalePct", before: 9, after: 12, threshold: QUALITY_EVENT_STALENESS_ABS_THRESHOLD_PCT },
+        },
+      ]);
+    });
+  });
+
+  describe("diffQualitySnapshots — kitchen sink: multiple metrics regress/cross in one diff call", () => {
+    test("every metric can fire independently in the same diffQualitySnapshots call", () => {
+      const previous = snap({
+        embeddingCoverage: { coveragePct: 96 }, // will cross + regress
+        staleness: { stalePct: 5 }, // will cross
+        recallSpotCheck: { recallAtK: 0.9, mrr: 0.9 }, // both will regress
+        quietAgents: {
+          perAgent: [
+            { id: "anvil", quiet: false, daysSinceLastWrite: 1 }, // will newly-quiet
+            { id: "pulse", quiet: true, daysSinceLastWrite: 30 }, // stays quiet, no repeat event
+          ],
+        },
+        dedupClusters: { clusterCount: 4 }, // will regress
+      });
+      const current = snap({
+        embeddingCoverage: { coveragePct: 70 },
+        staleness: { stalePct: 25 },
+        recallSpotCheck: { recallAtK: 0.4, mrr: 0.3 },
+        quietAgents: {
+          perAgent: [
+            { id: "anvil", quiet: true, daysSinceLastWrite: 8 },
+            { id: "pulse", quiet: true, daysSinceLastWrite: 37 },
+          ],
+        },
+        dedupClusters: { clusterCount: 12 },
+      });
+      const findings = diffQualitySnapshots(current, previous);
+      const kinds = findings.map((f) => f.kind);
+      expect(kinds.filter((k) => k === "quality.threshold_crossed")).toHaveLength(3); // coverage, staleness, anvil-quiet
+      expect(kinds.filter((k) => k === "quality.regression")).toHaveLength(4); // coverage, recall@k, mrr, dedup
+      expect(findings).toHaveLength(7);
+      // Every finding is JSON-serializable (this is exactly what ends up in
+      // an OrgEvent's `detail` field via JSON.stringify).
+      for (const f of findings) expect(() => JSON.stringify(f.detail)).not.toThrow();
     });
   });
 });
