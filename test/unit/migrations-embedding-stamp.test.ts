@@ -42,6 +42,15 @@ function matchesCondition(row: Row, cond: any): boolean {
   const value = row[cond.attribute];
   switch (cond.comparator) {
     case "not_equal":
+    // flair#807: staleCondition()'s not-current leg now uses "not_equals"
+    // (the `not_` prefix form real Harper resolves to a negated-equals leaf
+    // — see embedding-stamp.ts's module doc) instead of the legacy
+    // "not_equal" alias. Same value-level semantics either way; this fake
+    // table doesn't model Harper's index-vs-live-record execution split
+    // (that's exercised for real in test/integration/
+    // migrations-embedding-stamp-e2e.test.ts), so both comparator spellings
+    // are handled identically here.
+    case "not_equals":
       return value !== cond.value;
     case "equals":
       return value === cond.value;
@@ -251,5 +260,109 @@ describe("embedding-stamp migration — a FAILED regen leaves the row pending, n
     const result = await m.run(50);
     expect(result.processed).toBe(0);
     expect(await m.countPending()).toBe(1);
+  });
+});
+
+describe("embedding-stamp migration — flair#807: staleCondition() comparator shape", () => {
+  it("uses \"not_equals\" (the negated-form comparator), never the legacy \"not_equal\" alias, for the not-current leg", async () => {
+    // Locks in the flair#807 fix: real Harper resolves "not_equals" (the
+    // `not_` PREFIX form) to a `negated: true` leaf, which bypasses a
+    // potentially stale/desynced secondary index and reads the live record
+    // directly (see embedding-stamp.ts's module doc for the full mechanism,
+    // root-caused against the installed @harperfast/harper source). The
+    // legacy "not_equal" alias does NOT get this bypass — reverting to it
+    // would silently reopen #807.
+    const queries: any[] = [];
+    const { table } = makeFakeMemoryTable([{ id: "m1", content: "a", embeddingModel: "old" }]);
+    const spyTable = {
+      ...table,
+      search(query: any) {
+        queries.push(query);
+        return table.search(query);
+      },
+    };
+    const m = createEmbeddingStampMigration(() => spyTable, () => CURRENT_MODEL, async () => true);
+    await m.detect();
+
+    expect(queries).toHaveLength(1);
+    const orGroup = queries[0].conditions[0];
+    expect(orGroup.operator).toBe("or");
+    const notCurrentLeg = orGroup.conditions.find((c: any) => c.attribute === "embeddingModel" && c.value === CURRENT_MODEL);
+    expect(notCurrentLeg.comparator).toBe("not_equals");
+    expect(notCurrentLeg.comparator).not.toBe("not_equal");
+  });
+});
+
+describe("embedding-stamp migration — flair#807: recheckPending() safety-net hook", () => {
+  /**
+   * A fake table whose search() and get() paths are DECOUPLED — search()
+   * reports whatever `searchIds` says is "pending" regardless of the
+   * store's real content, while get() always reads the store's true,
+   * current value. This mirrors the production divergence this safety net
+   * exists for: countPending()'s search-based query (index-assisted, can be
+   * stale) vs. a direct per-id record read (always live) disagreeing about
+   * the SAME row.
+   */
+  function makeDivergentTable(store: Map<string, Row>, searchIds: string[]) {
+    return {
+      async get(id: string) {
+        return store.has(id) ? { ...store.get(id)! } : null;
+      },
+      search(query: any): AsyncIterable<Row> {
+        const limit = typeof query?.limit === "number" ? query.limit : Infinity;
+        const ids = searchIds.slice(0, limit);
+        async function* gen() {
+          for (const id of ids) yield { ...(store.get(id) ?? { id }) } as Row;
+        }
+        return gen();
+      },
+    };
+  }
+
+  it("flags a row as a false positive when the search claims it pending but a direct get() shows it already current", async () => {
+    const store = new Map<string, Row>([
+      ["m1", { id: "m1", content: "a", embeddingModel: CURRENT_MODEL }], // TRUE state: already current
+    ]);
+    const table = makeDivergentTable(store, ["m1"]); // search() WRONGLY claims m1 is pending
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+
+    const recheck = await m.recheckPending!(10);
+    expect(recheck.sampled).toBe(1);
+    expect(recheck.falsePositives).toBe(1);
+  });
+
+  it("does NOT flag a genuinely stale row as a false positive (direct get() agrees it's still pending)", async () => {
+    const store = new Map<string, Row>([
+      ["m1", { id: "m1", content: "a", embeddingModel: "genuinely-old" }], // TRUE state: still stale
+    ]);
+    const table = makeDivergentTable(store, ["m1"]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+
+    const recheck = await m.recheckPending!(10);
+    expect(recheck.sampled).toBe(1);
+    expect(recheck.falsePositives).toBe(0);
+  });
+
+  it("a mix of real-stale and false-positive rows reports both counts correctly", async () => {
+    const store = new Map<string, Row>([
+      ["m1", { id: "m1", content: "a", embeddingModel: CURRENT_MODEL }], // false positive
+      ["m2", { id: "m2", content: "b", embeddingModel: "genuinely-old" }], // real
+    ]);
+    const table = makeDivergentTable(store, ["m1", "m2"]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+
+    const recheck = await m.recheckPending!(10);
+    expect(recheck.sampled).toBe(2);
+    expect(recheck.falsePositives).toBe(1);
+  });
+
+  it("a row deleted between search and the direct get() is never counted as a false positive", async () => {
+    const store = new Map<string, Row>(); // empty — "m1" was deleted
+    const table = makeDivergentTable(store, ["m1"]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+
+    const recheck = await m.recheckPending!(10);
+    expect(recheck.sampled).toBe(1);
+    expect(recheck.falsePositives).toBe(0);
   });
 });

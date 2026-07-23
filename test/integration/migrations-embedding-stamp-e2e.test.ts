@@ -25,9 +25,16 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { rm } from "node:fs/promises";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const EMBEDDING_STAMP_ID = "embedding-stamp";
 const AGENT_ID = "__flair_embedding_stamp_e2e_test_agent__";
+// getModelId() is a pure function of process.env (FLAIR_EMBEDDING_MODEL +
+// the prefix gate) — the spawned Harper child inherits this SAME process.env
+// (harper-lifecycle.ts's startHarper() spreads process.env as the child's
+// base env), so calling it here in the test process yields the IDENTICAL
+// value embedding-stamp.ts's getCurrentModelId() computes inside Harper.
+const CURRENT_MODEL_ID = getModelId();
 
 let harper: HarperInstance;
 let installDir: string;
@@ -61,6 +68,14 @@ describe("zero-touch migrations — embedding-stamp end-to-end (real Harper, alw
     // Row B: EXPLICIT null (a prior regen attempt failed, or a write raced
     // the embeddings engine's boot probe) — the queryable state
     // embedding-stamp's own writes now guarantee, per the module doc above.
+    // Row C (flair#807 regression): ALREADY carries the current model stamp
+    // — the exact shape a false positive would wrongly re-touch. Inserted
+    // via the ops-API `insert` operation (a fresh write, so its secondary
+    // index entry is genuinely in sync — this is the "3/3 success on a
+    // healthy store" reference case, not a reproduction of the actual
+    // stale-index bug, which requires a cross-version index desync this
+    // black-box test can't inject). Proves the fixed `not_equals`-based
+    // query has no false positives on real Harper for the common case.
     await opsCall({
       operation: "insert",
       database: "flair",
@@ -80,6 +95,14 @@ describe("zero-touch migrations — embedding-stamp end-to-end (real Harper, alw
           content: "embedding-stamp-e2e-marker-beta",
           embedding: null,
           embeddingModel: null,
+          createdAt: new Date().toISOString(),
+        },
+        {
+          id: "stamp-already-current",
+          agentId: AGENT_ID,
+          content: "embedding-stamp-e2e-marker-gamma",
+          embedding: [0.42, 0.42, 0.42],
+          embeddingModel: CURRENT_MODEL_ID,
           createdAt: new Date().toISOString(),
         },
       ],
@@ -131,5 +154,36 @@ describe("zero-touch migrations — embedding-stamp end-to-end (real Harper, alw
       // Content untouched — proves the migration is genuinely derived-only.
       expect(record.content).toContain("embedding-stamp-e2e-marker");
     }
+  }, 120_000);
+
+  test("flair#807: a row that ALREADY carries the current model stamp is never re-touched (no false positive on real Harper)", async () => {
+    // Reuses the SAME completed cycle the test above waits for — this just
+    // asserts on the row that was never supposed to be pending in the first
+    // place. A false positive on this row would have re-run it through
+    // Memory.put()'s regen branch, producing a NEW (different) embedding
+    // vector — the byte-for-byte-unchanged assertion below is exactly what
+    // would fail if staleCondition()'s not-current leg falsely matched it.
+    const deadline = Date.now() + 90_000;
+    let mig: any = null;
+    while (Date.now() < deadline) {
+      const detail = await healthDetail();
+      mig = detail?.migrations?.migrations?.find((m: any) => m.id === EMBEDDING_STAMP_ID);
+      if (mig?.state === "completed" || mig?.state === "halted" || mig?.state === "failed") break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    expect(mig?.state).toBe("completed");
+
+    const row = await opsCall({
+      operation: "search_by_value",
+      database: "flair",
+      table: "Memory",
+      search_attribute: "id",
+      search_value: "stamp-already-current",
+      get_attributes: ["*"],
+    });
+    const record = Array.isArray(row) ? row[0] : row;
+    expect(record.embeddingModel).toBe(CURRENT_MODEL_ID);
+    expect(record.embedding).toEqual([0.42, 0.42, 0.42]); // byte-identical — never regenerated
+    expect(record.content).toBe("embedding-stamp-e2e-marker-gamma");
   }, 120_000);
 });

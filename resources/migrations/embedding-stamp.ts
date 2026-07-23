@@ -60,6 +60,47 @@
  * known, narrow gap this bounded query cannot see;
  * resources/migration-boot.ts mitigates the common case by waiting for the
  * embeddings engine to settle before running migrations at all.
+ *
+ * flair#807 — completion-gate false-negative on 0.10-era / cross-version
+ * stores, root-caused against the installed `@harperfast/harper@5.1.22`
+ * source (node_modules/@harperfast/harper/resources/search.ts): for an
+ * INDEXED attribute (`embeddingModel` IS `@indexed` — schemas/memory.graphql),
+ * a non-negated `not_equal`/`ne` leaf condition takes `searchByIndex`'s
+ * `index && !skipIndex` branch, which reconstructs a SYNTHETIC partial record
+ * from the SECONDARY INDEX KEY alone (`recordMatcher = { [attribute_name]:
+ * key }`, resources/search.ts ~L418) and filters against THAT — never reading
+ * the live record. On a store whose rows were written under flair 0.10.0 /
+ * Harper 5.0.x and later rewritten via `PUT /Memory` (crossing a Harper
+ * 5.0.21→5.1.22 boot), the secondary index for `embeddingModel` can lag the
+ * live, on-disk value — the filter then evaluates a STALE key that never
+ * equals `getCurrentModelId()`, matching every row regardless of its true
+ * (already-current) stamp.
+ *
+ * The fix: use `comparator: "not_equals"` (the `not_` PREFIX form, distinct
+ * from the legacy `not_equal`/`ne` ALIAS — see search.ts's
+ * `resolveComparator`/`NEGATABLE_BASE_COMPARATORS`) for the not-current leg.
+ * `prepareConditions` resolves this to `{comparator: "equals", negated:
+ * true}`, which flips `searchByIndex`'s `skipIndex` flag
+ * (`searchCondition.negated && index && !isPrimaryKey`) — this is Harper's
+ * OWN documented mechanism for "bypass the secondary index, iterate the
+ * primary store directly" (see that file's comment: "we need to consider
+ * records whose attribute value is missing from the index... so we bypass
+ * the secondary index"). That path reads the LIVE record unconditionally,
+ * immune to any index/record divergence regardless of cause (this migration,
+ * a future one, or a Harper-internal index-rebuild timing issue). Strictly
+ * MORE reliable than the index-assisted path in every case — a genuinely
+ * stale row still matches (full scan over live values), so this changes
+ * nothing about the "3/3 success" happy path, only closes the false-positive
+ * gap on migrated stores. The `equals: null` leg is unaffected (not a
+ * negated comparator — no analogous bypass exists or is needed; its
+ * behavior was already verified against real Harper per the doc above).
+ *
+ * `recheckPending()` below is a SEPARATE, generic defense-in-depth layer
+ * (wired into resources/migrations/runner.ts's completion gate) — even a
+ * migration whose countPending() query is airtight can be defeated by some
+ * OTHER, not-yet-understood counting artifact; this lets the runner PROVE
+ * (via `.get()`, a primary-key lookup — always live, never index-assisted)
+ * that a nonzero countPending() result is real before halting on it.
  */
 import { databases } from "@harperfast/harper";
 import { getModelId } from "../embeddings-provider.js";
@@ -134,16 +175,24 @@ export function createEmbeddingStampMigration(
     regenViaHttpPut(id, existing, fetch),
 ): Migration {
   function staleCondition() {
-    // OR-combined: `not_equal <current>` catches a stale non-null model
+    // OR-combined: `not_equals <current>` catches a stale non-null model
     // string; `equals null` catches the explicit-null state this
     // migration's own writes leave behind on a failed regen (see the
     // module doc above — Harper's index never sees a TRULY ABSENT
     // property, only an explicit null).
+    //
+    // "not_equals" (NOT the legacy "not_equal" alias — see the flair#807
+    // addendum in the module doc) is load-bearing: it's the `not_` PREFIX
+    // form Harper's query engine resolves to a `negated: true` leaf, which
+    // bypasses the (on some stores, stale/desynced) secondary index and
+    // reads the live record directly. Reverting this to "not_equal" would
+    // reopen #807 on any store where the embeddingModel index lags the
+    // on-disk value.
     return [
       {
         operator: "or",
         conditions: [
-          { attribute: "embeddingModel", comparator: "not_equal", value: getCurrentModelId() },
+          { attribute: "embeddingModel", comparator: "not_equals", value: getCurrentModelId() },
           { attribute: "embeddingModel", comparator: "equals", value: null },
         ],
       },
@@ -195,6 +244,40 @@ export function createEmbeddingStampMigration(
       }
 
       return { processed: touchedIds.length, touchedIds };
+    },
+
+    /**
+     * flair#807 completion-gate safety net (resources/migrations/runner.ts
+     * calls this ONLY when a nonzero countPending() would otherwise halt the
+     * migration). Re-derives up to `limit` currently-"pending" ids via the
+     * SAME staleCondition() search countPending() uses, then re-checks each
+     * one by a DIRECT `.get()` — a primary-key lookup, never index-assisted,
+     * so it can't be fooled by the same secondary-index divergence that can
+     * make the search-based count wrong. Returns counts only (never ids —
+     * matches this codebase's structural-only-disclosure discipline, e.g.
+     * resources/migrations/ledger.ts's module doc), so the runner can log a
+     * loud, actionable WARN without ever needing to know which rows.
+     */
+    async recheckPending(limit: number): Promise<{ sampled: number; falsePositives: number }> {
+      const table = getTable();
+      const current = getCurrentModelId();
+
+      const ids: string[] = [];
+      for await (const row of table.search({ conditions: staleCondition(), limit })) {
+        const id = String((row as { id?: unknown }).id ?? "");
+        if (id) ids.push(id);
+      }
+
+      let falsePositives = 0;
+      for (const id of ids) {
+        const existing = await table.get(id);
+        // A row that vanished since the search, OR whose live embeddingModel
+        // still doesn't match current, is a GENUINE pending row (or a
+        // concurrent delete) — never counted as a false positive.
+        if (existing && existing.embeddingModel === current) falsePositives++;
+      }
+
+      return { sampled: ids.length, falsePositives };
     },
   };
 }
