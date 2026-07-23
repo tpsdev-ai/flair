@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-07-23
+
 ### Added
 
 - **`flair quality --emit` — quality OrgEvents (Slice 2 of the memory-quality-observability arc).** `flair quality` learns to snapshot, diff, and alert on regressions, riding the *existing* OrgEvent write surface — no schema change, no new table. Passing `--emit` (requires an agent identity) snapshots the report's numeric core, diffs it against the agent's previous quality snapshot (stored as a persistent-durability Flair memory, subject `quality-snapshot/<host>`), and publishes an OrgEvent (`quality.threshold_crossed` or `quality.regression`) for each finding via the same signed `PUT /OrgEvent/{id}` `flair orgevent` already uses (now shared through one `publishOrgEvent()` call site). Thresholds: embedding coverage below 90% or dropped >5pts, staleness above 10%, recall spot-check recall@k/MRR dropped >0.2, an agent newly quiet, dedup clusters grown >50% *and* by ≥5 — all edge-triggered (fires on the transition since the last snapshot, not on every run a condition merely persists) and all skipped on missing/gapped data (absence is never treated as a regression). Every event carries a behavioral fact, never a trust judgment ("embedding coverage dropped to 85% (threshold 90%)", never "agent X is low quality"). A first `--emit` run has no baseline to diff against, so it stores the snapshot and emits nothing. Without `--emit`, `flair quality` is unchanged — fully read-only, byte-identical output.
