@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-07-23
+
 ### Fixed
 
 - **The `embedding-stamp` migration's completion gate could halt forever on stores where every row already carried the current embedding-model stamp.** On a store whose rows were written under an older flair/Harper release and later rewritten via `PUT /Memory` (crossing a Harper minor-version boundary at boot), the migration's in-process pending-count query could report every row as still pending even though a direct record read showed each one already correctly stamped — root-caused to `embeddingModel` being an `@indexed` attribute: Harper's non-negated `not_equal` leaf condition reconstructs its match target from the (on such stores, stale) secondary index key rather than the live record, while the equivalent ops-API query reads the live record and returns the correct count. Fixed at the root by switching the query to the `not_equals` negated-comparator form, which Harper resolves to bypass the secondary index and scan primary-store records directly — immune to any index/record divergence, and behaviorally identical for genuinely-stale rows. Added a completion-gate safety net (opt-in via a new optional `Migration.recheckPending()` hook): before halting on a nonzero pending count small enough to check exhaustively, the runner re-verifies every claimed-pending row by a direct per-id read and, if all are already correct, logs a loud WARN and passes the gate instead of halting on what was really a counting artifact (#807).
