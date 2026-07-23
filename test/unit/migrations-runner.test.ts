@@ -7,7 +7,7 @@
  * real-Harper end-to-end coverage: boot wiring, process-kill/resume,
  * version handshake).
  */
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -548,6 +548,187 @@ describe("runMigrationCycle — completion gate: row count still nonzero", () =>
     const detail = JSON.parse((ledgerEvents[0] as any).detail);
     expect(detail.outcome).toBe("halted");
     expect(detail.error).toContain("rowsRemaining=1");
+  });
+});
+
+describe("runMigrationCycle — flair#807 completion-gate safety net (migration.recheckPending)", () => {
+  /**
+   * A migration whose countPending() is a COUNTING ARTIFACT — it always
+   * reports `stuckCount` regardless of what run() actually did (mirrors the
+   * production bug: a search-based count reading a stale/desynced secondary
+   * index). `recheckFalsePositives` controls how many of the "pending" rows
+   * recheckPending() reports as already-correct on a direct read.
+   */
+  function makeArtifactMigration(opts: {
+    id: string;
+    stuckCount: number;
+    recheckFalsePositives: number;
+    recheckThrows?: boolean;
+  }): Migration & { recheckCalls: number[] } {
+    const recheckCalls: number[] = [];
+    return {
+      id: opts.id,
+      riskClass: "derived-only",
+      affectsTables: ["Memory"],
+      recheckCalls,
+      async detect() { return true; },
+      async countPending() { return opts.stuckCount; },
+      async run() { return { processed: 0, touchedIds: [] }; }, // 0 signals loop-end immediately
+      async recheckPending(limit: number) {
+        recheckCalls.push(limit);
+        if (opts.recheckThrows) throw new Error("recheckPending boom");
+        return { sampled: opts.stuckCount, falsePositives: opts.recheckFalsePositives };
+      },
+    };
+  }
+
+  it("PASSES the gate with a WARN when recheckPending proves every claimed-pending row is already correct", async () => {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
+    const relationship = makeStore([]);
+    const migration = makeArtifactMigration({ id: "artifact-all-fp", stuckCount: 3, recheckFalsePositives: 3 });
+    const registry = buildRegistryWith(migration);
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    let result;
+    try {
+      const ledgerEvents: unknown[] = [];
+      result = await runMigrationCycle({
+        registry,
+        getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+        dataDir,
+        runningVersion: "0.1.0",
+        sleep: fastSleep,
+        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      });
+
+      expect(result.ran).toBe(true);
+      const detail = JSON.parse((ledgerEvents[0] as any).detail);
+      expect(detail.outcome).toBe("success");
+      expect(detail.rowsRemaining).toBe(0);
+      expect(migration.recheckCalls).toEqual([3]); // called once, with finalRemaining as the limit
+
+      const progress = listMigrationProgress().find((p) => p.id === "artifact-all-fp");
+      expect(progress?.state).toBe("completed");
+
+      expect(warnSpy).toHaveBeenCalled();
+      const warnedText = warnSpy.mock.calls.map((c) => String(c[0])).join(" ");
+      expect(warnedText).toContain("artifact-all-fp");
+      expect(warnedText).toContain("counting artifact");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("still HALTS when recheckPending finds at least one row genuinely still pending (no false-pass on real work)", async () => {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
+    const relationship = makeStore([]);
+    // 2 claimed pending, only 1 is a false positive — the OTHER is real.
+    const migration = makeArtifactMigration({ id: "artifact-partial-fp", stuckCount: 2, recheckFalsePositives: 1 });
+    const registry = buildRegistryWith(migration);
+
+    const ledgerEvents: unknown[] = [];
+    const result = await runMigrationCycle({
+      registry,
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+    });
+
+    expect(result.ran).toBe(true);
+    const detail = JSON.parse((ledgerEvents[0] as any).detail);
+    expect(detail.outcome).toBe("halted");
+    expect(detail.error).toContain("rowsRemaining=2");
+  });
+
+  it("skips the safety net (halts as before) when finalRemaining exceeds the exhaustive-recheck ceiling", async () => {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
+    const relationship = makeStore([]);
+    // Even though recheckPending WOULD report every row as a false positive,
+    // a count this large can't be cheaply verified exhaustively — the net
+    // must not engage at all (recheckPending never even gets called).
+    const migration = makeArtifactMigration({ id: "artifact-too-big", stuckCount: 51, recheckFalsePositives: 51 });
+    const registry = buildRegistryWith(migration);
+
+    const ledgerEvents: unknown[] = [];
+    const result = await runMigrationCycle({
+      registry,
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+    });
+
+    expect(result.ran).toBe(true);
+    const detail = JSON.parse((ledgerEvents[0] as any).detail);
+    expect(detail.outcome).toBe("halted");
+    expect(detail.error).toContain("rowsRemaining=51");
+    expect(migration.recheckCalls).toEqual([]); // never called — over the ceiling
+  });
+
+  it("a throwing recheckPending never crashes the cycle — falls back to the original halt", async () => {
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
+    const relationship = makeStore([]);
+    const migration = makeArtifactMigration({
+      id: "artifact-throws",
+      stuckCount: 3,
+      recheckFalsePositives: 3,
+      recheckThrows: true,
+    });
+    const registry = buildRegistryWith(migration);
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const ledgerEvents: unknown[] = [];
+      const result = await runMigrationCycle({
+        registry,
+        getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+        dataDir,
+        runningVersion: "0.1.0",
+        sleep: fastSleep,
+        ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+      });
+
+      expect(result.ran).toBe(true);
+      const detail = JSON.parse((ledgerEvents[0] as any).detail);
+      expect(detail.outcome).toBe("halted");
+      expect(detail.error).toContain("rowsRemaining=3");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("a migration that doesn't implement recheckPending behaves exactly as before (plain halt, no net)", async () => {
+    // Covered structurally by the pre-existing "broken migration" test above
+    // (no recheckPending on that Migration literal at all) — this test just
+    // makes the flair#807 non-regression explicit for future readers.
+    const memory = makeStore([{ id: "m1", content: "a", agentId: "a1" }]);
+    const relationship = makeStore([]);
+    const noNetMigration: Migration = {
+      id: "no-safety-net",
+      riskClass: "derived-only",
+      affectsTables: ["Memory"],
+      async detect() { return true; },
+      async countPending() { return 1; },
+      async run() { return { processed: 0, touchedIds: [] }; },
+    };
+    const registry = buildRegistryWith(noNetMigration);
+
+    const ledgerEvents: unknown[] = [];
+    const result = await runMigrationCycle({
+      registry,
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+    });
+
+    expect(result.ran).toBe(true);
+    const detail = JSON.parse((ledgerEvents[0] as any).detail);
+    expect(detail.outcome).toBe("halted");
   });
 });
 

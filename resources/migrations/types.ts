@@ -98,4 +98,22 @@ export interface Migration {
    * marker) — no separate journal/checkpoint file.
    */
   run(batchSize: number): Promise<RunBatchResult>;
+  /**
+   * OPTIONAL completion-gate safety net (flair#807). If countPending()
+   * reports a nonzero, would-otherwise-halt count, the runner calls this
+   * (bounded by GATE_SAFETY_NET_MAX_RECHECK — see runner.ts) to re-verify up
+   * to `limit` of those "pending" rows by a DIRECT per-row read, bypassing
+   * whatever query mechanism countPending() itself used. Root cause this
+   * exists for: countPending()'s search-based query can be misled by a
+   * stale/desynced secondary index on a migrated store (see
+   * resources/migrations/embedding-stamp.ts's flair#807 doc for the
+   * concrete mechanism); a `.get()`-by-id primary-key lookup is immune to
+   * that class of bug. Returns COUNTS ONLY — never row ids — so the runner
+   * can log a loud, actionable WARN without exposing which records.
+   *
+   * A migration that omits this gets exactly the prior behavior: a nonzero
+   * countPending() at the gate always halts. Implementing it is a purely
+   * additive opt-in, never required for correctness of the base gate.
+   */
+  recheckPending?(limit: number): Promise<{ sampled: number; falsePositives: number }>;
 }

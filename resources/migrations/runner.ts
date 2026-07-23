@@ -48,6 +48,18 @@ import { join } from "node:path";
  */
 export const TEST_BATCH_DELAY_ENV = "FLAIR_MIGRATION_TEST_BATCH_DELAY_MS";
 
+/**
+ * flair#807 completion-gate safety net: the maximum `finalRemaining` count
+ * the gate will EXHAUSTIVELY re-verify (every claimed-pending row, never a
+ * probabilistic subset) via `migration.recheckPending()` before declaring a
+ * halt. Bounded so this stays "cheap" (a per-boot gate check, not a bulk
+ * job) and so the net can only ever flip a gate from fail→pass when it has
+ * proven — not sampled — that the WHOLE remaining set is a counting
+ * artifact. A `finalRemaining` above this threshold skips the net entirely
+ * and halts exactly as before (a partial recheck is not proof for the rest).
+ */
+const GATE_SAFETY_NET_MAX_RECHECK = 50;
+
 function resolveTestBatchDelayMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
   if (!shouldRegisterSyntheticMigration(env)) return undefined;
   const raw = env[TEST_BATCH_DELAY_ENV];
@@ -423,6 +435,45 @@ async function runOneMigration(
 
   let hashEnvelopeMatch: boolean | null = null;
   let gateOk = finalRemaining === 0;
+
+  // ── flair#807 safety net: a nonzero finalRemaining can itself be a
+  // COUNTING ARTIFACT (e.g. countPending()'s search-based query reading a
+  // stale/desynced secondary index on a migrated store — see
+  // resources/migrations/embedding-stamp.ts's flair#807 doc for the
+  // concrete mechanism that motivated this) rather than real pending work.
+  // Only engages when finalRemaining is small enough to verify
+  // EXHAUSTIVELY — every claimed-pending row, not a subset — via a DIRECT
+  // per-row read (migration.recheckPending(), opt-in per Migration type).
+  // If every single one comes back already correct on direct read, the
+  // gate's nonzero count was the bug: log loudly and PASS with a WARN
+  // instead of halting forever on an artifact a real re-run can never
+  // clear (countPending() would report the same wrong number next boot).
+  if (
+    !gateOk &&
+    finalRemaining > 0 &&
+    finalRemaining <= GATE_SAFETY_NET_MAX_RECHECK &&
+    typeof migration.recheckPending === "function"
+  ) {
+    try {
+      const recheck = await migration.recheckPending(finalRemaining);
+      if (recheck.sampled === finalRemaining && recheck.falsePositives === recheck.sampled) {
+        console.warn(
+          `[migrations] ${migration.id}: completion gate countPending() reported ${finalRemaining} pending, ` +
+            `but a direct per-record read of ALL ${recheck.sampled} claimed-pending rows found every one already ` +
+            `correct. Treating this as a counting artifact (search/index divergence), NOT real pending work — ` +
+            `passing the gate with this WARN instead of halting.`,
+        );
+        gateOk = true;
+      }
+    } catch (err) {
+      // The safety net itself must never crash or worsen the gate outcome —
+      // a failure here just leaves gateOk as countPending() computed it.
+      console.warn(
+        `[migrations] ${migration.id}: completion-gate safety net recheckPending() threw (` +
+          `${(err as Error)?.message ?? String(err)}) — proceeding with the original gate result.`,
+      );
+    }
+  }
 
   if (gateOk && posture.gate === "count+full-envelope") {
     try {
