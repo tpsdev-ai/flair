@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The cross-encoder reranker (`FLAIR_RERANK_ENABLED`) errored on every call against real production data and silently no-op'd (fail-open masked it — `rerankCount` stayed 0, `fallbackCount` climbed).** Found running the OPS-RERANKER-INTEGRATION §6 live-corpus gate against rockit (#811). Two compounding root causes, both fixed in `resources/rerank-provider.ts`: (1) **context overflow** — the offline pilot's 16-doc fixture used short synthetic prose, but real memory content routinely exceeds either model's small context window; every (query, doc) pair is now truncated to a context-derived token budget (char pre-cut + exact tokenizer-level cut) before it ever reaches the engine, making the `rankAll` "input lengths... exceed the context size" throw effectively unreachable instead of routine. (2) **stale config** — `ensureInit()` used to cache which model was loaded PERMANENTLY on first success/failure, so a later `FLAIR_RERANK_MODEL` change had no effect until process restart ("configured model X, served model Y" could persist silently); config is now re-validated on every call and the engine reinitializes when it changes. Also flipped the **default model to `jina-reranker-v2`** (its rank-pooling path completes inside Harper) — the previous default, `qwen3-reranker-0.6b-q8`'s generative yes/no path, reliably returns empty logits inside Harper's resource runtime (a separate, previously-documented dual-native-backend limitation truncation alone doesn't fix) and is now marked experimental, kept available but not default. Fail-open behavior is unchanged (a rerank error still never blocks recall); `health.ts`'s `rerank.{state,rerankCount,fallbackCount,lastLatencyMs}` surface is unchanged in shape.
+
 ## [0.27.1] - 2026-07-23
 
 ### Fixed
