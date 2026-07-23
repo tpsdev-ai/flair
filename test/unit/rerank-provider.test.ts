@@ -8,6 +8,9 @@ import {
   getRerankMinCandidates,
   getRerankStatus,
   rerankCandidates,
+  truncateChars,
+  truncateTokenBudget,
+  needsReinit,
 } from "../../resources/rerank-provider";
 
 // These tests exercise the DETERMINISTIC scoring + reorder + config paths
@@ -161,12 +164,94 @@ describe("config readers (FLAIR_RERANK_* env, default OFF)", () => {
     expect(s.enabled).toBe(false);
     expect(s.topN).toBe(50);
     expect(s.budgetMs).toBe(2500);
-    // model resolves to the quality default
-    expect(s.model).toBe("qwen3-reranker-0.6b-q8");
+    // model resolves to the WORKING default (flair#811: jina's rank path
+    // completes inside Harper; qwen3's generative path doesn't — see
+    // resources/rerank-provider.ts's file header).
+    expect(s.model).toBe("jina-reranker-v2");
   });
-  test("unknown FLAIR_RERANK_MODEL falls back to the quality default", () => {
+  test("unknown FLAIR_RERANK_MODEL falls back to the working default", () => {
     process.env.FLAIR_RERANK_MODEL = "does-not-exist";
+    expect(getRerankStatus().model).toBe("jina-reranker-v2");
+  });
+  test("qwen3 is still selectable explicitly (kept available, EXPERIMENTAL)", () => {
+    process.env.FLAIR_RERANK_MODEL = "qwen3-reranker-0.6b-q8";
     expect(getRerankStatus().model).toBe("qwen3-reranker-0.6b-q8");
+  });
+});
+
+describe("truncateChars (context-budget truncation, flair#811 layer 1)", () => {
+  test("long text is truncated to the char budget", () => {
+    const long = "x".repeat(5000);
+    const out = truncateChars(long, 2000);
+    expect(out.length).toBe(2000);
+    expect(out).toBe("x".repeat(2000));
+  });
+
+  test("short text is returned UNCHANGED (same reference, no copy)", () => {
+    const short = "a short memory note";
+    const out = truncateChars(short, 2000);
+    expect(out).toBe(short);
+  });
+
+  test("text exactly at the budget is unchanged", () => {
+    const exact = "y".repeat(2000);
+    expect(truncateChars(exact, 2000)).toBe(exact);
+  });
+
+  test("negative/zero budget never throws, clamps to empty", () => {
+    expect(truncateChars("hello", 0)).toBe("");
+    expect(truncateChars("hello", -5)).toBe("");
+  });
+});
+
+describe("truncateTokenBudget (context-budget truncation, flair#811 layer 2 core)", () => {
+  test("long token array is truncated to the budget", () => {
+    const tokens = Array.from({ length: 500 }, (_, i) => i);
+    const out = truncateTokenBudget(tokens, 100);
+    expect(out.length).toBe(100);
+    expect(out).toEqual(tokens.slice(0, 100));
+  });
+
+  test("short token array is returned UNCHANGED (same reference)", () => {
+    const tokens = [1, 2, 3];
+    expect(truncateTokenBudget(tokens, 100)).toBe(tokens);
+  });
+
+  test("token array exactly at the budget is unchanged", () => {
+    const tokens = [1, 2, 3];
+    expect(truncateTokenBudget(tokens, 3)).toBe(tokens);
+  });
+
+  test("negative/zero budget never throws, clamps to empty", () => {
+    expect(truncateTokenBudget([1, 2, 3], 0)).toEqual([]);
+    expect(truncateTokenBudget([1, 2, 3], -5)).toEqual([]);
+  });
+});
+
+describe("needsReinit (config-change reinit decision, flair#811 point 3)", () => {
+  // The bug: ensureInit() used to short-circuit on _state === "ready" or
+  // "failed" UNCONDITIONALLY, so a later FLAIR_RERANK_MODEL change had no
+  // effect for the life of the process ("configured model X, served model
+  // Y" could persist silently). needsReinit() is the fix's decision core.
+  test("never initialized -> always reinit, regardless of cached/requested keys", () => {
+    expect(needsReinit("uninitialized", "", "jina-reranker-v2")).toBe(true);
+    expect(needsReinit("uninitialized", "jina-reranker-v2", "jina-reranker-v2")).toBe(true);
+  });
+
+  test("same model, ready -> no-op (don't reload a loaded GGUF)", () => {
+    expect(needsReinit("ready", "jina-reranker-v2", "jina-reranker-v2")).toBe(false);
+  });
+
+  test("same model, failed -> no-op (don't retry-storm a config that's still broken)", () => {
+    expect(needsReinit("failed", "jina-reranker-v2", "jina-reranker-v2")).toBe(false);
+  });
+
+  test("different model, ready -> reinit (config changed away from a working model)", () => {
+    expect(needsReinit("ready", "jina-reranker-v2", "qwen3-reranker-0.6b-q8")).toBe(true);
+  });
+
+  test("different model, failed -> reinit (config changed; give the new config its own attempt)", () => {
+    expect(needsReinit("failed", "qwen3-reranker-0.6b-q8", "jina-reranker-v2")).toBe(true);
   });
 });
 
