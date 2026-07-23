@@ -140,7 +140,6 @@
     "harper-fabric-embeddings",
   ],
   "overrides": {
-    "harper": "npm:@harperfast/harper@5.1.22",
     "react-native-fs": "npm:empty-npm-package@1.0.0",
   },
   "packages": {
