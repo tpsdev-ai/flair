@@ -34,6 +34,17 @@
  * (and its ownership gate) — its own auth model is verified-agent +
  * within-org + explicitly NO ownership requirement.
  *
+ * NO READ-SCOPE GATE — INTENTIONAL ASYMMETRY with citation-on-write
+ * (flair#775): this endpoint deliberately does NOT validate reported ids
+ * against the caller's read scope. Usage feedback is the cross-agent
+ * contract described above (agent B reports using agent A's memory
+ * regardless of A's visibility setting), and the no-enumeration response
+ * below already denies existence probing on this surface. Citation-on-write
+ * (./usage-recording.ts's recordCitations()) DOES scope-gate each cited id —
+ * it is a separate write surface with a narrower threat model; see that
+ * module's doc. Do not "unify" the two: the difference is a K&S binding
+ * condition on the flair#775 locked design, not drift.
+ *
  * WHY THIS ISN'T A @table-BACKED RESOURCE: the actual dedup ledger (one row
  * per (agentId, memoryId) contribution) lives in the `MemoryUsage` table
  * (schemas/memory.graphql), guarded by resources/MemoryUsage.ts. But this
@@ -173,7 +184,10 @@ export class RecordUsage extends Resource {
         // ./usage-recording.ts's recordUsageContribution() — a shared,
         // single-implementation extraction (also used by citation-on-write,
         // resources/Memory.ts's post()/put()). Byte-identical behavior to
-        // the former private _recordOne() this replaced.
+        // the former private _recordOne() this replaced. Deliberately NO
+        // read-scope check on memoryId here (flair#775 asymmetry — see the
+        // module doc's NO READ-SCOPE GATE paragraph; citation-on-write's
+        // recordCitations() is the surface that scope-gates).
         await recordUsageContribution(ctx, agentId, memoryId, attribution, now);
       } catch (err) {
         // Never let one bad id fail the whole batch, and never let an

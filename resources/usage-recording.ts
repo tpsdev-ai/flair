@@ -26,10 +26,29 @@
  * RecordUsage.post()'s loop, parameterized so Memory.ts can drive it from a
  * write body instead of a dedicated POST body. It NEVER reads the ledger for
  * authority — it only writes contributions; `usedMemoryIds` must never enter
- * an access/scope/attribution/dedup decision (flair#744 slice A invariant 3).
+ * an access/scope/attribution/dedup decision (flair#744 slice A invariant 3;
+ * the flair#775 read-scope gate below is the REVERSE direction — the writer's
+ * scope vets the cited ids, the cited ids never widen anything).
+ *
+ * recordCitations() additionally validates each cited id against the
+ * WRITER's own read-scope before crediting (flair#775, a Kern+Sherlock
+ * binding condition on the locked design): citing a memory the writer cannot
+ * read is silently dropped, uniformly with a nonexistent id — never an
+ * error, never a distinguishable code path (an error, or any response/shape
+ * difference, would leak "that id exists but you can't see it").
+ * POST /RecordUsage is DELIBERATELY not scope-gated — its module doc
+ * establishes usage feedback as a cross-agent contract (agent B reports
+ * using agent A's memory regardless of A's visibility setting);
+ * citation-on-write is a separate write surface with a narrower threat
+ * model (the ids ride along on the WRITER's own memory-creation call, so
+ * crediting an unreadable id would let a writer both probe for and boost
+ * memories it cannot see). So the scope gate lives HERE, not retrofitted
+ * onto recordUsageContribution() — do not "unify" the two surfaces.
  */
 import { databases } from "@harperfast/harper";
 import { withDetachedTxn } from "./table-helpers.js";
+import { resolveReadScope } from "./memory-read-scope.js";
+import type { ReadScope, ScopableRecord } from "./memory-read-scope.js";
 import type { AgentAuthVerdict } from "./agent-auth.js";
 
 /**
@@ -121,6 +140,18 @@ export async function recordUsageContribution(
 }
 
 /**
+ * Default record fetch for recordCitations()'s read-scope gate — the RAW
+ * Memory table (bypassing the Memory RESOURCE class's own read wrapper; the
+ * same trusted-internal-caller pattern recordUsageContribution() uses) so
+ * `scope.isAllowed` runs against the raw stored record. Never throws: a
+ * fetch failure reads as "not found", which the gate silently drops —
+ * identical to a nonexistent id.
+ */
+async function fetchMemoryForScopeCheck(ctx: any, memoryId: string): Promise<ScopableRecord | null> {
+  return withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(memoryId)).catch(() => null) as Promise<ScopableRecord | null>;
+}
+
+/**
  * Batch citation helper — credits every id in `usedMemoryIds` through
  * `recordFn` (the real `recordUsageContribution` by default), one contribution
  * per unique id, capped at `MAX_USAGE_IDS_PER_CALL`.
@@ -143,14 +174,28 @@ export async function recordUsageContribution(
  *     validated request body, so an oversized list is trimmed rather than
  *     rejected (unlike RecordUsage.post()'s validated `memoryIds`, which
  *     400s over the same cap).
+ *   - Each cited id is validated against the WRITER's read scope before it
+ *     is credited (flair#775 slice 1, K&S binding condition — see the module
+ *     doc above): the scope is resolved ONCE per batch via resolveReadScope
+ *     (the same single source every cross-agent Memory read path uses), then
+ *     each id gets one raw fetch + one in-process `scope.isAllowed` check.
+ *     Not-found and out-of-scope take the SAME silent-drop branch — there is
+ *     no structurally distinguishable code path, error, or response
+ *     difference between them that a caller could use to probe whether
+ *     another agent's private id exists.
  *   - Each id is credited independently: one id throwing never stops the
  *     rest, and the failure is logged server-side, never surfaced to the
  *     caller (the write already committed by the time this runs).
  *
- * `agentId` passed to `recordFn` is ALWAYS `auth.agentId` — the resolved
- * auth context, never anything derived from `usedMemoryIds` or any other
- * caller-supplied input (flair#744 slice A invariant 4: no forging on
- * behalf of another identity).
+ * `agentId` passed to `recordFn` (and to the scope resolution) is ALWAYS
+ * `auth.agentId` — the resolved auth context, never anything derived from
+ * `usedMemoryIds` or any other caller-supplied input (flair#744 slice A
+ * invariant 4: no forging on behalf of another identity).
+ *
+ * `recordFn` / `fetchFn` / `scopeFn` are unit-test injection seams
+ * (test/unit/usage-recording.test.ts) — production callers pass none of
+ * them and always get the real recordUsageContribution / raw-table fetch /
+ * resolveReadScope.
  */
 export async function recordCitations(
   ctx: any,
@@ -158,6 +203,8 @@ export async function recordCitations(
   usedMemoryIds: unknown,
   now: string,
   recordFn: typeof recordUsageContribution = recordUsageContribution,
+  fetchFn: (ctx: any, memoryId: string) => Promise<ScopableRecord | null> = fetchMemoryForScopeCheck,
+  scopeFn: typeof resolveReadScope = resolveReadScope,
 ): Promise<void> {
   if (auth.kind !== "agent") return;
 
@@ -171,8 +218,30 @@ export async function recordCitations(
 
   const ids = [...new Set(usedMemoryIds as string[])].slice(0, MAX_USAGE_IDS_PER_CALL);
 
+  // Resolve the WRITER's read scope ONCE per batch. Fail CLOSED: if scope
+  // resolution itself fails, drop the whole batch rather than credit
+  // unvetted ids — citations are advisory signal, so losing a batch is
+  // strictly safer than crediting an id the writer may not be able to read.
+  let scope: ReadScope;
+  try {
+    scope = await scopeFn(auth.agentId);
+  } catch (err) {
+    console.error("recordCitations: read-scope resolution failed — batch dropped (no-op)", { err });
+    return;
+  }
+
   for (const id of ids) {
     try {
+      // flair#775 slice 1 read-scope gate. The raw fetch + in-process
+      // predicate is deliberately ONE branch for both "doesn't exist" and
+      // "exists but out of the writer's read scope" — uniform silent drop
+      // (see the module doc). recordUsageContribution's own existence
+      // re-check makes this a second point-lookup of the same record;
+      // accepted — keeping the shared ledger core byte-identical for
+      // RecordUsage.post() is worth two point-lookups on a ≤20-id advisory
+      // batch.
+      const record = await fetchFn(ctx, id);
+      if (!record || !scope.isAllowed(record)) continue;
       await recordFn(ctx, auth.agentId, id, undefined, now);
     } catch (err) {
       // Never let one bad id stop the batch — same no-op-on-error discipline

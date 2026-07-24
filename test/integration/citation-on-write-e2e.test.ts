@@ -1,4 +1,5 @@
-// Citation-on-write (flair#744 slice A) e2e — real-Harper integration tests.
+// Citation-on-write (flair#744 slice A; flair#775 slice 1 read-scope gate)
+// e2e — real-Harper integration tests.
 //
 // WHY THIS FILE EXISTS: mirrors test/integration/record-usage-e2e.test.ts
 // (same real-Harper spawn / signed TPS-Ed25519 request pattern) for the NEW
@@ -6,11 +7,21 @@
 // wrapper around the SAME shared ledger core RecordUsage.ts uses
 // (resources/usage-recording.ts), so this file focuses on the properties that
 // are SPECIFIC to the write-surface integration — the ledger-sharing/dedup
-// parity itself, cross-agent isolation, out-of-scope/nonexistent-id silent
-// drop, post-commit write-success isolation, and that `usedMemoryIds` is
-// never persisted on the row — rather than re-proving every RecordUsage
-// property (auth/no-enumeration/attribution-sanitization) already covered
-// there against the identical underlying ledger.
+// parity itself, cross-agent isolation, the read-scope gate (a cited id the
+// writer cannot read drops IDENTICALLY to a nonexistent one — flair#775),
+// post-commit write-success isolation, and that `usedMemoryIds` is never
+// persisted on the row — rather than re-proving every RecordUsage property
+// (auth/no-enumeration/attribution-sanitization) already covered there
+// against the identical underlying ledger.
+//
+// VISIBILITY NOTE (flair#775): a `durability: "standard"` write with no
+// explicit visibility is stamped `private` by Memory's durability-keyed
+// default — and a private memory is OUTSIDE any other agent's read scope, so
+// a cross-agent citation of it is now (correctly) dropped by the scope gate.
+// Every test below whose scenario is "agent B cites agent A's memory and it
+// counts" therefore writes the cited memory with an explicit
+// `visibility: "shared"`; the scope-gate test at the bottom covers the
+// private case.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
@@ -103,7 +114,7 @@ describe("citation-on-write e2e (real Harper) — flair#744 slice A", () => {
     await registerAgent(harper, citer);
 
     const citedId = `${owner.id}-cited`;
-    const putCited = await putMemory(harper, owner, citedId, { agentId: owner.id, content: "The cited memory, long enough for the dedup gate to consider.", durability: "standard" });
+    const putCited = await putMemory(harper, owner, citedId, { agentId: owner.id, content: "The cited memory, long enough for the dedup gate to consider.", durability: "standard", visibility: "shared" });
     expect(putCited.status).toBe(200);
 
     const newId = `${citer.id}-citing-write`;
@@ -150,7 +161,7 @@ describe("citation-on-write e2e (real Harper) — flair#744 slice A", () => {
     await registerAgent(harper, citer);
 
     const citedId = `${owner.id}-cited`;
-    await putMemory(harper, owner, citedId, { agentId: owner.id, content: "Dedup-parity cited memory, long enough for the gate.", durability: "standard" });
+    await putMemory(harper, owner, citedId, { agentId: owner.id, content: "Dedup-parity cited memory, long enough for the gate.", durability: "standard", visibility: "shared" });
 
     // First contribution via citation-on-write.
     const citingId = `${citer.id}-citing`;
@@ -180,7 +191,7 @@ describe("citation-on-write e2e (real Harper) — flair#744 slice A", () => {
     await registerAgent(harper, agentB);
 
     const citedId = `${owner.id}-cited`;
-    await putMemory(harper, owner, citedId, { agentId: owner.id, content: "Cross-agent-isolation cited memory, long enough for the gate.", durability: "standard" });
+    await putMemory(harper, owner, citedId, { agentId: owner.id, content: "Cross-agent-isolation cited memory, long enough for the gate.", durability: "standard", visibility: "shared" });
 
     // Agent B cites owner's memory on a write of B's own.
     const bWriteId = `${agentB.id}-citing`;
@@ -232,7 +243,7 @@ describe("citation-on-write e2e (real Harper) — flair#744 slice A", () => {
     await registerAgent(harper, citer);
 
     const citedId = `${owner.id}-cited`;
-    await putMemory(harper, owner, citedId, { agentId: owner.id, content: "Shape-parity cited memory, long enough for the gate.", durability: "standard" });
+    await putMemory(harper, owner, citedId, { agentId: owner.id, content: "Shape-parity cited memory, long enough for the gate.", durability: "standard", visibility: "shared" });
 
     const plainId = `${citer.id}-plain`;
     const plainRes = await putMemory(harper, citer, plainId, { agentId: citer.id, content: "A plain write with no citations.", durability: "standard" });
@@ -267,4 +278,64 @@ describe("citation-on-write e2e (real Harper) — flair#744 slice A", () => {
     expect(rec.usageCount ?? 0).toBe(0);
     expect(rec.usedMemoryIds).toBeUndefined();
   }, 30_000);
+
+  test("read-scope gate (flair#775 slice 1): citing another agent's PRIVATE memory drops IDENTICALLY to citing a nonexistent id — no usageCount bump, no ledger row, indistinguishable write response", async () => {
+    const owner = mkAgent(`cow-gate-owner-${randomUUID()}`);
+    const citerA = mkAgent(`cow-gate-citer-a-${randomUUID()}`);
+    const citerB = mkAgent(`cow-gate-citer-b-${randomUUID()}`);
+    await registerAgent(harper, owner);
+    await registerAgent(harper, citerA);
+    await registerAgent(harper, citerB);
+
+    const privateId = `${owner.id}-private`;
+    const putPrivate = await putMemory(harper, owner, privateId, {
+      agentId: owner.id,
+      content: "The owner's private memory, outside every other agent's read scope.",
+      durability: "standard",
+      visibility: "private",
+    });
+    expect(putPrivate.status).toBe(200);
+
+    // Two citing writes as alike as the API allows — IDENTICAL content
+    // (different WRITERS, so the per-agent dedup gate can't collapse them)
+    // and the same id suffix — differing ONLY in which cited id rides along:
+    // another agent's private memory vs an id that doesn't exist at all.
+    const PROBE_CONTENT = "A citing write used to compare the private-cited and nonexistent-cited responses byte for byte.";
+    const resPrivate = await putMemory(harper, citerA, `${citerA.id}-gate-probe`, {
+      agentId: citerA.id, content: PROBE_CONTENT, durability: "standard",
+      usedMemoryIds: [privateId],
+    });
+    const resMissing = await putMemory(harper, citerB, `${citerB.id}-gate-probe`, {
+      agentId: citerB.id, content: PROBE_CONTENT, durability: "standard",
+      usedMemoryIds: [`does-not-exist-${randomUUID()}`],
+    });
+    expect(resPrivate.status).toBe(200);
+    expect(resMissing.status).toBe(200);
+
+    // Uniform behavior at the response level: after normalizing each
+    // response's own write inputs (the writer's caller-chosen agent id and
+    // write timestamps — different for any two writes regardless of what
+    // they cite), the two bodies must be byte-identical. Any residual
+    // difference would be signal attributable to the CITED id's status
+    // (exists-but-unreadable vs nonexistent) — an enumeration oracle.
+    const canon = (body: any, citer: TestAgent) =>
+      JSON.stringify(body)
+        .replaceAll(citer.id, "<WRITER>")
+        .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z/g, "<TS>");
+    expect(canon(await resPrivate.json(), citerA)).toBe(canon(await resMissing.json(), citerB));
+
+    // No credit: the private memory's usageCount is untouched...
+    const check = await getMemory(harper, owner, privateId);
+    const rec: any = await check.json();
+    expect(rec.usageCount ?? 0).toBe(0);
+
+    // ...and no MemoryUsage ledger row exists for it either (checked via the
+    // admin ops API — the ledger is the ground truth the count derives from).
+    const ledger = await adminOp(harper, {
+      operation: "search_by_value", database: "flair", table: "MemoryUsage",
+      search_attribute: "memoryId", search_value: privateId, get_attributes: ["id", "agentId", "memoryId"],
+    });
+    expect(ledger.status).toBe(200);
+    expect(await ledger.json()).toEqual([]);
+  }, 60_000);
 });
