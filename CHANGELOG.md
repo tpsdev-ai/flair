@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The reranker ignored `FLAIR_MODELS_DIR` (GGUF resolved from a hardcoded `<cwd>/models`), silently failing open to vector order in any deployment where Harper's cwd wasn't the models location — and the recall harness's `--rerank` arm could measure a NON-reranked run while labeling it reranked.** `resources/rerank-provider.ts`'s `ensureInit()` now resolves the reranker GGUF through the same `resolveModelsDir()` the embedding engine uses (`FLAIR_MODELS_DIR` → `<ROOTPATH>/models` → `<cwd>/models` backward compat → `~/.flair/data/models`; extracted unchanged to a shared `resources/models-dir.ts`, re-exported from `embeddings-provider.ts` for existing consumers), so the "provisioned alongside the embedding GGUF" contract from `docs/rerank-provisioning.md` actually holds by construction, and the not-found error now reports the full resolved path instead of a bare `models/<file>`. Production fail-open behavior is unchanged (a rerank error still never blocks recall) — what changed is that the recall harness (`test/bench/recall-harness/run.ts`) no longer *inherits* it as fictitious measurement: the `--rerank` arm now pins `FLAIR_RERANK_MODEL=jina-reranker-v2` (the rank-pooling model that actually serves inside Harper; caller override respected) and, after measuring, asserts engagement against the same spawned Harper's `/HealthDetail` rerank diagnostics — failing loud (nonzero exit, with state/model/counts/error in the message) if the reranker was enabled but never engaged (`state≠ready` or `rerankCount=0`), instead of publishing vector-order numbers under a "rerank" label (#815).
+
 ## [0.28.0] - 2026-07-24
 
 ### Fixed
