@@ -40,7 +40,7 @@ Pick whichever you use. The MCP server is the same package; only the config synt
 
 ### Claude Code
 
-The canonical approach is the `claude mcp add` CLI (writes to `~/.claude/mcp.json`):
+The canonical approach is the `claude mcp add` CLI (writes to `~/.claude.json`):
 
 ```bash
 claude mcp add flair --scope user \
