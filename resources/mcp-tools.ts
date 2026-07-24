@@ -52,6 +52,10 @@
  * Prod: first tool call loads the real classes against a fully-real Harper.
  */
 import type { RecordTypeName } from "./record-types.js";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 
 type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};
@@ -280,6 +284,29 @@ async function memoryDelete(agent: ResolvedAgent, args: any) {
   return unwrap(await h.delete(args?.id));
 }
 
+/**
+ * Resolve the running @tpsdev-ai/flair version from package.json.
+ * Duplicated from resources/Presence.ts / resources/AdminInstance.ts —
+ * each resource module keeps its own copy for dependency isolation
+ * rather than importing a shared helper.
+ */
+function resolveVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      join(here, "..", "..", "package.json"),
+      join(here, "..", "package.json"),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        const pkg = JSON.parse(readFileSync(p, "utf-8"));
+        if (pkg.version) return pkg.version;
+      }
+    }
+  } catch { /* fall through */ }
+  return process.env.npm_package_version ?? "dev";
+}
+
 async function bootstrap(agent: ResolvedAgent, args: any) {
   const Cls = await handler("BootstrapMemories");
   const h = new Cls(undefined, delegationContext(agent));
@@ -292,6 +319,9 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
     subjects: args?.subjects,
     entities: args?.entities,
   };
+  // flair#831 — include the running Flair version so agents can detect
+  // stale checkouts / version skew on the very first call they make.
+  body.flairVersion = resolveVersion();
   // flair#744 slice 1 — opt-in per-memory trust block array. Forwarded ONLY
   // when requested so a plain bootstrap delegates a byte-identical body.
   if (args?.includeTrust === true) body.includeTrust = true;
