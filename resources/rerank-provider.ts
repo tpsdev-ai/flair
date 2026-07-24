@@ -70,11 +70,18 @@
  * No Ollama (no logprobs, no rerank endpoint — verified), no network hop, no
  * new auth boundary.
  *
- * GGUF files are NOT committed; they are provisioned into models/ alongside the
- * embedding GGUF. See docs/rerank-provisioning.md for download sources.
+ * GGUF files are NOT committed; they are provisioned into the models dir
+ * alongside the embedding GGUF — resolved via the SAME `resolveModelsDir()`
+ * the embedding engine uses (FLAIR_MODELS_DIR → <ROOTPATH>/models →
+ * <cwd>/models → ~/.flair/data/models; flair#815 — this file used to hardcode
+ * <cwd>/models, so any deployment whose cwd wasn't the models location failed
+ * init and silently fell open to vector order). See docs/rerank-provisioning.md
+ * for download sources.
  */
 
 import { join } from "node:path";
+
+import { resolveModelsDir } from "./models-dir.js";
 
 type InitState = "uninitialized" | "ready" | "failed";
 
@@ -209,6 +216,21 @@ function resolveModelKey(): string {
 }
 
 /**
+ * Absolute path the reranker GGUF is expected at: `<models dir>/<file>`,
+ * where the models dir is the shared `resolveModelsDir()` (models-dir.ts,
+ * same resolution the embedding engine uses) — the single documented source
+ * of truth (FLAIR_MODELS_DIR override, ROOTPATH/models, cwd/models backward
+ * compat, ~/.flair/data/models default).
+ * flair#815: this used to be a hardcoded `<cwd>/models/<file>`, which broke
+ * (fail-open, silently) in any deployment where Harper's cwd wasn't the
+ * models location — including the recall harness's ephemeral Harpers.
+ * Exported for unit testing (see test/unit/rerank-provider.test.ts).
+ */
+export function resolveRerankModelPath(file: string): string {
+  return join(resolveModelsDir(), file);
+}
+
+/**
  * Decide whether `ensureInit()` needs to (re)run the engine init sequence —
  * the flair#811 point-3 fix. Pure so the decision matrix is directly
  * unit-testable without touching the native engine.
@@ -269,10 +291,10 @@ async function ensureInit(): Promise<void> {
     _mode = spec.mode;
 
     const { existsSync } = await import("node:fs");
-    const modelPath = join(process.cwd(), "models", spec.file);
+    const modelPath = resolveRerankModelPath(spec.file);
     if (!existsSync(modelPath)) {
       throw new Error(
-        `reranker GGUF not found: models/${spec.file} (provision per docs/rerank-provisioning.md)`,
+        `reranker GGUF not found: ${modelPath} (provision per docs/rerank-provisioning.md; set FLAIR_MODELS_DIR to override the models dir)`,
       );
     }
 

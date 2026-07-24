@@ -108,10 +108,6 @@
  * description for that distinction.
  */
 
-import { join } from "node:path";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-
 /**
  * The nomic search-prefix `inputType` — closed union, not `string`. See the
  * file header: the VALUES `'document'`/`'query'` are what HFE 0.3.0's engine
@@ -258,42 +254,15 @@ async function getModelsApi(): Promise<HarperModelsApi> {
 /**
  * Resolve the directory the embeddings model lives in / downloads into.
  *
- * Resolution order (everything writable, never the read-only package dir):
- *   1. FLAIR_MODELS_DIR        — explicit operator/docker override.
- *   2. <ROOTPATH>/models       — Harper's data dir (Flair passes ROOTPATH =
- *                                ~/.flair/data when it spawns Harper). User-
- *                                owned and writable even on sudo-global installs.
- *   3. <cwd>/models            — ONLY if a model already lives there. Backward
- *                                compat for existing writable installs that
- *                                downloaded into the package dir before this fix;
- *                                never used as a download target on fresh installs.
- *   4. ~/.flair/data/models    — last-resort default when ROOTPATH is unset.
- *
- * The chosen dir is always writable, so the embeddings engine can download the
- * model on first use without hitting EACCES on a root-owned package dir.
- *
- * Called by `resources/embeddings-boot.ts` (flair#694) to build the
- * `modelsDir` it passes to harper-fabric-embeddings' `register()` — both run
- * in the SAME process now (unlike the retired src/cli.ts-side computation,
- * which duplicated this exact default because it ran in a separate process
- * that set the resulting value via an env var). Still exported and tested
- * independently (test/unit/embeddings-models-dir.test.ts) as the single
- * documented source of truth for this default.
+ * Implementation moved to `resources/models-dir.ts` (flair#815) so the
+ * reranker can share the exact same resolution without importing this module
+ * (several unit-isolated tests `mock.module()` this file wholesale — see
+ * models-dir.ts's header). Re-exported here so existing consumers keep their
+ * import site: `resources/embeddings-boot.ts` (flair#694), which builds the
+ * `modelsDir` it passes to harper-fabric-embeddings' `register()`, and
+ * test/unit/embeddings-models-dir.test.ts, which pins the resolution order.
  */
-export function resolveModelsDir(): string {
-  const override = process.env.FLAIR_MODELS_DIR;
-  if (override) return override;
-
-  const rootPath = process.env.ROOTPATH;
-  if (rootPath) return join(rootPath, "models");
-
-  // Backward compat: a prior (writable) install may have the model cached in
-  // the package dir. Reuse it rather than re-downloading — but only if present.
-  const cwdModels = join(process.cwd(), "models");
-  if (existsSync(cwdModels)) return cwdModels;
-
-  return join(homedir(), ".flair", "data", "models");
-}
+export { resolveModelsDir } from "./models-dir.js";
 
 // ─── Health translation (Design §3 / Kern's hardening) ──────────────────────
 // `models.embed()` THROWS (ModelBackendNotFoundError / ModelCapabilityError)

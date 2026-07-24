@@ -291,6 +291,41 @@ async function runQueries(harper: HarperInstance, agent: TestAgent, scoring: "ra
   return { scoring, ...overall, byKind, byCluster, rows };
 }
 
+// flair#815: a rerank arm whose reranker fails open (GGUF not found, engine
+// init failure, per-call fallback) measures a NON-reranked run while labeling
+// it reranked — the two arms of a rerank A/B come back byte-identical and the
+// "rerank" numbers are fiction. The provider's fail-open is correct behavior
+// for production recall (never block a search); what's NOT acceptable is a
+// measurement run silently inheriting it. So after measuring, read the
+// provider's own diagnostics (getRerankStatus() via the authenticated
+// /HealthDetail `rerank` block — resources/health.ts) from the SAME spawned
+// Harper that served the queries, and fail loud unless the reranker actually
+// engaged (state=ready AND rerankCount > 0).
+async function assertRerankEngaged(harper: HarperInstance, agent: TestAgent, label: string): Promise<void> {
+  // failLoud: print the full diagnosis on stderr BEFORE throwing — the FATAL
+  // handlers at the bottom of this file print `e.stack`, and the message line
+  // is not reliably part of it under bun (observed live: a throw from here
+  // surfaced as a bare "FATAL: Error" + frames, diagnosis lost), so the
+  // message must not depend on stack formatting to reach the operator.
+  const failLoud = (msg: string): never => {
+    console.error(msg);
+    throw new Error(msg);
+  };
+  const res = await signedFetch(harper, agent, "GET", "/HealthDetail");
+  if (!res.ok) failLoud(`${label} rerank engagement check: /HealthDetail failed: HTTP ${res.status} ${JSON.stringify(res.body ?? null).slice(0, 300)}`);
+  const rr = res.body?.rerank;
+  if (!rr || typeof rr !== "object") failLoud(`${label} rerank engagement check: /HealthDetail returned no rerank status block`);
+  if (rr.state !== "ready" || !(rr.rerankCount > 0)) {
+    const detail = `state=${rr.state} model=${rr.model} rerankCount=${rr.rerankCount} fallbackCount=${rr.fallbackCount}` + (rr.error ? ` error="${rr.error}"` : "");
+    failLoud(
+      `${label} rerank arm NEVER ENGAGED: ${detail} — the reranker fell open and this arm measured a ` +
+      `NON-reranked run (flair#815). Provision the reranker GGUF per docs/rerank-provisioning.md ` +
+      `(FLAIR_MODELS_DIR may point at an existing install's models/ dir, same as for the embedding model).`,
+    );
+  }
+  console.log(`${label} rerank engaged: model=${rr.model} rerankCount=${rr.rerankCount} fallbackCount=${rr.fallbackCount} lastLatencyMs=${rr.lastLatencyMs}`);
+}
+
 // One independent (spawn → register → seed → wait → measure[raw,composite] →
 // teardown) cycle for a given (hybrid, rerank, prefixesOn) config.
 // prefixesOn=false forces the harness-only prefix override to "false" (see
@@ -303,9 +338,19 @@ async function runOnce(hybrid: boolean, rerank: boolean, prefixesOn: boolean, ru
   const label = `[hybrid=${hybrid} rerank=${rerank} prefixes=${prefixesOn ? "on" : "off"} run ${runIdx}/${totalRuns}]`;
   const prevHybrid = process.env.FLAIR_HYBRID_RETRIEVAL;
   const prevRerank = process.env.FLAIR_RERANK_ENABLED;
+  const prevRerankModel = process.env.FLAIR_RERANK_MODEL;
   const prevPrefix = process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX;
   process.env.FLAIR_HYBRID_RETRIEVAL = hybrid ? "true" : "false";
-  if (rerank) process.env.FLAIR_RERANK_ENABLED = "true"; else delete process.env.FLAIR_RERANK_ENABLED;
+  if (rerank) {
+    process.env.FLAIR_RERANK_ENABLED = "true";
+    // flair#815: pin the model this arm measures to the rank-pooling
+    // cross-encoder that actually serves inside Harper's runtime (see
+    // resources/rerank-provider.ts's file header — the generative qwen3 path
+    // reliably fails open in-Harper), unless the caller explicitly chose one.
+    // Belt-and-suspenders with assertRerankEngaged() below: pinning makes the
+    // arm measure a known model; the assertion proves it actually ran.
+    if (!process.env.FLAIR_RERANK_MODEL) process.env.FLAIR_RERANK_MODEL = "jina-reranker-v2";
+  } else delete process.env.FLAIR_RERANK_ENABLED;
   if (prefixesOn) delete process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX; else process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX = "false";
 
   let harper: HarperInstance | undefined;
@@ -342,11 +387,15 @@ async function runOnce(hybrid: boolean, rerank: boolean, prefixesOn: boolean, ru
     // durability/recency effect this harness targets, but worth naming.
     const raw = await runQueries(harper, agent, "raw");
     const composite = await runQueries(harper, agent, "composite");
+    // flair#815: measurement integrity gate — fail loud (nonzero exit via
+    // main()'s catch) if this arm's reranker never actually engaged.
+    if (rerank) await assertRerankEngaged(harper, agent, label);
     return { raw, composite };
   } finally {
     if (harper) await stopHarper(harper, { keepInstallDir: false });
     if (prevHybrid === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL; else process.env.FLAIR_HYBRID_RETRIEVAL = prevHybrid;
     if (prevRerank === undefined) delete process.env.FLAIR_RERANK_ENABLED; else process.env.FLAIR_RERANK_ENABLED = prevRerank;
+    if (prevRerankModel === undefined) delete process.env.FLAIR_RERANK_MODEL; else process.env.FLAIR_RERANK_MODEL = prevRerankModel;
     if (prevPrefix === undefined) delete process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX; else process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX = prevPrefix;
   }
 }

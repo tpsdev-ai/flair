@@ -1,4 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   yesNoScore,
   applyRerank,
@@ -11,6 +14,7 @@ import {
   truncateChars,
   truncateTokenBudget,
   needsReinit,
+  resolveRerankModelPath,
 } from "../../resources/rerank-provider";
 
 // These tests exercise the DETERMINISTIC scoring + reorder + config paths
@@ -176,6 +180,68 @@ describe("config readers (FLAIR_RERANK_* env, default OFF)", () => {
   test("qwen3 is still selectable explicitly (kept available, EXPERIMENTAL)", () => {
     process.env.FLAIR_RERANK_MODEL = "qwen3-reranker-0.6b-q8";
     expect(getRerankStatus().model).toBe("qwen3-reranker-0.6b-q8");
+  });
+});
+
+describe("resolveRerankModelPath (models-dir resolution, flair#815)", () => {
+  // The bug: ensureInit() hardcoded join(process.cwd(), "models", file),
+  // ignoring FLAIR_MODELS_DIR — so any deployment whose cwd wasn't the models
+  // location (e.g. the recall harness's ephemeral Harpers) failed init and
+  // silently fell open to vector order. The fix routes through the shared
+  // resolveModelsDir() (resources/models-dir.ts — the same resolution the
+  // embedding engine uses; its full 4-step priority chain is covered by
+  // test/unit/embeddings-models-dir.test.ts; these tests pin the two ends
+  // the reranker cares about).
+  const SAVED = {
+    FLAIR_MODELS_DIR: process.env.FLAIR_MODELS_DIR,
+    ROOTPATH: process.env.ROOTPATH,
+  };
+  let originalCwd: string;
+  let scratch: string;
+
+  beforeEach(() => {
+    originalCwd = process.cwd();
+    // realpath so comparisons against process.cwd() hold on macOS, where
+    // /var and /tmp are symlinks to /private/* (cwd reports the resolved path).
+    scratch = realpathSync(mkdtempSync(join(tmpdir(), "flair-rerank-models-dir-")));
+    delete process.env.FLAIR_MODELS_DIR;
+    delete process.env.ROOTPATH;
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    if (SAVED.FLAIR_MODELS_DIR === undefined) delete process.env.FLAIR_MODELS_DIR;
+    else process.env.FLAIR_MODELS_DIR = SAVED.FLAIR_MODELS_DIR;
+    if (SAVED.ROOTPATH === undefined) delete process.env.ROOTPATH;
+    else process.env.ROOTPATH = SAVED.ROOTPATH;
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  test("FLAIR_MODELS_DIR set → GGUF path resolves under it (not cwd)", () => {
+    process.env.FLAIR_MODELS_DIR = "/opt/flair-models";
+    expect(resolveRerankModelPath("jina-reranker-v2-base.Q8_0.gguf")).toBe(
+      join("/opt/flair-models", "jina-reranker-v2-base.Q8_0.gguf"),
+    );
+  });
+
+  test("unset, cwd has a models/ dir → falls back to <cwd>/models (backward compat)", () => {
+    process.chdir(scratch);
+    mkdirSync(join(scratch, "models"), { recursive: true });
+    expect(resolveRerankModelPath("jina-reranker-v2-base.Q8_0.gguf")).toBe(
+      join(scratch, "models", "jina-reranker-v2-base.Q8_0.gguf"),
+    );
+  });
+
+  test("resolves the SAME dir as the embedding engine (alongside guarantee)", () => {
+    // docs/rerank-provisioning.md: the reranker GGUF lives alongside the
+    // embedding GGUF. That only holds if both read the same resolution —
+    // ROOTPATH (Harper's data dir) beats a cwd models/ dir, same as embeddings.
+    process.env.ROOTPATH = join(scratch, "data");
+    process.chdir(scratch);
+    mkdirSync(join(scratch, "models"), { recursive: true });
+    expect(resolveRerankModelPath("jina-reranker-v2-base.Q8_0.gguf")).toBe(
+      join(scratch, "data", "models", "jina-reranker-v2-base.Q8_0.gguf"),
+    );
   });
 });
 
