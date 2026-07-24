@@ -4,7 +4,25 @@ type Memory @table(database: "flair") {
   content: String!
   contentHash: String @indexed
   visibility: String
-  embedding: [Float] @indexed(type: "HNSW")
+  embedding: [Float] @indexed(type: "HNSW", M: 16)   # M:16 is Harper's own HNSW default
+                               # (HierarchicalNavigableSmallWorld M default) — declaring it explicitly is a
+                               # ZERO behavior / graph-quality change. Its ONLY effect is the recall-heal
+                               # trigger (resources/migrations/graph-heal.ts): Harper persists each HNSW
+                               # attribute's option descriptor and, on boot, structurally diffs it against
+                               # the schema (databases.ts canonicalizeIndexOptions — sorts keys, coerces
+                               # numeric strings, but does NOT inject defaults, so `{type:"HNSW"}` and
+                               # `{type:"HNSW",M:16}` are DIFFERENT canonical keys). A store whose descriptor
+                               # was persisted WITHOUT options (every pre-this-change install) therefore sees
+                               # a structural diff on the first boot after upgrade → runIndexing clears the
+                               # graph store and rebuilds it CLEANLY from the already-correct stored vectors
+                               # (lastIndexedKey reset to undefined). This heals graphs left stale by Harper's
+                               # incremental HNSW update after a bulk in-place re-embed (the July embedding-
+                               # stamp re-embed corrupted prod's reverse edges; a fresh index of the SAME
+                               # vectors finds the true neighbors, the incrementally-updated one didn't).
+                               # NO re-embed — the stored vectors are untouched; only the graph is rebuilt.
+                               # Fires once per instance (the descriptor is then persisted to match); brief
+                               # vector-search 503 window during the rebuild (~seconds; BM25/direct keep
+                               # serving). Do NOT remove the `M: 16` — reverting it removes the upgrade heal.
   embeddingModel: String @indexed  # ops-1l18: previously written (resources/Memory.ts stamps every
                                # write) but never DECLARED in this schema, so it was storable but not
                                # queryable — Harper's Table.search({conditions}) rejects a condition on
