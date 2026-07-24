@@ -101,6 +101,29 @@
  * OTHER, not-yet-understood counting artifact; this lets the runner PROVE
  * (via `.get()`, a primary-key lookup — always live, never index-assisted)
  * that a nonzero countPending() result is real before halting on it.
+ *
+ * ┌─ ROOT-CAUSE GUARD — recall graph correctness (recall-hnsw-graph-heal) ─┐
+ * │ This migration RE-EMBEDS rows in BULK via `PUT /Memory/:id`, i.e. it   │
+ * │ replaces the stored vector of many rows in place. That write path runs │
+ * │ Harper's INCREMENTAL HNSW update (Table.updateIndices →                │
+ * │ customIndex.index(id, newVec, oldVec)), which leaves stale/asymmetric  │
+ * │ reverse edges and is order-dependent under bulk re-embed — the exact   │
+ * │ mechanism that collapsed prod recall (p@3 0.25) in July. A clean       │
+ * │ `runIndexing` rebuild from the SAME stored vectors is immune and heals │
+ * │ it. THE RULE, therefore: any BULK re-embed MUST be paired with a       │
+ * │ structural graph REBUILD trigger — NEVER trust Harper's incremental    │
+ * │ HNSW updates to converge, and NEVER reach for                          │
+ * │ resources/MemoryReindex.ts's `_reindex` to "fix" the graph (it re-PUTs │
+ * │ the same vector through this same incremental path and rebuilds        │
+ * │ nothing). Today the only rebuild lever flair has is a structural       │
+ * │ schema-descriptor change: the `@indexed(type:"HNSW", M:16)` bump in    │
+ * │ schemas/memory.graphql ships alongside this migration precisely so the │
+ * │ prod graph this re-embed corrupted is rebuilt on the upgrade boot      │
+ * │ (observed/ledgered by resources/migrations/graph-heal.ts). Before      │
+ * │ enabling any FUTURE bulk re-embed, ship a structural reindex trigger   │
+ * │ with it (or the clean recurrence-proof: a supported Harper vector-     │
+ * │ index rebuild API, filed upstream separately).                         │
+ * └────────────────────────────────────────────────────────────────────────┘
  */
 import { databases } from "@harperfast/harper";
 import { getModelId } from "../embeddings-provider.js";

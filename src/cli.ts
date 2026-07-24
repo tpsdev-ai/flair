@@ -9727,6 +9727,26 @@ program
   });
 
 // ─── flair reembed ────────────────────────────────────────────────────────────
+//
+// ROOT-CAUSE GUARD — recall graph correctness (recall-hnsw-graph-heal).
+// `flair reembed` replaces the stored embedding of many rows IN PLACE (it
+// clears embedding/embeddingModel, then re-PUTs through Memory.put()'s regen
+// branch — the same bulk in-place re-embed path resources/migrations/
+// embedding-stamp.ts uses). That path runs Harper's INCREMENTAL HNSW update,
+// which leaves stale/asymmetric reverse edges under bulk re-embed and diverges
+// from a clean rebuild — the mechanism that collapsed prod recall in July. A
+// re-embed alone does NOT rebuild the graph. THE RULE: any BULK re-embed MUST
+// be paired with a structural graph REBUILD trigger (today: the
+// `@indexed(type:"HNSW", M:16)` descriptor bump in schemas/memory.graphql that
+// forces Harper to clear + rebuild the graph cleanly from the stored vectors
+// on the next boot — see resources/migrations/graph-heal.ts). NEVER assume the
+// incremental updates converge, and NEVER use resources/MemoryReindex.ts's
+// `_reindex` for graph correctness (it re-PUTs the same vector through the same
+// incremental path and rebuilds nothing). If a `flair reembed` run ever
+// materially changes the vector space (e.g. a model swap), follow it with a
+// deploy that trips the structural reindex (bump the HNSW descriptor / restart
+// after a schema change) — or wait on the clean fix: a supported Harper
+// vector-index rebuild API (filed upstream separately).
 
 program
   .command("reembed")
