@@ -499,6 +499,36 @@ export function detectOpsApiAllInterfacesBind(
   return { allInterfaces: true, boundHost: null };
 }
 
+/**
+ * Decide the source `flair init` should use for the admin password when no
+ * explicit `--admin-pass` / `--admin-pass-file` / env var was given
+ * (flair#827).
+ *
+ * Before this existed, init ALWAYS generated a fresh random password and
+ * overwrote `~/.flair/admin-pass` on every run — including a re-run against
+ * an install that was already bootstrapped and working (e.g. following
+ * `flair doctor`'s ops-bind finding, whose only prescribed remedy is
+ * re-running `flair init`). Harper's `HDB_ADMIN_PASSWORD` env var only seeds
+ * a brand-new install's user record — it does NOT rotate an existing user's
+ * stored password hash on every boot. So overwriting the file desynced it
+ * from what Harper actually had persisted, and the very next ops-API call in
+ * that SAME init run (seeding the agent) failed with a 401 "Login failed",
+ * breaking working auth on an install that had nothing wrong with its
+ * credentials.
+ *
+ * An admin-pass file that already exists on disk IS the working install's
+ * password — `flair init` is the only thing that ever writes it — so reuse
+ * it instead of generating a new one. That makes re-init idempotent: safe to
+ * run again at any time without risking the instance's auth. Deliberately
+ * rotating the admin password is a separate operation, not a `flair init`
+ * side effect.
+ */
+export function resolveInitAdminPasswordSource(
+  adminPassFileExists: boolean,
+): "reuse-existing" | "generate-new" {
+  return adminPassFileExists ? "reuse-existing" : "generate-new";
+}
+
 // ─── Ops-socket permission posture (flair#763) ─────────────────────────────────
 //
 // The ops API domain socket (dataDir/operations-server) is protected by a
@@ -2435,10 +2465,11 @@ program
     }
 
     // Admin password: determine from opts, env, or generate
-    // Priority: 1) --admin-pass-file, 2) env vars, 3) generate new
+    // Priority: 1) --admin-pass-file, 2) env vars, 3) reuse existing file, 4) generate new
     let adminPass: string;
     let passwordSource: "generated" | "file" | "env" = "generated";
-    
+    let reusedExistingAdminPass = false;
+
     // Warn if --admin-pass is passed inline (not from env)
     if (shouldShowInlineSecretWarning(opts.adminPass, false, new Set(["--admin-pass"]), "--admin-pass")) {
       console.error(
@@ -2446,7 +2477,7 @@ program
         "to keep secrets out of shell history."
       );
     }
-    
+
     // Read from file if provided
     if (opts.adminPassFile) {
       try {
@@ -2468,32 +2499,61 @@ program
       // Don't generate - don't write to file
       passwordSource = "env"; // Treat same as env for display purposes
     } else {
-      // Generate new password and write to file atomically
-      adminPass = Buffer.from(nacl.randomBytes(18)).toString("base64url");
-      passwordSource = "generated";
-      
-      // Atomic write: create temp file in same dir, then rename
       const flairDir = join(homedir(), ".flair");
-      mkdirSync(flairDir, { recursive: true });
       const adminPassPath = join(flairDir, "admin-pass");
-      const tempPath = mkdtempSync(join(flairDir, ".admin-pass.tmp-"));
-      const finalTempPath = join(tempPath, "admin-pass");
-      try {
-        writeFileSync(finalTempPath, adminPass + "\n", { mode: 0o600 });
-        renameSync(finalTempPath, adminPassPath);
-        rmSync(tempPath, { recursive: true, force: true });
-      } catch (err) {
-        // Clean up temp dir on failure
-        try { rmSync(tempPath, { recursive: true, force: true }); } catch {}
-        throw err;
+      passwordSource = "generated";
+
+      if (resolveInitAdminPasswordSource(existsSync(adminPassPath)) === "reuse-existing") {
+        // flair#827: an admin-pass file already on disk means a PRIOR `flair
+        // init` already bootstrapped Harper's admin user with this password.
+        // HDB_ADMIN_PASSWORD only seeds a brand-new install — Harper does
+        // NOT rotate an existing user's stored password hash from env on
+        // every boot. Generating and overwriting the file here would desync
+        // it from what Harper actually has persisted, breaking ops-API auth
+        // (401 "Login failed") on THIS SAME init run (the agent-seeding call
+        // below) without fixing whatever the re-run was meant to fix — e.g.
+        // `flair doctor`'s ops-bind finding, whose only prescribed remedy is
+        // re-running `flair init`. Re-init must be idempotent here: reuse
+        // the existing password so it's always safe to re-run against a
+        // working install. Rotating the admin password on purpose is a
+        // separate, deliberate operation (see the ops runbook), not a side
+        // effect of re-init.
+        try {
+          adminPass = readAdminPassFileSecure(adminPassPath);
+        } catch (err: any) {
+          console.error(`Error: ${err.message}`);
+          process.exit(1);
+        }
+        reusedExistingAdminPass = true;
+      } else {
+        // Generate new password and write to file atomically
+        adminPass = Buffer.from(nacl.randomBytes(18)).toString("base64url");
+
+        // Atomic write: create temp file in same dir, then rename
+        mkdirSync(flairDir, { recursive: true });
+        const tempPath = mkdtempSync(join(flairDir, ".admin-pass.tmp-"));
+        const finalTempPath = join(tempPath, "admin-pass");
+        try {
+          writeFileSync(finalTempPath, adminPass + "\n", { mode: 0o600 });
+          renameSync(finalTempPath, adminPassPath);
+          rmSync(tempPath, { recursive: true, force: true });
+        } catch (err) {
+          // Clean up temp dir on failure
+          try { rmSync(tempPath, { recursive: true, force: true }); } catch {}
+          throw err;
+        }
       }
     }
     const adminUser = DEFAULT_ADMIN_USER;
-    
-    // If we generated the password, report where it was saved
+
+    // If we generated (or reused) the password, report where it lives
     if (passwordSource === "generated") {
       const adminPassPath = join(homedir(), ".flair", "admin-pass");
-      console.log(`Admin password saved to: ${adminPassPath}`);
+      if (reusedExistingAdminPass) {
+        console.log(`Reusing existing admin password from: ${adminPassPath} (flair#827: re-init never rotates it — see the ops runbook to change it deliberately)`);
+      } else {
+        console.log(`Admin password saved to: ${adminPassPath}`);
+      }
     }
     // Check Node.js version
     const major = parseInt(process.version.slice(1), 10);
@@ -10553,7 +10613,13 @@ program
     // 3b. Ops API bind (flair#670) — report-only finding, never auto-fixed.
     // Rebinding the ops API requires a Harper restart to take effect, so
     // `doctor --fix` deliberately does not touch it here; the fix is
-    // `flair init` (re-run) or a manual harper-config.yaml edit + restart.
+    // `flair init` (re-run, then `flair restart` to apply it) or a manual
+    // harper-config.yaml edit + restart. flair#827: re-running `flair init`
+    // used to regenerate ~/.flair/admin-pass unconditionally, desyncing it
+    // from Harper's already-persisted credential and breaking admin auth on
+    // the very re-run this remedy prescribed — resolveInitAdminPasswordSource
+    // (see its doc comment) now reuses the existing password instead, so this
+    // remedy is safe to follow on a working install.
     try {
       const harperConfigPath = join(defaultDataDir(), "harper-config.yaml");
       if (existsSync(harperConfigPath)) {
@@ -10562,7 +10628,7 @@ program
         const bind = detectOpsApiAllInterfacesBind(opsPortValue);
         if (bind.allInterfaces) {
           console.log(`  ${render.icons.error} Ops API bound to ${render.wrap(render.c.bold, "all interfaces")} (${render.wrap(render.c.dim, String(opsPortValue))})`);
-          console.log(`     ${render.wrap(render.c.dim, "Single-host installs don't need this reachable off-box. Fix:")} flair init ${render.wrap(render.c.dim, "(rebinds to loopback + domain socket on next start; pass --ops-bind for deliberate remote admin)")}`);
+          console.log(`     ${render.wrap(render.c.dim, "Single-host installs don't need this reachable off-box. Fix:")} flair init && flair restart ${render.wrap(render.c.dim, "(rebinds to loopback + domain socket; re-init reuses your existing admin password, so this is safe on a running install — pass --ops-bind for deliberate remote admin)")}`);
           issues++;
         }
       }
