@@ -2,6 +2,8 @@
 
 REM (Reflect · Extract · Merge) is Flair's memory-curation cycle: it reads an agent's recent memories, distills them into candidate insights, and stages those candidates for explicit human/agent review — nothing is ever auto-promoted. `flair rem rapid` runs it on demand; `flair rem nightly enable` runs it on a schedule. See [`docs/notes/rem-ux.md`](notes/rem-ux.md) for the full trigger model, locality guarantees, and the review-loop UX this page's commands feed into.
 
+> **⚠️ Prerequisite: a configured generative backend.** All REM commands (`rapid`, `nightly`, `candidates`, `promote`, `reject`) require Harper's `models.generate()` to be wired — without it, REM calls fail with `Reflection error: No generative backend configured`. Set up a backend first (see [Configuration](#configuration) below) before running any REM command. The fastest path is Ollama with a non-thinking model, which needs zero credentials and keeps all traffic local.
+
 ## Configuration
 
 Distillation runs **server-side**, via Harper's model-access API (`models.generate()`). Flair ships zero provider code — which backend answers a REM call is entirely a Harper `models:` configuration decision.
