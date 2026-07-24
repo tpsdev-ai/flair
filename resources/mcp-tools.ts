@@ -52,6 +52,7 @@
  * Prod: first tool call loads the real classes against a fully-real Harper.
  */
 import type { RecordTypeName } from "./record-types.js";
+import { resolveVersion } from "./version.js";
 
 type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};
@@ -298,7 +299,14 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
   // flair#744 slice 2 — opt-in task-relevance abstention verdict. Forwarded
   // ONLY when requested so a plain bootstrap delegates a byte-identical body.
   if (args?.abstain === true) body.abstain = true;
-  return unwrap(await h.post(body));
+  // flair#831 — attach the running Flair version to the RESPONSE (not the
+  // delegated request body) so the calling agent learns the server version
+  // on its very first call.
+  const result = unwrap(await h.post(body));
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    return { ...result, flairVersion: resolveVersion() };
+  }
+  return result;
 }
 
 async function soulSet(agent: ResolvedAgent, args: any) {
