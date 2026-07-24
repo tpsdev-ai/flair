@@ -260,16 +260,20 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
     expect(body.result.structuredContent.agentId).toBe("agt_bob");
   });
 
-  it("bootstrap includes flairVersion in the delegated body (flair#831)", async () => {
-    await mcpHandler(post(
+  it("bootstrap response includes flairVersion (flair#831)", async () => {
+    const res = await mcpHandler(post(
       { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bootstrap", arguments: {} } },
       { sub: "sub-bob" },
     ));
-    expect(lastCall?.resource).toBe("BootstrapMemories.post");
-    expect(lastCall?.args).toHaveProperty("flairVersion");
-    expect(typeof lastCall?.args.flairVersion).toBe("string");
-    // Must be a real semver (or "dev"), not empty/undefined.
-    expect(lastCall?.args.flairVersion.length).toBeGreaterThan(0);
+    const body = await parse(res);
+    // The delegated request body must NOT carry flairVersion — the
+    // documented invariant is that a plain bootstrap delegates a
+    // byte-identical body (includeTrust/abstain are opt-in only).
+    expect(lastCall?.args).not.toHaveProperty("flairVersion");
+    // The RESPONSE is where the agent learns the server version.
+    expect(body.result.structuredContent).toHaveProperty("flairVersion");
+    expect(typeof body.result.structuredContent.flairVersion).toBe("string");
+    expect(body.result.structuredContent.flairVersion.length).toBeGreaterThan(0);
   });
 
   it("memory_store uses resolved agentId, ignores a forged body agentId", async () => {
