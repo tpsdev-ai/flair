@@ -50,8 +50,9 @@ docs/          User-facing documentation. mcp-clients.md, federation.md,
 specs/         DRAFT planning documents. May not reflect shipped state.
                Do NOT read as current architecture.
 
-packages/      Published sub-packages: flair-client, flair-mcp, hermes-flair,
-               n8n-nodes-flair, openclaw-flair, and bridge adapters.
+packages/      Published sub-packages: flair-client, flair-mcp, flair-bench,
+               hermes-flair, n8n-nodes-flair, openclaw-flair,
+               langgraph-flair, pi-flair, and bridge adapters.
 
 scripts/       Build, CI, deploy, and operational scripts.
 
