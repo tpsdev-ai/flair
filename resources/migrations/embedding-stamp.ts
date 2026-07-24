@@ -101,6 +101,29 @@
  * OTHER, not-yet-understood counting artifact; this lets the runner PROVE
  * (via `.get()`, a primary-key lookup — always live, never index-assisted)
  * that a nonzero countPending() result is real before halting on it.
+ *
+ * ROOT-CAUSE GUARD — recall graph correctness (recall-hnsw-graph-heal).
+ * This migration RE-EMBEDS rows in BULK via `PUT /Memory/:id` — it replaces
+ * the stored vector of many rows in place. Historically, an OLDER (pre-fix)
+ * Harper's INCREMENTAL HNSW update left stale/asymmetric reverse edges under
+ * exactly this kind of bulk re-embed (order-dependent), which collapsed prod
+ * recall (p@3 0.25) in July. That engine bug is FIXED in the Harper this ships
+ * against (5.1.22): its index() reconstructs the prior vector from the stored
+ * node and carries the node's real connections into the reverse-edge cleanup
+ * the old build skipped, so a bulk re-embed no longer corrupts the graph.
+ * DEFENSE-IN-DEPTH RULE (a prudent, version-independent default — not a
+ * workaround for a live bug): pair any BULK re-embed with a structural graph
+ * REBUILD trigger rather than relying on incremental HNSW updates to converge
+ * — it keeps recall correct regardless of engine version, closes the rare
+ * decode-failure edge case, and heals a graph already corrupted on disk by an
+ * older engine. Do NOT reach for resources/MemoryReindex.ts's `_reindex` for
+ * graph correctness (it re-PUTs the same vector through the incremental path
+ * and rebuilds nothing). The lever flair uses is a structural schema-descriptor
+ * change: the `@indexed(type:"HNSW", M:16)` bump in schemas/memory.graphql
+ * ships alongside this migration precisely so a graph corrupted under an older
+ * engine is rebuilt on the upgrade boot (observed/ledgered by
+ * resources/migrations/graph-heal.ts). Before enabling any FUTURE bulk
+ * re-embed, ship a structural reindex trigger with it.
  */
 import { databases } from "@harperfast/harper";
 import { getModelId } from "../embeddings-provider.js";

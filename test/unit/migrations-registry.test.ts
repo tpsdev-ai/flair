@@ -10,34 +10,36 @@ mock.module("@harperfast/harper", () => ({ databases: {}, Resource: class {} }))
 
 const { buildRegistry, MigrationRegistry } = await import("../../resources/migrations/registry.ts");
 const { EMBEDDING_STAMP_ID } = await import("../../resources/migrations/embedding-stamp.ts");
+const { GRAPH_HEAL_ID } = await import("../../resources/migrations/graph-heal.ts");
 const { SYNTHETIC_MIGRATION_ID, ENABLE_TEST_MIGRATIONS_ENV } = await import("../../resources/migrations/synthetic-test-migration.ts");
 
 describe("buildRegistry — production default (no env override)", () => {
-  it("registers ONLY embedding-stamp when FLAIR_ENABLE_TEST_MIGRATIONS is unset — the synthetic variant never ships active", () => {
+  it("registers the always-on migrations (embedding-stamp, graph-heal) when FLAIR_ENABLE_TEST_MIGRATIONS is unset — the synthetic variant never ships active", () => {
     const registry = buildRegistry({});
     const ids = registry.list().map((m) => m.id);
-    expect(ids).toEqual([EMBEDDING_STAMP_ID]);
+    expect(ids).toEqual([EMBEDDING_STAMP_ID, GRAPH_HEAL_ID]);
     expect(ids).not.toContain(SYNTHETIC_MIGRATION_ID);
   });
 
-  it("registers only embedding-stamp for a realistic prod env snapshot (PATH, HOME, etc. present, flag absent)", () => {
+  it("registers only the always-on migrations for a realistic prod env snapshot (PATH, HOME, etc. present, flag absent)", () => {
     const registry = buildRegistry({ PATH: "/usr/bin", HOME: "/home/flair", NODE_ENV: "production" } as NodeJS.ProcessEnv);
-    expect(registry.list().map((m) => m.id)).toEqual([EMBEDDING_STAMP_ID]);
+    expect(registry.list().map((m) => m.id)).toEqual([EMBEDDING_STAMP_ID, GRAPH_HEAL_ID]);
   });
 });
 
 describe("buildRegistry — CI/test opt-in", () => {
-  it("registers BOTH migrations when the exact opt-in env var is \"1\"", () => {
+  it("registers the synthetic variant ALONGSIDE the always-on migrations when the exact opt-in env var is \"1\"", () => {
     const registry = buildRegistry({ [ENABLE_TEST_MIGRATIONS_ENV]: "1" } as NodeJS.ProcessEnv);
     const ids = registry.list().map((m) => m.id);
     expect(ids).toContain(EMBEDDING_STAMP_ID);
+    expect(ids).toContain(GRAPH_HEAL_ID);
     expect(ids).toContain(SYNTHETIC_MIGRATION_ID);
-    expect(ids).toHaveLength(2);
+    expect(ids).toHaveLength(3);
   });
 
   it("does NOT register the synthetic variant for a near-miss value", () => {
     const registry = buildRegistry({ [ENABLE_TEST_MIGRATIONS_ENV]: "true" } as NodeJS.ProcessEnv);
-    expect(registry.list().map((m) => m.id)).toEqual([EMBEDDING_STAMP_ID]);
+    expect(registry.list().map((m) => m.id)).toEqual([EMBEDDING_STAMP_ID, GRAPH_HEAL_ID]);
   });
 });
 
