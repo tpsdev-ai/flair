@@ -12,11 +12,19 @@
  * installed @harperfast/harper source, resources/databases.js:
  * canonicalizeIndexOptions + the `indexOptionsChanged` reset of
  * `lastIndexedKey` to undefined), clears the graph store and rebuilds it
- * CLEANLY from the already-correct stored vectors. That rebuild is immune to
- * the stale/asymmetric reverse-edge corruption Harper's INCREMENTAL HNSW
- * update leaves behind after a bulk in-place re-embed (the July
- * embedding-stamp re-embed that collapsed prod recall). No re-embed happens —
- * only the graph is rebuilt from the vectors already on disk.
+ * CLEANLY from the already-correct stored vectors. That rebuild heals the
+ * stale/asymmetric reverse-edge corruption that an OLDER (pre-fix) Harper's
+ * INCREMENTAL HNSW update left on disk during the July bulk embedding-stamp
+ * re-embed — a fresh index of the same vectors finds the true neighbors, the
+ * mangled live graph did not. The corruption is HISTORICAL: the installed
+ * Harper (5.1.22) already fixes that incremental-update path —
+ * HierarchicalNavigableSmallWorld reconstructs the prior vector from the
+ * stored node and carries its real connections into the reverse-edge cleanup
+ * the old build skipped — so current Harper no longer produces it; it just
+ * still persists on disk in stores re-embedded under the old engine. The heal
+ * is therefore version-agnostic: it repairs any such store regardless of the
+ * Harper now running. No re-embed happens — only the graph is rebuilt from the
+ * vectors already on disk.
  *
  * WHY THIS MIGRATION EXISTS ANYWAY: the heal is invisible — Harper triggers
  * it, this code cannot force it, and there is no Harper API to observe it
@@ -34,19 +42,20 @@
  * failure all degrade to "not verified this boot, retry next boot" or a
  * best-effort skip — never an exception into the boot path.
  *
- * ROOT-CAUSE GUARD (the recurrence-proof rule this migration is the current
- * instance of): any BULK re-embed of the corpus MUST be paired with a
- * structural graph REBUILD (a full runIndexing pass), never left to Harper's
- * incremental `index()` updates, which diverge from a clean rebuild under
- * bulk in-place vector replacement. Today the only lever flair has for that
- * rebuild is smuggling a structural-schema change (the M:16 descriptor bump
- * that ships with this migration) — see the guard comments in
+ * DEFENSE-IN-DEPTH RULE (a prudent, version-independent default — NOT a
+ * workaround for a live bug): any BULK re-embed of the corpus should be paired
+ * with a structural graph REBUILD (a full runIndexing pass) rather than
+ * relying on the engine's incremental `index()` updates to converge. The
+ * installed Harper (5.1.22) DOES converge — its update path is fixed — but the
+ * rebuild keeps recall correct regardless of engine version, closes the rare
+ * decode-failure edge case, and is what heals a store already corrupted on
+ * disk by an older engine. The lever flair uses for that rebuild is a
+ * structural-schema change (the M:16 descriptor bump that ships with this
+ * migration) — see the guard comments in
  * resources/migrations/embedding-stamp.ts and the `flair reembed` path in
- * src/cli.ts. The clean recurrence-proof fix is a supported Harper
- * vector-index rebuild API (filed upstream separately); until then, NEVER use
- * resources/MemoryReindex.ts's `_reindex` for graph correctness — it re-PUTs
- * the same vector through the same buggy incremental path and does not
- * rebuild the graph.
+ * src/cli.ts. Do NOT use resources/MemoryReindex.ts's `_reindex` for graph
+ * correctness — it re-PUTs the same vector through the incremental path and
+ * does not rebuild the graph.
  */
 import { databases } from "@harperfast/harper";
 import { existsSync, readFileSync } from "node:fs";
