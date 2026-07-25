@@ -1,6 +1,6 @@
 /**
  * Bridge discovery — scans the four conventional sources defined in
- * FLAIR-BRIDGES.md §7:
+ * docs/bridges.md § Discovery:
  *
  *   1. Project YAML:   <cwd>/.flair-bridge/*.yaml
  *   2. User YAML:      ~/.flair/bridges/*.yaml

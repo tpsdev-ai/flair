@@ -71,7 +71,7 @@ export async function loadCodePlugin(
       field: "exports",
       expected: "named `bridge` export or default export implementing MemoryBridge",
       got: typeof mod === "object" && mod !== null ? `exports=${Object.keys(mod).join(",") || "(empty)"}` : typeof mod,
-      hint: `flair-bridge-<name> packages must export \`bridge\` (or default-export) a MemoryBridge. See specs/FLAIR-BRIDGES.md §6`,
+      hint: `flair-bridge-<name> packages must export \`bridge\` (or default-export) a MemoryBridge. See docs/bridges.md § Shape B`,
     });
   }
 

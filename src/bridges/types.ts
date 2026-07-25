@@ -1,7 +1,7 @@
 /**
  * Types for the Flair memory bridge plugin system.
  *
- * Mirrors the contract in specs/FLAIR-BRIDGES.md. These types are the
+ * Mirrors the contract in docs/bridges.md. These types are the
  * public surface a bridge author (human or agent) targets.
  *
  * IMPORTANT: the YAML bridge format (shape A) also conforms to these types

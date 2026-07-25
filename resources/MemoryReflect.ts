@@ -5,7 +5,7 @@
  * reflection prompt for a human/agent to run through their own LLM, or (b)
  * with execute:true, runs the distillation server-side via Harper's models
  * facade and stages the results as MemoryCandidate rows for review. See
- * specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md §3A (issue #707).
+ * issue #707 (§3A).
  *
  * Request:
  *   agentId      string   — which agent to reflect on

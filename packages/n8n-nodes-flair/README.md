@@ -8,7 +8,7 @@ n8n community node — use [Flair](https://github.com/tpsdev-ai/flair) as your A
 - **Flair Search** — n8n AI Agent Tool port. Two operations:
   - *Semantic Search* — finds memories ranked by similarity to a natural-language query.
   - *Get By Subject* — lists memories filtered by subject, ordered by recency.
-  - *Get By Tag* — coming in a follow-up once `flair-client.memory.list` exposes a `tags` filter (tracked in the [spec](https://github.com/tpsdev-ai/flair/blob/main/specs/N8N-NODE-q3qf.md) §6).
+  - *Get By Tag* — coming in a follow-up once `flair-client.memory.list` exposes a `tags` filter.
 
 ## Installation
 

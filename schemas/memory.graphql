@@ -179,7 +179,7 @@ type MemoryUsage @table(database: "flair") {
 }
 
 # MemoryCandidate — staged distillations from the FLAIR-NIGHTLY-REM cycle.
-# Per specs/FLAIR-NIGHTLY-REM.md § 7. Slice 1 of ops-2qq adds the schema +
+# Per docs/rem.md. Slice 1 of ops-2qq adds the schema +
 # `flair rem candidates` listing command. Future slices wire the nightly
 # cycle that populates this table and the promote/reject endpoints.
 #

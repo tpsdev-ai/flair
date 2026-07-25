@@ -10,7 +10,7 @@
  * To add a new built-in:
  *   - YAML: write `src/bridges/builtins/<name>.ts` exporting a `YamlBridgeDescriptor`
  *   - Code plugin: write `src/bridges/builtins/<name>.ts` exporting a `MemoryBridge`
- *   Then register it here. See specs/FLAIR-BRIDGES.md §2 for shapes A/B.
+ *   Then register it here. See docs/bridges.md § Two shapes for shapes A/B.
  */
 
 import type {

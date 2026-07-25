@@ -6602,8 +6602,7 @@ export function describeReflectError(message: string): { kind: "no-backend" | "d
 }
 
 // ─── flair rem rapid ──────────────────────────────────────────────────────────
-// Executes by default (specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md § 3C,
-// issue #707): distills server-side via /ReflectMemories execute:true and
+// Executes by default (§3C, issue #707): distills server-side via /ReflectMemories execute:true and
 // stages MemoryCandidate rows, printing a staged-candidate summary. --prompt-only
 // preserves the pre-#710 handoff behavior byte-for-byte, for the bring-your-
 // own-model workflow.
@@ -13205,7 +13204,7 @@ soul.command("list")
 // Slice 1: discovery + scaffold. Slice 2: YAML runtime + `import` for Shape A
 // + agentic-stack reference adapter as a built-in.
 // `test` and `export` are still stubbed; Shape B (npm code plugins) too.
-// See specs/FLAIR-BRIDGES.md.
+// See docs/bridges.md.
 
 const bridge = program.command("bridge").description("Manage memory bridges (import/export between Flair and foreign systems)");
 

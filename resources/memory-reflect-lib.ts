@@ -1,6 +1,6 @@
 // ─── Memory Reflection — pure logic for /ReflectMemories ────────────────────
 // Pure helpers backing resources/MemoryReflect.ts (FLAIR-NIGHTLY-REM slice 2,
-// §3A — see specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md, issue #707).
+// §3A — see issue #707).
 //
 // Same split as resources/memory-consolidate-lib.ts: importing MemoryReflect.ts
 // pulls in the Harper runtime (`databases`/`Resource`/`models`, storage init),

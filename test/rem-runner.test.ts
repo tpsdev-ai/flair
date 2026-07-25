@@ -5,8 +5,7 @@
  * outside an isolated tmpdir. Tests pause sentinel, env-var pause, dry-run
  * (skip write but still log), happy path (writes snapshot + log row),
  * api failure (fail-stops-cycle + error in log row), soul shape coercion
- * (single row vs multi row), and step 5 distillation (specs/
- * FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md § 3B): success populates
+ * (single row vs multi row), and step 5 distillation (§3B, issue #707): success populates
  * `candidates` and flips `slice` to "2"; failure is recorded in `errors[]`
  * without failing the cycle; dry-run skips the /ReflectMemories call
  * entirely and `slice` stays "2-maintenance".
