@@ -101,7 +101,7 @@ A few things worth knowing:
 - **`--agent` is required** unless your descriptor maps an `agentId` column. If you forget, `flair bridge import` errors with a one-line operator-pointer hint plus a structured `BridgeRuntimeError` JSON on stderr.
 - **`--dry-run` is your friend.** Validates the descriptor, parses every record, applies the mapping, but skips the PUT. Use it to confirm the count and check a few records before committing.
 - **Output is throttled** to one progress line every 2 seconds (or every 25 records, whichever comes first), so big imports don't flood your terminal.
-- **Errors are structured.** Every error includes `bridge`, `op`, `path`, `record`, `field`, `expected`, `got`, `hint` (per [§10 of the spec](../specs/FLAIR-BRIDGES.md#-10-error-format)). The `hint` is the part you act on; the rest is for an LLM to self-correct without operator help.
+- **Errors are structured.** Every error includes `bridge`, `op`, `path`, `record`, `field`, `expected`, `got`, `hint` (per [Error format](#error-format) below). The `hint` is the part you act on; the rest is for an LLM to self-correct without operator help.
 
 ## Shape A — Declarative YAML
 
@@ -286,6 +286,6 @@ If you want an agent to write a bridge for you, here's the one-shot prompt:
 
 That's the bar. If an agent can't ship a working bridge from this doc plus the scaffold, the doc is the bug.
 
-## Full spec
+## Authority
 
-The authoritative contract is in [`specs/FLAIR-BRIDGES.md`](../specs/FLAIR-BRIDGES.md). This doc is the user-facing view; the spec covers edge cases, future extensions, and design rationale.
+This document is the authoritative contract for the bridge plugin system: the record schema, both plugin shapes, discovery, distribution, trust, round-trip testing, and the error format are all specified above. There is no separate design spec — the original planning document was retired once the system shipped, and its design-rationale and milestone-scoping sections are preserved in git history rather than maintained here.

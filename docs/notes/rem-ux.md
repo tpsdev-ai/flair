@@ -1,6 +1,6 @@
 # REM UX — trigger model, attach semantics, review loop
 
-> Design note accompanying REM slice 2 (#707). Describes the intended user experience of in-process distillation so the CLI/docs surfaces stay coherent as the feature grows. Parent spec: `specs/FLAIR-NIGHTLY-REM.md`; slice spec: `specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md`.
+> Design note accompanying REM slice 2 (#707). Describes the intended user experience of in-process distillation so the CLI/docs surfaces stay coherent as the feature grows. See [`docs/rem.md`](../rem.md) for the REM configuration and command reference.
 
 ## Triggers — three, nothing implicit
 

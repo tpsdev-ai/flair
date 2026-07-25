@@ -93,7 +93,7 @@ If any of those don't hold, use Flair's CLI / SDK clients (which support per-age
 
 ## Get By Tag — coming soon
 
-The Flair Search node currently exposes Semantic Search and Get By Subject. **Get By Tag** is deferred until `flair-client.memory.list` exposes a `tags` filter (tracked in the [n8n-node spec](https://github.com/tpsdev-ai/flair/blob/main/specs/N8N-NODE-q3qf.md) §6). Workaround for now: use Semantic Search and let the model filter results by tags in the response.
+The Flair Search node currently exposes Semantic Search and Get By Subject. **Get By Tag** is deferred until `flair-client.memory.list` exposes a `tags` filter. Workaround for now: use Semantic Search and let the model filter results by tags in the response.
 
 ## Worked examples
 
@@ -117,6 +117,5 @@ Same Flair instance, same memories, different surfaces.
 
 ## See also
 
-- [Spec — `@tpsdev-ai/n8n-nodes-flair`](https://github.com/tpsdev-ai/flair/blob/main/specs/N8N-NODE-q3qf.md) — implementation plan, design decisions, anti-patterns
 - [Bridges](./bridges.md) — how Flair memories flow between hosts and instances
 - [Federation](./federation.md) — hub-and-spoke replication

@@ -81,7 +81,7 @@ flair bridge list                        # confirm it's discovered
 flair bridge test my-system              # round-trip diff
 ```
 
-Full contract in [docs/bridges.md](docs/bridges.md) and the spec at [specs/FLAIR-BRIDGES.md](specs/FLAIR-BRIDGES.md). The round-trip test is the signal — if it passes, the bridge is ready.
+Full contract in [docs/bridges.md](docs/bridges.md). The round-trip test is the signal — if it passes, the bridge is ready.
 
 ## Releases
 

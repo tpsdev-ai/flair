@@ -1,6 +1,6 @@
 /**
  * cli-rem-rapid.test.ts — Unit tests for the `flair rem rapid` execute-mode
- * flip (specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md § 3C, issue #707).
+ * flip (§3C, issue #707).
  *
  * Tests the pure helpers formatCandidateLine + describeReflectError. Same
  * pattern as cli-rem-promote-reject.test.ts: the action callback itself

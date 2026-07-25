@@ -20,8 +20,8 @@
  *   - Steps 1, 2 shipped in slice-1 PR-1 (#414).
  *   - Step 3 (maintenance) shipped in a prior slice-2 PR — fills
  *     `archived`/`expired` in the audit row.
- *   - Step 4: per specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md § 3B,
- *     "Deferred from parent § 4 step 4" — trust tiers aren't derivable yet
+ *   - Step 4: per §3B (issue #707), "Deferred from parent § 4 step 4" —
+ *     trust tiers aren't derivable yet
  *     (that's the emergent-trust arc). The input filter stays as today (own
  *     agent, non-archived, non-permanent, scope window); the safety net for
  *     un-tiered input is structural — candidates are staged, never
@@ -87,8 +87,7 @@ export type RunnerStatus = "paused" | "completed" | "dry-run" | "failed";
  *   "2-maintenance" — snapshot + /MemoryMaintenance, distillation not
  *                     attempted this cycle (dry-run skip)
  *   "2"             — distillation attempted (success or failure — see
- *                     `candidates` / `errors`), per
- *                     specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md § 3B
+ *                     `candidates` / `errors`), per §3B (issue #707)
  */
 export type RunnerSlice = "1" | "2-maintenance" | "2";
 

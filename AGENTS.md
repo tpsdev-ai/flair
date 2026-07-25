@@ -47,9 +47,6 @@ test/          Unit, integration, e2e, smoke, compat, and benchmark tests.
 docs/          User-facing documentation. mcp-clients.md, federation.md,
                deployment.md, auth.md, and others.
 
-specs/         DRAFT planning documents. May not reflect shipped state.
-               Do NOT read as current architecture.
-
 packages/      Published sub-packages: flair-client, flair-mcp, flair-bench,
                hermes-flair, n8n-nodes-flair, openclaw-flair,
                langgraph-flair, pi-flair, and bridge adapters.
@@ -81,4 +78,4 @@ config.yaml    Flair server configuration (port via CLI or HTTP_PORT env).
 | How do I contribute? | `CONTRIBUTING.md` |
 | How do I use Flair? | `README.md` → `docs/quickstart.md` |
 | What does the data model look like? | `schemas/` |
-| Is this spec current? | `specs/` are DRAFT — verify against `resources/` and `DESIGN.md` |
+| Where is planned/proposed work? | GitHub issues — not in this repo. Nothing in the tree is a proposal |

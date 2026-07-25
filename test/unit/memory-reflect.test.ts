@@ -1,5 +1,5 @@
 // Unit tests for the /ReflectMemories execute-mode logic (FLAIR-NIGHTLY-REM
-// slice 2, §3A — see specs/FLAIR-NIGHTLY-REM-SLICE-2-DISTILLATION.md, #707).
+// slice 2, §3A — see issue #707).
 //
 // These exercise resources/memory-reflect-lib.ts directly — the Harper-free
 // module MemoryReflect.ts's post() delegates to. MemoryReflect.ts itself

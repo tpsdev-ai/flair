@@ -127,8 +127,8 @@
  *
  * `remEligible` — MUST be `false` for every entry in v1 (typed as the
  * literal `false`, not `boolean`, so a stray `true` is a compile error, not
- * just a runtime policy mistake). REM's nightly gather step
- * (specs/FLAIR-NIGHTLY-REM.md §11) is hardcoded to `GET /Memory?agentId=…`
+ * just a runtime policy mistake). REM's nightly gather step (see docs/rem.md)
+ * is hardcoded to `GET /Memory?agentId=…`
  * — single table, single agent, by construction. There is no multi-table
  * distillation input path to opt into yet; the field exists so a future
  * REM generalization doesn't require a breaking schema change to every
