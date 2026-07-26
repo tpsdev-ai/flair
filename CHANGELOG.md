@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`flair rem nightly enable` printed a green "scheduler enabled" headline even when activation failed, and `flair status`/`flair rem nightly status` kept repeating the claim afterward — with no way to detect the failure from an exit code.** In any session without a systemd user bus (ssh without lingering, a container, CI), `systemctl --user enable --now flair-rem-nightly.timer` exits nonzero with `Failed to connect to bus: No medium found` — `enableScheduler()` (`src/rem/scheduler.ts`) already captured that failure as `loadResult`, but the CLI (`src/cli.ts`) printed the success headline unconditionally, first, and only reported the nonzero code in a line underneath it, with `process.exit` never called — so scripts saw exit 0 for a scheduler that had nothing scheduled. Both scheduler-status surfaces had the same shape: `schedulerStatus()` and the `/HealthDetail` REM block (`resources/health.ts`) both inferred "enabled" from the timer/plist file existing, which a failed `enable` still writes. Fixed at the root: `formatEnableReport()` and `formatStatusReport()` (new, `src/rem/scheduler.ts`) only print a success headline when activation is actually known to have succeeded, `flair rem nightly enable` now exits nonzero on activation failure, and a new genuine active-state query (`launchctl print` / `systemctl --user is-active`, sync for the CLI and a non-blocking async form for the Health endpoint) replaces the file-existence check in both `schedulerStatus()` and `resources/health.ts`'s `nightlyEnabled`. The bus-connection failure now also names its own remedy inline (`loginctl enable-linger <user>`) instead of surfacing a bare error the operator has to go research.
+
 ## [0.29.0] - 2026-07-26
 
 ### Security
