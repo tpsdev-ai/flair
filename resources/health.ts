@@ -406,12 +406,31 @@ export class HealthDetail extends Resource {
       const lastRapidAt = findLast("rapid");
       const lastRestorativeAt = findLast("restorative");
 
+      // File presence only proves the scheduler templates were written —
+      // NOT that launchctl/systemctl actually loaded the job. A
+      // `systemctl --user enable --now` that fails (e.g. no session bus)
+      // still leaves the timer file on disk, so file-existence alone would
+      // report "enabled" for a scheduler that has nothing scheduled
+      // (flair#850). Query genuine active state once the file is known to
+      // exist; async + short-timeout so a slow/hung service manager can't
+      // stall this request.
       let nightlyEnabled: boolean | null = null;
+      let nightlyInstalled = false;
       const plat = platform();
-      if (plat === "darwin") {
-        nightlyEnabled = await exists(join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist"));
-      } else if (plat === "linux") {
-        nightlyEnabled = await exists(join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer"));
+      if (plat === "darwin" || plat === "linux") {
+        nightlyInstalled = plat === "darwin"
+          ? await exists(join(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist"))
+          : await exists(join(homedir(), ".config", "systemd", "user", "flair-rem-nightly.timer"));
+        if (nightlyInstalled) {
+          try {
+            const { queryActiveStateAsync } = await import("../src/rem/scheduler.js");
+            nightlyEnabled = await queryActiveStateAsync(plat);
+          } catch {
+            nightlyEnabled = null;
+          }
+        } else {
+          nightlyEnabled = false;
+        }
       }
 
       const nightlyRecords = await tailJsonl(nightlyLog);
@@ -447,6 +466,9 @@ export class HealthDetail extends Resource {
         };
         if (nightlyEnabled && lastNightlyAt && nowMs - new Date(lastNightlyAt).getTime() > 48 * 3600 * 1000) {
           warnings.push({ level: "warn", message: "nightly REM hasn't run in >48h" });
+        }
+        if (nightlyInstalled && nightlyEnabled === false) {
+          warnings.push({ level: "warn", message: "REM nightly scheduler files are written but not active — nothing is scheduled (see `flair rem nightly status`)" });
         }
       }
     } catch { stats.rem = null; }

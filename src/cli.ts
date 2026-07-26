@@ -7150,25 +7150,15 @@ remNightly
     const port = readPortFromConfig() ?? DEFAULT_PORT;
     const flairUrl = opts.flairUrl || process.env.FLAIR_URL || `http://127.0.0.1:${port}`;
 
-    const { enableScheduler } = await import("./rem/scheduler.js");
+    const { enableScheduler, formatEnableReport } = await import("./rem/scheduler.js");
     try {
       const r = enableScheduler({ agentId, flairUrl, hour, minute });
-      console.log(`✅ REM nightly scheduler enabled (${r.platform})`);
-      console.log(`   Schedule:    ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} local time`);
-      console.log(`   Scheduler:   ${r.schedulerPath}`);
-      console.log(`   Shim:        ${r.shimPath}`);
-      console.log(`   Agent:       ${agentId}`);
-      console.log(`   Flair URL:   ${flairUrl}`);
-      if (r.loadResult) {
-        if (r.loadResult.code === 0) {
-          console.log(`   Load:        ${r.loadCommand.join(" ")} → ok`);
-        } else {
-          console.log(`   Load:        ${r.loadCommand.join(" ")} → code ${r.loadResult.code}`);
-          if (r.loadResult.stderr) console.log(`     stderr: ${r.loadResult.stderr.trim()}`);
-        }
-      }
-      console.log(`\nTip: run \`flair rem nightly run-once --dry-run\` to verify the cycle works`);
-      console.log(`     before the first scheduled fire. Disable with \`flair rem nightly disable\`.`);
+      // formatEnableReport() owns the success-vs-failure decision (flair#850:
+      // do not print a success headline before activation is known to have
+      // succeeded) — see src/rem/scheduler.ts for the unit-tested logic.
+      const { lines, ok } = formatEnableReport(r, { hour, minute, agentId, flairUrl });
+      for (const line of lines) console.log(line);
+      if (!ok) process.exit(1);
     } catch (err: any) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
@@ -7204,18 +7194,13 @@ remNightly
 
 remNightly
   .command("status")
-  .description("Show whether the nightly scheduler is installed")
+  .description("Show whether the nightly scheduler is installed and genuinely active")
   .action(async () => {
-    const { schedulerStatus } = await import("./rem/scheduler.js");
+    const { schedulerStatus, formatStatusReport } = await import("./rem/scheduler.js");
     try {
       const s = schedulerStatus();
-      console.log(`REM nightly scheduler (${s.platform}):`);
-      console.log(`  Installed:   ${s.installed ? "yes" : "no"}`);
-      console.log(`  Scheduler:   ${s.schedulerPath}`);
-      console.log(`  Shim:        ${s.shimPath}${s.shimExists ? "" : " (missing)"}`);
-      if (!s.installed) {
-        console.log(`\nEnable with: flair rem nightly enable --agent <id> [--at HH:MM]`);
-      }
+      const { lines } = formatStatusReport(s);
+      for (const line of lines) console.log(line);
     } catch (err: any) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
