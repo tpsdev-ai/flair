@@ -14,8 +14,14 @@ import {
   enableScheduler,
   disableScheduler,
   schedulerStatus,
+  formatEnableReport,
+  formatStatusReport,
+  describeLoadFailure,
+  interpretActiveResult,
   type SchedulerSubstitutions,
   type EnableOpts,
+  type EnableResult,
+  type SchedulerStatus,
 } from "../src/rem/scheduler.ts";
 
 let testRoot: string;
@@ -242,5 +248,235 @@ describe("schedulerStatus", () => {
     const s = schedulerStatus({ platformOverride: "linux" });
     expect(s.platform).toBe("linux");
     expect(s.schedulerPath).toContain("flair-rem-nightly.timer");
+  });
+
+  // flair#850 — schedulerStatus() must not claim active from file presence
+  // alone. These use overrides + skipActiveCheck so the assertions are
+  // hermetic (no real launchctl/systemctl dependency).
+
+  it("reports installed=false, active=false when nothing was ever written", () => {
+    const s = schedulerStatus({
+      platformOverride: "linux",
+      systemdTimerOverride: timerPath,
+      systemdServiceOverride: servicePath,
+      shimPathOverride: shimPath,
+    });
+    expect(s.installed).toBe(false);
+    // Nothing written — there is nothing to be active either, and we know
+    // that for certain (no need to shell out), so `false`, not `null`.
+    expect(s.active).toBe(false);
+  });
+
+  it("does NOT report active=true purely because the timer file exists (the flair#850 bug shape)", () => {
+    enableScheduler(baseOpts({ platformOverride: "linux" }));
+    expect(existsSync(timerPath)).toBe(true);
+
+    // skipActiveCheck simulates "we chose not to query" — installed files
+    // alone must yield `active: null` (unknown), never `true`. A `true`
+    // here would be the exact bug: inferring activation from file presence.
+    const s = schedulerStatus({
+      platformOverride: "linux",
+      systemdTimerOverride: timerPath,
+      systemdServiceOverride: servicePath,
+      shimPathOverride: shimPath,
+      skipActiveCheck: true,
+    });
+    expect(s.installed).toBe(true);
+    expect(s.active).not.toBe(true);
+    expect(s.active).toBeNull();
+  });
+
+  it("darwin: installed=true, active=null when the plist exists but the check is skipped", () => {
+    enableScheduler(baseOpts({ platformOverride: "darwin" }));
+    const s = schedulerStatus({
+      platformOverride: "darwin",
+      launchdPlistOverride: plistPath,
+      shimPathOverride: shimPath,
+      skipActiveCheck: true,
+    });
+    expect(s.installed).toBe(true);
+    expect(s.active).not.toBe(true);
+    expect(s.active).toBeNull();
+  });
+});
+
+describe("interpretActiveResult (flair#850 — genuine active state, not file presence)", () => {
+  it("linux: 'active' stdout means active", () => {
+    expect(interpretActiveResult("linux", 0, "active\n", "")).toBe(true);
+  });
+
+  it("linux: 'inactive' stdout means not active", () => {
+    expect(interpretActiveResult("linux", 3, "inactive\n", "")).toBe(false);
+  });
+
+  it("linux: no session bus (empty stdout, connection-refused stderr) is treated as NOT active — not unknown", () => {
+    // This is the exact traced production failure mode: `systemctl --user`
+    // fails before it ever prints a status word.
+    const r = interpretActiveResult("linux", 1, "", "Failed to connect to bus: No medium found\n");
+    expect(r).toBe(false);
+  });
+
+  it("linux: total spawn failure with no output at all is inconclusive (null), not a confident false", () => {
+    expect(interpretActiveResult("linux", null, "", "")).toBeNull();
+  });
+
+  it("darwin: exit code 0 means active", () => {
+    expect(interpretActiveResult("darwin", 0, "some plist dump", "")).toBe(true);
+  });
+
+  it("darwin: nonzero exit with 'could not find service' means not active", () => {
+    expect(interpretActiveResult("darwin", 3, "", "Could not find service \"dev.flair.rem.nightly\" in domain")).toBe(false);
+  });
+
+  it("darwin: total spawn failure with no output is inconclusive", () => {
+    expect(interpretActiveResult("darwin", null, "", "")).toBeNull();
+  });
+});
+
+describe("describeLoadFailure (flair#850 — remedy naming)", () => {
+  it("names loginctl enable-linger for the traced 'no bus' linux failure", () => {
+    const remedy = describeLoadFailure("linux", { code: 1, stderr: "Failed to connect to bus: No medium found\n" });
+    expect(remedy).not.toBeNull();
+    expect(remedy).toContain("loginctl enable-linger");
+  });
+
+  it("returns null for an unrecognized linux failure (caller falls back to raw stderr)", () => {
+    const remedy = describeLoadFailure("linux", { code: 1, stderr: "some other systemd error\n" });
+    expect(remedy).toBeNull();
+  });
+
+  it("returns null on darwin (no traced/verified remedy for launchctl failures)", () => {
+    const remedy = describeLoadFailure("darwin", { code: 1, stderr: "Failed to connect to bus: No medium found\n" });
+    expect(remedy).toBeNull();
+  });
+});
+
+describe("formatEnableReport (flair#850 — the core honesty fix)", () => {
+  const reportInput = { hour: 3, minute: 0, agentId: "test-agent", flairUrl: "http://127.0.0.1:9926" };
+
+  function baseEnableResult(overrides: Partial<EnableResult> = {}): EnableResult {
+    return {
+      platform: "linux",
+      shimPath: "/home/test/.flair/bin/flair-rem-nightly",
+      schedulerPath: "/home/test/.config/systemd/user/flair-rem-nightly.timer",
+      loadCommand: ["systemctl", "--user", "enable", "--now", "flair-rem-nightly.timer"],
+      ...overrides,
+    };
+  }
+
+  it("SUCCESS PATH: reports success when loadResult.code === 0", () => {
+    const r = baseEnableResult({ loadResult: { code: 0, stdout: "", stderr: "" } });
+    const { lines, ok } = formatEnableReport(r, reportInput);
+    expect(ok).toBe(true);
+    expect(lines.join("\n")).toContain("✅ REM nightly scheduler enabled");
+    expect(lines.join("\n")).not.toMatch(/NOT activated/);
+  });
+
+  it("SUCCESS PATH: reports success when loadResult is absent (test-only skipLoad shape)", () => {
+    const r = baseEnableResult({ loadResult: undefined });
+    const { lines, ok } = formatEnableReport(r, reportInput);
+    expect(ok).toBe(true);
+    expect(lines.join("\n")).toContain("✅ REM nightly scheduler enabled");
+  });
+
+  it("FAILURE PATH: does NOT print a success headline when loadResult.code !== 0", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" },
+    });
+    const { lines, ok } = formatEnableReport(r, reportInput);
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).not.toContain("✅ REM nightly scheduler enabled");
+    expect(text).not.toMatch(/^✅/m);
+    expect(text).toMatch(/NOT activated/);
+  });
+
+  it("FAILURE PATH: signals failure via ok=false (caller exits nonzero)", () => {
+    const r = baseEnableResult({ loadResult: { code: 1, stdout: "", stderr: "boom\n" } });
+    const { ok } = formatEnableReport(r, reportInput);
+    expect(ok).toBe(false);
+  });
+
+  it("FAILURE PATH: names the loginctl remedy for the bus-connection failure", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" },
+    });
+    const { lines } = formatEnableReport(r, reportInput);
+    const text = lines.join("\n");
+    expect(text).toContain("loginctl enable-linger");
+  });
+
+  it("FAILURE PATH: still surfaces the raw stderr and the failing command", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" },
+    });
+    const { lines } = formatEnableReport(r, reportInput);
+    const text = lines.join("\n");
+    expect(text).toContain("systemctl --user enable --now flair-rem-nightly.timer");
+    expect(text).toContain("code 1");
+    expect(text).toContain("Failed to connect to bus");
+  });
+
+  it("FAILURE PATH: treats a null exit code (timeout/killed) as failure too", () => {
+    const r = baseEnableResult({ loadResult: { code: null, stdout: "", stderr: "" } });
+    const { ok } = formatEnableReport(r, reportInput);
+    expect(ok).toBe(false);
+  });
+
+  it("FAILURE PATH on darwin: no invented remedy, but still reports NOT activated", () => {
+    const r = baseEnableResult({
+      platform: "darwin",
+      schedulerPath: "/home/test/Library/LaunchAgents/dev.flair.rem.nightly.plist",
+      loadCommand: ["launchctl", "bootstrap", "gui/501", "/home/test/Library/LaunchAgents/dev.flair.rem.nightly.plist"],
+      loadResult: { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error\n" },
+    });
+    const { lines, ok } = formatEnableReport(r, reportInput);
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).not.toContain("✅ REM nightly scheduler enabled");
+    expect(text).toMatch(/NOT activated/);
+    expect(text).toContain("Re-run the activation command above manually");
+  });
+});
+
+describe("formatStatusReport (flair#850 — status reflects genuine active state)", () => {
+  function baseStatus(overrides: Partial<SchedulerStatus> = {}): SchedulerStatus {
+    return {
+      platform: "linux",
+      installed: true,
+      active: true,
+      schedulerPath: "/home/test/.config/systemd/user/flair-rem-nightly.timer",
+      shimPath: "/home/test/.flair/bin/flair-rem-nightly",
+      shimExists: true,
+      ...overrides,
+    };
+  }
+
+  it("reports Active: yes when genuinely active", () => {
+    const { lines, ok } = formatStatusReport(baseStatus({ active: true }));
+    expect(ok).toBe(true);
+    expect(lines.join("\n")).toContain("Active:      yes");
+  });
+
+  it("reports Active: no — and does not claim enabled — when files exist but the job is not active (the flair#850 bug shape)", () => {
+    const { lines, ok } = formatStatusReport(baseStatus({ installed: true, active: false }));
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).toContain("Active:      no");
+    expect(text).not.toMatch(/Active:\s+yes/);
+    expect(text).toMatch(/nothing is scheduled/i);
+  });
+
+  it("reports Active: unknown when the check was inconclusive/skipped", () => {
+    const { lines } = formatStatusReport(baseStatus({ installed: true, active: null }));
+    expect(lines.join("\n")).toContain("Active:      unknown");
+  });
+
+  it("reports not-installed distinctly from installed-but-inactive", () => {
+    const { lines } = formatStatusReport(baseStatus({ installed: false, active: false }));
+    const text = lines.join("\n");
+    expect(text).toContain("Installed:   no");
+    expect(text).toContain("Enable with:");
+    expect(text).not.toMatch(/nothing is scheduled/i);
   });
 });
