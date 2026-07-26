@@ -298,8 +298,7 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
   // One anonymous PUT per agent-writable resource; any 200/204 is an auth leak.
   // EVERY @export @table must reject anonymous writes. Harper's role gate denies
   // admin/system tables for a no-user request (→ 403, passes); a 200/204 is a real
-  // leak in a table that relied on the (now non-rejecting) global gate. MemoryCandidate
-  // is intentionally NOT @export (not REST-routable) so it's excluded.
+  // leak in a table that relied on the (now non-rejecting) global gate.
   const AGENT_WRITE_RESOURCES: Array<{ name: string; body: (id: string) => any }> = [
     // agent-facing (agent-owned data)
     { name: "Soul",            body: (id) => ({ id, agentId: agent.id, content: "anon soul" }) },
@@ -311,6 +310,13 @@ describe("flair_agent de-elevation (verified agents act as flair-agent, not admi
     { name: "MemoryGrant",     body: (id) => ({ id, ownerId: agent.id, granteeId: "x", scope: "read" }) },
     { name: "OrgEvent",        body: (id) => ({ id, authorId: agent.id, kind: "note", body: "anon" }) },
     { name: "Agent",           body: (id) => ({ id, displayName: "anon", role: "agent" }) },
+    // flair#849: MemoryCandidate gained @export + a resource file (was
+    // previously excluded here as "not REST-routable" — that exclusion WAS
+    // the bug: no @export meant no REST surface at all, so `flair rem
+    // candidates`/`promote`/`reject` 404'd on every call). Now @export'd and
+    // agent-writable (owner-scoped), it belongs in this same anonymous-write
+    // sweep like every other agent-facing table.
+    { name: "MemoryCandidate", body: (id) => ({ id, agentId: agent.id, claim: "anon candidate", generatedAt: new Date().toISOString(), status: "pending" }) },
     // admin / system / federation tables (no agent grant → must deny anon)
     { name: "Instance",        body: (id) => ({ id, name: "anon" }) },
     { name: "Peer",            body: (id) => ({ id, url: "http://x" }) },

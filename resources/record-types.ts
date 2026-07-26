@@ -427,6 +427,35 @@ export const RECORD_TYPES = {
     federation: "included",
     mcp: { toolPrefix: "soul", readVerbs: ["get"], writeVerbs: ["store"] },
   },
+
+  // MemoryCandidate — flair#849. A candidate is an unreviewed draft
+  // distillation staged by the FLAIR-NIGHTLY-REM cycle (docs/rem.md);
+  // `readScope: "owner-only"` (not "open-within-org") is deliberate: a
+  // candidate must not be org-readable before a human/agent reviewer
+  // explicitly promotes or rejects it — this is the standard-review-bar
+  // choice per this file's header doc's review-gate tiering (an
+  // "open-within-org" or "none" entry would additionally require Sherlock's
+  // explicit security sign-off, which this entry does not carry). No
+  // `embedding` — the claim text has no dedicated recall surface (it isn't
+  // Memory.content). No `mcp` — no MCP tool exposes this table today.
+  MemoryCandidate: {
+    table: "MemoryCandidate",
+    ownerField: "agentId",
+    identity: "gated",
+    readScope: "owner-only",
+    attribution: { post: "validate-truthy", put: "validate-truthy" },
+    // No provenance field on the schema (schemas/memory.graphql) — nobody
+    // stamps buildProvenance() for this table.
+    provenance: false,
+    remEligible: false,
+    // Not in Federation.ts's push table map nor src/cli.ts's
+    // runFederationSyncOnce hardcoded list (`["Memory", "Soul", "Agent",
+    // "Relationship"]`) — per this file's header doc's federation section,
+    // a new type's registration must not silently inherit whatever that
+    // filter does or doesn't already exclude, so this is "excluded" by the
+    // same reasoning, not by omission.
+    federation: "excluded",
+  },
 } as const satisfies Record<string, RecordTypePolicy>;
 
 export type RecordTypeName = keyof typeof RECORD_TYPES;
