@@ -47,6 +47,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { httpStatus } from "../helpers/http-status";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "flair679-e2e-agent";
@@ -139,7 +140,7 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Workspace state updated");
     // The old bug surfaced as a REST 405; assert that error never appears.
-    expect(`${r.stdout}${r.stderr}`).not.toContain("405");
+    expect(`${r.stdout}${r.stderr}`).not.toMatch(httpStatus(405));
     expect(`${r.stdout}${r.stderr}`).not.toContain("does not have a post method");
 
     // MEASURED round-trip: read the record back over real HTTP (admin bypasses
@@ -202,7 +203,7 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("OrgEvent published");
     // The old bug surfaced as a REST 405; assert that error never appears.
-    expect(`${r.stdout}${r.stderr}`).not.toContain("405");
+    expect(`${r.stdout}${r.stderr}`).not.toMatch(httpStatus(405));
     expect(`${r.stdout}${r.stderr}`).not.toContain("does not have a post method");
 
     // The CLI prints the generated id (`  id: <id>`) — extract it so the
