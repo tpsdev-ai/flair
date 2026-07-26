@@ -139,6 +139,48 @@ function makeSchemaAdditiveMigration(memoryStore: ReturnType<typeof makeStore>, 
   };
 }
 
+/**
+ * derived-only migration whose marker IS a SOURCE field — the
+ * visibility-backfill shape: it stamps `visibility` (in
+ * MEMORY_SOURCE_FIELDS, so it perturbs the corpus envelope) into rows where
+ * it is absent. Exists to prove the runner re-baselines the shared envelope
+ * for a LATER count+full-envelope gate after this migration's own,
+ * legitimate writes (the CI-observed failure: visibility-backfill running
+ * before the synthetic schema-additive migration in the same cycle halted
+ * the latter with "hash envelope mismatch").
+ */
+function makeSourceFieldWritingMigration(memoryStore: ReturnType<typeof makeStore>, id = "fake-visibility-backfill"): Migration {
+  const table = memoryStore.accessor;
+  const pendingCond = () => [
+    { attribute: "visibility", comparator: "not_equal", value: "private" },
+    { attribute: "visibility", comparator: "not_equal", value: "shared" },
+  ];
+  return {
+    id,
+    riskClass: "derived-only",
+    affectsTables: ["Memory"],
+    async detect() {
+      for await (const _r of table.search({ conditions: pendingCond(), limit: 1 })) return true;
+      return false;
+    },
+    async countPending() {
+      let n = 0;
+      for await (const _r of table.search({ conditions: pendingCond() })) n++;
+      return n;
+    },
+    async run(batchSize): Promise<RunBatchResult> {
+      const rows: Row[] = [];
+      for await (const r of table.search({ conditions: pendingCond(), limit: batchSize })) rows.push(r);
+      const touchedIds: string[] = [];
+      for (const r of rows) {
+        await table.put({ ...r, visibility: "private" }); // SOURCE field write — perturbs the envelope
+        touchedIds.push(String(r.id));
+      }
+      return { processed: touchedIds.length, touchedIds };
+    },
+  };
+}
+
 /** content-transform: gate is old-row-envelope (unchanged source fields) + new-row presence. */
 function makeContentTransformMigration(
   memoryStore: ReturnType<typeof makeStore>,
@@ -349,6 +391,96 @@ describe("runMigrationCycle — schema-additive happy path (count+full-envelope 
     const state = readMigrationState(defaultStatePath(dataDir));
     expect(state["fake-schema"].lastOutcome).toBe("halted");
     expect(state["fake-schema"].completedAtVersion).toBeUndefined();
+  });
+});
+
+describe("runMigrationCycle — shared envelope re-baselines after an earlier migration's own SOURCE-field writes", () => {
+  // The CI-observed bug this locks in (PR #845): the corpus envelope was
+  // computed ONCE per cycle, so an earlier migration legitimately writing a
+  // SOURCE field (visibility-backfill stamping `visibility`) made a later
+  // migration's count+full-envelope gate read those ledgered writes as
+  // corruption and spuriously halt ("completion gate failed:
+  // rowsRemaining=0, hash envelope mismatch").
+  it("a later schema-additive gate PASSES (hashEnvelopeMatch: true) when an earlier migration in the SAME cycle wrote a SOURCE field", async () => {
+    const memory = makeStore([
+      // Pending for BOTH migrations: no `visibility` (source-writer will stamp it), newField false (schema migration will stamp that).
+      { id: "m1", content: "a", agentId: "a1", durability: "standard", newField: false },
+      { id: "m2", content: "b", agentId: "a1", durability: "standard", newField: false },
+    ]);
+    const relationship = makeStore([]);
+    const registry = buildRegistryWith(makeSourceFieldWritingMigration(memory), makeSchemaAdditiveMigration(memory));
+
+    const ledgerEvents: unknown[] = [];
+    const result = await runMigrationCycle({
+      registry,
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+    });
+
+    expect(result.ran).toBe(true);
+    // Both migrations converged on the rows.
+    expect(memory.map.get("m1")!.visibility).toBe("private");
+    expect(memory.map.get("m1")!.newField).toBe(true);
+    expect(memory.map.get("m2")!.visibility).toBe("private");
+    expect(memory.map.get("m2")!.newField).toBe(true);
+
+    expect(ledgerEvents).toHaveLength(2);
+    const first = JSON.parse((ledgerEvents[0] as any).detail);
+    expect(first.migrationId).toBe("fake-visibility-backfill");
+    expect(first.outcome).toBe("success");
+    const second = JSON.parse((ledgerEvents[1] as any).detail);
+    expect(second.migrationId).toBe("fake-schema");
+    expect(second.outcome).toBe("success");
+    expect(second.hashEnvelopeMatch).toBe(true); // the re-baselined comparison — NOT vs. the pre-cycle corpus
+
+    const state = readMigrationState(defaultStatePath(dataDir));
+    expect(state["fake-visibility-backfill"].lastOutcome).toBe("success");
+    expect(state["fake-schema"].lastOutcome).toBe("success");
+  });
+
+  it("re-baselining does NOT weaken invariant I: a genuinely concurrent SOURCE mutation DURING the gated migration still halts it", async () => {
+    const memory = makeStore([
+      { id: "m1", content: "a", agentId: "a1", durability: "standard", newField: false },
+      // Pending for NEITHER migration — the innocent bystander a concurrent writer corrupts.
+      { id: "bystander", content: "untouched", agentId: "a1", durability: "standard", visibility: "shared", newField: true },
+    ]);
+    const relationship = makeStore([]);
+    const registry = buildRegistryWith(makeSourceFieldWritingMigration(memory), makeSchemaAdditiveMigration(memory));
+
+    // sleep is called once per non-empty batch: call 1 = the source-writer's
+    // only batch; call 2 = the schema migration's only batch — i.e. AFTER
+    // the re-baseline (which happens between the two migrations). Mutating
+    // the bystander there is a concurrent write the gated migration never
+    // declared, landing after its baseline was captured.
+    let sleepCalls = 0;
+    const meddlingSleep = async () => {
+      sleepCalls++;
+      if (sleepCalls === 2) {
+        memory.map.set("bystander", { ...memory.map.get("bystander")!, content: "mutated by something else entirely" });
+      }
+    };
+
+    const ledgerEvents: unknown[] = [];
+    const result = await runMigrationCycle({
+      registry,
+      getTable: (t) => (t === "Memory" ? memory.accessor : relationship.accessor),
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: meddlingSleep,
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+    });
+
+    expect(result.ran).toBe(true);
+    expect(ledgerEvents).toHaveLength(2);
+    const first = JSON.parse((ledgerEvents[0] as any).detail);
+    expect(first.outcome).toBe("success"); // the source-writer itself was fine
+    const second = JSON.parse((ledgerEvents[1] as any).detail);
+    expect(second.migrationId).toBe("fake-schema");
+    expect(second.outcome).toBe("halted");
+    expect(second.hashEnvelopeMatch).toBe(false);
   });
 });
 
