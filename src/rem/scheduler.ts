@@ -16,7 +16,7 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 import { homedir, platform } from "node:os";
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 export const SHIM_PATH_DEFAULT = resolve(homedir(), ".flair", "bin", "flair-rem-nightly");
@@ -177,16 +177,224 @@ function writeFileWithDir(path: string, contents: string, mode: number = 0o600):
 // can't block the CLI indefinitely. Sherlock #415 follow-up.
 const SPAWN_TIMEOUT_MS = 30_000;
 
-function spawnReport(cmd: string[]): { code: number | null; stdout: string; stderr: string } {
+// Status-check spawns (launchctl print / systemctl is-active) return
+// near-instantly when the service manager is reachable, and fail fast (no
+// hang) when it isn't (e.g. "Failed to connect to bus"). A short ceiling
+// keeps `flair rem nightly status` and the Health endpoint responsive even
+// when the query is inconclusive.
+const STATUS_CHECK_TIMEOUT_MS = 5_000;
+
+function spawnReport(cmd: string[], timeoutMs: number = SPAWN_TIMEOUT_MS): { code: number | null; stdout: string; stderr: string } {
   const r: SpawnSyncReturns<Buffer> = spawnSync(cmd[0], cmd.slice(1), {
     encoding: "buffer",
-    timeout: SPAWN_TIMEOUT_MS,
+    timeout: timeoutMs,
   });
   return {
     code: r.status,
     stdout: r.stdout?.toString("utf-8") ?? "",
     stderr: r.stderr?.toString("utf-8") ?? "",
   };
+}
+
+/**
+ * Command to genuinely query the platform scheduler's active/loaded state
+ * for a given install (as opposed to the shape of `loadCommand`, which
+ * *installs* it). Shared by the sync and async active-state checks below so
+ * the two can't drift.
+ */
+function activeCheckCommand(plat: SchedulerPlatform): string[] {
+  if (plat === "darwin") {
+    return ["launchctl", "print", `gui/${process.getuid?.() ?? ""}/dev.flair.rem.nightly`];
+  }
+  return ["systemctl", "--user", "is-active", "flair-rem-nightly.timer"];
+}
+
+/**
+ * Interprets the result of `activeCheckCommand()`. Shared by the sync
+ * (CLI) and async (server) callers.
+ *
+ * - true  — the service manager confirms the job is loaded/active.
+ * - false — confirmed NOT active. This includes the "no session bus" case
+ *   (flair#850): when `systemctl --user` can't reach a bus, it fails
+ *   before printing a status word ("Failed to connect to bus: No medium
+ *   found") — but nothing CAN be running without a bus, so `false` is the
+ *   honest answer, not "unknown".
+ * - null  — genuinely inconclusive (the command itself couldn't run at
+ *   all — e.g. the binary is missing — with no output to interpret).
+ */
+export function interpretActiveResult(plat: SchedulerPlatform, code: number | null, stdout: string, stderr: string): boolean | null {
+  const noOutput = !stdout.trim() && !stderr.trim();
+  if (plat === "darwin") {
+    if (code === 0) return true;
+    if (code === null && noOutput) return null; // spawn itself failed — inconclusive
+    return false; // launchctl ran and reported not-loaded
+  }
+  const out = stdout.trim();
+  if (out === "active" || out === "activating") return true;
+  if (out === "inactive" || out === "failed" || out === "unknown") return false;
+  if (code === null && noOutput) return null; // spawn itself failed — inconclusive
+  return false; // covers the no-bus case: empty stdout, nonzero/failed exit
+}
+
+/**
+ * Synchronous active-state check for CLI use (`flair rem nightly status`).
+ * Blocking is fine here — this is a one-shot process and the caller wants
+ * the answer before printing anything.
+ */
+function queryActiveState(plat: SchedulerPlatform): boolean | null {
+  const [cmd, ...args] = activeCheckCommand(plat);
+  const r = spawnReport([cmd, ...args], STATUS_CHECK_TIMEOUT_MS);
+  return interpretActiveResult(plat, r.code, r.stdout, r.stderr);
+}
+
+/**
+ * Async, non-blocking equivalent for server contexts (the Health endpoint)
+ * where a synchronous subprocess would stall the request-handling thread.
+ * Same semantics as `queryActiveState()`.
+ */
+export async function queryActiveStateAsync(plat: SchedulerPlatform, timeoutMs: number = STATUS_CHECK_TIMEOUT_MS): Promise<boolean | null> {
+  const [cmd, ...args] = activeCheckCommand(plat);
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    let child: ReturnType<typeof spawn>;
+    const finish = (result: boolean | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise(result);
+    };
+    const timer = setTimeout(() => {
+      try { child?.kill("SIGKILL"); } catch { /* best-effort */ }
+      finish(null);
+    }, timeoutMs);
+    try {
+      child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    } catch {
+      finish(null);
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d) => { stdout += d.toString("utf-8"); });
+    child.stderr?.on("data", (d) => { stderr += d.toString("utf-8"); });
+    child.on("error", () => finish(null));
+    child.on("close", (code) => finish(interpretActiveResult(plat, code, stdout, stderr)));
+  });
+}
+
+/**
+ * Human remedy text for a failed scheduler-load attempt (flair#850). Covers
+ * the one root cause traced so far: a missing systemd user session bus,
+ * which blocks `systemctl --user` entirely in ssh-without-lingering,
+ * container, and CI contexts. Returns null when the failure doesn't match a
+ * known pattern — the caller already prints the raw stderr, so the operator
+ * still has something to go on.
+ */
+export function describeLoadFailure(plat: SchedulerPlatform, loadResult: { code: number | null; stderr: string }): string | null {
+  const stderr = loadResult.stderr || "";
+  if (plat === "linux" && /failed to connect to bus/i.test(stderr)) {
+    return (
+      "No systemd user session bus is available in this session (common over ssh without lingering, " +
+      "in containers, or under CI). Fix: enable lingering for this user — `loginctl enable-linger <user>` " +
+      "— then re-run `flair rem nightly enable`."
+    );
+  }
+  return null;
+}
+
+export interface EnableReportInput {
+  hour: number;
+  minute: number;
+  agentId: string;
+  flairUrl: string;
+}
+
+export interface FormattedReport {
+  lines: string[];
+  /** false means the caller should signal failure (nonzero exit). */
+  ok: boolean;
+}
+
+/**
+ * Formats the `flair rem nightly enable` report from an `EnableResult`.
+ * Pulled out of the CLI action so the success-vs-failure decision (flair#850:
+ * do not print a success headline before activation is known to have
+ * succeeded) is unit-testable without spawning a real launchctl/systemctl or
+ * parsing CLI argv.
+ *
+ * `r.loadResult` is only set when the load command actually ran (the CLI
+ * never sets `skipLoad`). A missing `loadResult` (test-only path) is treated
+ * as success — matches the CLI's real-world behavior, which always runs the
+ * load command and therefore always gets a `loadResult`.
+ */
+export function formatEnableReport(r: EnableResult, input: EnableReportInput): FormattedReport {
+  const { hour, minute, agentId, flairUrl } = input;
+  const scheduleTime = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  const activationFailed = !!r.loadResult && r.loadResult.code !== 0;
+
+  if (activationFailed) {
+    const lr = r.loadResult!;
+    const lines = [
+      `⚠️  REM nightly scheduler files written but NOT activated (${r.platform})`,
+      `   Schedule:    ${scheduleTime} local time — NOT scheduled (see below)`,
+      `   Scheduler:   ${r.schedulerPath}`,
+      `   Shim:        ${r.shimPath}`,
+      `   Agent:       ${agentId}`,
+      `   Flair URL:   ${flairUrl}`,
+      `   Activation:  ${r.loadCommand.join(" ")} → code ${lr.code}`,
+    ];
+    if (lr.stderr) lines.push(`     stderr: ${lr.stderr.trim()}`);
+    const remedy = describeLoadFailure(r.platform, lr);
+    lines.push("");
+    lines.push(remedy ? `   ${remedy}` : `   Re-run the activation command above manually to see the full diagnostic.`);
+    lines.push("");
+    lines.push(`   Nothing is scheduled until activation succeeds. Check anytime with: flair rem nightly status`);
+    return { lines, ok: false };
+  }
+
+  const lines = [
+    `✅ REM nightly scheduler enabled (${r.platform})`,
+    `   Schedule:    ${scheduleTime} local time`,
+    `   Scheduler:   ${r.schedulerPath}`,
+    `   Shim:        ${r.shimPath}`,
+    `   Agent:       ${agentId}`,
+    `   Flair URL:   ${flairUrl}`,
+  ];
+  if (r.loadResult) {
+    lines.push(`   Load:        ${r.loadCommand.join(" ")} → ok`);
+  }
+  lines.push("");
+  lines.push(`Tip: run \`flair rem nightly run-once --dry-run\` to verify the cycle works`);
+  lines.push(`     before the first scheduled fire. Disable with \`flair rem nightly disable\`.`);
+  return { lines, ok: true };
+}
+
+/**
+ * Formats the `flair rem nightly status` report from a `SchedulerStatus`.
+ * Extracted for the same testability reason as `formatEnableReport()`
+ * (flair#850): status must report genuine active state, not file presence.
+ */
+export function formatStatusReport(s: SchedulerStatus): FormattedReport {
+  const activeTxt = s.active === true ? "yes" : s.active === false ? "no" : "unknown";
+  const lines = [
+    `REM nightly scheduler (${s.platform}):`,
+    `  Active:      ${activeTxt}`,
+    `  Installed:   ${s.installed ? "yes" : "no"}`,
+    `  Scheduler:   ${s.schedulerPath}`,
+    `  Shim:        ${s.shimPath}${s.shimExists ? "" : " (missing)"}`,
+  ];
+  if (!s.installed) {
+    lines.push("");
+    lines.push(`Enable with: flair rem nightly enable --agent <id> [--at HH:MM]`);
+  } else if (s.active === false) {
+    lines.push("");
+    lines.push(`Files are written but nothing is scheduled — the job is not loaded/active.`);
+    lines.push(`Re-run: flair rem nightly enable --agent <id> [--at HH:MM]`);
+  }
+  // Status is informational — it does not itself signal process failure,
+  // consistent with the pre-existing "not installed" case never exiting
+  // nonzero. `ok` here only reflects whether the headline claims success.
+  return { lines, ok: s.active !== false };
 }
 
 /**
@@ -296,33 +504,73 @@ export function disableScheduler(opts: DisableOpts = {}): DisableResult {
 
 export interface SchedulerStatus {
   platform: SchedulerPlatform;
+  /** Whether the scheduler entry files were written to disk. */
   installed: boolean;
+  /**
+   * Whether the scheduler genuinely has the job loaded/active per
+   * launchctl/systemctl — NOT inferred from file presence (flair#850: a
+   * `systemctl --user enable --now` that fails leaves `installed: true`
+   * but nothing scheduled). `null` when this could not be determined
+   * (files absent — nothing to check — or the query itself was
+   * inconclusive) or when the check was explicitly skipped.
+   */
+  active: boolean | null;
   schedulerPath: string;
   shimPath: string;
   shimExists: boolean;
 }
 
+export interface SchedulerStatusOpts {
+  platformOverride?: SchedulerPlatform;
+  /** Override target paths for testing. */
+  shimPathOverride?: string;
+  launchdPlistOverride?: string;
+  systemdTimerOverride?: string;
+  systemdServiceOverride?: string;
+  /**
+   * Skip the launchctl/systemctl active-state query (testing, or callers
+   * that only want file-presence). When skipped, `active` is `null` if
+   * `installed` is true (unknown) and `false` if `installed` is false
+   * (nothing to be active).
+   */
+  skipActiveCheck?: boolean;
+}
+
 /**
- * Reports whether the scheduler is installed. Filesystem-only — does not
- * shell out to launchctl/systemctl to query active state. The Health
- * endpoint already does that via existence checks; same approach here.
+ * Reports whether the scheduler is installed AND whether it is genuinely
+ * active. File presence alone proves the templates were written — it does
+ * NOT prove `launchctl`/`systemctl` successfully loaded the job (flair#850).
  */
-export function schedulerStatus(opts: { platformOverride?: SchedulerPlatform } = {}): SchedulerStatus {
+export function schedulerStatus(opts: SchedulerStatusOpts = {}): SchedulerStatus {
   const plat = detectPlatform(opts.platformOverride);
+  const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
+
+  let schedulerPath: string;
+  let installed: boolean;
   if (plat === "darwin") {
-    return {
-      platform: plat,
-      installed: existsSync(LAUNCHD_PLIST_PATH),
-      schedulerPath: LAUNCHD_PLIST_PATH,
-      shimPath: SHIM_PATH_DEFAULT,
-      shimExists: existsSync(SHIM_PATH_DEFAULT),
-    };
+    schedulerPath = opts.launchdPlistOverride ?? LAUNCHD_PLIST_PATH;
+    installed = existsSync(schedulerPath);
+  } else {
+    schedulerPath = opts.systemdTimerOverride ?? SYSTEMD_TIMER_PATH;
+    const servicePath = opts.systemdServiceOverride ?? SYSTEMD_SERVICE_PATH;
+    installed = existsSync(schedulerPath) && existsSync(servicePath);
   }
+
+  let active: boolean | null;
+  if (!installed) {
+    active = false; // nothing written — definitely nothing active
+  } else if (opts.skipActiveCheck) {
+    active = null; // caller opted out — unknown, not a claim either way
+  } else {
+    active = queryActiveState(plat);
+  }
+
   return {
     platform: plat,
-    installed: existsSync(SYSTEMD_TIMER_PATH) && existsSync(SYSTEMD_SERVICE_PATH),
-    schedulerPath: SYSTEMD_TIMER_PATH,
-    shimPath: SHIM_PATH_DEFAULT,
-    shimExists: existsSync(SHIM_PATH_DEFAULT),
+    installed,
+    active,
+    schedulerPath,
+    shimPath,
+    shimExists: existsSync(shimPath),
   };
 }
