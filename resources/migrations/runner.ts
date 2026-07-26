@@ -216,9 +216,11 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
     return { ran: false, reason: "nothing pending" };
   }
 
-  // ── ONE shared async pre-hash for the whole cycle (K&S: computed once,
-  // after ready, before any migration's first write; failure → halt all
-  // pending candidates rather than guessing which ones are safe). ──
+  // ── ONE shared async pre-hash at cycle start (K&S: computed after ready,
+  // before any migration's first write; failure → halt all pending
+  // candidates rather than guessing which ones are safe). Re-baselined
+  // below iff an earlier migration's own writes stale it for a later
+  // full-envelope gate — see the staleness comment on the loop. ──
   setCyclePhase("pre-hash");
   let envelope: CorpusEnvelope;
   try {
@@ -233,8 +235,47 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
   }
   setCyclePhase("running");
 
+  // The cycle-start envelope is a valid gate BASELINE only until a migration
+  // in this same cycle writes rows: a legitimate, already-gated, ledgered
+  // write by an EARLIER migration (e.g. visibility-backfill stamping
+  // `visibility` — a SOURCE field) would otherwise read as corruption to a
+  // later migration's count+full-envelope gate and spuriously halt it
+  // ("completion gate failed: rowsRemaining=0, hash envelope mismatch" — the
+  // CI-observed failure on PR #845). That gate exists to catch writes the
+  // GATED migration didn't declare, not its predecessors' own completed
+  // work. So: track staleness conservatively (ANY rows written by any
+  // earlier migration, source-field or not — one cheap recompute beats
+  // enumerating which fields each migration touches), and re-baseline with a
+  // fresh computeCorpusEnvelope immediately BEFORE a full-envelope consumer
+  // starts — still before that migration's own first write, which is exactly
+  // the invariant-IV wording ("computed before first write and after
+  // completion; must match"). Cycles with no full-envelope consumer after a
+  // writing migration (every production cycle today — no schema-additive
+  // migration is registered outside CI) never pay for a second corpus walk.
+  let envelopeStale = false;
   for (const migration of candidates) {
-    await runOneMigration(migration, envelope, deps, lock);
+    if (envelopeStale && postureFor(migration.riskClass).gate === "count+full-envelope") {
+      try {
+        envelope = await computeCorpusEnvelope(deps.getTable, deps.now);
+        envelopeStale = false;
+      } catch (err) {
+        // Same failure class as the cycle-start pre-hash, but scoped: only
+        // THIS migration consumes the baseline, so only it halts (the
+        // cycle-start variant halts every candidate because nothing has run
+        // yet and a failing corpus walk taints them all equally). Halted ≠
+        // bricked: it is retried on the next boot's cycle.
+        setMigrationProgress({
+          id: migration.id,
+          rowsDone: 0,
+          rowsRemaining: 0,
+          state: "halted",
+          reason: `pre-flight integrity check failed: ${(err as Error)?.message ?? String(err)}`,
+        });
+        continue;
+      }
+    }
+    const wroteRows = await runOneMigration(migration, envelope, deps, lock);
+    if (wroteRows) envelopeStale = true;
   }
 
   setCyclePhase("done");
@@ -288,12 +329,21 @@ async function haltMigration(
   }
 }
 
+/**
+ * Returns whether this migration MAY have written any rows — the cycle
+ * loop's envelope-staleness signal (see runCycleLocked). Deliberately
+ * conservative: `true` whenever rows were processed OR run() threw
+ * mid-batch (a partial batch may have landed before the throw); a false
+ * `true` merely costs one extra corpus walk before the next full-envelope
+ * gate, while a false `false` would let that gate compare against a stale
+ * baseline and spuriously halt.
+ */
 async function runOneMigration(
   migration: Migration,
   envelope: CorpusEnvelope,
   deps: ResolvedDeps,
   lock: Extract<AcquireResult, { acquired: true }>,
-): Promise<void> {
+): Promise<boolean> {
   const startedAt = deps.now().toISOString();
   const state = readMigrationState(deps.statePath);
   const posture = postureFor(migration.riskClass);
@@ -313,7 +363,7 @@ async function runOneMigration(
       hashEnvelopeMatch: null,
       state,
     });
-    return;
+    return false; // halted before any write
   }
 
   const estSnapshot = estimateSnapshotBytes(posture.snapshotScope, initialRemaining);
@@ -342,7 +392,7 @@ async function runOneMigration(
       hashEnvelopeMatch: null,
       state,
     });
-    return;
+    return false; // halted before any write
   }
 
   // ── Ladder step 3 (+ step 4 fallback): risk-scoped snapshot, or a
@@ -375,7 +425,7 @@ async function runOneMigration(
         `snapshot failed (${(snapErr as Error)?.message ?? String(snapErr)}) and the content-only export fallback also failed (${(expErr as Error)?.message ?? String(expErr)})`,
         { deps, startedAt, rowsDone: 0, rowsRemaining: initialRemaining, hashEnvelopeMatch: null, state },
       );
-      return;
+      return false; // halted before any write
     }
   }
 
@@ -413,7 +463,7 @@ async function runOneMigration(
       hashEnvelopeMatch: null,
       state,
     });
-    return;
+    return true; // conservative: a partial batch may have landed before the throw
   }
 
   // ── Completion gate — strictness per risk class ──
@@ -430,7 +480,7 @@ async function runOneMigration(
       hashEnvelopeMatch: null,
       state,
     });
-    return;
+    return rowsDone > 0;
   }
 
   let hashEnvelopeMatch: boolean | null = null;
@@ -491,7 +541,7 @@ async function runOneMigration(
         hashEnvelopeMatch,
         state,
       });
-      return;
+      return rowsDone > 0;
     }
   } else if (gateOk && posture.gate === "count+old-row-envelope+new-row-presence") {
     let allMatch = true;
@@ -532,7 +582,7 @@ async function runOneMigration(
       hashEnvelopeMatch,
       state,
     });
-    return;
+    return rowsDone > 0;
   }
 
   // ── Success: ledger → state → prune ──
@@ -570,4 +620,5 @@ async function runOneMigration(
 
   pruneMigrationSnapshots(deps.snapshotRoot);
   setMigrationProgress({ id: migration.id, rowsDone, rowsRemaining: 0, state: "completed" });
+  return rowsDone > 0;
 }
