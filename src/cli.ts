@@ -2185,6 +2185,40 @@ const __pkgVersion = (() => {
   catch { return "unknown"; }
 })();
 
+/**
+ * The `@tpsdev-ai/flair-mcp` spec written into a client's MCP config.
+ *
+ * PINNED, deliberately. A bare `npx -y @tpsdev-ai/flair-mcp` re-resolves to
+ * whatever is currently published on EVERY agent session — so a single bad
+ * publish (stolen credentials, a malicious commit that clears review, or a
+ * compromised dependency of the MCP package) reaches every wired user
+ * silently, with no lockfile and no review step in the path. The postmark-mcp
+ * incident was exactly this shape: a legitimate publish by the legitimate
+ * owner, propagating for 16 days before anyone noticed. Worse, a yank does
+ * not help — unpinned clients keep resolving latest.
+ *
+ * Our publish side is already hardened (OIDC staged publish, human 2FA at the
+ * release gate), but that defends against credential theft, not against a bad
+ * version being published legitimately. The consumer side is where that gap
+ * closes, and pinning is what closes it: a wired client keeps running the
+ * exact version that was current when it was wired, and moving forward
+ * becomes a deliberate act.
+ *
+ * flair and flair-mcp ship in version lockstep from this monorepo, so the
+ * running CLI's own version is the correct pin. `flair init` re-run rewires
+ * to the then-current version; see the upgrade-rewire follow-up issue for
+ * making `flair upgrade` do the same.
+ *
+ * Falls back to the unpinned spec only when the version can't be read, which
+ * is the same condition under which `--version` reports "unknown" — a broken
+ * install, where a working MCP wiring matters more than a precise pin.
+ */
+export function mcpServerSpec(version: string = __pkgVersion): string {
+  return version && version !== "unknown"
+    ? `@tpsdev-ai/flair-mcp@${version}`
+    : "@tpsdev-ai/flair-mcp";
+}
+
 const program = new Command();
 program.name("flair").version(__pkgVersion, "-v, --version");
 
@@ -2890,7 +2924,8 @@ program
 
       // ── MCP client wiring ────────────────────────────────────────────────
       // The full one-command front door: detect installed MCP clients and wire
-      // each to the zero-install `npx -y @tpsdev-ai/flair-mcp` server. Claude
+      // each to the zero-install `npx -y @tpsdev-ai/flair-mcp@<version>` server
+      // (pinned — see mcpServerSpec()). Claude
       // Code is auto-wired into ~/.claude.json (the only client the CLI can
       // safely modify); other clients get copy-paste snippets. `--no-mcp`
       // skips wiring entirely; `--client <name>` targets one client; the
@@ -2929,7 +2964,7 @@ program
             const flairMcpConfig = {
               type: "stdio" as const,
               command: "npx",
-              args: ["-y", "@tpsdev-ai/flair-mcp"] as string[],
+              args: ["-y", mcpServerSpec()] as string[],
               // flair#718 authorship-provenance: each client's wired env block
               // gets its OWN FLAIR_CLIENT label (never the shared mcpEnv
               // object directly — that would stamp the same label into every
@@ -3009,7 +3044,9 @@ program
       if (!opts.skipSmoke && !noMcp && clientOpt !== "none" && wiringResults.length > 0) {
         console.log("\n   Smoke-testing MCP server...");
         try {
-          const mcpProc = spawn("npx", ["-y", "@tpsdev-ai/flair-mcp"], {
+          // Same spec that gets WIRED above — the smoke test must exercise the
+          // exact version the user will run, not whatever npm resolves latest to.
+          const mcpProc = spawn("npx", ["-y", mcpServerSpec()], {
             env: { ...process.env, FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl },
             stdio: ["pipe", "pipe", "pipe"],
           });

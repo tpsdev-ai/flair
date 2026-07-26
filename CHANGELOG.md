@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- **The MCP server reference written into client configs is now pinned to the installed version.** `flair init` previously wired `npx -y @tpsdev-ai/flair-mcp`, which re-resolves to whatever is currently published on *every* agent session — so a single bad publish would reach every wired user silently, with no lockfile and no review in the path, and a yank would not help because unpinned clients keep resolving latest. Clients are now wired to `@tpsdev-ai/flair-mcp@<version>` (the running CLI's own version; the two ship in lockstep), so a wired client keeps running the version that was current when it was wired and moving forward is a deliberate act. The `init` MCP smoke test now exercises that same pinned spec rather than resolving latest independently. Falls back to the unpinned form only when the version cannot be read — the same condition under which `--version` reports `unknown`.
+
 ### Changed
 
 - **Removed the `specs/` directory** (12 planning docs — `FLAIR-1.0-SPEC.md`, `FLAIR-BRIDGES.md`, `FLAIR-CONTENT-SAFETY.md`, `FLAIR-DEPLOY.md`, `FLAIR-NIGHTLY-REM.md` + its two slice docs, `FLAIR-REEMBEDDING.md`, `FLAIR-XAA.md`, `AGENT-CONTEXT-TIERS-B-task-reset.md`, `N8N-NODE-q3qf.md`, `N8N-ED25519-q3qf-followup.md`). Planning docs now live as GitHub issues; reference docs live in `docs/`, `DESIGN.md`, and `CONTRIBUTING.md`. Every in-tree reference to a deleted spec path was repointed: bridge contract references now point at `docs/bridges.md` (now the authoritative contract, which now carries the full contract and states its own authority); REM references now point at `docs/rem.md` and `docs/notes/rem-ux.md`; n8n spec links (which pointed at absolute GitHub URLs that would 404) became plain prose; comments citing a slice spec + section for deferred/in-flight work (e.g. `§3A`, `§3B`, `§3C`) kept the section and issue number (#707) and dropped the dead file path. Historical `CHANGELOG.md` entries were left untouched — they correctly describe files that existed at the time.
