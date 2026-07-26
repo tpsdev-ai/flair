@@ -38,6 +38,8 @@ Flair runs as a local server at `http://127.0.0.1:19926` by default. The MCP ser
 
 Pick whichever you use. The MCP server is the same package; only the config syntax differs.
 
+> **Pin the version.** The snippets below use the bare package name for readability. `flair init` wires clients to a **pinned** spec (`@tpsdev-ai/flair-mcp@<version>`) on purpose: an unpinned reference re-resolves to whatever is currently published on every agent session, so any future publish reaches your machine silently. If you wire by hand, append the version you intend to run — `@tpsdev-ai/flair-mcp@0.28.0` — and bump it deliberately. `flair init` is the easier path and does this for you.
+
 ### Claude Code
 
 The canonical approach is the `claude mcp add` CLI (writes to `~/.claude.json`):
