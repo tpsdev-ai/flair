@@ -32,6 +32,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { httpStatus } from "../helpers/http-status";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "krais-onboarding";
@@ -103,7 +104,7 @@ describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("registered");
     // The old bug surfaced as a REST 405; assert that error never appears.
-    expect(`${r.stdout}${r.stderr}`).not.toContain("405");
+    expect(`${r.stdout}${r.stderr}`).not.toMatch(httpStatus(405));
     expect(`${r.stdout}${r.stderr}`).not.toContain("does not have a post method");
   });
 
@@ -119,7 +120,7 @@ describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
     ], { FLAIR_AGENT_ID: AGENT_ID });
     if (r.code !== 0) console.error(`soul set failed:\n${r.stdout}\n${r.stderr}`);
     expect(r.code).toBe(0);
-    expect(`${r.stdout}${r.stderr}`).not.toContain("405");
+    expect(`${r.stdout}${r.stderr}`).not.toMatch(httpStatus(405));
     expect(`${r.stdout}${r.stderr}`).not.toContain("does not have a post method");
 
     // Confirm the record actually landed: read it back via the server.
@@ -147,7 +148,7 @@ describe("first-run onboarding (real CLI, isolated temp Harper + home)", () => {
     expect(r.code).toBe(0);
     // The old bug surfaced as a 400 "id is not indexed for nulls".
     expect(`${r.stdout}${r.stderr}`).not.toContain("not indexed for nulls");
-    expect(`${r.stdout}${r.stderr}`).not.toContain("400");
+    expect(`${r.stdout}${r.stderr}`).not.toMatch(httpStatus(400));
     const agents = JSON.parse(r.stdout) as Array<{ id: string }>;
     expect(Array.isArray(agents)).toBe(true);
     expect(agents.some(a => a.id === AGENT_ID)).toBe(true);
