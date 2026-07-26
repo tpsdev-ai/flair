@@ -69,9 +69,9 @@ const VALID_MCP_WRITE_VERBS = ["store", "delete", "update"];
 describe("RECORD_TYPES — shape and exhaustiveness", () => {
   const entries = Object.entries(RECORD_TYPES) as Array<[string, RecordTypePolicy]>;
 
-  it("registers exactly the five core tables (slice 2 scope — no more, no fewer)", () => {
+  it("registers exactly the five core tables plus MemoryCandidate (flair#849 — no more, no fewer)", () => {
     expect(Object.keys(RECORD_TYPES).sort()).toEqual(
-      ["Memory", "OrgEvent", "Relationship", "Soul", "WorkspaceState"].sort(),
+      ["Memory", "MemoryCandidate", "OrgEvent", "Relationship", "Soul", "WorkspaceState"].sort(),
     );
   });
 
@@ -128,6 +128,10 @@ describe("RECORD_TYPES — shape and exhaustiveness", () => {
 
   it("Relationship has no mcp field (no MCP tool today — absent means no exposure)", () => {
     expect(RECORD_TYPES.Relationship.mcp).toBeUndefined();
+  });
+
+  it("MemoryCandidate has no mcp field (no MCP tool today — absent means no exposure, flair#849)", () => {
+    expect(RECORD_TYPES.MemoryCandidate.mcp).toBeUndefined();
   });
 });
 
@@ -226,6 +230,19 @@ describe("RECORD_TYPES — golden values (must match each table's current shippe
       mcp: { toolPrefix: "soul", readVerbs: ["get"], writeVerbs: ["store"] },
     });
   });
+
+  it("MemoryCandidate (flair#849): owner-only, validate-truthy on post+put, no provenance/embedding/mcp, not federated", () => {
+    expect(RECORD_TYPES.MemoryCandidate).toEqual({
+      table: "MemoryCandidate",
+      ownerField: "agentId",
+      identity: "gated",
+      readScope: "owner-only",
+      attribution: { post: "validate-truthy", put: "validate-truthy" },
+      provenance: false,
+      remEligible: false,
+      federation: "excluded",
+    });
+  });
 });
 
 // ─── 3b. MCP surface — golden-value pins (slice 3, flair#520) ─────────────
@@ -296,6 +313,7 @@ describe("Drift tripwire — the five resource classes wire their kit parameters
     WorkspaceState: readFileSync(join(RESOURCES_DIR, "WorkspaceState.ts"), "utf8"),
     OrgEvent: readFileSync(join(RESOURCES_DIR, "OrgEvent.ts"), "utf8"),
     Soul: readFileSync(join(RESOURCES_DIR, "Soul.ts"), "utf8"),
+    MemoryCandidate: readFileSync(join(RESOURCES_DIR, "MemoryCandidate.ts"), "utf8"),
   };
 
   it.each(Object.entries(files))("%s: imports RECORD_TYPES from ./record-types.js", (_table, source) => {
@@ -343,6 +361,10 @@ describe("Drift tripwire — the five resource classes wire their kit parameters
 
   it("Soul: enforceWriteAuth (shared by post()+put()) draws mode from RECORD_TYPES.Soul.attribution.post", () => {
     expect(files.Soul).toContain("RECORD_TYPES.Soul.attribution.post");
+  });
+
+  it.each(entries("MemoryCandidate", "post", "put"))("MemoryCandidate (flair#849): stampAttribution draws mode %s from RECORD_TYPES.MemoryCandidate.attribution.%s", (method) => {
+    expect(files.MemoryCandidate).toContain(`RECORD_TYPES.MemoryCandidate.attribution.${method}`);
   });
 
   function entries(_table: string, ...methods: string[]): string[][] {

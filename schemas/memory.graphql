@@ -188,7 +188,15 @@ type MemoryUsage @table(database: "flair") {
 # that requires both --rationale and --to (soul|memory). Rejected candidates
 # retain their decision history so recurring false-positives become visible
 # via the `supersedes` chain.
-type MemoryCandidate @table(database: "flair") {
+#
+# flair#849: this type shipped WITHOUT @export, so it had no REST surface at
+# all — `flair rem candidates`/`promote`/`reject` 404'd on every call, a
+# clean-room dogfood blocker. @export alone would have reopened the exact P0
+# leak the memory-soul-read-gate family fix closed for every other
+# agent-facing table (anonymous read/write of every row); see
+# resources/MemoryCandidate.ts for the paired identity-gated, owner-scoped
+# resource class that makes @export here safe.
+type MemoryCandidate @table(database: "flair") @export {
   id: ID @primaryKey
   agentId: String! @indexed
   claim: String!                   # distilled lesson text

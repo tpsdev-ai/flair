@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`flair rem candidates`/`promote`/`reject` 404'd on every call — the `MemoryCandidate` table had no REST surface at all.** `schemas/memory.graphql` declared `MemoryCandidate` with `@table` but no `@export` and no resource file, so `POST /MemoryCandidate/search_by_conditions` (and the by-id `GET`/`PUT` the promote/reject flow uses) had nowhere to route. Added `@export` plus a new `resources/MemoryCandidate.ts`, modeled on the existing identity-gated resource classes (`resources/Relationship.ts`/`resources/MemoryGrant.ts`): verified agents, admins, and trusted internal calls pass; anonymous HTTP is denied on every verb. Reads are scoped `"owner-only"` — an agent sees only its own candidates, never org-wide — since a candidate is an unreviewed draft distillation that must not be readable before a deliberate promote/reject decision. Registered in `resources/record-types.ts`'s `RECORD_TYPES` registry (`readScope: "owner-only"`, `remEligible: false`, `federation: "excluded"` — not in the federation push table list).
+
 ## [0.29.0] - 2026-07-26
 
 ### Security
