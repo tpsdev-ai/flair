@@ -44,7 +44,7 @@
  *      the shared `resources/*.ts` files (a process-global bun mock that leaks
  *      into every other test file).
  *   2. The handler classes statically `import { Resource, databases } from
- *      "@harperfast/harper"`. Importing them lazily (dynamic import on first tool
+ *      "harper"`. Importing them lazily (dynamic import on first tool
  *      call, not at module top) keeps `mcp-tools`/`mcp-handler` free of a
  *      top-level Harper link, so importing the /mcp handler in a unit test never
  *      requires the full Harper module surface up front.

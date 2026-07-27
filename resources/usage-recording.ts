@@ -45,7 +45,7 @@
  * memories it cannot see). So the scope gate lives HERE, not retrofitted
  * onto recordUsageContribution() — do not "unify" the two surfaces.
  */
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { withDetachedTxn } from "./table-helpers.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import type { ReadScope, ScopableRecord } from "./memory-read-scope.js";

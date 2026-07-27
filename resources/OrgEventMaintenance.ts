@@ -5,7 +5,7 @@
  * Auth: admin only.
  */
 
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { allowAdmin } from "./agent-auth.js";
 
 export class OrgEventMaintenance extends Resource {

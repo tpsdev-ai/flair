@@ -1,4 +1,4 @@
-declare module "@harperfast/harper" {
+declare module "harper" {
   export const server: {
     http: (handler: (request: any, next: any) => any, options?: any) => void;
     operation: (operation: Record<string, unknown>, context: any, authorize?: boolean) => Promise<any>;
@@ -8,7 +8,7 @@ declare module "@harperfast/harper" {
   export const databases: Record<string, any>;
   /**
    * Process-wide model-call facade (#1325). Only the shapes flair currently
-   * consumes are stubbed here — mirrors @harperfast/harper's
+   * consumes are stubbed here — mirrors harper's
    * resources/models/types.ts EmbedOpts/GenerateOpts/GenerateResult.
    * `generate` added for #707 (REM slice 2 in-process distillation,
    * resources/MemoryReflect.ts execute mode) — no tool-calling or streaming

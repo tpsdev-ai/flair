@@ -4,7 +4,7 @@
  * silent-fail fix).
  *
  * Exercises resources/Memory.ts (post/put) directly against a mocked
- * @harperfast/harper, same technique as coordination-write-auth.test.ts and
+ * harper, same technique as coordination-write-auth.test.ts and
  * resolve-agent-auth.test.ts. The auth verdict is injected via
  * getContext().request.tpsAgent/tpsAgentIsAdmin — exactly what the
  * non-rejecting gate sets after verifying a signature.
@@ -203,7 +203,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Memory } = await import("../../resources/Memory.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
@@ -211,7 +211,7 @@ const { jaccardSimilarity, isConservativeMatch, computeMatchConfidence, cosineSi
 const { tokenize } = await import("../../resources/bm25.ts");
 // Dynamic (not static) import — MUST run after mock.module() above, same
 // reason as the three imports directly above: a static `import ... from`
-// here would be hoisted and evaluate before the @harperfast/harper mock is
+// here would be hoisted and evaluate before the harper mock is
 // registered, binding this module's `databases` to the REAL package instead.
 const { resolveAllowedOwners: scopeAllowedOwners, resolveReadScope } = await import("../../resources/memory-read-scope.ts");
 
@@ -765,7 +765,7 @@ describe("supersede transaction (write-new-before-close-old fix)", () => {
 //
 // These tests live in THIS file (rather than a separate one) deliberately:
 // bun runs every file in test/unit/ in one process, and a second file that
-// also `mock.module("@harperfast/harper", ...)` + dynamically imports
+// also `mock.module("harper", ...)` + dynamically imports
 // "../../resources/Memory.ts" collides with THIS file's mock — the Memory
 // class is a singleton across the whole run (its `class Memory extends
 // (databases as any).flair.Memory` superclass reference is captured once, at
@@ -1270,7 +1270,7 @@ describe("Memory.delete() — durability/ownership check uses the raw record (su
 // the within-org-read-open migration-equivalence block above does: bun runs every
 // test/unit/ file in one process, and resources/Memory.ts's `class Memory
 // extends (databases as any).flair.Memory` superclass reference is captured
-// ONCE at whichever file's mock.module("@harperfast/harper", ...) + dynamic
+// ONCE at whichever file's mock.module("harper", ...) + dynamic
 // import wins first — a second file doing the same thing would silently
 // collide instead of getting its own isolated Memory/mock pairing. This
 // file's existing mock/import is reused instead.
@@ -1552,7 +1552,7 @@ describe("federation-edge-hardening slice 1 — migration-equivalence (no-origin
 //
 // Reuses this file's existing mock/import (see the memory-soul-read-gate
 // collision-avoidance comment above): a second file mock.module-ing
-// "@harperfast/harper" + importing "../../resources/Memory.ts" would race
+// "harper" + importing "../../resources/Memory.ts" would race
 // this file's Memory class singleton.
 describe("flair#718 authorship-provenance — Memory.post()/put() claimedClient handling", () => {
   it("post(): a claimedClient on the write body is folded into provenance.claimed.client, and NEVER persisted as a top-level row field", async () => {

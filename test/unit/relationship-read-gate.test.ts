@@ -8,7 +8,7 @@
  * anonymous caller got a 200 with full record content.
  *
  * Same mocking technique as memory-integrity.test.ts / coordination-write-
- * auth.test.ts: mock @harperfast/harper so the resource class loads outside
+ * auth.test.ts: mock harper so the resource class loads outside
  * a real Harper runtime, then exercise allowRead()/get() directly. No other
  * test/unit/ file imports resources/Relationship.ts, so this file owns that
  * mock+import with no collision risk (see memory-soul-read-gate.test.ts's
@@ -74,7 +74,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Relationship } = await import("../../resources/Relationship.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");

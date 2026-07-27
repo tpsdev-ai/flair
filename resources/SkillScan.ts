@@ -1,4 +1,4 @@
-import { Resource } from "@harperfast/harper";
+import { Resource } from "harper";
 import { allowVerified } from "./agent-auth.js";
 import { scanSkillContent } from "./scan/skill-scanner.js";
 

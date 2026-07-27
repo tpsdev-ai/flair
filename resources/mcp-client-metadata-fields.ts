@@ -39,7 +39,7 @@
  * `allowedHosts` configured → rejected; leaked private `d` in a JWK →
  * rejected by the plugin even if our own build-time guard were bypassed).
  *
- * Kept free of any @harperfast/harper import (mirrors agentcard-fields.ts)
+ * Kept free of any harper import (mirrors agentcard-fields.ts)
  * so the document shape is unit-testable without spinning up Harper.
  */
 

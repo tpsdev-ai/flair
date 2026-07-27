@@ -180,7 +180,7 @@ jobs:
           #
           # cwd = $BASE_DIR for every baseline CLI call (same convention as
           # upgrade-smoke's `cd "$BASE_DIR"`): harperBin() falls back to
-          # process.cwd()/node_modules when @harperfast/harper isn't nested
+          # process.cwd()/node_modules when harper isn't nested
           # inside the flair package (npm hoists it to the install root), so
           # running from the workspace would silently make the BASELINE spawn
           # the WORKSPACE'S Harper instead of its own — wrong binary for the
@@ -436,7 +436,7 @@ jobs:
           ( cd "$HEAD_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3 )
           FLAIR="node $HEAD_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
           # cwd = $HEAD_DIR for every CLI call: harperBin() falls back to
-          # process.cwd()/node_modules for the npm-hoisted @harperfast/harper,
+          # process.cwd()/node_modules for the npm-hoisted harper,
           # so this install must run ITS OWN Harper, not the workspace's
           # (same convention as upgrade-smoke's `cd`; see the downgrade
           # lane's step-2 comment for the full rationale).

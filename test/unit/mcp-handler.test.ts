@@ -14,7 +14,7 @@
  *   - a tools/call whose token has no sub, or an unresolvable sub, is denied.
  *   - unknown tool / bad JSON-RPC → proper errors.
  *
- * We mock @harperfast/harper (databases: Credential/Agent) AND the 7 delegated
+ * We mock harper (databases: Credential/Agent) AND the 7 delegated
  * handler modules, so each tool's invocation is capturable and we can assert the
  * exact agent context + args it forwards.
  */
@@ -60,7 +60,7 @@ class SoulMock {
   async get(id: any) { lastCall = { resource: "Soul.get", ctx: this._ctx, args: id }; return { ok: true, resource: "Soul.get", agentId: this._ctx?.request?.tpsAgent }; }
 }
 
-// ─── Mock @harperfast/harper: Credential + Agent tables ──────────────────────
+// ─── Mock harper: Credential + Agent tables ──────────────────────
 // Configurable per-test via these mutable fixtures.
 let credentials: any[] = [];
 let agents: Record<string, any> = {};
@@ -91,7 +91,7 @@ const databasesMock = {
 // AttentionQuery.ts `extends Resource` (not a table subclass), so it needs no
 // databasesMock.flair entry of its own — only __setHandlers below, same as
 // SemanticSearch/BootstrapMemories.
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {} } }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {} } }));
 
 const { mcpHandler, resolveAgentFromSub } = await import("../../resources/mcp-handler.ts");
 const { __setHandlers } = await import("../../resources/mcp-tools.ts");

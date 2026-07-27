@@ -26,7 +26,7 @@
  * the `.catch()` below is pure defense-in-depth so a bug there can never
  * take down the process either.
  */
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";

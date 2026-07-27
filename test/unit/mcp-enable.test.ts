@@ -358,7 +358,7 @@ describe("applyRemoteConfigAndRestart", () => {
     );
     expect(calls.map((c) => c.body.operation)).toEqual(["set_configuration", "restart"]);
     // set_configuration's body spreads the config block at the top level
-    // alongside `operation` (matches @harperfast/harper's setConfiguration
+    // alongside `operation` (matches harper's setConfiguration
     // destructuring: `{ operation, hdb_user, hdbAuthHeader, ...configFields }`).
     expect(calls[0].body["@harperfast/oauth"]).toEqual({ mcp: { enabled: true } });
   });

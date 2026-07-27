@@ -1,4 +1,4 @@
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { promises as fsp, existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";

@@ -3,7 +3,7 @@
  * (flair#677, "Phase 1 — the query").
  *
  * Exercises the SHIPPED AttentionQuery.post() directly against a mocked
- * @harperfast/harper, using the same in-memory-store mocking technique as
+ * harper, using the same in-memory-store mocking technique as
  * test/unit/semantic-search-scoping.test.ts / test/unit/memory-integrity.test.ts.
  *
  * Coverage:
@@ -110,7 +110,7 @@ const databasesMock = {
 
 class ResourceBase {}
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: ResourceBase }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: ResourceBase }));
 
 const { AttentionQuery } = await import("../../resources/AttentionQuery.ts");
 

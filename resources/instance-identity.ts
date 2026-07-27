@@ -1,4 +1,4 @@
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 
 /**
  * ─── Local instance identity (federation-edge-hardening slice 1) ────────────

@@ -17,9 +17,9 @@ import { buildEmbedOptions, getModelId } from "../../resources/embeddings-provid
  * SAME dist build.
  *
  * Deliberately does NOT go through `getEmbedding()` itself (which would
- * require mocking `@harperfast/harper`'s deferred dynamic import) — that
+ * require mocking `harper`'s deferred dynamic import) — that
  * import is process-global and this codebase already has multiple test files
- * racing to be the first to mock `@harperfast/harper` (see
+ * racing to be the first to mock `harper` (see
  * memory-soul-read-gate.test.ts's header for the mechanics of that
  * collision); none of those existing mocks export `models`, so a fresh mock
  * here would be at the mercy of `bun test`'s file load order, not a real

@@ -22,7 +22,7 @@
  *   The installed Harper (5.1.22) already fixes the incremental-update bug in
  *   its HNSW `index()` path (it reconstructs `existingVector` from the stored
  *   node and does the reverse-edge cleanup the old build skipped —
- *   node_modules/@harperfast/harper/.../HierarchicalNavigableSmallWorld.js).
+ *   node_modules/harper/.../HierarchicalNavigableSmallWorld.js).
  *   Empirically confirmed here: NO in-Harper write path (REST `PUT`, ops-API
  *   `insert`/`update`) leaves a stale graph against this version — recall is
  *   always correct, so a "stale graph" can't be synthesized to heal. The
@@ -67,7 +67,7 @@ const CURRENT_MODEL_ID = getModelId(); // real id → the always-on embedding-st
 const SEARCH_LIMIT = 10;
 
 // The exact Harper explainability log for a structural-diff rebuild of the
-// embedding HNSW index (node_modules/@harperfast/harper/.../databases.js:
+// embedding HNSW index (node_modules/harper/.../databases.js:
 // `reindex ${db}.${table}.${attr}: reason=structural-options-changed`). Matched
 // without the DB-name prefix to stay robust.
 const REBUILD_LOG_MARK = "Memory.embedding: reason=structural-options-changed";

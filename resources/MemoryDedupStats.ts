@@ -53,7 +53,7 @@
  * agent's embeddings — so it follows the admin-gated precedent instead.
  */
 
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { allowAdmin } from "./agent-auth.js";

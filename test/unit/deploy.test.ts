@@ -363,13 +363,43 @@ describe("flair deploy: deploy() gating — --no-verify and --dry-run both skip 
     return dir;
   }
 
-  function addStubHarperBinary(packageRoot: string): void {
+  // flair#870: `harperPkg` selects which package-name layout the stub is
+  // planted under. Default is the BARE `harper` name flair now declares; the
+  // legacy scoped name is exercised by its own test below, because a staged
+  // install of an OLDER published flair still resolves that way.
+  function addStubHarperBinary(packageRoot: string, harperPkg = "harper"): void {
     // Stands in for the real harper CLI so spawnHarper() succeeds without
     // touching a real Fabric cluster — exits 0 immediately.
-    const binDir = join(packageRoot, "node_modules", "@harperfast", "harper", "dist", "bin");
+    const binDir = join(packageRoot, "node_modules", harperPkg, "dist", "bin");
     mkdirSync(binDir, { recursive: true });
     writeFileSync(join(binDir, "harper.js"), "process.exit(0);\n");
   }
+
+  // flair#870 regression guard: resolveHarperBin() must still find a Harper
+  // planted ONLY under the legacy scoped layout. `flair upgrade --target`
+  // stages a published flair version, and every version before #870 declared
+  // `@harperfast/harper` — if this fallback is dropped, deploying from such a
+  // stage throws "Could not locate Harper CLI binary" instead of deploying.
+  test("resolves the Harper bin from the legacy @harperfast/harper layout", async () => {
+    const pkgRoot = synthPkgRootForGatingTests();
+    addStubHarperBinary(pkgRoot, join("@harperfast", "harper"));
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("", { status: 200 })) as any;
+    try {
+      const result = await deploy({
+        fabricOrg: "acme",
+        fabricCluster: "prod",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        packageRoot: pkgRoot,
+        verify: false,
+      });
+      expect(result.dryRun).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
 
   test("verify: false skips the served-API check entirely (--no-verify)", async () => {
     const pkgRoot = synthPkgRootForGatingTests();
@@ -509,7 +539,7 @@ describe("flair deploy: deploy() replication-flake retry + --ignore-replication-
   // Attempt count is persisted to a counter file on disk so it survives
   // across separate process spawns (one spawn per retry attempt).
   function addScriptedHarperBinary(packageRoot: string, behaviors: string[]): string {
-    const binDir = join(packageRoot, "node_modules", "@harperfast", "harper", "dist", "bin");
+    const binDir = join(packageRoot, "node_modules", "harper", "dist", "bin");
     mkdirSync(binDir, { recursive: true });
     const counterPath = join(packageRoot, ".attempt-count");
     writeFileSync(counterPath, "0");

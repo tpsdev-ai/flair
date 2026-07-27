@@ -5,7 +5,7 @@
  * Auth: requesting agent must match agentId in path (or be admin).
  */
 
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 
 export class WorkspaceLatest extends Resource {

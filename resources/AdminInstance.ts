@@ -1,4 +1,4 @@
-import { Resource } from "@harperfast/harper";
+import { Resource } from "harper";
 import { layout, htmlResponse } from "./admin-layout.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";

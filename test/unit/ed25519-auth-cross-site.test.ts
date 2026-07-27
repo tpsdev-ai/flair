@@ -3,7 +3,7 @@
  * nonce-store consolidation): agent-auth.ts's verifyAgentRequest() and Presence.ts's post()
  * fallback verification are two of the three independent TPS-Ed25519 call
  * sites that used to carry their OWN nonceSeen Map. This test imports BOTH
- * real modules under one @harperfast/harper mock (bun's module cache is
+ * real modules under one harper mock (bun's module cache is
  * process-global, so both modules resolve the SAME `../../resources/
  * ed25519-auth.ts` singleton) and proves a nonce recorded via one site is
  * rejected as a replay via the OTHER — in both directions — using a real
@@ -14,13 +14,13 @@
  * via `server.http()` needs a slightly different mock shape.)
  *
  * Per the harness lesson (order-dependent CI failure): any test that mocks
- * @harperfast/harper MUST also export `Resource` in the mock object.
+ * harper MUST also export `Resource` in the mock object.
  *
  * Also hosts the #592 currentTask-content-gate tests for Presence.get()
  * (below the nonce-replay describe blocks) — this file already owns the
  * process-wide `resources/Presence.ts` import/mock in test/unit/, and bun
  * runs every file in test/unit/ in ONE process, so a second file re-mocking
- * @harperfast/harper and re-importing Presence.ts would race this one for
+ * harper and re-importing Presence.ts would race this one for
  * which mock "wins" for the shared module cache (see
  * memory-soul-read-gate.test.ts's header comment for the same footgun on
  * Memory.ts). Safer to extend this file than add a competing one.
@@ -66,7 +66,7 @@ const databasesMock = {
 };
 
 // Minimal stand-in for Harper's runtime-injected `Resource` base class —
-// required alongside `databases` any time @harperfast/harper is mocked, or a
+// required alongside `databases` any time harper is mocked, or a
 // later-loaded test file in the same bun process fails with "Export named
 // Resource not found" (bun mock.module is process-global).
 class MockResourceBase {}
@@ -77,7 +77,7 @@ class MockResourceBase {}
 // mock is active when THAT file's import resolves wins, regardless of file
 // order. A superset mock (server + databases + Resource) is the safe shape
 // (same pattern as test/unit/mcp-oauth-register.test.ts).
-mock.module("@harperfast/harper", () => ({
+mock.module("harper", () => ({
   server: { http: () => {}, getUser: async (name: string) => ({ username: name, role: { permission: {} } }) },
   databases: databasesMock,
   Resource: MockResourceBase,
@@ -299,7 +299,7 @@ describe("Presence.ts post() — per-site negative paths", () => {
 // These tests therefore drive REAL request shapes (signed header / no header /
 // super_user-without-header), NOT tpsAgent annotations. Reuses this file's
 // existing Presence.ts import/mock (test/unit/ files that
-// mock.module("@harperfast/harper") + dynamically import resources/Presence.ts
+// mock.module("harper") + dynamically import resources/Presence.ts
 // share bun's process-global module cache — see memory-soul-read-gate.test.ts's
 // header comment for the collision this avoids by NOT re-importing Presence.ts
 // from a second file).

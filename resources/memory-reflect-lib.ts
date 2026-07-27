@@ -50,7 +50,7 @@ export const GENERATE_TEMPERATURE = 0.2;
 //
 // Passed as `responseFormat: { schema: CANDIDATES_SCHEMA }` to models.generate()
 // so backends that honor structured output (Ollama, OpenAI — verified against
-// the pinned @harperfast/harper 5.1.17's bundled backends) return conformant
+// the pinned harper 5.1.17's bundled backends) return conformant
 // JSON directly. Not every backend enforces it (Anthropic's Messages API has
 // no equivalent and Harper documents that it silently ignores the option) —
 // this module never trusts the backend to have enforced the schema; every
@@ -298,7 +298,7 @@ export function parseAndValidateCandidates(raw: string, gatheredMemoryIds: Set<s
 /**
  * Minimal shape of Harper's models.generate() this module needs — just
  * enough to drive the retry/validate loop without importing Harper types.
- * The real call is `models.generate(input, opts)` from "@harperfast/harper";
+ * The real call is `models.generate(input, opts)` from "harper";
  * tests inject a stub matching this signature.
  */
 export type GenerateFn = (
@@ -314,7 +314,7 @@ export type GenerateFn = (
 /**
  * Name Harper's models facade sets on the error it throws when no backend is
  * registered for the requested logical name (`ModelBackendNotFoundError`,
- * resources/models/backendRegistry.ts in @harperfast/harper 5.1.17). That
+ * resources/models/backendRegistry.ts in harper 5.1.17). That
  * class isn't part of the package's public export surface (only its
  * `Models`/type surface is re-exported from the package root), so detecting
  * it here is a documented duck-type on `.name` rather than `instanceof` —
@@ -332,7 +332,7 @@ export type GenerateCandidatesOutcome =
  * Calls generate(), validates the result, and on malformed/mismatched output
  * retries exactly once with an explicit `responseFormat: 'json'` (the
  * "json-fallback path" — spec §3A items 2 & 3: build-time check confirmed
- * `GenerateOpts.responseFormat` supports `{ schema }` in @harperfast/harper
+ * `GenerateOpts.responseFormat` supports `{ schema }` in harper
  * 5.1.17's types, but not every backend enforces it, so the first attempt
  * requests schema mode and the fallback attempt requests plain json mode).
  * Both attempts run through the SAME parseAndValidateCandidates — a parse

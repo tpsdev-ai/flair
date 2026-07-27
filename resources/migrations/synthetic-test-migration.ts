@@ -27,7 +27,7 @@
  * encodes the migration id, so "is this row done" is answered entirely by
  * re-reading the row itself (invariant IV: state lives IN the data).
  */
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export const SYNTHETIC_MIGRATION_ID = "synthetic-ci-schema-stamp";

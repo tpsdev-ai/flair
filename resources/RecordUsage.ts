@@ -93,7 +93,7 @@
  * sanitized (control-character-stripped, length-capped) and stored as-is,
  * for audit/analytics only. Treat it as untrusted data, always.
  */
-import { Resource } from "@harperfast/harper";
+import { Resource } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { recordUsageContribution, MAX_USAGE_IDS_PER_CALL } from "./usage-recording.js";

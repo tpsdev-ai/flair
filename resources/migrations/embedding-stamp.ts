@@ -62,8 +62,8 @@
  * embeddings engine to settle before running migrations at all.
  *
  * flair#807 — completion-gate false-negative on 0.10-era / cross-version
- * stores, root-caused against the installed `@harperfast/harper@5.1.22`
- * source (node_modules/@harperfast/harper/resources/search.ts): for an
+ * stores, root-caused against the installed `harper@5.1.22`
+ * source (node_modules/harper/resources/search.ts): for an
  * INDEXED attribute (`embeddingModel` IS `@indexed` — schemas/memory.graphql),
  * a non-negated `not_equal`/`ne` leaf condition takes `searchByIndex`'s
  * `index && !skipIndex` branch, which reconstructs a SYNTHETIC partial record
@@ -125,7 +125,7 @@
  * resources/migrations/graph-heal.ts). Before enabling any FUTURE bulk
  * re-embed, ship a structural reindex trigger with it.
  */
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { getModelId } from "../embeddings-provider.js";
 import type { Migration, RunBatchResult } from "./types.js";
 

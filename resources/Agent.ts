@@ -1,4 +1,4 @@
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin } from "./agent-auth.js";
 import { localInstanceId } from "./instance-identity.js";
 

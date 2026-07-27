@@ -1,4 +1,4 @@
-import { Resource, databases } from '@harperfast/harper';
+import { Resource, databases } from 'harper';
 import { allowVerified } from './agent-auth.js';
 
 export class FeedSouls extends Resource {

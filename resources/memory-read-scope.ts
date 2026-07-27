@@ -1,4 +1,4 @@
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { PRIVATE_VISIBILITY, isPrivateVisibility } from "./memory-visibility.js";
 
 /**

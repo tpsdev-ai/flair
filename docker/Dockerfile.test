@@ -37,7 +37,7 @@ FROM node:24-slim AS test
 
 WORKDIR /app
 
-# Install bun for node_modules (needed at runtime for tweetnacl, commander, @harperfast/harper)
+# Install bun for node_modules (needed at runtime for tweetnacl, commander, harper)
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates && \
     curl -fsSL https://bun.sh/install | bash && \
     apt-get clean && rm -rf /var/lib/apt/lists/*

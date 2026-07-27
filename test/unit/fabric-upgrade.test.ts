@@ -105,6 +105,10 @@ describe("buildDeployablePackageJson", () => {
       resolveHarperPin("5.0.21"),
     );
     expect((withOverride.dependencies as any)["@tpsdev-ai/flair"]).toBe("0.14.0");
+    // flair#870: both Harper package names are overridden. The scoped key is
+    // the load-bearing one here — an override is only ever needed for a
+    // PRE-rename flair (declared < 5.1.13), which depends on the scoped name.
+    expect((withOverride.overrides as any)["harper"]).toBe(DEFAULT_HARPER_PIN);
     expect((withOverride.overrides as any)["@harperfast/harper"]).toBe(DEFAULT_HARPER_PIN);
 
     const noOverride = buildDeployablePackageJson(
@@ -116,7 +120,27 @@ describe("buildDeployablePackageJson", () => {
 });
 
 describe("resolveStagedHarperVersion", () => {
-  test("reads version from a hoisted @harperfast/harper", () => {
+  test("reads version from a hoisted harper", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-staged-"));
+    try {
+      const harperDir = join(dir, "node_modules", "harper");
+      mkdirSync(harperDir, { recursive: true });
+      writeFileSync(
+        join(harperDir, "package.json"),
+        JSON.stringify({ name: "harper", version: "5.1.14" }),
+      );
+      expect(resolveStagedHarperVersion(dir)).toBe("5.1.14");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // flair#870 regression guard: `flair upgrade --target` stages a PUBLISHED
+  // flair version, and every release before the rename declared
+  // `@harperfast/harper`. If this fallback is dropped, the staged-version probe
+  // returns null for exactly those versions and the fix-floor confirmation
+  // silently degrades.
+  test("reads version from the legacy @harperfast/harper layout", () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-staged-"));
     try {
       const harperDir = join(dir, "node_modules", "@harperfast", "harper");
@@ -136,12 +160,12 @@ describe("resolveStagedHarperVersion", () => {
     try {
       const harperDir = join(
         dir, "node_modules", "@tpsdev-ai", "flair",
-        "node_modules", "@harperfast", "harper",
+        "node_modules", "harper",
       );
       mkdirSync(harperDir, { recursive: true });
       writeFileSync(
         join(harperDir, "package.json"),
-        JSON.stringify({ name: "@harperfast/harper", version: "5.1.13" }),
+        JSON.stringify({ name: "harper", version: "5.1.13" }),
       );
       expect(resolveStagedHarperVersion(dir)).toBe("5.1.13");
     } finally {
@@ -172,11 +196,11 @@ function mockDeps(over: Partial<FabricUpgradeDeps> = {}): {
     npmInstall: (dir: string) => {
       calls.npmInstall.push(dir);
       // Simulate npm honoring the override: drop a fixed Harper + the flair pkg.
-      const harperDir = join(dir, "node_modules", "@harperfast", "harper");
+      const harperDir = join(dir, "node_modules", "harper");
       mkdirSync(harperDir, { recursive: true });
       writeFileSync(
         join(harperDir, "package.json"),
-        JSON.stringify({ name: "@harperfast/harper", version: DEFAULT_HARPER_PIN }),
+        JSON.stringify({ name: "harper", version: DEFAULT_HARPER_PIN }),
       );
       const flairDir = join(dir, "node_modules", "@tpsdev-ai", "flair");
       mkdirSync(flairDir, { recursive: true });
@@ -294,11 +318,11 @@ describe("fabricUpgrade (deploy path)", () => {
     const { deps, calls } = mockDeps({
       npmInstall: (dir: string) => {
         // Simulate the override NOT taking — a stale 5.0.21 lands.
-        const harperDir = join(dir, "node_modules", "@harperfast", "harper");
+        const harperDir = join(dir, "node_modules", "harper");
         mkdirSync(harperDir, { recursive: true });
         writeFileSync(
           join(harperDir, "package.json"),
-          JSON.stringify({ name: "@harperfast/harper", version: "5.0.21" }),
+          JSON.stringify({ name: "harper", version: "5.0.21" }),
         );
         const flairDir = join(dir, "node_modules", "@tpsdev-ai", "flair");
         mkdirSync(flairDir, { recursive: true });

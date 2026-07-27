@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, mock } from "bun:test";
 
-mock.module("@harperfast/harper", () => ({ databases: {}, Resource: class {} }));
+mock.module("harper", () => ({ databases: {}, Resource: class {} }));
 
 const {
   createSyntheticTestMigration,

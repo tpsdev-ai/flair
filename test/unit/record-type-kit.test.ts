@@ -13,7 +13,7 @@
  * classes now compose.
  *
  * Same mocking technique as allow-helpers.test.ts / relationship-read-
- * gate.test.ts: mock @harperfast/harper so record-type-kit.ts (which
+ * gate.test.ts: mock harper so record-type-kit.ts (which
  * transitively imports agent-auth.ts / memory-read-scope.ts / provenance.ts)
  * loads outside a real Harper runtime.
  */
@@ -28,7 +28,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const {
   makeAuthGate,

@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import type { AddressInfo, Server } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,12 +21,21 @@ const MAX_SPAWN_ATTEMPTS = 3;
 // which must not be mistaken for a Harper port-bind failure.
 const BIND_ERROR_RE = /Unable to bind to port/i;
 
-// Use @harperfast/harper from node_modules — spawned under node (not bun)
+// Use harper from node_modules — spawned under node (not bun)
 // because bun 1.3.x doesn't support uv_ip6_addr which Harper's NAPI modules need.
 const NODE_BIN = process.env.NODE_BIN ?? "node";
 
+// flair#870: flair declares the BARE `harper` package name. The scoped
+// `@harperfast/harper` layout is still probed as a fallback because the compat
+// lanes (test/compat/*) point `harperBinDir` at an install root produced by an
+// OLDER published flair, which declared the scoped name.
 function harperBinPath(harperBinDir: string): string {
-  return join(harperBinDir, "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js");
+  const candidates = [
+    join(harperBinDir, "node_modules", "harper", "dist", "bin", "harper.js"),
+    join(harperBinDir, "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js"),
+  ];
+  for (const c of candidates) if (existsSync(c)) return c;
+  return candidates[0];
 }
 
 // External service mode: set HARPER_HTTP_URL (and optionally HARPER_OPS_URL) to
@@ -198,9 +208,9 @@ export interface StartHarperOptions {
    */
   cwd?: string;
   /**
-   * Directory whose `node_modules/@harperfast/harper` provides the Harper
+   * Directory whose `node_modules/harper` provides the Harper
    * binary. Defaults to `cwd`. Split out from `cwd` because npm hoists
-   * `@harperfast/harper` to the INSTALL ROOT, not into the nested
+   * `harper` to the INSTALL ROOT, not into the nested
    * `node_modules/@tpsdev-ai/flair` component directory — so a caller
    * pointing `cwd` at an installed package's directory must pass the
    * install root here separately.

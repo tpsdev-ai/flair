@@ -13,7 +13,7 @@ let cleanupTimer: ReturnType<typeof setInterval> | null = null;
  * and performs housekeeping on expired/unconsumed token records.
  *
  * In test environments, callers pass mock serverOp/db via `opts` so this
- * module never imports @harperfast/harper at the top level (which would
+ * module never imports harper at the top level (which would
  * crash when STORAGE_PATH isn't set).
  */
 export async function initFederationCleanup(
@@ -27,7 +27,7 @@ export async function initFederationCleanup(
   const immediate = opts?.immediateTick ?? true;
 
   // Resolve server / databases: use caller-supplied mocks when available,
-  // otherwise lazy-import @harperfast/harper at call time.
+  // otherwise lazy-import harper at call time.
   let svr: (op: any, ctx?: any, authorize?: boolean) => Promise<any>;
   let db: any;
   if (opts?.serverOp && opts?.db) {
@@ -35,12 +35,12 @@ export async function initFederationCleanup(
     db  = opts.db;
   } else {
     try {
-      const harper = await import("@harperfast/harper");
+      const harper = await import("harper");
       svr = opts?.serverOp ?? harper.server.operation;
       db  = opts?.db ?? harper.databases;
     } catch (err: any) {
       console.error(
-        "[federation-cleanup] failed to load @harperfast/harper:",
+        "[federation-cleanup] failed to load harper:",
         err?.message ?? err,
       );
       return;
@@ -127,7 +127,7 @@ export async function runCleanupTick(
     svr = opts.serverOp;
     db = opts.db;
   } else {
-    const harper = await import("@harperfast/harper");
+    const harper = await import("harper");
     svr = opts.serverOp ?? harper.server.operation;
     db = opts.db ?? harper.databases;
   }

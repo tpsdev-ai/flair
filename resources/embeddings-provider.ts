@@ -36,11 +36,11 @@
  * what this migration removes: `models.embed` is a process-wide singleton
  * Harper initializes at boot, off the first-call dynamic-import race.
  *
- * `@harperfast/harper` is dynamic-imported here (deferred to first actual
+ * `harper` is dynamic-imported here (deferred to first actual
  * getEmbedding()/getMode()/getStatus() call), NOT statically imported like
  * every other resource's `Resource`/`databases`/`server` — those work
  * unmocked-import-free only because every test that (transitively) imports
- * them already mocks `@harperfast/harper` first. Statically importing
+ * them already mocks `harper` first. Statically importing
  * `models` here would make *any* test that imports this file for
  * `resolveModelsDir()` alone (test/unit/embeddings-models-dir.test.ts, which
  * has no reason to know about Harper at all) also eagerly load Harper's real
@@ -199,7 +199,7 @@ function prefixesEnabled(): boolean {
  * Build the options object passed to `models.embed()`. Pulled out as its own
  * pure, harper-free function so the value-forwarding (and the reject-a-
  * wrong-value guard) is unit-testable without touching the deferred
- * `@harperfast/harper` import this file's header explains — see
+ * `harper` import this file's header explains — see
  * test/unit/embeddings-provider-input-type.test.ts.
  *
  * Gate ON (default): rejects anything other than the literal
@@ -228,14 +228,14 @@ export function buildEmbedOptions(inputType?: EmbedInputType): { model: "default
   return inputType ? { model: "default", inputType } : { model: "default" };
 }
 
-type HarperModelsApi = typeof import("@harperfast/harper")["models"];
+type HarperModelsApi = typeof import("harper")["models"];
 
 let _modelsApi: HarperModelsApi | undefined;
 
 /**
  * Resolve (and cache) Harper's `models` facade via a deferred import — see file header.
  *
- * NOTE for anyone using this as a reference: `models` (the `@harperfast/harper`
+ * NOTE for anyone using this as a reference: `models` (the `harper`
  * package export) and a component's `scope.models` are the SAME boot-time
  * singleton — Harper's jsLoader hands components `scope.models = <the global
  * models>` (two accessors, one object; the model registry lives on that singleton).
@@ -246,7 +246,7 @@ let _modelsApi: HarperModelsApi | undefined;
  */
 async function getModelsApi(): Promise<HarperModelsApi> {
   if (_modelsApi) return _modelsApi;
-  const harper = await import("@harperfast/harper");
+  const harper = await import("harper");
   _modelsApi = harper.models;
   return _modelsApi;
 }

@@ -22,13 +22,13 @@
 import { mock, describe, it, expect } from "bun:test";
 import type { AgentAuthVerdict } from "../../resources/agent-auth.ts";
 
-// resources/usage-recording.ts imports `databases` from @harperfast/harper,
+// resources/usage-recording.ts imports `databases` from harper,
 // whose module chain throws when loaded outside a Harper runtime (the same
 // gotcha test/unit/resolve-agent-auth.test.ts documents for agent-auth.ts).
 // Mock it — every test below drives recordCitations() exclusively through
 // the injected `recordFn` seam, so this stub is never actually touched; it
 // exists purely so importing the module under test doesn't throw.
-mock.module("@harperfast/harper", () => ({
+mock.module("harper", () => ({
   databases: { flair: { Memory: { get: async () => null }, MemoryUsage: { get: async () => null, put: async () => {} } } },
   Resource: class {},
 }));

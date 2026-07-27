@@ -27,7 +27,7 @@
  *     in-org agents only; see get()'s inline comment.
  */
 
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,7 +86,7 @@ function resolveVersion(): string {
 }
 
 /**
- * Resolve the running @harperfast/harper version. Unlike flair's own
+ * Resolve the running harper version. Unlike flair's own
  * package.json (readable via a plain relative path above), Harper's package
  * only exports "." → dist/index.js — there's no "./package.json" subpath, so
  * requiring it directly throws (Node's exports-map enforcement). Resolve the
@@ -99,7 +99,7 @@ function resolveVersion(): string {
 function resolveHarperVersion(): string | null {
   try {
     const req = createRequire(import.meta.url);
-    const mainPath = req.resolve("@harperfast/harper");
+    const mainPath = req.resolve("harper");
     const pkgPath = join(dirname(mainPath), "..", "package.json");
     if (existsSync(pkgPath)) {
       const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));

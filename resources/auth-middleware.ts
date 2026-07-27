@@ -1,5 +1,5 @@
 import { patchRecord } from "./table-helpers.js";
-import { server, databases } from "@harperfast/harper";
+import { server, databases } from "harper";
 import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";

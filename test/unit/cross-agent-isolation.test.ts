@@ -14,7 +14,7 @@
  *   - OrgEventCatchup.ts:27 had the identical bug via `(this as any).request`.
  *
  * Same mocking technique as coordination-write-auth.test.ts: mock
- * @harperfast/harper (databases + Resource) so the resource classes can be
+ * harper (databases + Resource) so the resource classes can be
  * imported and invoked directly with a synthetic context, outside a running
  * Harper instance.
  */
@@ -86,7 +86,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({
+mock.module("harper", () => ({
   databases: databasesMock,
   Resource: MockResourceBase,
 }));

@@ -177,7 +177,7 @@ FABRIC_USER=<admin> FABRIC_PASSWORD=<pass> \
 (or `--fabric-password-file <path>` instead of the `FABRIC_PASSWORD` env var — reads the
 password from a file, chmod 600). This resolves the target version (latest published
 `@tpsdev-ai/flair`, or pin one with `--version`), stages a clean deployable with the
-required `@harperfast/harper` version pin applied (`--harper-version` to override),
+required `harper` version pin applied (`--harper-version` to override),
 confirms the staged Harper build before deploying, then reuses `flair deploy` to push it
 and verifies the result. `--check` shows the version diff and plan without deploying
 anything; `--yes` skips the confirmation prompt for scripted use.
@@ -223,7 +223,7 @@ Exit codes:
 *Flair's own* federation peer table, not Harper Fabric's own cluster-replication
 nodes. Harper's `cluster_status` operation (the one that would answer "what nodes are
 in this cluster and are they in sync") is harper-pro-only and unavailable in the OSS
-`@harperfast/harper` build this CLI ships — there is no way for this CLI to enumerate
+`harper` build this CLI ships — there is no way for this CLI to enumerate
 Fabric's own replication topology, on the origin or anywhere else. A Fabric replica
 that was never separately paired as a Flair federation peer (`flair federation pair`)
 is invisible to this sweep: `0 peers known` means "0 peers on file," never "0 peers

@@ -1,4 +1,4 @@
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord } from "./table-helpers.js";

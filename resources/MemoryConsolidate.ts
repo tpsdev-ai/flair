@@ -16,7 +16,7 @@
  *   prompt      string
  */
 
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { isAdmin, allowVerified } from "./agent-auth.js";
 import { evaluate, parseDuration, type Suggestion, type Candidate } from "./memory-consolidate-lib.js";
 

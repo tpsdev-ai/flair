@@ -238,29 +238,37 @@ export function deriveVerifyResources(packageRoot: string): string[] {
   return names.length ? names : [FALLBACK_VERIFY_RESOURCE];
 }
 
-function resolveHarperBin(packageRoot: string): string {
-  const local = join(
-    packageRoot,
-    "node_modules/@harperfast/harper/dist/bin/harper.js",
-  );
-  if (existsSync(local)) return local;
+// flair#870: flair declares the BARE `harper` package name, so that is probed
+// first. `@harperfast/harper` is a permanent lockstep publish of the same
+// source under the legacy scoped name; it stays in the probe list because
+// `packageRoot` can be a staged install of an OLDER published flair (see
+// src/fabric-upgrade.ts) that declared the scoped name.
+const HARPER_PKG_NAMES = ["harper", "@harperfast/harper"] as const;
 
-  try {
-    const req = createRequire(join(packageRoot, "package.json"));
-    const mainPath = req.resolve("@harperfast/harper");
-    let dir = dirname(mainPath);
-    for (let i = 0; i < 6; i++) {
-      const candidate = join(dir, "dist/bin/harper.js");
-      if (existsSync(candidate)) return candidate;
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
+function resolveHarperBin(packageRoot: string): string {
+  for (const pkg of HARPER_PKG_NAMES) {
+    const local = join(packageRoot, "node_modules", pkg, "dist/bin/harper.js");
+    if (existsSync(local)) return local;
+  }
+
+  for (const pkg of HARPER_PKG_NAMES) {
+    try {
+      const req = createRequire(join(packageRoot, "package.json"));
+      const mainPath = req.resolve(pkg);
+      let dir = dirname(mainPath);
+      for (let i = 0; i < 6; i++) {
+        const candidate = join(dir, "dist/bin/harper.js");
+        if (existsSync(candidate)) return candidate;
+        const parent = dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+    } catch {
+      /* try the next package name */
     }
-  } catch {
-    /* fall through */
   }
   throw new Error(
-    "Could not locate Harper CLI binary (@harperfast/harper). " +
+    `Could not locate Harper CLI binary (tried ${HARPER_PKG_NAMES.join(", ")}). ` +
       "Flair deploy requires Harper to be installed alongside Flair.",
   );
 }

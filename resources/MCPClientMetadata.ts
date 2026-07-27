@@ -1,4 +1,4 @@
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { mcpIssuer } from "./mcp-oauth-flag.js";
 import { agentPublicKeyToJwk, buildCimdDocument } from "./mcp-client-metadata-fields.js";
 

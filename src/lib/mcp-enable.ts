@@ -70,9 +70,9 @@
  *
  * ── Ground truth used to design the remote "existing ops paths" step ────────
  * Verified against the ACTUALLY INSTALLED packages, not assumed:
- *   - `@harperfast/harper`'s Operations API has a genuine `set_configuration`
+ *   - `harper`'s Operations API has a genuine `set_configuration`
  *     operation (writes harperdb-config.yaml for all workers, requires a
- *     restart to take effect — node_modules/@harperfast/harper/dist/config/
+ *     restart to take effect — node_modules/harper/dist/config/
  *     configUtils.js's `setConfiguration`) and a genuine `restart` operation
  *     (whole-process restart — see .../components/mcp/tools/schemas/
  *     operationDescriptions.js's operation catalog). Both are called the

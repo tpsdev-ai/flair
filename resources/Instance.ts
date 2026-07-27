@@ -1,4 +1,4 @@
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { allowVerified, allowAdmin } from "./agent-auth.js";
 
 /**

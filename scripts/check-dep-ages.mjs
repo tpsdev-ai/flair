@@ -73,9 +73,13 @@ if (!Number.isFinite(MIN_AGE_DAYS) || MIN_AGE_DAYS < 0) {
  * Override per-run via FLAIR_DEP_KEEP_CURRENT="pkg1,pkg2,@scope/pkg3" env.
  */
 const DEFAULT_KEEP_CURRENT = new Set([
-  "@harperfast/harper",
+  // `harper` is the BARE package name upstream publishes as its primary public
+  // name; `@harperfast/harper` is a permanent lockstep publish of the same
+  // source. flair aligned to the bare name in flair#870 so a stock install
+  // stops materialising both copies.
+  "harper",
   "harper-fabric-embeddings",
-  // @harperfast/oauth: same high-trust @harperfast/* owner as @harperfast/harper
+  // @harperfast/oauth: same high-trust upstream owner as `harper`
   // (already exempt). Used ONLY by the default-OFF native-MCP OAuth surface
   // (FLAIR_MCP_OAUTH), which dynamically imports it only when the flag is on — so
   // it is not loaded in the shipped default build (zero exposure until an operator

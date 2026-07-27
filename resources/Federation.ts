@@ -1,4 +1,4 @@
-import { Resource, databases, server } from "@harperfast/harper";
+import { Resource, databases, server } from "harper";
 import { createHash, randomBytes } from "node:crypto";
 import nacl from "tweetnacl";
 import { allowAdmin } from "./agent-auth.js";

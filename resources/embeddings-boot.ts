@@ -7,7 +7,7 @@
  * The previous mechanism (removed by this change) delivered the registration
  * as a `models.embedding.default` block via the `HARPER_CONFIG` env var
  * (src/cli.ts's old `buildEmbeddingsHarperConfigEnv`) — a "merge layer" that
- * Harper's environment-manager (`@harperfast/harper`'s
+ * Harper's environment-manager (`harper`'s
  * `config/harperConfigEnvVars.js`) reasserts on every boot AND PERSISTS into
  * the instance-root `harper-config.yaml`. That file proved to be config-as-
  * STATE, not config-as-intent: `flair#694`'s downgrade-and-revert CI lane
@@ -28,14 +28,14 @@
  *      to), leaving `models.embedding.default: {}` — an empty shell —
  *      persisted to disk.
  *   3. The next boot's config schema validator
- *      (`@harperfast/harper`'s `validation/configValidator.js`) resolves the
+ *      (`harper`'s `validation/configValidator.js`) resolves the
  *      entry's backend via `Joi.alternatives().conditional('.backend', {...,
  *      otherwise: unknownBackendEntrySchema})`; with `backend` absent, that
  *      falls through to `unknownBackendEntrySchema = Joi.object({backend:
  *      string.required()})`, which throws exactly: "Harper config file
  *      validation error: 'models.embedding.default.backend' is required" —
- *      Harper refuses to boot. Confirmed byte-identical in both @harperfast/
- *      harper 5.1.15 and 5.1.17 (this is upstream env-var-config behavior,
+ *      Harper refuses to boot. Confirmed byte-identical in both harper
+ *      5.1.15 and 5.1.17 (this is upstream env-var-config behavior,
  *      not a schema difference between versions), and reproduced locally by
  *      replaying the exact downgrade-and-revert sequence.
  *

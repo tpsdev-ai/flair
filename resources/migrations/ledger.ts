@@ -17,7 +17,7 @@
  * resources/MemoryReindex.ts's `_reindex` path already rely on for
  * server-internal writes with no HTTP caller behind them.
  */
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 
 export type LedgerOutcome = "success" | "halted" | "failed";
 export type LedgerInitiator = "auto" | "operator";

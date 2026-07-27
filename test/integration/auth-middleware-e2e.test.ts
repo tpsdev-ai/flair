@@ -480,9 +480,9 @@ describe("auth-middleware e2e (real Harper)", () => {
   // coverage for auth-middleware.ts's Ed25519 branch didn't previously exist
   // (only unit-level simulator logic did). Real-Harper is also the only place
   // this is reliably testable end-to-end: auth-middleware.ts's `import {
-  // server } from "@harperfast/harper"` can't be safely mocked in the unit
+  // server } from "harper"` can't be safely mocked in the unit
   // suite (bun's mock.module is process-global and ~10+ sibling unit test
-  // files mock @harperfast/harper without a `server` export — any of them
+  // files mock harper without a `server` export — any of them
   // can end up "active" when auth-middleware.ts's import resolves, racing
   // unpredictably). Real cross-path closure between the OTHER two sites
   // (agent-auth.ts <-> Presence.ts) is covered at the unit level in

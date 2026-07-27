@@ -9,9 +9,9 @@
  *   Upgrading a deployed Fabric Flair used to require, by hand:
  *     1. mkdir a fresh temp dir
  *     2. write a package.json that depends on @tpsdev-ai/flair@<version> AND
- *        carries an `overrides` block pinning @harperfast/harper to a fixed
+ *        carries an `overrides` block pinning harper to a fixed
  *        version — because the PUBLISHED flair declares an OLD Harper
- *        (@harperfast/harper@5.0.21 as of flair@0.14.0) whose component
+ *        (harper@5.0.21 as of flair@0.14.0) whose component
  *        packager (`packageComponent`) emits an EMPTY tarball when the package
  *        root lives under node_modules (the real npm-install scenario).
  *        See flair#513 — fixed in Harper >= 5.1.13.
@@ -34,7 +34,7 @@ import { createRequire } from "node:module";
 import type { DeployOptions, DeployResult } from "./deploy.js";
 
 /**
- * Minimum @harperfast/harper version whose component packager works when the
+ * Minimum harper version whose component packager works when the
  * package root is under node_modules (flair#513 — the empty-tarball fix landed
  * in 5.1.13). Anything below this MUST be overridden before a Fabric deploy.
  */
@@ -48,7 +48,18 @@ export const MIN_HARPER_VERSION = "5.1.13";
 export const DEFAULT_HARPER_PIN = "5.1.14";
 
 const FLAIR_PKG = "@tpsdev-ai/flair";
-const HARPER_PKG = "@harperfast/harper";
+const HARPER_PKG = "harper";
+/**
+ * flair#870 renamed flair's Harper dependency from the scoped
+ * `@harperfast/harper` to the BARE `harper` name (permanent lockstep publishes
+ * of the same source; bare is upstream's primary public name).
+ *
+ * This module reads and rewrites the dependency graph of a PUBLISHED flair
+ * version, which may predate that rename — so every lookup here has to accept
+ * either name. The bare name is always preferred when both are present.
+ */
+const LEGACY_HARPER_PKG = "@harperfast/harper";
+const HARPER_PKG_NAMES = [HARPER_PKG, LEGACY_HARPER_PKG] as const;
 
 /**
  * Parse "5.1.14" / "5.1.14-rc.1" / "v0.14.0" into [major, minor, patch],
@@ -89,7 +100,7 @@ export interface HarperPinDecision {
 }
 
 /**
- * Decide what (if any) @harperfast/harper override to bake into the temp
+ * Decide what (if any) harper override to bake into the temp
  * deployable's package.json.
  *
  *   - If flair already declares Harper >= MIN_HARPER_VERSION → no override
@@ -101,7 +112,7 @@ export interface HarperPinDecision {
  *     passed something too old.
  *
  * Pure — no I/O. The LOAD-BEARING bit is `overridden`: when true, the temp
- * package.json gets `overrides: { "@harperfast/harper": pin }`.
+ * package.json gets `overrides: { "harper": pin }`.
  */
 export function resolveHarperPin(
   declared: string | null,
@@ -139,6 +150,13 @@ export function resolveHarperPin(
  * @tpsdev-ai/flair@<version> and, when the Harper pin is an override, carries
  * the `overrides` block that forces npm to install the fix Harper under the
  * flair package's node_modules.
+ *
+ * The override is written under BOTH Harper package names (flair#870). Only
+ * flair versions OLDER than the rename ever need an override — MIN_HARPER_VERSION
+ * is 5.1.13 and every post-rename flair declares ≥ 5.1.22 — and those declare
+ * the scoped name, so dropping the legacy key would make the override a silent
+ * no-op exactly when it matters. Both are plain VERSION overrides, not `npm:`
+ * aliases; an override key that matches nothing in the tree is inert.
  */
 export function buildDeployablePackageJson(
   flairVersion: string,
@@ -153,7 +171,7 @@ export function buildDeployablePackageJson(
     },
   };
   if (pin.overridden) {
-    pkg.overrides = { [HARPER_PKG]: pin.pin };
+    pkg.overrides = Object.fromEntries(HARPER_PKG_NAMES.map((n) => [n, pin.pin]));
   }
   return pkg;
 }
@@ -164,7 +182,7 @@ export interface FabricUpgradeDeps {
   /** Fetch the latest published version of @tpsdev-ai/flair from the registry. */
   fetchLatestFlairVersion: () => Promise<string>;
   /**
-   * Read the @harperfast/harper version that @tpsdev-ai/flair@<version>
+   * Read the harper version that @tpsdev-ai/flair@<version>
    * DECLARES (its package.json `dependencies`). Used to decide overrides
    * without a full install.
    */
@@ -247,7 +265,13 @@ async function defaultFetchDeclaredHarperVersion(
   const data = (await res.json()) as {
     dependencies?: Record<string, string>;
   };
-  return data.dependencies?.[HARPER_PKG] ?? null;
+  // Either package name (flair#870) — pre-rename flair versions declare the
+  // scoped one, and those are precisely the versions that may need an override.
+  for (const name of HARPER_PKG_NAMES) {
+    const declared = data.dependencies?.[name];
+    if (declared) return declared;
+  }
+  return null;
 }
 
 function defaultNpmInstall(dir: string): void {
@@ -305,20 +329,24 @@ async function defaultFetchDeployedVersion(opts: {
   }
 }
 
-/** Resolve the @harperfast/harper bin that npm installed under the staged flair. */
+/**
+ * Resolve the harper bin that npm installed under the staged flair.
+ *
+ * Probes both Harper package names (flair#870): the staged flair may be a
+ * pre-rename published version whose Harper landed under `@harperfast/harper`.
+ */
 export function resolveStagedHarperVersion(stagingDir: string): string | null {
-  const harperPkgJson = join(
-    stagingDir,
-    "node_modules",
-    FLAIR_PKG,
-    "node_modules",
-    HARPER_PKG,
-    "package.json",
-  );
-  // npm dedupes: with an override the fixed Harper may hoist to the staging
-  // root rather than nest under flair. Check both.
-  const hoisted = join(stagingDir, "node_modules", HARPER_PKG, "package.json");
-  for (const candidate of [harperPkgJson, hoisted]) {
+  const candidates: string[] = [];
+  for (const name of HARPER_PKG_NAMES) {
+    // Nested under the staged flair…
+    candidates.push(
+      join(stagingDir, "node_modules", FLAIR_PKG, "node_modules", name, "package.json"),
+    );
+    // …or hoisted: npm dedupes, and with an override the fixed Harper may sit
+    // at the staging root rather than nest under flair. Check both.
+    candidates.push(join(stagingDir, "node_modules", name, "package.json"));
+  }
+  for (const candidate of candidates) {
     if (existsSync(candidate)) {
       try {
         const pkg = JSON.parse(readFileSync(candidate, "utf8"));
@@ -329,15 +357,18 @@ export function resolveStagedHarperVersion(stagingDir: string): string | null {
     }
   }
   // Last resort: resolve through the staged flair's module graph.
-  try {
-    const flairPkg = join(stagingDir, "node_modules", FLAIR_PKG, "package.json");
-    const req = createRequire(flairPkg);
-    const resolved = req.resolve(`${HARPER_PKG}/package.json`);
-    const pkg = JSON.parse(readFileSync(resolved, "utf8"));
-    return typeof pkg.version === "string" ? pkg.version : null;
-  } catch {
-    return null;
+  const flairPkg = join(stagingDir, "node_modules", FLAIR_PKG, "package.json");
+  for (const name of HARPER_PKG_NAMES) {
+    try {
+      const req = createRequire(flairPkg);
+      const resolved = req.resolve(`${name}/package.json`);
+      const pkg = JSON.parse(readFileSync(resolved, "utf8"));
+      if (typeof pkg.version === "string") return pkg.version;
+    } catch {
+      /* try the next package name */
+    }
   }
+  return null;
 }
 
 /** Locate the staged @tpsdev-ai/flair package root (the deploy() packageRoot). */
