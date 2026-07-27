@@ -188,7 +188,21 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
 
   for (const migration of deps.registry.list()) {
     if (isShortCircuited(state, migration.id, deps.runningVersion)) {
-      setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "completed" });
+      // flair#812: a short-circuit is an ASSERTION READ OFF A FILE, not an
+      // observation of the corpus — and that file is hand-editable (the
+      // documented remediation for a stuck migration is to correct it by
+      // hand). Reporting it as plain "completed" made a hand-written entry
+      // indistinguishable from a migration this boot actually verified.
+      // The skip itself is unchanged (it is the documented cheap path); it
+      // now just says what it is, so `flair doctor` never presents an
+      // unverified claim as a verified one.
+      setMigrationProgress({
+        id: migration.id,
+        rowsDone: 0,
+        rowsRemaining: 0,
+        state: "completed",
+        reason: `recorded complete at ${deps.runningVersion} in ${deps.statePath} — not re-verified this boot`,
+      });
       continue;
     }
     setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "checking" });
@@ -196,12 +210,18 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
     try {
       pending = await migration.detect();
     } catch (err) {
+      // flair#812: a throwing detect() removes this migration from the
+      // candidate set, so a cycle where EVERY detect() throws used to reach
+      // the `nothing pending` return and look like a clean no-op. Log it
+      // with the standard marker as well as recording it in progress.
+      const reason = `detect() threw: ${(err as Error)?.message ?? String(err)}`;
+      console.error(`[flair-migrations] ${migration.id}: ${reason}`);
       setMigrationProgress({
         id: migration.id,
         rowsDone: 0,
         rowsRemaining: 0,
         state: "failed",
-        reason: `detect() threw: ${(err as Error)?.message ?? String(err)}`,
+        reason,
       });
       continue;
     }
@@ -213,6 +233,13 @@ async function runCycleLocked(deps: ResolvedDeps, lock: Extract<AcquireResult, {
   }
 
   if (candidates.length === 0) {
+    // flair#812: mark the cycle done even on the no-op path. "Nothing was
+    // pending" and "the cycle never ran" are opposite conclusions that used
+    // to produce an IDENTICAL `/HealthDetail` reading (`cyclePhase: "idle",
+    // lastCycleAt: null`), which is exactly why a totally-skipped boot cycle
+    // looked healthy for months. A cycle that reached this line has done its
+    // job, and now says so.
+    setCyclePhase("done");
     return { ran: false, reason: "nothing pending" };
   }
 

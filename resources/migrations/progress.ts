@@ -14,7 +14,17 @@
  */
 import type { MigrationProgress } from "./types.js";
 
-export type CyclePhase = "idle" | "pre-hash" | "running" | "done";
+/**
+ * `scheduled` (flair#812) is set SYNCHRONOUSLY by
+ * `resources/migration-boot.ts`'s module-level `scheduleMigrationBoot()`,
+ * before the deferred cycle runs. It exists so that `idle` carries real
+ * information: after this change, an instance still reporting `idle` is one
+ * where migration-boot.js never loaded at all. Without it, "the trigger
+ * never fired" and "the trigger fired and the cycle hasn't reached a phase
+ * transition yet" were the same observation — which is why flair#812 could
+ * not be diagnosed from `/HealthDetail`.
+ */
+export type CyclePhase = "idle" | "scheduled" | "pre-hash" | "running" | "done";
 
 export interface CycleStatus {
   phase: CyclePhase;
