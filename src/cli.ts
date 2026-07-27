@@ -370,6 +370,38 @@ function readPortFromConfig(): number | null {
   return null;
 }
 
+/**
+ * Read the persisted ops-API bind host from ~/.flair/config.yaml (flair#863).
+ * Line-anchored so it can't be satisfied by some other key that merely ends
+ * in `opsBind`, and quote-tolerant because a hand-edited config may quote it.
+ *
+ * `path` is injected the same way launchdPlistPath's `launchAgentsDir` is —
+ * so tests exercise the real parse against a temp file instead of the
+ * developer's own ~/.flair.
+ */
+function readOpsBindFromConfig(path: string = configPath()): string | null {
+  try {
+    if (existsSync(path)) {
+      const yaml = readFileSync(path, "utf-8");
+      const m = yaml.match(/^\s*opsBind:\s*["']?([^"'\s#]+)["']?/m);
+      if (m && m[1]) return m[1];
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/** Read the persisted ops-API port from ~/.flair/config.yaml (flair#863). */
+function readOpsPortFromConfig(path: string = configPath()): number | null {
+  try {
+    if (existsSync(path)) {
+      const yaml = readFileSync(path, "utf-8");
+      const m = yaml.match(/^\s*opsPort:\s*(\d+)/m);
+      if (m) return Number(m[1]);
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 // Unified port resolution: --port flag > FLAIR_URL env > config file > default
 // Every command that talks to Harper MUST use these helpers.
 function resolveHttpPort(opts: { port?: string | number }): number {
@@ -429,22 +461,57 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
   return resolveHttpPort(opts) - 1;
 }
 
-// Ops API bind-host resolution (flair#670): --ops-bind flag > FLAIR_OPS_BIND
-// env > loopback default. This is the escape hatch — deployments that
-// genuinely need remote ops access (multi-host / Fabric) pass an explicit
-// wider address (e.g. `--ops-bind 0.0.0.0`) to opt back in; everything else
-// gets the loopback-only single-host default. FLAIR_OPS_BIND (not just the
-// flag) matters for `flair start`'s non-launchd fallback spawn, which has no
-// --ops-bind flag of its own — see the comment at its OPERATIONSAPI_NETWORK_PORT
-// assignment for why it re-resolves this on every start instead of trusting
-// the persisted config alone.
-function resolveOpsBindHost(opts: { opsBind?: string }): string {
-  if (opts.opsBind !== undefined && opts.opsBind !== null && String(opts.opsBind).trim() !== "") {
-    return String(opts.opsBind).trim();
-  }
-  const envBind = process.env.FLAIR_OPS_BIND;
+// Ops API bind-host resolution (flair#670, #863): --ops-bind flag >
+// FLAIR_OPS_BIND env > persisted `opsBind` in ~/.flair/config.yaml > loopback
+// default. This is the escape hatch — deployments that genuinely need remote
+// ops access (multi-host / Fabric) pass an explicit wider address (e.g.
+// `--ops-bind 0.0.0.0`) to opt back in; everything else gets the loopback-only
+// single-host default.
+//
+// The config-file rung (flair#863) is what makes `--ops-bind` durable. Every
+// Harper spawn re-asserts the bind (see opsNetworkPortValue's doc comment for
+// why it MUST), and those spawns happen in `flair start` / `flair restart` /
+// `flair upgrade`, none of which take an `--ops-bind` flag. Without a
+// flair-owned persisted value, a one-off `flair init --ops-bind 0.0.0.0` would
+// be silently reverted to the loopback default by the very next restart — the
+// widening case would be as broken as the narrowing one. Mirrors
+// resolveOpsPort's config rung.
+export function resolveOpsBindHostFrom(
+  flag: string | undefined | null,
+  envBind: string | undefined | null,
+  configuredBind: string | undefined | null,
+): string {
+  if (flag !== undefined && flag !== null && String(flag).trim() !== "") return String(flag).trim();
   if (envBind && envBind.trim() !== "") return envBind.trim();
+  if (configuredBind && configuredBind.trim() !== "") return configuredBind.trim();
   return DEFAULT_OPS_BIND_HOST;
+}
+
+function resolveOpsBindHost(opts: { opsBind?: string }): string {
+  return resolveOpsBindHostFrom(opts.opsBind, process.env.FLAIR_OPS_BIND, readOpsBindFromConfig());
+}
+
+/**
+ * The one place that renders Harper's `operationsApi.network.port` value
+ * (flair#863). Used by both the HARPER_SET_CONFIG block
+ * (buildOperationsApiConfig) and every `OPERATIONSAPI_NETWORK_PORT` env var
+ * flair sets, so the two can never disagree about whether the bind host is
+ * present.
+ *
+ * Why every spawn has to carry the host-qualified form, not a bare number:
+ * Harper's HARPER_SET_CONFIG handling (@harperfast/harper
+ * config/harperConfigEnvVars.ts) records, for each key it force-sets, the
+ * value that key had BEFORE the force — `state.originalValues` in
+ * `<rootPath>/backup/.harper-config-state.json` — and on the next boot where
+ * HARPER_SET_CONFIG is absent, `cleanupRemovedEnvVar` RESTORES those
+ * originals into harper-config.yaml. So a bare `OPERATIONSAPI_NETWORK_PORT`
+ * anywhere in flair's spawn chain doesn't just lose on that boot: it is
+ * latched as the "original" and silently re-widens the bind to all interfaces
+ * on the first later boot that omits HARPER_SET_CONFIG. That is exactly what
+ * `flair restart` / `flair upgrade` do on the non-launchd path.
+ */
+export function opsNetworkPortValue(opsBindHost: string, opsPort: number | string): string {
+  return `${opsBindHost}:${opsPort}`;
 }
 
 /**
@@ -470,8 +537,49 @@ export function buildOperationsApiConfig(
   opsBindHost: string,
 ): { network: { port: string; cors: boolean; domainSocket: string } } {
   return {
-    network: { port: `${opsBindHost}:${opsPort}`, cors: true, domainSocket: opsSocket },
+    network: { port: opsNetworkPortValue(opsBindHost, opsPort), cors: true, domainSocket: opsSocket },
   };
+}
+
+/**
+ * Build the flair-owned environment overrides for a DIRECT (non-launchd)
+ * Harper spawn (flair#863) — shared by `flair start`'s fallback path and
+ * startFlairProcess() (which backs `flair restart` and `flair upgrade`).
+ * Callers spread this over `process.env`.
+ *
+ * These two sites used to build the env inline and had drifted: `start` set a
+ * host-qualified OPERATIONSAPI_NETWORK_PORT, `startFlairProcess` set none at
+ * all. Neither path sets HARPER_SET_CONFIG, and Harper restores the
+ * pre-SET_CONFIG original for every key SET_CONFIG had forced whenever that
+ * variable is absent — so the site that omitted the var silently re-widened
+ * the ops API to all interfaces on every restart/upgrade, and persisted it.
+ * One builder means the next spawn site cannot reintroduce that gap.
+ *
+ * Deliberately omits HDB_ADMIN_PASSWORD when no password is in hand: an empty
+ * string would strip Harper's auth on an existing install.
+ */
+export function buildDirectSpawnEnv(opts: {
+  dataDir: string;
+  modelsDir: string;
+  httpPort: number;
+  opsPort: number;
+  opsBindHost: string;
+  adminUser: string;
+  adminPass?: string;
+}): Record<string, string> {
+  const env: Record<string, string> = {
+    ROOTPATH: opts.dataDir,
+    // The embedding backend self-registers in-process at boot
+    // (resources/embeddings-boot.ts); this only tells it where the model lives.
+    FLAIR_MODELS_DIR: opts.modelsDir,
+    DEFAULTS_MODE: "dev",
+    HDB_ADMIN_USERNAME: opts.adminUser,
+    HTTP_PORT: String(opts.httpPort),
+    OPERATIONSAPI_NETWORK_PORT: opsNetworkPortValue(opts.opsBindHost, opts.opsPort),
+    LOCAL_STUDIO: "false",
+  };
+  if (opts.adminPass) env.HDB_ADMIN_PASSWORD = opts.adminPass;
+  return env;
 }
 
 /**
@@ -865,10 +973,24 @@ function resolveOpsUrlFromTarget(targetUrl: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
-function writeConfig(port: number): void {
-  const p = configPath();
-  mkdirSync(join(homedir(), ".flair"), { recursive: true });
-  writeFileSync(p, `# Flair configuration\nport: ${port}\n`);
+/**
+ * Persist the instance coordinates other commands need to find and re-assert
+ * this install (flair#863).
+ *
+ * This rewrites the file wholesale, so `opsPort`/`opsBind` default to whatever
+ * is already persisted rather than being dropped — otherwise an unrelated
+ * caller (e.g. `flair doctor --fix` correcting a drifted HTTP port) would
+ * silently erase the operator's `--ops-bind` choice and the next restart would
+ * revert the bind.
+ */
+function writeConfig(port: number, opsPort?: number, opsBind?: string, path: string = configPath()): void {
+  const resolvedOpsPort = opsPort ?? readOpsPortFromConfig(path);
+  const resolvedOpsBind = opsBind ?? readOpsBindFromConfig(path);
+  mkdirSync(dirname(path), { recursive: true });
+  let body = `# Flair configuration\nport: ${port}\n`;
+  if (resolvedOpsPort !== null && resolvedOpsPort !== undefined) body += `opsPort: ${resolvedOpsPort}\n`;
+  if (resolvedOpsBind) body += `opsBind: ${resolvedOpsBind}\n`;
+  writeFileSync(path, body);
 }
 
 function privKeyPath(agentId: string, keysDir: string): string {
@@ -2658,7 +2780,12 @@ program
           THREADS_COUNT: "1",
           NODE_HOSTNAME: "localhost",
           HTTP_PORT: String(httpPort),
-          OPERATIONSAPI_NETWORK_PORT: String(opsPort),
+          // flair#863: host-qualified, NOT a bare port. A bare value here is
+          // what Harper latches as `originalValues["operationsApi.network.port"]`
+          // when HARPER_SET_CONFIG force-sets the same key — and restores on the
+          // first later boot without HARPER_SET_CONFIG, re-widening the bind to
+          // all interfaces. See opsNetworkPortValue's doc comment.
+          OPERATIONSAPI_NETWORK_PORT: opsNetworkPortValue(opsBindHost, opsPort),
           LOCAL_STUDIO: "false",
         };
         // models (flair#504 Phase 1): the embedding backend registers itself
@@ -2791,7 +2918,7 @@ program
     <key>THREADS_COUNT</key><string>1</string>
     <key>NODE_HOSTNAME</key><string>localhost</string>
     <key>HTTP_PORT</key><string>${httpPort}</string>
-    <key>OPERATIONSAPI_NETWORK_PORT</key><string>${opsPort}</string>
+    <key>OPERATIONSAPI_NETWORK_PORT</key><string>${escapeXml(opsNetworkPortValue(opsBindHost, opsPort))}</string>
     <key>LOCAL_STUDIO</key><string>false</string>
   </dict>
   <key>RunAtLoad</key><true/>
@@ -2806,8 +2933,15 @@ program
       }
     }
 
-    // Persist port to config so other commands can find this instance
-    writeConfig(httpPort);
+    // Persist the instance coordinates so other commands can find AND
+    // re-assert this instance. flair#863: `opsBind` in particular has to be
+    // persisted here, not just handed to this run's spawn — `flair start` /
+    // `flair restart` / `flair upgrade` re-assert the bind on every spawn and
+    // have no `--ops-bind` flag of their own, so this is the only thing that
+    // survives an `--ops-bind` choice past the next restart. It also runs on
+    // the already-running path (where init skips the spawn entirely), which is
+    // what makes doctor's `flair init && flair restart` remedy actually apply.
+    writeConfig(httpPort, opsPort, opsBindHost);
 
     if (agentId) {
       // Generate or reuse keypair
@@ -9514,34 +9648,23 @@ program
     }
 
     const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
-    const opsPort = resolveOpsPort(opts);
-    // flair#670: this fallback path (no launchd plist) sets no HARPER_SET_CONFIG,
-    // so OPERATIONSAPI_NETWORK_PORT applies unfiltered on top of whatever init
-    // persisted to harper-config.yaml. A bare port number here would silently
-    // strip a loopback (or escape-hatch) bind host back to all-interfaces on
-    // every plain `flair start`. Re-resolving the same host:port form init uses
-    // keeps this re-assertion consistent instead of regressing it — the
-    // escape hatch on this path is FLAIR_OPS_BIND (no --ops-bind flag on `start`).
-    const opsBindHost = resolveOpsBindHost({});
-    const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
+    // flair#670/#863: this fallback path (no launchd plist) sets no
+    // HARPER_SET_CONFIG, so the ops bind has to be re-asserted explicitly on
+    // every spawn — see buildDirectSpawnEnv. The escape hatch on this path is
+    // FLAIR_OPS_BIND or the `opsBind` that `flair init --ops-bind` persisted to
+    // ~/.flair/config.yaml; there is no --ops-bind flag on `start`.
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
-      ROOTPATH: dataDir,
-      // See the matching comment at the install-time spawn site above.
-      FLAIR_MODELS_DIR: modelsDir,
-      DEFAULTS_MODE: "dev",
-      HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
-      HTTP_PORT: String(port),
-      OPERATIONSAPI_NETWORK_PORT: `${opsBindHost}:${opsPort}`,
-      LOCAL_STUDIO: "false",
+      ...buildDirectSpawnEnv({
+        dataDir,
+        modelsDir: process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models"),
+        httpPort: port,
+        opsPort: resolveOpsPort(opts),
+        opsBindHost: resolveOpsBindHost({}),
+        adminUser: DEFAULT_ADMIN_USER,
+        adminPass,
+      }),
     };
-    // Only set HDB_ADMIN_PASSWORD if we have a real value — empty string
-    // would strip Harper's auth on an existing install
-    if (adminPass) {
-      env.HDB_ADMIN_PASSWORD = adminPass;
-    }
-    // models (flair#504 Phase 1): no env var needed — resources/embeddings-boot.ts
-    // self-registers the backend in-process on every boot (flair#694).
 
     const proc = spawn(process.execPath, [bin, "run", "."], {
       cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
@@ -9659,22 +9782,29 @@ async function startFlairProcess(port: number): Promise<void> {
   // to the initial Harper spawn) followed by `flair restart` would silently
   // drop admin credentials — any subsequent auth'd call returns 401.
   const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
-  const modelsDir = process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models");
+  // flair#863: the same env `flair start` builds, from the same builder — this
+  // path sets no HARPER_SET_CONFIG, and Harper RESTORES the pre-SET_CONFIG
+  // original for every key SET_CONFIG had forced whenever that variable is
+  // absent (cleanupRemovedEnvVar; see opsNetworkPortValue). This site used to
+  // set no OPERATIONSAPI_NETWORK_PORT at all, so every `flair restart` /
+  // `flair upgrade` on the non-launchd path silently reverted
+  // `operationsApi.network.port` to a bare number in harper-config.yaml and
+  // re-bound the ops API to all interfaces — permanently, since the reverted
+  // value is what the next boot reads. It also made doctor's
+  // `flair init && flair restart` remedy a no-op: the restart undid whatever
+  // init had just written.
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
-    ROOTPATH: dataDir,
-    // See the matching comment at the install-time spawn site above.
-    FLAIR_MODELS_DIR: modelsDir,
-    DEFAULTS_MODE: "dev",
-    HDB_ADMIN_USERNAME: DEFAULT_ADMIN_USER,
-    HTTP_PORT: String(port),
-    LOCAL_STUDIO: "false",
+    ...buildDirectSpawnEnv({
+      dataDir,
+      modelsDir: process.env.FLAIR_MODELS_DIR ?? join(dataDir, "models"),
+      httpPort: port,
+      opsPort: resolveOpsPort({ port }),
+      opsBindHost: resolveOpsBindHost({}),
+      adminUser: DEFAULT_ADMIN_USER,
+      adminPass,
+    }),
   };
-  if (adminPass) {
-    env.HDB_ADMIN_PASSWORD = adminPass;
-  }
-  // models (flair#504 Phase 1): no env var needed — resources/embeddings-boot.ts
-  // self-registers the backend in-process on every boot (flair#694).
 
   const proc = spawn(process.execPath, [bin, "run", "."], {
     cwd: flairPackageDir(), env, detached: true, stdio: "ignore",
@@ -15041,6 +15171,9 @@ export {
   resolveKeyPath,
   buildEd25519Auth,
   readPortFromConfig,
+  readOpsBindFromConfig,
+  readOpsPortFromConfig,
+  writeConfig,
   resolveHttpPort,
   resolveOpsPort,
   resolveOpsBindHost,
