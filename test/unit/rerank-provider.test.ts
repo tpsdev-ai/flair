@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,6 +15,12 @@ import {
   truncateTokenBudget,
   needsReinit,
   resolveRerankModelPath,
+  resolveModelKey,
+  isKnownRerankModel,
+  rerankModelFile,
+  assertRerankAvailable,
+  RerankUnavailableError,
+  KNOWN_RERANK_MODELS,
 } from "../../resources/rerank-provider";
 
 // These tests exercise the DETERMINISTIC scoring + reorder + config paths
@@ -173,9 +179,28 @@ describe("config readers (FLAIR_RERANK_* env, default OFF)", () => {
     // resources/rerank-provider.ts's file header).
     expect(s.model).toBe("jina-reranker-v2");
   });
-  test("unknown FLAIR_RERANK_MODEL falls back to the working default", () => {
+  test("unknown FLAIR_RERANK_MODEL is reported VERBATIM, not swapped for the default (flair#888)", () => {
+    // Regression: this used to return "jina-reranker-v2" — a typo'd model
+    // name served the default and the status surface agreed with the swap, so
+    // "configured model X, served model Y" left no trace anywhere. The status
+    // block must show what was ASKED for; ensureInit() is what turns the
+    // unknown key into a loud failure (see the assertRerankAvailable tests).
     process.env.FLAIR_RERANK_MODEL = "does-not-exist";
-    expect(getRerankStatus().model).toBe("jina-reranker-v2");
+    expect(resolveModelKey()).toBe("does-not-exist");
+    expect(getRerankStatus().model).toBe("does-not-exist");
+  });
+  test("blank/whitespace FLAIR_RERANK_MODEL still means 'the default'", () => {
+    process.env.FLAIR_RERANK_MODEL = "   ";
+    expect(resolveModelKey()).toBe("jina-reranker-v2");
+  });
+  test("KNOWN_RERANK_MODELS / isKnownRerankModel agree with what can be served", () => {
+    expect([...KNOWN_RERANK_MODELS].sort()).toEqual(["jina-reranker-v2", "qwen3-reranker-0.6b-q8"]);
+    expect(isKnownRerankModel("jina-reranker-v2")).toBe(true);
+    expect(isKnownRerankModel("does-not-exist")).toBe(false);
+    // The bench derives the GGUF filename from here rather than hardcoding a
+    // second copy that could drift from the provider's own map.
+    expect(rerankModelFile("jina-reranker-v2")).toBe("jina-reranker-v2-base.Q8_0.gguf");
+    expect(rerankModelFile("does-not-exist")).toBeUndefined();
   });
   test("qwen3 is still selectable explicitly (kept available, EXPERIMENTAL)", () => {
     process.env.FLAIR_RERANK_MODEL = "qwen3-reranker-0.6b-q8";
@@ -340,5 +365,187 @@ describe("rerankCandidates fail-open contract (engine-free paths only)", () => {
     const out = await rerankCandidates("q", cands, { topN: 1, budgetMs: 2500 });
     expect(out).toBe(cands);
     expect(out.map((r) => r._score)).toEqual([0.9, 0.8]);
+  });
+});
+
+// ── flair#888: unavailability must be LOUD, ACTIONABLE and OBSERVABLE ────────
+//
+// Every case here reaches ensureInit() but returns BEFORE the dynamic
+// `import("node-llama-cpp")` — either the model key is unknown (rejected
+// first) or the GGUF is absent (existsSync check, also first). So these stay
+// hermetic: no 600MB load, no native teardown crash, no dependence on whether
+// a reranker is provisioned on the machine running the suite.
+//
+// IMPORTANT for anyone extending this block: the provider is a module
+// singleton and `needsReinit()` short-circuits on an unchanged model key, so
+// each test that needs a FRESH init attempt uses a DISTINCT
+// FLAIR_RERANK_MODEL. Reusing a key deliberately exercises the
+// don't-retry-storm path instead.
+describe("reranker unavailability is never silent (flair#888)", () => {
+  const SAVED: Record<string, string | undefined> = {};
+  const KEYS = ["FLAIR_RERANK_MODEL", "FLAIR_MODELS_DIR", "ROOTPATH", "FLAIR_RERANK_ENABLED"];
+  let emptyModelsDir: string;
+  let warnings: string[];
+  let realWarn: typeof console.warn;
+
+  beforeEach(() => {
+    for (const k of KEYS) { SAVED[k] = process.env[k]; delete process.env[k]; }
+    // A models dir that provably contains no GGUF — so "the model is missing"
+    // is a property of the test, not of the machine.
+    emptyModelsDir = mkdtempSync(join(tmpdir(), "flair-rerank-empty-models-"));
+    process.env.FLAIR_MODELS_DIR = emptyModelsDir;
+    warnings = [];
+    realWarn = console.warn;
+    console.warn = (...args: any[]) => { warnings.push(args.join(" ")); };
+  });
+
+  afterEach(() => {
+    console.warn = realWarn;
+    for (const k of KEYS) {
+      if (SAVED[k] === undefined) delete process.env[k];
+      else process.env[k] = SAVED[k];
+    }
+    rmSync(emptyModelsDir, { recursive: true, force: true });
+  });
+
+  const mkCandidates = () => [
+    { id: "a", content: "alpha", _score: 0.9, _rawScore: 0.9 },
+    { id: "b", content: "bravo", _score: 0.8, _rawScore: 0.8 },
+    { id: "c", content: "charlie", _score: 0.7, _rawScore: 0.7 },
+  ];
+
+  test("assertRerankAvailable THROWS when the GGUF is missing, naming the path and the fixes", async () => {
+    process.env.FLAIR_RERANK_MODEL = "jina-reranker-v2";
+    let err: any;
+    try { await assertRerankAvailable(); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(RerankUnavailableError);
+    const msg = String(err.message);
+    // Errors must enable a response: what's wrong, where it looked, how to fix.
+    expect(msg).toContain("UNAVAILABLE");
+    expect(msg).toContain(join(emptyModelsDir, "jina-reranker-v2-base.Q8_0.gguf"));
+    expect(msg).toContain("docs/rerank-provisioning.md");
+    expect(msg).toContain("FLAIR_MODELS_DIR");
+    expect(msg).toContain("FLAIR_RERANK_ENABLED");
+  });
+
+  test("assertRerankAvailable THROWS on an unknown model key, listing the known ones", async () => {
+    process.env.FLAIR_RERANK_MODEL = "totally-bogus-model";
+    let err: any;
+    try { await assertRerankAvailable(); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(RerankUnavailableError);
+    const msg = String(err.message);
+    expect(msg).toContain("totally-bogus-model");
+    for (const known of KNOWN_RERANK_MODELS) expect(msg).toContain(known);
+    // Pin the DIAGNOSIS, not merely the failure. Without the explicit
+    // unknown-key check, init still fails — but on a TypeError from reading
+    // `.mode` off undefined, and an operator handed "Cannot read properties
+    // of undefined" has to go read our source to learn they typo'd an env
+    // var. Mutation-checked: removing that check leaves every other
+    // assertion here passing.
+    expect(msg).toContain("unknown reranker model");
+    expect(msg).not.toContain("Cannot read properties");
+  });
+
+  test("assertRerankAvailable resolves (does NOT throw) when reranking is simply off — availability is about the engine, not the flag", async () => {
+    // Guard against a lazier implementation that keys off
+    // FLAIR_RERANK_ENABLED: the bench sets that flag on the SPAWNED Harper,
+    // not necessarily in its own process, so conflating the two would make
+    // the gate silently vacuous — the exact class of bug being fixed.
+    process.env.FLAIR_RERANK_MODEL = "qwen3-reranker-0.6b-q8";
+    delete process.env.FLAIR_RERANK_ENABLED;
+    await expect(assertRerankAvailable()).rejects.toThrow(/UNAVAILABLE/);
+  });
+
+  test("rerankCandidates DEGRADES (returns vector order) rather than throwing", async () => {
+    process.env.FLAIR_RERANK_MODEL = "jina-reranker-v2";
+    const cands = mkCandidates();
+    const out = await rerankCandidates("some query", cands, { topN: 50, budgetMs: 2500 });
+    // Same array, untouched order, untouched scores: no partial reorder, and
+    // crucially no `_semScore` stamped on records that were never reranked.
+    expect(out).toBe(cands);
+    expect(out.map(r => r.id)).toEqual(["a", "b", "c"]);
+    expect(out.map(r => r._score)).toEqual([0.9, 0.8, 0.7]);
+    expect((out[0] as any)._semScore).toBeUndefined();
+  });
+
+  test("...but the degradation is RECORDED: classified reason, detail, timestamp, counter", async () => {
+    // THE REGRESSION. Before this fix the only trace of "reranking was asked
+    // for and did not happen" was fallbackCount going up with no reason
+    // attached, plus one console line that a long-running process emitted at
+    // most once, ever. rerankCount pinned at 0 with no other signal is
+    // precisely the production symptom flair#888 was filed about.
+    process.env.FLAIR_RERANK_MODEL = "qwen3-reranker-0.6b-q8";
+    const before = getRerankStatus().fallbackCount;
+    await rerankCandidates("some query", mkCandidates(), { topN: 50, budgetMs: 2500 });
+    const s = getRerankStatus();
+    expect(s.fallbackCount).toBe(before + 1);
+    expect(s.rerankCount).toBe(0);
+    expect(s.lastFallbackReason).toBe("unavailable");
+    expect(s.lastFallbackDetail).toContain("UNAVAILABLE");
+    expect(s.lastFallbackDetail).toContain("Qwen3-Reranker-0.6B-q8_0.gguf");
+    expect(s.lastFallbackAt).not.toBeNull();
+    expect(Date.parse(s.lastFallbackAt!)).not.toBeNaN();
+    // And the status block must not claim a model nobody configured.
+    expect(s.model).toBe("qwen3-reranker-0.6b-q8");
+  });
+
+  test("the fallback is LOGGED, at ERROR level, with the remedy in the line", async () => {
+    process.env.FLAIR_RERANK_MODEL = "jina-reranker-v2";
+    await rerankCandidates("some query", mkCandidates(), { topN: 50, budgetMs: 2500 });
+    const text = warnings.join("\n");
+    expect(text).toContain("[rerank] ERROR:");
+    expect(text).toContain("docs/rerank-provisioning.md");
+    // The consequence, stated — not just the cause.
+    expect(text).toContain("vector order");
+  });
+
+  test("repeat failures dedupe the LOG but never the COUNTER", async () => {
+    // A search-per-second install must not spew a log line per search; it
+    // must also not lose count. The counter is the signal channel, the log is
+    // a convenience — so they dedupe differently, on purpose.
+    process.env.FLAIR_RERANK_MODEL = "jina-reranker-v2";
+    const before = getRerankStatus().fallbackCount;
+    await rerankCandidates("q1", mkCandidates(), { topN: 50, budgetMs: 2500 });
+    const afterFirst = warnings.length;
+    await rerankCandidates("q2", mkCandidates(), { topN: 50, budgetMs: 2500 });
+    await rerankCandidates("q3", mkCandidates(), { topN: 50, budgetMs: 2500 });
+    expect(warnings.length).toBe(afterFirst);
+    expect(getRerankStatus().fallbackCount).toBe(before + 3);
+  });
+});
+
+// ── Structural tripwire: the BENCH must gate BEFORE it measures ─────────────
+// flair#888's second half. A benchmark that measures a different
+// configuration than the one it reports is worse than no benchmark, and the
+// harness previously checked engagement only AFTER a full measurement pass —
+// it caught the lie, but only once a number already existed. This pins the
+// ordering in source, because no unit test can spawn the harness's ephemeral
+// Harper to observe it at runtime.
+describe("recall-harness --rerank gates before measuring (flair#888)", () => {
+  const runTs = readFileSync(join(import.meta.dir, "../bench/recall-harness/run.ts"), "utf8");
+
+  test("a pre-measure engagement check exists and precedes the first runQueries() call", () => {
+    const preMeasure = runTs.indexOf("[pre-measure]");
+    const firstMeasure = runTs.indexOf("await runQueries(");
+    expect(preMeasure).toBeGreaterThan(-1);
+    expect(firstMeasure).toBeGreaterThan(-1);
+    expect(preMeasure).toBeLessThan(firstMeasure);
+  });
+
+  test("a post-measure check is still there too (engaged on query 1 ≠ engaged on query 126)", () => {
+    expect(runTs).toContain("[post-measure]");
+  });
+
+  test("preflight refuses to start when the GGUF is absent, rather than measuring", () => {
+    expect(runTs).toContain("function preflightRerank()");
+    expect(runTs).toContain("REFUSING TO MEASURE");
+    // Called from main() before the sweep, not merely defined.
+    expect(runTs).toContain("if (WITH_RERANK) preflightRerank();");
+  });
+
+  test("the harness README no longer advertises the fail-open it just closed", () => {
+    const readme = readFileSync(join(import.meta.dir, "../bench/recall-harness/README.md"), "utf8");
+    expect(readme).not.toContain("silently measures the *non-reranked* config");
+    expect(readme).toContain("A null result from this arm therefore means");
   });
 });

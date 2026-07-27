@@ -289,6 +289,15 @@ export class SemanticSearch extends Resource {
     // own vector-order sort — recall is never blocked. retrieveCandidates
     // already returns its output sorted best-first, so the non-rerank branch
     // needs no additional sort here.
+    //
+    // flair#888: that fall-through is deliberate (an unranked search still
+    // answers the question; a failed one doesn't) but is NO LONGER SILENT —
+    // rerank-provider classifies every fallback, logs it once per distinct
+    // reason, and reports reason/detail/timestamp through getRerankStatus() →
+    // /HealthDetail, which now warns explicitly on the "enabled, 0 successful
+    // reranks" case. Callers that need a hard gate instead of a degrade call
+    // assertRerankAvailable() (the recall bench does); production recall
+    // deliberately does not.
     if (rerankOn && qEmb && q && filteredResults.length >= getRerankMinCandidates()) {
       filteredResults = await rerankCandidates(String(q), filteredResults, {
         topN: rerankTopN,
