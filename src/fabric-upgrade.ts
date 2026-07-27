@@ -218,6 +218,19 @@ export interface FabricUpgradeOptions {
   check?: boolean; // plan only, do not deploy
   restart?: boolean;
   replicated?: boolean;
+  /**
+   * flair#878: these were reachable from `flair deploy` but NOT from
+   * `flair upgrade --target` — this module built its deploy() options by hand
+   * and simply omitted them. So when harper's own error said "pass
+   * ignore_replication_errors: true", there was no way to do that through the
+   * upgrade path, and `--deploy-retries` was likewise unreachable (upgrades
+   * silently ran on deploy()'s default). Both are threaded through now, along
+   * with the convergence-poll knobs.
+   */
+  ignoreReplicationErrors?: boolean;
+  deployRetries?: number;
+  convergenceCheck?: boolean;
+  convergenceTimeoutMs?: number;
 }
 
 export interface FabricUpgradePlan {
@@ -237,6 +250,14 @@ export interface FabricUpgradeResult {
   verifiedVersion: string | null;
   /** Temp staging dir that was used + cleaned up (for logging/debug). */
   stagingDir: string;
+  /** Origin-only deploy accepted via --ignore-replication-errors (see DeployResult). */
+  replicationWarning?: boolean;
+  /**
+   * flair#878: harper reported a peer-replication failure and the per-node
+   * component-tree comparison then showed every peer had converged. The upgrade
+   * succeeded; this is surfaced so the CLI says so rather than hiding it.
+   */
+  convergedAfterReplicationError?: boolean;
 }
 
 // ─── Default (real) dependency implementations ──────────────────────────────
@@ -501,6 +522,14 @@ export async function fabricUpgrade(
       restart: opts.restart,
       replicated: opts.replicated,
       packageRoot,
+      // flair#878 — see FabricUpgradeOptions: these used to stop at this
+      // boundary, which is why the upgrade path could not act on harper's own
+      // "pass ignore_replication_errors: true" advice.
+      ignoreReplicationErrors: opts.ignoreReplicationErrors,
+      deployRetries: opts.deployRetries,
+      convergenceCheck: opts.convergenceCheck,
+      convergenceTimeoutMs: opts.convergenceTimeoutMs,
+      onProgress: (m: string) => log(`  ${m}`),
     });
 
     // Step 4: verify the deployed version (best-effort).
@@ -528,7 +557,14 @@ export async function fabricUpgrade(
       );
     }
 
-    return { plan, deployed: true, verifiedVersion, stagingDir };
+    return {
+      plan,
+      deployed: true,
+      verifiedVersion,
+      stagingDir,
+      replicationWarning: result.replicationWarning,
+      convergedAfterReplicationError: result.convergedAfterReplicationError,
+    };
   } finally {
     // SAFETY: always clean up the temp dir.
     rmSync(stagingDir, { recursive: true, force: true });

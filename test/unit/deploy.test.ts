@@ -25,7 +25,70 @@ import {
   REPLICATION_FAILURE_RE,
   DEFAULT_DEPLOY_RETRIES,
   DEPLOY_RETRY_BACKOFF_MS,
+  describeDeployFailure,
+  summarizeHarperOutput,
+  type DeployAttemptFailure,
 } from "../../src/deploy.js";
+import type { ConvergenceDeps } from "../../src/replication-convergence.js";
+
+// ─── flair#878 helpers: a fake cluster for the convergence poll ─────────────
+//
+// deploy()'s convergence/quiescence polls go through an injected
+// ConvergenceDeps, so these tests drive real decision logic with no network
+// and no wall-clock waiting (the clock only advances when sleep() is awaited).
+
+const FAKE_TARGET = "https://prod.acme.harperfabric.com";
+const FAKE_TARGET_HOST = "prod.acme.harperfabric.com";
+const FAKE_PEER_HOST = "node-b.acme.harperfabric.com";
+const FAKE_PEER_URL = "https://node-b.acme.harperfabric.com";
+
+function fakeTree(project: string, mtime: string): unknown {
+  return {
+    name: "components",
+    entries: [{ name: project, entries: [{ name: "config.yaml", size: 2551, mtime }] }],
+  };
+}
+
+const MTIME_NEW = "2026-07-27T14:45:44.000Z";
+const MTIME_OLD = "2026-07-01T09:00:00.000Z";
+
+function fakeConvergenceDeps(cfg: {
+  /** baseUrl -> body (or a thunk, to script a per-read sequence). */
+  trees: Record<string, unknown | (() => unknown)>;
+  addresses: Record<string, string[]>;
+}): ConvergenceDeps {
+  let t = 0;
+  return {
+    getComponents: async (baseUrl: string) => {
+      const entry = cfg.trees[baseUrl];
+      if (entry === undefined) throw new Error("get_components returned HTTP 502");
+      return typeof entry === "function" ? (entry as () => unknown)() : entry;
+    },
+    resolveHostAddresses: async (hostname: string) => {
+      const addrs = cfg.addresses[hostname];
+      if (!addrs) throw new Error("ENOTFOUND");
+      return addrs;
+    },
+    sleep: async (ms: number) => {
+      t += ms;
+    },
+    now: () => t,
+  };
+}
+
+/** Every peer holds exactly what the origin holds — replication healed. */
+const CONVERGED_CLUSTER = () =>
+  fakeConvergenceDeps({
+    trees: { [FAKE_TARGET]: fakeTree("flair", MTIME_NEW), [FAKE_PEER_URL]: fakeTree("flair", MTIME_NEW) },
+    addresses: { [FAKE_TARGET_HOST]: ["203.0.113.10"], [FAKE_PEER_HOST]: ["203.0.113.20"] },
+  });
+
+/** Peer stuck on the previous tree, origin stable — conclusive non-convergence. */
+const DIVERGED_CLUSTER = () =>
+  fakeConvergenceDeps({
+    trees: { [FAKE_TARGET]: fakeTree("flair", MTIME_NEW), [FAKE_PEER_URL]: fakeTree("flair", MTIME_OLD) },
+    addresses: { [FAKE_TARGET_HOST]: ["203.0.113.10"], [FAKE_PEER_HOST]: ["203.0.113.20"] },
+  });
 
 describe("flair deploy: validateOptions", () => {
   test("rejects missing org + cluster", () => {
@@ -555,7 +618,21 @@ if (behavior === 'success') {
   console.log('Successfully deployed');
   process.exit(0);
 } else if (behavior === 'replication-fail') {
+  // Peer detail that is NOT an addressable host — harper's detail is free
+  // text and can be an error string. Fixture for "convergence cannot be
+  // checked from here" (flair#878).
   console.error("Component 'flair' was deployed on the origin node but failed to replicate to 1 of 1 peer node(s): timeout waiting for ack (Error: Connection closed 1006)");
+  process.exit(1);
+} else if (behavior === 'replication-fail-named') {
+  // The real shape harper emits, with a node name the CLI can address.
+  console.error("Component 'flair' was deployed on the origin node but failed to replicate to 1 of 1 peer node(s): ${FAKE_PEER_HOST} (Error: Connection closed  1006). See deployment 0f2c-9b1a (get_deployment) for details, or pass ignore_replication_errors: true to treat replication failures as non-fatal.");
+  process.exit(1);
+} else if (behavior === 'enotempty-fail') {
+  // The exact escalation from the flair#878 report: the RETRY's install dies
+  // over the previous attempt's native-module tree.
+  console.error("npm error code ENOTEMPTY");
+  console.error("npm error ENOTEMPTY: directory not empty, rmdir '/home/harperdb/harper/components/flair/node_modules/node-llama-cpp/dist'");
+  console.error("error: Failed to install dependencies for flair using npm default. Exit code: 217 (500)");
   process.exit(1);
 } else {
   console.error('Error: ENOENT: package tarball not found');
@@ -570,8 +647,12 @@ if (behavior === 'success') {
     return parseInt(readFileSync(counterPath, "utf8"), 10) || 0;
   }
 
-  test("defaults: DEFAULT_DEPLOY_RETRIES=2, DEPLOY_RETRY_BACKOFF_MS=[5000,10000]", () => {
-    expect(DEFAULT_DEPLOY_RETRIES).toBe(2);
+  // flair#878 moved this default from 2 to 0: retrying re-runs harper's own
+  // component install, which is not idempotent over an existing native-module
+  // tree, so the remedy could be worse than the transient it retried. The
+  // convergence poll now covers the window the retry was buying.
+  test("defaults: DEFAULT_DEPLOY_RETRIES=0, DEPLOY_RETRY_BACKOFF_MS=[5000,10000]", () => {
+    expect(DEFAULT_DEPLOY_RETRIES).toBe(0);
     expect(DEPLOY_RETRY_BACKOFF_MS).toEqual([5_000, 10_000]);
   });
 
@@ -599,9 +680,9 @@ if (behavior === 'success') {
     }
   });
 
-  test("succeeds on attempt 2 after a replication flake on attempt 1 (loud retry log)", async () => {
+  test("succeeds on attempt 2 after an OBSERVED non-convergence on attempt 1 (loud retry log)", async () => {
     const pkgRoot = synthPkgRootForReplicationTests();
-    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail", "success"]);
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail-named", "success"]);
     const origWarn = console.warn;
     const warnings: string[] = [];
     console.warn = (msg: any) => { warnings.push(String(msg)); };
@@ -615,18 +696,20 @@ if (behavior === 'success') {
         verify: false,
         deployRetries: 2,
         deployRetryBackoffMs: [1, 1],
+        convergenceTimeoutMs: 1,
+        convergenceDeps: DIVERGED_CLUSTER(),
       });
       expect(result.dryRun).toBe(false);
       expect(result.replicationWarning).toBe(false);
       expect(attemptCount(counterPath)).toBe(2);
-      expect(warnings.some((w) => /replication flake on attempt 1\/3/.test(w))).toBe(true);
+      expect(warnings.some((w) => /did not converge on attempt 1\/3/.test(w))).toBe(true);
     } finally {
       console.warn = origWarn;
       rmSync(pkgRoot, { recursive: true, force: true });
     }
   });
 
-  test("--deploy-retries 0 disables retry — first replication flake fails immediately", async () => {
+  test("--deploy-retries 0 disables retry — first replication failure fails immediately", async () => {
     const pkgRoot = synthPkgRootForReplicationTests();
     const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail", "success"]);
     try {
@@ -640,7 +723,7 @@ if (behavior === 'success') {
           verify: false,
           deployRetries: 0,
         }),
-      ).rejects.toThrow(/peer replication failed after 1 attempt/);
+      ).rejects.toThrow(/peer replication was reported failed/);
       expect(attemptCount(counterPath)).toBe(1);
     } finally {
       rmSync(pkgRoot, { recursive: true, force: true });
@@ -679,9 +762,9 @@ if (behavior === 'success') {
   test("--ignore-replication-errors composes with retry: retries first, then falls back to warned success", async () => {
     const pkgRoot = synthPkgRootForReplicationTests();
     const counterPath = addScriptedHarperBinary(pkgRoot, [
-      "replication-fail",
-      "replication-fail",
-      "replication-fail",
+      "replication-fail-named",
+      "replication-fail-named",
+      "replication-fail-named",
     ]);
     try {
       const result = await deploy({
@@ -693,6 +776,8 @@ if (behavior === 'success') {
         verify: false,
         deployRetries: 2,
         deployRetryBackoffMs: [1, 1],
+        convergenceTimeoutMs: 1,
+        convergenceDeps: DIVERGED_CLUSTER(),
         ignoreReplicationErrors: true,
       });
       expect(result.replicationWarning).toBe(true);
@@ -701,5 +786,259 @@ if (behavior === 'success') {
     } finally {
       rmSync(pkgRoot, { recursive: true, force: true });
     }
+  });
+
+  // ── flair#878 ─────────────────────────────────────────────────────────────
+
+  test("CONVERGED: a replication error whose peers actually converged is a SUCCESS, not a failure", async () => {
+    // The reported incident: harper exits 1 with a peer-replication error while
+    // Harper is still healing; afterwards both nodes carry identical component
+    // files. The deploy succeeded and must be reported as such.
+    const pkgRoot = synthPkgRootForReplicationTests();
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail-named"]);
+    const origWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (msg: any) => { warnings.push(String(msg)); };
+    try {
+      const result = await deploy({
+        fabricOrg: "acme",
+        fabricCluster: "prod",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        packageRoot: pkgRoot,
+        verify: false,
+        deployRetries: 2,
+        deployRetryBackoffMs: [1, 1],
+        convergenceDeps: CONVERGED_CLUSTER(),
+      });
+      expect(result.convergedAfterReplicationError).toBe(true);
+      expect(result.replicationWarning).toBe(false);
+      // No retry: convergence was confirmed, so nothing was re-deployed.
+      expect(attemptCount(counterPath)).toBe(1);
+      expect(warnings.some((w) => /CONVERGED on its own/.test(w))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("NO ESCALATION: when a retry dies with ENOTEMPTY, the reported error is the ORIGINAL replication failure", async () => {
+    // The core defect. Attempt 1 = transient peer-replication error; the retry
+    // then dies on npm ENOTEMPTY over the previous attempt's native-module
+    // tree. Reporting the ENOTEMPTY sends the operator into node_modules when
+    // the actual event was a peer link blipping.
+    const pkgRoot = synthPkgRootForReplicationTests();
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail-named", "enotempty-fail"]);
+    try {
+      const err = await deploy({
+        fabricOrg: "acme",
+        fabricCluster: "prod",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        packageRoot: pkgRoot,
+        verify: false,
+        deployRetries: 1,
+        deployRetryBackoffMs: [1],
+        convergenceTimeoutMs: 1,
+        convergenceDeps: DIVERGED_CLUSTER(),
+      }).then(
+        () => null,
+        (e: Error) => e,
+      );
+      expect(attemptCount(counterPath)).toBe(2);
+      expect(err).not.toBeNull();
+      const msg = err!.message;
+      // The headline is the replication failure...
+      expect(msg.split("\n")[0]).toMatch(/peer replication was reported failed/);
+      // ...the ENOTEMPTY is still reported, but explicitly as a consequence...
+      expect(msg).toMatch(/ENOTEMPTY/);
+      expect(msg).toMatch(/CONSEQUENCE of retrying/);
+      // ...and it is never the first thing the operator reads.
+      expect(msg.indexOf("peer replication")).toBeLessThan(msg.indexOf("ENOTEMPTY"));
+    } finally {
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("INCONCLUSIVE: convergence that cannot be determined does NOT authorise a retry", async () => {
+    // A retry is the destructive operation here. "We could not look" is not a
+    // licence to re-deploy into a cluster that may still be mid-heal.
+    const pkgRoot = synthPkgRootForReplicationTests();
+    // Attempt 2 would SUCCEED if it fired — so the assertion is about the retry
+    // decision, not about eventual failure.
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail", "success"]);
+    const origWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (msg: any) => { warnings.push(String(msg)); };
+    try {
+      await expect(
+        deploy({
+          fabricOrg: "acme",
+          fabricCluster: "prod",
+          fabricUser: "admin",
+          fabricPassword: "pw",
+          packageRoot: pkgRoot,
+          verify: false,
+          deployRetries: 2,
+          deployRetryBackoffMs: [1, 1],
+          convergenceDeps: CONVERGED_CLUSTER(),
+        }),
+      ).rejects.toThrow(/peer replication was reported failed/);
+      expect(attemptCount(counterPath)).toBe(1);
+      expect(warnings.some((w) => /NOT retrying/.test(w))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("NOT QUIESCENT: a retry is withheld while the origin's component tree is still changing", async () => {
+    // Overlapping a retry with the previous attempt's still-running install is
+    // what produces ENOTEMPTY. Attempt 2 would succeed if it fired.
+    const pkgRoot = synthPkgRootForReplicationTests();
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail-named", "success"]);
+    let n = 0;
+    const churning = fakeConvergenceDeps({
+      trees: {
+        // Origin never settles: a different tree on every read.
+        [FAKE_TARGET]: () => fakeTree("flair", `2026-07-27T14:45:${String(44 + ++n).padStart(2, "0")}.000Z`),
+        [FAKE_PEER_URL]: fakeTree("flair", MTIME_OLD),
+      },
+      addresses: { [FAKE_TARGET_HOST]: ["203.0.113.10"], [FAKE_PEER_HOST]: ["203.0.113.20"] },
+    });
+    const origWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (msg: any) => { warnings.push(String(msg)); };
+    try {
+      await expect(
+        deploy({
+          fabricOrg: "acme",
+          fabricCluster: "prod",
+          fabricUser: "admin",
+          fabricPassword: "pw",
+          packageRoot: pkgRoot,
+          verify: false,
+          deployRetries: 2,
+          deployRetryBackoffMs: [1, 1],
+          convergenceTimeoutMs: 1,
+          convergenceDeps: churning,
+        }),
+      ).rejects.toThrow(/peer replication was reported failed/);
+      expect(attemptCount(counterPath)).toBe(1);
+      expect(warnings.some((w) => /NOT retrying/.test(w) && /ENOTEMPTY/.test(w))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("--no-convergence-check + --deploy-retries honours the pre-#878 retry behaviour it opts into", async () => {
+    // The flag means "don't poll, do what you used to". An operator who sets
+    // BOTH gets the old behaviour including its hazard — silently refusing to
+    // retry would make the flag mean something other than what it says.
+    const pkgRoot = synthPkgRootForReplicationTests();
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail-named", "success"]);
+    try {
+      const result = await deploy({
+        fabricOrg: "acme",
+        fabricCluster: "prod",
+        fabricUser: "admin",
+        fabricPassword: "pw",
+        packageRoot: pkgRoot,
+        verify: false,
+        deployRetries: 1,
+        deployRetryBackoffMs: [1],
+        convergenceCheck: false,
+      });
+      expect(result.convergedAfterReplicationError).toBe(false);
+      expect(attemptCount(counterPath)).toBe(2);
+    } finally {
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("--no-convergence-check restores the pre-#878 behaviour (fail on harper's error verbatim)", async () => {
+    const pkgRoot = synthPkgRootForReplicationTests();
+    const counterPath = addScriptedHarperBinary(pkgRoot, ["replication-fail-named"]);
+    try {
+      await expect(
+        deploy({
+          fabricOrg: "acme",
+          fabricCluster: "prod",
+          fabricUser: "admin",
+          fabricPassword: "pw",
+          packageRoot: pkgRoot,
+          verify: false,
+          deployRetries: 0,
+          convergenceCheck: false,
+          // Would report CONVERGED if it were consulted — it must not be.
+          convergenceDeps: CONVERGED_CLUSTER(),
+        }),
+      ).rejects.toThrow(/peer replication was reported failed/);
+      expect(attemptCount(counterPath)).toBe(1);
+    } finally {
+      rmSync(pkgRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── flair#878: describeDeployFailure (the anti-escalation rule) ────────────
+
+describe("flair#878: describeDeployFailure", () => {
+  const rep = (attempt: number, summary = "failed to replicate to 1 of 1 peer node(s): node-b (1006)"): DeployAttemptFailure =>
+    ({ attempt, totalAttempts: 3, code: 1, kind: "replication", summary });
+  const other = (attempt: number, summary = "npm error ENOTEMPTY: directory not empty, rmdir '.../node-llama-cpp/dist'"): DeployAttemptFailure =>
+    ({ attempt, totalAttempts: 3, code: 1, kind: "other", summary });
+
+  test("a single non-replication failure is reported verbatim", () => {
+    const msg = describeDeployFailure([other(1, "Error: 401 Unauthorized")]);
+    expect(msg).toMatch(/401 Unauthorized/);
+    expect(msg).not.toMatch(/CONSEQUENCE/);
+  });
+
+  test("replication then ENOTEMPTY: the headline is the replication failure, not the ENOTEMPTY", () => {
+    const msg = describeDeployFailure([rep(1), other(2)]);
+    expect(msg.split("\n")[0]).toMatch(/peer replication was reported failed/);
+    expect(msg.split("\n")[0]).not.toMatch(/ENOTEMPTY/);
+  });
+
+  test("the escalated failure is still surfaced, labelled as caused by the retry, with the remedy named", () => {
+    const msg = describeDeployFailure([rep(1), other(2)]);
+    expect(msg).toMatch(/ENOTEMPTY/);
+    expect(msg).toMatch(/CONSEQUENCE of retrying/);
+    expect(msg).toMatch(/--deploy-retries 0/);
+  });
+
+  test("repeated replication failures do not manufacture an escalation notice", () => {
+    const msg = describeDeployFailure([rep(1), rep(2), rep(3)]);
+    expect(msg).not.toMatch(/CONSEQUENCE of retrying/);
+  });
+
+  test("the convergence verdict is carried into the error so the operator knows what was checked", () => {
+    const msg = describeDeployFailure([rep(1)], {
+      converged: false,
+      conclusive: true,
+      peers: [],
+      elapsedMs: 12,
+      detail: "peer replication did NOT converge — node-b: diverged",
+    });
+    expect(msg).toMatch(/convergence check: peer replication did NOT converge/);
+  });
+
+  test("an empty history never produces a confident message", () => {
+    expect(describeDeployFailure([])).toMatch(/no recorded attempt/);
+  });
+});
+
+describe("flair#878: summarizeHarperOutput", () => {
+  test("prefers the last error-shaped line", () => {
+    const out = "prepare done\ninstall started\nnpm error code ENOTEMPTY\nsome trailing note\n";
+    expect(summarizeHarperOutput(out)).toMatch(/ENOTEMPTY/);
+  });
+
+  test("falls back to the last non-empty line, and never returns an empty string", () => {
+    expect(summarizeHarperOutput("alpha\nbeta\n\n")).toBe("beta");
+    expect(summarizeHarperOutput("")).toBe("(no output)");
+    expect(summarizeHarperOutput("   \n\n")).toBe("(no output)");
   });
 });

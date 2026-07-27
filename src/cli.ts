@@ -8562,6 +8562,7 @@ export function resolveFabricCredentials(opts: {
 async function runFabricUpgrade(opts: any): Promise<void> {
   const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
   const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+  const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
   const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
   let fabricUser: string | undefined;
@@ -8603,6 +8604,12 @@ async function runFabricUpgrade(opts: any): Promise<void> {
     check,
     restart: opts.restart !== false,
     replicated: opts.replicated !== false,
+    // flair#878 — previously unreachable from this command; see
+    // FabricUpgradeOptions.
+    deployRetries: Number(opts.deployRetries ?? 0),
+    ignoreReplicationErrors: opts.ignoreReplicationErrors ?? false,
+    convergenceCheck: opts.convergenceCheck !== false,
+    convergenceTimeoutMs: opts.convergenceTimeout != null ? Number(opts.convergenceTimeout) : undefined,
   };
 
   console.log(`${green("→")} Upgrading Fabric Flair at ${upgradeOpts.target}`);
@@ -8639,6 +8646,24 @@ async function runFabricUpgrade(opts: any): Promise<void> {
       console.log(`\n${green("✓")} already up to date.`);
       return;
     }
+    if (result.convergedAfterReplicationError) {
+      // flair#878: this deploy is a SUCCESS that harper's own exit code called
+      // a failure. Say both halves out loud — an operator who saw the
+      // replication error scroll past needs to know it resolved, and an
+      // operator reading only this line needs to know it happened at all.
+      console.log(
+        `\n${yellow("⚠")} harper reported a peer-replication failure during this upgrade, but the component ` +
+          `tree on every named peer node matched the origin when checked afterwards — replication converged ` +
+          `on its own. Harper replicates components asynchronously, so a replication error at deploy time is ` +
+          `a snapshot, not a verdict.`,
+      );
+    }
+    if (result.replicationWarning) {
+      console.log(
+        `\n${yellow("⚠")} Deployed to the ORIGIN NODE ONLY — peer replication did not converge and ` +
+          `--ignore-replication-errors was set. The peer will need to catch up via federation sync or a later deploy.`,
+      );
+    }
     console.log(`\n${green("✓")} Fabric upgrade complete.`);
 
     // ── Post-upgrade fleet sweep (flair#636) ────────────────────────────────
@@ -8668,6 +8693,27 @@ async function runFabricUpgrade(opts: any): Promise<void> {
     const hint = err.message?.toLowerCase() ?? "";
     if (hint.includes("401") || hint.includes("unauthoriz")) {
       console.error(dim("  hint: check Fabric Studio → Cluster Settings → Admin for the admin password"));
+    }
+    // flair#878: harper's own replication error tells the operator to "pass
+    // ignore_replication_errors: true" — until now there was no way to do that
+    // through `flair upgrade`. Name the flag that actually does it, and the
+    // one that turns off the retry that can make things worse.
+    if (hint.includes("peer replication") || hint.includes("ignore_replication_errors")) {
+      console.error(
+        dim(
+          "  hint: --ignore-replication-errors accepts an origin-only upgrade (the peer catches up via federation sync or a later deploy)",
+        ),
+      );
+      console.error(
+        dim(
+          "  hint: --convergence-timeout <ms> waits longer for asynchronous replication before giving up (default 180000)",
+        ),
+      );
+      console.error(
+        dim(
+          "  hint: --deploy-retries defaults to 0 — a retry can turn a transient replication warning into a hard install failure (flair#878)",
+        ),
+      );
     }
     process.exit(1);
   }
@@ -9071,6 +9117,14 @@ program
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
   .option("--yes", "Skip the confirmation prompt for --target")
   .option("--no-fleet-verify", "Skip the automatic post-upgrade fleet convergence sweep for --target (default: sweep runs — see flair#636)")
+  // ── flair#878 ─────────────────────────────────────────────────────────────
+  // These existed on `flair deploy` but stopped at the upgrade boundary, so
+  // harper's own remedy ("pass ignore_replication_errors: true") was not
+  // actually reachable through `flair upgrade --target`.
+  .option("--deploy-retries <n>", "Retry the full harper deploy this many times for --target, ONLY when peer replication is positively observed not to converge (default: 0 — a retry can escalate a transient replication warning into a hard install failure; see flair#878)", "0")
+  .option("--ignore-replication-errors", "For --target: if peer replication still hasn't converged, accept an origin-only deploy instead of failing (the peer catches up via federation sync or a later deploy)")
+  .option("--no-convergence-check", "For --target: skip the post-replication-error convergence poll and fail on harper's error verbatim (default: poll — Harper replicates asynchronously, so its error is a snapshot, not a verdict; flair#878)")
+  .option("--convergence-timeout <ms>", "For --target: how long to wait for peer replication to converge before reporting a replication failure (default: 180000)")
   .action(async (opts) => {
     // ── Fabric-upgrade branch ───────────────────────────────────────────────
     if (opts.target) {
@@ -10332,8 +10386,10 @@ program
   .option("--no-verify", "Skip post-deploy served-API verification (default: verify — on by design, so the CLI can't report success on an empty/broken deploy)")
   .option("--verify-timeout <ms>", "Milliseconds to wait for the served API to settle after harper's post-deploy restart before verifying (default: 300000)")
   .option("--verify-resource <name>", "Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)", (val: string, prev: string[]) => [...prev, val], [] as string[])
-  .option("--deploy-retries <n>", "Retry the full harper deploy this many times on a detected flaky peer-replication failure ONLY — a normal deploy failure (auth, bad package, ...) never retries (default: 2; 0 disables)", "2")
-  .option("--ignore-replication-errors", "If peer replication is still failing once retries are exhausted, treat it as a non-fatal warning and succeed with an origin-only deploy (the peer catches up via federation sync or a later deploy)")
+  .option("--deploy-retries <n>", "Retry the full harper deploy this many times, ONLY when peer replication is positively observed not to converge (default: 0 — retrying re-runs harper's component install and can escalate a transient replication warning into a hard ENOTEMPTY install failure; see flair#878)", "0")
+  .option("--ignore-replication-errors", "If peer replication still hasn't converged, treat it as a non-fatal warning and succeed with an origin-only deploy (the peer catches up via federation sync or a later deploy)")
+  .option("--no-convergence-check", "Skip the post-replication-error convergence poll and fail on harper's error verbatim (default: poll — Harper replicates asynchronously, so its error is a snapshot, not a verdict; flair#878)")
+  .option("--convergence-timeout <ms>", "How long to wait for peer replication to converge before reporting a replication failure (default: 180000)")
   .option("--no-fleet-verify", "Skip the automatic post-deploy fleet convergence sweep (default: sweep runs — see flair#636)")
   .action(async (opts) => {
     const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
@@ -10369,8 +10425,10 @@ program
       verify: opts.verify !== false,
       verifyResources: (opts.verifyResource as string[] | undefined)?.length ? opts.verifyResource : undefined,
       verifyTimeoutMs: Number(opts.verifyTimeout ?? 300_000),
-      deployRetries: Number(opts.deployRetries ?? 2),
+      deployRetries: Number(opts.deployRetries ?? 0),
       ignoreReplicationErrors: opts.ignoreReplicationErrors ?? false,
+      convergenceCheck: opts.convergenceCheck !== false,
+      convergenceTimeoutMs: opts.convergenceTimeout != null ? Number(opts.convergenceTimeout) : undefined,
       onProgress: (msg: string) => console.log(dim(`  ${msg}`)),
     };
 
@@ -10395,6 +10453,11 @@ program
         console.log(`${green("✓")} dry-run OK: ${result.project} ${result.version} ready to deploy to ${result.url}`);
         console.log(dim(`  package root: ${result.packageRoot}`));
         return;
+      }
+      if (result.convergedAfterReplicationError) {
+        // flair#878: harper's exit code said failure; the per-node component
+        // comparison said otherwise. Both halves get said out loud.
+        console.log(`\n${yellow("⚠")} harper reported a peer-replication failure, but every named peer node's component tree matched the origin when checked afterwards — replication converged on its own.`);
       }
       if (result.replicationWarning) {
         console.log(`\n${yellow("⚠")} Flair ${result.version} deployed to the ORIGIN NODE ONLY — peer replication did not complete (see warning above). The peer will catch up via federation sync or a later deploy.`);
@@ -10448,8 +10511,9 @@ program
       if (hint?.includes("did not settle")) {
         console.error(dim("  hint: Harper may still be restarting — check Fabric Studio, or retry with a longer --verify-timeout"));
       }
-      if (hint?.includes("peer replication failed after")) {
+      if (hint?.includes("peer replication")) {
         console.error(dim("  hint: pass --ignore-replication-errors to accept an origin-only deploy, or re-run once the peer link recovers"));
+        console.error(dim("  hint: --convergence-timeout <ms> waits longer for asynchronous replication before giving up (default 180000)"));
       }
       process.exit(1);
     }

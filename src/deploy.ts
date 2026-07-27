@@ -3,6 +3,15 @@ import { dirname, join, resolve } from "node:path";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import {
+  awaitOriginQuiescent,
+  awaitReplicationConvergence,
+  defaultConvergenceDeps,
+  parseReplicationFailure,
+  type ConvergenceDeps,
+  type ConvergenceResult,
+  type QuiescenceResult,
+} from "./replication-convergence.js";
 
 export interface DeployOptions {
   fabricOrg?: string;
@@ -41,9 +50,8 @@ export interface DeployOptions {
   // must still fail fast, never retry).
   //
   // How many times to retry the FULL `harper deploy` (not just the peer
-  // push) after a detected replication-signature failure. Default 2, i.e.
-  // up to 3 total attempts. 0 disables retry entirely (first replication
-  // failure fails immediately, same as any other failure).
+  // push) after a detected replication-signature failure. DEFAULT 0 as of
+  // flair#878 — see DEFAULT_DEPLOY_RETRIES for why that default moved.
   deployRetries?: number;
   // Internal/testing knob: override the retry backoff schedule (ms per
   // attempt; last value repeats if retries exceed the array length).
@@ -60,6 +68,19 @@ export interface DeployOptions {
   // first (transient flakes usually clear on their own), fall back to
   // "accept origin-only" only once retries are exhausted.
   ignoreReplicationErrors?: boolean;
+  // ── flair#878: convergence check before declaring a replication failure ──
+  // Harper's peer replication converges ASYNCHRONOUSLY, so the deploy call's
+  // replication error is a snapshot, not a verdict. Before this CLI reports
+  // failure (or retries), it polls each named peer's component tree and
+  // reports SUCCESS if replication healed on its own. See
+  // src/replication-convergence.ts for the signal and its safety guards.
+  // `false` skips the poll entirely and restores the pre-#878 behaviour.
+  convergenceCheck?: boolean;
+  convergenceTimeoutMs?: number;
+  convergencePollIntervalMs?: number;
+  // Injectable seam for the convergence/quiescence polls (tests supply fakes;
+  // real runs get defaultConvergenceDeps built from the Fabric credentials).
+  convergenceDeps?: ConvergenceDeps;
   // Optional progress sink so callers (the CLI) can surface what would
   // otherwise be a silent multi-minute poll. Never required — deploy() and
   // verifyDeployServing() work fine without it (e.g. fabric-upgrade.ts's
@@ -77,6 +98,11 @@ export interface DeployResult {
   // was accepted via --ignore-replication-errors — the origin
   // node has the component, at least one peer does not (yet).
   replicationWarning?: boolean;
+  // flair#878: true iff `harper deploy` exited non-zero with a peer-replication
+  // error, and a subsequent per-node component-tree comparison showed every
+  // named peer had actually converged. The deploy SUCCEEDED; this flag exists
+  // so callers can say so out loud rather than silently swallowing the error.
+  convergedAfterReplicationError?: boolean;
 }
 
 // Files that must be present in a Flair package for deployment.
@@ -303,7 +329,34 @@ export function buildHarperDeployArgs(
 
 // Flaky-peer-replication resilience defaults. See DeployOptions
 // for the full incident writeup this closes.
-export const DEFAULT_DEPLOY_RETRIES = 2;
+//
+// ── Why this default is 0 (flair#878) ───────────────────────────────────────
+// It was 2 (three attempts). The reasoning behind that — "a bare manual re-run
+// cleared it, so let the tool self-heal" — was right about the symptom and
+// wrong about the mechanism. What actually clears a peer-replication error is
+// Harper finishing its own asynchronous replication; the re-run merely happened
+// to take long enough for that to complete. Retrying is not what fixed it, and
+// the retry is not free:
+//
+//   1. It races work that was going to succeed anyway. Harper keeps replicating
+//      after the deploy call returns, so the retry re-issues a full deploy into
+//      a cluster mid-heal.
+//   2. It is not idempotent. A retry re-runs the whole deploy including
+//      Harper's own `npm install` into the component directory on every node.
+//      Overlapping that with the previous attempt's still-running install is
+//      how the reported upgrade died with
+//      `ENOTEMPTY: directory not empty, rmdir '.../node_modules/<pkg>/dist'`
+//      on a native module — a hard failure the original error never was.
+//   3. It is now redundant. The convergence poll added in flair#878 covers
+//      exactly the window a retry was buying, WITHOUT touching the cluster:
+//      it waits and looks instead of waiting and re-deploying.
+//
+// So the remedy was strictly worse than the problem it retried, and the thing
+// it was compensating for is now observed directly. Retrying is kept as an
+// explicit opt-in (`--deploy-retries <n>`) for the genuine case — replication
+// observed NOT to converge — where it is additionally gated on the origin
+// having gone quiescent first (see awaitOriginQuiescent).
+export const DEFAULT_DEPLOY_RETRIES = 0;
 export const DEPLOY_RETRY_BACKOFF_MS = [5_000, 10_000];
 
 // The signature of a Fabric PEER-REPLICATION failure specifically — harper
@@ -322,6 +375,114 @@ export const REPLICATION_FAILURE_RE =
 interface HarperSpawnResult {
   code: number | null;
   output: string;
+}
+
+// ─── Failure-class bookkeeping (flair#878) ──────────────────────────────────
+
+/**
+ * "replication" = harper reached the origin fine and only peer replication
+ * failed (REPLICATION_FAILURE_RE). "other" = anything else — auth, bad package,
+ * a broken install. The distinction is what makes the anti-escalation rule
+ * below expressible.
+ */
+export type DeployFailureKind = "replication" | "other";
+
+export interface DeployAttemptFailure {
+  attempt: number;
+  totalAttempts: number;
+  code: number | null;
+  kind: DeployFailureKind;
+  /** A short, operator-legible extract of harper's output for this attempt. */
+  summary: string;
+}
+
+const HARPER_OUTPUT_SUMMARY_MAX = 300;
+
+/**
+ * Pull the most useful single line out of harper's combined output. Prefers the
+ * last line that looks like an error, falling back to the last non-empty line —
+ * harper prints its fatal reason last on both paths.
+ */
+export function summarizeHarperOutput(output: string): string {
+  const lines = (output ?? "")
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, "").replace(/^\s*[!>]\s?/, "").trim())
+    .filter((l) => l.length > 0);
+  if (lines.length === 0) return "(no output)";
+  const errorish = [...lines].reverse().find((l) => /error|failed|cannot|denied|exit code/i.test(l));
+  const chosen = errorish ?? lines[lines.length - 1];
+  return chosen.length > HARPER_OUTPUT_SUMMARY_MAX
+    ? chosen.slice(0, HARPER_OUTPUT_SUMMARY_MAX - 1) + "…"
+    : chosen;
+}
+
+/**
+ * Build the error message for a failed deploy from the FULL attempt history.
+ *
+ * ── The rule this encodes (flair#878, the core defect) ──────────────────────
+ * The reported failure is always the FIRST attempt's failure. A later attempt
+ * can only exist because this CLI chose to retry, so a later, different failure
+ * describes the state the CLI's own remedy created — not the state the operator
+ * needs to act on. In the reported incident attempt 1 was a transient
+ * peer-replication warning and attempt 2 died with npm `ENOTEMPTY` on a native
+ * module; surfacing the ENOTEMPTY sent the diagnosis into the component's
+ * node_modules when the actual event was "a peer link blipped and then healed".
+ *
+ * The later failure is still REPORTED — suppressing it would hide that the
+ * cluster may have been left in a worse state — but it is explicitly labelled
+ * as a consequence of retrying, with the remedy (stop retrying) named inline.
+ * Errors have to enable a response, and "ENOTEMPTY on node-llama-cpp/dist"
+ * enables the wrong one.
+ */
+export function describeDeployFailure(
+  failures: DeployAttemptFailure[],
+  convergence?: ConvergenceResult | null,
+): string {
+  if (failures.length === 0) return "harper deploy failed with no recorded attempt";
+
+  const primary = failures[0];
+  const escalations = failures
+    .slice(1)
+    .filter((f) => f.kind !== primary.kind || f.summary !== primary.summary);
+
+  const lines: string[] = [];
+  if (primary.kind === "replication") {
+    lines.push(
+      `harper deploy exited with code ${primary.code}: the component deployed to the origin node but ` +
+        `peer replication was reported failed, and this CLI could not confirm the peers converged.`,
+    );
+  } else {
+    lines.push(`harper deploy exited with code ${primary.code}: ${primary.summary}`);
+  }
+
+  if (convergence) {
+    lines.push(`  convergence check: ${convergence.detail}`);
+  }
+
+  if (failures.length > 1) {
+    lines.push(
+      `  attempt 1 of ${primary.totalAttempts} is the failure reported above (${primary.summary}).`,
+    );
+  }
+
+  for (const f of escalations) {
+    const consequence =
+      primary.kind === "replication" && f.kind === "other"
+        ? ` This is a CONSEQUENCE of retrying, not the original problem: re-running a deploy over a component ` +
+          `directory the previous attempt is still installing into is not idempotent (npm ENOTEMPTY on a native ` +
+          `module is the known shape). Diagnose the replication failure above, not this. Run with ` +
+          `--deploy-retries 0 to remove this class of failure entirely.`
+        : "";
+    lines.push(`  attempt ${f.attempt} of ${f.totalAttempts} then failed with: ${f.summary}.${consequence}`);
+  }
+
+  if (primary.kind === "replication") {
+    lines.push(
+      `  Pass --ignore-replication-errors to accept an origin-only deploy, or re-run once the peer link recovers.`,
+    );
+  }
+
+  return lines.join("\n");
 }
 
 // Tee-style capture: streams harper's stdout/stderr to the user in real time
@@ -391,36 +552,136 @@ async function runHarperDeploy(
   cwd: string,
   env: NodeJS.ProcessEnv,
   opts: DeployOptions,
-): Promise<{ replicationWarning: boolean }> {
+  targetUrl: string,
+  project: string,
+): Promise<{ replicationWarning: boolean; convergedAfterReplicationError: boolean }> {
   const maxRetries = opts.deployRetries ?? DEFAULT_DEPLOY_RETRIES;
   const backoff = opts.deployRetryBackoffMs ?? DEPLOY_RETRY_BACKOFF_MS;
   const totalAttempts = Math.max(1, maxRetries + 1);
+  const convergenceDeps =
+    opts.convergenceDeps ??
+    defaultConvergenceDeps(opts.fabricUser, opts.fabricPassword, opts.onProgress);
+
+  // The attempt history is what makes the anti-escalation rule possible —
+  // describeDeployFailure() always reports failures[0], never the newest.
+  const failures: DeployAttemptFailure[] = [];
+  let lastConvergence: ConvergenceResult | null = null;
 
   for (let attempt = 1; attempt <= totalAttempts; attempt++) {
     const { code, output } = await spawnHarperCaptured(bin, args, cwd, env);
-    if (code === 0) return { replicationWarning: false };
+    if (code === 0) return { replicationWarning: false, convergedAfterReplicationError: false };
 
     const isReplicationFailure = REPLICATION_FAILURE_RE.test(output);
     const isLastAttempt = attempt === totalAttempts;
+    failures.push({
+      attempt,
+      totalAttempts,
+      code,
+      kind: isReplicationFailure ? "replication" : "other",
+      summary: summarizeHarperOutput(output),
+    });
 
-    if (isReplicationFailure && !isLastAttempt) {
-      const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)];
-      // Self-healing must be visible, never silent — console.warn directly
-      // (not gated behind onProgress, which some callers like
-      // fabric-upgrade.ts don't wire up) so this is loud regardless of caller.
-      console.warn(
-        `⚠ flair deploy: replication flake on attempt ${attempt}/${totalAttempts} ` +
-          `(harper deploy exited ${code}, peer-replication signature matched) — ` +
-          `retrying in ${Math.round(waitMs / 1000)}s...`,
-      );
-      opts.onProgress?.(
-        `replication flake on attempt ${attempt}/${totalAttempts} — retrying in ${Math.round(waitMs / 1000)}s...`,
-      );
-      await sleep(waitMs);
-      continue;
+    // A non-replication failure has never been retried and still isn't. It
+    // fails fast — but through describeDeployFailure(), so that when it lands
+    // as attempt 2+ it is reported as the consequence of a retry rather than
+    // as the headline. That reordering IS the flair#878 fix.
+    if (!isReplicationFailure) {
+      throw new Error(describeDeployFailure(failures, lastConvergence));
     }
 
-    if (isReplicationFailure && opts.ignoreReplicationErrors) {
+    // ── flair#878 step 1: check convergence BEFORE deciding anything ────────
+    // Harper is still replicating after the call returned. Look before
+    // declaring, and before retrying — a converged upgrade must report success.
+    if (opts.convergenceCheck !== false) {
+      const parsed = parseReplicationFailure(output);
+      opts.onProgress?.(
+        parsed.peers.length
+          ? `peer replication reported failed for ${parsed.peers.length} node(s) — checking whether it converged anyway...`
+          : `peer replication reported failed — harper named no peer nodes, so convergence cannot be checked`,
+      );
+      lastConvergence = await awaitReplicationConvergence(
+        {
+          targetUrl,
+          project,
+          peers: parsed.peers,
+          timeoutMs: opts.convergenceTimeoutMs,
+          pollIntervalMs: opts.convergencePollIntervalMs,
+        },
+        convergenceDeps,
+      );
+
+      if (lastConvergence.converged) {
+        console.warn(
+          `⚠ flair deploy: harper reported a peer-replication failure on attempt ${attempt}/${totalAttempts}, ` +
+            `but replication CONVERGED on its own — ${lastConvergence.detail}. Harper replicates components ` +
+            `asynchronously, so that error was a snapshot, not a verdict. Treating this deploy as SUCCESSFUL.`,
+        );
+        opts.onProgress?.(`peer replication converged after ${lastConvergence.elapsedMs}ms — deploy succeeded`);
+        return { replicationWarning: false, convergedAfterReplicationError: true };
+      }
+    }
+
+    // ── flair#878 steps 2 + 4: retry only when it is justified AND safe ─────
+    // Justified: we positively OBSERVED non-convergence. An unknown is not a
+    // licence to re-deploy — the retry is the destructive operation here.
+    // Safe: the origin's component tree has stopped changing, so attempt N+1
+    // cannot collide with attempt N's still-running server-side install (the
+    // ENOTEMPTY shape).
+    if (!isLastAttempt) {
+      let refusal: string | null = null;
+      let retryReason = "";
+
+      if (opts.convergenceCheck === false) {
+        // --no-convergence-check is an explicit "do what you did before
+        // flair#878": no operations-API polling at all, retry on the
+        // replication signature alone. Honour it rather than silently
+        // downgrading it to "never retry" — an operator who set BOTH this and
+        // --deploy-retries has asked for the old behaviour, hazard included.
+        // The anti-escalation rule still applies, so a retry that fails
+        // differently still cannot hijack what gets reported.
+        retryReason = "convergence checking is disabled (--no-convergence-check)";
+      } else if (!lastConvergence || !lastConvergence.conclusive) {
+        refusal =
+          `peer replication could not be confirmed either way ` +
+          `(${lastConvergence?.detail ?? "no convergence result"}). Re-deploying without knowing whether the ` +
+          `cluster converged risks colliding with an in-flight replication or install; reporting the original ` +
+          `failure instead.`;
+      } else {
+        const quiescence: QuiescenceResult = await awaitOriginQuiescent(
+          { targetUrl, project },
+          convergenceDeps,
+        );
+        if (!quiescence.quiescent) {
+          refusal =
+            `${quiescence.detail}. Re-deploying while the origin's component directory is still being written ` +
+            `is the overlap that turns a replication warning into a hard install failure (npm ENOTEMPTY over an ` +
+            `existing native-module tree).`;
+        } else {
+          retryReason = `origin is quiescent (${quiescence.detail})`;
+        }
+      }
+
+      if (refusal) {
+        console.warn(`⚠ flair deploy: NOT retrying — ${refusal}`);
+        opts.onProgress?.(`not retrying — ${refusal}`);
+      } else {
+        const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)];
+        // Self-healing must be visible, never silent — console.warn directly
+        // (not gated behind onProgress, which some callers like
+        // fabric-upgrade.ts don't wire up) so this is loud regardless of caller.
+        console.warn(
+          `⚠ flair deploy: replication did not converge on attempt ${attempt}/${totalAttempts} ` +
+            `(harper deploy exited ${code}); ${retryReason} — retrying in ${Math.round(waitMs / 1000)}s...`,
+        );
+        opts.onProgress?.(
+          `replication did not converge on attempt ${attempt}/${totalAttempts} — retrying in ${Math.round(waitMs / 1000)}s...`,
+        );
+        await sleep(waitMs);
+        continue;
+      }
+    }
+
+    if (opts.ignoreReplicationErrors) {
       console.warn(
         `⚠ flair deploy: peer replication still failing after ${attempt} attempt(s), ` +
           `but --ignore-replication-errors is set — treating this as a WARNED SUCCESS ` +
@@ -430,18 +691,10 @@ async function runHarperDeploy(
       opts.onProgress?.(
         `WARNING: proceeding origin-only — peer replication did not complete after ${attempt} attempt(s)`,
       );
-      return { replicationWarning: true };
+      return { replicationWarning: true, convergedAfterReplicationError: false };
     }
 
-    if (isReplicationFailure) {
-      throw new Error(
-        `harper deploy exited with code ${code}: peer replication failed after ${attempt} attempt(s) ` +
-          `(retries exhausted). Pass --ignore-replication-errors to accept an origin-only deploy, ` +
-          `or re-run once the peer link recovers.`,
-      );
-    }
-
-    throw new Error(`harper deploy exited with code ${code}`);
+    throw new Error(describeDeployFailure(failures, lastConvergence));
   }
 
   // Unreachable — the loop always returns or throws — but keeps TS happy.
@@ -599,7 +852,15 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     CLI_TARGET_PASSWORD: opts.fabricPassword,
   };
 
-  const { replicationWarning } = await runHarperDeploy(harperBin, args, packageRoot, childEnv, opts);
+  const { replicationWarning, convergedAfterReplicationError } = await runHarperDeploy(
+    harperBin,
+    args,
+    packageRoot,
+    childEnv,
+    opts,
+    url,
+    project,
+  );
 
   // harper can print "Successfully deployed" for a component that isn't
   // actually serving anything (the incident this closes: an empty deploy,
@@ -617,5 +878,13 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     });
   }
 
-  return { url, project, version, packageRoot, dryRun: false, replicationWarning };
+  return {
+    url,
+    project,
+    version,
+    packageRoot,
+    dryRun: false,
+    replicationWarning,
+    convergedAfterReplicationError,
+  };
 }

@@ -233,6 +233,56 @@ dropped, never shown green. The sweep also needs Basic-auth credentials
 `--fabric-user`/`--fabric-password`) to authenticate each peer probe; a token-only
 (`--fabric-token`) deploy skips it with a note instead of a silent no-op.
 
+### Peer-replication errors are not verdicts
+
+Harper replicates a deployed component to its cluster peers **asynchronously**, so
+`harper deploy` can exit non-zero with
+
+```
+Component 'flair' was deployed on the origin node but failed to replicate to 1 of 1
+peer node(s): <peer> (Error: Connection closed 1006)
+```
+
+for a deploy that then converges on its own moments later. That error describes one
+instant, not an outcome.
+
+Both `flair deploy` and `flair upgrade --target` therefore **check before they
+declare**. On that error the CLI reads the peer node names out of Harper's own
+message, polls each node's component file tree (`get_components` — path, size and
+mtime), and compares it against the origin's. If every named peer converged, the
+deploy is reported as a **success**, with a line saying that Harper's error resolved:
+
+```
+⚠ harper reported a peer-replication failure, but every named peer node's component
+  tree matched the origin when checked afterwards — replication converged on its own.
+```
+
+Convergence is only ever claimed on positive evidence. A peer whose name is not an
+addressable host, whose hostname does not resolve, which cannot be reached, which
+reports no such component, or which currently resolves to the *same address as the
+deploy target* (a Fabric cluster endpoint is steered to one member node, so that
+comparison would be a node against itself) is reported as unverified — never as
+converged.
+
+| Flag | Effect |
+|------|--------|
+| `--convergence-timeout <ms>` | How long to wait for replication to converge before reporting failure (default `180000`) |
+| `--no-convergence-check` | Skip the poll and fail on Harper's error verbatim |
+| `--ignore-replication-errors` | Accept an origin-only deploy when replication has not converged; the peer catches up via federation sync or a later deploy |
+| `--deploy-retries <n>` | Retry the full deploy when replication is *observed* not to have converged (default `0`) |
+
+**`--deploy-retries` defaults to `0`, deliberately.** A retry re-runs the whole
+deploy, including Harper's own `npm install` into the component directory on every
+node, and a real upgrade died that way — `ENOTEMPTY` on a native module, on the
+*retry*, for a deploy whose peers had already converged. Retrying was compensating
+for the absence of a convergence check; the poll above covers that window without
+touching the cluster. When retries are enabled they are gated twice: only on
+positively observed non-convergence, and only once the origin's component tree has
+stopped changing across consecutive reads. If a retry does still fail differently
+from the original error, the CLI reports the **original** failure as the headline and
+labels the later one as a consequence of retrying — a retry can never change what the
+failure is reported to be.
+
 ## Re-embedding after an upgrade
 
 Two situations require a re-embed pass, and `flair doctor` will flag both:
