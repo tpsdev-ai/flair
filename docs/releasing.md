@@ -5,9 +5,9 @@ Flair publishes eight workspace packages to npm under `@tpsdev-ai/*`. Releases a
 (no `NPM_TOKEN` lives anywhere) and submits each package to npm's **staging** area.
 A maintainer then approves the staged tarballs on npmjs.com with 2FA to make them live.
 
-> `flair-bench` is version-bumped and tagged in lockstep with the other 7, but stages
-> in its own step in CI (allowed to fail) until its one-time bootstrap is done — see
-> [flair-bench bootstrap](#flair-bench-bootstrap-one-time) below.
+> `flair-bench` is version-bumped and tagged in lockstep with the other 7, and stages in
+> its own step in CI for [historical reasons](#flair-bench-bootstrap-one-time-done). That
+> step is no longer allowed to fail: all eight packages must stage for a release to pass.
 
 ```
  merge release PR ──▶ push tag v0.11.0 ──▶ CI stages all packages ──▶ npm staging
@@ -51,9 +51,10 @@ workflow, which:
 
 1. Resolves the version from the tag and validates it as semver.
 2. Verifies the tagged commit is an ancestor of `main` (a tag can't ship un-merged code).
-3. Verifies all 7 `package.json` files are at that version.
+3. Verifies all 8 `package.json` files are at that version.
 4. Builds every package.
-5. Runs `npm stage publish` for each package in dependency order (flair-client first).
+5. Runs `npm stage publish` for each package in dependency order (flair-client first),
+   then `flair-bench` in its own step. Any one of the eight failing fails the release.
 
 It authenticates via OIDC — no secrets, and it does **not** create or move any tag (the
 tag you pushed is the trigger). Watch the run; when it's green, the packages are staged
@@ -82,10 +83,9 @@ npm stage view <stage-id> # inspect one
 npm stage approve <stage-id>   # 2FA prompt; package goes live
 ```
 
-There are seven lockstep-staged packages, so seven approvals (the web UI lists them on
+There are eight lockstep-staged packages, so eight approvals (the web UI lists them on
 one page). Approve in dependency order if installing immediately — flair-client before
-its dependents — though staging does not itself resolve dependencies. `flair-bench`
-stages separately and only appears here once its bootstrap (below) is done.
+its dependents — though staging does not itself resolve dependencies.
 
 Verify when done:
 
@@ -99,7 +99,7 @@ These are configured once and reused for every release.
 
 ### npm trusted publisher (per package)
 
-For **each** of the seven packages, on npmjs.com → the package → **Settings → Trusted
+For **each** of the eight packages, on npmjs.com → the package → **Settings → Trusted
 Publisher → Add**:
 
 | Field           | Value                       |
@@ -116,32 +116,39 @@ CI/OIDC identity from publishing anything live directly — the only path to liv
 human 2FA approval of a staged package.
 
 Packages: `flair-client`, `flair-mcp`, `flair`, `openclaw-flair`, `pi-flair`,
-`n8n-nodes-flair`, `langgraph-flair`.
+`n8n-nodes-flair`, `langgraph-flair`, `flair-bench`.
 
 > A package must already exist on npm before a trusted publisher can be added — all
-> seven already do. This account-level config can only be done by an npm org owner.
-> `flair-bench` doesn't exist on npm yet (verified via `npm view @tpsdev-ai/flair-bench`
-> → 404 as of 2026-07-13) so it can't have a Trusted Publisher yet either — see below.
+> eight already do. This account-level config can only be done by an npm org owner.
 
-### `flair-bench` bootstrap (one-time)
+### `flair-bench` bootstrap (one-time, done)
 
-`flair-bench` (added 2026-07-12, flair#702) is wired into the version-bump/tag flow
-(`scripts/release.sh`, `release-publish.yml`'s version-check) alongside the other 7, but
-`npm stage publish` categorically requires the package already exist on the npm registry
-(`npm help stage`: "Package must exist"), and a Trusted Publisher can only be registered
-for a package that already exists — chicken-and-egg for a brand-new package. Until an npm
-org owner does this once, the workflow's dedicated "Stage-publish flair-bench" step is
-expected to fail (it's `continue-on-error: true` so it doesn't block the other 7):
+**Nothing to do here.** This section is kept because the next brand-new package added to
+the release set will hit the same wall, and because it explains why `flair-bench` still
+stages in its own workflow step.
 
-1. From a machine logged into npm with 2FA: `cd packages/flair-bench && npm run build &&
-   npm publish --access public` — one normal (non-staged) publish to create the package
-   on the registry. Any valid semver works; the very next lockstep release will bump it
-   to match the other 7 automatically (it's in `scripts/release.sh`'s `PACKAGES` array).
-2. Add the Trusted Publisher for `@tpsdev-ai/flair-bench` using the same table as the
-   other 7 above (org=`tpsdev-ai`, repo=`flair`, workflow=`release-publish.yml`,
-   environment=`release`, allowed=`npm stage publish` only).
-3. Remove `continue-on-error: true` from the "Stage-publish flair-bench" step in
-   `release-publish.yml` once a tag push has staged it successfully.
+`flair-bench` (added 2026-07-12, flair#702) was wired into the version-bump/tag flow
+(`scripts/release.sh`, `release-publish.yml`'s version-check) alongside the other 7 before
+it existed on npm at all. That is a chicken-and-egg: `npm stage publish` categorically
+requires the package to already exist on the registry (`npm help stage`: "Package must
+exist"), and a Trusted Publisher can only be registered for a package that already exists.
+So the workflow gave it a dedicated "Stage-publish flair-bench" step marked
+`continue-on-error: true`, letting the expected failure pass without blocking the other 7,
+and an npm org owner broke the cycle once:
+
+1. One normal (non-staged) `npm publish --access public` from a machine logged into npm
+   with 2FA, to create the package on the registry. Any valid semver works — the next
+   lockstep release bumps it to match the other 7 automatically.
+2. Add its Trusted Publisher using the same table as the other packages above.
+
+Both are done, and the step staged `@tpsdev-ai/flair-bench` successfully at v0.30.0, so
+`continue-on-error` has been **removed**: a flair-bench staging failure now fails the
+release like any other package's.
+
+> Why it mattered to go back and remove it: `continue-on-error: true` makes a step report
+> `conclusion: success` even when it failed. While it was set, a green run was not evidence
+> that flair-bench had staged — the only way to know was to read the raw log. A justified
+> exception outlives the condition that justified it unless someone returns for it.
 
 ### GitHub `release` environment
 

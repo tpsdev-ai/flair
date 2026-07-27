@@ -19,10 +19,12 @@ name: Release — stage-publish (OIDC) + GitHub release
 # and allow ONLY "npm stage publish". The `release` GitHub environment must permit
 # `v*` tag deploys.
 #
-# flair-bench is version-bumped/tagged with the other 7 but stages in its own
-# continue-on-error step below — it needs a one-time first manual publish +
-# Trusted Publisher registration before `npm stage publish` will work for it
-# (see docs/releasing.md's "flair-bench bootstrap" section).
+# flair-bench is version-bumped/tagged with the other 7 and stages in its own
+# step below. That step used to be `continue-on-error: true`, because a
+# brand-new package cannot be staged or given a Trusted Publisher until it
+# exists on the registry. That one-time bootstrap is done — flair-bench staged
+# cleanly at v0.30.0 — so the step now fails the release like every other
+# package (see docs/releasing.md's "flair-bench bootstrap" section).
 
 on:
   push:
@@ -191,19 +193,27 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Stage-publish flair-bench (bootstrap-pending — isolated on purpose)
-        # `npm stage publish` requires the package already exist on the npm
-        # registry (npm-stage(1): "Package must exist"), and a Trusted Publisher
-        # can only be registered for a package that already exists — so this
-        # step WILL fail until a maintainer does the one-time bootstrap in
-        # docs/releasing.md (first manual `npm publish` of @tpsdev-ai/flair-bench,
-        # then register its Trusted Publisher). `continue-on-error: true` keeps
-        # that expected failure from aborting the other 7 packages' staging (the
-        # loop above runs under `set -euo pipefail` with no per-package
-        # isolation — a hard failure here would kill the whole job). Remove
-        # continue-on-error once the bootstrap is confirmed done and this step
-        # has staged flair-bench successfully at least once.
-        continue-on-error: true
+      - name: Stage-publish flair-bench
+        # Still its own step rather than an entry in the loop above, for the
+        # reason it was split out: `npm stage publish` requires the package to
+        # already exist on the npm registry (npm-stage(1): "Package must
+        # exist"), and a Trusted Publisher can only be registered for a package
+        # that already exists — so until a maintainer did the one-time bootstrap
+        # in docs/releasing.md, this step was EXPECTED to fail, and it carried
+        # `continue-on-error: true` so that expected failure could not abort the
+        # other 7 packages' staging (the loop above runs under `set -euo
+        # pipefail` with no per-package isolation, so a hard failure inside it
+        # kills the whole job).
+        #
+        # The bootstrap is done: @tpsdev-ai/flair-bench exists on the registry
+        # and staged from this step at v0.30.0. continue-on-error is therefore
+        # removed — a failure here is now a real failure and must fail the
+        # release, exactly like the other 7. Worth recording why it could not
+        # just be left in place: continue-on-error makes a step report
+        # `conclusion: success` even when it failed, so while it was set, this
+        # workflow's own summary was not evidence about this step — you had to
+        # read the raw log to know whether flair-bench had staged or silently
+        # had not.
         run: |
           set -euo pipefail
           echo "::group::npm stage publish — @tpsdev-ai/flair-bench (packages/flair-bench)"
@@ -217,13 +227,8 @@ jobs:
           {
             echo "### 🚀 v$VERSION staged for release"
             echo ""
-            echo "All 7 lockstep-versioned workspace packages submitted to npm **staging**"
+            echo "All 8 lockstep-versioned workspace packages submitted to npm **staging**"
             echo "with provenance. They are **not live yet**."
-            echo ""
-            echo "flair-bench is included in the version bump/tag but stages in its own"
-            echo "step, which is allowed to fail until the one-time first-publish +"
-            echo "Trusted Publisher bootstrap in docs/releasing.md is done (check the"
-            echo "'Stage-publish flair-bench' step above for its actual result)."
             echo ""
             echo "**To release:** open [npmjs.com → Staged Packages](https://www.npmjs.com/settings/tpsdev-ai/staging),"
             echo "review each tarball, and approve with 2FA. Or: \`npm stage list\` then \`npm stage approve <id>\`."
