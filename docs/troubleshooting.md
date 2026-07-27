@@ -173,6 +173,30 @@ flair doctor    # check for issues
 
 **Fix:** Either rephrase the content to avoid injection patterns, or switch to default mode (remove `FLAIR_CONTENT_SAFETY=strict` from environment). In default mode, flagged content is stored but tagged — not rejected.
 
+### "no writable migration data directory" / migrations reported failed
+
+**Symptoms:** `flair doctor` reports every migration `failed` with a "no writable migration data directory" reason, and the instance log carries a matching `[flair-migrations]` line naming each path it tried.
+
+**Cause:** flair keeps its migration bookkeeping (`.migrations/state.json`, the single-flight lock, and risk-scoped snapshots) in a directory alongside the instance's data — by default `~/.flair/data`, falling back to Harper's root path. On a provisioned install (a service-managed unit, a container, a component deployment) the account the process runs as may have a home directory it cannot write to, and if none of the candidates is usable there is nowhere safe to snapshot before a migration writes.
+
+**Fix:** point `FLAIR_MIGRATION_DATA_DIR` at a writable directory and restart, or make one of the paths named in the error writable by the account the instance runs as:
+
+```bash
+export FLAIR_MIGRATION_DATA_DIR=/var/lib/flair   # add to the service unit / launch script to persist
+flair restart
+flair doctor                                     # migrations should now report completed
+```
+
+Migrations are boot-keyed, so the next start runs the cycle and clears the finding. Nothing is lost while this is unresolved — a migration that cannot snapshot refuses to run rather than writing unprotected.
+
+### "Migration boot cycle never fired on this instance"
+
+**Symptoms:** `flair doctor` reports the boot cycle never fired, and `/HealthDetail` shows `migrations.cyclePhase: "idle"`.
+
+**Cause:** the trigger that schedules the migration cycle registers itself at boot, so `idle` means the running build's `dist/resources/migration-boot.js` never loaded — usually a partial or interrupted install rather than a runtime failure.
+
+**Fix:** reinstall flair (`npm install -g @tpsdev-ai/flair`) and restart, then check the instance log for `[flair-migrations]` lines, which name any error raised while the trigger was loading.
+
 ## Getting Help
 
 ```bash

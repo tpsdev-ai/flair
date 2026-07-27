@@ -44,10 +44,24 @@ export function readMigrationState(path: string): MigrationStateFile {
   try {
     if (!existsSync(path)) return {};
     const raw = JSON.parse(readFileSync(path, "utf-8"));
-    return raw && typeof raw === "object" ? raw : {};
-  } catch {
+    if (raw && typeof raw === "object") return raw;
+    console.warn(
+      `[flair-migrations] ${path} is not a JSON object — ignoring it and re-detecting every migration this boot`,
+    );
+    return {};
+  } catch (err) {
     // Corrupt/unreadable state — treat as "nothing known yet", never throw.
     // Worst case this costs one extra (cheap, bounded) detect() call.
+    //
+    // flair#812: but SAY SO. This file is hand-edited in practice (the
+    // documented remediation for a stuck migration), and a fat-fingered
+    // edit silently discarding every recorded outcome is precisely the
+    // class of quiet failure this issue is about. The behaviour is
+    // unchanged and still safe — only the silence is fixed.
+    console.warn(
+      `[flair-migrations] could not read ${path} (${(err as Error)?.message ?? String(err)}) — ` +
+        `treating migration state as empty and re-detecting every migration this boot`,
+    );
     return {};
   }
 }

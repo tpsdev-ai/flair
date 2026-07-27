@@ -11292,7 +11292,7 @@ program
           console.log(`${indent}${render.icons.warn} Could not fetch migration state (HTTP ${migRes.status})`);
           return;
         }
-        const detail = (await migRes.json()) as { migrations?: { cyclePhase?: string; migrations?: Array<{ id: string; state: string; rowsDone: number; rowsRemaining: number; reason?: string }> } };
+        const detail = (await migRes.json()) as { migrations?: { cyclePhase?: string; lastCycleError?: string | null; migrations?: Array<{ id: string; state: string; rowsDone: number; rowsRemaining: number; reason?: string }> } };
         const migBlock = detail?.migrations;
         if (!migBlock || !Array.isArray(migBlock.migrations) || migBlock.migrations.length === 0) {
           console.log(`${indent}${render.icons.info} No migrations registered on this instance`);
@@ -11301,9 +11301,30 @@ program
         if (migBlock.cyclePhase === "pre-hash") {
           console.log(`${indent}${render.icons.info} Pre-flight integrity check in progress — migrations deferred until it completes`);
         }
+        // flair#812: the boot trigger sets `scheduled` synchronously at
+        // module load, so `idle` means resources/migration-boot.js never
+        // loaded in the serving process — NO migration will ever run on
+        // this instance, which is precisely the failure that went unnoticed
+        // because a skipped cycle looked identical to a clean one.
+        if (migBlock.cyclePhase === "idle") {
+          console.log(`${indent}${render.icons.error} Migration boot cycle never fired on this instance — no migration will run until this is resolved. Check the instance log for [flair-migrations] and confirm the running build ships dist/resources/migration-boot.js.`);
+          issues++;
+        }
+        // A cycle that reached a terminal phase carrying an error explains
+        // itself here rather than only in the process log — the reason
+        // string names the paths tried and the remedy.
+        if (migBlock.lastCycleError) {
+          console.log(`${indent}${render.icons.error} Last migration cycle did not complete: ${migBlock.lastCycleError}`);
+          issues++;
+        }
         for (const m of migBlock.migrations) {
           if (m.state === "completed") {
-            console.log(`${indent}${render.icons.ok} ${m.id}: completed`);
+            // flair#812: a `reason` on a COMPLETED migration means the
+            // runner short-circuited it from the (hand-editable) state file
+            // rather than verifying the corpus this boot. Print it, so an
+            // unverified claim is never rendered as a verified one.
+            const note = m.reason ? ` ${render.wrap(render.c.dim, `(${m.reason})`)}` : "";
+            console.log(`${indent}${render.icons.ok} ${m.id}: completed${note}`);
           } else if (m.state === "halted" || m.state === "failed") {
             console.log(`${indent}${render.icons.error} ${m.id}: ${m.state}${m.reason ? ` — ${m.reason}` : ""}`);
             issues++;

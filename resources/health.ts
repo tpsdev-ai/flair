@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { getRerankStatus } from "./rerank-provider.js";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { getMigrationStatusSnapshot } from "./migrations/status.js";
+import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
 import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
 
 const db = databases as any;
@@ -508,12 +509,21 @@ export class HealthDetail extends Resource {
     // "pre-flight integrity check in progress" state the K&S verdict calls
     // for; a halted migration surfaces here (with `reason`) AND as a
     // warning below so it's visible without a separate lookup.
+    //
+    // flair#812: the dataDir is resolved by the shared, READ-ONLY resolver
+    // (resources/migrations/data-dir.ts) rather than the old
+    // `HDB_ROOT ?? homedir()/.flair/data` expression duplicated here — that
+    // env var is never set by anything, so the left branch was dead and the
+    // path silently disagreed with wherever the boot cycle actually wrote.
+    // `lastCycleError` is surfaced so `flair doctor` can name WHY a cycle
+    // didn't run, not merely that it didn't.
     try {
-      const migrationsDataDir = process.env.HDB_ROOT ?? join(homedir(), ".flair", "data");
+      const migrationsDataDir = resolveMigrationDataDirForRead();
       const snapshot = getMigrationStatusSnapshot(migrationsDataDir);
       stats.migrations = {
         cyclePhase: snapshot.cyclePhase,
         lastCycleAt: snapshot.lastCycleAt ?? null,
+        lastCycleError: snapshot.lastCycleError ?? null,
         migrations: snapshot.migrations,
       };
       for (const m of snapshot.migrations) {
@@ -521,11 +531,24 @@ export class HealthDetail extends Resource {
           warnings.push({ level: "warn", message: `migration '${m.id}' ${m.state}${m.reason ? `: ${m.reason}` : ""} — see \`flair doctor\`` });
         }
       }
+      // The boot trigger sets `scheduled` synchronously at module load, so
+      // `idle` here means resources/migration-boot.js never loaded — the
+      // instance is running a build whose migration trigger is absent or
+      // failed to import, and NO migration will ever run on it.
+      if (snapshot.cyclePhase === "idle" && snapshot.migrations.length > 0) {
+        warnings.push({
+          level: "warn",
+          message:
+            "migration boot cycle never fired on this instance (cyclePhase=idle) — no migration will run until this is resolved; see `flair doctor`",
+        });
+      }
     } catch { stats.migrations = null; }
 
     // ── Disk ──
+    // flair#812: same shared read-only resolution as the migrations section
+    // above, so `disk.dataDir` names the directory migrations actually use.
     try {
-      const dataDir = process.env.HDB_ROOT ?? join(homedir(), ".flair", "data");
+      const dataDir = resolveMigrationDataDirForRead();
       const snapshotDir = join(homedir(), ".flair", "snapshots");
 
       const dirSize = async (root: string, maxDepth = 6): Promise<number | null> => {

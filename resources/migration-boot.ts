@@ -25,22 +25,47 @@
  * `runMigrationCycle` itself never throws (see runner.ts's module doc) —
  * the `.catch()` below is pure defense-in-depth so a bug there can never
  * take down the process either.
+ *
+ * ─── flair#812: this path must never fail silently ────────────────────────
+ * `runMigrationCycle` REPORTS why a cycle didn't run (`{ ran: false, reason
+ * }`) — it does not log it, because it is a library. This file, the only
+ * caller, previously DISCARDED that value, which is what turned a
+ * recoverable environment problem into an invisible one: on a provisioned
+ * install where `~/.flair/data` isn't creatable, the runner's very first
+ * step (`acquireMigrationLock` → `mkdirSync`) threw `EACCES`, the runner
+ * caught it and returned `reason: "lock error: ..."`, and nothing anywhere
+ * said a word. `.migrations/state.json` was never written, no
+ * `[flair-migrations]` marker ever appeared, and EVERY migration — shipped
+ * and future — was skipped on that instance forever.
+ *
+ * So: the data dir is now resolved to a candidate PROVEN writable before
+ * the cycle is handed one (resources/migrations/data-dir.ts), and every
+ * non-benign outcome — an unresolvable data dir, tables that never became
+ * ready, a runner-reported failure, an unexpected throw — is BOTH logged
+ * with a `[flair-migrations]` marker AND recorded as a `failed` progress
+ * entry per registered migration. That progress entry is what makes the
+ * condition visible where an operator will actually meet it:
+ * `/HealthDetail` (with a warning), `flair doctor`'s Migrations section
+ * (counted as an issue) and `flair quality`'s `instance.migrationsClean`.
+ *
+ * The one deliberately-quiet outcome is `single-flight` — another thread or
+ * process holds the lock and is running the cycle. That is the guard doing
+ * its job, not a failure, and Harper boots N worker threads that each load
+ * this module; logging it would emit N-1 scary lines on every healthy boot.
  */
 import { databases } from "harper";
-import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildRegistry } from "./migrations/registry.js";
+import { buildRegistry, type MigrationRegistry } from "./migrations/registry.js";
 import { runMigrationCycle } from "./migrations/runner.js";
-import { seedIdleProgress } from "./migrations/progress.js";
+import { markIdleMigrationsFailed, seedIdleProgress, setCyclePhase } from "./migrations/progress.js";
+import {
+  describeUnresolvableDataDir,
+  resolveWritableMigrationDataDir,
+} from "./migrations/data-dir.js";
 import type { SourceTable } from "./migrations/types.js";
 import { getMode } from "./embeddings-provider.js";
-
-/** Same dataDir resolution as resources/health.ts's disk section. */
-export function resolveMigrationDataDir(): string {
-  return process.env.HDB_ROOT ?? join(homedir(), ".flair", "data");
-}
 
 /** Same "resolve the running package's own version" idiom as resources/health.ts. */
 export function resolveRunningVersion(): string {
@@ -107,6 +132,27 @@ async function waitForEmbeddingsSettled(maxWaitMs = 8_500, intervalMs = 150): Pr
   }
 }
 
+/**
+ * Records a boot-path failure everywhere an operator might look: the
+ * process log (with the `[flair-migrations]` marker the runbook greps for),
+ * the cycle status (`lastCycleError`, surfaced by `/HealthDetail` and named
+ * by `flair doctor`), and a `failed` entry for each migration that never
+ * started — because a boot path that cannot run is not a per-migration
+ * problem, it is an instance-wide one, and `flair doctor` / `flair quality`
+ * read per-migration state.
+ *
+ * `failed` (not `halted`) is deliberate for these: nothing was attempted
+ * against the corpus, so there is no halted work to resume. And the marking
+ * deliberately touches only migrations still `idle` — see
+ * `markIdleMigrationsFailed` for why overwriting a terminal state would be
+ * a downgrade rather than extra information.
+ */
+function reportBootFailure(registry: MigrationRegistry, reason: string): void {
+  console.error(`[flair-migrations] ${reason}`);
+  setCyclePhase("done", reason);
+  markIdleMigrationsFailed(registry.list().map((m) => m.id), reason);
+}
+
 let scheduled = false;
 
 export function scheduleMigrationBoot(): void {
@@ -115,29 +161,65 @@ export function scheduleMigrationBoot(): void {
 
   const registry = buildRegistry();
   seedIdleProgress(registry.list().map((m) => m.id));
+  // Proof-of-life, set SYNCHRONOUSLY at module load: from here on,
+  // `cyclePhase === "idle"` means this module never loaded at all — the
+  // one hypothesis flair#812 could not otherwise rule out from the outside.
+  setCyclePhase("scheduled");
 
   setImmediate(() => {
     void (async () => {
       const ready = await waitForTablesReady();
       if (!ready) {
-        console.error("[flair-migrations] Memory/Relationship tables never became ready — skipping this boot's migration cycle (will retry next boot)");
+        reportBootFailure(
+          registry,
+          "Memory/Relationship tables never became ready within 30s — this boot's migration cycle was skipped (it retries on the next restart)",
+        );
         return;
       }
       await waitForEmbeddingsSettled();
+
+      // Resolve a data dir PROVEN writable before handing one to the runner
+      // — the runner's first act is to take a file lock there, and a
+      // failure at that point is reported back rather than thrown, which is
+      // precisely how flair#812 stayed invisible. See data-dir.ts.
+      const resolved = resolveWritableMigrationDataDir();
+      if (!resolved.dataDir) {
+        reportBootFailure(registry, describeUnresolvableDataDir(resolved.tried));
+        return;
+      }
+
       try {
-        await runMigrationCycle({
+        const result = await runMigrationCycle({
           registry,
           getTable,
-          dataDir: resolveMigrationDataDir(),
+          dataDir: resolved.dataDir,
           runningVersion: resolveRunningVersion(),
         });
+        // `nothing pending` is the healthy no-op; `single-flight` is the
+        // lock guard working as designed on a multi-threaded boot. Anything
+        // else is a cycle that WANTED to run and couldn't, and must be loud.
+        if (!result.ran && result.reason && !isBenignSkip(result.reason)) {
+          reportBootFailure(registry, `migration cycle did not run: ${result.reason}`);
+        }
       } catch (err) {
         // Defense-in-depth only — runMigrationCycle is documented to never
         // throw. A boot-path exception must never surface here regardless.
-        console.error(`[flair-migrations] unexpected error from runMigrationCycle: ${(err as Error)?.message ?? String(err)}`);
+        reportBootFailure(
+          registry,
+          `unexpected error from runMigrationCycle: ${(err as Error)?.message ?? String(err)}`,
+        );
       }
     })();
   });
+}
+
+/**
+ * The two `{ ran: false }` reasons that are NOT failures: nothing was
+ * pending, or another holder is already running the cycle. Matched on the
+ * prefixes runner.ts constructs (`"nothing pending"`, `"single-flight: …"`).
+ */
+export function isBenignSkip(reason: string): boolean {
+  return reason === "nothing pending" || reason.startsWith("single-flight:");
 }
 
 // Test-only reset so a unit/integration test can re-trigger scheduling
