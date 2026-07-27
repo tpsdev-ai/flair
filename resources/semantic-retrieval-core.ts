@@ -36,7 +36,7 @@
 // before calling in). Never exposes which internal leg (BM25+RRF hybrid vs.
 // legacy HNSW-only vs. keyword-only fallback) produced a given result — the
 // output shape is identical regardless of `hybrid`.
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { withDetachedTxn } from "./table-helpers.js";
 import { wrapUntrusted } from "./content-safety.js";
 import { cosineSimilarity } from "./dedup.js";

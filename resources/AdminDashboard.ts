@@ -1,4 +1,4 @@
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { layout, htmlResponse } from "./admin-layout.js";
 import { allowAdmin } from "./agent-auth.js";
 

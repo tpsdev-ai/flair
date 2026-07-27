@@ -1,4 +1,4 @@
-import { Resource } from "@harperfast/harper";
+import { Resource } from "harper";
 import { allowAdmin } from "./agent-auth.js";
 
 /**

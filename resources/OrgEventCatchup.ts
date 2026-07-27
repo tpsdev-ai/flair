@@ -10,7 +10,7 @@
  * Limit 50 events max.
  */
 
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 
 export class OrgEventCatchup extends Resource {

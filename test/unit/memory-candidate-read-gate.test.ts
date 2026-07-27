@@ -12,7 +12,7 @@
  * draft distillation and must not be org-readable before promotion).
  *
  * Same mocking technique as relationship-read-gate.test.ts /
- * memory-grant-read-gate.test.ts: mock @harperfast/harper so the resource
+ * memory-grant-read-gate.test.ts: mock harper so the resource
  * class loads outside a real Harper runtime, then exercise allowRead()/
  * get()/search()/post()/put()/delete() directly against an in-memory store.
  * No other test/unit/ file imports resources/MemoryCandidate.ts, so this
@@ -70,7 +70,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { MemoryCandidate } = await import("../../resources/MemoryCandidate.ts");
 

@@ -11,12 +11,12 @@
  */
 import { describe, it, expect, mock } from "bun:test";
 
-// visibility-backfill.ts imports `{ databases } from "@harperfast/harper"`
+// visibility-backfill.ts imports `{ databases } from "harper"`
 // for its DEFAULT table accessor only (never used here — every test injects
 // its own fake table via createVisibilityBackfillMigration's argument). Same
 // workaround as migrations-embedding-stamp.test.ts: mock the module out
 // before import so the real package's import-time side effects never fire.
-mock.module("@harperfast/harper", () => ({ databases: {}, Resource: class {} }));
+mock.module("harper", () => ({ databases: {}, Resource: class {} }));
 
 const { createVisibilityBackfillMigration, deriveVisibilityFromDurability, VISIBILITY_BACKFILL_ID } = await import(
   "../../resources/migrations/visibility-backfill.ts"
@@ -27,7 +27,7 @@ type Row = Record<string, unknown> & { id: string };
 /**
  * Mirrors real Harper's condition semantics for THIS migration's query
  * shape: a flat top-level array of leaf conditions defaults to AND
- * (confirmed against the installed @harperfast/harper source,
+ * (confirmed against the installed harper source,
  * resources/Table.ts's prepareConditions: `case 'and': case undefined:`
  * fall through together), and `not_equals` on an unindexed attribute is a
  * full-table-scan strict-inequality filter — `undefined !== "private"` is

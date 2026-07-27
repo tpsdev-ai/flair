@@ -18,7 +18,7 @@
  * docs). The plugin serves DCR / authorize / token / JWKS / discovery.
  */
 
-import * as harper from "@harperfast/harper";
+import * as harper from "harper";
 import { mcpOAuthEnabled, mcpAuthConfig } from "./mcp-oauth-flag.js";
 // NOTE: mcpHandler is intentionally NOT statically imported here — it's resolved
 // lazily (deps.mcpHandler ?? dynamic import) inside registerMcpOAuthRoute, same
@@ -93,7 +93,7 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
 
   // Read `server` lazily off the namespace (it's a runtime global on the Harper
   // module, not a static named export) so this module links cleanly even where a
-  // stub build of @harperfast/harper lacks the export.
+  // stub build of harper lacks the export.
   const srv = deps.server ?? ((harper as any).server);
 
   // Primary registration: urlPath subroute → own chain (flair's auth-middleware

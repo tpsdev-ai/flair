@@ -263,7 +263,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   // The npm-published baseline (0.21.0) DOES boot successfully against a data
   // directory written by this worktree's HEAD build (~14 commits ahead of
   // 0.21.0, including several security/behavior changes but no Flair schema
-  // migration and only a patch-level @harperfast/harper bump, 5.1.15→5.1.17).
+  // migration and only a patch-level harper bump, 5.1.15→5.1.17).
   // Both the pre-existing memory and presence rows written by the CURRENT
   // build are readable back through the BASELINE's own HTTP surface after the
   // downgrade boot. This is the "green" branch below. If a future run of this

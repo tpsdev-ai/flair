@@ -9,7 +9,7 @@
  * every pre-this-change install) against the schema and, because
  * `canonicalizeIndexOptions` does NOT inject defaults (`{type:"HNSW"}` and
  * `{type:"HNSW",M:16}` are DIFFERENT canonical keys — verified against the
- * installed @harperfast/harper source, resources/databases.js:
+ * installed harper source, resources/databases.js:
  * canonicalizeIndexOptions + the `indexOptionsChanged` reset of
  * `lastIndexedKey` to undefined), clears the graph store and rebuilds it
  * CLEANLY from the already-correct stored vectors. That rebuild heals the
@@ -57,7 +57,7 @@
  * correctness — it re-PUTs the same vector through the incremental path and
  * does not rebuild the graph.
  */
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";

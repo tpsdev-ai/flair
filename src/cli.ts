@@ -499,7 +499,7 @@ function resolveOpsBindHost(opts: { opsBind?: string }): string {
  * present.
  *
  * Why every spawn has to carry the host-qualified form, not a bare number:
- * Harper's HARPER_SET_CONFIG handling (@harperfast/harper
+ * Harper's HARPER_SET_CONFIG handling (harper
  * config/harperConfigEnvVars.ts) records, for each key it force-sets, the
  * value that key had BEFORE the force — `state.originalValues` in
  * `<rootPath>/backup/.harper-config-state.json` — and on the next boot where
@@ -518,7 +518,7 @@ export function opsNetworkPortValue(opsBindHost: string, opsPort: number | strin
  * Build the `operationsApi` block for Harper's HARPER_SET_CONFIG (flair#670).
  *
  * `network.port` uses Harper's "host:port" string form — Harper's server
- * bootstrap (@harperfast/harper dist/server/threads/threadServer.js,
+ * bootstrap (harper dist/server/threads/threadServer.js,
  * listenOnPorts/listenOnPortsBun) splits a config port value on its last
  * `:` into an explicit bind host + port when present, and falls back to
  * binding all interfaces (0.0.0.0 / ::) when given a bare number. A colon-free
@@ -526,7 +526,7 @@ export function opsNetworkPortValue(opsBindHost: string, opsPort: number | strin
  * it with a host is the only config-level way to narrow the bind.
  *
  * `domainSocket` lives under `network` per Harper's own config schema
- * (@harperfast/harper/config-root.schema.json → properties.operationsApi
+ * (harper/config-root.schema.json → properties.operationsApi
  * .properties.network.properties.domainSocket, and
  * dist/validation/configValidator.js's `operationsApi.network.domainSocket`
  * Joi path) — nested here, not as a sibling of `network`.
@@ -1008,11 +1008,25 @@ function flairPackageDir(): string {
 }
 
 function harperBin(): string | null {
-  // Resolve relative to this file's location (dist/cli.js → ../node_modules/...)
-  const candidates = [
-    join(import.meta.dirname ?? __dirname, "..", "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js"),
-    join(process.cwd(), "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js"),
+  // Resolve relative to this file's location (dist/cli.js → ../node_modules/...).
+  //
+  // flair#870: flair depends on the BARE `harper` package name. The scoped
+  // `@harperfast/harper` segments are kept as a fallback so an in-place upgrade
+  // over a pre-#870 install (whose node_modules still holds the scoped copy,
+  // and whose Harper is the one currently serving the data dir) keeps booting
+  // until the next clean install. Bare name is tried first so a tree that has
+  // BOTH resolves to the one flair actually declares.
+  const roots = [
+    join(import.meta.dirname ?? __dirname, ".."),
+    process.cwd(),
   ];
+  const pkgSegments = [["harper"], ["@harperfast", "harper"]];
+  const candidates: string[] = [];
+  for (const root of roots) {
+    for (const segs of pkgSegments) {
+      candidates.push(join(root, "node_modules", ...segs, "dist", "bin", "harper.js"));
+    }
+  }
   for (const c of candidates) if (existsSync(c)) return c;
   return null;
 }
@@ -2741,7 +2755,15 @@ program
 
       if (!alreadyRunning) {
         const bin = harperBin();
-        if (!bin) throw new Error("@harperfast/harper not found in node_modules.\nRun: npm install @harperfast/harper");
+        if (!bin) {
+          throw new Error(
+            "Harper CLI not found: no dist/bin/harper.js under node_modules/harper " +
+              "(or the legacy node_modules/@harperfast/harper) next to this flair " +
+              `install or in ${process.cwd()}.\n` +
+              "Flair ships Harper as a dependency, so this normally means a partial " +
+              "or interrupted install.\nFix: reinstall flair — npm install -g @tpsdev-ai/flair",
+          );
+        }
 
         mkdirSync(dataDir, { recursive: true });
 
@@ -8535,7 +8557,7 @@ export function resolveFabricCredentials(opts: {
 // Mirrors `flair deploy`'s credential handling (FABRIC_USER/FABRIC_PASSWORD env
 // fallbacks, password-via-flag warning, --fabric-password-file — see
 // resolveFabricCredentials above) and NEVER prints credentials. The
-// version-resolution + @harperfast/harper pin + reuse of deploy() lives in
+// version-resolution + harper pin + reuse of deploy() lives in
 // src/fabric-upgrade.ts; this wrapper only does CLI plumbing + the confirm.
 async function runFabricUpgrade(opts: any): Promise<void> {
   const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
@@ -8659,7 +8681,7 @@ async function runFabricUpgrade(opts: any): Promise<void> {
 // before the package swap, with a keep-last-3 retention policy.
 //
 // Native-backup alternative considered and rejected: Harper ships a
-// `get_backup` operation (@harperfast/harper's dataLayer/getBackup.ts,
+// `get_backup` operation (harper's dataLayer/getBackup.ts,
 // wired in server/serverHelpers/serverUtilities.ts, documented in
 // components/mcp/tools/schemas/operationDescriptions.ts) that streams a
 // live backup over the running HTTP operations API. It's available in this
@@ -9038,13 +9060,13 @@ program
   // ── Fabric upgrade (--target) ────────────────────────────────────────────
   // When --target is passed, upgrade the Flair component DEPLOYED to that
   // Harper Fabric URL instead of the local npm install. Reuses `flair deploy`
-  // under the hood with the @harperfast/harper pin baked in (flair#513).
+  // under the hood with the harper pin baked in (flair#513).
   .option("--target <url>", "Upgrade the Flair deployed to this Fabric URL (not the local install)")
   .option("--fabric-user <user>", "Fabric admin username — for --target (env: FABRIC_USER preferred; inline leaks to shell history)")
   .option("--fabric-password <pass>", "Fabric admin password — for --target (prefer FABRIC_PASSWORD env or --fabric-password-file; inline leaks to shell history)")
   .option("--fabric-password-file <path>", "Read the Fabric admin password from a file (chmod 600) — for --target")
   .option("--version <semver>", "Flair version to deploy with --target (default: latest published @tpsdev-ai/flair)")
-  .option("--harper-version <semver>", "Pin @harperfast/harper to this version for --target (default: registry latest, floored at the flair#513 fix)")
+  .option("--harper-version <semver>", "Pin harper to this version for --target (default: registry latest, floored at the flair#513 fix)")
   .option("--project <name>", "Fabric component name for --target", "flair")
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
   .option("--yes", "Skip the confirmation prompt for --target")
@@ -10025,7 +10047,7 @@ program
       // through the HNSW cosine index, which throws "Cosine distance comparison
       // requires an array" against rows whose stored embedding shape is
       // incompatible with the running Harper version (e.g. data written under
-      // @harperfast/harper@5.0.1 read under 5.0.9). The ops API bypasses the
+      // harper@5.0.1 read under 5.0.9). The ops API bypasses the
       // vector index — exactly what we need when the goal is to replace every
       // embedding with a freshly-computed one. Without this path, `flair
       // reembed` could not recover from the very condition it exists to fix.
@@ -10463,7 +10485,7 @@ Exit codes:
 
 "peer" here means a Flair federation peer (GET /FederationPeers on the
 origin) — NOT Harper's own cluster-replication nodes, which the OSS
-@harperfast/harper build this CLI ships does not expose (cluster_status is
+harper build this CLI ships does not expose (cluster_status is
 a harper-pro-only operation). A Fabric replica that was never
 federation-paired (\`flair federation pair\`) is invisible to this sweep —
 see src/fleet-verify.ts's file header for the full caveat.`)

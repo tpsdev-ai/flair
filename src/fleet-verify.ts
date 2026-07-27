@@ -13,11 +13,11 @@
  * ── What "peer" means here — read before trusting a green sweep ──────────
  * Harper Fabric's OWN cluster-replication peers (the physical nodes a
  * component gets replicated to by `harper deploy`) are NOT enumerable
- * through any operation in the OSS @harperfast/harper build this repo
+ * through any operation in the OSS harper build this repo
  * depends on. `cluster_status` — the operation that would answer "what
  * nodes are in this cluster and are they in sync" — is explicitly called
- * out as harper-pro-only in Harper's own source (node_modules/@harperfast/
- * harper/components/mcp/tools/schemas/operationDescriptions.ts: "Out-of-core
+ * out as harper-pro-only in Harper's own source (node_modules/harper/
+ * components/mcp/tools/schemas/operationDescriptions.ts: "Out-of-core
  * operations (e.g. harper-pro's cluster_status) cannot have entries here").
  * There is no "list this cluster's replication nodes" call available to this
  * CLI, on the origin or anywhere else — direct AND via-origin cluster

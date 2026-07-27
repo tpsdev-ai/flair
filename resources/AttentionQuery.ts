@@ -76,7 +76,7 @@
  * goes through the source's own content-gated resource (Presence).
  */
 
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified, type AgentAuthVerdict } from "./agent-auth.js";
 import { isValidEntity } from "./entity-vocab.js";
 import { resolveReadScope } from "./memory-read-scope.js";

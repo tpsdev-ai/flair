@@ -1,4 +1,4 @@
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { createHash, randomBytes } from "node:crypto";
 import { handleJwtBearerGrant } from "./XAA.js";
 import { resolveAgentAuth } from "./agent-auth.js";

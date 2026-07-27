@@ -1,4 +1,4 @@
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import {
   makeAuthGate,

@@ -1,4 +1,4 @@
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { localInstanceId } from "./instance-identity.js";
 import { makeAuthGate, stampAttribution, UNAUTH } from "./record-type-kit.js";

@@ -49,7 +49,7 @@ export interface PersistentNonceStore extends NonceStore {
 }
 
 export interface PersistentNonceStoreOptions {
-  /** Injected `databases` object — tests pass a fake; production lazy-imports @harperfast/harper. */
+  /** Injected `databases` object — tests pass a fake; production lazy-imports harper. */
   db?: any;
 }
 
@@ -59,7 +59,7 @@ export const DEFAULT_RETENTION_MS = 60_000;
 async function resolveDb(opts: PersistentNonceStoreOptions, cache: { db?: Promise<any> }): Promise<any> {
   if (opts.db) return opts.db;
   if (!cache.db) {
-    cache.db = import("@harperfast/harper").then((h: any) => h.databases);
+    cache.db = import("harper").then((h: any) => h.databases);
   }
   return cache.db;
 }
@@ -155,7 +155,7 @@ export async function runNonceCleanupTick(
   if (opts.db) {
     db = opts.db;
   } else {
-    const harper = await import("@harperfast/harper");
+    const harper = await import("harper");
     db = harper.databases;
   }
 
@@ -200,7 +200,7 @@ export async function runNonceCleanupTick(
  * Initialise the periodic Nonce-table eviction sweep (5-min cadence).
  *
  * In test environments, callers pass a mock `db` via `opts` so this module
- * never imports @harperfast/harper at the top level (mirrors
+ * never imports harper at the top level (mirrors
  * federation-cleanup.ts's `initFederationCleanup`).
  */
 export async function initNonceStoreCleanup(
@@ -217,11 +217,11 @@ export async function initNonceStoreCleanup(
     db = opts.db;
   } else {
     try {
-      const harper = await import("@harperfast/harper");
+      const harper = await import("harper");
       db = harper.databases;
     } catch (err: any) {
       console.error(
-        "[federation-nonce-store] failed to load @harperfast/harper:",
+        "[federation-nonce-store] failed to load harper:",
         err?.message ?? err,
       );
       return;

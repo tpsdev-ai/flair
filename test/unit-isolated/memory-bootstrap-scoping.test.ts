@@ -116,7 +116,7 @@ const databasesMock = {
 
 class ResourceBase {}
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: ResourceBase }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: ResourceBase }));
 
 const { BootstrapMemories } = await import("../../resources/MemoryBootstrap.ts");
 

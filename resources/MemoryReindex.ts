@@ -24,7 +24,7 @@
  * This endpoint is idempotent: running it again finds zero drift.
  */
 
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
 
 type AgentDrift = { agentId: string; primary: number; indexed: number; missing: number };

@@ -24,7 +24,7 @@
  * JSON-RPC 2.0, so we serialize the JSON-RPC response object as the body.
  */
 
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { randomBytes } from "node:crypto";
 import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
 

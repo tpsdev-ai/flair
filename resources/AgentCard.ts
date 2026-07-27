@@ -1,4 +1,4 @@
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { type SoulLike, selectPublicDescription, selectPublicSkills } from "./agentcard-fields.js";
 
 export class AgentCard extends Resource {

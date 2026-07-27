@@ -133,7 +133,7 @@
  * `derived-only`, also unindexed-field-adjacent) already applies by also
  * omitting it.
  */
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export type BackfilledVisibility = "private" | "shared";

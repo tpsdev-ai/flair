@@ -15,7 +15,7 @@
  * scoping, search() parity, delete() regression-guard) live in
  * test/unit/memory-integrity.test.ts instead of here — bun runs every file
  * in test/unit/ in ONE process, and that file already `mock.module`s
- * "@harperfast/harper" and dynamically imports "../../resources/Memory.ts".
+ * "harper" and dynamically imports "../../resources/Memory.ts".
  * A second file doing the same thing collides: Memory's `class Memory
  * extends (databases as any).flair.Memory` superclass reference is captured
  * ONCE, at whichever file's import wins the race, so a second competing
@@ -75,7 +75,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Soul } = await import("../../resources/Soul.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");

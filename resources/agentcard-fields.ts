@@ -7,7 +7,7 @@
 // fallback that could surface a private soul (an operator's internal note,
 // prompt fragment, or credential reminder) on the public endpoint.
 //
-// Kept free of any @harperfast/harper import so the real logic is unit-testable
+// Kept free of any harper import so the real logic is unit-testable
 // without spinning up Harper (avoids the simulator-pattern that let the
 // description-fallback leak ship untested).
 

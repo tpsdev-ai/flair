@@ -15,7 +15,7 @@
  * verified against the agent's stored Ed25519 public key. Replay is bounded by a
  * 30s timestamp window + a per-(agent,nonce) seen-set pruned to that window.
  */
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 
 /**

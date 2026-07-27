@@ -17,7 +17,7 @@
  * to gate auth correctly.
  */
 
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { isAdmin } from "./agent-auth.js";
 
 export class MemoryMaintenance extends Resource {

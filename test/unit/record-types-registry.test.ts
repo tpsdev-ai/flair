@@ -5,7 +5,7 @@
  * `resources/record-types.ts` has ZERO runtime imports (its only import is
  * `import type { ... }`, erased by bun's TS transpile — see that module's
  * header) so, unlike record-type-kit.test.ts / the five tables' own behavior
- * tests, this file needs NO `mock.module("@harperfast/harper", ...)` and can
+ * tests, this file needs NO `mock.module("harper", ...)` and can
  * import RECORD_TYPES directly.
  *
  * Three kinds of coverage:
@@ -24,9 +24,9 @@
  *      truth" requirement). Verified via a SOURCE-TEXT scan of the five
  *      resource files, DELIBERATELY not by importing them: importing any of
  *      Memory.ts/Relationship.ts/WorkspaceState.ts/OrgEvent.ts/Soul.ts
- *      requires @harperfast/harper's `databases` proxy to resolve real
+ *      requires harper's `databases` proxy to resolve real
  *      table classes at module-eval time (`class X extends (databases as
- *      any).flair.X`) — without a `mock.module("@harperfast/harper", ...)`
+ *      any).flair.X`) — without a `mock.module("harper", ...)`
  *      it throws immediately trying to boot a real Harper storage path
  *      (confirmed empirically: this file failed exactly that way on a first
  *      draft that imported Memory.ts directly). Standing up a compatible

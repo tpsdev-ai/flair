@@ -1,4 +1,4 @@
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 
 const FORBIDDEN = (msg: string) =>

@@ -11,7 +11,7 @@ import { join } from "node:path";
  * Authorization header at all). Harper's own `Resource` base class default
  * is `allowRead/allowCreate/allowUpdate/allowDelete(user) { return
  * user?.role.permission.super_user }` (see
- * node_modules/@harperfast/harper/dist/resources/Resource.js) — so ANY
+ * node_modules/harper/dist/resources/Resource.js) — so ANY
  * Resource that does not override these methods is, by default, WIDE OPEN
  * to that forged loopback super_user. Seven instances of exactly this
  * pattern were independently found and patched in two weeks: Memory/Soul

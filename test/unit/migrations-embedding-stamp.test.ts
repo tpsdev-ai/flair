@@ -15,12 +15,12 @@
  */
 import { describe, it, expect, mock } from "bun:test";
 
-// embedding-stamp.ts imports `{ databases } from "@harperfast/harper"` for
+// embedding-stamp.ts imports `{ databases } from "harper"` for
 // its DEFAULT table accessor only (never used here — every test injects its
 // own fake table via createEmbeddingStampMigration's first argument). Same
 // workaround as migrations-ledger.test.ts: mock the module out before import
 // so the real package's import-time side effects never fire.
-mock.module("@harperfast/harper", () => ({ databases: {}, Resource: class {} }));
+mock.module("harper", () => ({ databases: {}, Resource: class {} }));
 
 const { createEmbeddingStampMigration, EMBEDDING_STAMP_ID } = await import("../../resources/migrations/embedding-stamp.ts");
 
@@ -269,7 +269,7 @@ describe("embedding-stamp migration — flair#807: staleCondition() comparator s
     // `not_` PREFIX form) to a `negated: true` leaf, which bypasses a
     // potentially stale/desynced secondary index and reads the live record
     // directly (see embedding-stamp.ts's module doc for the full mechanism,
-    // root-caused against the installed @harperfast/harper source). The
+    // root-caused against the installed harper source). The
     // legacy "not_equal" alias does NOT get this bypass — reverting to it
     // would silently reopen #807.
     const queries: any[] = [];

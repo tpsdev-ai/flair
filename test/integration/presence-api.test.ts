@@ -317,7 +317,7 @@ describe("Presence API integration", () => {
     readFileSync(`${process.cwd()}/package.json`, "utf-8"),
   ).version;
   const expectedHarperVersion: string = JSON.parse(
-    readFileSync(`${process.cwd()}/node_modules/@harperfast/harper/package.json`, "utf-8"),
+    readFileSync(`${process.cwd()}/node_modules/harper/package.json`, "utf-8"),
   ).version;
 
   test("POST /Presence stamps the real running flairVersion + harperVersion", async () => {

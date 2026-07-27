@@ -8,18 +8,18 @@
 import { describe, it, expect, mock } from "bun:test";
 // Type-only import — erased at compile time, so it never triggers ledger.ts's
 // runtime module body (and therefore never touches the real
-// "@harperfast/harper" import below) ahead of the mock.module() call.
+// "harper" import below) ahead of the mock.module() call.
 import type { LedgerEvent } from "../../resources/migrations/ledger.ts";
 
-// ledger.ts imports `{ databases } from "@harperfast/harper"` for its
+// ledger.ts imports `{ databases } from "harper"` for its
 // DEFAULT table accessor (only used when a test doesn't inject its own, per
-// its `deps.orgEventTable` seam below). The REAL @harperfast/harper package
+// its `deps.orgEventTable` seam below). The REAL harper package
 // has import-time side effects that assume it's running as the actual
 // Harper server process (crashes with "Unable to determine database storage
 // path" when merely imported outside one) — so, same technique as
 // test/unit/instance-identity.test.ts / test/unit/attention-query.test.ts,
 // the module is mocked out BEFORE ledger.ts is imported at all.
-mock.module("@harperfast/harper", () => ({ databases: {}, Resource: class {} }));
+mock.module("harper", () => ({ databases: {}, Resource: class {} }));
 
 const { writeLedgerEvent, buildLedgerDetail } = await import("../../resources/migrations/ledger.ts");
 

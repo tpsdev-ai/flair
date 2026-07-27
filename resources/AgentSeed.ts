@@ -17,7 +17,7 @@
  * Auth: admin only.
  */
 
-import { Resource, databases } from "@harperfast/harper";
+import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({

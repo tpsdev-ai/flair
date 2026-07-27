@@ -1,11 +1,11 @@
 import { mock, describe, it, expect } from "bun:test";
 
-// agent-auth.ts imports `databases` from @harperfast/harper (throws outside a
+// agent-auth.ts imports `databases` from harper (throws outside a
 // Harper runtime). Mock it. A thin flair.Agent (get→null) keeps the shared,
 // process-global module registry safe if this file's mock is the one bound when
 // another test's well-formed-TPS path reaches verifyAgentRequest — Agent.get
 // returns null rather than throwing on `databases.flair` being undefined.
-mock.module("@harperfast/harper", () => ({
+mock.module("harper", () => ({
   databases: { flair: { Agent: { get: async () => null, search: async function* () {} } } },
   Resource: class {},
 }));

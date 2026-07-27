@@ -8,7 +8,7 @@
  *   The real CLI (dist/cli.js) is an ES module. In ESM, every top-level
  *   `import` is HOISTED and the whole module graph is LINKED + EVALUATED before
  *   the first statement in the file body runs. Flair's deps (harper-fabric-
- *   embeddings requires Node >=22, @harperfast/harper / commander require >=20)
+ *   embeddings requires Node >=22, harper / commander require >=20)
  *   fail to load on an older engine — so a Node-version check placed even at the
  *   very top of cli.ts never executes: the import graph crashes first. That is
  *   exactly the silent-onboarding-failure bug (a Harper dev got zero output and

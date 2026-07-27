@@ -10,12 +10,12 @@
  */
 import { describe, it, expect } from "bun:test";
 
-// graph-heal.ts imports `{ databases } from "@harperfast/harper"` for its
+// graph-heal.ts imports `{ databases } from "harper"` for its
 // DEFAULT accessors only (never used here — every test injects fakes). Same
 // workaround as migrations-embedding-stamp.test.ts: mock the module before
 // import so its import-time side effects never fire.
 import { mock } from "bun:test";
-mock.module("@harperfast/harper", () => ({ databases: {}, Resource: class {} }));
+mock.module("harper", () => ({ databases: {}, Resource: class {} }));
 
 const { createGraphHealMigration, GRAPH_HEAL_ID } = await import("../../resources/migrations/graph-heal.ts");
 

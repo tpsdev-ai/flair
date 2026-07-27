@@ -9,18 +9,18 @@
  *   - src/cli.ts's runFederationSyncOnce() — the federation-sync PUSH filter
  *     that must not replicate `private` memories to peer instances.
  *
- * Deliberately has ZERO imports — not even "@harperfast/harper". That is
+ * Deliberately has ZERO imports — not even "harper". That is
  * intentional and load-bearing: src/cli.ts is a standalone CLI entrypoint
  * that runs OUTSIDE any running Harper instance (e.g. `flair federation
  * sync` invoked from a cron/launchd job). resources/memory-read-scope.ts
- * imports `databases` from "@harperfast/harper", and that package's
+ * imports `databases` from "harper", and that package's
  * top-level init eagerly resolves storage paths and THROWS when there is no
  * live Harper runtime backing it (confirmed empirically — it takes down
  * even `flair --help`). So src/cli.ts must never import
  * resources/memory-read-scope.ts (or anything else that drags that
  * side-effecting import in) directly. This module is the safe seam: a pure
  * function + constant that both sides can import without dragging in
- * "@harperfast/harper".
+ * "harper".
  *
  * ── The migration invariant (non-negotiable, mirrors memory-read-scope.ts) ──
  * A record with NO `visibility` field (written before the field existed) is

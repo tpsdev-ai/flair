@@ -41,7 +41,7 @@
  * to expose "which agent used which memory" cross-agent, and narrowing this
  * costs nothing.
  */
-import { databases } from "@harperfast/harper";
+import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 
 const FORBIDDEN = (msg: string) =>

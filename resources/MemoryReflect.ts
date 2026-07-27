@@ -37,7 +37,7 @@
  * resource is a thin orchestrator over the lib's tested functions.
  */
 
-import { Resource, databases, models, logger } from "@harperfast/harper";
+import { Resource, databases, models, logger } from "harper";
 import { randomBytes } from "node:crypto";
 import { isAdmin, allowVerified } from "./agent-auth.js";
 import { patchRecordSilent } from "./table-helpers.js";
@@ -174,7 +174,7 @@ export class ReflectMemories extends Resource {
     }
     const toStage = dedupeCandidates(outcome.candidates, existingPendingClaims);
 
-    // generatedBy: GenerateResult in the pinned @harperfast/harper 5.1.17 has
+    // generatedBy: GenerateResult in the pinned harper 5.1.17 has
     // no model/backend-id field (content/finishReason/usage/toolCalls/trace
     // only) — the "from the generate result if available" branch is
     // unreachable in this version, so this always falls back to the

@@ -56,10 +56,10 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@harperfast/harper": "5.1.22",
     "@harperfast/oauth": "2.4.0",
     "@types/js-yaml": "4.0.9",
     "commander": "14.0.3",
+    "harper": "5.1.22",
     "harper-fabric-embeddings": "^0.5.0",
     "jose": "6.2.2",
     "js-yaml": "4.3.0",

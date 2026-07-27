@@ -8,7 +8,7 @@
  * records). Agent.ts stamps in both post() and put().
  *
  * Same mocking technique as memory-integrity.test.ts / relationship-read-
- * gate.test.ts: mock @harperfast/harper so the resource class loads outside
+ * gate.test.ts: mock harper so the resource class loads outside
  * a real Harper runtime. No other test/unit/ file imports resources/Agent.ts,
  * so this file owns that mock+import with no collision risk (bun runs
  * test/unit/ in one process and dynamic imports are cached by resolved path).
@@ -55,7 +55,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { Agent } = await import("../../resources/Agent.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");

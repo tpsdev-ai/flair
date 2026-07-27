@@ -351,8 +351,8 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     const pkgDirA = join(baselineDir, "node_modules", "@tpsdev-ai", "flair");
 
     // ── 2. Start both Harper instances ────────────────────────────────────
-    // A: baseline component + baseline's own bundled @harperfast/harper.
-    // B: this worktree's component + this worktree's @harperfast/harper —
+    // A: baseline component + baseline's own bundled harper.
+    // B: this worktree's component + this worktree's harper —
     // identical to how every other test/integration/*.test.ts spawns Harper
     // (startHarper() with no args), per the issue's "the repo's normal
     // integration-test path" instruction.

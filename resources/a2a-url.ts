@@ -6,7 +6,7 @@
 // reflect the REAL listening port, or a remote A2A peer that follows discovery
 // hits a dead port.
 //
-// Kept free of any @harperfast/harper import so the resolution logic is
+// Kept free of any harper import so the resolution logic is
 // unit-testable without spinning up Harper (mirrors agentcard-fields.ts —
 // avoids the simulator-pattern drift that let the AdminInstance predicate be
 // reproduced-not-imported).

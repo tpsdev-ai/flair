@@ -1,16 +1,16 @@
 import { mock, describe, it, expect } from "bun:test";
 
-// agent-auth.ts imports `databases` from @harperfast/harper, whose module chain
+// agent-auth.ts imports `databases` from harper, whose module chain
 // throws when loaded outside a Harper runtime. Mock it. Provide a thin
 // flair.Agent so the verifyAgentRequest fallback (reached by a well-formed
 // TPS-Ed25519 header with no forged user) looks up an unknown agent and returns
 // null WITHOUT throwing — proving the header ROUTED into verifyAgentRequest.
 // (The positive path — a VALID signature resolving to `agent` — is covered end-
 // to-end against real Harper in test/integration/oauth-authorize-authz.test.ts;
-// reproducing it here would depend on which sibling file's @harperfast/harper
+// reproducing it here would depend on which sibling file's harper
 // mock wins bun's process-global module registry, so it's deliberately left to
 // the integration harness.)
-mock.module("@harperfast/harper", () => ({
+mock.module("harper", () => ({
   databases: { flair: { Agent: { get: async () => null, search: async function* () {} } } },
   Resource: class {},
 }));

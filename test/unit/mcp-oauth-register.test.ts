@@ -9,7 +9,7 @@
  *
  * We call the exported registration function directly with injected deps (a spy
  * server + a stub withMCPAuth loader), so the test never depends on the load-time
- * side effect or the real Harper `server`. @harperfast/harper is mocked only so
+ * side effect or the real Harper `server`. harper is mocked only so
  * the module's static `import { server }` resolves; the module-level fire-and-
  * forget call runs with the flag OFF (default) and returns before touching it.
  */
@@ -27,7 +27,7 @@ process.env.FLAIR_MCP_NO_AUTOSTART = "1";
 // the safe shape.
 class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 const dbStub = new Proxy({}, { get: () => new Proxy({}, { get: () => NoopBase }) });
-mock.module("@harperfast/harper", () => ({
+mock.module("harper", () => ({
   server: { http: () => {} },
   Resource: NoopBase,
   databases: { flair: dbStub },

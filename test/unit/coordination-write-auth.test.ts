@@ -3,7 +3,7 @@
  * coordination write surface (Kris #510).
  *
  * Exercises WorkspaceState.post() and OrgEvent.post() directly, mocking
- * @harperfast/harper so the resource classes load + their writes are capturable
+ * harper so the resource classes load + their writes are capturable
  * outside a Harper runtime (same technique as resolve-agent-auth.test.ts). These
  * are the security-critical assertions the integration harness can't make at the
  * unit level:
@@ -22,7 +22,7 @@
  * ── WorkspaceState.allowRead() + get() ownership scoping (memory-soul-read-
  * gate family fix) ─────────────────────────────────────────────────
  * These tests are ADDED HERE (not a separate file) deliberately: this file
- * already `mock.module("@harperfast/harper", ...)` + dynamically imports
+ * already `mock.module("harper", ...)` + dynamically imports
  * "../../resources/WorkspaceState.ts". bun runs every test/unit/ file in ONE
  * process and dynamic imports are cached by resolved path — a second file
  * doing the same mock+import would silently reuse whichever mock won the
@@ -53,7 +53,7 @@ function matchesCondition(record: any, cond: any): boolean {
   return true;
 }
 
-// Mock @harperfast/harper:
+// Mock harper:
 //   - databases.flair.WorkspaceState / OrgEvent are constructable base classes
 //     (the resources do `class X extends databases.flair.X`).
 //   - The base post()/put() capture their argument so we can assert attribution,
@@ -106,7 +106,7 @@ const databasesMock = {
   },
 };
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { WorkspaceState } = await import("../../resources/WorkspaceState.ts");
 const { OrgEvent } = await import("../../resources/OrgEvent.ts");

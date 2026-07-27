@@ -17,7 +17,7 @@
  * remains owner-only.
  *
  * These tests exercise the SHIPPED SemanticSearch.post() directly against a
- * mocked @harperfast/harper, using the "no embedding, no q" keyword-fallback
+ * mocked harper, using the "no embedding, no q" keyword-fallback
  * path (resources/SemanticSearch.ts's final `else` branch) so the scoping
  * conditions[] alone determine what comes back — no embeddings-provider
  * dependency, deterministic. Same in-memory-store mocking technique as
@@ -103,7 +103,7 @@ const databasesMock = {
 
 class ResourceBase {}
 
-mock.module("@harperfast/harper", () => ({ databases: databasesMock, Resource: ResourceBase }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: ResourceBase }));
 
 const { SemanticSearch } = await import("../../resources/SemanticSearch.ts");
 
