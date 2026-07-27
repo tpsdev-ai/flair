@@ -462,6 +462,63 @@ jobs:
           $FLAIR restart --port $PORT
           wait_for_flair_status_running "$FLAIR" "$PORT" 90
 
+          # ── flair#863: the ops-API bind must survive a restart ────────────────
+          # This job is the only lane that exercises the direct (non-launchd)
+          # spawn a Linux user actually gets. That path sets no
+          # HARPER_SET_CONFIG, and Harper restores the pre-SET_CONFIG original
+          # for every key SET_CONFIG had forced whenever that variable is
+          # absent — so a bare OPERATIONSAPI_NETWORK_PORT anywhere in flair's
+          # spawn chain silently re-widened the ops API to all interfaces on
+          # the FIRST restart, and persisted it. Unit tests pin the values
+          # flair emits; only this asserts against the real listening socket.
+          #
+          # Blocking depends on branch protection: a failure here fails this
+          # matrix leg, which fails `pack-smoke-gate` (fixed context
+          # "Install-from-tarball smoke", defined below). That context must be
+          # listed as a required status check for this to block a merge —
+          # otherwise these assertions are a test, not a gate.
+          #
+          # assert_ops_bind <ere> <label>: every listener on the ops port must
+          # match the extended regex, and there must be at least one. The
+          # widened case accepts any wildcard spelling (0.0.0.0 / * / [::])
+          # because that is Node's dual-stack behaviour, not flair's choice.
+          assert_ops_bind() {
+            local expected="$1" label="$2" listeners l
+            listeners=$(ss -ltn 2>/dev/null | awk -v p=":${OPS_PORT}\$" '$4 ~ p {print $4}')
+            echo "ops-API listeners after ${label}: ${listeners:-<none>}"
+            [ -n "$listeners" ] || { echo "FAIL: no ops-API listener on ${OPS_PORT} after ${label} (flair#863)"; exit 1; }
+            while read -r l; do
+              printf '%s\n' "$l" | grep -Eq "$expected" || {
+                echo "FAIL: ops API bound to '$l' after ${label}, expected /${expected}/ (flair#863)"
+                exit 1
+              }
+            done <<< "$listeners"
+          }
+
+          # 1. Stock install + restart: loopback, and doctor's finding is gone.
+          assert_ops_bind "^127\.0\.0\.1:${OPS_PORT}\$" "stock init + restart"
+          $FLAIR doctor --port $PORT > /tmp/flair863-doctor.txt 2>&1 || true
+          if grep -q "Ops API bound to all interfaces" /tmp/flair863-doctor.txt; then
+            echo "FAIL: doctor still reports the all-interfaces ops bind after init + restart (flair#863)"
+            cat /tmp/flair863-doctor.txt
+            exit 1
+          fi
+
+          # 2. The documented escape hatch must genuinely widen — and survive
+          #    the restart, which is what --ops-bind failed to do before.
+          $FLAIR init --agent-id smoke --port $PORT --admin-pass "$FLAIR_ADMIN_PASS" --skip-soul --ops-bind 0.0.0.0
+          $FLAIR restart --port $PORT
+          wait_for_flair_status_running "$FLAIR" "$PORT" 90
+          assert_ops_bind "^(0\\.0\\.0\\.0|\\*|\\[::\\]):${OPS_PORT}$" "--ops-bind 0.0.0.0 + restart"
+
+          # 3. And it must be reversible — the finding has to be CLEARABLE by
+          #    the documented means, which is the whole of flair#863.
+          $FLAIR init --agent-id smoke --port $PORT --admin-pass "$FLAIR_ADMIN_PASS" --skip-soul --ops-bind 127.0.0.1
+          $FLAIR restart --port $PORT
+          wait_for_flair_status_running "$FLAIR" "$PORT" 90
+          assert_ops_bind "^127\\.0\\.0\\.1:${OPS_PORT}$" "--ops-bind 127.0.0.1 + restart"
+          # ── end flair#863 hard gate ───────────────────────────────────────────
+
           # Write/search round-trip (0.5.2-class regression guard): write a
           # memory as the smoke agent, then search for it. Exercises the
           # authenticated PUT path, agent-scoped keyword fallback in
@@ -494,6 +551,28 @@ jobs:
 
           # Tear down
           $FLAIR stop --port $PORT || true
+
+  pack-smoke-gate:
+    # Same reason test-unit-gate and typecheck-gate exist: GitHub suffixes a
+    # matrixed job's display name per leg ("Install-from-tarball smoke (node
+    # 22)", ...), so no fixed check context exists for branch protection to
+    # require. This job reports one — required-check name: "Install-from-tarball
+    # smoke". Without it the pack-smoke assertions (including the flair#863
+    # ops-bind gate, whose whole point is that a control which can't block is
+    # what lets a defect persist) can only turn a matrixed check red; they
+    # cannot block a merge.
+    name: Install-from-tarball smoke
+    needs: pack-smoke
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Require all Node-version legs to pass
+        run: |
+          echo "pack-smoke matrix result: ${{ needs.pack-smoke.result }}"
+          if [ "${{ needs.pack-smoke.result }}" != "success" ]; then
+            echo "::error::One or more Install-from-tarball smoke Node-version legs did not succeed"
+            exit 1
+          fi
 
   upgrade-smoke:
     name: Upgrade from npm-stable

@@ -179,6 +179,7 @@ Set these in the Flair process environment (`~/Library/LaunchAgents/ai.tpsdev.fl
 | `HDB_ADMIN_PASSWORD` | Bootstrap password for the embedded Harper. After first start, the persisted user record is the source of truth; rotate via the Harper ops API, not by changing this env var. | Set at install time. See [secrets-and-keys.md](secrets-and-keys.md) for rotation. |
 | `FLAIR_KEY_PASSPHRASE` | Passphrase used to derive the AES-256-GCM key that wraps federation private-key seeds at rest. Auto-generated to `~/.flair/keys/.passphrase` if unset. | Set explicitly for production federation deployments so the passphrase isn't auto-generated and lost on disk wipe. |
 | `HTTP_PORT` | Override the Harper HTTP port. Useful for sandboxes; production deployments should configure the port in `config.yaml` instead. | Rare. |
+| `FLAIR_OPS_BIND` | Bind address for the Harper **ops API**. Resolution order: `flair init --ops-bind` > this variable > the `opsBind` key `flair init` persists in `~/.flair/config.yaml` > `127.0.0.1`. Every Flair-managed Harper start re-asserts the resolved value, so the persisted key is what makes a choice survive `flair restart` / `flair upgrade`. | Only for deployments that genuinely need remote ops admin (multi-host / Fabric) — set it to `0.0.0.0`, or record it once with `flair init --ops-bind 0.0.0.0`. Single-host installs want the loopback default. |
 
 ---
 
