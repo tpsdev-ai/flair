@@ -462,7 +462,7 @@ jobs:
           $FLAIR restart --port $PORT
           wait_for_flair_status_running "$FLAIR" "$PORT" 90
 
-          # ── flair#863 HARD GATE: the ops-API bind must survive a restart ──────
+          # ── flair#863: the ops-API bind must survive a restart ────────────────
           # This job is the only lane that exercises the direct (non-launchd)
           # spawn a Linux user actually gets. That path sets no
           # HARPER_SET_CONFIG, and Harper restores the pre-SET_CONFIG original
@@ -471,6 +471,12 @@ jobs:
           # spawn chain silently re-widened the ops API to all interfaces on
           # the FIRST restart, and persisted it. Unit tests pin the values
           # flair emits; only this asserts against the real listening socket.
+          #
+          # Blocking depends on branch protection: a failure here fails this
+          # matrix leg, which fails `pack-smoke-gate` (fixed context
+          # "Install-from-tarball smoke", defined below). That context must be
+          # listed as a required status check for this to block a merge —
+          # otherwise these assertions are a test, not a gate.
           #
           # assert_ops_bind <ere> <label>: every listener on the ops port must
           # match the extended regex, and there must be at least one. The
@@ -545,6 +551,28 @@ jobs:
 
           # Tear down
           $FLAIR stop --port $PORT || true
+
+  pack-smoke-gate:
+    # Same reason test-unit-gate and typecheck-gate exist: GitHub suffixes a
+    # matrixed job's display name per leg ("Install-from-tarball smoke (node
+    # 22)", ...), so no fixed check context exists for branch protection to
+    # require. This job reports one — required-check name: "Install-from-tarball
+    # smoke". Without it the pack-smoke assertions (including the flair#863
+    # ops-bind gate, whose whole point is that a control which can't block is
+    # what lets a defect persist) can only turn a matrixed check red; they
+    # cannot block a merge.
+    name: Install-from-tarball smoke
+    needs: pack-smoke
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Require all Node-version legs to pass
+        run: |
+          echo "pack-smoke matrix result: ${{ needs.pack-smoke.result }}"
+          if [ "${{ needs.pack-smoke.result }}" != "success" ]; then
+            echo "::error::One or more Install-from-tarball smoke Node-version legs did not succeed"
+            exit 1
+          fi
 
   upgrade-smoke:
     name: Upgrade from npm-stable
