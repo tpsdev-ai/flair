@@ -59,7 +59,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildRegistry, type MigrationRegistry } from "./migrations/registry.js";
 import { runMigrationCycle } from "./migrations/runner.js";
-import { seedIdleProgress, setCyclePhase, setMigrationProgress } from "./migrations/progress.js";
+import { markIdleMigrationsFailed, seedIdleProgress, setCyclePhase } from "./migrations/progress.js";
 import {
   describeUnresolvableDataDir,
   resolveWritableMigrationDataDir,
@@ -135,18 +135,22 @@ async function waitForEmbeddingsSettled(maxWaitMs = 8_500, intervalMs = 150): Pr
 /**
  * Records a boot-path failure everywhere an operator might look: the
  * process log (with the `[flair-migrations]` marker the runbook greps for),
- * the cycle status, and a `failed` entry for EVERY registered migration —
- * because a boot path that cannot run is not a per-migration problem, it is
- * an instance-wide one, and `flair doctor` / `flair quality` read per-
- * migration state. `failed` (not `halted`) is deliberate: nothing was
- * attempted against the corpus, so there is no halted work to resume.
+ * the cycle status (`lastCycleError`, surfaced by `/HealthDetail` and named
+ * by `flair doctor`), and a `failed` entry for each migration that never
+ * started — because a boot path that cannot run is not a per-migration
+ * problem, it is an instance-wide one, and `flair doctor` / `flair quality`
+ * read per-migration state.
+ *
+ * `failed` (not `halted`) is deliberate for these: nothing was attempted
+ * against the corpus, so there is no halted work to resume. And the marking
+ * deliberately touches only migrations still `idle` — see
+ * `markIdleMigrationsFailed` for why overwriting a terminal state would be
+ * a downgrade rather than extra information.
  */
 function reportBootFailure(registry: MigrationRegistry, reason: string): void {
   console.error(`[flair-migrations] ${reason}`);
   setCyclePhase("done", reason);
-  for (const migration of registry.list()) {
-    setMigrationProgress({ id: migration.id, rowsDone: 0, rowsRemaining: 0, state: "failed", reason });
-  }
+  markIdleMigrationsFailed(registry.list().map((m) => m.id), reason);
 }
 
 let scheduled = false;

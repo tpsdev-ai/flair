@@ -66,6 +66,39 @@ export function seedIdleProgress(ids: readonly string[]): void {
   }
 }
 
+/**
+ * Marks every migration that never got off the starting line as `failed`
+ * with `reason` — and ONLY those (flair#812).
+ *
+ * The boot path calls this when a cycle couldn't run, so that a condition
+ * which is really instance-wide (no writable data dir, tables never ready,
+ * the lock itself unobtainable) shows up per-migration, which is the shape
+ * `flair doctor` and `flair quality`'s `instance.migrationsClean` actually
+ * read.
+ *
+ * Restricting it to `idle` entries is load-bearing, not tidiness: a cycle
+ * can fail AFTER some migrations already reached a terminal state — the
+ * pre-hash path, for instance, halts each candidate with its own precise
+ * reason and THEN reports cycle failure. Overwriting those would replace a
+ * specific `halted` (which the runner retries on the next boot, per its
+ * documented contract) with a blanket `failed`, and would flip migrations
+ * that genuinely completed this cycle to failed. Only an entry still `idle`
+ * is one nothing has said anything about yet.
+ *
+ * Returns the ids actually marked, so a caller can tell "nothing had
+ * started" from "the cycle died partway".
+ */
+export function markIdleMigrationsFailed(ids: readonly string[], reason: string): string[] {
+  const marked: string[] = [];
+  for (const id of ids) {
+    const current = progressById.get(id);
+    if (current && current.state !== "idle") continue;
+    progressById.set(id, { id, rowsDone: 0, rowsRemaining: 0, state: "failed", reason });
+    marked.push(id);
+  }
+  return marked;
+}
+
 export function _resetProgressForTests(): void {
   progressById.clear();
   cycleStatus = { phase: "idle" };
