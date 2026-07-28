@@ -1,4 +1,4 @@
-// instance-local-port.test.ts — regression tests for flair#914: the port was
+// harper-config-port.test.ts — regression tests for flair#914: the port was
 // recorded in `~/.flair/config.yaml`, which holds ONE port for the whole user.
 // `flair init --data-dir X --port P` wrote it unconditionally, so a second
 // instance silently overwrote the first's recorded port, and `resolveHttpPort()`
@@ -9,6 +9,14 @@
 // INSTANCE from the wrong directory; this one resolved the PORT from a file
 // with no notion of instances. Both are the same shape — a lookup keyed by
 // something other than the thing it describes.
+//
+// The port is read from HARPER'S OWN CONFIG in the data directory, not from a
+// Flair-owned file beside it. Harper writes `harper-config.yaml` at install and
+// rewrites it from its environment on every boot, so it describes the instance
+// served from that directory and is maintained by the process that binds the
+// socket. A Flair-owned copy of the same three facts was a second record with
+// nothing to reconcile it — and it goes stale the first time an existing data
+// directory is booted on a different port (flair#937).
 //
 // What these tests pin, and how they stay safe on a host with a real Flair
 // running:
@@ -24,8 +32,8 @@
 //     listener this test spawned. Where the CLI must refuse, the assertion is
 //     that the listener is STILL SERVING — a killed listener fails the test
 //     instead of taking anything else down.
-//   - `init` runs with `--skip-start`, so no Harper is ever spawned; the
-//     coordinates it persists are the thing under test.
+//   - No Harper is ever spawned. Harper's config is written by the fixture in
+//     the shape Harper writes it, which is what resolution reads.
 //
 // All but the last test are deliberately platform-independent: the launchd
 // path is macOS-only, but the port path is the ONLY path on Linux (where CI
@@ -42,7 +50,10 @@ const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 /** The per-user port a pre-flair#914 install has recorded. Never a resolved answer for a NAMED instance. */
 const LEGACY_PER_USER_PORT = 20881;
 
-describe("flair#914 — the port lives beside the data directory it describes", () => {
+/** `DEFAULT_PORT` in src/cli.ts. A refusal must never quietly answer with it. */
+const DEFAULT_PORT = 19926;
+
+describe("flair#914 — an instance's port comes from Harper's config in its data directory", () => {
   let tmpHome: string;
   let shimBin: string;
   let defaultDataDir: string;
@@ -108,9 +119,9 @@ describe("flair#914 — the port lives beside the data directory it describes", 
    * The per-user `~/.flair/config.yaml` a pre-flair#914 install carries.
    *
    * Deliberately NOT byte-identical to what `writeConfig` would emit: the
-   * operator comment survives only if the migration READS this file and never
-   * rewrites it. Without it, a mutation that rewrote the file on migration
-   * produced the same bytes on a canonical fixture and no test noticed.
+   * operator comment survives only if resolution READS this file and never
+   * rewrites it. Without it, a mutation that rewrote the file produced the same
+   * bytes on a canonical fixture and no test noticed.
    */
   function writeLegacyPerUserConfig(port: number = LEGACY_PER_USER_PORT): void {
     mkdirSync(join(tmpHome, ".flair"), { recursive: true });
@@ -125,14 +136,35 @@ describe("flair#914 — the port lives beside the data directory it describes", 
     return existsSync(p) ? readFileSync(p, "utf-8") : "";
   }
 
-  function instanceConfig(dataDir: string): string {
-    const p = join(resolve(dataDir), "flair-instance.yaml");
-    return existsSync(p) ? readFileSync(p, "utf-8") : "";
+  /**
+   * Harper's own config, in the shape Harper writes it — nested `http.port` and
+   * `operationsApi.network.port`, alongside `rootPath`. Nesting is the point:
+   * a resolver that line-matched a bare `port:` key would pick whichever block
+   * came first, so the ops block is written FIRST here on purpose.
+   *
+   * `opsPortValue` takes Harper's host-qualified form (`"127.0.0.1:9925"`) as
+   * well as a bare port, because Harper persists both (`opsNetworkPortValue`).
+   */
+  function writeHarperConfig(
+    dataDir: string,
+    opts: { httpPort?: number; opsPortValue?: string | number } = {},
+  ): void {
+    const dir = resolve(dataDir);
+    mkdirSync(dir, { recursive: true });
+    const lines = ["# Harper configuration", `rootPath: ${dir}`];
+    if (opts.opsPortValue !== undefined) {
+      lines.push("operationsApi:", "  network:", `    port: "${opts.opsPortValue}"`, "    cors: true");
+    }
+    if (opts.httpPort !== undefined) {
+      lines.push("http:", `  port: ${opts.httpPort}`, "  cors: true");
+    }
+    writeFileSync(join(dir, "harper-config.yaml"), `${lines.join("\n")}\n`);
   }
 
-  function recordedPort(dataDir: string): number | null {
-    const m = instanceConfig(dataDir).match(/^\s*port:\s*(\d+)/m);
-    return m ? Number(m[1]) : null;
+  /** Proof that resolution never conjures a Flair-owned port file (flair#937). */
+  function flairOwnedPortFiles(dataDir: string): string[] {
+    return ["flair-instance.yaml", "flair-coordinates.yaml", "flair-ports.yaml"]
+      .filter((n) => existsSync(join(resolve(dataDir), n)));
   }
 
   /**
@@ -172,21 +204,24 @@ describe("flair#914 — the port lives beside the data directory it describes", 
     };
   }
 
-  // ─── 1. the instance's own file is the answer ───────────────────────────
+  // ─── 1. Harper's config is the answer for a named instance ──────────────
 
-  test("resolves a named instance's port from its own config, never from the per-user file", async () => {
+  test("resolves a named instance's port from Harper's config, never from the per-user file", async () => {
     // Two ports in play, and they must not be confusable: the per-user file
     // carries one instance's port, the scratch directory carries its own.
     const stub = await spawnHealthStub();
     writeLegacyPerUserConfig();
     const scratch = newScratchDataDir();
-    writeFileSync(join(scratch, "flair-instance.yaml"), `port: ${stub.port}\n`);
+    // The ops block carries the per-user file's number, and comes FIRST in the
+    // document: a resolver reading the wrong nested key lands on it too, so a
+    // single assertion catches both wrong sources.
+    writeHarperConfig(scratch, { httpPort: stub.port, opsPortValue: `127.0.0.1:${LEGACY_PER_USER_PORT}` });
 
     // No --port: the CLI has to work out which port this directory serves.
     const { stderr, exitCode } = await runCli(["snapshot", "create", "--data-dir", scratch]);
 
-    // It found the stub's port — which it can only have got from the
-    // instance-local file — and then refused to signal it, because the
+    // It found the stub's port — which it can only have got from Harper's
+    // config in that directory — and then refused to signal it, because the
     // flair#910 attribution guard could not tie that listener to this
     // directory (no hdb.pid). Both halves matter: the port is instance-correct
     // AND the guard still fires on it.
@@ -194,62 +229,93 @@ describe("flair#914 — the port lives beside the data directory it describes", 
     expect(stderr).toContain(`port ${stub.port}`);
     expect(stderr).toContain("cannot be attributed");
     expect(stderr).toContain(resolve(scratch));
-    // The per-user file's port never entered the resolution.
     expect(stderr).not.toContain(String(LEGACY_PER_USER_PORT));
 
     expect(await stub.alive()).toBe(true);
     expect(existsSync(join(defaultDataDir, "DEFAULT-INSTANCE-MARKER"))).toBe(true);
   }, 30_000);
 
-  // ─── 2. the migration: default dir, legacy per-user file ────────────────
+  test("reads the port out of Harper's LEGACY config filename too", async () => {
+    // An install predating Harper's harperdb-config.yaml → harper-config.yaml
+    // rename still serves from the old name, and Harper still falls back to it.
+    // Reading only the current name would make a working instance unaddressable.
+    const stub = await spawnHealthStub();
+    const scratch = newScratchDataDir();
+    writeHarperConfig(scratch, { httpPort: stub.port });
+    const dir = resolve(scratch);
+    writeFileSync(join(dir, "harperdb-config.yaml"), readFileSync(join(dir, "harper-config.yaml"), "utf-8"));
+    rmSync(join(dir, "harper-config.yaml"));
 
-  test("a default install with only the legacy per-user config migrates on first use and is unchanged by it", async () => {
+    const { stderr, exitCode } = await runCli(["snapshot", "create", "--data-dir", scratch]);
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain(`port ${stub.port}`);
+    expect(stderr).toContain("cannot be attributed");
+    expect(await stub.alive()).toBe(true);
+  }, 30_000);
+
+  // ─── 2. the default install keeps its per-user file ─────────────────────
+
+  test("a default install with only the per-user config resolves from it, and nothing is written", async () => {
     writeLegacyPerUserConfig();
     const before = perUserConfig();
-    expect(instanceConfig(defaultDataDir)).toBe(""); // nothing there yet
 
     // `doctor` is read-only — it resolves the port, probes it, and starts
-    // nothing. The migration is a side effect of the resolution, which is the
-    // point: an existing install upgrades on first use, whatever that use is.
+    // nothing.
     const { stdout, exitCode } = await runCli(["doctor"]);
 
     // The install still works and still answers on its recorded port.
     expect(stdout).toContain(`(port: ${LEGACY_PER_USER_PORT})`);
     expect(exitCode).not.toBe(0); // no Harper running in the fixture; unrelated to the port
 
-    // Migrated: the port now lives beside the data directory it describes.
-    expect(recordedPort(defaultDataDir)).toBe(LEGACY_PER_USER_PORT);
-    // And nothing else moved. The per-user file is byte-identical — the
-    // migration reads it, it does not rewrite or delete it — and the data
-    // directory's contents are untouched.
+    // Nothing was migrated, copied or invented. The per-user file is
+    // byte-identical (read, never rewritten), no Flair-owned port file appeared
+    // beside the data directory, and Harper's config was not fabricated for it.
     expect(perUserConfig()).toBe(before);
+    expect(flairOwnedPortFiles(defaultDataDir)).toEqual([]);
+    expect(existsSync(join(defaultDataDir, "harper-config.yaml"))).toBe(false);
     expect(existsSync(join(defaultDataDir, "DEFAULT-INSTANCE-MARKER"))).toBe(true);
   }, 30_000);
 
-  test("once migrated, the instance's own file outranks the per-user file", async () => {
+  test("Harper's config outranks the per-user file for the default install", async () => {
     const stub = await spawnHealthStub();
-    writeLegacyPerUserConfig(stub.port);
-
-    // First use migrates stub.port into the data directory.
-    await runCli(["doctor"]);
-    expect(recordedPort(defaultDataDir)).toBe(stub.port);
-
-    // Now the per-user file changes underneath it — which is exactly what a
-    // pre-fix `flair init --data-dir <elsewhere> --port <other>` did to it.
+    // The per-user file says one thing; Harper — the process that actually
+    // bound the socket — says another. Harper wins, because it is the one that
+    // cannot be wrong about which port it is serving.
     writeLegacyPerUserConfig(LEGACY_PER_USER_PORT);
+    writeHarperConfig(defaultDataDir, { httpPort: stub.port });
+    const before = perUserConfig();
 
     const { stdout } = await runCli(["doctor"]);
-    // Resolution still answers with THIS instance's port: doctor reached the
-    // live stub. The per-user file is reported as the file it is, and it now
-    // disagrees — which is precisely why it is no longer the authority.
+
     expect(stdout).toContain(`Harper responding on port ${stub.port}`);
+    // The per-user file is still reported as the file it is, and it now
+    // disagrees — which is precisely why it is no longer the authority.
     expect(stdout).toContain(`(port: ${LEGACY_PER_USER_PORT})`);
+    expect(perUserConfig()).toBe(before);
+    expect(await stub.alive()).toBe(true);
+  }, 30_000);
+
+  test("a Harper config with no http.port falls through to the per-user file for the default install", async () => {
+    // Harper's config exists but has not recorded an HTTP port — the shape a
+    // data directory has between `harper install` and a boot that sets one.
+    // Its mere presence must not be read as an answer.
+    const stub = await spawnHealthStub();
+    writeLegacyPerUserConfig(stub.port);
+    writeFileSync(join(defaultDataDir, "harper-config.yaml"), "some: config\n");
+    const before = perUserConfig();
+
+    const { stdout } = await runCli(["doctor"]);
+
+    expect(stdout).toContain(`Harper responding on port ${stub.port}`);
+    expect(perUserConfig()).toBe(before);
+    expect(readFileSync(join(defaultDataDir, "harper-config.yaml"), "utf-8")).toBe("some: config\n");
     expect(await stub.alive()).toBe(true);
   }, 30_000);
 
   // ─── 3. the case that must NOT silently default ─────────────────────────
 
-  test("a non-default data directory with no instance config is refused, not defaulted", async () => {
+  test("a non-default data directory with no Harper config is refused, not defaulted", async () => {
     // The per-user file points at a live listener. Under the old resolution
     // this command would have found that port and signalled it.
     const stub = await spawnHealthStub();
@@ -263,22 +329,41 @@ describe("flair#914 — the port lives beside the data directory it describes", 
     expect(stderr).toContain("cannot determine which port");
     expect(stderr).toContain(resolve(scratch));
     expect(stderr).toContain("--port");
+    // And names what it looked for, so the operator can see why it failed.
+    expect(stderr).toContain("harper-config.yaml");
     // It did NOT fall back to the per-user file, and it did NOT default.
     expect(stderr).not.toContain(String(stub.port));
-    expect(stderr).not.toContain("19926");
+    expect(stderr).not.toContain(String(DEFAULT_PORT));
 
-    // Nothing was signalled, and nothing was invented on disk: no instance
-    // config conjured for a directory we know nothing about, and no migration
-    // fired for the default install either.
+    // Nothing was signalled, and nothing was invented on disk.
     expect(await stub.alive()).toBe(true);
-    expect(instanceConfig(scratch)).toBe("");
-    expect(instanceConfig(defaultDataDir)).toBe("");
+    expect(flairOwnedPortFiles(scratch)).toEqual([]);
+    expect(existsSync(join(resolve(scratch), "harper-config.yaml"))).toBe(false);
     expect(existsSync(join(defaultDataDir, "DEFAULT-INSTANCE-MARKER"))).toBe(true);
+  }, 30_000);
+
+  test("a non-default directory whose Harper config records no http.port is refused too", async () => {
+    // The presence of Harper's config is not the signal — a resolvable port is.
+    // A directory Harper installed into but never booted has no port to give,
+    // and guessing one is the bug this fixes.
+    const stub = await spawnHealthStub();
+    writeLegacyPerUserConfig(stub.port);
+    const scratch = newScratchDataDir();
+    writeFileSync(join(resolve(scratch), "harper-config.yaml"), "some: config\n");
+
+    const { stderr, exitCode } = await runCli(["snapshot", "create", "--data-dir", scratch]);
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("cannot determine which port");
+    expect(stderr).toContain(resolve(scratch));
+    expect(stderr).not.toContain(String(stub.port));
+    expect(stderr).not.toContain(String(DEFAULT_PORT));
+    expect(await stub.alive()).toBe(true);
   }, 30_000);
 
   // ─── 4. the headline defect: two instances ──────────────────────────────
 
-  test("a second instance's init does not overwrite the first's recorded port", async () => {
+  test("two instances resolve to their own ports, and neither can renumber the other", async () => {
     writeLegacyPerUserConfig();
     const before = perUserConfig();
     // Two live listeners, so the resolution below has something to find and a
@@ -288,21 +373,8 @@ describe("flair#914 — the port lives beside the data directory it describes", 
     expect(stubA.port).not.toBe(stubB.port);
     const instanceA = newScratchDataDir();
     const instanceB = newScratchDataDir();
-
-    // The real init path, twice. --skip-start so no Harper is spawned; the
-    // coordinates it persists are what is under test.
-    const a = await runCli(["init", "--skip-start", "--no-mcp", "--data-dir", instanceA, "--port", String(stubA.port)]);
-    expect(a.exitCode).toBe(0);
-    const b = await runCli(["init", "--skip-start", "--no-mcp", "--data-dir", instanceB, "--port", String(stubB.port)]);
-    expect(b.exitCode).toBe(0);
-
-    // Each instance kept its own port. This is the whole bug: B's init used to
-    // land on the same per-user file A's had written, so A's port was gone.
-    expect(recordedPort(instanceA)).toBe(stubA.port);
-    expect(recordedPort(instanceB)).toBe(stubB.port);
-
-    // And neither of them touched the default install's record.
-    expect(perUserConfig()).toBe(before);
+    writeHarperConfig(instanceA, { httpPort: stubA.port, opsPortValue: `127.0.0.1:${stubA.port - 1}` });
+    writeHarperConfig(instanceB, { httpPort: stubB.port, opsPortValue: `0.0.0.0:${stubB.port - 1}` });
 
     // Resolution agrees, per directory, with no --port and no ambiguity. Each
     // refusal names the port of the instance it was pointed at and nothing
@@ -314,55 +386,45 @@ describe("flair#914 — the port lives beside the data directory it describes", 
     expect(fromB.stderr).toContain(`port ${stubB.port}`);
     expect(fromB.stderr).not.toContain(String(stubA.port));
 
+    // Neither directory's record was disturbed by addressing the other, and the
+    // default install's record was never in the conversation.
+    expect(readFileSync(join(resolve(instanceA), "harper-config.yaml"), "utf-8")).toContain(`port: ${stubA.port}`);
+    expect(readFileSync(join(resolve(instanceB), "harper-config.yaml"), "utf-8")).toContain(`port: ${stubB.port}`);
+    expect(perUserConfig()).toBe(before);
+
     expect(await stubA.alive()).toBe(true);
     expect(await stubB.alive()).toBe(true);
   }, 60_000);
 
-  // ─── 5. the install everybody already has ───────────────────────────────
-
-  test("an existing single-instance install keeps working on its own port, untouched, and upgrades on first use", async () => {
-    // A pre-flair#914 install: Harper already in the default data directory,
-    // port recorded only in the per-user file, and something answering on it.
-    const stub = await spawnHealthStub();
-    writeLegacyPerUserConfig(stub.port);
-    writeFileSync(join(defaultDataDir, "harper-config.yaml"), "some: config\n");
+  test("a non-default init leaves the per-user file alone; a default init writes it", async () => {
+    // This is the flair#914 fix itself, and it now lives entirely in the guard
+    // on the per-user write. `init --data-dir X --port P` used to write
+    // ~/.flair/config.yaml unconditionally, so it renumbered the DEFAULT
+    // install every time somebody created a second instance.
+    writeLegacyPerUserConfig();
     const before = perUserConfig();
+    const instanceA = newScratchDataDir();
 
-    const first = await runCli(["doctor"]);
-    // It found the running instance — on the port this install has always
-    // used, resolved through the migration.
-    expect(first.stdout).toContain(`Harper responding on port ${stub.port}`);
-    expect(recordedPort(defaultDataDir)).toBe(stub.port);
-
-    // Untouched: the per-user file is byte-identical (read, never rewritten),
-    // and nothing in the data directory was disturbed.
+    const a = await runCli(["init", "--skip-start", "--no-mcp", "--data-dir", instanceA, "--port", "20991"]);
+    expect(a.exitCode).toBe(0);
+    // Untouched: still the operator's hand-edited file, still the old port.
     expect(perUserConfig()).toBe(before);
-    expect(existsSync(join(defaultDataDir, "DEFAULT-INSTANCE-MARKER"))).toBe(true);
-    expect(readFileSync(join(defaultDataDir, "harper-config.yaml"), "utf-8")).toBe("some: config\n");
+    expect(perUserConfig()).toContain(`port: ${LEGACY_PER_USER_PORT}`);
+    // And no Flair-owned port file was left beside the new directory either.
+    expect(flairOwnedPortFiles(instanceA)).toEqual([]);
 
-    // Second use goes straight to the instance-local file. Same answer, and
-    // the migration does not run twice or drift.
-    const second = await runCli(["doctor"]);
-    expect(second.stdout).toContain(`Harper responding on port ${stub.port}`);
-    expect(recordedPort(defaultDataDir)).toBe(stub.port);
-    expect(perUserConfig()).toBe(before);
-    expect(await stub.alive()).toBe(true);
-
-    // Re-running init is doctor's standing remedy, so it has to keep working
-    // on this install. It does not assert the port here on purpose: init's
-    // `--port` option carries a commander default of 19926, so init always
-    // states a port and never consults the config rung at all. That is
-    // pre-existing (an install on a custom port is renumbered to 19926 by a
-    // bare `flair init` on unmodified main too) and is reported separately —
-    // it is not this change's to alter.
-    const reinit = await runCli(["init", "--skip-start", "--no-mcp"]);
-    expect(reinit.exitCode).toBe(0);
+    // The default install is the one case where the per-user file IS about this
+    // instance, so init still records it there.
+    const d = await runCli(["init", "--skip-start", "--no-mcp", "--port", "20992"]);
+    expect(d.exitCode).toBe(0);
+    expect(perUserConfig()).toContain("port: 20992");
+    expect(flairOwnedPortFiles(defaultDataDir)).toEqual([]);
     expect(existsSync(join(defaultDataDir, "DEFAULT-INSTANCE-MARKER"))).toBe(true);
   }, 60_000);
 
-  // ─── 6. flair#910's guard, on a port that now comes from the instance ───
+  // ─── 5. flair#910's guard, on a port that now comes from Harper ─────────
 
-  test("the flair#910 attribution guard passes when the instance-local port is the one this instance serves", async () => {
+  test("the flair#910 attribution guard passes when Harper's recorded port is the one this instance serves", async () => {
     // The guard's evidence is independent of the port's source: hdb.pid is
     // written by the running process, the listening PIDs come from lsof. Here
     // they agree, so the stop is attributable and proceeds — which is what
@@ -370,9 +432,9 @@ describe("flair#914 — the port lives beside the data directory it describes", 
     // succeeds.
     const stub = await spawnHealthStub();
     const scratch = newScratchDataDir();
-    writeFileSync(join(scratch, "flair-instance.yaml"), `port: ${stub.port}\n`);
+    writeHarperConfig(scratch, { httpPort: stub.port });
     // The stub IS this instance, as far as the data directory is concerned.
-    writeFileSync(join(scratch, "hdb.pid"), `${stub.pid}\n`);
+    writeFileSync(join(resolve(scratch), "hdb.pid"), `${stub.pid}\n`);
 
     // A deliberately unopenable "snapshot" (a directory — tar's first read is
     // EISDIR). restore stops FIRST, then validates the archive, so this
@@ -395,25 +457,27 @@ describe("flair#914 — the port lives beside the data directory it describes", 
     expect(existsSync(join(defaultDataDir, "DEFAULT-INSTANCE-MARKER"))).toBe(true);
   }, 30_000);
 
-  // ─── 7. a snapshot must not rename the port of the instance it lands in ──
+  // ─── 6. a snapshot must not take the restore near the source instance ────
   //
   // darwin-only, and the reason is the HARNESS, not the behaviour: the code
-  // under test (re-asserting the port after the extract) is platform-
-  // independent, but this is the only test here that has to drive a restore
-  // all the way THROUGH to its restart leg. On darwin that leg is a launchctl
-  // call the recording shim absorbs; everywhere else it spawns a real Harper
-  // and waits a minute for health. Gating beats spawning a database in a unit
-  // test — and the assertion is on a file written before the restart either
-  // way.
+  // under test is platform-independent, but this is the only test here that has
+  // to drive a restore all the way THROUGH to its restart leg. On darwin that
+  // leg is a launchctl call the recording shim absorbs; everywhere else it
+  // spawns a real Harper and waits a minute for health. Gating beats spawning a
+  // database in a unit test.
 
   test.if(process.platform === "darwin")(
-    "restoring a snapshot does not give the target instance the source instance's port",
+    "restoring a snapshot acts on the target instance and never on the source's port",
     async () => {
       // A snapshot is a byte-exact copy of a data directory, so it carries the
-      // SOURCE instance's flair-instance.yaml — including, here, a port that
-      // belongs to a live listener. If the extract's copy were left in place,
-      // the restored directory would claim a port it does not serve, and the
-      // next command to address it would act on somebody else's instance.
+      // SOURCE instance's harper-config.yaml — including, here, a port that
+      // belongs to a live listener. The restore resolves the TARGET's port
+      // BEFORE the extract and hands it to the restart explicitly, so the
+      // source's port never becomes an address this host acts on. (The restart
+      // is what makes the directory self-describing again: Harper rewrites
+      // http.port from that spawn's environment as it boots. Here the launchctl
+      // shim absorbs the restart, so this test pins the half it can observe —
+      // that nothing was aimed at the source.)
       const foreign = await spawnHealthStub();
       const target = await spawnHealthStub();
       expect(foreign.port).not.toBe(target.port);
@@ -422,17 +486,16 @@ describe("flair#914 — the port lives beside the data directory it describes", 
       // a stop/start cycle.
       const sourceDir = mkdtempSync(join(tmpdir(), "flair914-source-"));
       scratchDirs.push(sourceDir);
-      writeFileSync(join(sourceDir, "harper-config.yaml"), "some: config\n");
-      writeFileSync(join(sourceDir, "flair-instance.yaml"), `port: ${foreign.port}\nopsBind: 0.0.0.0\n`);
+      writeHarperConfig(sourceDir, { httpPort: foreign.port, opsPortValue: `0.0.0.0:${foreign.port - 1}` });
       const { path: snapshotPath } = await createDataSnapshot(sourceDir, join(tmpHome, ".flair", "upgrade-snapshots"));
 
-      // The instance being restored into: its own port, its own ops bind, and
-      // a launchd registration so both the stop and the restart are launchctl
-      // calls the recording shim eats. No hdb.pid on purpose — the stop leg
-      // waits for a recorded PID to exit, and the listener this test needs
-      // alive for the restart's health check is that same process.
+      // The instance being restored into: its own port, and a launchd
+      // registration so both the stop and the restart are launchctl calls the
+      // recording shim eats. No hdb.pid on purpose — the stop leg waits for a
+      // recorded PID to exit, and the listener this test needs alive for the
+      // restart's health check is that same process.
       const dest = newScratchDataDir();
-      writeFileSync(join(dest, "flair-instance.yaml"), `port: ${target.port}\nopsBind: 127.0.0.1\n`);
+      writeHarperConfig(dest, { httpPort: target.port, opsPortValue: `127.0.0.1:${target.port - 1}` });
       const destLabel = launchdLabel(dest);
       writeFileSync(
         launchdPlistPath(destLabel, join(tmpHome, "Library", "LaunchAgents")),
@@ -443,13 +506,17 @@ describe("flair#914 — the port lives beside the data directory it describes", 
       const { exitCode } = await runCli(["snapshot", "restore", snapshotPath, "--data-dir", dest, "--yes"]);
       expect(exitCode).toBe(0);
 
-      // The data arrived; the identity did not.
-      expect(existsSync(join(dest, "harper-config.yaml"))).toBe(true);
-      expect(recordedPort(dest)).toBe(target.port);
-      expect(instanceConfig(dest)).not.toContain(String(foreign.port));
-      expect(instanceConfig(dest)).toContain("opsBind: 127.0.0.1");
-      // Nothing went near the instance the snapshot came from.
+      // The data arrived.
+      expect(existsSync(join(resolve(dest), "harper-config.yaml"))).toBe(true);
+      // Every lifecycle call this restore made was aimed at THIS instance's
+      // launchd label — the stop and the restart both. The source instance was
+      // never addressed, and it is still serving.
+      const calls = existsSync(launchctlLog) ? readFileSync(launchctlLog, "utf-8") : "";
+      expect(calls).toContain(destLabel);
+      expect(calls).not.toContain(launchdLabel(sourceDir));
       expect(await foreign.alive()).toBe(true);
+      // And no Flair-owned port file was resurrected beside the restored data.
+      expect(flairOwnedPortFiles(dest)).toEqual([]);
     },
     60_000,
   );

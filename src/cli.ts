@@ -457,7 +457,7 @@ function readPortFromConfig(): number | null {
   return null;
 }
 
-// ─── instance-local config (flair#914) ───────────────────────────────────────
+// ─── Harper's own config: where an instance's port actually lives (flair#914) ─
 //
 // `~/.flair/config.yaml` records ONE port for the whole user. `flair init
 // --data-dir X --port P` wrote it unconditionally, so a second instance
@@ -469,86 +469,99 @@ function readPortFromConfig(): number | null {
 // INSTANCE from the wrong directory; this one resolved the PORT from a file
 // that has no notion of instances. The fix is the same shape flair#910
 // established — the data directory IS the instance identity, and everything
-// else derives from it. The port now lives beside the data directory it
-// describes, so it is self-describing: copy or move a data directory and its
-// port travels with it.
+// else derives from it.
 //
-// The alternative considered and rejected was a per-user registry keyed by data
-// dir. It is a second source of truth that has to be kept in step with the
-// filesystem — a moved directory leaves a stale entry, a copied one arrives
-// with none — whereas an instance-local file cannot drift from the thing it
-// describes because it IS part of it.
+// The port is read from HARPER'S config, not a Flair-owned file beside it.
+// Harper writes `<dataDir>/harper-config.yaml` at install (configUtils'
+// `createConfigFile`) and rewrites it from its environment on EVERY boot, so it
+// records `rootPath`, `http.port` and `operationsApi.network.port` for the
+// instance served from this directory — written by the process that actually
+// binds the sockets. That is what makes it authoritative.
+//
+// A Flair-owned file recording the same three facts (the `flair-instance.yaml`
+// this replaces) was a fourth artefact duplicating the first, with nothing to
+// reconcile the two. It does not stay true: boot an existing data directory on
+// a different port and Harper updates its own config while the Flair copy keeps
+// the old number — a silent wrong answer that looks authoritative. Measured, not
+// theorised.
+//
+// The layering this restores: Harper core owns the data root and the ports, the
+// Flair component owns memory semantics, local wrappers own convenience.
+//
+// Everything here is a PLAIN FILE READ. Resolution must work while the instance
+// is DOWN — locating a stopped instance is most of what `flair start`, `stop`
+// and `doctor` are for — so it must never require the process it is trying to
+// find.
 //
 // Enumeration (`flair instances`) is deliberately NOT accommodated here. If it
 // ever lands it is a DERIVED registry written by a scan, never by `init`, so
 // that it can be stale without being wrong.
 
-/** The instance-local config file for `dataDir` — the port's home (flair#914). */
-function instanceConfigPath(dataDir: string): string {
-  return join(resolve(dataDir), "flair-instance.yaml");
-}
-
 /**
- * The keys the instance-local config holds. A closed union, not a string:
- * these names are interpolated into a RegExp below, and a type that cannot
- * carry anything else is a cheaper guarantee than a comment asking the next
- * reader to check every call site.
+ * Harper's config filenames, in Harper's own resolution order — current name
+ * first, pre-rename legacy name second (harper `bin/run.js` and
+ * `config/configUtils.js` both fall back this way, and `docs/rem.md` documents
+ * the pair). An install predating the rename still serves from the legacy name,
+ * so reading only the current one would make a working instance unaddressable.
  */
-type InstanceConfigKey = "port" | "opsPort" | "opsBind";
+const HARPER_CONFIG_FILENAMES = ["harper-config.yaml", "harperdb-config.yaml"] as const;
 
-/** Read a numeric key out of the instance-local config for `dataDir`. */
-function readInstanceConfigNumber(dataDir: string, key: InstanceConfigKey): number | null {
-  try {
-    const p = instanceConfigPath(dataDir);
-    if (existsSync(p)) {
-      const yaml = readFileSync(p, "utf-8");
-      const m = yaml.match(new RegExp(`^\\s*${key}:\\s*(\\d+)`, "m"));
-      if (m) return Number(m[1]);
-    }
-  } catch { /* ignore */ }
-  return null;
-}
-
-/** Read a string key out of the instance-local config for `dataDir`. */
-function readInstanceConfigString(dataDir: string, key: InstanceConfigKey): string | null {
-  try {
-    const p = instanceConfigPath(dataDir);
-    if (existsSync(p)) {
-      const yaml = readFileSync(p, "utf-8");
-      const m = yaml.match(new RegExp(`^\\s*${key}:\\s*["']?([^"'\\s#]+)["']?`, "m"));
-      if (m && m[1]) return m[1];
-    }
-  } catch { /* ignore */ }
-  return null;
-}
-
-/** This instance's HTTP port, from the file that sits inside it. */
-function readPortFromInstanceConfig(dataDir: string): number | null {
-  return readInstanceConfigNumber(dataDir, "port");
-}
-
-/**
- * Write `<dataDir>/flair-instance.yaml`.
- *
- * Rewrites wholesale like `writeConfig` does, so callers that know only the
- * port pass `undefined` for the rest and the persisted values are preserved
- * rather than erased — otherwise `flair doctor --fix` correcting a drifted HTTP
- * port would silently drop the operator's `--ops-bind` choice.
- */
-function writeInstanceConfig(dataDir: string, port: number, opsPort?: number, opsBind?: string): void {
+/** Harper's config file for `dataDir`, or null when Harper has written none there yet. */
+function harperConfigPath(dataDir: string): string | null {
   const dir = resolve(dataDir);
-  const resolvedOpsPort = opsPort ?? readInstanceConfigNumber(dir, "opsPort") ?? undefined;
-  const resolvedOpsBind = opsBind ?? readInstanceConfigString(dir, "opsBind") ?? undefined;
-  mkdirSync(dir, { recursive: true });
-  let body =
-    "# Flair instance configuration (flair#914).\n"
-    + "# These are the coordinates of the instance served from THIS directory.\n"
-    + "# ~/.flair/config.yaml describes the default install only; it cannot tell\n"
-    + "# two instances apart, which is why the port lives here.\n"
-    + `port: ${port}\n`;
-  if (resolvedOpsPort !== undefined && resolvedOpsPort !== null) body += `opsPort: ${resolvedOpsPort}\n`;
-  if (resolvedOpsBind) body += `opsBind: ${resolvedOpsBind}\n`;
-  writeFileSync(instanceConfigPath(dir), body);
+  for (const name of HARPER_CONFIG_FILENAMES) {
+    const p = join(dir, name);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/**
+ * Parse Harper's config for `dataDir`. Returns null when absent or unreadable —
+ * a malformed config is Harper's problem to report, and resolution falling back
+ * to its next rung beats a crash in an unrelated command.
+ *
+ * Parsed as YAML, never regex-matched. The values wanted here are NESTED
+ * (`http.port`, `operationsApi.network.port`), so line-anchored matching on a
+ * bare key name would find `port:` under whichever block came first — wrong
+ * answer, not just an ugly one. It is also how the predecessor earned a
+ * blocking `detect-non-literal-regexp` SAST finding for building a RegExp from
+ * a key name.
+ */
+function readHarperConfig(dataDir: string): Record<string, any> | null {
+  try {
+    const p = harperConfigPath(dataDir);
+    if (!p) return null;
+    const parsed = parseYaml(readFileSync(p, "utf-8"));
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, any>) : null;
+  } catch { /* ignore — see doc comment */ }
+  return null;
+}
+
+/**
+ * A Harper port config value as a number.
+ *
+ * Harper accepts both a bare port (`9926`, all interfaces) and the
+ * host-qualified `host:port` form flair writes for the ops API (`127.0.0.1:9925`
+ * — see `opsNetworkPortValue`). Both name the same port; only the bind differs,
+ * and `detectOpsApiAllInterfacesBind` is what reads the host half. Splits on the
+ * LAST colon so an IPv6 literal (`[::1]:9925`) keeps its port.
+ */
+export function harperPortValue(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "number") return Number.isInteger(value) && value > 0 ? value : null;
+  const str = String(value).trim();
+  if (str === "") return null;
+  const lastColon = str.lastIndexOf(":");
+  const portPart = lastColon > 0 ? str.slice(lastColon + 1) : str;
+  if (!/^\d+$/.test(portPart)) return null;
+  const n = Number(portPart);
+  return n > 0 ? n : null;
+}
+
+/** This instance's HTTP port, from Harper's own config in its data directory. */
+function readPortFromHarperConfig(dataDir: string): number | null {
+  return harperPortValue(readHarperConfig(dataDir)?.http?.port);
 }
 
 /** Which instance a command is addressing: `--data-dir` if given, else the default install. */
@@ -593,8 +606,9 @@ function readOpsPortFromConfig(path: string = configPath()): number | null {
 }
 
 /**
- * Unified port resolution: `--port` flag > `FLAIR_URL` env > the instance's own
- * config > (default install only) the per-user config > default.
+ * Unified port resolution: `--port` flag > `FLAIR_URL` env > Harper's own config
+ * in the instance's data directory > (default install only) the per-user config
+ * > default.
  *
  * Every command that talks to Harper MUST use this helper.
  *
@@ -605,8 +619,8 @@ function readOpsPortFromConfig(path: string = configPath()): number | null {
  * `mode` distinguishes ADDRESSING an instance that is expected to exist from
  * CREATING one:
  *
- *   - `"address"` (default) — a non-default data directory with no
- *     instance-local config is a hard error. That case is precisely the bug
+ *   - `"address"` (default) — a non-default data directory Harper has never
+ *     written a config into is a hard error. That case is precisely the bug
  *     this fixes: falling back to the per-user file would answer with some
  *     OTHER instance's port, which is a silent wrong answer wearing a
  *     migration. The default install keeps today's behaviour exactly.
@@ -618,18 +632,17 @@ function readOpsPortFromConfig(path: string = configPath()): number | null {
  * Note that `init`'s own `--port` option carries a commander default of
  * DEFAULT_PORT, so in practice `opts.port` is always set there and this
  * function returns on the first rung — including when re-initialising an
- * instance that already records a different port, which is silently renumbered
+ * instance that already serves a different port, which is silently renumbered
  * to DEFAULT_PORT. That is pre-existing (it is equally true of the default
  * install on a custom port, where re-running init is `flair doctor`'s standing
  * remedy) and is tracked separately; the "create" rung is what this function
  * would answer if that default were removed, and is what keeps the mode
  * distinction honest rather than hypothetical.
  *
- * The migration is one-way and one-time: the default install's port is copied
- * out of `~/.flair/config.yaml` into the instance-local file on first use, and
- * every read after that is answered by the instance. Nothing is copied for a
- * non-default directory, because there is nothing that can be known to be
- * about it.
+ * Nothing is copied, migrated or written here. Harper's config already IS the
+ * per-instance record, so there is no second file to keep in step — which is
+ * the whole reason the port is read from it. The per-user file stays exactly as
+ * it is for the default install that has always relied on it.
  */
 function resolveHttpPort(opts: { port?: string | number; dataDir?: string }, mode: "address" | "create" = "address"): number {
   if (opts.port !== undefined && opts.port !== null) {
@@ -644,46 +657,29 @@ function resolveHttpPort(opts: { port?: string | number; dataDir?: string }, mod
 
   const dataDir = instanceDataDir(opts);
 
-  // 1. The instance's own record. Once this exists it is the only answer.
-  const instancePort = readPortFromInstanceConfig(dataDir);
-  if (instancePort !== null) return instancePort;
+  // 1. Harper's own config for this instance. Once Harper has written one it is
+  //    the only answer — it is maintained by the process that binds the socket.
+  const harperPort = readPortFromHarperConfig(dataDir);
+  if (harperPort !== null) return harperPort;
 
-  // 2. No instance-local record. For the DEFAULT install the per-user file is
-  //    about this instance by definition — a single-instance install is the
-  //    overwhelmingly common case and its recorded port is correct — so read
-  //    it and write the instance-local file as we go, so the next call is
-  //    answered by the instance itself.
+  // 2. Harper has written nothing here. For the DEFAULT install the per-user
+  //    file is about this instance by definition — a single-instance install is
+  //    the overwhelmingly common case and its recorded port is correct — so it
+  //    stays the answer for existing installs. Read, never rewritten.
   if (isDefaultDataDir(dataDir)) {
-    const legacyPort = readPortFromConfig();
-    if (legacyPort === null) return DEFAULT_PORT; // clean install, nothing to migrate
-    // Best-effort: a read-only or absent data directory must not turn port
-    // resolution into a failure. Only ever writes into a directory that
-    // already exists — resolving a port is not a reason to create one. The
-    // ops coordinates come along so the instance's record is the whole record
-    // and not a port with two gaps beside it; nothing reads them from here
-    // yet, and the per-user file is left exactly as it was.
-    try {
-      if (existsSync(dataDir)) {
-        writeInstanceConfig(
-          dataDir,
-          legacyPort,
-          readOpsPortFromConfig() ?? undefined,
-          readOpsBindFromConfig() ?? undefined,
-        );
-      }
-    } catch { /* migration is an optimisation, not a precondition */ }
-    return legacyPort;
+    return readPortFromConfig() ?? DEFAULT_PORT;
   }
 
-  // 3. A non-default directory with no record of its own. `init` may go on to
-  //    create one; nothing else may guess.
+  // 3. A non-default directory Harper has never written to. `init` may go on to
+  //    create the instance; nothing else may guess.
   if (mode === "create") return DEFAULT_PORT;
 
   throw new Error(
-    `cannot determine which port ${dataDir} serves: it has no ${instanceConfigPath(dataDir)}. `
+    `cannot determine which port ${dataDir} serves: Harper has written no config there `
+      + `(no ${HARPER_CONFIG_FILENAMES.join(" or ")}), so that directory does not hold an instance yet. `
       + `Falling back to ~/.flair/config.yaml would answer with the port of a DIFFERENT instance — that file records one port `
       + `for the whole user, not one per data directory. `
-      + `Pass --port <port> to say which port that instance serves, or run 'flair init --data-dir ${dataDir} --port <port>' to record it.`,
+      + `Pass --port <port> to say which port that instance serves, or run 'flair init --data-dir ${dataDir} --port <port>' to create it.`,
   );
 }
 
@@ -711,6 +707,15 @@ function resolveAgentIdOrEnv(opts: { agent?: string }): string | null {
 }
 
 // Ops port resolution: --ops-port flag > FLAIR_OPS_PORT env > config opsPort > httpPort - 1
+//
+// Deliberately NOT routed through Harper's per-instance config the way
+// resolveHttpPort is (flair#914). The last rung couples the ops port to the HTTP
+// port the CALLER named, and that coupling is what makes `flair init --port N`
+// land its ops API at N-1 on a host that already runs an instance. A Harper rung
+// above it would answer that call with the EXISTING instance's ops port instead,
+// which is the bug flair#914 fixed pointing the other way. The ops port becomes
+// per-instance when the lifecycle commands grow `--data-dir` and there is a
+// named instance to attribute it to.
 function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }): number {
   if (opts.opsPort !== undefined && opts.opsPort !== null) {
     const n = Number(opts.opsPort);
@@ -1266,22 +1271,30 @@ function writeConfig(port: number, opsPort?: number, opsBind?: string, path: str
 /**
  * Persist the coordinates of the instance served from `dataDir` (flair#914).
  *
- * The instance-local file is the record: it is written for EVERY instance, and
- * it is what `resolveHttpPort` reads. `~/.flair/config.yaml` is written too,
- * but only when `dataDir` is the default install — and that restriction is the
- * whole of the fix. `init` used to write the per-user file unconditionally, so
- * `flair init --data-dir X --port P` overwrote whatever port the DEFAULT
- * install had recorded, and every later lookup answered with P.
+ * Harper records its OWN coordinates — `rootPath`, `http.port`,
+ * `operationsApi.network.port` — into `<dataDir>/harper-config.yaml` on every
+ * boot, and that is what `resolveHttpPort` reads. So there is nothing
+ * instance-local for flair to write: the instance already describes itself, and
+ * a second copy is a drift source, not a record (flair#937).
  *
- * The per-user write is a mirror, not a second authority: same call, same
- * value, so the two cannot disagree. It keeps the readers that have no
- * `--data-dir` of their own (`readPortFromConfig` — `flair uninstall`, the
- * `rem` scheduler, `api()`, doctor's config line) correct for the one instance
- * they are able to address. Those move to the instance-local file when the
- * lifecycle commands grow the flag, and this mirror goes with them.
+ * What remains is the per-user file, and the GUARD on it is the whole of the
+ * flair#914 fix. `init` used to write `~/.flair/config.yaml` unconditionally, so
+ * `flair init --data-dir X --port P` overwrote whatever port the DEFAULT install
+ * had recorded, and every later lookup answered with P. Writing it only for the
+ * default install is what makes one instance's `init` unable to renumber
+ * another's.
+ *
+ * The guard lives HERE rather than at the call sites: a caller that forgets it
+ * reintroduces flair#914 silently, and there is no test that would notice at the
+ * call site it was forgotten in.
+ *
+ * It keeps the readers that have no `--data-dir` of their own
+ * (`readPortFromConfig` — `flair uninstall`, the `rem` scheduler, `api()`,
+ * doctor's config line) correct for the one instance they are able to address.
+ * Those read Harper's config directly when the lifecycle commands grow the flag,
+ * and this file goes with them.
  */
-function writeInstanceCoordinates(dataDir: string, port: number, opsPort?: number, opsBind?: string): void {
-  writeInstanceConfig(dataDir, port, opsPort, opsBind);
+function persistDefaultInstallCoordinates(dataDir: string, port: number, opsPort?: number, opsBind?: string): void {
   if (isDefaultDataDir(dataDir)) writeConfig(port, opsPort, opsBind);
 }
 
@@ -3153,11 +3166,14 @@ program
         mkdirSync(dataDir, { recursive: true });
 
         // Detect whether Harper has already been installed in this data dir.
-        // harper-config.yaml is created during install — its presence means
+        // Harper's config is created during install — its presence means
         // install already ran. Re-running install against an existing data dir
         // crashes in Harper v5 beta.6+ (checkForExistingInstall queries the
-        // database before the env is initialized).
-        const alreadyInstalled = existsSync(join(dataDir, "harper-config.yaml"));
+        // database before the env is initialized). Goes through
+        // harperConfigPath so an install predating Harper's config-file rename
+        // (harperdb-config.yaml) is still recognised as installed rather than
+        // re-installed over.
+        const alreadyInstalled = harperConfigPath(dataDir) !== null;
 
         const opsSocket = join(dataDir, "operations-server");
         // authorizeLocal: false (flair#654) — a credential-less loopback ops-API
@@ -3327,11 +3343,12 @@ program
     // survives an `--ops-bind` choice past the next restart. It also runs on
     // the already-running path (where init skips the spawn entirely), which is
     // what makes doctor's `flair init && flair restart` remedy actually apply.
-    // flair#914: written into the data directory this init is about, so a
-    // second instance can no longer overwrite the first's recorded port. The
-    // per-user file is still written for the default install (see
-    // writeInstanceCoordinates).
-    writeInstanceCoordinates(dataDir, httpPort, opsPort, opsBindHost);
+    // flair#914: written ONLY when this init is about the default install, so a
+    // second instance can no longer overwrite the first's recorded port. This
+    // instance's own port needs no write here — Harper has just recorded it in
+    // <dataDir>/harper-config.yaml, which is what resolveHttpPort reads (see
+    // persistDefaultInstallCoordinates).
+    persistDefaultInstallCoordinates(dataDir, httpPort, opsPort, opsBindHost);
 
     if (agentId) {
       // Generate or reuse keypair
@@ -9785,12 +9802,6 @@ snapshotCmd
       process.exit(1);
     }
 
-    // This instance's own ops coordinates, read before the directory is
-    // destroyed so they can be re-asserted after the extract writes the
-    // SOURCE instance's over them (flair#914 — see below).
-    const priorOpsPort = readInstanceConfigNumber(dataDir, "opsPort") ?? undefined;
-    const priorOpsBind = readInstanceConfigString(dataDir, "opsBind") ?? undefined;
-
     try {
       rmSync(dataDir, { recursive: true, force: true });
       mkdirSync(dataDir, { recursive: true, mode: 0o700 });
@@ -9808,23 +9819,20 @@ snapshotCmd
     }
 
     // flair#914: a snapshot is a byte-exact copy of a data directory, so it
-    // carries the SOURCE instance's flair-instance.yaml — and the extract just
-    // wrote it over this instance's. Re-assert the port this command resolved
-    // and is about to start on, or the directory would describe one port while
-    // the process serving it listens on another, and the next command to
-    // address this directory would act on the source instance's port instead.
+    // carries the SOURCE instance's harper-config.yaml, and the extract just
+    // wrote it over this instance's. Between here and the boot below, that file
+    // names the SOURCE's port — but nothing re-resolves in that window: `port`
+    // was resolved before the extract and is handed to startFlairProcess
+    // explicitly, and Harper rewrites http.port / operationsApi.network.port
+    // from that spawn's environment as it boots. So the directory is
+    // self-describing again the moment it is serving, without flair writing into
+    // Harper's config to make it so.
     //
     // The port is a property of the instance, not of the data it serves. That
     // is also what keeps a snapshot from somewhere else out of the business of
     // naming ports on this host: restoring one to look at it cannot hand the
-    // restored directory a port it did not have.
-    try {
-      writeInstanceConfig(dataDir, port, priorOpsPort, priorOpsBind);
-    } catch (err: any) {
-      console.error(`⚠️  restored, but could not record the port for ${dataDir}: ${err?.message ?? err}`);
-      console.error(`   Pass --port ${port} to commands addressing this instance, or run 'flair init --data-dir ${dataDir} --port ${port}'.`);
-    }
-
+    // restored directory a port it did not have — the boot immediately below is
+    // what settles the question, on this host's terms.
     try {
       await startFlairProcess(port, dataDir);
     } catch (err: any) {
@@ -11781,7 +11789,7 @@ program
               // dataDir0 is defaultDataDir() — `flair doctor` has no
               // --data-dir, so the default install is what it means, and
               // saying so keeps that true when it grows one (flair#914).
-              writeInstanceCoordinates(dataDir0, discoveredPort);
+              persistDefaultInstallCoordinates(dataDir0, discoveredPort);
               console.log(`     ${render.icons.ok} Updated config to port ${discoveredPort}`);
               fixed++;
             }
@@ -11921,9 +11929,8 @@ program
     // (see its doc comment) now reuses the existing password instead, so this
     // remedy is safe to follow on a working install.
     try {
-      const harperConfigPath = join(defaultDataDir(), "harper-config.yaml");
-      if (existsSync(harperConfigPath)) {
-        const harperConfig: any = parseYaml(readFileSync(harperConfigPath, "utf-8")) || {};
+      const harperConfig = readHarperConfig(defaultDataDir());
+      if (harperConfig) {
         const opsPortValue = harperConfig?.operationsApi?.network?.port;
         const bind = detectOpsApiAllInterfacesBind(opsPortValue);
         if (bind.allInterfaces) {
@@ -16369,11 +16376,11 @@ export {
   resolveOpsPort,
   resolveOpsBindHost,
 
-  // instance-local config (flair#914)
-  instanceConfigPath,
-  readPortFromInstanceConfig,
-  writeInstanceConfig,
-  writeInstanceCoordinates,
+  // Harper's own config — the per-instance port record (flair#914)
+  harperConfigPath,
+  readHarperConfig,
+  readPortFromHarperConfig,
+  persistDefaultInstallCoordinates,
 
   resolveTarget,
   resolveOpsTarget,
