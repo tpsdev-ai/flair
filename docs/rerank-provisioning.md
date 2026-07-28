@@ -56,8 +56,36 @@ huggingface-cli download gpustack/jina-reranker-v2-base-multilingual-GGUF \
   jina-reranker-v2-base.Q8_0.gguf --local-dir models/
 ```
 
-If the GGUF is missing, the provider logs one warning and recall falls back to
-vector order — it never blocks or breaks search.
+An unrecognised `FLAIR_RERANK_MODEL` is **rejected**, not quietly replaced with
+the default — a typo used to serve `jina-reranker-v2` while every status
+surface agreed with the swap, leaving the operator's actual request with no
+trace anywhere.
+
+## When the reranker can't serve
+
+If the GGUF is missing (or the engine can't load it), recall **degrades to
+vector order rather than failing** — an unranked search still answers the
+question, and turning a provisioning mistake into a total recall outage would
+be worse. It never blocks or breaks search.
+
+It is not, however, silent. Every fall-back is:
+
+- **classified** — `unavailable` / `timeout` / `error`, surfaced as
+  `lastFallbackReason`, `lastFallbackDetail` and `lastFallbackAt` in
+  `/HealthDetail`'s `rerank` block next to the counters;
+- **logged** once per *distinct* reason (not once per process, ever), with
+  `unavailable` at ERROR level since it needs a human;
+- **warned about by `/HealthDetail`**, including — as of flair#888 — the case
+  where `rerankCount` is 0 and `fallbackCount` is climbing. That combination
+  is the total-failure state, and it used to be the *one* state that produced
+  no warning at all.
+
+Callers that must not proceed on a degraded reranker call
+`assertRerankAvailable()`, which throws the same diagnosis instead of
+degrading. The recall harness's `--rerank` arm uses it: a benchmark that
+measures a different configuration than the one it reports is worse than no
+benchmark, so it refuses to measure unless the reranker provably engaged.
+Production recall deliberately does not use it.
 
 ## Config
 
@@ -92,9 +120,11 @@ The Qwen3 generative path scores `P(yes)/(P(yes)+P(no))` via node-llama-cpp's
 plain Node worker thread, but **inside Harper's resource runtime — where HFE's
 embedding engine has already initialized a separate native llama backend —
 `controlledEvaluate` returns an empty result (no decoded logits).** The provider
-detects this (`out.length === 0`), throws, and **fails open to vector order** (it
+detects this (`out.length === 0`), throws, and **degrades to vector order** (it
 never writes corrupt scores). Net effect today: with `FLAIR_RERANK_MODEL=qwen3-...`
-the rerank stage cleanly no-ops inside Harper.
+the rerank stage no-ops inside Harper — visibly, per "When the reranker can't
+serve" above, and the recall harness refuses to measure that arm at all rather
+than reporting a non-reranked run as a reranked one.
 
 flair#811 (the live-corpus Phase-1 gate) found the qwen3 path erroring on every
 call in production and root-caused two compounding issues, fixed in that PR:

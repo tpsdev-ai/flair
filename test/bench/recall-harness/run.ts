@@ -66,6 +66,8 @@ import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../../helpers/harper-lifecycle";
+import { KNOWN_RERANK_MODELS, isKnownRerankModel, rerankModelFile } from "../../../resources/rerank-provider";
+import { classifyDelta } from "./verdict";
 import * as CorpusV1 from "./corpus";
 import * as CorpusV2 from "./corpus-v2";
 import type { QueryKind, CorpusRecord } from "./corpus";
@@ -88,6 +90,53 @@ function assertBuilt(): void {
   }
 }
 
+// flair#888: refuse to START a --rerank sweep whose reranker demonstrably
+// cannot load. A benchmark that measures a different configuration than the
+// one it reports is worse than no benchmark, and the cheapest, earliest,
+// least ambiguous form of that check is "is the GGUF the spawned Harper will
+// look for actually on disk" — answerable in microseconds, BEFORE spawning
+// anything, seeding 251 records, or spending ten minutes measuring.
+//
+// The path is derived the way the CHILD will derive it, not the way this
+// process would: test/helpers/harper-lifecycle.ts hands every spawned Harper
+// `FLAIR_MODELS_DIR: parentEnv.FLAIR_MODELS_DIR ?? join(process.cwd(),
+// "models")`, and resources/models-dir.ts's FLAIR_MODELS_DIR branch wins over
+// everything else — so that expression IS the child's models dir. Reproducing
+// it here (rather than calling resolveModelsDir() in this process, whose
+// ROOTPATH/cwd fallbacks differ) is what makes this check honest.
+//
+// assertRerankEngaged() below is still the real gate — this one only catches
+// the common case fast and with a better message. A GGUF that exists but
+// won't serve (wrong architecture, no platform addon, the in-Harper empty-
+// logits failure the generative path hits) gets caught there instead.
+function preflightRerank(): void {
+  // The rerank arm is only ever built alongside hybrid=true + prefixes=on (see
+  // the config list in main()). Asking for --rerank with a filter that
+  // excludes that combination used to print "rerank=on" in the config banner
+  // and then quietly measure nothing — a smaller cousin of the same lie.
+  if (!hybridValues.includes(true) || !prefixValues.includes(true)) {
+    console.error(`FATAL: --rerank needs the hybrid=true, prefixes=on arm, but this invocation requested --hybrid ${HYBRID_ARG} --prefixes ${PREFIXES_ARG}.`);
+    console.error(`The rerank config is only ever spawned alongside that (production-default) combination — re-run with --hybrid on|both --prefixes on|both.`);
+    process.exit(2);
+  }
+  if (!isKnownRerankModel(RERANK_MODEL)) {
+    console.error(`FATAL: --rerank requested with FLAIR_RERANK_MODEL="${RERANK_MODEL}", which is not a known reranker model.`);
+    console.error(`Known models: ${KNOWN_RERANK_MODELS.join(", ")}. Unset FLAIR_RERANK_MODEL to use the harness default (jina-reranker-v2).`);
+    process.exit(2);
+  }
+  const modelsDir = process.env.FLAIR_MODELS_DIR ?? path.join(process.cwd(), "models");
+  const gguf = path.join(modelsDir, rerankModelFile(RERANK_MODEL)!);
+  if (!existsSync(gguf)) {
+    console.error(`FATAL: --rerank requested but the reranker GGUF is missing: ${gguf}`);
+    console.error(`Model "${RERANK_MODEL}" needs that file in the models dir every spawned Harper will use`);
+    console.error(`(FLAIR_MODELS_DIR if set, else <repo>/models — see test/helpers/harper-lifecycle.ts).`);
+    console.error(`Provision it per docs/rerank-provisioning.md, or set FLAIR_MODELS_DIR to an existing Flair install's models/ dir.`);
+    console.error(`REFUSING TO MEASURE: without it the reranker falls open and this run would report a NON-reranked config as "rerank" (flair#888).`);
+    process.exit(2);
+  }
+  console.log(`[preflight] rerank model "${RERANK_MODEL}" GGUF present: ${gguf}`);
+}
+
 // ─── CLI args ────────────────────────────────────────────────────────────────
 function argVal(flag: string, dflt: string): string {
   const i = process.argv.indexOf(flag);
@@ -96,6 +145,13 @@ function argVal(flag: string, dflt: string): string {
 const RUNS = Math.max(1, parseInt(argVal("--runs", "3"), 10) || 3);
 const HYBRID_ARG = argVal("--hybrid", "both"); // "both" | "on" | "off"
 const WITH_RERANK = process.argv.includes("--rerank");
+// The reranker model the --rerank arm measures. Pinned to the rank-pooling
+// cross-encoder that actually serves inside Harper's runtime (the generative
+// qwen3 path reliably fails open in-Harper — see
+// resources/rerank-provider.ts's file header) unless the caller overrides it.
+// Resolved HERE, not lazily inside runOnce(), because preflightRerank() below
+// has to know which GGUF to look for BEFORE anything is measured.
+const RERANK_MODEL = process.env.FLAIR_RERANK_MODEL?.trim() || "jina-reranker-v2";
 const VERBOSE = process.argv.includes("--verbose");
 const KEEP_ON_FAIL = process.argv.includes("--keep-on-fail");
 // flair#683: run ONLY the usage-injection rematch (see "USAGE-FEEDBACK
@@ -265,7 +321,14 @@ async function waitSearchable(harper: HarperInstance, agent: TestAgent, timeoutM
 // ─── Measurement ─────────────────────────────────────────────────────────────
 interface QueryRow { q: string; kind: QueryKind; cluster: string; expectMarker: string; rank: number /* 0-based, -1 = not found */ }
 interface KindStats { p3: number; mrr: number; n: number }
-interface ScoringResult { scoring: "raw" | "composite"; p3: number; mrr: number; n: number; byKind: Record<QueryKind, KindStats>; byCluster: Record<string, KindStats>; rows: QueryRow[] }
+/** Per-query wall-clock for the /SemanticSearch round trip (flair#888: the
+ * rerank decision is benefit-per-COST, and the harness had no cost number at
+ * all). Mean is what the report compares; p50 is carried alongside because a
+ * budget-capped stage (FLAIR_RERANK_BUDGET_MS) makes the mean tail-sensitive
+ * in a way the median isn't, and a gap between them is itself the signal that
+ * some queries are hitting the cap. */
+interface LatencyStats { mean: number; p50: number; n: number }
+interface ScoringResult { scoring: "raw" | "composite"; p3: number; mrr: number; n: number; byKind: Record<QueryKind, KindStats>; byCluster: Record<string, KindStats>; rows: QueryRow[]; latency: LatencyStats }
 
 function statsFor(rows: QueryRow[]): { p3: number; mrr: number; n: number } {
   if (!rows.length) return { p3: 0, mrr: 0, n: 0 };
@@ -274,11 +337,30 @@ function statsFor(rows: QueryRow[]): { p3: number; mrr: number; n: number } {
   return { p3: hits3 / rows.length, mrr: rr / rows.length, n: rows.length };
 }
 
+function latencyStats(samples: number[]): LatencyStats {
+  if (!samples.length) return { mean: 0, p50: 0, n: 0 };
+  const sorted = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return {
+    mean: samples.reduce((s, x) => s + x, 0) / samples.length,
+    p50: sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2,
+    n: samples.length,
+  };
+}
+
 async function runQueries(harper: HarperInstance, agent: TestAgent, scoring: "raw" | "composite"): Promise<ScoringResult> {
   const rows: QueryRow[] = [];
+  // flair#888: wall-clock every search so the report can state the COST of a
+  // config, not just its benefit. Queries run strictly sequentially here, so
+  // each sample is a clean round trip with no queueing behind a sibling
+  // request — which matters specifically for rerank, whose engine access is
+  // serialized in-process (see rerank-provider's runExclusive).
+  const latencies: number[] = [];
   for (const { q, expectMarker, kind } of QUERIES) {
     const expectId = idFor(expectMarker);
+    const t0 = performance.now();
     const res = await signedFetch(harper, agent, "POST", "/SemanticSearch", { agentId: agent.id, q, limit: SEARCH_LIMIT, scoring });
+    latencies.push(performance.now() - t0);
     if (!res.ok) throw new Error(`search failed (scoring=${scoring}) for "${q}": HTTP ${res.status} ${JSON.stringify(res.body).slice(0, 200)}`);
     const ids: string[] = (res.body.results || []).map((r: any) => r.id);
     const rank = ids.indexOf(expectId);
@@ -288,7 +370,7 @@ async function runQueries(harper: HarperInstance, agent: TestAgent, scoring: "ra
   const kinds: QueryKind[] = ["stress", "trap", "hard", "clean"];
   const byKind = Object.fromEntries(kinds.map(k => [k, statsFor(rows.filter(r => r.kind === k))])) as Record<QueryKind, KindStats>;
   const byCluster = Object.fromEntries(CLUSTERS.map(c => [c, statsFor(rows.filter(r => r.cluster === c))])) as Record<string, KindStats>;
-  return { scoring, ...overall, byKind, byCluster, rows };
+  return { scoring, ...overall, byKind, byCluster, rows, latency: latencyStats(latencies) };
 }
 
 // flair#815: a rerank arm whose reranker fails open (GGUF not found, engine
@@ -296,11 +378,20 @@ async function runQueries(harper: HarperInstance, agent: TestAgent, scoring: "ra
 // it reranked — the two arms of a rerank A/B come back byte-identical and the
 // "rerank" numbers are fiction. The provider's fail-open is correct behavior
 // for production recall (never block a search); what's NOT acceptable is a
-// measurement run silently inheriting it. So after measuring, read the
-// provider's own diagnostics (getRerankStatus() via the authenticated
-// /HealthDetail `rerank` block — resources/health.ts) from the SAME spawned
-// Harper that served the queries, and fail loud unless the reranker actually
-// engaged (state=ready AND rerankCount > 0).
+// measurement run silently inheriting it. So read the provider's own
+// diagnostics (getRerankStatus() via the authenticated /HealthDetail `rerank`
+// block — resources/health.ts) from the SAME spawned Harper that served the
+// queries, and fail loud unless the reranker actually engaged (state=ready
+// AND rerankCount > 0).
+//
+// flair#888: this ran ONLY after the full measurement pass. It caught the lie
+// but did so having already spent the whole run, and — worse as a matter of
+// principle — the sequence was "measure, then find out whether the
+// measurement meant anything." runOnce() now calls this TWICE: once after a
+// single warm-up query and BEFORE any measurement (so a fail-open aborts
+// before a number exists at all), and once after, since "engaged on query 1"
+// does not prove "engaged on query 126" — a reranker that loads and then
+// starts timing out mid-pass would clear the first check and fail the second.
 async function assertRerankEngaged(harper: HarperInstance, agent: TestAgent, label: string): Promise<void> {
   // failLoud: print the full diagnosis on stderr BEFORE throwing — the FATAL
   // handlers at the bottom of this file print `e.stack`, and the message line
@@ -316,14 +407,39 @@ async function assertRerankEngaged(harper: HarperInstance, agent: TestAgent, lab
   const rr = res.body?.rerank;
   if (!rr || typeof rr !== "object") failLoud(`${label} rerank engagement check: /HealthDetail returned no rerank status block`);
   if (rr.state !== "ready" || !(rr.rerankCount > 0)) {
-    const detail = `state=${rr.state} model=${rr.model} rerankCount=${rr.rerankCount} fallbackCount=${rr.fallbackCount}` + (rr.error ? ` error="${rr.error}"` : "");
+    const detail = `state=${rr.state} model=${rr.model} rerankCount=${rr.rerankCount} fallbackCount=${rr.fallbackCount}`
+      + (rr.lastFallbackReason ? ` lastFallbackReason=${rr.lastFallbackReason}` : "")
+      + (rr.error ? ` error="${rr.error}"` : "");
+    // flair#888: the remedy has to match the actual failure. This used to say
+    // "provision the GGUF" unconditionally — which is actively misleading in
+    // the case that actually happens (the GGUF is right there, loaded,
+    // state=ready, and the ENGINE can't produce a score). Branch on the
+    // provider's own classification, and quote its detail verbatim rather
+    // than paraphrasing it.
+    const remedy = rr.state !== "ready"
+      ? `The engine never initialised. Provision the reranker GGUF per docs/rerank-provisioning.md (FLAIR_MODELS_DIR may point at an existing install's models/ dir, same as for the embedding model).`
+      : rr.lastFallbackReason === "timeout"
+        ? `The model loaded but scoring did not finish inside FLAIR_RERANK_BUDGET_MS (${rr.budgetMs}ms) for topN=${rr.topN}. Raise the budget or lower topN — do NOT measure this arm until it completes.`
+        : `The model LOADED (state=ready) but every call fell back, so this is an ENGINE-level failure, not a missing file. Known case: FLAIR_RERANK_MODEL=qwen3-reranker-0.6b-q8's generative path returns empty logits inside Harper's runtime (docs/rerank-provisioning.md, "Known limitation") — use jina-reranker-v2, which serves in-process.`;
     failLoud(
-      `${label} rerank arm NEVER ENGAGED: ${detail} — the reranker fell open and this arm measured a ` +
-      `NON-reranked run (flair#815). Provision the reranker GGUF per docs/rerank-provisioning.md ` +
-      `(FLAIR_MODELS_DIR may point at an existing install's models/ dir, same as for the embedding model).`,
+      `${label} rerank arm NEVER ENGAGED: ${detail} — the reranker fell open, so this arm would have measured a ` +
+      `NON-reranked run while reporting it as reranked (flair#815/#888). REFUSING TO MEASURE.\n` +
+      (rr.lastFallbackDetail ? `  provider says: ${rr.lastFallbackDetail}\n` : "") +
+      `  ${remedy}`,
     );
   }
   console.log(`${label} rerank engaged: model=${rr.model} rerankCount=${rr.rerankCount} fallbackCount=${rr.fallbackCount} lastLatencyMs=${rr.lastLatencyMs}`);
+}
+
+// One real search whose ONLY purpose is to make the reranker init and run, so
+// assertRerankEngaged() has something to assert on BEFORE the measurement
+// pass starts. Uses the first ground-truth query at the real SEARCH_LIMIT so
+// the candidate pool matches what the measurement will actually feed the
+// reranker (a smaller limit could fall under FLAIR_RERANK_MIN_CANDIDATES and
+// skip the stage entirely, which would prove nothing).
+async function warmupRerank(harper: HarperInstance, agent: TestAgent): Promise<void> {
+  const res = await signedFetch(harper, agent, "POST", "/SemanticSearch", { agentId: agent.id, q: QUERIES[0].q, limit: SEARCH_LIMIT, scoring: "raw" });
+  if (!res.ok) throw new Error(`rerank warm-up search failed: HTTP ${res.status} ${JSON.stringify(res.body ?? null).slice(0, 300)}`);
 }
 
 // One independent (spawn → register → seed → wait → measure[raw,composite] →
@@ -349,7 +465,11 @@ async function runOnce(hybrid: boolean, rerank: boolean, prefixesOn: boolean, ru
     // reliably fails open in-Harper), unless the caller explicitly chose one.
     // Belt-and-suspenders with assertRerankEngaged() below: pinning makes the
     // arm measure a known model; the assertion proves it actually ran.
-    if (!process.env.FLAIR_RERANK_MODEL) process.env.FLAIR_RERANK_MODEL = "jina-reranker-v2";
+    // RERANK_MODEL is resolved once at module load (honouring an explicit
+    // FLAIR_RERANK_MODEL) so preflightRerank() checks for the SAME GGUF this
+    // sets here — a second, independently-computed default would be exactly
+    // the kind of drift that lets a bench measure something else.
+    process.env.FLAIR_RERANK_MODEL = RERANK_MODEL;
   } else delete process.env.FLAIR_RERANK_ENABLED;
   if (prefixesOn) delete process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX; else process.env.FLAIR_RECALL_HARNESS_FORCE_PREFIX = "false";
 
@@ -376,6 +496,15 @@ async function runOnce(hybrid: boolean, rerank: boolean, prefixesOn: boolean, ru
     const seedMs = performance.now() - seedStart;
     console.log(`${label} seeded ${CORPUS.length} records in ${seedMs.toFixed(0)}ms (${(seedMs / CORPUS.length).toFixed(1)}ms/record avg)`);
     await waitSearchable(harper, agent);
+
+    // flair#888: measurement-integrity gate #1 — BEFORE anything is measured.
+    // If the reranker can't serve, this arm must produce no number at all,
+    // rather than a number that silently describes the non-reranked config.
+    if (rerank) {
+      await warmupRerank(harper, agent);
+      await assertRerankEngaged(harper, agent, `${label} [pre-measure]`);
+    }
+
     console.log(`${label} corpus searchable, measuring ${QUERIES.length} queries × 2 scoring modes...`);
 
     // raw FIRST, then composite, against the SAME seeded instance — matches
@@ -387,9 +516,11 @@ async function runOnce(hybrid: boolean, rerank: boolean, prefixesOn: boolean, ru
     // durability/recency effect this harness targets, but worth naming.
     const raw = await runQueries(harper, agent, "raw");
     const composite = await runQueries(harper, agent, "composite");
-    // flair#815: measurement integrity gate — fail loud (nonzero exit via
-    // main()'s catch) if this arm's reranker never actually engaged.
-    if (rerank) await assertRerankEngaged(harper, agent, label);
+    console.log(`${label} latency/query: raw mean=${raw.latency.mean.toFixed(1)}ms p50=${raw.latency.p50.toFixed(1)}ms   composite mean=${composite.latency.mean.toFixed(1)}ms p50=${composite.latency.p50.toFixed(1)}ms`);
+    // flair#815/#888: measurement-integrity gate #2 — after the pass, because
+    // gate #1 only proved the reranker engaged on the warm-up query. Fails
+    // loud (nonzero exit via main()'s catch) if it stopped engaging partway.
+    if (rerank) await assertRerankEngaged(harper, agent, `${label} [post-measure]`);
     return { raw, composite };
   } finally {
     if (harper) await stopHarper(harper, { keepInstallDir: false });
@@ -456,6 +587,8 @@ function printClusterMovers(
 
 async function main() {
   assertBuilt();
+  // flair#888: refuse to start a rerank sweep we can already prove is a lie.
+  if (WITH_RERANK) preflightRerank();
   console.log(`recall-harness — ISOLATED recall eval (corpus=${CORPUS_ARG}: ${CORPUS.length} records / ${CLUSTERS.length} clusters, queries=${QUERIES.length})`);
   console.log(`config: runs=${RUNS} hybrid=${hybridValues.join(",")} prefixes=${prefixValues.map(p => p ? "on" : "off").join(",")} rerank=${WITH_RERANK ? "on(hybrid=true,prefixes=true only)+off" : "off"}\n`);
   if (process.env.FLAIR_MODELS_DIR) console.log(`FLAIR_MODELS_DIR=${process.env.FLAIR_MODELS_DIR} (reusing pre-downloaded models)\n`);
@@ -470,9 +603,14 @@ async function main() {
   for (const h of hybridValues) for (const p of prefixValues) configs.push({ hybrid: h, rerank: false, prefixesOn: p });
   if (WITH_RERANK && hybridValues.includes(true) && prefixValues.includes(true)) configs.push({ hybrid: true, rerank: true, prefixesOn: true });
 
-  type Agg = { p3: number[]; mrr: number[]; byKind: Record<QueryKind, { p3: number[]; mrr: number[] }>; byCluster: Record<string, { p3: number[]; mrr: number[] }> };
+  // `latMean`/`latP50` hold ONE value per run (that run's per-query mean /
+  // median), so aggStats over them yields a mean ± SE across runs on the same
+  // footing as p@3/MRR — i.e. the latency number carries an error bar too,
+  // and "config A is slower than config B" is a claim the report can size
+  // against run-to-run noise rather than assert.
+  type Agg = { p3: number[]; mrr: number[]; latMean: number[]; latP50: number[]; byKind: Record<QueryKind, { p3: number[]; mrr: number[] }>; byCluster: Record<string, { p3: number[]; mrr: number[] }> };
   const emptyAgg = (): Agg => ({
-    p3: [], mrr: [],
+    p3: [], mrr: [], latMean: [], latP50: [],
     byKind: { stress: { p3: [], mrr: [] }, trap: { p3: [], mrr: [] }, hard: { p3: [], mrr: [] }, clean: { p3: [], mrr: [] } },
     byCluster: Object.fromEntries(CLUSTERS.map(c => [c, { p3: [], mrr: [] }])),
   });
@@ -490,6 +628,7 @@ async function main() {
       for (const [scoring, res] of [["raw", raw], ["composite", composite]] as const) {
         const agg = results[key][scoring];
         agg.p3.push(res.p3); agg.mrr.push(res.mrr);
+        agg.latMean.push(res.latency.mean); agg.latP50.push(res.latency.p50);
         for (const k of Object.keys(res.byKind) as QueryKind[]) {
           agg.byKind[k].p3.push(res.byKind[k].p3);
           agg.byKind[k].mrr.push(res.byKind[k].mrr);
@@ -517,7 +656,8 @@ async function main() {
     for (const scoring of ["raw", "composite"] as const) {
       const agg = results[key][scoring];
       const p3 = aggStats(agg.p3), mrr = aggStats(agg.mrr);
-      console.log(`  scoring=${scoring.padEnd(9)} p@3=${fmtAgg(p3)}   MRR=${fmtAgg(mrr)}`);
+      const lat = aggStats(agg.latMean), latP50 = aggStats(agg.latP50);
+      console.log(`  scoring=${scoring.padEnd(9)} p@3=${fmtAgg(p3)}   MRR=${fmtAgg(mrr)}   latency/query mean=${fmtAgg(lat, 1)}ms p50=${fmtAgg(latP50, 1)}ms`);
     }
     // Per-kind MRR for scoring=raw — same shape as BASELINE.json's `perKind`
     // block (n + mrr per kind), so a model/quant A/B's per-kind numbers are
@@ -608,6 +748,50 @@ async function main() {
       console.log(bump
         ? "  → Prefixes (the shipped default) match or beat the off comparison arm on THIS run — consistent with the flip decision, though a single run isn't the full re-baseline (see BASELINE.json + README's ratchet-gate process)."
         : "  → Prefixes trail the off comparison arm on p@3 or MRR this run — a single run isn't grounds to revert THE GATE on its own; re-run the full sweep and compare against BASELINE.json before considering a revert.");
+    }
+  }
+
+  // ── RERANK A/B (flair#888 — the first measurement this feature has ever had)
+  // Both arms are hybrid=true, prefixes=on, scoring=raw (the production
+  // default) against the SAME corpus, differing ONLY in FLAIR_RERANK_ENABLED —
+  // and the rerank arm is guaranteed by assertRerankEngaged() to have actually
+  // reranked, so a null result here means "reranking didn't help", never
+  // "reranking didn't run".
+  //
+  // The verdict compares |Δ| against the run-to-run standard error of the two
+  // arms rather than against zero: a delta inside the error bars is not a
+  // delta, and the whole reason this feature went unmeasured for its entire
+  // life is that nobody made that comparison. Latency is reported next to it
+  // because the decision is benefit-per-cost, not benefit.
+  if (WITH_RERANK) {
+    const offKey = keyFor({ hybrid: true, rerank: false, prefixesOn: true });
+    const onKey = keyFor({ hybrid: true, rerank: true, prefixesOn: true });
+    if (results[offKey] && results[onKey]) {
+      console.log(`\n══ RERANK A/B (flair#888 — hybrid=true, prefixes=on, scoring=raw) ══\n`);
+      const offP3 = aggStats(results[offKey].raw.p3), onP3 = aggStats(results[onKey].raw.p3);
+      const offMrr = aggStats(results[offKey].raw.mrr), onMrr = aggStats(results[onKey].raw.mrr);
+      const offLat = aggStats(results[offKey].raw.latMean), onLat = aggStats(results[onKey].raw.latMean);
+      console.log(`  rerank=off  p@3=${fmtAgg(offP3)}   MRR=${fmtAgg(offMrr)}   latency/query=${fmtAgg(offLat, 1)}ms`);
+      console.log(`  rerank=on   p@3=${fmtAgg(onP3)}   MRR=${fmtAgg(onMrr)}   latency/query=${fmtAgg(onLat, 1)}ms   (model=${RERANK_MODEL})`);
+      const dP3 = onP3.mean - offP3.mean, dMrr = onMrr.mean - offMrr.mean, dLat = onLat.mean - offLat.mean;
+      console.log(`  Δ (on − off)   p@3=${dP3 >= 0 ? "+" : ""}${fmt(dP3)}   MRR=${dMrr >= 0 ? "+" : ""}${fmt(dMrr)}   latency=${dLat >= 0 ? "+" : ""}${fmt(dLat, 1)}ms/query`);
+      console.log(`  by kind (on − off, MRR):`);
+      for (const k of ["stress", "trap", "hard", "clean"] as QueryKind[]) {
+        const o = aggStats(results[offKey].raw.byKind[k].mrr), n = aggStats(results[onKey].raw.byKind[k].mrr);
+        console.log(`    ${k.padEnd(6)} off=${fmt(o.mean)}  on=${fmt(n.mean)}  Δ=${(n.mean - o.mean) >= 0 ? "+" : ""}${fmt(n.mean - o.mean)}`);
+      }
+      printClusterMovers(results[offKey].raw.byCluster, results[onKey].raw.byCluster, "off", "on");
+      // Combined SE of the difference of two independent means. Null SE (a
+      // single run) means there IS no variance estimate — say so rather than
+      // silently treating 0 as "no noise". See verdict.ts for why SE alone is
+      // NOT a sufficient test on this deterministic corpus.
+      const combinedSE = (offP3.se != null && onP3.se != null) ? Math.sqrt(offP3.se ** 2 + onP3.se ** 2) : null;
+      const combinedSEMrr = (offMrr.se != null && onMrr.se != null) ? Math.sqrt(offMrr.se ** 2 + onMrr.se ** 2) : null;
+      const cls = classifyDelta({ dP3, dMrr, seP3: combinedSE, seMrr: combinedSEMrr, nQueries: QUERIES.length });
+      console.log(`\nRERANK HEADLINE: Δp@3=${dP3 >= 0 ? "+" : ""}${fmt(dP3)} (combined SE ${combinedSE == null ? "n/a — single run" : "±" + fmt(combinedSE)}) = ${cls.p3Queries >= 0 ? "+" : ""}${cls.p3Queries.toFixed(1)} of ${QUERIES.length} queries;`);
+      console.log(`                 ΔMRR=${dMrr >= 0 ? "+" : ""}${fmt(dMrr)} (combined SE ${combinedSEMrr == null ? "n/a — single run" : "±" + fmt(combinedSEMrr)}) = ${cls.mrrPoints >= 0 ? "+" : ""}${cls.mrrPoints.toFixed(2)} reciprocal-rank points;`);
+      console.log(`                 cost ${dLat >= 0 ? "+" : ""}${fmt(dLat, 1)}ms/query (${(onLat.mean / offLat.mean).toFixed(1)}× the rerank=off latency).`);
+      console.log(`  → ${cls.explanation}`);
     }
   }
 }

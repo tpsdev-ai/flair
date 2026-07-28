@@ -3,7 +3,7 @@ import { promises as fsp, existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getRerankStatus } from "./rerank-provider.js";
+import { getRerankStatus, rerankWarnings } from "./rerank-provider.js";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { getMigrationStatusSnapshot } from "./migrations/status.js";
 import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
@@ -617,12 +617,7 @@ export class HealthDetail extends Resource {
     try {
       const rr = getRerankStatus();
       stats.rerank = rr;
-      if (rr.enabled && rr.state === "failed") {
-        warnings.push({ level: "warn", message: `reranker enabled but unavailable: ${rr.error ?? "init failed"} — recall falling back to vector order` });
-      }
-      if (rr.enabled && rr.rerankCount > 0 && rr.fallbackCount > rr.rerankCount) {
-        warnings.push({ level: "warn", message: `reranker falling back more than reranking (${rr.fallbackCount} fallbacks / ${rr.rerankCount} reranks) — check latency budget / topN` });
-      }
+      warnings.push(...rerankWarnings(rr));
     } catch { stats.rerank = null; }
 
     // ── Warnings ──
