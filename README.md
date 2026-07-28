@@ -314,11 +314,11 @@ Run Flair on a VPS or cloud instance; agents connect over HTTPS.
 # On the server
 flair init --agent mybot --port 19926
 
-# On each client
-FLAIR_URL=https://your-server:19926 flair agent add otherbot
+# On each client — --target seeds the agent on the remote instance
+flair agent add otherbot --target https://your-server:19926
 ```
 
-Good for teams with multiple machines or always-on agents.
+`--target` derives the operations API as *REST port − 1*. If that isn't where your ops API lives, pass `--ops-target` explicitly. Good for teams with multiple machines or always-on agents.
 
 ### Harper Fabric
 
