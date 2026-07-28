@@ -7,8 +7,9 @@ set -euo pipefail
 #
 #   Phase 1 — open release PR:
 #     ./scripts/release.sh 0.5.0
-#       → creates branch release/v0.5.0, bumps + builds + tests,
-#         commits, pushes, opens PR. Review and merge via GitHub.
+#       → creates branch release/v0.5.0, assembles the .changelog/unreleased/
+#         fragments into a `## [0.5.0]` CHANGELOG section, bumps + builds +
+#         tests, commits, pushes, opens PR. Review and merge via GitHub.
 #
 #   Phase 2 — publish after merge:
 #     ./scripts/release.sh 0.5.0 --publish
@@ -191,6 +192,18 @@ fi
 echo "🌿 Creating $RELEASE_BRANCH..."
 git -C "$ROOT" checkout -b "$RELEASE_BRANCH"
 
+# 1a. Assemble the changelog fragments into this version's section.
+# Entries live one-per-file under .changelog/unreleased/ (flair#835) so
+# concurrent PRs never conflict on CHANGELOG.md. This turns them into a
+# `## [$VERSION] - <date>` section and deletes the fragment files; released
+# history above it is untouched. It refuses to run when there are no fragments
+# (an empty release section) or when someone hand-wrote an entry into
+# `## [Unreleased]` that this step would otherwise overwrite.
+echo "📰 Assembling changelog fragments..."
+(cd "$ROOT" && node scripts/changelog-fragments.mjs promote "$VERSION") || {
+  echo "❌ Changelog assembly failed — fix the fragments before releasing."; exit 1;
+}
+
 # 2. Bump versions in all package.json files
 echo "📦 Bumping all packages to v${VERSION}..."
 for pkg in "${PACKAGES[@]}"; do
@@ -285,10 +298,14 @@ git -C "$ROOT" add \
   "$ROOT/packages/flair-bench/package.json" \
   "$ROOT/bun.lock"
 
+# The fragment files consumed by step 1a are DELETED, so this needs -A to stage
+# the removals — scoped to that one directory by pathspec, never repo-wide.
+git -C "$ROOT" add -A -- "$ROOT/.changelog"
+
 # Also stage CHANGELOG.md and scripts/release.sh if they have pre-staged changes —
-# operators routinely write the release notes before invoking this script, and
-# script bugfixes (like the missing langgraph-flair stage line, 2026-05-14) need
-# to ride along with the release that surfaces them.
+# CHANGELOG.md is always modified by the fragment assembly in step 1a, and script
+# bugfixes (like the missing langgraph-flair stage line, 2026-05-14) need to ride
+# along with the release that surfaces them.
 for extra in "$ROOT/CHANGELOG.md" "$ROOT/scripts/release.sh"; do
   if ! git -C "$ROOT" diff --quiet -- "$extra"; then
     git -C "$ROOT" add "$extra"

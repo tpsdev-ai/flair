@@ -2,7 +2,7 @@
 // Docs-freshness gate (flair#618).
 //
 // Catches the doc-rot classes an adopter audit keeps surfacing — stale version
-// pins, port drift, package-name drift, an empty CHANGELOG [Unreleased] despite
+// pins, port drift, package-name drift, no unreleased changelog entry despite
 // merged work, and CLI commands shipping with no help text. Each check fails
 // independently with a `file:line` pointer so a contributor knows exactly what
 // to fix. Runnable locally (`node scripts/docs-freshness-check.mjs`) and in CI.
@@ -21,6 +21,13 @@ import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, resolve, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  CATEGORIES,
+  FRAGMENT_DIR_REL,
+  locateUnreleased,
+  readFragments,
+  strayUnreleasedEntries,
+} from "./changelog-fragments.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 const IN_CI = !!process.env.GITHUB_ACTIONS;
@@ -214,30 +221,48 @@ defineCheck("package-name-drift", () => {
   return failures;
 });
 
-// ── Check 5: CHANGELOG [Unreleased] populated when work has landed ──────────────
-// FAILS when feat/fix commits exist since the latest v* tag but the CHANGELOG's
-// [Unreleased] section is empty. Degrades to a skip (never a false fail) when
-// there is no tag or git history to compare against.
+// ── Check 5: unreleased changelog entries exist when work has landed ────────────
+// FAILS when feat/fix commits exist since the latest v* tag but no changelog
+// fragment is staged under .changelog/unreleased/. Degrades to a skip (never a
+// false fail) when there is no tag or git history to compare against.
+//
+// Entries moved out of CHANGELOG.md's [Unreleased] block and into one file per
+// change (flair#835) — concurrent PRs were conflicting on those lines every time,
+// and resolving a conflict dismisses approvals. The gate's power is unchanged:
+// work landed + nothing written down is still a hard failure. It gains two
+// failure modes it could not previously have, both of them silent-loss vectors:
+// a fragment that cannot be parsed (fail rather than skip it), and a hand-written
+// entry left in [Unreleased] (the release step overwrites that body).
 defineCheck("changelog-unreleased", () => {
   const changelogPath = join(ROOT, "CHANGELOG.md");
   if (!existsSync(changelogPath)) return [];
-  const text = readFileSync(changelogPath, "utf8");
-  const lines = text.split("\n");
-  const start = lines.findIndex((l) => /^##\s+\[Unreleased\]/i.test(l));
-  if (start === -1) {
+  const lines = readFileSync(changelogPath, "utf8").split("\n");
+  const loc = locateUnreleased(lines);
+  if (!loc) {
     return [{ file: "CHANGELOG.md", line: 1, msg: "no '## [Unreleased]' section found. Add one so in-flight work is recorded." }];
   }
-  let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
-    if (/^##\s+\[/.test(lines[i])) { end = i; break; }
+
+  // A malformed fragment is a failure, never a skip. Silently ignoring a file it
+  // could not place is exactly how an entry disappears without anyone noticing.
+  let fragments;
+  try {
+    fragments = readFragments();
+  } catch (err) {
+    return [{ file: `${FRAGMENT_DIR_REL}/`, line: 1, msg: `${err?.message ?? err}` }];
   }
-  const body = lines.slice(start + 1, end);
-  const hasContent = body.some((l) => {
-    const t = l.trim();
-    if (t.length === 0) return false;
-    if (/^(_?nothing[^\n]*_?|n\/?a|tbd|none|—|-)$/i.test(t)) return false; // placeholder
-    return true;
-  });
+  const hasContent = fragments.length > 0;
+
+  const failures = [];
+
+  // The release step REPLACES the [Unreleased] body, so an entry written there by
+  // hand is lost at the version cut. Catch it while it is still cheap to move.
+  const stray = strayUnreleasedEntries(loc.body);
+  if (stray.length > 0) {
+    failures.push({
+      file: "CHANGELOG.md", line: loc.start + 2,
+      msg: `[Unreleased] has ${stray.length} hand-written entr${stray.length === 1 ? "y" : "ies"}; the release step replaces this section's body, so ${stray.length === 1 ? "it" : "they"} would be silently dropped. Move ${stray.length === 1 ? "it" : "them"} to ${FRAGMENT_DIR_REL}/<category>-<slug>.md.`,
+    });
+  }
 
   // How much work has landed since the last release?
   let commitsSinceTag = null;
@@ -254,13 +279,13 @@ defineCheck("changelog-unreleased", () => {
   } catch {
     // No tags, shallow clone, or not a git repo — can't compare; skip gracefully.
     console.warn("  (changelog-unreleased: no v* tag / git history available — skipping commit comparison)");
-    return [];
+    return failures;
   }
 
-  // Release-PR exception: an empty [Unreleased] is correct when its content was
-  // just PROMOTED to a `## [X.Y.Z]` section for the release being cut — the
-  // CHANGELOG carries a section matching package.json's current version while
-  // no v<version> tag exists yet, so the since-tag work is recorded there.
+  // Release-PR exception: an empty fragment directory is correct when its content
+  // was just PROMOTED to a `## [X.Y.Z]` section for the release being cut — the
+  // CHANGELOG carries a section matching package.json's current version while no
+  // v<version> tag exists yet, so the since-tag work is recorded there.
   if (!hasContent) {
     try {
       const pkgVersion = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
@@ -272,19 +297,19 @@ defineCheck("changelog-unreleased", () => {
       });
       const tagExists = execFileSync("git", ["tag", "-l", `v${pkgVersion}`],
         { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim().length > 0;
-      if (hasVersionSection && !tagExists) return [];
+      if (hasVersionSection && !tagExists) return failures;
     } catch {
       // package.json unreadable or git unavailable — fall through to the normal rule.
     }
   }
 
   if (commitsSinceTag !== null && commitsSinceTag > 0 && !hasContent) {
-    return [{
-      file: "CHANGELOG.md", line: start + 1,
-      msg: `[Unreleased] is empty but ${commitsSinceTag} feat/fix commit(s) have landed since the last release tag. Document what changed.`,
-    }];
+    failures.push({
+      file: `${FRAGMENT_DIR_REL}/`, line: 1,
+      msg: `no changelog fragments staged, but ${commitsSinceTag} feat/fix commit(s) have landed since the last release tag. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md describing what changed (categories: ${CATEGORIES.join(", ")}).`,
+    });
   }
-  return [];
+  return failures;
 });
 
 // ── Check 6: every CLI command has help text ────────────────────────────────────
