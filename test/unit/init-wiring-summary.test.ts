@@ -152,12 +152,69 @@ describe("Claude Code detection is by binary on PATH, not by its config (flair#9
   });
 
   it("does not detect Claude Code when the binary is absent", () => {
-    // Empty-ish PATH: no `claude`, and the npm-global fallback cannot run
-    // either, so this exercises the negative case end to end.
+    // Empty PATH: no `claude` anywhere, so this exercises the negative case
+    // end to end.
     process.env.PATH = isoHome;
     const claudeCode = detectClients().find(c => c.id === "claude-code")!;
     expect(claudeCode.detected).toBe(false);
   });
+
+  it("reports NO client detected when PATH holds none of their binaries", () => {
+    // The Gemini false positive: detection used to fall back to
+    // `npm list -g @google/generative-ai`, which exits 0 when that package is
+    // anywhere in the global tree — including as a transitive dependency of an
+    // unrelated global tool. Gemini was then reported installed, and
+    // ~/.gemini/settings.json written, on a machine with no `gemini` binary.
+    // PATH is the only question detection asks now, so the answer cannot
+    // depend on what else happens to be installed globally.
+    process.env.PATH = isoHome;
+    for (const client of detectClients()) {
+      expect(`${client.id}=${client.detected}`).toBe(`${client.id}=false`);
+    }
+  });
+
+  it("detects a client purely from its own binary, never a sibling's", () => {
+    fakeBinOnPath(isoHome, "gemini");
+    const byId = new Map(detectClients().map(c => [c.id, c.detected]));
+    expect(byId.get("gemini")).toBe(true);
+    expect(byId.get("claude-code")).toBe(false);
+    expect(byId.get("codex")).toBe(false);
+    expect(byId.get("cursor")).toBe(false);
+  });
+});
+
+describe("client detection is bounded — it never shells out (flair#906 follow-up)", () => {
+  /**
+   * Detection runs on `flair init`, an interactive first-run path, so its cost
+   * has to be bounded by construction rather than by luck.
+   *
+   * It used to fall back to `npm list -g <pkg>` for three of the four clients
+   * whenever their binary was absent — an unbounded subprocess that walks the
+   * entire global package tree, measured at ~800 ms per call on a warm
+   * developer machine. A user with none of these clients installed paid up to
+   * three of those in silence, and on a loaded CI runner the same calls pushed
+   * a sibling test past its 5 s timeout.
+   *
+   * PATH here contains no client binary at all, which is precisely the case
+   * that triggered every fallback — the most expensive path detection has.
+   * Filesystem-only detection measures ~0.04 ms per call, so the budget below
+   * sits several hundred times above real cost while remaining far under what
+   * even a single npm spawn per iteration would need (~9 s at the fastest
+   * spawn time we have observed on CI). Restoring any subprocess to the
+   * detection path fails this test rather than merely making it flaky.
+   */
+  const ITERATIONS = 40;
+  const BUDGET_MS = 1000;
+
+  it(`runs ${ITERATIONS} full detection passes well inside ${BUDGET_MS}ms`, () => {
+    process.env.PATH = isoHome;
+
+    const started = performance.now();
+    for (let i = 0; i < ITERATIONS; i++) detectClients();
+    const elapsed = performance.now() - started;
+
+    expect({ overBudget: elapsed > BUDGET_MS }).toEqual({ overBudget: false });
+  }, 60_000);
 });
 
 describe("wiring Claude Code creates ~/.claude.json when it does not exist", () => {
