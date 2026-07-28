@@ -72,6 +72,39 @@ Only Nathan publishes to npm (per the existing MFA boundary). Flint preps the re
 - The build host is not logged into npm by design.
 - A planned post-publish smoke job will add an automated round-trip check after each publish to ensure cross-package resolution works on the actually-published artifacts.
 
+### 7. Dependency audit gate: blocking, with dated exceptions
+
+`bun audit` runs on every PR via the `audit` job and **blocks merge**. Every advisory it reports must either be fixed or appear in `.github/audit-allowlist.json`. There is no third option and no global escape hatch.
+
+This replaced a step that could not fail:
+
+```yaml
+run: bun audit || echo "::warning::Audit found vulnerabilities — all in harper transitive deps (unreleased v5 build)"
+continue-on-error: true
+```
+
+Both mechanisms independently forced a pass (`|| echo` made the shell exit 0, so `continue-on-error` was dead config that never even fired). The justification was accurate the day it was written. It carried **no expiry**, so it outlived its reason — by the time it was removed, "all in harper transitive deps" was false, and a critical advisory was reaching users through a first-party workspace package while the gate reported green.
+
+**The defect was the unexpirable exception, not the exception.** Some advisories genuinely cannot be fixed from this repo. So each one is now enumerated with:
+
+| field | meaning |
+|---|---|
+| `ghsa` | the published advisory id |
+| `package`, `severity` | re-verified against `bun audit` on every run; drift fails the gate |
+| `class` | `no-patch-published`, `vendor-pinned`, or `remediation-available` |
+| `introducedBy` | the dependency edge that pulls it in |
+| `reason` | why it cannot be fixed here, specifically |
+| `added`, `expires` | hard dates; lifetime is capped by severity |
+| `removeWhen` | the concrete condition that retires the entry |
+
+`scripts/audit-gate.mjs` fails the build on: an unlisted advisory, a malformed entry, an entry parked beyond its severity cap (critical 30 days, high 60, moderate/low 180), an **expired** entry, a **stale** entry whose advisory no longer appears, or a `no-patch-published` entry for which a patched version has since shipped. That last pair matters — an allowlist that only ever grows is the same failure with more ceremony.
+
+When an entry expires the build fails and a human re-decides. **That is the mechanism working, not a flaw.** Re-dating an entry without re-reading its reason is how this file rots back into the thing it replaced.
+
+Run it locally with `node scripts/audit-gate.mjs --explain`.
+
+**Standing rule for every check in this repo:** any check that is advisory-only must carry, in a comment at its own definition, what would make it blocking and when that gets re-evaluated. Advisory is a terminating state with a defined promotion event, never a resting place.
+
 ---
 
 ## Automation
