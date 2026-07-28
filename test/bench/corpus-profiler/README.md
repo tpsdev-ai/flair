@@ -66,6 +66,7 @@ bun run test/bench/corpus-profiler/profile.ts --out profiles/live-<label>.json
 | `--include-archived` | off | Profile all rows rather than only retrievable ones. |
 | `--clusters <k>` | `round(sqrt(n/2))` clamped to `[4,64]` | k for k-means. |
 | `--seed <n>` | `20260728` | PRNG seed. Profiles reproduce exactly from the same snapshot. |
+| `--sample-size <n>` | unset | Deterministically subsample to `n` records before profiling. Use it to match a smaller corpus's size before comparing — see below. |
 | `--out <path>` | stdout | Where to write. |
 
 Two things it deliberately does **not** do:
@@ -106,10 +107,65 @@ directly comparable. `--models-dir` follows the recall harness's
 a download); `--addon-path` is needed because the `@node-llama-cpp` platform
 package is an optional dependency and is often absent in a fresh worktree.
 
-Use `--sample-size` to match record counts before comparing. Nearest-neighbour
-similarity rises with `n` purely because there are more candidates to be close
-to, so an unmatched comparison credits the larger corpus with difficulty that is
-really just size.
+### Comparing the two
+
+Nearest-neighbour similarity rises with `n` purely because there are more
+candidates to be close to, so an unmatched comparison credits the larger corpus
+with difficulty that is really just size. **Both** CLIs take `--sample-size` for
+this reason, and both subsample deterministically from `--seed`, so a
+like-for-like comparison is reproducible by anyone with an instance rather than
+being a number only the person who ran it can verify:
+
+```bash
+# 251 records each, same model, same space
+bun run test/bench/corpus-profiler/profile-bench-corpus.ts --corpus v2 ... --out /tmp/v2.json
+bun run test/bench/corpus-profiler/profile.ts --sample-size 251 --out /tmp/live-251.json
+```
+
+Measured that way (2026-07), real memories collide considerably harder than the
+corpus we currently grade recall against. **The subsampled column is mean ± sd
+over 8 independent seeds**, because a single draw of 251 from 1080 has enough
+sampling noise in the tail bands to mislead — a lone draw is not a measurement:
+
+| | corpus-v2 (n=251, whole corpus) | live, subsampled (n=251, 8 seeds) | live, full (n=1080) |
+|---|---|---|---|
+| nearest-neighbour cosine, median | 0.805 | **0.838 ± 0.006** | 0.870 |
+| fraction with a neighbour ≥ 0.80 | 0.506 | **0.789 ± 0.015** | 0.918 |
+| ≥ 0.85 | 0.283 | 0.390 ± 0.055 | 0.652 |
+| ≥ 0.90 | 0.064 | 0.110 ± 0.024 | 0.261 |
+| ≥ 0.95 | 0.000 | 0.024 ± 0.017 *(one seed of 8 gave 0.000)* | 0.056 |
+| type/token ratio | 0.425 | **0.201 ± 0.010** | 0.100 |
+| Zipf slope | −0.69 | **−1.012 ± 0.016** | −1.30 |
+| silhouette, mean | 0.073 | 0.080 ± 0.023 | 0.112 |
+
+Read it honestly, band by band:
+
+- **The ≥ 0.80 band and the vocabulary metrics separate decisively** — 19 sd and
+  22 sd respectively. Real records are far more likely to have a close
+  neighbour, and they reuse a heavy head of common terms where corpus-v2's
+  tokens are nearly all distinct. That second one bears directly on BM25: a
+  type/token ratio of 0.425 means almost any query term is rare and cleanly
+  discriminating, which is not the regime real queries run in.
+- **The ≥ 0.95 band does not separate reliably at n=251** — one draw of eight
+  contained no such pair at all. Pairs that tight are rare enough that a
+  251-record corpus may simply not contain any.
+- **Cluster separation is not different at all.** Silhouette overlaps within one
+  sd, and the intra/inter gap is slightly *wider* in real data.
+
+So the difficulty is **not** that real topics blur together. It is that
+individual records are near-restatements of each other while sharing a heavy
+common vocabulary — and that the tightest collisions only emerge at corpus
+sizes larger than corpus-v2. A generator matching these distributions needs
+tight within-topic collisions and a realistic vocabulary head, not fuzzy topic
+boundaries.
+
+One number is worth stating separately because it is a property of each corpus
+at its own full size, with no sampling involved: **corpus-v2's closest pair
+anywhere is 0.936.** It contains no true near-duplicates, despite naming
+near-duplicate density as a design axis. The live corpus has 60 records in 18
+components at ≥ 0.95, the largest holding 15. A cross-encoder reranker's whole
+job is disambiguating near ties, so a Δp@3 of 0.000 against corpus-v2 measured a
+corpus with nothing for it to do.
 
 ## Output schema
 

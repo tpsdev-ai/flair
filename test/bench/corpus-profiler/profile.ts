@@ -18,6 +18,9 @@
 //   --include-archived      profile ALL rows, not just the retrievable ones
 //   --clusters <k>          k for k-means; default round(sqrt(n/2)) in [4,64]
 //   --seed <n>              PRNG seed; default 20260728
+//   --sample-size <n>       deterministically subsample to n records, so a
+//                           like-for-like comparison against a smaller corpus
+//                           is reproducible rather than size-inflated
 //   --out <path>            write JSON here; default stdout
 //
 // READ-ONLY against the live instance. It issues exactly one GET; see
@@ -55,11 +58,37 @@ const all: ProfileRecord[] = await fetchCorpus({ url, agentId, privateKeyPath, o
 // that replaced them, including them would INFLATE the near-duplicate density
 // with pairs no query can ever confuse. Off by default; recorded in meta.scope
 // either way so a profile always says which corpus it measured.
-const records = includeArchived ? all : all.filter((r) => r.archived !== true);
+const inScope = includeArchived ? all : all.filter((r) => r.archived !== true);
+
+const seed = flag("seed") ? Number(flag("seed")) : 20260728;
+
+// Nearest-neighbour similarity rises with corpus size purely because there are
+// more candidates to be close to, so comparing this profile against a smaller
+// one (corpus-v2 is 251 records) would credit the live corpus with difficulty
+// that is really just volume. --sample-size takes a deterministic subset so a
+// like-for-like comparison is reproducible by anyone with an instance, rather
+// than being a number only the person who ran it can verify.
+function subsample<T>(arr: T[], n: number, s: number): T[] {
+  let a = s >>> 0;
+  const rnd = () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const c = arr.slice();
+  for (let i = c.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [c[i], c[j]] = [c[j], c[i]];
+  }
+  return c.slice(0, Math.min(n, c.length));
+}
+
+const records = flag("sample-size") ? subsample(inScope, Number(flag("sample-size")), seed) : inScope;
 
 const profile = computeProfile(records, {
   clusterCount: flag("clusters") ? Number(flag("clusters")) : undefined,
-  seed: flag("seed") ? Number(flag("seed")) : undefined,
+  seed,
   scope: includeArchived ? "all-records" : "retrievable",
   embeddingSource: "stored",
 });
