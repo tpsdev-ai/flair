@@ -20,7 +20,9 @@
   templates and dependency names are all things a release may change, and the
   pre-swap process would get each of them wrong the same silent way. A CLI that
   cannot be located or confirmed falls back to an in-process restart and says so
-  rather than refusing to start anything. As defence in depth, the Harper binary is
+  rather than refusing to start anything, as does an upgrade of a non-default data
+  directory — `flair restart` has no `--data-dir`, so delegating one would restart
+  a different instance. As defence in depth, the Harper binary is
   now located by reading the package name out of the post-swap `package.json`
   instead of a compiled-in list, so a future rename cannot reproduce this class.
 

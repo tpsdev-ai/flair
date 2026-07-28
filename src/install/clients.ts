@@ -42,6 +42,7 @@ import { spawnSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { mcpServerSpec } from "../lib/mcp-spec.js";
 
 /**
  * Resolve the user's home dir. Prefer the live HOME/USERPROFILE env over
@@ -76,8 +77,17 @@ function binInPath(name: string): boolean {
   }
 }
 
+/**
+ * Claude Code is INSTALLED when its binary is on PATH — the same test every
+ * other client here uses, and the one that matches how Claude Code is actually
+ * distributed. The npm-global lookup below is only a fallback: Claude Code's
+ * native installer puts `claude` on PATH without registering an npm global, so
+ * `npm list -g @anthropic-ai/claude-code` alone reports "not installed" for a
+ * large share of real users (flair#906).
+ */
 function claudeCodeDetect(): boolean {
   try {
+    if (binInPath("claude")) return true;
     const result = spawnSync("npm", ["list", "-g", "@anthropic-ai/claude-code"], {
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -121,11 +131,18 @@ function cursorDetect(): boolean {
 
 // ---- Shared config shapes -------------------------------------------------------
 
-/** The standard MCP stdio server entry every client (except Codex TOML) uses. */
+/**
+ * The standard MCP stdio server entry every client (except Codex TOML) uses.
+ *
+ * The spec comes from mcpServerSpec() and is therefore PINNED — this used to
+ * hardcode the bare `@tpsdev-ai/flair-mcp`, so Gemini, Cursor and the Claude
+ * Code array fallback were all wired unpinned while only the inline Claude
+ * Code path in cli.ts got the pin it was documented to get (flair#907).
+ */
 function flairMcpEntry(env: WireEnv) {
   return {
     command: "npx",
-    args: ["-y", "@tpsdev-ai/flair-mcp"],
+    args: ["-y", mcpServerSpec()],
     env: {
       FLAIR_AGENT_ID: env.FLAIR_AGENT_ID,
       FLAIR_URL: env.FLAIR_URL,
@@ -142,12 +159,13 @@ function jsonSnippet(env: WireEnv): string {
 }
 
 /** TOML `[mcp_servers.flair]` snippet (Codex format). Exported for tests
- * (flair#727 — asserts the rendered template carries a full scheme+port URL). */
+ * (flair#727 — asserts the rendered template carries a full scheme+port URL).
+ * Pinned via mcpServerSpec() — see flairMcpEntry above for why (flair#907). */
 export function tomlSnippet(env: WireEnv): string {
   return [
     `[mcp_servers.flair]`,
     `command = "npx"`,
-    `args = ["-y", "@tpsdev-ai/flair-mcp"]`,
+    `args = ["-y", "${mcpServerSpec()}"]`,
     ``,
     `[mcp_servers.flair.env]`,
     `FLAIR_AGENT_ID = "${env.FLAIR_AGENT_ID}"`,
@@ -336,6 +354,87 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
     wire: _wireCursor,
   },
 ];
+
+// ---- End-of-run wiring summary (flair#906) --------------------------------
+
+/** One client's outcome. `wired` means a config file was actually written. */
+export interface WiringOutcome {
+  client: string;
+  message: string;
+  wired: boolean;
+}
+
+/** A summary line, tagged with severity so the caller owns icon/colour. */
+export interface SummaryLine {
+  level: "heading" | "ok" | "error" | "warn" | "muted";
+  text: string;
+}
+
+/**
+ * The summary `flair init` prints LAST.
+ *
+ * Every fact here was already available mid-run — `wiringResults` has always
+ * distinguished "wired ~/.claude.json" from "snippet printed (no
+ * ~/.claude.json)". What was missing is a place where the difference is still
+ * on screen once the command finishes: a not-wired client showed up only as a
+ * snippet in the middle of a wall of output, *after* a success line, so
+ * `--client all` read as having done all of it (flair#906). Pure so it can be
+ * tested without running init.
+ */
+export function renderWiringSummary(
+  results: WiringOutcome[],
+  opts: {
+    labels?: Map<string, string>;
+    /** Clients `--client all` passed over because they aren't installed. */
+    skippedUndetected?: string[];
+    /** Command to suggest when nothing at all got wired. */
+    rewireHint?: string;
+    /** True when the written spec could not be pinned (flair#907). */
+    unpinned?: boolean;
+  } = {},
+): SummaryLine[] {
+  const label = (id: string) => opts.labels?.get(id) ?? id;
+  const skipped = opts.skippedUndetected ?? [];
+  const wired = results.filter(r => r.wired);
+  const notWired = results.filter(r => !r.wired);
+
+  if (results.length === 0 && skipped.length === 0) return [];
+
+  const lines: SummaryLine[] = [{ level: "heading", text: "MCP clients" }];
+
+  if (wired.length > 0) {
+    lines.push({ level: "ok", text: `Wired: ${wired.map(r => label(r.client)).join(", ")}` });
+  }
+  // One line per NOT-wired client, naming the client and why — a count alone
+  // ("1 client failed") sends the user back to scrollback to find which.
+  for (const r of notWired) {
+    lines.push({ level: "error", text: `NOT wired: ${label(r.client)} — ${r.message}` });
+  }
+  if (skipped.length > 0) {
+    lines.push({ level: "muted", text: `Not installed, skipped: ${skipped.join(", ")}` });
+  }
+  if (wired.length === 0 && notWired.length === 0) {
+    lines.push({
+      level: "warn",
+      text: opts.rewireHint
+        ? `No MCP client was wired. Install a client, then re-run: ${opts.rewireHint}`
+        : "No MCP client was wired.",
+    });
+  }
+  if (notWired.length > 0) {
+    lines.push({
+      level: "warn",
+      text: `${notWired.length} client(s) need manual wiring — see the config printed above, or docs/mcp-clients.md`,
+    });
+  }
+  if (opts.unpinned) {
+    lines.push({
+      level: "warn",
+      text: "MCP server wired UNPINNED (Flair could not read its own version) — see the warning above.",
+    });
+  }
+  return lines;
+}
 
 export function detectClients(): Client[] {
   return ALL_CLIENTS.map((client) => ({

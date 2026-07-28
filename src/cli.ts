@@ -39,7 +39,8 @@ import {
   type FleetSweepResult,
 } from "./fleet-verify.js";
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
-import { detectClients, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
+import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
+import { flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "./lib/mcp-spec.js";
 import {
   resolveAgentKeyPath,
   loadEd25519PrivateKeyFromFile,
@@ -2427,46 +2428,17 @@ async function runSoulWizard(agentId: string): Promise<SoulEntries> {
 
 // ─── Program ─────────────────────────────────────────────────────────────────
 
-// Read version from package.json at the package root
-const __pkgDir = join(import.meta.dirname ?? __dirname, "..");
-const __pkgVersion = (() => {
-  try { return JSON.parse(readFileSync(join(__pkgDir, "package.json"), "utf-8")).version; }
-  catch { return "unknown"; }
-})();
+// This CLI's own version. Resolution lives in src/lib/mcp-spec.ts so that the
+// client-wiring code (src/install/clients.ts) shares ONE definition of both
+// the version and the MCP spec derived from it — see flair#907 for what
+// happened when the pin lived next to a single call site.
+const __pkgVersion = flairCliVersion();
 
-/**
- * The `@tpsdev-ai/flair-mcp` spec written into a client's MCP config.
- *
- * PINNED, deliberately. A bare `npx -y @tpsdev-ai/flair-mcp` re-resolves to
- * whatever is currently published on EVERY agent session — so a single bad
- * publish (stolen credentials, a malicious commit that clears review, or a
- * compromised dependency of the MCP package) reaches every wired user
- * silently, with no lockfile and no review step in the path. The postmark-mcp
- * incident was exactly this shape: a legitimate publish by the legitimate
- * owner, propagating for 16 days before anyone noticed. Worse, a yank does
- * not help — unpinned clients keep resolving latest.
- *
- * Our publish side is already hardened (OIDC staged publish, human 2FA at the
- * release gate), but that defends against credential theft, not against a bad
- * version being published legitimately. The consumer side is where that gap
- * closes, and pinning is what closes it: a wired client keeps running the
- * exact version that was current when it was wired, and moving forward
- * becomes a deliberate act.
- *
- * flair and flair-mcp ship in version lockstep from this monorepo, so the
- * running CLI's own version is the correct pin. `flair init` re-run rewires
- * to the then-current version; see the upgrade-rewire follow-up issue for
- * making `flair upgrade` do the same.
- *
- * Falls back to the unpinned spec only when the version can't be read, which
- * is the same condition under which `--version` reports "unknown" — a broken
- * install, where a working MCP wiring matters more than a precise pin.
- */
-export function mcpServerSpec(version: string = __pkgVersion): string {
-  return version && version !== "unknown"
-    ? `@tpsdev-ai/flair-mcp@${version}`
-    : "@tpsdev-ai/flair-mcp";
-}
+// mcpServerSpec now lives in src/lib/mcp-spec.ts alongside the version
+// resolution it depends on, so every writer shares it. Re-exported here
+// because it is part of this module's public surface (tests and callers
+// import it from src/cli.ts).
+export { mcpServerSpec };
 
 const program = new Command();
 program.name("flair").version(__pkgVersion, "-v, --version");
@@ -3200,14 +3172,35 @@ program
       // skips wiring entirely; `--client <name>` targets one client; the
       // default (no flag) wires every detected client.
       const mcpEnv: { FLAIR_AGENT_ID: string; FLAIR_URL: string } = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
-      const wiringResults: { client: string; message: string }[] = [];
+      // `wired` is the load-bearing field (flair#906): it separates "a config
+      // file was actually written" from "we printed something and moved on".
+      // Both outcomes used to be pushed here indistinguishably as far as the
+      // user was concerned, so `--client all` reported success for a client it
+      // had not wired.
+      const wiringResults: { client: ClientId | string; message: string; wired: boolean }[] = [];
+      // Human-readable labels + the clients `--client all` passed over because
+      // they aren't installed, so the closing summary can account for every
+      // client the user asked for rather than only the ones we tried.
+      const clientLabels = new Map<string, string>();
+      const skippedUndetected: string[] = [];
 
       if (!noMcp && clientOpt !== "none") {
+        // A spec we cannot pin is a security property quietly downgraded, so
+        // say so BEFORE writing it and again in the summary below (flair#907).
+        // stderr: this must survive `flair init | tee`, and it is a warning,
+        // not part of the command's normal output.
+        const pinWarning = unpinnedSpecWarning();
+        if (pinWarning) {
+          console.error("");
+          for (const line of pinWarning.split("\n")) console.error(`   ⚠ ${line}`);
+        }
+
         // Determine which clients to wire.
         let clients = detectClients();
         if (selectedClients.length > 0) {
           clients = clients.filter(c => selectedClients.includes(c.id));
         }
+        for (const c of clients) clientLabels.set(c.id, c.label);
         const detected = clients.filter(c => c.detected);
 
         if (!clientOpt) {
@@ -3223,6 +3216,15 @@ program
           : selectedClients.length > 0
             ? selectedClients
             : clients.filter(c => c.detected).map(c => c.id);
+
+        // `--client all` is a promise about every client, so the ones it
+        // passed over have to be accounted for too — silently omitting them
+        // is how "all" reports success for work it never did (flair#906).
+        if (clientOpt === "all") {
+          for (const c of clients) {
+            if (!c.detected) skippedUndetected.push(c.label);
+          }
+        }
 
         for (const clientId of toWire) {
           if (clientId === "claude-code") {
@@ -3241,29 +3243,43 @@ program
               // provenance.claimed.client = "claude-code".
               env: { ...mcpEnv, FLAIR_CLIENT: "claude-code" },
             };
+            // ~/.claude.json exists once Claude Code has been RUN, not once it
+            // is installed — so gating the write on it skipped every user who
+            // installed Claude Code and Flair in the same sitting (flair#906).
+            // The file is Claude Code's own and creating it with a single
+            // `mcpServers` key is exactly what `claude mcp add` does, so an
+            // absent file is created rather than turned into a printed snippet
+            // the user has to notice and act on.
             try {
-              if (existsSync(claudeJsonPath)) {
-                const claudeJson = JSON.parse(readFileSync(claudeJsonPath, "utf-8"));
-                const existing = claudeJson.mcpServers?.flair;
-                if (existing && existing.env?.FLAIR_URL === httpUrl && existing.env?.FLAIR_AGENT_ID === agentId) {
-                  console.log(`   ✓ Claude Code already wired in ~/.claude.json`);
-                  wiringResults.push({ client: "claude-code", message: "already wired" });
-                } else {
-                  claudeJson.mcpServers = claudeJson.mcpServers || {};
-                  claudeJson.mcpServers.flair = flairMcpConfig;
-                  writeFileSync(claudeJsonPath, JSON.stringify(claudeJson, null, 2));
-                  console.log(`   ✓ Claude Code wired in ~/.claude.json (restart Claude Code to pick it up)`);
-                  wiringResults.push({ client: "claude-code", message: "wired ~/.claude.json" });
-                }
+              const claudeJsonExisted = existsSync(claudeJsonPath);
+              const claudeJson = claudeJsonExisted
+                ? JSON.parse(readFileSync(claudeJsonPath, "utf-8"))
+                : {};
+              const existing = claudeJson.mcpServers?.flair;
+              if (existing && existing.env?.FLAIR_URL === httpUrl && existing.env?.FLAIR_AGENT_ID === agentId) {
+                console.log(`   ✓ Claude Code already wired in ~/.claude.json`);
+                wiringResults.push({ client: "claude-code", message: "already wired", wired: true });
               } else {
-                console.log(`   MCP config (add to ~/.claude.json):`);
-                console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
-                wiringResults.push({ client: "claude-code", message: "snippet printed (no ~/.claude.json)" });
+                claudeJson.mcpServers = claudeJson.mcpServers || {};
+                claudeJson.mcpServers.flair = flairMcpConfig;
+                writeFileSync(claudeJsonPath, JSON.stringify(claudeJson, null, 2));
+                const how = claudeJsonExisted ? "wired in ~/.claude.json" : "wired in ~/.claude.json (created)";
+                console.log(`   ✓ Claude Code ${how} (restart Claude Code to pick it up)`);
+                wiringResults.push({
+                  client: "claude-code",
+                  message: claudeJsonExisted ? "wired ~/.claude.json" : "created and wired ~/.claude.json",
+                  wired: true,
+                });
               }
-            } catch {
+            } catch (err: unknown) {
+              // Only a genuine read/parse/write failure lands here now (bad
+              // permissions, malformed existing JSON) — never merely "the file
+              // does not exist yet".
+              const reason = err instanceof Error ? err.message : String(err);
+              console.log(`   ${render.icons.warn} Claude Code: could not write ~/.claude.json (${reason})`);
               console.log(`   MCP config (add manually to ~/.claude.json):`);
               console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
-              wiringResults.push({ client: "claude-code", message: "snippet printed" });
+              wiringResults.push({ client: "claude-code", message: `snippet printed (${reason})`, wired: false });
             }
 
             // ── CLAUDE.md bootstrap line (flair#597) ──────────────────────────
@@ -3300,7 +3316,7 @@ program
               case "cursor": result = wireCursor({ ...mcpEnv, FLAIR_CLIENT: "cursor" }); break;
               default: result = { ok: false, message: `Unknown client: ${clientId}` };
             }
-            wiringResults.push({ client: clientId, message: result.message });
+            wiringResults.push({ client: clientId, message: result.message, wired: result.ok });
             console.log(`   ${result.ok ? "✓" : "•"} ${result.message}`);
           }
         }
@@ -3365,6 +3381,34 @@ program
           const message = err instanceof Error ? err.message : String(err);
           console.log(`   ⚠ MCP smoke test failed: ${message}`);
           console.log("   Use --skip-smoke to bypass.");
+        }
+      }
+
+      // ── MCP wiring summary (flair#906) ───────────────────────────────────
+      // LAST thing init prints, deliberately. Every fact below was already
+      // available mid-run, but a client that was not wired appeared only as a
+      // snippet in the middle of a wall of output, after a success line — so
+      // the user's next action was to open their client and find nothing
+      // there, with no reason to suspect init. A client the user asked for and
+      // did NOT get must still be on screen when the command finishes.
+      if (!noMcp && clientOpt !== "none") {
+        // The pin warning repeats here for the same reason the summary exists:
+        // a warning only in scrollback is a warning the user acts on never.
+        const summaryLines = renderWiringSummary(wiringResults, {
+          labels: clientLabels,
+          skippedUndetected,
+          rewireHint: `flair init --agent ${agentId} --client all`,
+          unpinned: unpinnedSpecWarning() !== null,
+        });
+        for (const line of summaryLines) {
+          const icon =
+            line.level === "ok" ? render.icons.ok :
+            line.level === "error" ? render.icons.error :
+            line.level === "warn" ? render.icons.warn :
+            line.level === "muted" ? render.icons.bullet :
+            null;
+          if (line.level === "heading") console.log(`\n   ${line.text}`);
+          else console.log(`   ${icon} ${line.text}`);
         }
       }
     } else {
@@ -9076,7 +9120,9 @@ snapshotCmd
     // point-in-time-consistent guarantee, not a weaker one.
     let stoppedForSnapshot = false;
     try {
-      await stopFlairProcess(port);
+      // `dataDir`, not the default (flair#902) — quiesce the instance this
+      // command was pointed at, never whichever one owns ~/.flair/data.
+      await stopFlairProcess(port, dataDir);
       stoppedForSnapshot = true;
       const snapshot = await createDataSnapshot(dataDir);
       const removed = pruneOldSnapshots();
@@ -9087,12 +9133,12 @@ snapshotCmd
     } catch (err: any) {
       console.error(`❌ snapshot failed: ${err.message}`);
       if (stoppedForSnapshot) {
-        try { await startFlairProcess(port); } catch { /* best effort — surface the original snapshot error, not this */ }
+        try { await startFlairProcess(port, dataDir); } catch { /* best effort — surface the original snapshot error, not this */ }
       }
       process.exit(1);
     }
     try {
-      await startFlairProcess(port);
+      await startFlairProcess(port, dataDir);
     } catch (err: any) {
       console.error(`❌ the snapshot succeeded but Flair failed to restart: ${err.message}`);
       console.error("   Check: flair doctor");
@@ -9169,7 +9215,11 @@ snapshotCmd
     }
 
     try {
-      await stopFlairProcess(port);
+      // `dataDir`, not the default (flair#902) — the whole point of this
+      // command's --data-dir is that it may name a scratch directory, and
+      // stopping the default instance instead is how a cautious inspect-a-
+      // snapshot-somewhere-else took production down.
+      await stopFlairProcess(port, dataDir);
     } catch (err: any) {
       console.error(`❌ failed to stop Flair: ${err.message}`);
       process.exit(1);
@@ -9205,7 +9255,7 @@ snapshotCmd
     }
 
     try {
-      await startFlairProcess(port);
+      await startFlairProcess(port, dataDir);
     } catch (err: any) {
       console.error(`❌ restore succeeded but Flair failed to restart: ${err.message}`);
       console.error("   Check: flair doctor");
@@ -9421,6 +9471,13 @@ program
     const { restart: shouldRestart, verify: shouldVerify, deprecatedRestartFlagUsed } =
       resolveUpgradeRestartVerify(opts);
     const upgradePort = resolveHttpPort({});
+    // The instance this upgrade is about, named once next to its port
+    // (flair#902). `flair upgrade` has no --data-dir, so this IS the default
+    // install — but stop/start/restart now take the directory explicitly, so
+    // the choice is made here in the open rather than assumed inside them.
+    // A default that happens to be right is the same defect waiting for the
+    // next caller.
+    const upgradeDataDir = defaultDataDir();
     // Hoisted so the pre-flight check (below) and the post-restart/rollback
     // verification steps (further down) all target the same URL — upgrade
     // never restarts Flair onto a different port.
@@ -9505,11 +9562,10 @@ program
     // the exact same mechanism as a standalone command for anyone who wants
     // one without wrapping it around an upgrade.
     const flairIsUpgrading = npmUpgrades.some((u) => u.pkg === "@tpsdev-ai/flair");
-    const snapshotDataDir = defaultDataDir();
     const snapshotDecision = decideUpgradeSnapshotAction(
       flairIsUpgrading,
       !!opts.snapshot,
-      existsSync(snapshotDataDir),
+      existsSync(upgradeDataDir),
     );
     let snapshotPath: string | null = null;
     if (snapshotDecision === "nudge") {
@@ -9521,7 +9577,7 @@ program
       console.log("");
       for (const line of UPGRADE_SNAPSHOT_NUDGE_LINES) console.log(render.wrap(render.c.dim, line));
     } else if (snapshotDecision === "no-data") {
-      console.log(`\n(no data directory at ${snapshotDataDir} yet — nothing to snapshot)`);
+      console.log(`\n(no data directory at ${upgradeDataDir} yet — nothing to snapshot)`);
     } else if (snapshotDecision === "snapshot") {
       console.log("\nSnapshotting data before upgrade...");
       // Consistency: a running Harper's data dir can be mid-write, and a
@@ -9539,9 +9595,9 @@ program
       // the server being up).
       let stoppedForSnapshot = false;
       try {
-        await stopFlairProcess(upgradePort);
+        await stopFlairProcess(upgradePort, upgradeDataDir);
         stoppedForSnapshot = true;
-        const snapshot = await createDataSnapshot(snapshotDataDir);
+        const snapshot = await createDataSnapshot(upgradeDataDir);
         snapshotPath = snapshot.path;
         const removed = pruneOldSnapshots();
         console.log(`✅ Snapshot: ${snapshotPath} (${humanBytes(snapshot.bytes)})`);
@@ -9553,12 +9609,12 @@ program
         console.error(`❌ snapshot failed: ${err.message}`);
         console.error("   Aborting upgrade — no packages were changed. Omit --snapshot to proceed without one (not recommended).");
         if (stoppedForSnapshot) {
-          try { await startFlairProcess(upgradePort); } catch { /* best effort — surface the original snapshot error, not this */ }
+          try { await startFlairProcess(upgradePort, upgradeDataDir); } catch { /* best effort — surface the original snapshot error, not this */ }
         }
         process.exit(1);
       }
       try {
-        await startFlairProcess(upgradePort);
+        await startFlairProcess(upgradePort, upgradeDataDir);
       } catch (err: any) {
         console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
         console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
@@ -9662,7 +9718,7 @@ program
       // version's own CLI is the thing that knows how to start it.
       const rolledBackCli = resolveInstalledFlairCli(flairPackageDir(), toVersion);
       try {
-        await restartAfterUpgrade(port, rolledBackCli.ok ? rolledBackCli : null);
+        await restartAfterUpgrade(port, upgradeDataDir, rolledBackCli.ok ? rolledBackCli : null);
       } catch (err: any) {
         console.error(`❌ rollback restart failed: ${err.message}`);
         console.error(`   @tpsdev-ai/flair@${toVersion} is installed but NOT running. Start it with: flair start`);
@@ -9727,7 +9783,7 @@ program
 
     let restartWasDelegated = false;
     try {
-      restartWasDelegated = await restartAfterUpgrade(port, newCli);
+      restartWasDelegated = await restartAfterUpgrade(port, upgradeDataDir, newCli);
     } catch (err: any) {
       console.error(`❌ restart failed: ${err.message}`);
       console.error("   Flair is NOT running. Your data in ~/.flair was not touched by this upgrade.");
@@ -9935,6 +9991,86 @@ program
 // ─── flair restart ────────────────────────────────────────────────────────────
 
 /**
+ * Refuse to act on a launchd service that belongs to a DIFFERENT data
+ * directory than the one the command is operating on (flair#902).
+ *
+ * `resolveLaunchdLabel`'s instance-scoped label is a hash of the data dir,
+ * so it can never address another instance — but its pre-flair#693 legacy
+ * fallback CAN: `ai.tpsdev.flair` is a single global label, returned for
+ * ANY data dir whenever that plist exists. On a host that still has one,
+ * `flair snapshot restore --data-dir <scratch>` would resolve the legacy
+ * service and stop whatever install it actually belongs to.
+ *
+ * The plist records the instance it was written for (`ROOTPATH`), so the
+ * check is exact. Refuses ONLY on positive contradiction: a plist with no
+ * ROOTPATH (hand-written, or some other writer's) is no evidence and is
+ * left alone rather than blocking a legitimate stop.
+ *
+ * Never logs plist contents — the plist embeds HDB_ADMIN_PASSWORD. Only the
+ * extracted ROOTPATH path ever reaches a message.
+ */
+function assertLaunchdServiceOwnedBy(
+  dataDir: string,
+  label: string,
+  plistPath: string,
+  action: "stop" | "start",
+): void {
+  let declared: string | null = null;
+  try {
+    const raw = readFileSync(plistPath, "utf-8");
+    const m = raw.match(/<key>ROOTPATH<\/key>\s*<string>([^<]*)<\/string>/);
+    declared = m ? m[1] : null;
+  } catch {
+    return; // unreadable — no evidence, don't block
+  }
+  if (declared === null) return;
+  if (resolve(declared) === resolve(dataDir)) return;
+
+  throw new Error(
+    `refusing to ${action} launchd service ${label}: its plist (${plistPath}) is registered to data directory ` +
+      `${resolve(declared)}, not ${resolve(dataDir)} — that is a different Flair instance. ` +
+      `Re-run with --data-dir ${resolve(declared)} to act on that one, or run ` +
+      `'flair init --data-dir ${resolve(dataDir)}' to register a service for this one.`,
+  );
+}
+
+/**
+ * Refuse a port-based SIGTERM that cannot be attributed to `dataDir`
+ * (flair#902).
+ *
+ * The port fallback below identifies its target by port number and nothing
+ * else, so `--data-dir <scratch>` with a port that scratch instance does not
+ * serve signals whichever instance DOES serve it. That is the whole of this
+ * bug on Linux, where there is no launchd path at all.
+ *
+ * Scoped deliberately to a non-default data dir. For the default install the
+ * port genuinely is that instance's port by every convention in this CLI
+ * (`writeConfig`/`readPortFromConfig`), and the only evidence available here
+ * — `<dataDir>/hdb.pid` vs the listening PIDs — is not something we can
+ * require without risking a false refusal on a working install whose PID file
+ * is missing or whose listener is a worker. So the default path keeps today's
+ * behavior exactly, and the residual gap is stated rather than papered over:
+ * a default-dir port stop is still unattributed. The new refusal can only
+ * fire for a caller that explicitly named another data dir — the case that is
+ * wrong today whenever the port does not match.
+ */
+function assertPortInstanceOwnedBy(port: number, dataDir: string, listeningPids: number[]): void {
+  if (resolve(dataDir) === defaultDataDir()) return;
+  const expected = readHarperPid(dataDir);
+  if (expected !== null && listeningPids.includes(expected)) return;
+
+  const why =
+    expected === null
+      ? `no hdb.pid under that directory, so it does not look like a running instance`
+      : `its recorded PID ${expected} is not the process listening on ${port}`;
+  throw new Error(
+    `refusing to stop the process listening on port ${port}: it cannot be attributed to ${resolve(dataDir)} (${why}). ` +
+      `Stopping by port alone would signal a different Flair instance. ` +
+      `Pass --port with the port ${resolve(dataDir)} actually serves, or omit --data-dir to operate on the default install.`,
+  );
+}
+
+/**
  * Stop the local Flair (Harper) process — launchd `stop` on darwin when a
  * plist is present (falling back on failure), otherwise a manual SIGTERM by
  * port. Split out of the old monolithic `restartFlair` (flair#637) so the
@@ -9942,19 +10078,34 @@ program
  * start without duplicating this logic — `restartFlair` is now just
  * `stopFlairProcess` followed by `startFlairProcess`.
  *
+ * `dataDir` is REQUIRED and names the instance to stop — it is not a
+ * convenience parameter. It used to be resolved internally from
+ * `defaultDataDir()`, which meant `flair snapshot create|restore --data-dir
+ * <elsewhere>` stopped the DEFAULT instance and reported success
+ * (flair#902). A port alone does not identify an instance to launchd; the
+ * data dir does, via `resolveLaunchdLabel`.
+ *
  * Idempotent-ish: stopping an already-stopped instance is a harmless no-op
  * on both paths (launchctl stop on an unloaded/idle service, or an empty
  * `lsof` match).
+ *
+ * Throws when the resolved target provably belongs to a different instance
+ * — see assertLaunchdServiceOwnedBy / assertPortInstanceOwnedBy. Callers
+ * already treat a failed stop as fatal, which is the point: refusing beats
+ * quiescing the wrong install.
  */
-async function stopFlairProcess(port: number): Promise<void> {
+async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
   if (process.platform === "darwin") {
-    const dataDir = defaultDataDir();
     // resolveLaunchdLabel (flair#693) finds whichever label this data dir
     // is currently registered under (new instance-scoped, or a
     // pre-flair#693 legacy install) — stop only needs to operate on
     // whichever exists, no migration.
     const { label, plistPath } = resolveLaunchdLabel(dataDir);
     if (existsSync(plistPath)) {
+      // Outside the try below: an ownership refusal must NOT degrade into
+      // the port-based fallback, which would go on to signal by port the
+      // very instance we just refused to touch.
+      assertLaunchdServiceOwnedBy(dataDir, label, plistPath, "stop");
       try {
         const { execSync } = await import("node:child_process");
         // Ensure the service is loaded (init writes the plist but doesn't load it)
@@ -9975,40 +10126,54 @@ async function stopFlairProcess(port: number): Promise<void> {
 
   // Port-based stop (Linux, or macOS fallback when no launchd plist)
   console.log("Stopping...");
-  try {
-    const { execSync } = await import("node:child_process");
-    // Listening sockets only, never our own PID. A bare `lsof -ti :port` also
-    // matches CLIENT sockets referencing the port, including THIS CLI's own
-    // keep-alive connections left by the credential pre-flight's
-    // probeInstance() HTTP calls (flair#741). Without the filter, the upgrade
-    // path SIGTERM'd its own process mid-restart — "Stopping..." then death
-    // (exit 143) before "Starting..." ever ran, leaving the server down
-    // (flair#800, deterministic on the Linux/non-launchd default path).
-    // flair#905 moved both halves of that filter into listeningPidsOnPort so
-    // the three other kill-by-port sites can't drift back to the unsafe form.
-    const pids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
-    if (pids.length > 0) {
-      for (const pid of pids) {
-        try { process.kill(pid, "SIGTERM"); } catch {}
-      }
-      // Wait briefly for shutdown
-      await new Promise(r => setTimeout(r, 2000));
-    }
-  } catch { /* not running */ }
+  const { execSync } = await import("node:child_process");
+  // -sTCP:LISTEN plus a self-PID guard, both inside listeningPidsOnPort: a bare
+  // `lsof -ti :port` also matches CLIENT sockets referencing the port, including
+  // THIS CLI's own keep-alive connections left by the credential pre-flight's
+  // probeInstance() HTTP calls (flair#741). Without the filter, the upgrade
+  // path SIGTERM'd its own process mid-restart — "Stopping..." then death
+  // (exit 143) before "Starting..." ever ran, leaving the server down
+  // (flair#800, deterministic on the Linux/non-launchd default path).
+  // flair#905 moved both halves into that one helper because the same
+  // unfiltered pattern had survived in `flair stop`, `flair uninstall` and
+  // `flair doctor` — one guarded resolver is what keeps the next site honest.
+  // It returns [] when lsof matches nothing, which is this path's "not running".
+  const targets = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+  if (targets.length === 0) return;
+
+  // Deliberately outside any catch: a refusal must reach the caller, not be
+  // swallowed as "not running" and reported as a successful stop.
+  assertPortInstanceOwnedBy(port, dataDir, targets);
+
+  for (const target of targets) {
+    try { process.kill(target, "SIGTERM"); } catch {}
+  }
+  // Wait briefly for shutdown
+  await new Promise((r) => setTimeout(r, 2000));
 }
 
 /**
  * Start the local Flair (Harper) process — launchd `start` on darwin when a
  * plist is present (falling back on failure), otherwise a direct spawn.
  * Counterpart to `stopFlairProcess`; see that function's doc comment.
+ *
+ * `dataDir` is REQUIRED for the same reason it is on `stopFlairProcess`
+ * (flair#902): it, not the port, is what identifies the instance. This
+ * function resolved it internally from `defaultDataDir()` too, so the
+ * snapshot commands' restart leg brought the DEFAULT instance back up after
+ * operating on a `--data-dir` elsewhere.
  */
-async function startFlairProcess(port: number): Promise<void> {
-  const dataDir = defaultDataDir();
+async function startFlairProcess(port: number, dataDir: string): Promise<void> {
   if (process.platform === "darwin") {
     // resolveLaunchdLabel (flair#693) finds whichever label this data dir
     // is currently registered under before we attempt anything.
-    const { plistPath } = resolveLaunchdLabel(dataDir);
+    const { label, plistPath } = resolveLaunchdLabel(dataDir);
     if (existsSync(plistPath)) {
+      // Same ownership gate as the stop path (flair#902), and outside the
+      // try for the same reason: starting the wrong service would then wait
+      // for health on `port`, see the OTHER instance answer, and report
+      // success.
+      assertLaunchdServiceOwnedBy(dataDir, label, plistPath, "start");
       try {
         const { execSync } = await import("node:child_process");
         ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
@@ -10077,15 +10242,22 @@ async function startFlairProcess(port: number): Promise<void> {
  * Throws on failure instead of calling process.exit — callers decide how to
  * react (`flair restart` exits 1; `flair upgrade` treats a failed restart as
  * an upgrade failure and may attempt a rollback).
+ *
+ * Takes `dataDir` explicitly (flair#902) so the instance being bounced is
+ * named at the call site rather than assumed from `defaultDataDir()` two
+ * frames down.
  */
-async function restartFlair(port: number): Promise<void> {
-  await stopFlairProcess(port);
-  await startFlairProcess(port);
+async function restartFlair(port: number, dataDir: string): Promise<void> {
+  await stopFlairProcess(port, dataDir);
+  await startFlairProcess(port, dataDir);
   // Bust the version-handshake cache so the next preAction nudge re-fetches
   // the LIVE version instead of the pre-restart cached one (the false
   // "server is running <old>" users hit for up to 60s post-upgrade+restart).
   // Same (rootPath, serverUrl) key the preAction hook computes (~line 2189)
-  // — must match exactly, or this busts the wrong cache file.
+  // — must match exactly, or this busts the wrong cache file. Deliberately
+  // NOT `dataDir`: the key is whatever the preAction hook computed for THIS
+  // process, and using the restarted instance's dir instead would bust a
+  // different cache file (or none) and leave the stale entry in place.
   try {
     invalidateHandshakeCache(process.env.ROOTPATH ?? defaultDataDir(), `http://127.0.0.1:${port}`);
   } catch { /* best-effort — never fail a restart over cache cleanup */ }
@@ -10162,13 +10334,35 @@ export function resolveInstalledFlairCli(
  * output is how "it restarted fine" and "it restarted with the wrong code"
  * become indistinguishable after the fact.
  *
+ * Delegation is limited to the DEFAULT data directory, and that limit is not
+ * incidental. The child is `flair restart`, which has no `--data-dir` and
+ * therefore restarts `defaultDataDir()` — handing it a `dataDir` that is not
+ * the default would restart a different instance and then wait for health on
+ * `port` and watch the wrong one answer. That is flair#902 exactly, and the
+ * required `dataDir` parameter here exists so the condition is checkable rather
+ * than assumed. Today the upgrade path only ever operates on the default
+ * install, so this never triggers; if that changes, `flair restart` needs a
+ * `--data-dir` before this may delegate.
+ *
  * Throws on failure; the caller owns the rollback decision. Returns whether the
  * restart was delegated, so the caller can leave the success line to whichever
  * process actually printed one.
  */
-async function restartAfterUpgrade(port: number, newCli: { cliPath: string; version: string } | null): Promise<boolean> {
+async function restartAfterUpgrade(
+  port: number,
+  dataDir: string,
+  newCliArg: { cliPath: string; version: string } | null,
+): Promise<boolean> {
+  let newCli = newCliArg;
+  if (newCli && resolve(dataDir) !== defaultDataDir()) {
+    console.error(
+      `warning: not delegating the restart to ${newCli.cliPath} — it would restart ${defaultDataDir()}, ` +
+      `not ${resolve(dataDir)}. Restarting with this process's own code instead.`,
+    );
+    newCli = null;
+  }
   if (!newCli) {
-    await restartFlair(port);
+    await restartFlair(port, dataDir);
     return false;
   }
   console.log(`  (restarting via the newly installed CLI: ${newCli.cliPath} @ ${newCli.version})`);
@@ -10203,8 +10397,11 @@ program
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
     const port = resolveHttpPort(opts);
+    // Explicit, not defaulted inside restartFlair (flair#902): `flair
+    // restart` has no --data-dir, so the default install IS what it means —
+    // and saying so here is what keeps that true when someone adds one.
     try {
-      await restartFlair(port);
+      await restartFlair(port, defaultDataDir());
       console.log("✅ Flair restarted");
     } catch (err: any) {
       console.error(`❌ Flair failed to restart: ${err?.message ?? err}`);
@@ -11284,6 +11481,16 @@ program
     } else {
       let claudeCodeAgentId: string | undefined;
       let anyKnownAgentId: string | undefined;
+
+      // `doctor --fix` writes client configs through the same wire functions
+      // init does, so it owes the user the same warning when the spec it would
+      // write cannot be pinned (flair#907).
+      if (autoFix) {
+        const pinWarning = unpinnedSpecWarning();
+        if (pinWarning) {
+          for (const line of pinWarning.split("\n")) console.log(`  ${render.icons.warn} ${line}`);
+        }
+      }
 
       for (const client of detectedClients) {
         const block = readClientMcpBlock(client.id, homedir());

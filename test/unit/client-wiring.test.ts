@@ -26,6 +26,13 @@ import { resolveWireFlairUrl } from "../../src/doctor-client.ts";
  */
 
 const ENV = { FLAIR_AGENT_ID: "wirebot", FLAIR_URL: "http://127.0.0.1:19926" };
+
+/** This repo's real version, read straight from package.json — the pin every
+ *  wire function must write (flair#907). Deliberately NOT mcpServerSpec(), so
+ *  these assertions cannot be satisfied by a helper that stopped pinning. */
+const PKG_VERSION: string = JSON.parse(
+  readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf-8"),
+).version;
 let isoHome: string;
 let prevHome: string | undefined;
 
@@ -49,7 +56,11 @@ describe("client wiring (FIX 4: 'wired' means a file was written)", () => {
     expect(existsSync(cfgPath)).toBe(true);
     const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
     expect(cfg.mcpServers.flair.command).toBe("npx");
-    expect(cfg.mcpServers.flair.args).toEqual(["-y", "@tpsdev-ai/flair-mcp"]);
+    // Pinned (flair#907). This assertion used to expect the bare unpinned
+    // package — it was encoding the bug. The expected version is read
+    // independently from package.json rather than from mcpServerSpec(), so a
+    // regression that unpins BOTH the writer and the helper still fails here.
+    expect(cfg.mcpServers.flair.args).toEqual(["-y", `@tpsdev-ai/flair-mcp@${PKG_VERSION}`]);
     expect(cfg.mcpServers.flair.env.FLAIR_AGENT_ID).toBe("wirebot");
     expect(cfg.mcpServers.flair.env.FLAIR_URL).toBe(ENV.FLAIR_URL);
   });
