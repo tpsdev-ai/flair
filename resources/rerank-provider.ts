@@ -7,6 +7,39 @@
  * and graceful passthrough on ANY failure — the reranker is best-effort and must
  * NEVER block or break recall.
  *
+ * DEGRADE, BUT NEVER SILENTLY (flair#888). The passthrough above is a
+ * deliberate choice, re-affirmed rather than inherited: a search that returns
+ * vector-ordered results is still a useful search (reranking only REORDERS an
+ * already-relevant candidate pool), so hard-failing recall would turn an
+ * operator's provisioning mistake into a total recall outage. What is NOT
+ * acceptable is a search that silently claims to be reranked when it wasn't —
+ * that's how `rerankCount` sat at 0 in production while every surface looked
+ * healthy. So every passthrough is now:
+ *
+ *   1. CLASSIFIED — `unavailable` (engine/model can't serve at all) vs
+ *      `timeout` (budget exceeded) vs `error` (a scoring call threw), surfaced
+ *      as `lastFallbackReason`/`lastFallbackDetail`/`lastFallbackAt` on
+ *      getRerankStatus() so /HealthDetail can say WHICH happened.
+ *   2. LOGGED once per DISTINCT reason, not once per process. The old
+ *      `_warnedOnce` latch meant the second, different failure in a
+ *      long-running process was invisible forever.
+ *   3. ACTIONABLE — `unavailable` carries the resolved GGUF path it looked
+ *      for, the models-dir resolution order, and the three ways to fix it
+ *      (see `rerankUnavailableMessage()`), instead of the old bare
+ *      "reranker not ready".
+ *   4. HARD-FAILABLE ON DEMAND — `assertRerankAvailable()` turns the same
+ *      diagnosis into a throw for callers where a wrong answer is worse than
+ *      no answer. The recall bench uses it: a benchmark that measures a
+ *      different configuration than the one it reports is worse than no
+ *      benchmark, so `--rerank` refuses to measure unless the reranker
+ *      provably engaged. Production recall does NOT use it, by the reasoning
+ *      above.
+ *
+ * Relatedly, an UNRECOGNIZED `FLAIR_RERANK_MODEL` is no longer swapped for the
+ * default behind the operator's back (see `resolveModelKey()`) — "configured
+ * model X, served model Y" is the same silent-substitution class and it made
+ * `getRerankStatus().model` report a model nobody asked for.
+ *
  * Two inference modes (selected by FLAIR_RERANK_MODEL):
  *
  *  1. "jina-reranker-v2" (DEFAULT, working) — jina-reranker-v2 IS a rank-pooling
@@ -105,6 +138,25 @@ const MODELS: Record<string, ModelSpec> = {
 
 const DEFAULT_MODEL = "jina-reranker-v2";
 
+/** Every model key `FLAIR_RERANK_MODEL` accepts. Exported so callers that want
+ * to reject a bad config BEFORE paying for an init (the recall bench does)
+ * don't have to duplicate the list. */
+export const KNOWN_RERANK_MODELS: readonly string[] = Object.keys(MODELS);
+
+/** Is `key` a model this provider can actually serve? */
+export function isKnownRerankModel(key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(MODELS, key);
+}
+
+/** The GGUF filename `key` expects under the models dir, or undefined for an
+ * unknown key. Exported so out-of-process callers (the recall bench, which
+ * spawns Harper rather than importing this provider into the serving process)
+ * can check for the file WITHOUT hardcoding a second copy of the mapping that
+ * could drift from MODELS. */
+export function rerankModelFile(key: string): string | undefined {
+  return MODELS[key]?.file;
+}
+
 // Official Qwen3-Reranker prompt scaffold (generative yes/no judgement).
 const QWEN_PREFIX =
   '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n';
@@ -188,9 +240,69 @@ export function truncateTokenBudget(tokens: readonly number[], maxTokens: number
 
 let _state: InitState = "uninitialized";
 let _initError: string | undefined;
-let _warnedOnce = false;
 let _modelKey = "";
 let _mode: RerankMode | undefined;
+
+/**
+ * Why a rerank request produced vector order instead of a reranked order.
+ *  - `unavailable` — the engine/model can't serve at all (missing GGUF,
+ *    unknown model key, no platform addon, non-ranking GGUF in rank mode).
+ *    OPERATOR ERROR: reranking was asked for and cannot be delivered until
+ *    someone provisions something.
+ *  - `timeout`     — scoring didn't finish inside FLAIR_RERANK_BUDGET_MS.
+ *    Load/tuning, not provisioning.
+ *  - `error`       — a scoring call threw (engine-level).
+ */
+export type RerankFallbackReason = "unavailable" | "timeout" | "error";
+
+/**
+ * Thrown when reranking was requested but the engine/model can't serve it —
+ * distinct from an engine error DURING scoring, so `rerankCandidates` can
+ * classify the fallback without string-matching a message.
+ */
+export class RerankUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RerankUnavailableError";
+  }
+}
+
+let _lastFallbackReason: RerankFallbackReason | null = null;
+let _lastFallbackDetail: string | null = null;
+let _lastFallbackAt: string | null = null;
+
+// One warning per DISTINCT reason, not one per process (flair#888). The old
+// single `_warnedOnce` boolean meant that once ANY warning had been emitted,
+// every LATER and DIFFERENT failure was invisible for the life of the process
+// — precisely the "looks healthy, does nothing" mode this file exists to make
+// impossible. Bounded so a pathological stream of unique error strings can't
+// grow it without limit; past the cap the counters and getRerankStatus() are
+// still exact (they're the real signal channel — the log is a convenience).
+const MAX_WARNED_REASONS = 32;
+const _warnedReasons = new Set<string>();
+
+function warnOnce(key: string, message: string): void {
+  if (_warnedReasons.has(key)) return;
+  if (_warnedReasons.size >= MAX_WARNED_REASONS) return;
+  _warnedReasons.add(key);
+  console.warn(message);
+}
+
+/**
+ * Record a fall-back to vector order: bump the counter, remember WHICH kind of
+ * failure it was (so /HealthDetail can distinguish "never provisioned" from
+ * "too slow" from "engine threw"), and log it once per distinct reason.
+ * `unavailable` logs at ERROR level because it means someone turned reranking
+ * on and is not getting it, which needs a human; the others are WARN.
+ */
+function noteFallback(reason: RerankFallbackReason, detail: string): void {
+  _fallbackCount++;
+  _lastFallbackReason = reason;
+  _lastFallbackDetail = detail;
+  _lastFallbackAt = new Date().toISOString();
+  const level = reason === "unavailable" ? "ERROR" : "WARN";
+  warnOnce(`${reason}:${detail}`, `[rerank] ${level}: ${detail} — this search returned vector order, NOT reranked order.`);
+}
 
 // node-llama-cpp handles (kept alive as a singleton like the embedding engine).
 let _nlc: any = null;
@@ -209,10 +321,23 @@ let _lastLatencyMs: number | null = null;
 let _fallbackCount = 0;
 let _rerankCount = 0;
 
-function resolveModelKey(): string {
+/**
+ * The model key this process is CONFIGURED for — `FLAIR_RERANK_MODEL`
+ * verbatim, or DEFAULT_MODEL when it's unset/blank.
+ *
+ * flair#888: this used to silently return DEFAULT_MODEL for any UNRECOGNIZED
+ * value, so a typo'd `FLAIR_RERANK_MODEL` served jina while
+ * `getRerankStatus().model` reported jina too — the operator's request
+ * vanished with no trace anywhere. Returning it verbatim means the status
+ * surface shows what was ASKED for, and `ensureInit()` turns the unknown key
+ * into a loud, actionable init failure (which then degrades to vector order
+ * like any other unavailability — see the file header's DEGRADE, BUT NEVER
+ * SILENTLY note).
+ * Exported for unit testing.
+ */
+export function resolveModelKey(): string {
   const requested = process.env.FLAIR_RERANK_MODEL?.trim();
-  if (requested && MODELS[requested]) return requested;
-  return DEFAULT_MODEL;
+  return requested || DEFAULT_MODEL;
 }
 
 /**
@@ -283,11 +408,21 @@ async function ensureInit(): Promise<void> {
   // the old one).
   if (_state === "ready") await disposeHandles().catch(() => {});
   _state = "uninitialized";
-  _warnedOnce = false;
+  _warnedReasons.clear();
 
   try {
     _modelKey = requested;
     const spec = MODELS[_modelKey];
+    // flair#888: an unrecognized FLAIR_RERANK_MODEL is a config error the
+    // operator must see, not something to quietly paper over with the default
+    // (see resolveModelKey's doc).
+    if (!spec) {
+      throw new Error(
+        `unknown reranker model "${_modelKey}" (FLAIR_RERANK_MODEL). ` +
+        `Known models: ${KNOWN_RERANK_MODELS.join(", ")}. ` +
+        `Set FLAIR_RERANK_MODEL to one of those, or unset it to use the default (${DEFAULT_MODEL}).`,
+      );
+    }
     _mode = spec.mode;
 
     const { existsSync } = await import("node:fs");
@@ -344,15 +479,54 @@ async function ensureInit(): Promise<void> {
   } catch (err: any) {
     _state = "failed";
     _initError = err?.message || String(err);
-    if (!_warnedOnce) {
-      console.warn(
-        `[rerank] WARN: reranker unavailable, recall falls back to vector order. Error: ${_initError}`,
-      );
-      _warnedOnce = true;
-    }
+    // NOT logged here — every caller path routes through noteFallback(), which
+    // logs the full actionable diagnosis once per distinct reason. Logging
+    // here too would double up, and (worse) would fire even for
+    // assertRerankAvailable(), whose whole job is to THROW the diagnosis at a
+    // caller that asked to be told.
     // Best-effort cleanup of any partial handles.
     await disposeHandles().catch(() => {});
   }
+}
+
+/**
+ * The loud, actionable "you asked for reranking and are not getting it"
+ * diagnosis — names the configured model, the exact GGUF path that was
+ * checked, how that path was resolved, and every way to fix it. Single source
+ * of truth: the runtime logs it (via noteFallback) and
+ * `assertRerankAvailable()` throws it, so a bench failure and a production log
+ * line say exactly the same thing.
+ */
+function rerankUnavailableMessage(): string {
+  const key = _modelKey || resolveModelKey();
+  const spec = MODELS[key];
+  const where = spec
+    ? `expected GGUF at ${resolveRerankModelPath(spec.file)}`
+    : `no GGUF path — "${key}" is not a known model (known: ${KNOWN_RERANK_MODELS.join(", ")})`;
+  return (
+    `reranker ENABLED but UNAVAILABLE (model="${key}"): ${_initError ?? "init did not complete"}. ` +
+    `${where}; the models dir resolves as FLAIR_MODELS_DIR → <ROOTPATH>/models → <cwd>/models → ~/.flair/data/models. ` +
+    `Fix by one of: provision the GGUF per docs/rerank-provisioning.md; point FLAIR_MODELS_DIR at a directory that already has it; ` +
+    `correct FLAIR_RERANK_MODEL; or unset FLAIR_RERANK_ENABLED to run without reranking.`
+  );
+}
+
+/**
+ * Prove the reranker can actually serve, or THROW `rerankUnavailableMessage()`.
+ *
+ * For callers where measuring/serving the WRONG configuration is worse than
+ * failing: the recall bench's `--rerank` arm calls this before it measures
+ * anything, so a missing GGUF can never be reported as a rerank result (that
+ * exact substitution is what flair#888 is about). Production recall
+ * deliberately does NOT call this — see the file header for why degrading
+ * beats a recall outage there.
+ *
+ * Idempotent and cheap after the first call (ensureInit's own reinit guard).
+ */
+export async function assertRerankAvailable(): Promise<void> {
+  await ensureInit();
+  if (_state === "ready") return;
+  throw new RerankUnavailableError(rerankUnavailableMessage());
 }
 
 async function disposeHandles(): Promise<void> {
@@ -467,7 +641,11 @@ function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
  */
 export async function rerankScores(query: string, docs: string[]): Promise<number[]> {
   await ensureInit();
-  if (_state !== "ready") throw new Error("reranker not ready");
+  // flair#888: this used to throw a bare "reranker not ready", which the
+  // caller then logged — discarding the ONE piece of information an operator
+  // needs (what's missing and where it was looked for). Carry the full
+  // diagnosis instead; rerankCandidates classifies it as `unavailable`.
+  if (_state !== "ready") throw new RerankUnavailableError(rerankUnavailableMessage());
 
   if (_mode === "rank") {
     // Bound query + every doc BEFORE rankAll (flair#811 point 1) — rankAll
@@ -531,8 +709,11 @@ export async function rerankCandidates<T extends { content?: any; _score?: numbe
     if (timer) clearTimeout(timer);
 
     if (scores === null) {
-      // Budget exceeded — abandon rerank, keep vector order. No partial reorder.
-      _fallbackCount++;
+      // Budget exceeded — abandon rerank, keep vector order. No partial
+      // reorder. flair#888: this branch used to bump the counter and say
+      // NOTHING; "fallbackCount went up" with no reason attached can't be
+      // acted on. Classify it.
+      noteFallback("timeout", `rerank exceeded its ${opts.budgetMs}ms budget (FLAIR_RERANK_BUDGET_MS) over ${top.length} candidates`);
       return candidates;
     }
 
@@ -553,11 +734,11 @@ export async function rerankCandidates<T extends { content?: any; _score?: numbe
     return [...reranked, ...tail];
   } catch (err: any) {
     if (timer) clearTimeout(timer);
-    _fallbackCount++;
-    if (!_warnedOnce) {
-      console.warn(`[rerank] WARN: rerank threw, falling back to vector order. Error: ${err?.message || err}`);
-      _warnedOnce = true;
-    }
+    // Two very different situations, and the operator's next action differs:
+    // `unavailable` = provision something; `error` = an engine call blew up
+    // mid-scoring on a reranker that DID load.
+    if (err instanceof RerankUnavailableError) noteFallback("unavailable", err.message);
+    else noteFallback("error", `rerank threw during scoring: ${err?.message || err}`);
     return candidates;
   }
 }
@@ -585,7 +766,15 @@ export function getRerankMinCandidates(): number {
   return Number.isFinite(v) && v >= 2 ? Math.floor(v) : 2;
 }
 
-/** Status surface for health.ts. */
+/**
+ * Status surface for health.ts.
+ *
+ * flair#888: `rerankCount`/`fallbackCount` alone can't tell an operator WHY
+ * reranking isn't happening, and health.ts's ratio warning was structurally
+ * unable to fire in the total-failure case (see its own comment). The
+ * `lastFallback*` fields close that: they say which class of failure happened
+ * and when, in the same payload as the counters.
+ */
 export function getRerankStatus(): {
   enabled: boolean;
   model: string;
@@ -596,6 +785,9 @@ export function getRerankStatus(): {
   lastLatencyMs: number | null;
   rerankCount: number;
   fallbackCount: number;
+  lastFallbackReason: RerankFallbackReason | null;
+  lastFallbackDetail: string | null;
+  lastFallbackAt: string | null;
   error?: string;
 } {
   return {
@@ -608,8 +800,55 @@ export function getRerankStatus(): {
     lastLatencyMs: _lastLatencyMs,
     rerankCount: _rerankCount,
     fallbackCount: _fallbackCount,
+    lastFallbackReason: _lastFallbackReason,
+    lastFallbackDetail: _lastFallbackDetail,
+    lastFallbackAt: _lastFallbackAt,
     error: _initError,
   };
+}
+
+/** One entry of /HealthDetail's `warnings` array (structurally identical to
+ * health.ts's own inline shape — declared here so this module stays free of
+ * any Harper import). */
+export interface RerankHealthWarning { level: "warn" | "info"; message: string }
+
+/**
+ * Decide what /HealthDetail should say about the reranker, given a status
+ * block. Lives HERE rather than in health.ts because health.ts imports
+ * Harper's runtime (its module graph needs a configured database path), which
+ * makes it unreachable from a unit test — and this decision is exactly the
+ * thing that needed a regression test. Pure; see
+ * test/unit/health-rerank-warnings.test.ts.
+ *
+ * flair#888 — the bug this exists to prevent: health.ts guarded its
+ * degradation warning on `rerankCount > 0`:
+ *
+ *     if (rr.enabled && rr.rerankCount > 0 && rr.fallbackCount > rr.rerankCount)
+ *
+ * so the WORST possible state — reranking enabled, every search falling back,
+ * zero successful reranks — was the ONE state that produced no warning at
+ * all. "rerankCount sat at 0 while every surface looked healthy" was the
+ * reported production symptom, and the health surface was structurally
+ * incapable of reporting it. Total failure is now checked FIRST and
+ * separately, because the operator's next action differs: provision/fix
+ * config, versus tune budget/topN.
+ */
+export function rerankWarnings(rr: ReturnType<typeof getRerankStatus>): RerankHealthWarning[] {
+  const out: RerankHealthWarning[] = [];
+  if (!rr.enabled) return out;
+  if (rr.state === "failed") {
+    out.push({ level: "warn", message: `reranker enabled but unavailable: ${rr.error ?? "init failed"} — recall falling back to vector order` });
+  }
+  if (rr.rerankCount === 0 && rr.fallbackCount > 0) {
+    const why = rr.lastFallbackDetail ?? rr.error ?? "no reason recorded";
+    out.push({
+      level: "warn",
+      message: `reranker enabled but has NEVER successfully reranked (${rr.fallbackCount} fallbacks / 0 reranks, last reason: ${rr.lastFallbackReason ?? "unknown"}) — every search returned vector order, not reranked order. ${why}`,
+    });
+  } else if (rr.rerankCount > 0 && rr.fallbackCount > rr.rerankCount) {
+    out.push({ level: "warn", message: `reranker falling back more than reranking (${rr.fallbackCount} fallbacks / ${rr.rerankCount} reranks, last reason: ${rr.lastFallbackReason ?? "unknown"}) — check latency budget / topN` });
+  }
+  return out;
 }
 
 // ── Test seam ────────────────────────────────────────────────────────────────
