@@ -150,23 +150,43 @@ function readTextOrNull(abs) {
 
 // --- Modes -------------------------------------------------------------------
 
+/**
+ * `--write` rewrites the FIRST match only, so a file carrying two declarations
+ * would be half-bumped and the second left stale — invisible to the discovery
+ * scan, which only asks whether a file is in the inventory, not whether every
+ * declaration in it agrees. Require exactly one.
+ */
+function countMatches(src, pattern) {
+  return (src.match(new RegExp(pattern.source, pattern.flags + "g")) ?? []).length;
+}
+
 function readDeclared(file) {
   const abs = join(REPO_ROOT, file.path);
   const src = readFileSync(abs, "utf8");
-  const m = src.match(file.pattern);
-  if (!m) {
+  const n = countMatches(src, file.pattern);
+  if (n === 0) {
     return { ok: false, reason: `no ${file.label} declaration matched in ${file.path}` };
   }
-  return { ok: true, version: m[2] };
+  if (n > 1) {
+    return {
+      ok: false,
+      reason: `${file.path} has ${n} ${file.label} declarations; --write rewrites only the first. Reduce it to one.`,
+    };
+  }
+  return { ok: true, version: src.match(file.pattern)[2] };
 }
 
 function write(version) {
   for (const file of SOURCE_VERSION_FILES) {
     const abs = join(REPO_ROOT, file.path);
     const src = readFileSync(abs, "utf8");
-    if (!file.pattern.test(src)) {
-      console.error(`❌ ${file.path}: no ${file.label} declaration to rewrite.`);
-      console.error(`   The pattern in scripts/check-version-sync.mjs no longer matches this file.`);
+    const n = countMatches(src, file.pattern);
+    if (n !== 1) {
+      console.error(
+        n === 0
+          ? `❌ ${file.path}: no ${file.label} declaration to rewrite. The pattern in scripts/check-version-sync.mjs no longer matches this file.`
+          : `❌ ${file.path}: ${n} ${file.label} declarations, expected exactly 1. Rewriting would leave ${n - 1} stale.`,
+      );
       process.exit(1);
     }
     writeFileSync(abs, src.replace(file.pattern, `$1${version}$3`));
