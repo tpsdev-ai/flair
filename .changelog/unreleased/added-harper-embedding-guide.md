@@ -1,7 +1,9 @@
 - **Guide: embedding Flair inside an application that already runs on Harper.**
   [`docs/embedding-in-a-harper-app.md`](docs/embedding-in-a-harper-app.md) covers
   running Flair as a component alongside your own, and reaching its resources
-  in-process — no HTTP, no second process.
+  in-process — no HTTP, no second process, and no shell on the node. Includes
+  serving many agents from one process and registering them programmatically,
+  both without the CLI.
 
   The load-bearing detail it documents: `databases.flair.Memory` is the **table**,
   while the exported `Memory` class is the **resource**, and only the resource
