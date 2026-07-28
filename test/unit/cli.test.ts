@@ -230,11 +230,29 @@ describe("resolveHttpPort", () => {
     expect(result).toBe(7777);
   });
 
-  test("ignores zero port and falls through", () => {
+  // The two tests below name a data directory on purpose (flair#914).
+  // `homedir()` is baked in at module load and cannot be overridden in
+  // process, so a bare `resolveHttpPort({})` here resolves the DEVELOPER's
+  // own install — it used to merely READ their ~/.flair/config.yaml, and now
+  // it would also migrate their live data directory as a side effect of
+  // running the unit suite. Naming a throwaway directory keeps the assertion
+  // about the resolver instead of about whoever is running it.
+  function tmpInstanceDir(port: number): string {
+    const dir = makeTmpDir();
+    writeFileSync(join(dir, "flair-instance.yaml"), `port: ${port}\n`);
+    return dir;
+  }
+
+  test("ignores zero port and falls through to the instance's own config", () => {
     delete process.env.FLAIR_URL;
-    const result = resolveHttpPort({ port: 0 });
-    // With no FLAIR_URL and no valid port, falls to config or DEFAULT_PORT
-    expect(result).toBeGreaterThan(0);
+    const dir = tmpInstanceDir(20123);
+    try {
+      // Not a valid port, so it falls through — to the instance-local config,
+      // not to a default.
+      expect(resolveHttpPort({ port: 0, dataDir: dir })).toBe(20123);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("ignores NaN port and falls through to FLAIR_URL", () => {
@@ -266,9 +284,15 @@ describe("resolveHttpPort", () => {
 
   test("returns a positive integer in all code paths", () => {
     delete process.env.FLAIR_URL;
-    const result = resolveHttpPort({});
-    expect(result).toBeGreaterThan(0);
-    expect(Number.isInteger(result)).toBe(true);
+    const dir = tmpInstanceDir(20124);
+    try {
+      const result = resolveHttpPort({ dataDir: dir });
+      expect(result).toBe(20124);
+      expect(result).toBeGreaterThan(0);
+      expect(Number.isInteger(result)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

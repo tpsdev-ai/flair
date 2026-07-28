@@ -436,6 +436,15 @@ function configPath(): string {
   return yamlPath;
 }
 
+/**
+ * `~/.flair/config.yaml`'s `port:` — the PER-USER file, which describes the
+ * default install and only the default install (flair#914).
+ *
+ * Kept for the commands that have no `--data-dir` of their own and therefore
+ * genuinely mean the default instance, and as the source the instance-local
+ * migration reads from. Anything that resolves a port for a NAMED instance
+ * must go through `resolveHttpPort`, not this.
+ */
 function readPortFromConfig(): number | null {
   try {
     const p = configPath();
@@ -446,6 +455,109 @@ function readPortFromConfig(): number | null {
     }
   } catch { /* ignore */ }
   return null;
+}
+
+// ─── instance-local config (flair#914) ───────────────────────────────────────
+//
+// `~/.flair/config.yaml` records ONE port for the whole user. `flair init
+// --data-dir X --port P` wrote it unconditionally, so a second instance
+// overwrote the first's recorded port and `resolveHttpPort()` then answered a
+// per-instance question from a file that cannot tell instances apart — with no
+// data dir as input at all.
+//
+// This is the dual of flair#902 (fixed in flair#910): that one resolved the
+// INSTANCE from the wrong directory; this one resolved the PORT from a file
+// that has no notion of instances. The fix is the same shape flair#910
+// established — the data directory IS the instance identity, and everything
+// else derives from it. The port now lives beside the data directory it
+// describes, so it is self-describing: copy or move a data directory and its
+// port travels with it.
+//
+// The alternative considered and rejected was a per-user registry keyed by data
+// dir. It is a second source of truth that has to be kept in step with the
+// filesystem — a moved directory leaves a stale entry, a copied one arrives
+// with none — whereas an instance-local file cannot drift from the thing it
+// describes because it IS part of it.
+//
+// Enumeration (`flair instances`) is deliberately NOT accommodated here. If it
+// ever lands it is a DERIVED registry written by a scan, never by `init`, so
+// that it can be stale without being wrong.
+
+/** The instance-local config file for `dataDir` — the port's home (flair#914). */
+function instanceConfigPath(dataDir: string): string {
+  return join(resolve(dataDir), "flair-instance.yaml");
+}
+
+/**
+ * The keys the instance-local config holds. A closed union, not a string:
+ * these names are interpolated into a RegExp below, and a type that cannot
+ * carry anything else is a cheaper guarantee than a comment asking the next
+ * reader to check every call site.
+ */
+type InstanceConfigKey = "port" | "opsPort" | "opsBind";
+
+/** Read a numeric key out of the instance-local config for `dataDir`. */
+function readInstanceConfigNumber(dataDir: string, key: InstanceConfigKey): number | null {
+  try {
+    const p = instanceConfigPath(dataDir);
+    if (existsSync(p)) {
+      const yaml = readFileSync(p, "utf-8");
+      const m = yaml.match(new RegExp(`^\\s*${key}:\\s*(\\d+)`, "m"));
+      if (m) return Number(m[1]);
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/** Read a string key out of the instance-local config for `dataDir`. */
+function readInstanceConfigString(dataDir: string, key: InstanceConfigKey): string | null {
+  try {
+    const p = instanceConfigPath(dataDir);
+    if (existsSync(p)) {
+      const yaml = readFileSync(p, "utf-8");
+      const m = yaml.match(new RegExp(`^\\s*${key}:\\s*["']?([^"'\\s#]+)["']?`, "m"));
+      if (m && m[1]) return m[1];
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/** This instance's HTTP port, from the file that sits inside it. */
+function readPortFromInstanceConfig(dataDir: string): number | null {
+  return readInstanceConfigNumber(dataDir, "port");
+}
+
+/**
+ * Write `<dataDir>/flair-instance.yaml`.
+ *
+ * Rewrites wholesale like `writeConfig` does, so callers that know only the
+ * port pass `undefined` for the rest and the persisted values are preserved
+ * rather than erased — otherwise `flair doctor --fix` correcting a drifted HTTP
+ * port would silently drop the operator's `--ops-bind` choice.
+ */
+function writeInstanceConfig(dataDir: string, port: number, opsPort?: number, opsBind?: string): void {
+  const dir = resolve(dataDir);
+  const resolvedOpsPort = opsPort ?? readInstanceConfigNumber(dir, "opsPort") ?? undefined;
+  const resolvedOpsBind = opsBind ?? readInstanceConfigString(dir, "opsBind") ?? undefined;
+  mkdirSync(dir, { recursive: true });
+  let body =
+    "# Flair instance configuration (flair#914).\n"
+    + "# These are the coordinates of the instance served from THIS directory.\n"
+    + "# ~/.flair/config.yaml describes the default install only; it cannot tell\n"
+    + "# two instances apart, which is why the port lives here.\n"
+    + `port: ${port}\n`;
+  if (resolvedOpsPort !== undefined && resolvedOpsPort !== null) body += `opsPort: ${resolvedOpsPort}\n`;
+  if (resolvedOpsBind) body += `opsBind: ${resolvedOpsBind}\n`;
+  writeFileSync(instanceConfigPath(dir), body);
+}
+
+/** Which instance a command is addressing: `--data-dir` if given, else the default install. */
+function instanceDataDir(opts: { dataDir?: string }): string {
+  return opts.dataDir ? resolve(opts.dataDir) : defaultDataDir();
+}
+
+function isDefaultDataDir(dataDir: string): boolean {
+  return resolve(dataDir) === resolve(defaultDataDir());
 }
 
 /**
@@ -480,9 +592,46 @@ function readOpsPortFromConfig(path: string = configPath()): number | null {
   return null;
 }
 
-// Unified port resolution: --port flag > FLAIR_URL env > config file > default
-// Every command that talks to Harper MUST use these helpers.
-function resolveHttpPort(opts: { port?: string | number }): number {
+/**
+ * Unified port resolution: `--port` flag > `FLAIR_URL` env > the instance's own
+ * config > (default install only) the per-user config > default.
+ *
+ * Every command that talks to Harper MUST use this helper.
+ *
+ * `opts.dataDir` names the instance (flair#914). Commands without a
+ * `--data-dir` flag do not carry one and therefore mean the default install,
+ * which is what they have always meant.
+ *
+ * `mode` distinguishes ADDRESSING an instance that is expected to exist from
+ * CREATING one:
+ *
+ *   - `"address"` (default) — a non-default data directory with no
+ *     instance-local config is a hard error. That case is precisely the bug
+ *     this fixes: falling back to the per-user file would answer with some
+ *     OTHER instance's port, which is a silent wrong answer wearing a
+ *     migration. The default install keeps today's behaviour exactly.
+ *   - `"create"` — `flair init`, which is establishing the instance rather
+ *     than looking one up. An unknown instance takes DEFAULT_PORT, the same as
+ *     a clean install has always done, instead of the refusal that would make
+ *     `flair init --data-dir <new>` impossible.
+ *
+ * Note that `init`'s own `--port` option carries a commander default of
+ * DEFAULT_PORT, so in practice `opts.port` is always set there and this
+ * function returns on the first rung — including when re-initialising an
+ * instance that already records a different port, which is silently renumbered
+ * to DEFAULT_PORT. That is pre-existing (it is equally true of the default
+ * install on a custom port, where re-running init is `flair doctor`'s standing
+ * remedy) and is tracked separately; the "create" rung is what this function
+ * would answer if that default were removed, and is what keeps the mode
+ * distinction honest rather than hypothetical.
+ *
+ * The migration is one-way and one-time: the default install's port is copied
+ * out of `~/.flair/config.yaml` into the instance-local file on first use, and
+ * every read after that is answered by the instance. Nothing is copied for a
+ * non-default directory, because there is nothing that can be known to be
+ * about it.
+ */
+function resolveHttpPort(opts: { port?: string | number; dataDir?: string }, mode: "address" | "create" = "address"): number {
   if (opts.port !== undefined && opts.port !== null) {
     const n = Number(opts.port);
     if (!isNaN(n) && n > 0) return n;
@@ -492,7 +641,50 @@ function resolveHttpPort(opts: { port?: string | number }): number {
     const m = envUrl.match(/:(\d+)/);
     if (m) return Number(m[1]);
   }
-  return readPortFromConfig() ?? DEFAULT_PORT;
+
+  const dataDir = instanceDataDir(opts);
+
+  // 1. The instance's own record. Once this exists it is the only answer.
+  const instancePort = readPortFromInstanceConfig(dataDir);
+  if (instancePort !== null) return instancePort;
+
+  // 2. No instance-local record. For the DEFAULT install the per-user file is
+  //    about this instance by definition — a single-instance install is the
+  //    overwhelmingly common case and its recorded port is correct — so read
+  //    it and write the instance-local file as we go, so the next call is
+  //    answered by the instance itself.
+  if (isDefaultDataDir(dataDir)) {
+    const legacyPort = readPortFromConfig();
+    if (legacyPort === null) return DEFAULT_PORT; // clean install, nothing to migrate
+    // Best-effort: a read-only or absent data directory must not turn port
+    // resolution into a failure. Only ever writes into a directory that
+    // already exists — resolving a port is not a reason to create one. The
+    // ops coordinates come along so the instance's record is the whole record
+    // and not a port with two gaps beside it; nothing reads them from here
+    // yet, and the per-user file is left exactly as it was.
+    try {
+      if (existsSync(dataDir)) {
+        writeInstanceConfig(
+          dataDir,
+          legacyPort,
+          readOpsPortFromConfig() ?? undefined,
+          readOpsBindFromConfig() ?? undefined,
+        );
+      }
+    } catch { /* migration is an optimisation, not a precondition */ }
+    return legacyPort;
+  }
+
+  // 3. A non-default directory with no record of its own. `init` may go on to
+  //    create one; nothing else may guess.
+  if (mode === "create") return DEFAULT_PORT;
+
+  throw new Error(
+    `cannot determine which port ${dataDir} serves: it has no ${instanceConfigPath(dataDir)}. `
+      + `Falling back to ~/.flair/config.yaml would answer with the port of a DIFFERENT instance — that file records one port `
+      + `for the whole user, not one per data directory. `
+      + `Pass --port <port> to say which port that instance serves, or run 'flair init --data-dir ${dataDir} --port <port>' to record it.`,
+  );
 }
 
 // Unified base URL resolution. Precedence:
@@ -1069,6 +1261,28 @@ function writeConfig(port: number, opsPort?: number, opsBind?: string, path: str
   if (resolvedOpsPort !== null && resolvedOpsPort !== undefined) body += `opsPort: ${resolvedOpsPort}\n`;
   if (resolvedOpsBind) body += `opsBind: ${resolvedOpsBind}\n`;
   writeFileSync(path, body);
+}
+
+/**
+ * Persist the coordinates of the instance served from `dataDir` (flair#914).
+ *
+ * The instance-local file is the record: it is written for EVERY instance, and
+ * it is what `resolveHttpPort` reads. `~/.flair/config.yaml` is written too,
+ * but only when `dataDir` is the default install — and that restriction is the
+ * whole of the fix. `init` used to write the per-user file unconditionally, so
+ * `flair init --data-dir X --port P` overwrote whatever port the DEFAULT
+ * install had recorded, and every later lookup answered with P.
+ *
+ * The per-user write is a mirror, not a second authority: same call, same
+ * value, so the two cannot disagree. It keeps the readers that have no
+ * `--data-dir` of their own (`readPortFromConfig` — `flair uninstall`, the
+ * `rem` scheduler, `api()`, doctor's config line) correct for the one instance
+ * they are able to address. Those move to the instance-local file when the
+ * lifecycle commands grow the flag, and this mirror goes with them.
+ */
+function writeInstanceCoordinates(dataDir: string, port: number, opsPort?: number, opsBind?: string): void {
+  writeInstanceConfig(dataDir, port, opsPort, opsBind);
+  if (isDefaultDataDir(dataDir)) writeConfig(port, opsPort, opsBind);
 }
 
 function privKeyPath(agentId: string, keysDir: string): string {
@@ -2773,11 +2987,21 @@ program
     }
 
     // ── Local init (full one-command setup) ──
-    const httpPort = resolveHttpPort(opts);
-    const opsPort = resolveOpsPort(opts);
-    const opsBindHost = resolveOpsBindHost(opts);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
     const dataDir: string = opts.dataDir ?? defaultDataDir();
+    // "create" mode (flair#914): init ESTABLISHES an instance, so a data
+    // directory with no recorded port is a new instance taking the default,
+    // not the hard error every other caller gets — otherwise `flair init
+    // --data-dir <new>` could never succeed. `dataDir` is resolved first so
+    // this is never asked before the instance is known. (`--port` carries a
+    // commander default, so this usually returns on the flag rung; see
+    // resolveHttpPort's doc comment.)
+    const httpPort = resolveHttpPort(opts, "create");
+    // The already-resolved port is handed to the ops resolver rather than
+    // letting it re-resolve — its last rung is `resolveHttpPort(opts) - 1`,
+    // which would ask the same question again in "address" mode.
+    const opsPort = resolveOpsPort({ ...opts, port: httpPort });
+    const opsBindHost = resolveOpsBindHost(opts);
 
     // Resolve MCP client selection (union of init's auto-wire + the multi-client
     // detection/wiring that the front-door command provides). `--no-mcp` sets
@@ -3103,7 +3327,11 @@ program
     // survives an `--ops-bind` choice past the next restart. It also runs on
     // the already-running path (where init skips the spawn entirely), which is
     // what makes doctor's `flair init && flair restart` remedy actually apply.
-    writeConfig(httpPort, opsPort, opsBindHost);
+    // flair#914: written into the data directory this init is about, so a
+    // second instance can no longer overwrite the first's recorded port. The
+    // per-user file is still written for the default install (see
+    // writeInstanceCoordinates).
+    writeInstanceCoordinates(dataDir, httpPort, opsPort, opsBindHost);
 
     if (agentId) {
       // Generate or reuse keypair
@@ -9393,6 +9621,22 @@ const snapshotCmd = program
   .command("snapshot")
   .description("Physical ~/.flair/data snapshots (byte-exact tar.gz, local-only — see `flair backup`/`flair restore` for the logical JSON export/import)");
 
+/**
+ * `resolveHttpPort` for a command that takes `--data-dir`, reported as a
+ * message rather than a stack trace (flair#914).
+ *
+ * The throw is a refusal to guess which instance a directory is, and a refusal
+ * has to tell the operator what to pass instead — a stack trace does not.
+ */
+function resolveHttpPortForDataDir(opts: { port?: string | number; dataDir?: string }): number {
+  try {
+    return resolveHttpPort(opts);
+  } catch (err: any) {
+    console.error(`❌ ${err?.message ?? err}`);
+    process.exit(1);
+  }
+}
+
 snapshotCmd
   .command("create")
   .description("Take a physical snapshot of the Flair data directory now (briefly stops Flair for a consistent copy — use `flair backup` for a no-downtime logical export)")
@@ -9400,11 +9644,16 @@ snapshotCmd
   .option("--port <port>", "Harper HTTP port (used to quiesce Flair around the snapshot)")
   .action(async (opts) => {
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir();
-    const port = resolveHttpPort(opts);
+    // Existence first, THEN the port. A directory that isn't there has a more
+    // specific diagnosis than "it doesn't say which port it serves", and the
+    // caller should get the one that names the actual problem (flair#914).
     if (!existsSync(dataDir)) {
       console.error(`Error: data directory does not exist: ${dataDir}`);
       process.exit(1);
     }
+    // flair#914: the port of the instance NAMED here, never the per-user
+    // file's — refuses rather than guessing when that directory has no record.
+    const port = resolveHttpPortForDataDir(opts);
 
     console.log(`Snapshotting ${dataDir}...`);
     console.log("(Flair will be briefly stopped for a point-in-time-consistent copy, then restarted.)");
@@ -9488,7 +9737,9 @@ snapshotCmd
       process.exit(1);
     }
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir();
-    const port = resolveHttpPort(opts);
+    // flair#914: the port of the instance NAMED here, never the per-user
+    // file's — refuses rather than guessing when that directory has no record.
+    const port = resolveHttpPortForDataDir(opts);
 
     console.log("This will STOP Flair, DELETE the current data directory, and replace it with:");
     console.log(`  snapshot: ${snapshotPath}`);
@@ -9534,6 +9785,12 @@ snapshotCmd
       process.exit(1);
     }
 
+    // This instance's own ops coordinates, read before the directory is
+    // destroyed so they can be re-asserted after the extract writes the
+    // SOURCE instance's over them (flair#914 — see below).
+    const priorOpsPort = readInstanceConfigNumber(dataDir, "opsPort") ?? undefined;
+    const priorOpsBind = readInstanceConfigString(dataDir, "opsBind") ?? undefined;
+
     try {
       rmSync(dataDir, { recursive: true, force: true });
       mkdirSync(dataDir, { recursive: true, mode: 0o700 });
@@ -9548,6 +9805,24 @@ snapshotCmd
       console.error(`❌ restore failed: ${err.message}`);
       console.error(`   ${dataDir} may be partially restored or empty — do not start Flair until this is resolved.`);
       process.exit(1);
+    }
+
+    // flair#914: a snapshot is a byte-exact copy of a data directory, so it
+    // carries the SOURCE instance's flair-instance.yaml — and the extract just
+    // wrote it over this instance's. Re-assert the port this command resolved
+    // and is about to start on, or the directory would describe one port while
+    // the process serving it listens on another, and the next command to
+    // address this directory would act on the source instance's port instead.
+    //
+    // The port is a property of the instance, not of the data it serves. That
+    // is also what keeps a snapshot from somewhere else out of the business of
+    // naming ports on this host: restoring one to look at it cannot hand the
+    // restored directory a port it did not have.
+    try {
+      writeInstanceConfig(dataDir, port, priorOpsPort, priorOpsBind);
+    } catch (err: any) {
+      console.error(`⚠️  restored, but could not record the port for ${dataDir}: ${err?.message ?? err}`);
+      console.error(`   Pass --port ${port} to commands addressing this instance, or run 'flair init --data-dir ${dataDir} --port ${port}'.`);
     }
 
     try {
@@ -11503,7 +11778,10 @@ program
             if (dryRun) {
               console.log(`     ${render.wrap(render.c.dim, "Would update config to port")} ${discoveredPort}`);
             } else {
-              writeConfig(discoveredPort);
+              // dataDir0 is defaultDataDir() — `flair doctor` has no
+              // --data-dir, so the default install is what it means, and
+              // saying so keeps that true when it grows one (flair#914).
+              writeInstanceCoordinates(dataDir0, discoveredPort);
               console.log(`     ${render.icons.ok} Updated config to port ${discoveredPort}`);
               fixed++;
             }
@@ -16090,6 +16368,13 @@ export {
   resolveHttpPort,
   resolveOpsPort,
   resolveOpsBindHost,
+
+  // instance-local config (flair#914)
+  instanceConfigPath,
+  readPortFromInstanceConfig,
+  writeInstanceConfig,
+  writeInstanceCoordinates,
+
   resolveTarget,
   resolveOpsTarget,
   resolveEffectiveOpsUrl,
