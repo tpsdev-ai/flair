@@ -18,6 +18,7 @@ import { resolve, dirname, join } from "node:path";
 import { homedir, platform } from "node:os";
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { escapeXml } from "../lib/xml-escape.js";
 
 export const SHIM_PATH_DEFAULT = resolve(homedir(), ".flair", "bin", "flair-rem-nightly");
 export const LAUNCHD_PLIST_PATH = resolve(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist");
@@ -121,10 +122,39 @@ function defaultTemplateRoot(): string {
 }
 
 export function renderTemplate(text: string, subs: SchedulerSubstitutions): string {
+  return renderTemplateWith(text, subs, (v) => v);
+}
+
+/**
+ * renderTemplate() for the launchd plist template specifically: substituted
+ * values are XML-escaped.
+ *
+ * A launchd plist is XML, so a substitution carrying `&`, `<`, `>`, `"` or
+ * `'` makes it malformed and `launchctl bootstrap` rejects it — the timer
+ * silently never registers. FLAIR_URL is the realistic carrier (a URL with
+ * more than one query parameter contains `&`), but HOME and SHIM_PATH are
+ * arbitrary paths and equally capable of it. HOUR/MINUTE and AGENT_ID are
+ * validated upstream in buildSubstitutions(), but they are escaped too
+ * rather than exempted — the point of a chokepoint is that no value gets to
+ * argue it is special.
+ *
+ * Deliberately NOT folded into renderTemplate(): the same substitutions are
+ * rendered into the systemd unit files and the shell shim, where XML
+ * escaping would be corruption rather than a fix.
+ */
+export function renderPlistTemplate(text: string, subs: SchedulerSubstitutions): string {
+  return renderTemplateWith(text, subs, escapeXml);
+}
+
+function renderTemplateWith(
+  text: string,
+  subs: SchedulerSubstitutions,
+  escape: (value: string) => string,
+): string {
   return text.replace(/\{\{([A-Z_]+)\}\}/g, (_, key) => {
     const value = (subs as any)[key];
     if (value === undefined) throw new Error(`unknown template placeholder: ${key}`);
-    return String(value);
+    return escape(String(value));
   });
 }
 
@@ -421,7 +451,7 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
   // 2. Write the scheduler entry.
   if (plat === "darwin") {
     const plistPath = opts.launchdPlistOverride ?? LAUNCHD_PLIST_PATH;
-    const plistContents = renderTemplate(readTemplate(templateRoot, "launchd/dev.flair.rem.nightly.plist.tmpl"), subs);
+    const plistContents = renderPlistTemplate(readTemplate(templateRoot, "launchd/dev.flair.rem.nightly.plist.tmpl"), subs);
     writeFileWithDir(plistPath, plistContents, 0o600);
 
     const loadCommand = ["launchctl", "bootstrap", `gui/${process.getuid?.() ?? ""}`, plistPath];
