@@ -16,6 +16,8 @@ mock.module("harper", () => ({
 }));
 
 const { resolveAgentAuth, hasCredentialEvidence } = await import("../../resources/agent-auth.ts");
+// Zero-import module — safe to load statically alongside the mocked harper.
+import { agentContext } from "../../resources/in-process.ts";
 
 // ─── Request-shape helpers ────────────────────────────────────────────────────
 
@@ -85,6 +87,38 @@ describe("resolveAgentAuth — gate annotations (handler phase)", () => {
 
   it("explicit tpsAnonymous marker → anonymous (set by the non-rejecting gate)", async () => {
     expect(await resolveAgentAuth({ tpsAnonymous: true })).toEqual({ kind: "anonymous" });
+  });
+});
+
+// ─── the in-process seam emits exactly the shape this resolver honours ────────
+//
+// resources/in-process.ts's agentContext() is what an embedding Harper app (and
+// flair's own MCP handler) builds to act as one specific agent. It is only
+// correct if THIS resolver reads it as that agent — so the link is pinned here,
+// against the real resolver, rather than restated as a literal in two files.
+
+describe("resolveAgentAuth — resources/in-process.ts's agentContext()", () => {
+  it("agentContext(id) → that agent, ASSERTED: no signature, and no Agent-table lookup", async () => {
+    // The harper mock at the top of this file resolves EVERY Agent.get to null,
+    // so a passing assertion here is itself the proof that identity is taken at
+    // face value — an id with no Principal record acts as that agent. Correct
+    // for a caller already inside the trust boundary; the reason the context
+    // must be built from the app's own state and never from request data.
+    expect(await resolveAgentAuth(agentContext("planner")))
+      .toEqual({ kind: "agent", agentId: "planner", isAdmin: false });
+    expect(await resolveAgentAuth(agentContext("no-such-principal-anywhere")))
+      .toEqual({ kind: "agent", agentId: "no-such-principal-anywhere", isAdmin: false });
+  });
+
+  it("agentContext(id, { isAdmin: true }) → admin, ASSERTED: nothing checks the agent really is one", async () => {
+    expect(await resolveAgentAuth(agentContext("provisioner", { isAdmin: true })))
+      .toEqual({ kind: "agent", agentId: "provisioner", isAdmin: true });
+  });
+
+  it("NO context → internal, which is ADMIN-EQUIVALENT (the embedding hazard)", async () => {
+    // Not a weaker call — an unfiltered one. This is why agentContext() must be
+    // required, never defaulted, in an application wrapper.
+    expect(await resolveAgentAuth(undefined)).toEqual({ kind: "internal" });
   });
 });
 

@@ -24,13 +24,41 @@ import { mock, describe, it, expect, beforeEach, afterEach, afterAll } from "bun
 // ─── Capture state for the mocked handlers ───────────────────────────────────
 let lastCall: { resource: string; ctx: any; args: any } | null = null;
 
+/**
+ * Base for every capture double, shaped like Harper's real `Resource` on the
+ * two points that decide whether an in-process delegation works at all:
+ *
+ *   - `isCollection` is a GETTER WITH NO SETTER on the prototype, backed by a
+ *     PRIVATE field. Assigning to it from outside throws under ESM's strict
+ *     mode — exactly what the real class does. The doubles previously carried a
+ *     public `isCollection = false` data field, which silently ACCEPTED the
+ *     assignment mcp-tools.ts used to make and let the whole suite pass green
+ *     while `memory_store`/`memory_update`/`workspace_set`/`orgevent` threw
+ *     `TypeError: Cannot set property isCollection …` against a real Harper.
+ *   - `static getResource(target, context, options)` is the only way to obtain
+ *     a collection-bound instance, mirroring Harper's own signature — which is
+ *     what resources/in-process.ts's collectionResource() calls.
+ *
+ * Keep both properties. A double that is easier to satisfy than the real class
+ * cannot catch this class of bug.
+ */
+class HarperShapedBase {
+  #collection = false;
+  _ctx: any;
+  constructor(_id: any, ctx: any) { this._ctx = ctx; }
+  get isCollection() { return this.#collection; }
+  static getResource(_target: any, ctx: any, options?: any) {
+    const r = new (this as any)(undefined, ctx) as HarperShapedBase;
+    if (options?.isCollection) r.#collection = true;
+    return r;
+  }
+}
+
 // Each mocked handler records the delegation context (getContext via ctor arg2)
 // and the args it was called with, then returns a marker so we can assert the
 // dispatch reached the right tool.
 function makeHandlerMock(resource: string, method: string) {
-  return class {
-    _ctx: any;
-    constructor(_id: any, ctx: any) { this._ctx = ctx; }
+  return class extends HarperShapedBase {
     async [method](args: any) {
       lastCall = { resource, ctx: this._ctx, args };
       return { ok: true, resource, agentId: this._ctx?.request?.tpsAgent };
@@ -39,11 +67,8 @@ function makeHandlerMock(resource: string, method: string) {
 }
 
 // Memory has post/get/delete on the same class.
-class MemoryMock {
-  _ctx: any;
-  isCollection = false;
-  constructor(_id: any, ctx: any) { this._ctx = ctx; }
-  async post(args: any) { lastCall = { resource: "Memory.post", ctx: this._ctx, args }; return { ok: true, resource: "Memory.post", agentId: this._ctx?.request?.tpsAgent }; }
+class MemoryMock extends HarperShapedBase {
+  async post(args: any) { lastCall = { resource: "Memory.post", ctx: this._ctx, args, isCollection: this.isCollection } as any; return { ok: true, resource: "Memory.post", agentId: this._ctx?.request?.tpsAgent }; }
   async put(args: any) { lastCall = { resource: "Memory.put", ctx: this._ctx, args }; return { ok: true, resource: "Memory.put", agentId: this._ctx?.request?.tpsAgent }; }
   async get(id: any) {
     lastCall = { resource: "Memory.get", ctx: this._ctx, args: id };
@@ -52,10 +77,7 @@ class MemoryMock {
   }
   async delete(id: any) { lastCall = { resource: "Memory.delete", ctx: this._ctx, args: id }; return { ok: true, resource: "Memory.delete", agentId: this._ctx?.request?.tpsAgent }; }
 }
-class SoulMock {
-  _ctx: any;
-  isCollection = false;
-  constructor(_id: any, ctx: any) { this._ctx = ctx; }
+class SoulMock extends HarperShapedBase {
   async put(args: any) { lastCall = { resource: "Soul.put", ctx: this._ctx, args }; return { ok: true, resource: "Soul.put", agentId: this._ctx?.request?.tpsAgent }; }
   async get(id: any) { lastCall = { resource: "Soul.get", ctx: this._ctx, args: id }; return { ok: true, resource: "Soul.get", agentId: this._ctx?.request?.tpsAgent }; }
 }

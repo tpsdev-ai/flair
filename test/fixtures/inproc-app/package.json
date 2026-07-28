@@ -1,0 +1,7 @@
+{
+  "name": "inproc-app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Test fixture: a Harper application that loads Flair as a sub-component and calls it in-process."
+}

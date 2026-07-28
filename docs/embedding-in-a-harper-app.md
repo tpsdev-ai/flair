@@ -22,20 +22,19 @@ Embedding *adds* the in-process path; `rest: true` keeps serving MCP clients and
 
 ```javascript
 import { server } from "harper";
+// Flair ships these two helpers so you do not have to get either of them right
+// by hand. They are the whole in-process contract.
+import { agentContext, collectionResource } from "@tpsdev-ai/flair/dist/resources/in-process.js";
 
 // The RESOURCE — carries auth, scoping, visibility, embedding.
 // NOT databases.flair.Memory: that is the raw table, and enforces none of it.
-// Resolve lazily; Harper registers resources asynchronously.
+// Keys carry NO leading slash: get("Memory"), never get("/Memory").
 const flair = (path) => server.resources.get(path).Resource;
 
-// This context says WHICH agent is acting. Never omit it.
-const asAgent = (agentId, { isAdmin = false } = {}) => ({
-  request: { tpsAgent: agentId, tpsAgentIsAdmin: isAdmin },
-});
-
 export async function remember(agentId, content, opts = {}) {
-  const h = new (flair("Memory"))(undefined, asAgent(agentId));
-  h.isCollection = true;                    // collection POST
+  // A create needs a COLLECTION-bound instance. `new Cls(...)` does not give
+  // you one, and cannot be made to — see the note below.
+  const h = await collectionResource(flair("Memory"), agentContext(agentId));
   return h.post({
     agentId,                                // required — an absent one is never filled in
     content,
@@ -44,9 +43,23 @@ export async function remember(agentId, content, opts = {}) {
 }
 ```
 
-> ### ⚠️ `new Memory()` with no context is an administrator
+> ### Why `collectionResource`, and not `new Memory()`
+>
+> A resource's `post()` only works on an instance Harper has marked as a **collection**, and that mark is a *private* field only Harper's own `getResource()` can set. The public `isCollection` is a getter with no setter, so the obvious spelling fails two different ways, neither of which names the cause:
+>
+> ```javascript
+> const h = new (flair("Memory"))(undefined, agentContext(agentId));
+> h.isCollection = true;   // TypeError: Cannot set property isCollection ... which has only a getter
+> h.post({ ... });         // without the line above: 405 "The Memory does not have a post method implemented"
+> ```
+>
+> `collectionResource(Cls, context)` is a two-line wrapper over the supported call — `Cls.getResource({}, context, { isCollection: true })` — and exists so this is written once. **Reads do not need it:** `Cls.get(id, context)` and `Cls.search(query, context)` thread the context themselves.
+
+> ### ⚠️ A resource with no context is an administrator
 >
 > A resource built without a context resolves to Flair's trusted `internal` verdict and runs **unfiltered** — every read unscoped, every write unowned. Silently. No error, no warning, no trace.
+>
+> Measured, not inferred: a context-less `Memory.search()` returns every agent's `private` records, and so does a context-less `SemanticSearch`.
 >
 > Correct for Flair's own maintenance passes. In your app it is a data leak you find months later.
 >
@@ -56,7 +69,7 @@ export async function remember(agentId, content, opts = {}) {
 
 ```javascript
 export async function recall(agentId, query, limit = 5) {
-  const h = new (flair("SemanticSearch"))(undefined, asAgent(agentId));
+  const h = await collectionResource(flair("SemanticSearch"), agentContext(agentId));
   return h.post({ q: query, limit });
 }
 ```
@@ -69,7 +82,20 @@ console.log(await recall("agent-alpha", "deploy schedule"));
 console.log([...server.resources.keys()].sort());   // what Flair registered
 ```
 
-> **Confirm the step-2 lookup on your own instance before building on it.** `server.resources` is a process-global registry keyed by REST path, leading slash stripped. That is read from Harper 5.1.22's source — not from a two-component integration we have run end to end. If `get` returns `undefined`, print the keys as above, or try `server.resources.getMatch("/Memory")`.
+> ### What we measured, so you do not have to
+>
+> Run end to end on **Harper 5.1.22**, from a second component loaded into the same instance — the exact shape above. `test/integration/in-process-agents.test.ts` in the Flair repo is that run, and `test/fixtures/inproc-app` is the component it drives.
+>
+> | Claim | Result |
+> |---|---|
+> | `server.resources.get("Memory")` from another component | Returns an **entry object** `{ Resource, path, exportTypes, hasSubPaths, relativeURL }` — `.Resource` is required, it is not the class itself |
+> | `.Resource` is Flair's resource, not the raw table | Confirmed: prototype chain `Memory → Memory → Resource`, and it is **not** `databases.flair.Memory` |
+> | Key format | **No leading slash.** `get("Memory")` hits; `get("/Memory")` returns `undefined` |
+> | `getMatch` | `getMatch("Memory")` hits. **`getMatch("/Memory")` misses** — do not use the slashed form |
+> | When the lookup becomes valid | Flair's resources were already registered at the app component's **module top level** (55 entries, `Memory` and `Agent` present). The only entry missing at that moment was the app's *own*, still mid-registration. Resolving lazily, as above, is still the advice — it costs nothing and does not depend on component load order |
+> | Per-agent scoping through `SemanticSearch` | Holds. Querying as `agent-beta` for a topic only `agent-alpha` has written returns **beta's own** memory, never alpha's private one — with real 768-dim embeddings attached, not a degraded path |
+> | Cross-agent by-id read | `Memory.get(<beta's private id>)` as alpha returns **404**, never 403 — a denied caller cannot enumerate ids |
+> | Context-less call | Unfiltered across all agents, via both `search` and `SemanticSearch` (see the warning above) |
 
 Handlers return a `Response` for `401`/`403`/`400` rather than throwing — check for one. `Memory.post()` is in-process only; over HTTP the schema exposes `PUT`.
 
@@ -89,24 +115,23 @@ for (const id of ["planner", "researcher", "reviewer"]) {
 
 ### Registering agents, no CLI
 
-Provisioning is the one place you write the **table** rather than the resource. Agent records are infrastructure, not agent-scoped data, and Flair's own just-in-time provisioning does exactly this (`resources/mcp-handler.ts`). The table applies no defaults, so supply the whole shape:
+Go through the `Agent` **resource**, with no context — provisioning is infrastructure work your app has already authorised, and `Agent.post()` fills in the whole Principal shape for you:
 
 ```javascript
-import { databases } from "harper";
-
 export async function registerAgent(id, { publicKey = "pending", admin = false } = {}) {
-  const now = new Date().toISOString();
-  await databases.flair.Agent.put({
+  const h = await collectionResource(flair("Agent"));   // no context ⇒ trusted `internal`
+  return h.post({
     id, name: id, displayName: id,
-    kind: "agent", type: "agent", status: "active",
     publicKey,                            // a placeholder is fine — see below
-    defaultTrustTier: "unverified",
-    admin,
-    ...(admin ? { role: "admin" } : {}),  // role is what actually grants admin
-    createdAt: now, updatedAt: now,
+    runtime: "headless",
+    ...(admin ? { role: "admin", admin: true } : {}),   // role is what actually grants admin
   });
 }
 ```
+
+Verified against a real instance: that lands `kind: "agent"`, `status: "active"`, `displayName`, `admin: false`, `defaultTrustTier: "unverified"`, `type: "agent"`, `createdAt`/`updatedAt` and the federation `originatorInstanceId` stamp — without you naming any of them.
+
+> **Prefer this to `databases.flair.Agent.put()`.** The raw table applies **no** defaults, so a hand-written literal has to reproduce every field above and then stay in step with Flair as the Principal model grows. Records written that way are missing `kind`/`status`/`defaultTrustTier` and read as under-specified Principals in the admin surfaces.
 
 > **`isAdmin()` reads `role === "admin"`, not the `admin` boolean.** They are separate fields and only `role` grants admin rights; set both to keep the record self-consistent. Admin lookups are cached for 60 seconds, so a newly-created admin is not effective immediately.
 
@@ -123,7 +148,9 @@ await registerAgent("remote-worker", { publicKey: raw.toString("hex") });
 
 Flair accepts the public key as 64-char hex, or base64 of the raw 32 bytes.
 
-> **Two traps.** `Agent.put()` on the *resource* strips `publicKey` — key rotation goes through a dedicated path that today needs shell access, so set the key when you create the record. And do **not** call `AgentSeed` in-process: its `post()` requires `request.tpsAgent` to name a real admin, so a context-less internal call gets a 403.
+Both verified end to end: an agent registered this way, with a key its app minted, then authenticated over HTTP with a real `TPS-Ed25519` signature — and a request signed with the *wrong* key was rejected.
+
+> **Two traps.** `Agent.put()` on the *resource* silently strips `publicKey`, so set the key when you **create** the record; to rotate one later, write `databases.flair.Agent.put({ ...existing, publicKey })` on the raw table (which is what `flair agent rotate-key` does through the admin ops API — there is no dedicated endpoint today). And do **not** call `AgentSeed` in-process: although its `allowCreate()` explicitly permits the trusted `internal` verdict, its `post()` then re-checks for a named admin and returns `403 forbidden: admin only` — confirmed by running it.
 
 ---
 
@@ -149,7 +176,38 @@ Flair uses the raw table where it *wants* to bypass its own rules — the federa
 | `{ request: { tpsAgent: "mybot", tpsAgentIsAdmin: true } }` | admin | Unfiltered reads, cross-agent writes |
 | **Nothing** | `internal` | **Trusted. Unfiltered.** See the warning above. |
 
-**In-process callers are inside the trust boundary.** Ed25519 is how agents *outside* the process prove identity; a co-located component is trusted to declare it truthfully, so map your app's authenticated identity onto `tpsAgent` at the boundary. Treat `tpsAgentIsAdmin: true` as you would a root shell — reserve it for provisioning.
+### The context object is a security boundary
+
+**In-process identity is asserted, not verified.** Flair reads `request.tpsAgent` and acts as that agent. There is no signature check, no lookup against the `Agent` table, and no registration requirement — an id that has never been registered acts as an agent immediately. `tpsAgentIsAdmin: true` is asserted exactly the same way, and nothing checks that the named agent is really an admin.
+
+That is deliberate. A co-located caller is already inside the trust boundary and could write `databases.flair.Memory` directly, so demanding a signature from same-process code would be theatre. Ed25519 is how agents *outside* the process prove identity.
+
+The consequence is the single most important line in this guide:
+
+> **Build the context from your own server-side state. Never from request data.**
+>
+> If an agent id can reach `agentContext()` from user input — a body field, a query param, a header you did not verify yourself — that is privilege escalation with **no error, no 403 and no trace**. Authenticate the caller with your own mechanism first, then map the identity *you* established onto `tpsAgent`.
+
+There are exactly two ways to lose the model, from opposite ends. Both are pinned as tests in the Flair repo:
+
+| | |
+|---|---|
+| **By omission** | No context at all ⇒ `internal` ⇒ admin-equivalent, unfiltered. |
+| **By assertion** | An attacker-influenced `agentId`, or a stray `isAdmin: true`, is honoured verbatim. |
+
+### Individual identities, not one app identity
+
+Give every agent its own. A per-agent context costs nothing — no client to construct, no key to load, no per-agent setup, not even a registration. Collapsing N agents onto one shared identity buys you nothing and loses the two things that make the memory model work: **per-agent attribution**, which is what trust grading and provenance are computed from, and **N separate blast radii**, which become one.
+
+### In a cluster
+
+Harper replicates every table in a replicated database unless the table opts out with `@table(replicate: false)`. None of Flair's do. So:
+
+- **The registry replicates.** An agent registered on node A is visible on node B with no coordination. (Replication comes from the *database* being replicated — not from `@export`, which only controls REST exposure. `Memory` carries no `@export` and still replicates.)
+- **Authority is local.** The context is constructed per call, in whichever process handles it. No node asks another who a caller is.
+- **Attribution travels.** `agentId` is a field *on the record*, so a memory written on node A reads back correctly attributed — and correctly scoped — wherever it lands. Verified as far as this can be without a cluster: a fresh Harper process over the same storage resolves identical per-agent scope, so none of it lives in the process that did the writing.
+
+The consequence, stated plainly because someone will ask: **every node running the app is equally trusted**, since each one can assert any identity. That is fine for one application spread across regions — it is a single trust domain by construction. It is **not** fine for running this component beside untrusted co-tenants on the same instance. Co-location *is* the grant.
 
 ---
 

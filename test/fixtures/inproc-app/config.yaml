@@ -1,0 +1,16 @@
+# A Harper application that loads Flair as a sub-component and calls it
+# IN-PROCESS — the shape a Fabric deployment with no shell on the node has.
+#
+# The component name must match the directory under `node_modules/` that Harper
+# resolves it from (componentLoader.ts walks up from this directory looking for
+# `node_modules/<componentName>`); the `package:` identifier is only consulted
+# at deploy time. test/integration/in-process-agents.test.ts materialises that
+# symlink against the worktree before starting Harper.
+name: inproc-app
+rest: true
+
+'@tpsdev-ai/flair':
+  package: '@tpsdev-ai/flair'
+
+jsResource:
+  files: resources/*.js
