@@ -122,50 +122,104 @@ bun run test/bench/corpus-profiler/profile-bench-corpus.ts --corpus v2 ... --out
 bun run test/bench/corpus-profiler/profile.ts --sample-size 251 --out /tmp/live-251.json
 ```
 
-Measured that way (2026-07), real memories collide considerably harder than the
-corpus we currently grade recall against. **The subsampled column is mean ± sd
-over 8 independent seeds**, because a single draw of 251 from 1080 has enough
-sampling noise in the tail bands to mislead — a lone draw is not a measurement:
+Measured that way (2026-07), real memories are markedly more confusable than
+the corpus we currently grade recall against — but **which control you apply
+decides which of these claims survives**, so both are reported.
 
-| | corpus-v2 (n=251, whole corpus) | live, subsampled (n=251, 8 seeds) | live, full (n=1080) |
-|---|---|---|---|
-| nearest-neighbour cosine, median | 0.805 | **0.838 ± 0.006** | 0.870 |
-| fraction with a neighbour ≥ 0.80 | 0.506 | **0.789 ± 0.015** | 0.918 |
-| ≥ 0.85 | 0.283 | 0.390 ± 0.055 | 0.652 |
-| ≥ 0.90 | 0.064 | 0.110 ± 0.024 | 0.261 |
-| ≥ 0.95 | 0.000 | 0.024 ± 0.017 *(one seed of 8 gave 0.000)* | 0.056 |
-| type/token ratio | 0.425 | **0.201 ± 0.010** | 0.100 |
-| Zipf slope | −0.69 | **−1.012 ± 0.016** | −1.30 |
-| silhouette, mean | 0.073 | 0.080 ± 0.023 | 0.112 |
+#### Is it size, or is it difficulty?
 
-Read it honestly, band by band:
+The obvious objection to any such comparison: corpus-v2 is 251 records and the
+live corpus is 1080, and nearest-neighbour similarity rises with corpus size
+purely because there are more candidates to be close to. So the comparison was
+run as a **size sweep on both corpora**, 8 seeds per point:
 
-- **The ≥ 0.80 band and the vocabulary metrics separate decisively** — 19 sd and
-  22 sd respectively. Real records are far more likely to have a close
-  neighbour, and they reuse a heavy head of common terms where corpus-v2's
-  tokens are nearly all distinct. That second one bears directly on BM25: a
-  type/token ratio of 0.425 means almost any query term is rare and cleanly
-  discriminating, which is not the regime real queries run in.
-- **The ≥ 0.95 band does not separate reliably at n=251** — one draw of eight
-  contained no such pair at all. Pairs that tight are rare enough that a
-  251-record corpus may simply not contain any.
-- **Cluster separation is not different at all.** Silhouette overlaps within one
-  sd, and the intra/inter gap is slightly *wider* in real data.
+| n | corpus | frac ≥ 0.80 | ≥ 0.85 | ≥ 0.90 | ≥ 0.95 |
+|---|---|---|---|---|---|
+| 100 | corpus-v2 | 0.279 ± 0.064 | 0.111 ± 0.039 | 0.023 ± 0.023 | 0.000 |
+| 100 | live | **0.655 ± 0.057** | 0.217 ± 0.076 | 0.063 ± 0.029 | 0.013 ± 0.014 |
+| 150 | corpus-v2 | 0.342 ± 0.037 | 0.158 ± 0.028 | 0.037 ± 0.021 | 0.000 |
+| 150 | live | **0.707 ± 0.023** | 0.301 ± 0.067 | 0.080 ± 0.021 | 0.021 ± 0.022 |
+| 251 | corpus-v2 | 0.506 | 0.283 | 0.064 | 0.000 |
+| 251 | live | **0.789 ± 0.015** | 0.390 ± 0.055 | 0.110 ± 0.024 | 0.024 ± 0.017 |
+| 500 | live | 0.841 | 0.510 | 0.171 | 0.035 |
+| 800 | live | 0.893 | 0.598 | 0.223 | 0.047 |
+| 1080 | live | 0.919 | 0.651 | 0.261 | 0.056 |
 
-So the difficulty is **not** that real topics blur together. It is that
-individual records are near-restatements of each other while sharing a heavy
-common vocabulary — and that the tightest collisions only emerge at corpus
-sizes larger than corpus-v2. A generator matching these distributions needs
-tight within-topic collisions and a realistic vocabulary head, not fuzzy topic
-boundaries.
+Size manifestly *does* drive the number — both curves rise steeply with `n`, and
+the headline 0.918 figure is a full-corpus number that must never be compared
+against a 251-record corpus directly. But the difficulty difference survives the
+control at every matched point, and one row settles it:
 
-One number is worth stating separately because it is a property of each corpus
-at its own full size, with no sampling involved: **corpus-v2's closest pair
-anywhere is 0.936.** It contains no true near-duplicates, despite naming
-near-duplicate density as a design axis. The live corpus has 60 records in 18
-components at ≥ 0.95, the largest holding 15. A cross-encoder reranker's whole
-job is disambiguating near ties, so a Δp@3 of 0.000 against corpus-v2 measured a
-corpus with nothing for it to do.
+**The live corpus at n=100 (0.655) is more confusable than the whole of
+corpus-v2 at n=251 (0.506).** A real corpus with 2.5× *fewer* records still
+collides harder than all of corpus-v2. That cannot be a size artifact, because
+the size difference runs the wrong way.
+
+Nothing in the profiler's own parameters scales with `n` in a way that could
+manufacture this. Histogram bucketing is fixed (4000 fine bins over [−1, 1],
+coarsened to 100) and the near-duplicate fractions are not read off the
+histogram at all — they are exact per-record nearest-neighbour values compared
+against fixed thresholds `[0.80, 0.85, 0.90, 0.95]`. Neither the bins nor the
+thresholds move with `n`.
+
+**One parameter does scale with `n` and it invalidates one comparison.** The
+k-means cluster count is `clamp(round(sqrt(n/2)), 4, 64)`, so a full-size live
+profile uses k=23 against corpus-v2's k=11. **Intra/inter cluster distances and
+silhouette are therefore not comparable across the full-size column** — only at
+matched `n`, where both use the same k. At matched `n` they show no difference
+(silhouette 0.080 ± 0.023 against 0.073), which is itself the finding: real
+topics are not blurrier.
+
+#### Vocabulary: a claim that mostly did not survive its control
+
+Type/token ratio and Zipf slope are **token**-count dependent (Heaps' law; the
+Zipf fit also runs over a rank range set by the type count), so matching record
+counts does not control them — and live records are 3.2× longer, so a
+record-matched comparison hands the live corpus 4.8× the tokens. Matching total
+token count instead (≈6,700 each, live at ~53 records, 6 seeds):
+
+| | corpus-v2 | live, token-matched |
+|---|---|---|
+| type/token ratio | 0.425 | 0.370 ± 0.018 *(3.0 sd)* |
+| Zipf slope | −0.690 | −0.757 ± 0.018 *(3.6 sd)* |
+
+Against the record-matched figures (0.201 and −1.012, which read as ~20 sd
+effects), **most of the apparent vocabulary gap was record length, not
+vocabulary structure.** A real difference remains and it points the same way,
+but it is a ~3 sd effect, not a decisive one. The honest version of this finding
+is that real records are **longer** (median 872 vs 251 chars) and that length
+produces a heavier common-term head — length is the primary structural
+difference, and the vocabulary shape is a consequence of it rather than an
+independent axis.
+
+#### What survives, ranked
+
+1. **Near-duplicate density — decisive, size-controlled.** Live beats corpus-v2
+   at every matched `n`, and at n=100 beats corpus-v2's full corpus.
+2. **Record length — direct, no control needed.** Median 872 vs 251 chars,
+   p99 5562 vs ~305.
+3. **Vocabulary shape — real but modest (~3 sd)** once token count is
+   controlled, and largely downstream of length.
+4. **Cluster separation — no difference** at matched `n`. Not comparable at all
+   across the full-size column, because k scales with `n`.
+
+One number needs no control at all, because it is each corpus at its own full
+size: **corpus-v2's closest pair anywhere is 0.936.** It contains no true
+near-duplicates, despite naming near-duplicate density as a design axis. The
+live corpus has 60 records in 18 components at ≥ 0.95, the largest holding 15.
+A cross-encoder reranker's whole job is disambiguating near ties, so a Δp@3 of
+0.000 against corpus-v2 measured a corpus with nothing for it to do.
+
+#### Reproducibility
+
+Every number above is deterministic. `computeProfile` takes a single `seed`
+(default `20260728`) that drives both the k-means++ initialisation and the PCA
+subspace start vectors through one `mulberry32` generator; `--sample-size`
+subsamples through the same seeded helper both CLIs share. There is no wall
+clock, no `Math.random`, no map-iteration-order dependence in any emitted
+value. Running the profiler twice against an unchanged corpus produces
+byte-identical output, which is what makes a profile usable as a generator
+target rather than a moving one.
 
 ## Output schema
 

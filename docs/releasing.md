@@ -29,13 +29,28 @@ the maintainer's 2FA approval.
 ### Phase 1 — open the release PR
 
 ```bash
-# promote ## Unreleased to the new version in CHANGELOG.md first, then:
 ./scripts/release.sh 0.11.0
 ```
 
-This bumps every workspace package to the version, aligns internal deps, refreshes
-`bun.lock`, builds, tests, and opens a `release: v0.11.0` PR. Review and merge it
-(CI green + K&S approval) the same as any other PR.
+This assembles the changelog, bumps every workspace package to the version, aligns
+internal deps, refreshes `bun.lock`, builds, tests, and opens a `release: v0.11.0` PR.
+Review and merge it (CI green + K&S approval) the same as any other PR.
+
+**The changelog is assembled, not hand-promoted.** Entries land during development as one
+file per change under `.changelog/unreleased/` (flair#835 — a shared `[Unreleased]` block
+conflicted on every concurrent PR, and resolving a conflict dismisses approvals). The
+release script runs:
+
+```bash
+node scripts/changelog-fragments.mjs promote 0.11.0
+```
+
+which writes a `## [0.11.0] - <date>` section from the fragments — Keep a Changelog category
+order, filename order within a category, entry bodies copied verbatim — and deletes the
+fragment files. Released history above it is not touched. It **refuses** to run when the
+fragment directory is empty (nothing to release) or when someone hand-wrote an entry into
+`## [Unreleased]` that the step would otherwise silently overwrite. Preview any time with
+`node scripts/changelog-fragments.mjs render`.
 
 ### Phase 2 — tag the release
 
@@ -67,7 +82,8 @@ by `scripts/changelog-extract.mjs`). It is idempotent: re-running the workflow o
 re-pushing the tag updates the existing release rather than failing. The GitHub release
 documents the tagged commit immediately; it does not wait on the npm 2FA gate. If the
 CHANGELOG has no section for the version, this job fails loudly rather than cutting an
-empty release — so always promote `## [Unreleased]` to `## [X.Y.Z]` in the release PR.
+empty release — which is why phase 1's fragment assembly refuses to produce an empty
+section rather than letting the failure surface here, after the tag is already pushed.
 
 > `workflow_dispatch` with a `version` input remains as a manual fallback (needs
 > `Actions: write`), but the tag push is the normal path.

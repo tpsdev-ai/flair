@@ -54,14 +54,19 @@ Before opening a PR:
 - Match the existing code style. We don't run a formatter; follow the surrounding conventions.
 - Keep commits logically grouped. A PR with one focused change is easier to review than a PR with eight unrelated ones.
 - Add tests for any new behavior. Unit tests live in `test/unit/`, integration tests in `test/integration/`.
-- Update [CHANGELOG.md](CHANGELOG.md) under `## Unreleased` if the change is user-visible.
+- Add a **changelog fragment** if the change is user-visible: a new file
+  `.changelog/unreleased/<category>-<slug>.md` holding the entry as it should read under its
+  `### Category` heading. One file per change means two PRs never conflict on the changelog —
+  `scripts/release.sh` assembles them into `CHANGELOG.md` at the version cut. Conventions and
+  a preview command: [`.changelog/unreleased/README.md`](.changelog/unreleased/README.md).
+  Don't edit `## [Unreleased]` in `CHANGELOG.md` by hand; the release step overwrites it.
 - Reference a bead or issue in the PR body when one exists.
 
 ## What to avoid
 
 - **Breaking the memory record schema.** The fields listed in `src/bridges/types.ts` under `FLAIR_RESERVED_FIELDS` are computed by Flair on ingest; adding new reserved fields or changing existing ones is an architectural change that needs a design-review conversation first.
 - **Vendor lock-in.** Flair is model-agnostic and runtime-agnostic. Don't introduce hard dependencies on a specific LLM vendor, cloud provider, or agent framework. Compose with them, don't couple to them.
-- **Silent behavior changes.** If a release changes what an existing flag or command does, call it out in CHANGELOG and in the PR body.
+- **Silent behavior changes.** If a release changes what an existing flag or command does, call it out in a changelog fragment and in the PR body.
 
 ## Bridges
 
@@ -105,9 +110,10 @@ until a maintainer reviews the staged tarballs and **approves them on npmjs.com 
 that approval is the release gate. Tagging needs only repo push access (no npm creds, no
 `Actions: write`).
 
-Update `CHANGELOG.md` to promote `## Unreleased` to the new version before phase 1. The
-legacy `./scripts/release.sh 0.7.0 --publish` direct-publish path remains as a break-glass
-fallback for when CI is unavailable.
+Phase 1 assembles every `.changelog/unreleased/` fragment into a `## [X.Y.Z]` section of
+`CHANGELOG.md` and deletes the fragments — there is nothing to promote by hand. It refuses
+to run if the fragment directory is empty. The legacy `./scripts/release.sh 0.7.0 --publish`
+direct-publish path remains as a break-glass fallback for when CI is unavailable.
 
 ## Questions
 

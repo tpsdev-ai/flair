@@ -53,6 +53,11 @@ packages/      Published sub-packages: flair-client, flair-mcp, flair-bench,
 
 scripts/       Build, CI, deploy, and operational scripts.
 
+.changelog/unreleased/
+               Changelog fragments — one file per user-visible change, named
+               <category>-<slug>.md. Add yours here, not to CHANGELOG.md's
+               [Unreleased] section. Assembled at release time.
+
 templates/     Launchd/systemd service templates.
 
 types/         Ambient TypeScript declarations (harper.d.ts).
