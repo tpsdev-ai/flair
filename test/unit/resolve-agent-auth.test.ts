@@ -15,7 +15,9 @@ mock.module("harper", () => ({
   Resource: class {},
 }));
 
-const { resolveAgentAuth, hasCredentialEvidence } = await import("../../resources/agent-auth.ts");
+const { resolveAgentAuth, hasCredentialEvidence, allowVerified, allowAdmin } = await import("../../resources/agent-auth.ts");
+// Zero-import module — safe to load statically alongside the mocked harper.
+import { agentContext, adminContext, internalContext } from "../../resources/in-process.ts";
 
 // ─── Request-shape helpers ────────────────────────────────────────────────────
 
@@ -85,6 +87,80 @@ describe("resolveAgentAuth — gate annotations (handler phase)", () => {
 
   it("explicit tpsAnonymous marker → anonymous (set by the non-rejecting gate)", async () => {
     expect(await resolveAgentAuth({ tpsAnonymous: true })).toEqual({ kind: "anonymous" });
+  });
+});
+
+// ─── the in-process seam emits exactly the shape this resolver honours ────────
+//
+// resources/in-process.ts's agentContext() is what an embedding Harper app (and
+// flair's own MCP handler) builds to act as one specific agent. It is only
+// correct if THIS resolver reads it as that agent — so the link is pinned here,
+// against the real resolver, rather than restated as a literal in two files.
+
+describe("resolveAgentAuth — resources/in-process.ts's agentContext()", () => {
+  it("agentContext(id) → that agent, ASSERTED: no signature, and no Agent-table lookup", async () => {
+    // The harper mock at the top of this file resolves EVERY Agent.get to null,
+    // so a passing assertion here is itself the proof that identity is taken at
+    // face value — an id with no Principal record acts as that agent. Correct
+    // for a caller already inside the trust boundary; the reason the context
+    // must be built from the app's own state and never from request data.
+    expect(await resolveAgentAuth(agentContext("planner")))
+      .toEqual({ kind: "agent", agentId: "planner", isAdmin: false });
+    expect(await resolveAgentAuth(agentContext("no-such-principal-anywhere")))
+      .toEqual({ kind: "agent", agentId: "no-such-principal-anywhere", isAdmin: false });
+  });
+
+  it("adminContext(id) → admin, ASSERTED: nothing checks the agent really is one", async () => {
+    expect(await resolveAgentAuth(adminContext("provisioner")))
+      .toEqual({ kind: "agent", agentId: "provisioner", isAdmin: true });
+  });
+
+  it("internalContext() → internal, the deliberate unfiltered verdict", async () => {
+    expect(await resolveAgentAuth(internalContext())).toEqual({ kind: "internal" });
+  });
+
+  it("NO context → internal, which is ADMIN-EQUIVALENT (the embedding hazard)", async () => {
+    // Not a weaker call — an unfiltered one.
+    expect(await resolveAgentAuth(undefined)).toEqual({ kind: "internal" });
+  });
+});
+
+// ─── WHY agentContext() refuses a missing id ─────────────────────────────────
+//
+// This is the measurement the guard is built on, kept as a permanent test so the
+// guard can never be "simplified away" without its justification failing loudly
+// in the same run. `resolveAgentAuth` tests `tpsAgent` for TRUTHINESS, so an id
+// that came back undefined is indistinguishable from no identity at all — and
+// that is the trusted, unfiltered verdict. It even passes the ADMIN-only gate.
+//
+// If any of these ever stop holding, resources/in-process.ts's runtime guards
+// have become unnecessary and should be revisited deliberately, not by accident.
+
+describe("resolveAgentAuth — a missing/empty tpsAgent is INDISTINGUISHABLE from no identity", () => {
+  for (const [label, value] of [["undefined", undefined], ["null", null], ["empty string", ""]] as [string, unknown][]) {
+    it(`{ tpsAgent: ${label} } → internal (unfiltered), NOT anonymous`, async () => {
+      expect(await resolveAgentAuth({ request: { tpsAgent: value, tpsAgentIsAdmin: false } }))
+        .toEqual({ kind: "internal" });
+    });
+  }
+
+  it("and that verdict PASSES the admin-only gate — a forgotten id is a superuser", async () => {
+    const forgotten = { request: { tpsAgent: undefined, tpsAgentIsAdmin: false } };
+    expect(await allowVerified(forgotten)).toBe(true);
+    expect(await allowAdmin(forgotten)).toBe(true);
+  });
+
+  it("POSITIVE CONTROL: a real id resolves to that agent, so the above is not a broken harness", async () => {
+    expect(await resolveAgentAuth({ request: { tpsAgent: "planner" } }))
+      .toEqual({ kind: "agent", agentId: "planner", isAdmin: false });
+    expect(await allowAdmin({ request: { tpsAgent: "planner" } })).toBe(false);
+  });
+
+  it("a BLANK id is truthy, so it silently becomes a real agent id (misattribution, not escalation)", async () => {
+    // Also refused by agentContext(), for a different reason: memories written
+    // under an agent named three spaces are a bug either way.
+    expect(await resolveAgentAuth({ request: { tpsAgent: "   " } }))
+      .toEqual({ kind: "agent", agentId: "   ", isAdmin: false });
   });
 });
 

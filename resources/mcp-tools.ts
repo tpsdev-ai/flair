@@ -53,6 +53,7 @@
  */
 import type { RecordTypeName } from "./record-types.js";
 import { resolveVersion } from "./version.js";
+import { agentContext, adminContext, collectionResource } from "./in-process.js";
 
 type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};
@@ -124,16 +125,22 @@ export interface McpToolDef {
  * agent, never anonymous, never a header re-verify.
  */
 function delegationContext(agent: ResolvedAgent): any {
-  return {
-    request: {
-      tpsAgent: agent.agentId,
-      tpsAgentIsAdmin: agent.isAdmin,
-      headers: {
-        get: (k: string) => (k.toLowerCase() === "x-tps-agent" ? agent.agentId : undefined),
-      },
-    },
-    user: undefined,
+  // Shape single-sourced from resources/in-process.ts — the same context an
+  // embedding Harper app builds to act as one of its agents — plus the
+  // `x-tps-agent` header shim the delegated handlers' own header-reading paths
+  // expect.
+  //
+  // The admin branch is spelled out rather than passed as a flag: adminContext()
+  // is the greppable name for "this call carries flair-admin authority". Both
+  // constructors THROW on an empty agent id, which is the outcome we want here —
+  // a token that resolved to no principal must fail the tool call, never fall
+  // through to flair's unfiltered `internal` verdict.
+  const ctx = agent.isAdmin ? adminContext(agent.agentId) : agentContext(agent.agentId);
+  ctx.request.headers = {
+    get: (k: string) => (k.toLowerCase() === "x-tps-agent" ? agent.agentId : undefined),
   };
+  ctx.user = undefined;
+  return ctx;
 }
 
 /**
@@ -175,8 +182,7 @@ async function memorySearch(agent: ResolvedAgent, args: any) {
 
 async function memoryStore(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Memory");
-  const h = new Cls(undefined, delegationContext(agent));
-  (h as any).isCollection = true;
+  const h: any = await collectionResource(Cls, delegationContext(agent));
   // agentId is the RESOLVED agent — Memory.post also re-checks ownership via
   // resolveAgentAuth, so a mismatched body agentId would 403 anyway; we set it
   // to the verified id so the write is correctly owned.
@@ -251,8 +257,10 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
     // the resolved OAuth client_id (never forgeable via args) so the NEW
     // version's provenance records which client authored this update.
     if (agent.clientId) record.claimedClient = agent.clientId;
-    (h as any).isCollection = true;
-    return unwrap(await h.post(record));
+    // A create needs a COLLECTION-bound instance (see resources/in-process.ts);
+    // `h` above is the by-id handle the get()/put() branches use.
+    const coll: any = await collectionResource(Cls, delegationContext(agent));
+    return unwrap(await coll.post(record));
   }
 
   const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
@@ -334,8 +342,7 @@ async function soulGet(agent: ResolvedAgent, args: any) {
 
 async function workspaceSet(agent: ResolvedAgent, args: any) {
   const Cls = await handler("WorkspaceState");
-  const h = new Cls(undefined, delegationContext(agent));
-  (h as any).isCollection = true;
+  const h: any = await collectionResource(Cls, delegationContext(agent));
   // No agentId in the body — WorkspaceState.post attributes the record to the
   // authenticated identity (from the context), never the body. Same no-forge
   // contract as the flair-mcp stdio tool.
@@ -354,8 +361,7 @@ async function workspaceSet(agent: ResolvedAgent, args: any) {
 
 async function orgEvent(agent: ResolvedAgent, args: any) {
   const Cls = await handler("OrgEvent");
-  const h = new Cls(undefined, delegationContext(agent));
-  (h as any).isCollection = true;
+  const h: any = await collectionResource(Cls, delegationContext(agent));
   // No authorId in the body — OrgEvent.post attributes to the authenticated
   // identity, never the body (no forging as another agent).
   const body: Record<string, unknown> = { kind: args?.kind, summary: args?.summary };
