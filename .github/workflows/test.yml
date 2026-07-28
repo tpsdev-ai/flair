@@ -72,6 +72,13 @@ jobs:
         # that workspace package ships. Local dev hides it (bun symlinks);
         # only consumers of the published tarball see the staleness.
         run: node scripts/check-workspace-deps.mjs
+      - name: "Check version declarations in sync"
+        # The release version is declared outside package.json too (e.g.
+        # flair-bench's TOOL_VERSION constant). release.sh preflights this, but
+        # running it here catches a NEW declaration site on the PR that adds it,
+        # while the author still has the context — rather than at a release
+        # weeks later, after the release branch and PR already exist.
+        run: node scripts/check-version-sync.mjs
       - name: "Check production dep bake time (≥7 days)"
         # Supply-chain bake-time guard. Fails if any external pinned production
         # dep was published <7 days ago — catches the "compromise published,
