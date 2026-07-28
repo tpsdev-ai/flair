@@ -138,12 +138,33 @@ describe("zero-touch migrations — provisioned shape whose ~/.flair/data is unu
   test("the boot cycle still runs: migration state is written under ROOTPATH", async () => {
     const statePath = join(harper.installDir, ".migrations", "state.json");
     const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline && !existsSync(statePath)) {
+    // Poll for the POSTCONDITION, not a proxy for it. The runner creates
+    // state.json before writing into it, so `existsSync` can be true while the
+    // file is still empty or a partial object — JSON.parse then throws and the
+    // test fails intermittently on a migration that actually succeeded
+    // (flair#890). Waiting until it parses AND carries the entry removes the
+    // race without weakening the assertions below.
+    let state: Record<string, any> | null = null;
+    while (Date.now() < deadline) {
+      if (existsSync(statePath)) {
+        try {
+          const parsed = JSON.parse(readFileSync(statePath, "utf-8"));
+          if (parsed?.["visibility-backfill"]) {
+            state = parsed;
+            break;
+          }
+        } catch {
+          // partially-written file — keep waiting rather than failing
+        }
+      }
       await new Promise((r) => setTimeout(r, 500));
     }
 
-    expect(existsSync(statePath)).toBe(true);
-    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    if (state === null) {
+      throw new Error(
+        `no parseable .migrations/state.json carrying a visibility-backfill entry at ${statePath} within 60s`,
+      );
+    }
     expect(state["visibility-backfill"]?.lastOutcome).toBe("success");
     expect(state["visibility-backfill"]?.rowsProcessed).toBe(SEED_IDS.length);
   }, 90_000);
