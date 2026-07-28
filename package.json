@@ -66,14 +66,6 @@
     "tar": "7.5.20",
     "tweetnacl": "1.0.3"
   },
-  "peerDependencies": {
-    "node-llama-cpp": "3.18.1"
-  },
-  "peerDependenciesMeta": {
-    "node-llama-cpp": {
-      "optional": true
-    }
-  },
   "overrides": {
     "react-native-fs": "npm:empty-npm-package@1.0.0"
   },

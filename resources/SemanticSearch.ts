@@ -4,13 +4,6 @@ import { getEmbedding, getMode } from "./embeddings-provider.js";
 import { patchRecord } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveReadScope } from "./memory-read-scope.js";
-import {
-  isRerankEnabled,
-  getRerankTopN,
-  getRerankBudgetMs,
-  getRerankMinCandidates,
-  rerankCandidates,
-} from "./rerank-provider.js";
 
 // The BM25 + union-RRF hybrid path is feature-flagged via hybridEnabled()
 // (imported from ./bm25 — Harper-free so it's unit-testable). Default is ON as
@@ -23,7 +16,7 @@ import { hybridEnabled } from "./bm25.js";
 // supersede/isAllowed) now lives in the pure, side-effect-free
 // retrieveCandidates() core (flair-bootstrap-scale-fix, Kern-approved
 // extraction) — MemoryBootstrap.ts calls the SAME core bare, without
-// tripping this file's rate-limit/reranker/hit-tracking side effects. See
+// tripping this file's rate-limit/hit-tracking side effects. See
 // resources/semantic-retrieval-core.ts's module doc for the full boundary.
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
 import { attachTrust } from "./trust-block.js";
@@ -196,32 +189,20 @@ export class SemanticSearch extends Resource {
 
     const hybrid = hybridEnabled();
 
-    // When the reranker is on, widen the legacy HNSW fetch so it has a deeper
-    // pool to re-score (retrieve topN → rerank → slice to limit). Decoupled
-    // from CANDIDATE_MULTIPLIER so composite re-ranking keeps its existing
-    // headroom. Scoped to the legacy (non-hybrid) vector path below — the
-    // hybrid path's candidate pool is already governed by CANDIDATE_MULTIPLIER
-    // (semantic leg) + SEM_LIMIT (BM25 leg) via RRF union; the
-    // reranker still applies to its output further down regardless of which
-    // path produced `filteredResults`.
-    const rerankOn = isRerankEnabled();
-    const rerankTopN = getRerankTopN();
-
     // The overfetch policy (how many raw candidates to pull from the
     // HNSW/BM25 legs relative to what the caller ultimately wants) is THIS
     // wrapper's decision — retrieveCandidates() never multiplies its `limit`
     // param internally (see resources/semantic-retrieval-core.ts's doc), so
     // every caller (this one, and MemoryBootstrap's own K formula) computes
-    // its own fetch depth. Hybrid's semantic leg is never rerank-widened
-    // (matches the pre-extraction behavior: only the legacy path widened for
-    // rerank).
-    const candidateLimit = hybrid
-      ? limit * CANDIDATE_MULTIPLIER
-      : (rerankOn ? Math.max(limit * CANDIDATE_MULTIPLIER, rerankTopN) : limit * CANDIDATE_MULTIPLIER);
+    // its own fetch depth. Both the hybrid path (CANDIDATE_MULTIPLIER on the
+    // semantic leg + SEM_LIMIT on the BM25 leg, fused by RRF) and the legacy
+    // vector-only path overfetch by the same multiplier, which is what gives
+    // composite re-scoring headroom to reorder before the final slice.
+    const candidateLimit = limit * CANDIDATE_MULTIPLIER;
 
     const ctx = (this as any).getContext?.();
 
-    let filteredResults = await retrieveCandidates({
+    const filteredResults = await retrieveCandidates({
       queryEmbedding: qEmb,
       q,
       conditions,
@@ -252,10 +233,10 @@ export class SemanticSearch extends Resource {
     });
 
     // ─── flair#744 slice 2 — first-class abstention ("no memory covers this")
-    // Opt-in only. Evaluated on the RETRIEVED candidate pool, BEFORE the
-    // reranker / final slice / hit-tracking, so an abstaining recall does no
-    // rerank work and never bumps retrievalCount for memories it declines to
-    // surface. The decision reads ONLY the best absolute semantic similarity
+    // Opt-in only. Evaluated on the RETRIEVED candidate pool, BEFORE the final
+    // slice / hit-tracking, so an abstaining recall never bumps retrievalCount
+    // for memories it declines to surface. The decision reads ONLY the best
+    // absolute semantic similarity
     // (never any principal/authority signal — abstention.ts is pure and
     // authority-free), against the single GLOBAL threshold. Default OFF ⇒ this
     // whole block is skipped and the response is byte-identical to pre-slice-2.
@@ -273,37 +254,12 @@ export class SemanticSearch extends Resource {
       }
     }
 
-    // ─── Cross-encoder rerank (best-effort, fail-open to vector order) ───────
-    // Re-scores query+candidate TOGETHER (cross-attention the pooled embedding
-    // can't do) and reorders before the final slice. Reorders whatever
-    // `filteredResults` retrieveCandidates() produced — legacy HNSW-only OR
-    // the BM25+union-RRF hybrid path — since both converge into the same
-    // shape (retrieveCandidates never exposes which leg produced a result).
-    // Still gated on `qEmb` (an embedding was actually generated); the pure
-    // keyword-only fallback (no qEmb at all) is untouched either way. The
-    // reranker overwrites `_score` with the rerank score (so margin
-    // measurement reads it) and preserves the semantic score as `_semScore`;
-    // `_rawScore` is left as-is so recall-bench's scoring:"raw" path stays
-    // reproducible. On init failure, timeout, or any throw, rerankCandidates
-    // returns the input UNCHANGED and we fall through to retrieveCandidates'
-    // own vector-order sort — recall is never blocked. retrieveCandidates
-    // already returns its output sorted best-first, so the non-rerank branch
-    // needs no additional sort here.
-    //
-    // flair#888: that fall-through is deliberate (an unranked search still
-    // answers the question; a failed one doesn't) but is NO LONGER SILENT —
-    // rerank-provider classifies every fallback, logs it once per distinct
-    // reason, and reports reason/detail/timestamp through getRerankStatus() →
-    // /HealthDetail, which now warns explicitly on the "enabled, 0 successful
-    // reranks" case. Callers that need a hard gate instead of a degrade call
-    // assertRerankAvailable() (the recall bench does); production recall
-    // deliberately does not.
-    if (rerankOn && qEmb && q && filteredResults.length >= getRerankMinCandidates()) {
-      filteredResults = await rerankCandidates(String(q), filteredResults, {
-        topN: rerankTopN,
-        budgetMs: getRerankBudgetMs(),
-      });
-    }
+    // retrieveCandidates() already returns its output sorted best-first
+    // (whichever leg produced it — legacy HNSW-only, the BM25+union-RRF hybrid
+    // path, or the keyword-only fallback all converge into the same shape), so
+    // the final slice needs no additional sort. A cross-encoder rerank stage
+    // used to sit here and reorder the pool before this slice; it was removed
+    // in flair#893 after measuring Δp@3 = 0.000 at 4.1× query latency.
     const topResults = filteredResults.slice(0, limit);
 
     // Async hit tracking — don't block the response

@@ -41,7 +41,7 @@ pinning the mechanism with mocked Harper.
 This harness reproduces the same finding **in isolation**, on a full
 embeddings+BM25+RRF pipeline, across 30 queries and 87 records instead of one
 mocked pair — see "Measured results" below. Going forward, it's the tool to
-run *before* trusting the next scoring/retrieval/rerank config change,
+run *before* trusting the next scoring/retrieval config change,
 instead of measuring against production again.
 
 ## Usage
@@ -66,18 +66,14 @@ bun run test/bench/recall-harness/run.ts --runs 1
 # Only the production-default config (hybrid=true)
 bun run test/bench/recall-harness/run.ts --hybrid on
 
-# Also spawn one hybrid+rerank config (needs the rerank GGUF present, and
-# hard-fails rather than measuring if it isn't — see "The rerank arm" below)
-bun run test/bench/recall-harness/run.ts --hybrid on --rerank
-
 # Print every query's rank, not just the aggregates
 bun run test/bench/recall-harness/run.ts --verbose
 ```
 
-### Skip re-downloading the embedding/rerank models
+### Skip re-downloading the embedding model
 
-Every ephemeral Harper instance needs the embedding model (and, with
-`--rerank`, the reranker GGUF). By default `test/helpers/harper-lifecycle.ts`
+Every ephemeral Harper instance needs the embedding model. By default
+`test/helpers/harper-lifecycle.ts`
 points `FLAIR_MODELS_DIR` at `<repo>/models`, which is empty in a fresh
 worktree — set it to an **existing** Flair install's `models/` directory to
 reuse the already-downloaded weights (read-only; the harness never writes
@@ -93,7 +89,6 @@ export FLAIR_MODELS_DIR=/path/to/an/existing/flair/checkout/models
 |-------------------|---------|---------|
 | `--runs N`        | `3`     | Independent seed→measure→teardown cycles per config, aggregated as mean ± standard error. |
 | `--hybrid on\|off\|both` | `both` | Which `FLAIR_HYBRID_RETRIEVAL` value(s) to spawn instances for. |
-| `--rerank`        | off     | Additionally spawn one `hybrid=true, rerank=true` config and print a RERANK A/B section comparing it against the `rerank=false` arm. Opt-in. Requires the reranker GGUF and **hard-fails** if the reranker doesn't provably engage — see "The rerank arm" below. |
 | `--prefixes on\|off\|both` | `both` | flair#504 Phase 2 (**FLIPPED ON** — see "The gate, the flip decision, and BASELINE.json" below): which nomic search-prefix state(s) to spawn instances for. `on` = the real, unmodified shipped default (`EMBEDDING_PREFIXES_ENABLED = true` in `resources/embeddings-provider.ts` — no hatch needed, this IS production behavior); `off` = the harness-only `FLAIR_RECALL_HARNESS_FORCE_PREFIX` escape hatch (set to the literal string `"false"`), which force-disables the SAME gate against the SAME dist build (see `resources/embeddings-provider.ts`'s `harnessPrefixOverride()`) — this is how the harness keeps measuring the comparison arm even though production never exercises it. The hatch is bidirectional (reads `"true"`/`"false"`, not just presence), so it stays correct if the gate's default ever flips again. |
 | `--canary`        | off     | Run the mixed-space canary instead of the main sweep (see "MIXED-SPACE CANARY" in run.ts) — quantifies flair#504 Phase 2 stage-2 prod-re-embed transient-degradation risk in isolation. |
 | `--verbose`       | off     | Print every query's rank (hit/miss, kind, marker) under `--runs`. |
@@ -103,7 +98,7 @@ export FLAIR_MODELS_DIR=/path/to/an/existing/flair/checkout/models
 
 ## Interpreting the output
 
-For each `(hybrid, rerank)` config, the harness prints p@3 and MRR for
+For each `(hybrid, prefixes)` config, the harness prints p@3 and MRR for
 `scoring=raw` and `scoring=composite` against the **same seeded corpus** (no
 reseed between the two — matches `recall-eval.mjs`'s own convention), then:
 
@@ -132,11 +127,15 @@ made harder — see the numbers below; it already discriminates hard.
 
 ## Measured results (2026-07-08, isolated — zero production contact)
 
-`--runs 3`, `FLAIR_HYBRID_RETRIEVAL` swept `true`/`false`, `--rerank` not
-exercised (see caveat below). Real numbers from an ephemeral instance on this
+`--runs 3`, `FLAIR_HYBRID_RETRIEVAL` swept `true`/`false`. Real numbers
+from an ephemeral instance on this
 corpus — not simulated, and reproducible by re-running the command above
 (variance was ±0.000 across all 3 runs in both configs — this corpus's
-collapse is not a fluke of one HNSW build):
+collapse is not a fluke of one HNSW build).
+
+Output below is quoted verbatim as it was printed on the day. The per-config
+header no longer carries a `rerank=` field (that arm is gone — see "Removed:
+the cross-encoder rerank arm"); the numbers are unaffected:
 
 ```
 ── hybrid=true rerank=false ──
@@ -296,7 +295,7 @@ is never modified by this change, so every number already published in this
 file above stays reproducible verbatim forever (`--corpus v1`, the default).
 v2 is additive, and becomes **the standing gate for future
 embedding/scoring changes** — run it (not just v1) before trusting the next
-prefix/hybrid/rerank/scoring config change.
+prefix/hybrid/scoring config change.
 
 ### Size and design
 
@@ -519,136 +518,61 @@ to `false` in the future requires the same process in reverse: a fresh,
 re-baselined A/B through that ratchet showing staying on is actively worse,
 not just unproven — not a unilateral code change.
 
-## The rerank arm
+## Verdict rule
 
-`--rerank` adds one `hybrid=true, prefixes=on, rerank=true` config and prints
-a **RERANK A/B** section comparing it, on the same seeded corpus and the same
-`scoring=raw` production default, against the `rerank=false` arm from the same
-sweep. Latency per query is reported for both arms — the decision is
-benefit-per-cost, not benefit.
-
-### It cannot silently measure the wrong config
-
-This is the whole point of the arm's design. Three gates, all fatal:
-
-1. **Preflight, before anything spawns** — the model key must be known and its
-   GGUF must exist in the models dir the spawned Harper will actually use
-   (`FLAIR_MODELS_DIR` if set, else `<repo>/models` — the rule
-   `test/helpers/harper-lifecycle.ts` applies). Missing ⇒ exit 2 in
-   milliseconds, with the path it looked for.
-2. **Pre-measure engagement** — after seeding, one warm-up query runs and the
-   harness reads the provider's own diagnostics from that same Harper
-   (`/HealthDetail`'s `rerank` block). Unless `state=ready` **and**
-   `rerankCount > 0`, the run aborts **before any number exists**.
-3. **Post-measure engagement** — the same check again after the pass, because
-   "engaged on query 1" doesn't prove "engaged on query 126". A reranker that
-   loads and then starts timing out clears gate 2 and fails gate 3.
-
-A null result from this arm therefore means *reranking didn't help*, never
-*reranking didn't run*.
-
-### Model selection
-
-`FLAIR_RERANK_MODEL` picks the model; the harness defaults it to
-**`jina-reranker-v2`** (GGUF `jina-reranker-v2-base.Q8_0.gguf`), the
-rank-pooling cross-encoder that actually completes inside Harper's runtime.
-The other known model, `qwen3-reranker-0.6b-q8`, is validated offline but its
-generative logit readout returns empty inside Harper — so it fails gate 2
-loudly instead of falling open. An unrecognised value fails gate 1 rather than
-being swapped for the default behind your back.
-
-### Verdict rule
-
-Two floors, not one — see `verdict.ts` for the full reasoning.
+Every A/B this harness reports runs its delta through `classifyDelta()`
+(`verdict.ts`), which tests it against **two** floors rather than one.
 
 1. **Run-to-run noise**: the combined standard error of the two arms,
-   √(SE_off² + SE_on²).
+   √(SE_a² + SE_b²).
 2. **The instrument's own resolution**: Δp@3 converted to whole queries
    entering or leaving the top 3, ΔMRR to total reciprocal-rank points. A
    delta worth less than one query is rounding, not a result.
 
-The second floor is the load-bearing one here. **Every measurement this
-harness has ever published came back at ±0.000 variance** — the corpus is
-fixed and the HNSW build is deterministic — so a naive "|Δ| > SE" test calls
-*any* nonzero delta significant. The first real rerank measurement landed
-exactly there. With `--runs 1` there is no variance estimate at all and the
-harness says so rather than implying one.
+The second floor is the load-bearing one. **Every measurement this harness
+has ever published came back at ±0.000 variance** — the corpus is fixed and
+the HNSW build is deterministic — so a naive "|Δ| > SE" test calls *any*
+nonzero delta significant. With `--runs 1` there is no variance estimate at
+all, and the harness says so rather than implying one.
 
-### Measured results — the first rerank number (2026-07-27, isolated)
+Results are reported in query units for the same reason: "+0.42
+reciprocal-rank points across 126 queries" cannot be misread the way "+0.003"
+can.
 
-`--corpus v2 --hybrid on --prefixes on --rerank --runs 3`, scoring=raw (the
-production default), `FLAIR_RERANK_MODEL=jina-reranker-v2`. Both arms are the
-same seeded corpus with `FLAIR_RERANK_ENABLED` as the only variable, and the
-rerank arm passed all three engagement gates (`rerankCount=254`,
-`fallbackCount=0` per run — 252 measured queries plus 2 warm-up), so this is a
-measurement of reranking, not of a reranker that quietly didn't run.
+## Removed: the cross-encoder rerank arm (2026-07-27)
 
-```
-══ RERANK A/B (hybrid=true, prefixes=on, scoring=raw) ══
+`--rerank` used to add a `rerank=true` config and print a RERANK A/B section.
+The reranker was removed from Flair outright (flair#891 measured it,
+flair#893 removed it), and the flag went with it. The measurement is kept
+here because it is the baseline any future re-attempt argues against:
 
-  rerank=off  p@3=0.976 ± 0.000   MRR=0.946 ± 0.000   latency/query=147.2 ± 1.1ms
-  rerank=on   p@3=0.976 ± 0.000   MRR=0.949 ± 0.000   latency/query=607.2 ± 3.3ms   (model=jina-reranker-v2)
-  Δ (on − off)   p@3=+0.000   MRR=+0.003   latency=+460.0ms/query
-  by kind (on − off, MRR):
-    stress off=0.961  on=0.931  Δ=-0.029
-    trap   off=0.930  on=0.906  Δ=-0.024
-    hard   off=0.946  on=0.957  Δ=+0.011
-    clean  off=0.957  on=1.000  Δ=+0.043
-  per-cluster MRR movers (on − off, 30 clusters with data, 20 flat):
-    gained:
-      WINEMAKING     off=0.625  on=1.000  Δ=+0.375
-      AVIATION       off=0.750  on=1.000  Δ=+0.250
-      ASTRONOMY      off=0.875  on=1.000  Δ=+0.125
-      LOGISTICS      off=0.875  on=1.000  Δ=+0.125
-      GITWF          off=0.796  on=0.910  Δ=+0.114
-    lost:
-      LINGUISTICS    off=1.000  on=0.500  Δ=-0.500
-      FINOPS         off=0.917  on=0.703  Δ=-0.214
-      TEAMPROC       off=1.000  on=0.875  Δ=-0.125
-      HORTIC         off=1.000  on=0.944  Δ=-0.056
+`--corpus v2 --hybrid on --prefixes on --runs 3`, scoring=raw, 251 records /
+126 queries, `jina-reranker-v2`, with the rerank arm proven to have actually
+engaged on every run:
 
-RERANK HEADLINE: Δp@3=+0.000 (combined SE ±0.000) = +0.0 of 126 queries;
-                 ΔMRR=+0.003 (combined SE ±0.000) = +0.42 reciprocal-rank points;
-                 cost +460.0ms/query (4.1× the rerank=off latency).
-  → BELOW THIS INSTRUMENT'S RESOLUTION: p@3 moved 0.0 queries (not one query
-    entered or left the top 3 across all 126), and total MRR movement is 0.42
-    reciprocal-rank points — less than the 0.5 a SINGLE query gains moving
-    from rank 2 to rank 1. Not a difference.
-```
+| | p@3 | MRR | latency/query |
+|---|---|---|---|
+| rerank=off | 0.976 ± 0.000 | 0.946 ± 0.000 | 147.2 ± 1.1 ms |
+| rerank=on | 0.976 ± 0.000 | 0.949 ± 0.000 | 607.2 ± 3.3 ms |
+| **Δ** | **0.000** | **+0.003** | **+460.0 ms (4.1×)** |
 
-**Reading it.** Δp@3 is *exactly* zero: across 126 queries, reranking moved
-not one into or out of the top 3. The +0.003 MRR is 0.42 reciprocal-rank
-points across the entire query set — smaller than one query moving a single
-position at the top of its list. The per-kind breakdown isn't even
-consistently signed (`clean` +0.043 and `hard` +0.011 against `stress` −0.029
-and `trap` −0.024), and the per-cluster movers are large gains offset by large
-losses (WINEMAKING +0.375, AVIATION +0.250 against LINGUISTICS −0.500, FINOPS
-−0.214) — the signature of near-ties being reshuffled in both directions,
-which is the same read this file already applies to the prefix delta further
-up, not of a retrieval capability improving. The cost, by contrast, is
-unambiguous and large: **4.1× the query latency, +460 ms on every search.**
+**Δp@3 was exactly zero** — across 126 queries, reranking moved not one into
+or out of the top 3. The ΔMRR of +0.003 is 0.42 reciprocal-rank points across
+the whole set, less than the 0.5 a *single* query gains moving from rank 2 to
+rank 1, and it was not consistently signed per kind (clean +0.043, hard +0.011
+against stress −0.029, trap −0.024). `below-resolution`, at 4.1× the query
+latency.
 
-**Validity checks.** The `rerank=off` arm reproduces `BASELINE.json`
-byte-for-byte (p@3 0.976 / MRR 0.946), and the whole sweep was run twice as
-two independent invocations with identical recall figures in both (latency,
-the one non-deterministic dimension, moved 607–623 ms). So the null is a
-property of reranking on this corpus, not of one session.
+Two things about that result are worth carrying forward:
 
-**What it does not settle.** One synthetic corpus is not the live one — this
-file's own caveats have always said an isolated result in either direction
-isn't the final word, and `recall-eval.mjs` against the live corpus remains
-the higher tier. A different reranker, or a topN/budget other than the
-defaults, is also unmeasured; this measures *what a user actually gets*, which
-is the shipped default configuration. What it does settle is that the feature
-is no longer unmeasured.
-
-**Not added to `BASELINE.json`.** That file holds exactly one config — the
-production default a future CI ratchet gates on — and its own comment requires
-the `config` block to match the invocation that produced it. Reranking is
-off by default, so a ratchet could never exercise a rerank entry there.
-Measured results live in this README (as every other measurement in this file
-does); `BASELINE.json` stays the single production ratchet point, and the
-`rerank=off` arm above confirms it still holds.
+- **The instrument was nearly the problem too.** Under the old "|Δ| > SE"
+  rule, +0.003 against ±0.000 variance would have been reported as clearing
+  the error bars. The rule in "Verdict rule" above exists because of this,
+  and applies to every retrieval change measured here.
+- **p@3 0.976 leaves very little headroom.** An instrument that near its
+  ceiling struggles to distinguish a good change from noise, which is part of
+  why this measured as nothing. Before optimising recall further, check that
+  the instrument can still *see* an improvement — see flair#893.
 
 ## Caveats
 
@@ -663,11 +587,6 @@ does); `BASELINE.json` stays the single production ratchet point, and the
 - **HNSW/embedding run-to-run noise**: a single run can wobble; that's why
   the default is `--runs 3` and results are reported as mean ± SE, mirroring
   `recall-bench.mjs`'s convention.
-- **`--rerank` can no longer report a config it didn't run.** It used to:
-  if the GGUF was missing, `rerankCandidates()` fell open (returned
-  candidates unchanged) and the run measured the *non-reranked* config while
-  labelling it reranked. Three gates now stand in the way, all of which
-  **exit non-zero rather than measure** — see "The rerank arm" below.
 - **`--keep-on-fail`** only prints a reminder; it does not currently change
   `stopHarper`'s cleanup behavior. If you need to inspect a failed run's
   Harper installDir, comment out the `stopHarper` call in `runOnce()`

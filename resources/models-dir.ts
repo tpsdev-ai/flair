@@ -1,15 +1,23 @@
 /**
  * models-dir.ts — the ONE place that decides where model GGUFs live.
  *
- * Extracted from embeddings-provider.ts (flair#815) so the reranker
- * (rerank-provider.ts) can share the exact same resolution WITHOUT importing
+ * Extracted from embeddings-provider.ts (flair#815) so a second model
+ * consumer could share the exact same resolution WITHOUT importing
  * embeddings-provider: several unit-isolated tests `mock.module()` the whole
  * embeddings-provider module (with only the named exports THEY consume), and
  * bun's module cache is process-wide — so any new cross-module import of
  * embeddings-provider from another resource makes those mocks incomplete and
  * kills unrelated test files at module load. This module is tiny, pure
- * node-stdlib, and never mocked, so both providers (and any future model
- * consumer) can depend on it safely.
+ * node-stdlib, and never mocked, so any model consumer can depend on it
+ * safely.
+ *
+ * The second consumer that motivated the split (the cross-encoder reranker)
+ * has since been removed (flair#893), leaving the embedding engine as the
+ * only caller. The module stays split anyway, and deliberately: the
+ * `mock.module()` hazard above is a property of embeddings-provider, not of
+ * the reranker, so folding this back in would re-arm it for whatever the next
+ * model consumer turns out to be. It is also the single documented source of
+ * truth for the models dir, independently tested as such.
  */
 
 import { existsSync } from "node:fs";
@@ -17,11 +25,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
- * Resolve the directory model GGUFs live in / download into — shared by the
- * embedding engine (embeddings-boot.ts's `register()` options) and the
- * cross-encoder reranker (rerank-provider.ts, flair#815 — it used to hardcode
- * `<cwd>/models`, silently failing open wherever Harper's cwd wasn't the
- * models location).
+ * Resolve the directory model GGUFs live in / download into — used by the
+ * embedding engine (embeddings-boot.ts's `register()` options), and the
+ * resolution any future model consumer should use rather than re-deriving its
+ * own. flair#815 exists because a consumer that hardcoded `<cwd>/models`
+ * silently failed open wherever Harper's cwd wasn't the models location; the
+ * fix was to give the decision exactly one home, which is this function.
  *
  * Resolution order (everything writable, never the read-only package dir):
  *   1. FLAIR_MODELS_DIR        — explicit operator/docker override.

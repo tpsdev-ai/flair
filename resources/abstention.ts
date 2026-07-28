@@ -117,7 +117,7 @@ export interface AbstentionResult {
  * Reads ONLY the `_semSimilarity` number the retrieval core
  * (resources/semantic-retrieval-core.ts) attaches to each semantic-leg result
  * WHEN abstention is requested — an absolute cosine similarity in [0,1],
- * independent of the RRF normalization / rerank that make the ranking `_score`
+ * independent of the RRF normalization that makes the ranking `_score`
  * a *relative* signal (the top RRF-fused result is normalized to 1.0 regardless
  * of how weak the actual match is, so `_score` is unusable as a confidence
  * floor — this is why abstention reads the absolute similarity instead).

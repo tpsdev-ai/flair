@@ -10,9 +10,16 @@
  * variance across runs**: the corpus is fixed, the HNSW build is
  * deterministic, and the same queries run against the same records. When SE
  * is exactly zero, *any* nonzero delta "exceeds" it, so that rule promotes a
- * two-query reshuffle to a significant finding. A rerank A/B that reports
- * "+0.003 MRR, exceeds the error bars" is exactly the sort of number that
- * gets quoted as justification later.
+ * two-query reshuffle to a significant finding.
+ *
+ * That is not hypothetical. The A/B this rule was written during measured
+ * +0.003 MRR at Δp@3 exactly 0.000 and four times the query latency; under
+ * "|Δ| > SE" it would have been reported as clearing the error bars, and
+ * "+0.003 MRR, statistically significant" is precisely the sentence that gets
+ * quoted as justification a year later. Under the rule below it comes back
+ * `below-resolution`, which is what it was. (The feature that produced it was
+ * removed on that evidence — flair#891, flair#893 — but the rule is the part
+ * worth keeping: it applies to every retrieval change measured here.)
  *
  * So the delta is checked against TWO floors:
  *
