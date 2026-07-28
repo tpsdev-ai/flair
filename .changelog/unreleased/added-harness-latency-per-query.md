@@ -1,1 +1,0 @@
-- **The recall harness reports latency per query** for every config, aggregated mean ± SE across runs the same way p@3 and MRR are. A benefit number with no cost number next to it can only be read one way, and the rerank decision is benefit-per-cost.
