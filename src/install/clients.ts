@@ -32,13 +32,14 @@ export type WireEnv = { FLAIR_AGENT_ID: string; FLAIR_URL: string; FLAIR_CLIENT?
 export interface Client {
   id: ClientId;
   label: string;
+  /** The executable that has to be on PATH for this client to be usable. */
+  bin: string;
   detected: boolean;
   wire: (env: WireEnv) => { ok: boolean; message: string };
 }
 
 // ---- Detection helpers ----------------------------------------------------------
 
-import { spawnSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -78,52 +79,42 @@ function binInPath(name: string): boolean {
 }
 
 /**
- * Claude Code is INSTALLED when its binary is on PATH — the same test every
- * other client here uses, and the one that matches how Claude Code is actually
- * distributed. The npm-global lookup below is only a fallback: Claude Code's
- * native installer puts `claude` on PATH without registering an npm global, so
- * `npm list -g @anthropic-ai/claude-code` alone reports "not installed" for a
- * large share of real users (flair#906).
+ * A client is INSTALLED when its executable is on PATH. One rule for all four,
+ * evaluated with filesystem calls only — detection never starts a subprocess.
+ *
+ * Claude Code, Codex and Gemini used to fall back to `npm list -g <pkg>` when
+ * the binary was absent. That fallback was removed (flair#906 follow-up); it
+ * was wrong in three separate directions and bought nothing:
+ *
+ *   1. UNBOUNDED AND SLOW ON AN INTERACTIVE PATH. `npm list -g <pkg>` walks the
+ *      whole global tree, measured at ~0.8 s per call on a warm developer
+ *      machine, with no `timeout` set. `flair init` calls detectClients(), so a
+ *      user with none of these clients paid up to three of those walks — seconds
+ *      of silent stall on first run — and on a loaded CI runner the same three
+ *      calls blew past a 5 s test timeout.
+ *
+ *   2. FALSE POSITIVES. `npm list -g <pkg>` exits 0 when the package appears
+ *      ANYWHERE in the global tree, including as a transitive dependency of an
+ *      unrelated global package. Gemini was probed with `@google/generative-ai`
+ *      — a library, not the CLI — so any globally installed tool that depended
+ *      on it made Flair report Gemini "detected" and write ~/.gemini/settings.json
+ *      for a CLI that was not on the machine.
+ *
+ *   3. FALSE NEGATIVES. It assumes npm's default global prefix, so it reports
+ *      "not installed" for mise / fnm / nvm / volta users whose prefix lives
+ *      elsewhere — the same defect already fixed for `flair upgrade`'s presence
+ *      probes (see "Upgrade presence probes" in src/cli.ts).
+ *
+ * Nothing is lost by dropping it: an `npm install -g` links the package's bin
+ * into the prefix's bin directory, which is on PATH by construction (it is where
+ * `npm` itself is found from). A client whose binary is NOT on PATH is a client
+ * the user cannot launch, and wiring an MCP config for it is at best a no-op.
+ * `flair init --client <name>` still wires a client explicitly, bypassing
+ * detection entirely, so an exotic install is never locked out.
  */
-function claudeCodeDetect(): boolean {
+function detectBin(bin: string): boolean {
   try {
-    if (binInPath("claude")) return true;
-    const result = spawnSync("npm", ["list", "-g", "@anthropic-ai/claude-code"], {
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    return result.status === 0;
-  } catch (_e: unknown) {
-    return false;
-  }
-}
-
-function codexDetect(): boolean {
-  try {
-    if (binInPath("codex")) return true;
-    const npmResult = spawnSync("npm", ["list", "-g", "@openai/codex"], {
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    return npmResult.status === 0;
-  } catch (_e: unknown) {
-    return false;
-  }
-}
-
-function geminiDetect(): boolean {
-  try {
-    if (binInPath("gemini")) return true;
-    const npmResult = spawnSync("npm", ["list", "-g", "@google/generative-ai"], {
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    return npmResult.status === 0;
-  } catch (_e: unknown) {
-    return false;
-  }
-}
-
-function cursorDetect(): boolean {
-  try {
-    return binInPath("cursor");
+    return binInPath(bin);
   } catch (_e: unknown) {
     return false;
   }
@@ -336,21 +327,25 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
   {
     id: "claude-code",
     label: "Claude Code",
+    bin: "claude",
     wire: _wireClaudeCode,
   },
   {
     id: "codex",
     label: "Codex",
+    bin: "codex",
     wire: _wireCodex,
   },
   {
     id: "gemini",
     label: "Gemini",
+    bin: "gemini",
     wire: _wireGemini,
   },
   {
     id: "cursor",
     label: "Cursor",
+    bin: "cursor",
     wire: _wireCursor,
   },
 ];
@@ -436,19 +431,15 @@ export function renderWiringSummary(
   return lines;
 }
 
+/**
+ * Detect every known client. One rule (`bin` on PATH) applied uniformly, so a
+ * client added to ALL_CLIENTS is detected by declaring its executable — there is
+ * no per-client branch here to forget to extend.
+ */
 export function detectClients(): Client[] {
   return ALL_CLIENTS.map((client) => ({
     ...client,
-    detected:
-      client.id === "claude-code"
-        ? claudeCodeDetect()
-        : client.id === "codex"
-          ? codexDetect()
-          : client.id === "gemini"
-            ? geminiDetect()
-            : client.id === "cursor"
-              ? cursorDetect()
-              : false,
+    detected: detectBin(client.bin),
   }));
 }
 
