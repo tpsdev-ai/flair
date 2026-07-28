@@ -105,6 +105,7 @@ import {
   authedRequest,
 } from "./lib/auth-resolve.js";
 import { validateSnapshotArchive, extractSnapshotSafely } from "./lib/safe-snapshot-extract.js";
+import { escapeXml, unescapeXml } from "./lib/xml-escape.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
 // src/ into resources/, which don't survive npm packaging (see also
@@ -265,6 +266,76 @@ function launchdLabel(dataDir: string): string {
 
 function launchdPlistPath(label: string, launchAgentsDir: string = defaultLaunchAgentsDir()): string {
   return join(launchAgentsDir, `${label}.plist`);
+}
+
+/** Every value buildLaunchdPlist() interpolates into the plist XML. */
+export interface LaunchdPlistOptions {
+  label: string;
+  /** node binary that launchd execs (process.execPath). */
+  execPath: string;
+  /** harper.js entrypoint passed to node. */
+  harperBinPath: string;
+  /** cwd for the service — the installed flair package dir. */
+  workingDirectory: string;
+  dataDir: string;
+  modelsDir: string;
+  /** HARPER_SET_CONFIG payload; already JSON-stringified by the caller. */
+  setConfig: string;
+  adminUser: string;
+  adminPass: string;
+  httpPort: number | string;
+  /** OPERATIONSAPI_NETWORK_PORT value from opsNetworkPortValue(). */
+  opsNetworkPort: string;
+}
+
+/**
+ * Build the launchd plist for a Flair instance.
+ *
+ * Extracted from the `init` command so the XML escaping is unit-testable
+ * without touching real launchd or ~/Library/LaunchAgents. EVERY interpolated
+ * value goes through escapeXml() — including ones that look safe today (the
+ * label is a hash, the ports are numbers), because "this field can't contain
+ * a special character" is exactly the assumption that rots when a field's
+ * source changes. A future key added to this template that skips escapeXml()
+ * is the bug reappearing.
+ *
+ * Never log the return value: it embeds HDB_ADMIN_PASSWORD.
+ */
+export function buildLaunchdPlist(opts: LaunchdPlistOptions): string {
+  const e = escapeXml;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${e(opts.label)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${e(opts.execPath)}</string>
+    <string>${e(opts.harperBinPath)}</string>
+    <string>run</string>
+    <string>.</string>
+  </array>
+  <key>WorkingDirectory</key><string>${e(opts.workingDirectory)}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ROOTPATH</key><string>${e(opts.dataDir)}</string>
+    <key>FLAIR_MODELS_DIR</key><string>${e(opts.modelsDir)}</string>
+    <key>HARPER_SET_CONFIG</key><string>${e(opts.setConfig)}</string>
+    <key>DEFAULTS_MODE</key><string>dev</string>
+    <key>HDB_ADMIN_USERNAME</key><string>${e(opts.adminUser)}</string>
+    <key>HDB_ADMIN_PASSWORD</key><string>${e(opts.adminPass)}</string>
+    <key>THREADS_COUNT</key><string>1</string>
+    <key>NODE_HOSTNAME</key><string>localhost</string>
+    <key>HTTP_PORT</key><string>${e(String(opts.httpPort))}</string>
+    <key>OPERATIONSAPI_NETWORK_PORT</key><string>${e(opts.opsNetworkPort)}</string>
+    <key>LOCAL_STUDIO</key><string>false</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${e(join(opts.dataDir, "log", "launchd-stdout.log"))}</string>
+  <key>StandardErrorPath</key><string>${e(join(opts.dataDir, "log", "launchd-stderr.log"))}</string>
+</dict>
+</plist>`;
 }
 
 /**
@@ -3000,40 +3071,19 @@ program
           // backend on every KeepAlive restart in-process. See that file's
           // header (flair#694) for why this replaced the old HARPER_CONFIG
           // plist line.
-          const escapeXml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
-          const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${label}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${process.execPath}</string>
-    <string>${harperBinPath}</string>
-    <string>run</string>
-    <string>.</string>
-  </array>
-  <key>WorkingDirectory</key><string>${flairPackageDir()}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>ROOTPATH</key><string>${dataDir}</string>
-    <key>FLAIR_MODELS_DIR</key><string>${modelsDir}</string>
-    <key>HARPER_SET_CONFIG</key><string>${escapeXml(setConfig)}</string>
-    <key>DEFAULTS_MODE</key><string>dev</string>
-    <key>HDB_ADMIN_USERNAME</key><string>${adminUser}</string>
-    <key>HDB_ADMIN_PASSWORD</key><string>${adminPass}</string>
-    <key>THREADS_COUNT</key><string>1</string>
-    <key>NODE_HOSTNAME</key><string>localhost</string>
-    <key>HTTP_PORT</key><string>${httpPort}</string>
-    <key>OPERATIONSAPI_NETWORK_PORT</key><string>${escapeXml(opsNetworkPortValue(opsBindHost, opsPort))}</string>
-    <key>LOCAL_STUDIO</key><string>false</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${join(dataDir, "log", "launchd-stdout.log")}</string>
-  <key>StandardErrorPath</key><string>${join(dataDir, "log", "launchd-stderr.log")}</string>
-</dict>
-</plist>`;
+          const plist = buildLaunchdPlist({
+            label,
+            execPath: process.execPath,
+            harperBinPath,
+            workingDirectory: flairPackageDir(),
+            dataDir,
+            modelsDir,
+            setConfig,
+            adminUser,
+            adminPass,
+            httpPort,
+            opsNetworkPort: opsNetworkPortValue(opsBindHost, opsPort),
+          });
           writeFileSync(plistPath, plist);
           console.log("Launchd service registered ✓");
         }
@@ -10009,7 +10059,7 @@ program
  * Never logs plist contents — the plist embeds HDB_ADMIN_PASSWORD. Only the
  * extracted ROOTPATH path ever reaches a message.
  */
-function assertLaunchdServiceOwnedBy(
+export function assertLaunchdServiceOwnedBy(
   dataDir: string,
   label: string,
   plistPath: string,
@@ -10019,7 +10069,11 @@ function assertLaunchdServiceOwnedBy(
   try {
     const raw = readFileSync(plistPath, "utf-8");
     const m = raw.match(/<key>ROOTPATH<\/key>\s*<string>([^<]*)<\/string>/);
-    declared = m ? m[1] : null;
+    // The plist stores this XML-escaped (buildLaunchdPlist), so a data dir
+    // containing `&` is on disk as `&amp;`. Decode before comparing, or the
+    // path would never equal itself and this guard would refuse a legitimate
+    // stop/start on any instance whose path contains an escaped character.
+    declared = m ? unescapeXml(m[1]) : null;
   } catch {
     return; // unreadable — no evidence, don't block
   }
