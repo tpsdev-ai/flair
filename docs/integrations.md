@@ -24,6 +24,8 @@ Where Flair already runs. Each integration shown here is a working surface — t
 
 Don't see your harness? If it speaks **MCP** — Flair already works with `flair-mcp`. If it has a **custom memory protocol** like LangGraph's `BaseStore` or CrewAI's `RAGStorage`, an adapter is a ~200-line package; [open an issue](https://github.com/tpsdev-ai/flair/issues) or [send a PR](https://github.com/tpsdev-ai/flair).
 
+**Already running on Harper?** Every surface above reaches Flair over HTTP. If your application is itself a Harper app, you can skip the network entirely — load Flair as a component of the same instance and call its resources in-process. See [embedding-in-a-harper-app.md](embedding-in-a-harper-app.md), which also covers the table-vs-resource distinction that decides whether your memories are scoped.
+
 **Adjacent: memory bridges** — for moving memories between Flair and another memory product. Five bridges ship today (Mem0, ChatGPT exports, claude-project files, agentic-stack, markdown); see [bridges.md](bridges.md). Bridges are import/export plumbing, not live orchestrator integrations.
 
 ---
@@ -191,6 +193,7 @@ If it has a custom memory protocol, the adapter pattern is small (~200 lines). L
 ## See also
 
 - [Quickstart](quickstart.md) — `flair init` to working memory in 30 seconds
+- [Embedding in a Harper app](embedding-in-a-harper-app.md) — run Flair as a component of your own Harper instance and call it in-process
 - [Memory bridges](bridges.md) — import/export Flair ↔ Mem0, ChatGPT, claude-project, markdown, agentic-stack (five bridges shipped)
 - [Federation](federation.md) — pair instances peer-to-peer for cross-machine sync
 - [Supply-chain policy](supply-chain-policy.md) — what we do to keep this list of integrations safe
