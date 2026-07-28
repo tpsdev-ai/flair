@@ -188,14 +188,14 @@ describe("corpus profile privacy guard", () => {
 
     test("rejects a meta key that is not on the allowlist", () => {
       const leaky = JSON.parse(serialised);
-      leaky.meta.sourceHost = "rockit.internal";
+      leaky.meta.sourceHost = "buildbox7.example.invalid";
       const v = findViolations(leaky);
       expect(v.some((x) => x.path === "meta.sourceHost")).toBe(true);
     });
 
     test("rejects an off-enum value for an allowlisted meta key", () => {
       const leaky = JSON.parse(serialised);
-      leaky.meta.tokenizer = "/Users/someone/custom-tokenizer.ts";
+      leaky.meta.tokenizer = "/home/example/custom-tokenizer.ts";
       expect(findViolations(leaky).some((x) => x.path === "meta.tokenizer")).toBe(true);
     });
 
@@ -211,7 +211,7 @@ describe("corpus profile privacy guard", () => {
       // as redacting a secret with sed.
       const leaky = JSON.parse(serialised);
       leaky.vocabulary.topTerm = "zarquon-internal-codename";
-      leaky.meta.sourceHost = "buildbox7.internal";
+      leaky.meta.sourceHost = "buildbox7.example.invalid";
       let message = "";
       try {
         assertNumericOnly(leaky);
