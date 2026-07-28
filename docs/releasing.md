@@ -36,6 +36,17 @@ This assembles the changelog, bumps every workspace package to the version, alig
 internal deps, refreshes `bun.lock`, builds, tests, and opens a `release: v0.11.0` PR.
 Review and merge it (CI green + K&S approval) the same as any other PR.
 
+**Nothing about the version is bumped by hand.** The version is declared outside
+`package.json` too — `packages/flair-bench/src/version.ts` holds it as a `TOOL_VERSION`
+constant — and `release.sh` bumps every such site. It checks them *before* creating the
+branch, so an out-of-sync tree aborts while nothing has been touched, and again after the
+bump so a missed site can't be committed. The same check runs in CI
+(`node scripts/check-version-sync.mjs`) and fails on any file outside the known set that
+declares the release version, so a new version-bearing file is caught on the PR that adds
+it. If you ever find yourself editing a version constant by hand during a release, that is
+a bug in the script — add the file to `SOURCE_VERSION_FILES` in
+`scripts/check-version-sync.mjs` and to the `git add` list in `scripts/release.sh`.
+
 **The changelog is assembled, not hand-promoted.** Entries land during development as one
 file per change under `.changelog/unreleased/` (flair#835 — a shared `[Unreleased]` block
 conflicted on every concurrent PR, and resolving a conflict dismisses approvals). The

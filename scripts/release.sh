@@ -111,6 +111,10 @@ if [[ "$MODE" == "--publish" ]]; then
     fi
   done
 
+  # Same check the PR-prep path runs — covers the version declarations that are
+  # not package.json files, which the loop above cannot see.
+  (cd "$ROOT" && node scripts/check-version-sync.mjs "$VERSION") || exit 1
+
   if git -C "$ROOT" rev-parse "v${VERSION}" >/dev/null 2>&1; then
     echo "❌ Tag v${VERSION} already exists. Did you already publish?"
     exit 1
@@ -183,6 +187,18 @@ fi
 echo "🔄 Pulling latest main..."
 git -C "$ROOT" pull --ff-only origin main
 
+# 1b. Preflight the version declarations BEFORE anything destructive happens.
+# The version lives in more than just the package.json files, and a site this
+# script does not bump fails CI on the release PR — after the branch exists, the
+# changelog fragments have been consumed and deleted, and the PR is open.
+# Recovering from a half-run release is the expensive part, so this runs while
+# the tree is still untouched. It verifies the CURRENT version is consistent
+# everywhere and that no file outside the known set declares it.
+echo "🔍 Preflighting version declarations..."
+(cd "$ROOT" && node scripts/check-version-sync.mjs) || {
+  echo "❌ Version declarations are out of sync on main — fix before releasing. Nothing was changed."; exit 1;
+}
+
 RELEASE_BRANCH="release/v${VERSION}"
 if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$RELEASE_BRANCH"; then
   echo "❌ Branch $RELEASE_BRANCH already exists locally. Delete it first if re-running."
@@ -218,6 +234,20 @@ for pkg in "${PACKAGES[@]}"; do
   echo "  ✓ $name → $VERSION"
 done
 
+# 2a. Bump the version declarations that are NOT package.json files.
+# packages/flair-bench/src/version.ts holds TOOL_VERSION as a plain constant
+# (a runtime JSON import of package.json trips NodeNext import-attribute edges
+# in the published dist/), and a flair-bench package test asserts the two are
+# equal. Step 5 below runs only test/unit, test/integration and
+# test/unit-isolated — the flair-bench package tests are a separate CI job — so
+# skipping this bumped cleanly, tested green locally, and went red in CI every
+# single release. The rewrite lives in check-version-sync.mjs alongside the
+# pattern that verifies it, so the two cannot drift.
+echo "📌 Bumping source version declarations..."
+(cd "$ROOT" && node scripts/check-version-sync.mjs --write "$VERSION") || {
+  echo "❌ Source version bump failed"; exit 1;
+}
+
 # 3. Update internal dependencies (flair-mcp + pi-flair + n8n-nodes-flair all
 #    depend on flair-client)
 echo "🔗 Aligning internal dependencies..."
@@ -238,6 +268,15 @@ for INTERNAL_DEPENDENT in \
     }
   "
 done
+
+# Re-run the same check, now asserting the NEW version. The preflight above
+# proves the tree was consistent; this proves the bump covered every site it
+# knew about. It runs before the slow install/build/test so a miss costs seconds,
+# and still before the commit, so nothing half-bumped can be pushed.
+echo "🔍 Verifying every version declaration is at v${VERSION}..."
+(cd "$ROOT" && node scripts/check-version-sync.mjs "$VERSION") || {
+  echo "❌ Post-bump version check failed — do not push this branch."; exit 1;
+}
 
 # 3a. Refresh bun.lock so CI's --frozen-lockfile passes post-bump.
 # Omitting this was the 0.5.6 release failure: version bumps desynced the
@@ -296,6 +335,7 @@ git -C "$ROOT" add \
   "$ROOT/packages/n8n-nodes-flair/package.json" \
   "$ROOT/packages/langgraph-flair/package.json" \
   "$ROOT/packages/flair-bench/package.json" \
+  "$ROOT/packages/flair-bench/src/version.ts" \
   "$ROOT/bun.lock"
 
 # The fragment files consumed by step 1a are DELETED, so this needs -A to stage
@@ -306,7 +346,7 @@ git -C "$ROOT" add -A -- "$ROOT/.changelog"
 # CHANGELOG.md is always modified by the fragment assembly in step 1a, and script
 # bugfixes (like the missing langgraph-flair stage line, 2026-05-14) need to ride
 # along with the release that surfaces them.
-for extra in "$ROOT/CHANGELOG.md" "$ROOT/scripts/release.sh"; do
+for extra in "$ROOT/CHANGELOG.md" "$ROOT/scripts/release.sh" "$ROOT/scripts/check-version-sync.mjs"; do
   if ! git -C "$ROOT" diff --quiet -- "$extra"; then
     git -C "$ROOT" add "$extra"
   fi

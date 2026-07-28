@@ -163,6 +163,26 @@ jobs:
             echo "  ok $name @ $pv"
           done
 
+      - name: Verify version declarations outside package.json match the tag
+        # The loop above reads package.json files only. The version is also
+        # declared in source -- packages/flair-bench/src/version.ts holds it as
+        # a TOOL_VERSION constant -- and nothing here could see that.
+        #
+        # This is the LAST gate before npm staging. Everything upstream of a tag
+        # is recoverable; a staged tarball and a pushed tag are not, and the only
+        # thing after this is a human 2FA approval that cannot be expected to
+        # catch a wrong version constant. Relying on the release PR's CI to have
+        # caught it assumes no one ever merges past a red check, which is not an
+        # assumption this repo has earned.
+        #
+        # Same script release.sh preflights with, deliberately: a fourth call
+        # site is correct, a fourth implementation would be the bug this whole
+        # change exists to prevent. Needs only node + the git checkout, both
+        # already set up above.
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: node scripts/check-version-sync.mjs "$VERSION"
+
       - name: Build
         run: |
           set -euo pipefail
