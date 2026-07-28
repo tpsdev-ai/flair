@@ -31,7 +31,7 @@
 
 import { writeFileSync } from "node:fs";
 import { fetchCorpus } from "./fetch.ts";
-import { computeProfile, type ProfileRecord } from "./compute.ts";
+import { computeProfile, deterministicSubsample, type ProfileRecord } from "./compute.ts";
 import { assertNumericOnly } from "./guard.ts";
 
 function flag(name: string): string | undefined {
@@ -67,24 +67,12 @@ const seed = flag("seed") ? Number(flag("seed")) : 20260728;
 // one (corpus-v2 is 251 records) would credit the live corpus with difficulty
 // that is really just volume. --sample-size takes a deterministic subset so a
 // like-for-like comparison is reproducible by anyone with an instance, rather
-// than being a number only the person who ran it can verify.
-function subsample<T>(arr: T[], n: number, s: number): T[] {
-  let a = s >>> 0;
-  const rnd = () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-  const c = arr.slice();
-  for (let i = c.length - 1; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
-    [c[i], c[j]] = [c[j], c[i]];
-  }
-  return c.slice(0, Math.min(n, c.length));
-}
-
-const records = flag("sample-size") ? subsample(inScope, Number(flag("sample-size")), seed) : inScope;
+// than being a number only the person who ran it can verify. The helper is
+// shared with profile-bench-corpus.ts so both sides of that comparison are
+// matched by the same procedure.
+const records = flag("sample-size")
+  ? deterministicSubsample(inScope, Number(flag("sample-size")), seed)
+  : inScope;
 
 const profile = computeProfile(records, {
   clusterCount: flag("clusters") ? Number(flag("clusters")) : undefined,

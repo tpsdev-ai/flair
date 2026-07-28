@@ -37,7 +37,7 @@
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { computeProfile, type ProfileRecord } from "./compute.ts";
+import { computeProfile, deterministicSubsample, type ProfileRecord } from "./compute.ts";
 import { assertNumericOnly } from "./guard.ts";
 import * as CorpusV1 from "../recall-harness/corpus.ts";
 import * as CorpusV2 from "../recall-harness/corpus-v2.ts";
@@ -55,25 +55,10 @@ const seed = flag("seed") ? Number(flag("seed")) : 20260728;
 // The real corpus is bigger, and nearest-neighbour similarity rises with n
 // purely because there are more candidates to be close to. Comparing an
 // unmatched pair would credit the live corpus with difficulty that is really
-// just size, so --sample-size exists to control for it.
-function subsample<T>(arr: T[], n: number, s: number): T[] {
-  let a = s >>> 0;
-  const rnd = () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-  const c = arr.slice();
-  for (let i = c.length - 1; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
-    [c[i], c[j]] = [c[j], c[i]];
-  }
-  return c.slice(0, Math.min(n, c.length));
-}
-
+// just size, so --sample-size exists to control for it. Same helper profile.ts
+// uses, so both sides of the comparison are matched identically.
 const sampleSize = flag("sample-size") ? Number(flag("sample-size")) : corpus.length;
-const selected = subsample(corpus, sampleSize, seed);
+const selected = deterministicSubsample(corpus, sampleSize, seed);
 
 const { EmbeddingEngine } = await import("harper-fabric-embeddings");
 const engine = new EmbeddingEngine({

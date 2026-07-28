@@ -28,7 +28,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { computeProfile, type ProfileRecord } from "../bench/corpus-profiler/compute.ts";
+import { computeProfile, deterministicSubsample, type ProfileRecord } from "../bench/corpus-profiler/compute.ts";
 import { findViolations, assertNumericOnly, META_ALLOWLIST } from "../bench/corpus-profiler/guard.ts";
 
 const DIM = 24;
@@ -82,6 +82,39 @@ function fabricateCorpus(n = 60): ProfileRecord[] {
   }
   return out;
 }
+
+describe("deterministic subsample", () => {
+  // Not a privacy property, but it lives here because this is the profiler's
+  // only CI-run test file and the invariant is load-bearing: BOTH the live
+  // profiler and the bench-corpus profiler subsample through this one helper
+  // to match record counts before their outputs are compared. If it were not
+  // deterministic, or if the two callers used different procedures, a
+  // "matched-size" comparison would silently stop being controlled while
+  // still looking like it was.
+  const items = Array.from({ length: 100 }, (_, i) => i);
+
+  test("is reproducible for a given seed", () => {
+    expect(deterministicSubsample(items, 20, 7)).toEqual(deterministicSubsample(items, 20, 7));
+  });
+
+  test("differs across seeds", () => {
+    expect(deterministicSubsample(items, 20, 7)).not.toEqual(deterministicSubsample(items, 20, 8));
+  });
+
+  test("returns the requested size, without duplicates, and never mutates the input", () => {
+    const before = items.slice();
+    const got = deterministicSubsample(items, 20, 7);
+    expect(got.length).toBe(20);
+    expect(new Set(got).size).toBe(20);
+    expect(items).toEqual(before);
+  });
+
+  test("clamps rather than throwing when n exceeds or undercuts the array", () => {
+    expect(deterministicSubsample(items, 500, 7).length).toBe(100);
+    expect(deterministicSubsample(items, -5, 7).length).toBe(0);
+    expect(deterministicSubsample([], 10, 7)).toEqual([]);
+  });
+});
 
 describe("corpus profile privacy guard", () => {
   const profile = computeProfile(fabricateCorpus(), { profiledMonth: "2026-07" });

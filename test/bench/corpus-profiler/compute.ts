@@ -253,6 +253,27 @@ function mulberry32(seed: number): () => number {
   };
 }
 
+/**
+ * Deterministic subsample, seeded Fisher-Yates.
+ *
+ * Lives here, exported, rather than in each CLI, because BOTH the live
+ * profiler and the bench-corpus profiler use it to match record counts before
+ * their outputs are compared. Nearest-neighbour similarity rises with corpus
+ * size purely because there are more candidates to be close to, so a matched
+ * comparison is only meaningful if both sides were matched the SAME way — two
+ * copies of this that drifted would silently make the comparison unfair while
+ * still looking like a controlled one.
+ */
+export function deterministicSubsample<T>(arr: readonly T[], n: number, seed: number): T[] {
+  const rnd = mulberry32(seed);
+  const c = arr.slice();
+  for (let i = c.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [c[i], c[j]] = [c[j], c[i]];
+  }
+  return c.slice(0, Math.max(0, Math.min(n, c.length)));
+}
+
 function quantileSorted(sorted: ArrayLike<number>, p: number): number {
   const n = sorted.length;
   if (n === 0) return 0;
