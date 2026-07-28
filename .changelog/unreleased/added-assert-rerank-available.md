@@ -1,1 +1,0 @@
-- **`assertRerankAvailable()`** — proves the reranker can serve or throws the full diagnosis, for callers where measuring or serving the *wrong* configuration is worse than failing. The recall harness's `--rerank` arm uses it; production recall deliberately does not (see Fixed, below).
