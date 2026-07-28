@@ -240,9 +240,16 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
       const { path: snapshotPath } = await createDataSnapshot(sourceDir, join(tmpHome, ".flair", "upgrade-snapshots"));
       rmSync(sourceDir, { recursive: true, force: true });
 
+      // --port is explicit so this test reaches the launchd guard it is about.
+      // Without it the CLI refuses earlier, at port resolution: a non-default
+      // data dir with no instance-local config cannot be told which port it
+      // serves (flair#914). The value is never used — the refusal below fires
+      // before any port is touched — but leaving it out would have this test
+      // silently start asserting on a different guard.
       const { stderr, exitCode } = await runCli([
         "snapshot", "restore", snapshotPath,
         "--data-dir", scratchDataDir,
+        "--port", "20889",
         "--yes",
       ]);
 
