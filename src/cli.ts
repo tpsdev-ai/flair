@@ -103,6 +103,7 @@ import {
   isLocalBase,
   authedRequest,
 } from "./lib/auth-resolve.js";
+import { validateSnapshotArchive, extractSnapshotSafely } from "./lib/safe-snapshot-extract.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
 // src/ into resources/, which don't survive npm packaging (see also
@@ -9062,18 +9063,29 @@ snapshotCmd
       process.exit(1);
     }
 
+    // Validate the archive BEFORE the destructive rmSync below. Restore
+    // accepts snapshots this CLI did not create — copied off another machine,
+    // downloaded, handed over during a migration — so the archive is untrusted
+    // input, and a hostile one must not cost the operator their data directory
+    // on its way to being refused.
+    try {
+      await validateSnapshotArchive({ file: snapshotPath, targetDir: dataDir });
+    } catch (err: any) {
+      console.error(`❌ ${err.message}`);
+      console.error(`   ${dataDir} was NOT modified.`);
+      process.exit(1);
+    }
+
     try {
       rmSync(dataDir, { recursive: true, force: true });
       mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-      // preservePaths mirrors createDataSnapshot's own preservePaths: true —
-      // restores absolute symlink targets verbatim instead of node-tar's
-      // default of stripping the leading "/" on extraction. No `follow`
-      // option, so symlinks extract as symlinks (never their targets'
-      // contents), and file modes extract exactly as stored — the archive
-      // itself already only contains what createDataSnapshot's filter chose
-      // to include (in-bounds symlinks, regular files/dirs only), so restore
-      // needs no re-filtering of its own.
-      await tarExtract({ file: snapshotPath, cwd: dataDir, preservePaths: true });
+      // extractSnapshotSafely keeps preservePaths: true — load-bearing for
+      // symlink TARGET fidelity, mirroring createDataSnapshot — while doing
+      // the entry-path containment that flag disables. See
+      // src/lib/safe-snapshot-extract.ts for why the flag cannot simply be
+      // dropped. No `follow` option, so symlinks extract as symlinks (never
+      // their targets' contents), and file modes extract exactly as stored.
+      await extractSnapshotSafely({ file: snapshotPath, targetDir: dataDir });
     } catch (err: any) {
       console.error(`❌ restore failed: ${err.message}`);
       console.error(`   ${dataDir} may be partially restored or empty — do not start Flair until this is resolved.`);
@@ -12620,6 +12632,17 @@ sessionSnapshot
       process.exit(1);
     }
     mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+    // Deliberately NOT preservePaths, and deliberately NOT routed through
+    // extractSnapshotSafely. --snapshot is an operator-supplied path, so
+    // provenance here is no more controlled than the data-dir restore's — the
+    // difference is the flag, not the trust. node-tar's defaults keep their
+    // own containment: leading "/" stripped from entry paths, ".." entries
+    // dropped, and no writing through a symlink (including one created
+    // earlier in the same archive). Verified against the pinned tar (7.5.20)
+    // on all four cases, each contained, with a benign control entry landing
+    // to prove the archives parsed. Add `preservePaths` here and that
+    // containment disappears — this call would then need extractSnapshotSafely,
+    // exactly as the data-dir restore does. See src/lib/safe-snapshot-extract.ts.
     await tarExtract({ file: snapshotPath, cwd: targetDir });
     console.log(targetDir);
     console.error(`  extracted to: ${targetDir}`);
