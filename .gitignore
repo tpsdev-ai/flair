@@ -17,3 +17,8 @@ ui/_shoot*.mjs
 ui/floor-*.png
 ui/hero-*.png
 ui/office-space*.html
+
+# Environment files — never tracked (contain secrets or are service-manager config)
+.env
+.env.*
+!.env.example
