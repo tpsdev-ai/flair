@@ -53,7 +53,7 @@
  */
 import type { RecordTypeName } from "./record-types.js";
 import { resolveVersion } from "./version.js";
-import { agentContext, collectionResource } from "./in-process.js";
+import { agentContext, adminContext, collectionResource } from "./in-process.js";
 
 type HandlerKey = "SemanticSearch" | "Memory" | "BootstrapMemories" | "Soul" | "WorkspaceState" | "OrgEvent" | "AttentionQuery" | "RecordUsage";
 const H: Partial<Record<HandlerKey, any>> = {};
@@ -125,11 +125,17 @@ export interface McpToolDef {
  * agent, never anonymous, never a header re-verify.
  */
 function delegationContext(agent: ResolvedAgent): any {
-  // Shape single-sourced from resources/in-process.ts's agentContext() — the
-  // same context an embedding Harper app builds to act as one of its agents —
-  // plus the `x-tps-agent` header shim the delegated handlers' own
-  // header-reading paths expect.
-  const ctx = agentContext(agent.agentId, { isAdmin: agent.isAdmin });
+  // Shape single-sourced from resources/in-process.ts — the same context an
+  // embedding Harper app builds to act as one of its agents — plus the
+  // `x-tps-agent` header shim the delegated handlers' own header-reading paths
+  // expect.
+  //
+  // The admin branch is spelled out rather than passed as a flag: adminContext()
+  // is the greppable name for "this call carries flair-admin authority". Both
+  // constructors THROW on an empty agent id, which is the outcome we want here —
+  // a token that resolved to no principal must fail the tool call, never fall
+  // through to flair's unfiltered `internal` verdict.
+  const ctx = agent.isAdmin ? adminContext(agent.agentId) : agentContext(agent.agentId);
   ctx.request.headers = {
     get: (k: string) => (k.toLowerCase() === "x-tps-agent" ? agent.agentId : undefined),
   };

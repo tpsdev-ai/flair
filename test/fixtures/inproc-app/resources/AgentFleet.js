@@ -21,7 +21,7 @@ import { Resource, server } from "harper";
 // The in-process call seam. Deep-imported from the installed package the same
 // way an application would — Flair ships `dist/`, and this module has no
 // dependencies of its own.
-import { agentContext, collectionResource } from "@tpsdev-ai/flair/dist/resources/in-process.js";
+import { agentContext, adminContext, internalContext, collectionResource } from "@tpsdev-ai/flair/dist/resources/in-process.js";
 
 /**
  * Resolve a Flair RESOURCE by its REST path.
@@ -65,9 +65,18 @@ async function registerAgent({ id, publicKey = "pending", displayName, runtime =
   // No context ⇒ Flair's trusted `internal` verdict. Correct for provisioning,
   // which is infrastructure work your app has already authorised; never use a
   // context-less call to read or write on an agent's behalf (see below).
-  const h = await collectionResource(flair("Agent"));
+  const h = await collectionResource(flair("Agent"), internalContext());
   return h.post({ id, name: id, displayName: displayName ?? id, publicKey, runtime });
 }
+
+/**
+ * Test-only: pick the identity constructor. An application writes
+ * `agentContext(id)` and nothing else — `adminContext()` is a separate, more
+ * alarming name precisely so a flag from elsewhere can never turn an agent call
+ * into an admin one. This fixture branches only so the test can prove that
+ * admin, like identity, is ASSERTED rather than checked.
+ */
+const actingAs = (agentId, asAdmin) => (asAdmin === true ? adminContext(agentId) : agentContext(agentId));
 
 /**
  * Write a memory AS a specific agent.
@@ -86,14 +95,13 @@ async function registerAgent({ id, publicKey = "pending", displayName, runtime =
  * cannot do. That is the one context in which it is correct. Do not copy that
  * part.
  *
- * `agentId` is also a required argument on purpose: a call with NO context
- * resolves to `internal` and runs unfiltered — unscoped reads, unattributed
- * writes. Never default it.
+ * `agentContext()` refuses a missing or empty id rather than defaulting, so
+ * "I forgot the id" fails loudly instead of resolving to Flair's unfiltered
+ * `internal` verdict. An application never has to remember that rule — but it
+ * should still resolve `agentId` before it gets here, not hope for the throw.
  */
 async function remember(agentId, { content, durability = "standard", visibility, ownerAgentId, asAdmin }) {
-  // `asAdmin` exists only so the test can prove that admin, like identity, is
-  // ASSERTED — an app never sets it from anything a caller influenced.
-  const h = await collectionResource(flair("Memory"), agentContext(agentId, { isAdmin: asAdmin === true }));
+  const h = await collectionResource(flair("Memory"), actingAs(agentId, asAdmin));
   // `ownerAgentId` exists only so the test can attempt a forgery — acting as
   // one agent while claiming another owns the record. Flair 403s that; an
   // application would simply pass `agentId` and never expose the distinction.
@@ -108,7 +116,7 @@ async function remember(agentId, { content, durability = "standard", visibility,
  * `agentId` may and may not come from.
  */
 async function recall(agentId, { asAdmin } = {}) {
-  const rows = await flair("Memory").search({ conditions: [] }, agentContext(agentId, { isAdmin: asAdmin === true }));
+  const rows = await flair("Memory").search({ conditions: [] }, actingAs(agentId, asAdmin));
   return collect(rows);
 }
 
@@ -127,7 +135,7 @@ async function semanticRecall(agentId, q, limit = 20) {
 
 /** The same semantic read with NO context — see `recallUnscoped`. */
 async function semanticRecallUnscoped(q, limit = 20) {
-  const h = await collectionResource(flair("SemanticSearch"));
+  const h = await collectionResource(flair("SemanticSearch"), internalContext());
   const r = await h.post({ q, limit });
   if (r instanceof Response) return { status: r.status };
   const list = r?.results ?? r?.memories ?? r;
@@ -141,11 +149,41 @@ async function recallById(agentId, id) {
 }
 
 /**
- * The same read with NO context. Present so the test can PROVE what the
- * omission costs — it returns every agent's private records. Never ship this.
+ * The DELIBERATELY unfiltered read — every agent's private records, by name.
+ * `internalContext()` is what an infrastructure sweep asks for on purpose; an
+ * application must never reach this verdict, and since it now has to type this
+ * function to get there, it cannot reach it by accident.
  */
 async function recallUnscoped() {
-  return collect(await flair("Memory").search({ conditions: [] }));
+  return collect(await flair("Memory").search({ conditions: [] }, internalContext()));
+}
+
+// ── Guard probes ────────────────────────────────────────────────────────────
+// Not things an application does — the test drives these to prove that the
+// forgot-the-argument paths fail closed, and to pin the hazard they exist for.
+
+/** `agentContext(<bad id>)` must throw rather than return a usable context. */
+function buildContextWith(agentId) {
+  const ctx = agentContext(agentId);           // expected to throw
+  return { threw: false, ctx };                // reached only if the guard is gone
+}
+
+/** `collectionResource(Cls)` with the context argument left off must throw. */
+async function createWithNoContext() {
+  const h = await collectionResource(flair("Memory"));   // expected to throw
+  return { threw: false, isCollection: h?.isCollection };
+}
+
+/**
+ * THE HAZARD THE GUARD EXISTS FOR — bypasses `agentContext()` and hands the
+ * resolver the raw shape a forgotten id used to produce. If this stops
+ * returning other agents' private records, the guard has become unnecessary and
+ * this fixture (and the warnings around it) should be revisited. Until then it
+ * is the evidence that "I forgot the id" really did mean "I am an administrator".
+ */
+async function recallWithRawMissingId() {
+  const forgotten = { request: { tpsAgent: undefined, tpsAgentIsAdmin: false } };
+  return collect(await flair("Memory").search({ conditions: [] }, forgotten));
 }
 
 const summarise = (r) => ({ id: r?.id, agentId: r?.agentId, visibility: r?.visibility, content: r?.content });
@@ -198,6 +236,12 @@ export class AgentFleet extends Resource {
         return run(() => semanticRecallUnscoped(body.q, body.limit));
       case "recallUnscoped":
         return run(() => recallUnscoped());
+      case "buildContextWith":
+        return run(() => buildContextWith(body.agentId));
+      case "createWithNoContext":
+        return run(() => createWithNoContext());
+      case "recallWithRawMissingId":
+        return run(() => recallWithRawMissingId());
       default:
         return new Response(JSON.stringify({ error: `unknown op '${op}'` }), { status: 400 });
     }

@@ -6,19 +6,22 @@
  * any co-located application component that loads flair as a sub-component and
  * calls it directly instead of over HTTP.
  *
- * Two things an in-process caller has to get right, both of which are invisible
- * from a resource's own source and neither of which fails in a way that points
- * at the cause:
+ * Three things an in-process caller has to get right, none of which is visible
+ * from a resource's own source and none of which used to fail in a way that
+ * points at the cause:
  *
  * 1. **Identity.** Every flair resource resolves its caller through
  *    resources/agent-auth.ts's `resolveAgentAuth()`, whose FIRST hop is the
  *    `tpsAgent` annotation the HTTP auth middleware stamps on a verified
  *    request. There is no HTTP request in-process, so the caller supplies that
- *    annotation itself — that is `agentContext()` below. A caller that supplies
- *    NOTHING resolves to the trusted `internal` verdict, which reads and writes
- *    UNFILTERED (see `agentContext`'s doc — this is the whole hazard).
+ *    annotation itself — {@link agentContext}.
  *
- * 2. **Collection binding.** A resource's `post()` — the create path — only
+ * 2. **Not accidentally becoming an administrator.** A context with no usable
+ *    agent id resolves to flair's trusted `internal` verdict, which is
+ *    UNFILTERED. See the safety-design block below: this module's API shape is
+ *    built around making that unreachable by accident.
+ *
+ * 3. **Collection binding.** A resource's `post()` — the create path — only
  *    works on a resource instance Harper has marked as a COLLECTION. That mark
  *    is a PRIVATE field (`#isCollection`) set inside Harper's own
  *    `getResource()`; the public `isCollection` is a GETTER WITH NO SETTER on
@@ -28,13 +31,50 @@
  *    `TypeError: Cannot set property isCollection ... which has only a getter`,
  *    and dropping the assignment instead yields
  *    `405 The <X> does not have a post method implemented` from Harper's base
- *    `Resource.post()`. `collectionResource()` below is the one supported way
- *    in: hand `getResource()` an `{ isCollection: true }` option and let Harper
- *    set its own private field.
+ *    `Resource.post()`. {@link collectionResource} is the one supported way in:
+ *    hand `getResource()` an `{ isCollection: true }` option and let Harper set
+ *    its own private field.
  *
- * This module exists so those two facts live in ONE place. flair itself got (2)
- * wrong in four MCP tool paths before this module existed — the same mistake a
- * consumer reading only the resource classes would make.
+ * flair itself got (3) wrong in four MCP tool paths before this module existed —
+ * the same mistake a consumer reading only the resource classes would make.
+ *
+ * ─── SAFETY DESIGN: the dangerous thing has to look dangerous ────────────────
+ *
+ * MEASURED, against the real resolver:
+ *
+ *   resolveAgentAuth({ request: { tpsAgent: undefined } })  ->  { kind: "internal" }
+ *   resolveAgentAuth({ request: { tpsAgent: ""        } })  ->  { kind: "internal" }
+ *   allowAdmin({ request: { tpsAgent: undefined } })        ->  true
+ *
+ * `resolveAgentAuth` tests `tpsAgent` for TRUTHINESS, so a missing or empty id
+ * is indistinguishable from "no identity was supplied at all" — and that is the
+ * trusted verdict. The consequence is that the most ordinary application bug
+ * there is — `agentContext(session.agentId)` where the field is undefined, a
+ * typo'd property, a lookup that found nothing — would not fail closed. It
+ * would silently grant unfiltered cross-agent reads and writes, and pass the
+ * admin-only gate on admin-only resources. No error, no 403, no log line.
+ *
+ * That is the same defect class as a check that cannot fail: **the failure mode
+ * of "I forgot the id" must never be "you are now an administrator."** So:
+ *
+ *   - {@link agentContext} THROWS on a missing, empty or blank id. It is always
+ *     a programming error, and an exception is the only outcome that cannot be
+ *     mistaken for success.
+ *   - {@link agentContext} takes NO options. It is structurally incapable of
+ *     producing an admin context, so spreading a caller-influenced object into
+ *     its arguments cannot escalate.
+ *   - Admin is a SEPARATE, NAMED export ({@link adminContext}), and so is the
+ *     unfiltered maintenance verdict ({@link internalContext}). Both are
+ *     greppable: `git grep -n "adminContext\|internalContext"` enumerates every
+ *     privileged call site in a codebase.
+ *   - {@link collectionResource} REQUIRES a context and throws without one, so
+ *     the privileged path can never be reached by leaving an argument off. The
+ *     dangerous path is now the LONGEST path, not the shortest.
+ *
+ * These guards are runtime, not types, on purpose: an embedding application may
+ * be plain JavaScript, where a `string` parameter annotation buys exactly
+ * nothing. test/integration/in-process-agents.test.ts pins both the guards and
+ * the hazard they exist for, against a real Harper.
  *
  * ── Deliberately dependency-free ─────────────────────────────────────────────
  * No `import { databases } from "harper"` (see resources/memory-visibility.ts
@@ -42,110 +82,131 @@
  * and an embedding app may want them before any table is resolved.
  */
 
-/**
- * ─── THE CONTEXT OBJECT IS A SECURITY BOUNDARY ───────────────────────────────
- *
- * In-process identity is **asserted, not verified**. `resolveAgentAuth()` reads
- * `context.request.tpsAgent` and returns that agent — there is no signature
- * check, no lookup against the `Agent` table, and no registration requirement.
- * `tpsAgentIsAdmin: true` is asserted the same way, and grants unfiltered
- * cross-agent reads and writes.
- *
- * That is the right design, not a gap: a co-located caller is already inside
- * the trust boundary and could write `databases.flair.Memory` directly, so
- * demanding a signature from same-process code would be theatre. Ed25519 exists
- * for callers OUTSIDE the process.
- *
- * The consequence is the single most important thing to get right in an
- * embedding app:
- *
- *   **Build the context from your own server-side state. NEVER from request
- *   data.** If an agent id can reach `agentContext()` from user input — a body
- *   field, a query param, a header your app did not itself verify — that is
- *   privilege escalation with no error, no 403 and no trace. Resolve the caller
- *   with your own authentication first, then map the identity YOU established
- *   onto `tpsAgent`.
- *
- * The two ways to lose the whole model, from opposite ends:
- *   - **By omission** — no context at all resolves to `internal`, which is
- *     admin-equivalent (see {@link agentContext}).
- *   - **By assertion** — an attacker-influenced `agentId`, or a stray
- *     `isAdmin: true`, is honoured verbatim.
- * Both are pinned as tests in test/integration/in-process-agents.test.ts.
- *
- * ── Prefer individual agent identities over one app identity ─────────────────
- * A per-agent context costs nothing: no client to construct, no key to load, no
- * per-agent setup, and (per the above) not even a registration. Collapsing N
- * agents onto one shared identity buys nothing and loses the two things that
- * make the memory model work — per-agent attribution, which is what trust
- * grading and provenance are computed from, and N separate blast radii, which
- * become one. Register the agents anyway: the admin surfaces, federation, and
- * the HTTP path all read those records.
- *
- * ── In a cluster ────────────────────────────────────────────────────────────
- * Harper replicates every table in a replicated database unless the table opts
- * out with `@table(replicate: false)`; none of flair's do. So:
- *   - **The registry replicates.** An agent registered on node A is visible on
- *     node B with no coordination. (Replication comes from the DATABASE being
- *     replicated — not from `@export`, which only controls REST exposure.
- *     `Memory` has no `@export` and still replicates.)
- *   - **Authority is local.** The context is constructed per call, in whichever
- *     process handles it. No node consults another to decide who a caller is.
- *   - **Attribution travels.** `agentId` is a field ON the record, so a memory
- *     written on node A reads back correctly attributed — and correctly scoped
- *     — anywhere the record lands.
- *
- * Therefore **every node running the app is equally trusted**, because each one
- * can assert any identity. That is fine for one application spread across
- * regions — it is a single trust domain by construction. It is NOT fine for
- * running this component beside untrusted co-tenants on the same instance:
- * co-location IS the grant.
- */
+/** The context shape flair resources resolve a caller's identity from. */
+export interface CallContext {
+  request: Record<string, unknown>;
+  [key: string]: unknown;
+}
 
-/** Options for {@link agentContext}. */
-export interface AgentContextOptions {
-  /**
-   * Grant flair-admin authority to this call: unfiltered cross-agent reads and
-   * writes attributed to other agents. Asserted, never checked — nothing
-   * validates that the named agent is actually an admin. Treat exactly as you
-   * would a root shell: provisioning and maintenance only, never a request
-   * handler's default, and never derived from anything a caller supplied.
-   */
-  isAdmin?: boolean;
+/**
+ * Thrown when an in-process call is built in a way that would have silently
+ * escalated. Its own type so a caller can distinguish "I wired this wrong" from
+ * a resource's business-logic refusal (which arrives as a `Response`, not a
+ * throw).
+ */
+export class InProcessContextError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InProcessContextError";
+  }
+}
+
+/** Reject anything that would resolve to the trusted `internal` verdict, or to a nonsense id. */
+function requireAgentId(agentId: unknown, fnName: string): string {
+  if (typeof agentId !== "string" || agentId.trim() === "") {
+    const got =
+      agentId === undefined ? "undefined"
+      : agentId === null ? "null"
+      : typeof agentId !== "string" ? `a ${typeof agentId}`
+      : agentId === "" ? "an empty string"
+      : "a blank string";
+    throw new InProcessContextError(
+      `${fnName}() requires a non-empty agent id, but received ${got}. ` +
+      "This is refused rather than defaulted because flair resolves a missing or empty " +
+      "tpsAgent to its trusted `internal` verdict, which reads and writes UNFILTERED across " +
+      "every agent and passes the admin-only gate — so returning a context here would have " +
+      "turned a missing id into silent administrator access. Resolve the agent id from your " +
+      "own server-side state before calling, and never from request data.",
+    );
+  }
+  return agentId;
 }
 
 /**
  * The resource context that makes an in-process call act as ONE SPECIFIC agent.
+ * This is the call an application makes; the other two constructors below are
+ * privileged and deliberately harder to type.
  *
- * **`agentId` is asserted, not proven — see the security-boundary block above.
- * It must come from your own server-side state, never from request data.**
+ * **`agentId` is asserted, not proven.** flair reads it and acts as that agent:
+ * no signature, no lookup against the `Agent` table, no registration
+ * requirement. That is right for a caller already inside the trust boundary —
+ * it could write the raw table anyway — and it is exactly why the id must come
+ * from YOUR OWN server-side state (the session you authenticated, the job
+ * record you dequeued) and **never from request data**. An agent id that
+ * reaches here from a body field, a query param, or a header you did not verify
+ * yourself is privilege escalation with no error and no trace.
  *
- * Pass the result as the `context` argument of {@link collectionResource}, or as
- * the trailing `context` argument of a Harper static resource method
- * (`Cls.get(id, context)`, `Cls.put(id, record, context)`, …). Every flair
- * resource resolves it through `resolveAgentAuth()`, so the call is scoped,
- * attributed and rate-limited exactly as an Ed25519-signed REST call from that
- * agent would be — including the no-forge check that 403s a write whose
- * `agentId` names a different agent.
+ * Throws {@link InProcessContextError} on a missing, empty or blank id — see the
+ * safety-design block at the top of this file for why that is not merely
+ * defensive.
  *
- * ── OMITTING THE CONTEXT IS NOT A WEAKER CALL, IT IS AN ADMIN CALL ───────────
- * A resource built with no context at all resolves to `{ kind: "internal" }` —
- * flair's trusted in-process verdict — and runs UNFILTERED: every read sees
- * every agent's private records, every write is unattributed. That is correct
- * for flair's own maintenance passes (consolidation, migrations) and it is a
- * silent cross-agent data leak in an application. There is no error, no warning
- * and no log line to find it by.
+ * Takes no options, and in particular no way to ask for admin: use
+ * {@link adminContext} for that, so the escalation is a word you had to type.
  *
- * So in an embedding app: make the agent id a REQUIRED argument of whatever
- * wraps this, and never export a wrapper that defaults it.
+ * ```ts
+ * const Memory = server.resources.get("Memory").Resource;
+ * const h = await collectionResource(Memory, agentContext("planner"));
+ * const { id } = await h.post({ agentId: "planner", content: "…" });
+ * ```
  */
-export function agentContext(agentId: string, opts: AgentContextOptions = {}): any {
+export function agentContext(agentId: string): CallContext {
   return {
     request: {
-      tpsAgent: agentId,
-      tpsAgentIsAdmin: opts.isAdmin === true,
+      tpsAgent: requireAgentId(agentId, "agentContext"),
+      tpsAgentIsAdmin: false,
     },
   };
+}
+
+/**
+ * Like {@link agentContext}, but with flair-admin authority: unfiltered
+ * cross-agent reads, and writes attributed to agents other than this one.
+ *
+ * Asserted, never checked — nothing validates that the named agent is actually
+ * an admin principal. **Treat a call to this exactly as you would a root
+ * shell:** provisioning and maintenance only, never a request handler's
+ * default, and never with an id or a flag derived from anything a caller
+ * supplied.
+ *
+ * It is a separate export rather than an option so that (a) no options object
+ * spread into {@link agentContext} can escalate, and (b) every privileged call
+ * site in a codebase is findable by name.
+ *
+ * Throws {@link InProcessContextError} on a missing, empty or blank id.
+ */
+export function adminContext(agentId: string): CallContext {
+  return {
+    request: {
+      tpsAgent: requireAgentId(agentId, "adminContext"),
+      tpsAgentIsAdmin: true,
+    },
+  };
+}
+
+/**
+ * The TRUSTED, UNATTRIBUTED, UNFILTERED context — flair's `internal` verdict.
+ * Reads see every agent's private records; writes are owned by nobody.
+ *
+ * This exists for work that is genuinely infrastructure rather than an agent's:
+ * provisioning a principal, a migration, a maintenance sweep. It is the same
+ * verdict a context-less call used to fall into by accident; naming it means an
+ * application can no longer reach it by forgetting an argument, and means
+ * `git grep internalContext` enumerates every place flair or an embedder took
+ * that authority deliberately.
+ *
+ * There is no id to validate: the verdict comes precisely from the ABSENCE of
+ * an identity annotation, so the returned object carries none. The marker field
+ * is inert — it documents intent at a debugger breakpoint and is read by
+ * nothing.
+ *
+ * ```ts
+ * // Registering a principal — infrastructure, not an agent's own write.
+ * const h = await collectionResource(Agent, internalContext());
+ * await h.post({ id, name: id, publicKey });
+ * ```
+ */
+export function internalContext(): CallContext {
+  return { request: {}, __flairInternal: true };
 }
 
 /**
@@ -153,25 +214,29 @@ export function agentContext(agentId: string, opts: AgentContextOptions = {}): a
  * `post()` (the create path) works — see this module's header for why that mark
  * cannot be applied from outside Harper.
  *
- * Use it for every in-process CREATE:
- *
- * ```ts
- * const Memory = server.resources.get("Memory").Resource;
- * const h = await collectionResource(Memory, agentContext("planner"));
- * const { id } = await h.post({ agentId: "planner", content: "…" });
- * ```
- *
- * `context` is optional ONLY because flair's own maintenance paths legitimately
- * want the trusted `internal` verdict; omitting it in an application is the
- * admin hazard documented on {@link agentContext}.
+ * `context` is REQUIRED. Passing nothing used to yield the unfiltered
+ * `internal` verdict, which made the privileged path the shortest one to type;
+ * it now throws. Pass {@link agentContext} for an agent's own work,
+ * {@link adminContext} or {@link internalContext} when the authority is
+ * genuinely intended.
  *
  * Reads do not need this — `Cls.get(id, context)` and `Cls.search(query,
  * context)` (Harper's static resource methods) already thread the context and
  * start their own transaction.
  */
-export async function collectionResource<T = any>(Cls: any, context?: any): Promise<T> {
+export async function collectionResource<T = any>(Cls: any, context: CallContext): Promise<T> {
+  if (context == null || typeof context !== "object") {
+    throw new InProcessContextError(
+      "collectionResource() requires an explicit context, but received " +
+      (context === undefined ? "undefined" : context === null ? "null" : `a ${typeof context}`) +
+      ". Omitting it would resolve to flair's trusted `internal` verdict — unfiltered reads and " +
+      "unattributed writes across every agent — so the privileged path is never the one you get " +
+      "by leaving an argument off. Pass agentContext(id) to act as an agent, or internalContext() " +
+      "if this really is infrastructure work.",
+    );
+  }
   // `{}` is a sufficient RequestTarget here: getResource() reads only `.id` off
   // it (undefined ⇒ Harper mints the primary key), and takes the collection
   // mark from the options argument.
-  return (await Cls.getResource({}, context ?? {}, { isCollection: true })) as T;
+  return (await Cls.getResource({}, context, { isCollection: true })) as T;
 }

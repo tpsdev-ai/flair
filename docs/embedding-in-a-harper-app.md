@@ -24,7 +24,7 @@ Embedding *adds* the in-process path; `rest: true` keeps serving MCP clients and
 import { server } from "harper";
 // Flair ships these two helpers so you do not have to get either of them right
 // by hand. They are the whole in-process contract.
-import { agentContext, collectionResource } from "@tpsdev-ai/flair/dist/resources/in-process.js";
+import { agentContext, internalContext, collectionResource } from "@tpsdev-ai/flair/dist/resources/in-process.js";
 
 // The RESOURCE — carries auth, scoping, visibility, embedding.
 // NOT databases.flair.Memory: that is the raw table, and enforces none of it.
@@ -119,7 +119,7 @@ Go through the `Agent` **resource**, with no context — provisioning is infrast
 
 ```javascript
 export async function registerAgent(id, { publicKey = "pending", admin = false } = {}) {
-  const h = await collectionResource(flair("Agent"));   // no context ⇒ trusted `internal`
+  const h = await collectionResource(flair("Agent"), internalContext());   // provisioning is infrastructure, not an agent's write
   return h.post({
     id, name: id, displayName: id,
     publicKey,                            // a placeholder is fine — see below
@@ -174,7 +174,9 @@ Flair uses the raw table where it *wants* to bypass its own rules — the federa
 | `{ request: { tpsAnonymous: true } }` | `anonymous` | Denied everywhere |
 | `{ request: { tpsAgent: "mybot" } }` | `agent` | Scoped to that agent — **use this** |
 | `{ request: { tpsAgent: "mybot", tpsAgentIsAdmin: true } }` | admin | Unfiltered reads, cross-agent writes |
-| **Nothing** | `internal` | **Trusted. Unfiltered.** See the warning above. |
+| **Nothing**, or an empty/missing `tpsAgent` | `internal` | **Trusted. Unfiltered.** See the warning above. |
+
+Build these with `agentContext(id)`, `adminContext(id)` and `internalContext()` rather than by hand — see [below](#the-api-is-built-so-omission-cannot-happen-quietly) for why the hand-written form is a trap.
 
 ### The context object is a security boundary
 
@@ -192,8 +194,28 @@ There are exactly two ways to lose the model, from opposite ends. Both are pinne
 
 | | |
 |---|---|
-| **By omission** | No context at all ⇒ `internal` ⇒ admin-equivalent, unfiltered. |
-| **By assertion** | An attacker-influenced `agentId`, or a stray `isAdmin: true`, is honoured verbatim. |
+| **By omission** | No usable agent id ⇒ `internal` ⇒ admin-equivalent, unfiltered. |
+| **By assertion** | An attacker-influenced `agentId` is honoured verbatim. |
+
+### The API is built so omission cannot happen quietly
+
+`resolveAgentAuth` tests `tpsAgent` for *truthiness*, so a missing or empty id is indistinguishable from "no identity supplied" — which is the trusted, unfiltered verdict. Measured:
+
+```
+resolveAgentAuth({ request: { tpsAgent: undefined } })  ->  { kind: "internal" }
+allowAdmin({ request: { tpsAgent: undefined } })        ->  true
+```
+
+That would turn the most ordinary bug there is — `agentContext(session.agentId)` where the field came back undefined — into silent administrator access. So the helpers refuse rather than default:
+
+| | |
+|---|---|
+| `agentContext(id)` | **Throws** `InProcessContextError` on a missing, empty or blank id. Takes **no options**, so no object spread into it can escalate. |
+| `adminContext(id)` | The *only* way to get admin authority. Same id guard. |
+| `internalContext()` | The *only* way to get the unfiltered verdict. |
+| `collectionResource(Cls, context)` | Context is **required**; omitting it throws rather than granting `internal`. |
+
+The privileged paths are now the longest ones to type, and `git grep "adminContext\|internalContext"` enumerates every deliberate escalation in your codebase. These are runtime guards, not type annotations — a plain-JavaScript embedder gets exactly the same protection.
 
 ### Individual identities, not one app identity
 

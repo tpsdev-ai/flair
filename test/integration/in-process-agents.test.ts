@@ -203,8 +203,17 @@ describe("acting as each agent, in-process", () => {
   });
 
   test("writes are attributed to the acting agent in storage", async () => {
+    // Asserted as a property, not as an exact snapshot: an exact `toEqual` here
+    // would silently become order- and count-dependent the moment any later
+    // test writes another ALPHA record (see the by-id test for what that class
+    // of coupling costs).
     const rows = await adminSearch("Memory", "agentId", ALPHA);
-    expect(contents(rows)).toEqual([`${ALPHA} PRIVATE`, `${ALPHA} SHARED`]);
+    expect(contents(rows)).toContain(`${ALPHA} PRIVATE`);
+    expect(contents(rows)).toContain(`${ALPHA} SHARED`);
+    expect(rows.every((r) => r.agentId === ALPHA)).toBe(true);
+    expect(await adminSearch("Memory", "agentId", BRAVO)).not.toContainEqual(
+      expect.objectContaining({ content: `${ALPHA} PRIVATE` }),
+    );
   });
 
   test("an agent CANNOT write a memory owned by another agent", async () => {
@@ -280,18 +289,56 @@ describe("SCOPING PROOF — agent A cannot read agent B's private memories", () 
   }, 120_000);
 
   test("a by-id read of another agent's private record returns nothing", async () => {
-    const [bravoPrivate] = (await adminSearch("Memory", "agentId", BRAVO)).filter((r) => r.visibility === "private");
-    expect(bravoPrivate, "BRAVO's private record should exist in storage").toBeDefined();
+    // The id comes from the WRITE, never from a search.
+    //
+    // This test previously picked its target with
+    // `[first] = adminSearch(...).filter(r => r.visibility === "private")`. Once
+    // BRAVO owned a second private record that selection became ambiguous, and
+    // it is not merely unordered — `search_by_value` on the non-unique `agentId`
+    // index returns matches in PRIMARY KEY order, and Harper mints Memory ids as
+    // random UUIDs. So "the first private record" is decided by a coin flip that
+    // is re-tossed on every run. It passed locally and failed in CI for exactly
+    // that reason, on the owner control rather than on the security assertion —
+    // meaning the cross-agent read below never actually executed in that run.
+    //
+    // An order-dependent security proof is not a proof. This one now names its
+    // target explicitly and verifies against storage before asserting anything.
+    const marker = `${BRAVO} BY-ID TARGET ${randomUUID()}`;
+    const written = await fleet("remember", { agentId: BRAVO, content: marker, visibility: "private" });
+    expect(written.ok).toBe(true);
+    const targetId = written.value?.id;
+    expect(typeof targetId, "the write must hand back the id it minted").toBe("string");
 
-    // BRAVO can read it…
-    const owner = await fleet("recallById", { agentId: BRAVO, id: bravoPrivate.id });
+    // Ground truth, straight out of storage past every resource-level gate:
+    // this exact id really is BRAVO's, really is private, really holds `marker`.
+    const [stored] = await adminSearch("Memory", "id", targetId);
+    expect(stored?.agentId).toBe(BRAVO);
+    expect(stored?.visibility).toBe("private");
+    expect(stored?.content).toBe(marker);
+
+    // BRAVO can read it — the control, so a null below cannot be explained by
+    // the record being unreadable to everyone.
+    const owner = await fleet("recallById", { agentId: BRAVO, id: targetId });
     expect(owner.ok).toBe(true);
-    expect(owner.value?.content).toBe(`${BRAVO} PRIVATE`);
+    expect(owner.value?.id).toBe(targetId);
+    expect(owner.value?.content).toBe(marker);
 
-    // …ALPHA, holding the exact id, cannot.
-    const other = await fleet("recallById", { agentId: ALPHA, id: bravoPrivate.id });
+    // …ALPHA, holding that exact id, cannot. THIS is the security assertion.
+    const other = await fleet("recallById", { agentId: ALPHA, id: targetId });
+    expect(other.ok).toBe(true);
     expect(other.value ?? null).toBeNull();
-  });
+
+    // And the same for every OTHER private record BRAVO owns, so the property is
+    // asserted over the whole set rather than over one lucky pick.
+    const allBravoPrivate = (await adminSearch("Memory", "agentId", BRAVO)).filter((r) => r.visibility === "private");
+    expect(allBravoPrivate.length).toBeGreaterThan(1); // there really are several by now
+    for (const row of allBravoPrivate) {
+      const denied = await fleet("recallById", { agentId: ALPHA, id: row.id });
+      expect(denied.value ?? null, `ALPHA must not read BRAVO's private record ${row.id}`).toBeNull();
+      const allowed = await fleet("recallById", { agentId: BRAVO, id: row.id });
+      expect(allowed.value?.id, `BRAVO must still read its own record ${row.id}`).toBe(row.id);
+    }
+  }, 120_000);
 });
 
 // ─── The context object is a security boundary ───────────────────────────────
@@ -343,6 +390,58 @@ describe("SECURITY BOUNDARY — in-process identity is asserted, not verified", 
     const forged = await fleet("remember", { agentId: ALPHA, ownerAgentId: BRAVO, content: "admin-forged", asAdmin: true });
     expect(forged.ok).toBe(true); // …and writes a record owned by BRAVO
     expect(contents(await adminSearch("Memory", "agentId", BRAVO))).toContain("admin-forged");
+  });
+
+  // ── The forgot-the-argument guards ────────────────────────────────────────
+  //
+  // `resolveAgentAuth` tests `tpsAgent` for TRUTHINESS, so a missing or empty id
+  // is indistinguishable from "no identity supplied" — which is the trusted,
+  // unfiltered `internal` verdict. That turns the most ordinary application bug
+  // there is (a field that came back undefined) into silent administrator
+  // access. The API refuses instead. These tests pin the refusal AND the hazard
+  // it exists for, so nobody can "simplify" the guard away without the reason
+  // failing loudly alongside it.
+  test("GUARD: agentContext(undefined) and agentContext('') THROW rather than returning an admin context", async () => {
+    for (const bad of [undefined, null, "", "   "]) {
+      const r = await fleet("buildContextWith", { agentId: bad });
+      expect(r.ok, `agentContext(${JSON.stringify(bad)}) must not return a context`).toBe(false);
+      expect(r.errorName).toBe("InProcessContextError");
+      // The message has to name the hazard, not just the argument — whoever
+      // hits this should understand what they narrowly avoided.
+      expect(r.error).toContain("non-empty agent id");
+      expect(r.error).toMatch(/internal|UNFILTERED/);
+    }
+  });
+
+  test("GUARD: collectionResource() with the context argument left off THROWS", async () => {
+    const r = await fleet("createWithNoContext");
+    expect(r.ok).toBe(false);
+    expect(r.errorName).toBe("InProcessContextError");
+    expect(r.error).toContain("explicit context");
+  });
+
+  test("GUARD: a valid id still works — the guards are not just refusing everything", async () => {
+    // Positive control. Without this, every assertion above would also pass if
+    // agentContext() had been broken into throwing unconditionally.
+    const r = await fleet("buildContextWith", { agentId: ALPHA });
+    expect(r.ok).toBe(true);
+    expect(r.value.threw).toBe(false);
+    expect(r.value.ctx.request.tpsAgent).toBe(ALPHA);
+    expect(r.value.ctx.request.tpsAgentIsAdmin).toBe(false);
+  });
+
+  test("WHY THE GUARD EXISTS: the raw shape a forgotten id used to produce reads every agent's private records", async () => {
+    // Bypasses agentContext() and hands resolveAgentAuth the exact object a
+    // missing id used to yield: { request: { tpsAgent: undefined } }. If this
+    // ever stops being unfiltered, the guard is no longer load-bearing and this
+    // whole section should be revisited — deliberately, not by accident.
+    const { ok, value } = await fleet("recallWithRawMissingId");
+    expect(ok).toBe(true);
+    const owners = new Set(value.map((r: any) => r.agentId));
+    expect(owners.has(ALPHA)).toBe(true);
+    expect(owners.has(BRAVO)).toBe(true);
+    expect(value.some((r: any) => r.agentId === ALPHA && r.visibility === "private")).toBe(true);
+    expect(value.some((r: any) => r.agentId === BRAVO && r.visibility === "private")).toBe(true);
   });
 
   test("BY OMISSION: a context-LESS SEMANTIC search is unfiltered too", async () => {
