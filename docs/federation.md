@@ -83,12 +83,61 @@ Replace `<fabric-node>`, `<instance-name>`, and `<hub-admin-password>` with your
 
 ## Sync
 
-Push local changes to the hub:
+Push local changes to the hub, once:
 
 ```bash
 flair federation sync --admin-pass <password>
 # Output: ✅ Synced 12 records (0 skipped) in 145ms
 ```
+
+### Keeping it synced
+
+`flair federation sync` is one-shot and `flair federation watch` only runs
+while its terminal is open. Neither survives a logout, so a spoke that is only
+ever synced by hand looks paired but stops replicating — enable the scheduled
+driver instead:
+
+```bash
+flair federation sync enable                  # every 300s by default
+flair federation sync enable --interval 900   # or pick your own cadence
+flair federation sync status                  # is anything actually driving sync?
+flair federation sync disable
+```
+
+This installs a **periodic one-shot**: a launchd job (`StartInterval`) on
+macOS, a systemd user timer (`OnUnitActiveSec`) on Linux, each invoking
+`flair federation sync` on the interval. It is deliberately not a supervised
+long-lived watcher — the sync holds no state between runs, so a resident
+process would buy nothing, and a supervisor cannot restart a process that
+hangs rather than exits. The trade-off is latency, and `--interval` is the
+knob. The first sync runs immediately on enable.
+
+`flair federation watch` is unchanged and still the right tool for an
+interactive "watch it sync while I debug" session.
+
+**Credentials.** The scheduler never writes a password into a unit file. It
+stores the *path* given to `--admin-pass-file` (defaulting to
+`~/.flair/admin-pass` when that exists) and the CLI reads the file at run time,
+refusing it unless it is owner-only (`chmod 600`). Pass `--no-credentials` to
+wire none at all.
+
+### Is anything driving sync?
+
+`flair federation status` reports the driver alongside the peer table, because
+"no peer has merged in 24h" has two completely different causes:
+
+| What you see | What it means | What to do |
+|---|---|---|
+| `Sync driver: active` | A managed driver is loaded and syncs are landing | Nothing |
+| `Sync driver: active … but no peer contact in <window>` | Sync **is** running; the runs are not reaching the peer | `flair federation reachability`, then the driver log |
+| `Sync driver: NONE` | Nothing has run sync since you paired | `flair federation sync enable` |
+| `Sync driver: INSTALLED BUT NOT LOADED` | Unit files exist, the service manager never loaded them | `flair federation sync enable` |
+| `Sync driver: none managed by Flair — but syncs are landing` | A cron entry / hand-written unit is driving it | Nothing |
+
+The check is local to the machine running the CLI, so it is omitted when
+`--target` points at a remote instance.
+
+Driver logs: `~/.flair/logs/federation-sync.{stdout,stderr}.log`.
 
 ## Security
 
@@ -125,10 +174,13 @@ Records with `updatedAt` more than 5 minutes in the future are rejected. This pr
 
 | Command | Description |
 |---------|-------------|
-| `flair federation status` | Show instance identity and peer connections |
+| `flair federation status` | Show instance identity, peer connections, and whether anything is driving sync |
 | `flair federation pair <hub-url> --token-from <file>` | Pair this spoke with a hub using a token triple file (or `-` for stdin) |
 | `flair federation sync` | Push local changes to the hub (one-shot) |
-| `flair federation watch [--interval <s>]` | Run sync in a foreground daemon loop (default 30s) |
+| `flair federation sync enable [--interval <s>] [--admin-pass-file <path>]` | Install the scheduled sync driver (launchd on macOS, systemd timer on Linux) |
+| `flair federation sync disable [--remove-shim]` | Remove the scheduled sync driver |
+| `flair federation sync status` | Show whether the driver is installed and genuinely active |
+| `flair federation watch [--interval <s>]` | Run sync in a foreground loop for an interactive session (default 30s) |
 | `flair federation reachability` | Probe local instance + each paired peer (read-only) |
 | `flair federation token [--ttl <min>]` | Generate a one-time pairing token triple (hub only) |
 
@@ -174,6 +226,6 @@ flair federation unpin <instanceId>
 ## Limitations (1.0)
 
 - **HTTP push only** — no persistent WebSocket connections or real-time sync
-- **Manual or watch-loop sync** — `flair federation sync` is one-shot; `flair federation watch --interval 30` runs it on a loop in a foreground daemon (wrap in launchd / systemd for production)
+- **Polled sync** — `flair federation sync enable` schedules a periodic one-shot (launchd / systemd, default 300s); there is no write-path trigger, so a new memory replicates on the next tick rather than immediately
 - **Single hub** — spoke-to-spoke sync goes through the hub
 - **Record-level LWW** — not field-level; concurrent edits to different fields of the same record may lose data

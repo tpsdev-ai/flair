@@ -15,18 +15,35 @@
  */
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
-import { homedir, platform } from "node:os";
-import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { homedir } from "node:os";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { escapeXml } from "../lib/xml-escape.js";
+import {
+  type SchedulerPlatform,
+  detectPlatform as detectPlatformFor,
+  spawnReport,
+  readTemplate as readTemplateFrom,
+  renderTemplateWith,
+  writeFileWithDir,
+  interpretActiveResult,
+  describeLoadFailure as describeLoadFailureFor,
+  SPAWN_TIMEOUT_MS,
+  STATUS_CHECK_TIMEOUT_MS,
+} from "../lib/scheduler-platform.js";
+
+// Re-exported so this module's public surface is unchanged by the extraction
+// into src/lib/scheduler-platform.ts (a second scheduler — `flair federation
+// sync enable` — needs the identical launchctl/systemctl interpretation, and
+// flair#850's lesson must have exactly one implementation).
+export { interpretActiveResult };
+export type { SchedulerPlatform };
 
 export const SHIM_PATH_DEFAULT = resolve(homedir(), ".flair", "bin", "flair-rem-nightly");
 export const LAUNCHD_PLIST_PATH = resolve(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist");
 export const SYSTEMD_USER_DIR = resolve(homedir(), ".config", "systemd", "user");
 export const SYSTEMD_TIMER_PATH = resolve(SYSTEMD_USER_DIR, "flair-rem-nightly.timer");
 export const SYSTEMD_SERVICE_PATH = resolve(SYSTEMD_USER_DIR, "flair-rem-nightly.service");
-
-export type SchedulerPlatform = "darwin" | "linux";
 
 export interface SchedulerSubstitutions {
   /** Absolute path to the flair binary the shim should invoke. */
@@ -98,11 +115,7 @@ export interface DisableResult {
 }
 
 function detectPlatform(override?: SchedulerPlatform): SchedulerPlatform {
-  if (override) return override;
-  const p = platform();
-  if (p === "darwin") return "darwin";
-  if (p === "linux") return "linux";
-  throw new Error(`unsupported platform for REM nightly scheduler: ${p} (only darwin and linux)`);
+  return detectPlatformFor("REM nightly scheduler", override);
 }
 
 function defaultTemplateRoot(): string {
@@ -122,7 +135,7 @@ function defaultTemplateRoot(): string {
 }
 
 export function renderTemplate(text: string, subs: SchedulerSubstitutions): string {
-  return renderTemplateWith(text, subs, (v) => v);
+  return renderTemplateWith(text, { ...subs }, (v) => v);
 }
 
 /**
@@ -143,27 +156,11 @@ export function renderTemplate(text: string, subs: SchedulerSubstitutions): stri
  * escaping would be corruption rather than a fix.
  */
 export function renderPlistTemplate(text: string, subs: SchedulerSubstitutions): string {
-  return renderTemplateWith(text, subs, escapeXml);
-}
-
-function renderTemplateWith(
-  text: string,
-  subs: SchedulerSubstitutions,
-  escape: (value: string) => string,
-): string {
-  return text.replace(/\{\{([A-Z_]+)\}\}/g, (_, key) => {
-    const value = (subs as any)[key];
-    if (value === undefined) throw new Error(`unknown template placeholder: ${key}`);
-    return escape(String(value));
-  });
+  return renderTemplateWith(text, { ...subs }, escapeXml);
 }
 
 export function readTemplate(rootDir: string, relativePath: string): string {
-  const full = resolve(rootDir, relativePath);
-  if (!existsSync(full)) {
-    throw new Error(`template not found: ${full}`);
-  }
-  return readFileSync(full, "utf-8");
+  return readTemplateFrom(rootDir, relativePath);
 }
 
 /**
@@ -197,35 +194,6 @@ function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string
   };
 }
 
-function writeFileWithDir(path: string, contents: string, mode: number = 0o600): void {
-  const dir = dirname(path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  writeFileSync(path, contents, { mode });
-}
-
-// 30s ceiling on launchctl/systemctl invocations so a hung service manager
-// can't block the CLI indefinitely. Sherlock #415 follow-up.
-const SPAWN_TIMEOUT_MS = 30_000;
-
-// Status-check spawns (launchctl print / systemctl is-active) return
-// near-instantly when the service manager is reachable, and fail fast (no
-// hang) when it isn't (e.g. "Failed to connect to bus"). A short ceiling
-// keeps `flair rem nightly status` and the Health endpoint responsive even
-// when the query is inconclusive.
-const STATUS_CHECK_TIMEOUT_MS = 5_000;
-
-function spawnReport(cmd: string[], timeoutMs: number = SPAWN_TIMEOUT_MS): { code: number | null; stdout: string; stderr: string } {
-  const r: SpawnSyncReturns<Buffer> = spawnSync(cmd[0], cmd.slice(1), {
-    encoding: "buffer",
-    timeout: timeoutMs,
-  });
-  return {
-    code: r.status,
-    stdout: r.stdout?.toString("utf-8") ?? "",
-    stderr: r.stderr?.toString("utf-8") ?? "",
-  };
-}
-
 /**
  * Command to genuinely query the platform scheduler's active/loaded state
  * for a given install (as opposed to the shape of `loadCommand`, which
@@ -237,33 +205,6 @@ function activeCheckCommand(plat: SchedulerPlatform): string[] {
     return ["launchctl", "print", `gui/${process.getuid?.() ?? ""}/dev.flair.rem.nightly`];
   }
   return ["systemctl", "--user", "is-active", "flair-rem-nightly.timer"];
-}
-
-/**
- * Interprets the result of `activeCheckCommand()`. Shared by the sync
- * (CLI) and async (server) callers.
- *
- * - true  — the service manager confirms the job is loaded/active.
- * - false — confirmed NOT active. This includes the "no session bus" case
- *   (flair#850): when `systemctl --user` can't reach a bus, it fails
- *   before printing a status word ("Failed to connect to bus: No medium
- *   found") — but nothing CAN be running without a bus, so `false` is the
- *   honest answer, not "unknown".
- * - null  — genuinely inconclusive (the command itself couldn't run at
- *   all — e.g. the binary is missing — with no output to interpret).
- */
-export function interpretActiveResult(plat: SchedulerPlatform, code: number | null, stdout: string, stderr: string): boolean | null {
-  const noOutput = !stdout.trim() && !stderr.trim();
-  if (plat === "darwin") {
-    if (code === 0) return true;
-    if (code === null && noOutput) return null; // spawn itself failed — inconclusive
-    return false; // launchctl ran and reported not-loaded
-  }
-  const out = stdout.trim();
-  if (out === "active" || out === "activating") return true;
-  if (out === "inactive" || out === "failed" || out === "unknown") return false;
-  if (code === null && noOutput) return null; // spawn itself failed — inconclusive
-  return false; // covers the no-bus case: empty stdout, nonzero/failed exit
 }
 
 /**
@@ -321,15 +262,7 @@ export async function queryActiveStateAsync(plat: SchedulerPlatform, timeoutMs: 
  * still has something to go on.
  */
 export function describeLoadFailure(plat: SchedulerPlatform, loadResult: { code: number | null; stderr: string }): string | null {
-  const stderr = loadResult.stderr || "";
-  if (plat === "linux" && /failed to connect to bus/i.test(stderr)) {
-    return (
-      "No systemd user session bus is available in this session (common over ssh without lingering, " +
-      "in containers, or under CI). Fix: enable lingering for this user — `loginctl enable-linger <user>` " +
-      "— then re-run `flair rem nightly enable`."
-    );
-  }
-  return null;
+  return describeLoadFailureFor(plat, loadResult, "flair rem nightly enable");
 }
 
 export interface EnableReportInput {

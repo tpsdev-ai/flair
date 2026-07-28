@@ -106,6 +106,11 @@ import {
 } from "./lib/auth-resolve.js";
 import { validateSnapshotArchive, extractSnapshotSafely } from "./lib/safe-snapshot-extract.js";
 import { escapeXml, unescapeXml } from "./lib/xml-escape.js";
+// Value-only static import so `--interval`'s advertised default cannot drift
+// from the one the scheduler actually validates against. The module itself is
+// still loaded lazily at call time (the `await import()`s below) for the
+// functions — this pulls in nothing but node builtins.
+import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "./federation/scheduler.js";
 
 // Federation crypto helpers — inlined to avoid cross-boundary imports from
 // src/ into resources/, which don't survive npm packaging (see also
@@ -5777,13 +5782,55 @@ const signBodyFresh = signRequestBody;
 
 const federation = program.command("federation").description("Manage federation (hub-and-spoke sync)");
 
+/**
+ * The most recent CONTACT with any peer (max of peer.lastSyncAt), or null.
+ *
+ * Contact, not merge: a sync that reaches the peer and legitimately has
+ * nothing to send still proves the driver ran. This is half of what lets
+ * `federation status` tell "nothing is driving sync" apart from "sync is
+ * running, the peer is unreachable" (flair#922) — the other half is whether
+ * the service manager has a driver loaded.
+ *
+ * Returns null on ANY failure. A driver verdict is a diagnostic aid; it must
+ * never be the reason `federation status` fails.
+ */
+async function latestPeerContact(opts: { target?: string }): Promise<string | null> {
+  try {
+    const target = resolveTarget(opts);
+    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+    const { peers } = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+    let best: number | null = null;
+    for (const p of peers ?? []) {
+      if (!p?.lastSyncAt) continue;
+      const t = Date.parse(p.lastSyncAt);
+      if (Number.isFinite(t) && (best === null || t > best)) best = t;
+    }
+    return best === null ? null : new Date(best).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when the CLI is pointed at the instance running on THIS machine.
+ *
+ * The scheduler check is inherently local — launchctl/systemctl only know
+ * about jobs on the host the CLI is running on. Reporting "no driver" while
+ * `--target` points at someone else's hub would be a confident claim about a
+ * machine we cannot see, so the driver block is suppressed for remote targets.
+ */
+function driverCheckAppliesTo(opts: { target?: string }): boolean {
+  const target = resolveTarget(opts);
+  return !target || isLocalBase(target.replace(/\/$/, ""));
+}
+
 federation
   .command("status")
   .description("Show federation status and peer connections")
   .option("--port <port>", "Harper HTTP port")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
-  .option("--json", "Emit JSON {instance, peers} (also: pipe + FLAIR_OUTPUT=json)")
+  .option("--json", "Emit JSON {instance, peers, driver} (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
@@ -5792,8 +5839,40 @@ federation
       const instance = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
       const { peers } = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
 
+      // Driver state (flair#922). Computed from the LOCAL service manager, so
+      // it is only meaningful when the CLI is pointed at the local instance.
+      let driver: import("./federation/scheduler.js").SchedulerStatus | null = null;
+      let assessment: import("./federation/scheduler.js").DriverAssessment | null = null;
+      if (driverCheckAppliesTo(opts)) {
+        try {
+          const { schedulerStatus, assessDriver } = await import("./federation/scheduler.js");
+          driver = schedulerStatus();
+          let lastSyncAt: string | null = null;
+          for (const p of peers ?? []) {
+            if (!p?.lastSyncAt) continue;
+            const t = Date.parse(p.lastSyncAt);
+            if (Number.isFinite(t) && (lastSyncAt === null || t > Date.parse(lastSyncAt))) {
+              lastSyncAt = new Date(t).toISOString();
+            }
+          }
+          assessment = assessDriver({
+            installed: driver.installed,
+            active: driver.active,
+            intervalSeconds: driver.intervalSeconds,
+            lastSyncAt,
+            now: Date.now(),
+          });
+        } catch {
+          // An unsupported platform (neither darwin nor linux) or an
+          // unreadable unit must not take down `federation status` — the peer
+          // table is still the primary output.
+          driver = null;
+          assessment = null;
+        }
+      }
+
       if (mode === "json") {
-        console.log(render.asJSON({ instance, peers }));
+        console.log(render.asJSON({ instance, peers, driver, driverAssessment: assessment }));
         return;
       }
 
@@ -5806,6 +5885,26 @@ federation
       if (peers.length === 0) {
         console.log(`\n${render.icons.info} ${render.wrap(render.c.dim, "No peers configured. Use 'flair federation pair' to connect to a hub.")}`);
         return;
+      }
+
+      // Print the driver line BEFORE the per-peer table: "is anything running
+      // sync at all" is the question that decides how to read everything
+      // below it.
+      if (assessment) {
+        const icon = assessment.verdict === "driving" || assessment.verdict === "external-driver"
+          ? render.icons.ok
+          : assessment.verdict === "unknown"
+            ? render.icons.info
+            : render.icons.warn;
+        const color = assessment.verdict === "driving" || assessment.verdict === "external-driver"
+          ? render.c.green
+          : assessment.verdict === "unknown"
+            ? render.c.dim
+            : render.c.yellow;
+        console.log();
+        console.log(`${icon} ${render.wrap(color, assessment.headline)}`);
+        console.log(`  ${render.wrap(render.c.dim, assessment.detail)}`);
+        if (assessment.remedy) console.log(`  ${render.wrap(render.c.cyan, assessment.remedy)}`);
       }
 
       const now = Date.now();
@@ -5867,7 +5966,16 @@ federation
       });
       if (haveStale) {
         console.log();
-        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "One or more peers haven't merged a record in >24h.")} ${render.wrap(render.c.dim, "Check skippedReasons in SyncLog or run 'flair federation sync'.")}`);
+        // The staleness warning used to fire identically whether sync was
+        // running and the peer was unreachable, or nothing had run sync since
+        // the day the spoke was paired (flair#922). Those need opposite
+        // actions, so the remedy is now chosen by the driver verdict instead
+        // of always pointing at SyncLog.
+        const noDriver = assessment?.verdict === "no-driver" || assessment?.verdict === "driver-inactive";
+        const remedy = noDriver
+          ? "Nothing is driving sync — see the driver line above. Run 'flair federation sync enable'."
+          : "Check skippedReasons in SyncLog or run 'flair federation sync'.";
+        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "One or more peers haven't merged a record in >24h.")} ${render.wrap(render.c.dim, remedy)}`);
       }
 
       const haveContactButNoMerge = peers.some((p: any) => {
@@ -6548,18 +6656,156 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
   }
 }
 
-federation
+const federationSync = federation
   .command("sync")
-  .description("Push local changes to the hub")
+  .description("Push local changes to the hub (one-shot). Subcommands manage the scheduled driver.")
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password")
+  .option("--admin-pass-file <path>", "Read the admin password from a file (e.g. ~/.flair/admin-pass). Preferred for launchd/cron — keeps the secret out of ps and shell history.")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .action(async (opts) => {
+    // --admin-pass-file resolves into the same `adminPass` slot the inline
+    // flag uses, so the scheduler never has to embed a secret in a unit file.
+    // readAdminPassFileSecure() refuses a file that is not owner-only.
+    if (!opts.adminPass && opts.adminPassFile) {
+      try {
+        opts.adminPass = readAdminPassFileSecure(opts.adminPassFile);
+      } catch (err: any) {
+        console.error(`Error reading --admin-pass-file ${opts.adminPassFile}: ${err.message}`);
+        process.exit(1);
+      }
+    }
     const r = await runFederationSyncOnce(opts);
     if (r.error) {
       console.error(`Error: ${r.error.message}`);
+      process.exit(1);
+    }
+  });
+
+// ─── flair federation sync enable | disable | status ────────────────────────
+// The supervised driver (flair#922). Federation had no automatic driver at
+// all: `sync` is one-shot and `watch` is a foreground loop that dies with its
+// terminal, so every operator paired a spoke, saw one successful sync, and
+// then silently stopped syncing.
+//
+// Shape deliberately mirrors `flair rem nightly enable|disable|status` —
+// same verbs, same platform coverage (launchd on macOS, systemd --user timer
+// on Linux), same "never claim success before activation succeeded" rule.
+// Strategy is a PERIODIC ONE-SHOT rather than a supervised long-lived
+// watcher; the reasoning is in src/federation/scheduler.ts's header.
+
+federationSync
+  .command("enable")
+  .description("Install the sync driver (launchd on macOS, systemd timer on Linux)")
+  .option("--interval <seconds>", `Seconds between syncs (default ${FEDERATION_SYNC_DEFAULT_INTERVAL})`, String(FEDERATION_SYNC_DEFAULT_INTERVAL))
+  .option("--admin-pass-file <path>", "Path to a 0600 file holding the admin password (default ~/.flair/admin-pass when it exists). The PATH is stored in the unit — never the password.")
+  // Deliberately NOT `--no-admin-pass-file`: commander treats a `--no-x` flag
+  // as the negation of `--x`, and declaring both on one command makes the
+  // POSITIVE option silently parse to undefined — `--admin-pass-file /path`
+  // would be accepted and dropped, producing a driver that fails auth every
+  // cycle with no error anywhere. Verified against commander 14.
+  .option("--no-credentials", "Do not wire any credential file into the unit")
+  .option("--target <url>", "Remote Flair URL to sync (default: the local instance)")
+  .action(async (_opts, cmd) => {
+    // optsWithGlobals(), NOT the action's first argument: `--admin-pass-file`
+    // and `--target` are declared on BOTH this subcommand and its parent
+    // (`flair federation sync`), and when a parent declares the same option
+    // name commander binds the value to the PARENT — the subcommand's own
+    // opts come back undefined. Reading only the local opts silently dropped
+    // `--admin-pass-file <path>` here, which would have installed a driver
+    // that failed auth every cycle with no error anywhere. Verified against
+    // commander 14.
+    const opts = cmd.optsWithGlobals();
+    const intervalSeconds = Number(opts.interval);
+    if (!Number.isFinite(intervalSeconds)) {
+      console.error(`Error: --interval must be a number of seconds (got: ${opts.interval})`);
+      process.exit(1);
+    }
+
+    // Default to the canonical admin-pass file when it is actually there.
+    // Silently wiring a path that does not exist would produce a driver that
+    // runs and fails auth every interval — the failure mode this whole issue
+    // is about, in a new costume.
+    let adminPassFile: string | undefined;
+    if (opts.credentials === false) {
+      adminPassFile = undefined;
+    } else if (typeof opts.adminPassFile === "string" && opts.adminPassFile) {
+      adminPassFile = opts.adminPassFile;
+    } else {
+      const fallback = defaultAdminPassPath();
+      adminPassFile = existsSync(fallback) ? fallback : undefined;
+    }
+
+    const { enableScheduler, formatEnableReport } = await import("./federation/scheduler.js");
+    try {
+      const r = enableScheduler({ intervalSeconds, adminPassFile, target: opts.target });
+      const { lines, ok } = formatEnableReport(r, { adminPassFile, target: opts.target });
+      for (const line of lines) console.log(line);
+      if (!ok) process.exit(1);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+federationSync
+  .command("disable")
+  .description("Remove the sync driver (peers and sync history are preserved)")
+  .option("--remove-shim", "Also delete the ~/.flair/bin/flair-federation-sync shim")
+  .action(async (opts) => {
+    const { disableScheduler } = await import("./federation/scheduler.js");
+    try {
+      const r = disableScheduler({ removeShim: !!opts.removeShim });
+      if (r.removed.length === 0) {
+        console.log(`(Federation sync driver was not installed on ${r.platform})`);
+        return;
+      }
+      console.log(`✅ Federation sync driver disabled (${r.platform})`);
+      console.log(`   Removed:`);
+      for (const p of r.removed) console.log(`     ${p}`);
+      if (r.unloadResult && r.unloadResult.code !== 0) {
+        console.log(`   Unload:      ${r.unloadCommand.join(" ")} → code ${r.unloadResult.code}`);
+        if (r.unloadResult.stderr) console.log(`     stderr: ${r.unloadResult.stderr.trim()}`);
+      }
+      console.log(`\nPeers, keys and sync history are untouched. Nothing will sync until you`);
+      console.log(`re-enable the driver or run \`flair federation sync\` by hand.`);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+federationSync
+  .command("status")
+  .description("Show whether a sync driver is installed and genuinely active")
+  .option("--port <port>", "Harper HTTP port")
+  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  .option("--json", "Emit JSON")
+  .action(async (_opts, cmd) => {
+    // See the comment on `enable` above: `--target`/`--port` are declared on
+    // the parent too, so commander binds them there.
+    const opts = cmd.optsWithGlobals();
+    const { schedulerStatus, formatStatusReport, assessDriver } = await import("./federation/scheduler.js");
+    try {
+      const s = schedulerStatus();
+      const lastSyncAt = await latestPeerContact(opts);
+      const a = assessDriver({
+        installed: s.installed,
+        active: s.active,
+        intervalSeconds: s.intervalSeconds,
+        lastSyncAt,
+        now: Date.now(),
+      });
+      if (render.resolveOutputMode(opts) === "json") {
+        console.log(render.asJSON({ driver: s, assessment: a, lastSyncAt }));
+        return;
+      }
+      const { lines } = formatStatusReport(s, a);
+      for (const line of lines) console.log(line);
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
       process.exit(1);
     }
   });

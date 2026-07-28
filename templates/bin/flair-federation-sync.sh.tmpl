@@ -1,0 +1,28 @@
+#!/bin/sh
+# Flair federation sync driver shim.
+# Deployed by `flair federation sync enable` to {{SHIM_PATH}}.
+# Invoked by launchd (macOS) or systemd (Linux) every {{INTERVAL_SECONDS}}s.
+#
+# One-shot by design: every run is a fresh, fully bounded process. See
+# src/federation/scheduler.ts for why this is a periodic one-shot rather than
+# a supervised long-lived watcher.
+#
+# The admin password is NEVER written into the scheduler unit. The unit
+# carries FLAIR_ADMIN_PASS_FILE — a PATH — and the CLI reads the file itself
+# through readAdminPassFileSecure(), which refuses anything not owner-only.
+# Passing the path (not the value) also keeps it out of `ps`.
+#
+# Logs land in {{HOME}}/.flair/logs/federation-sync.{stdout,stderr}.log.
+set -e
+
+if [ -n "${FLAIR_TARGET:-}" ]; then
+  set -- --target "${FLAIR_TARGET}"
+else
+  set --
+fi
+
+if [ -n "${FLAIR_ADMIN_PASS_FILE:-}" ] && [ -f "${FLAIR_ADMIN_PASS_FILE}" ]; then
+  set -- "$@" --admin-pass-file "${FLAIR_ADMIN_PASS_FILE}"
+fi
+
+exec "{{FLAIR_BIN}}" federation sync "$@"

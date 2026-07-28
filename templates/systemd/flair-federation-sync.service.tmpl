@@ -1,0 +1,21 @@
+[Unit]
+Description=Flair federation sync (one-shot, driven by flair-federation-sync.timer)
+After=network-online.target
+
+[Service]
+# Type=oneshot, not a Restart=always long-lived watcher: the sync carries no
+# state between runs, and every network call inside it is bounded by its own
+# timeout, so a run always terminates and the timer always gets to fire the
+# next one. See src/federation/scheduler.ts.
+Type=oneshot
+ExecStart={{SHIM_PATH}}
+# A PATH to the password file, never the password.
+Environment=FLAIR_ADMIN_PASS_FILE={{ADMIN_PASS_FILE}}
+Environment=FLAIR_TARGET={{FLAIR_TARGET}}
+StandardOutput=append:{{HOME}}/.flair/logs/federation-sync.stdout.log
+StandardError=append:{{HOME}}/.flair/logs/federation-sync.stderr.log
+
+# No [Install] section: this unit is started by flair-federation-sync.timer,
+# which is what `flair federation sync enable` enables. A WantedBy here would
+# only invite someone to enable the service directly and get exactly one sync
+# per boot.
