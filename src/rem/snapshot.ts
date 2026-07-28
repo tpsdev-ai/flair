@@ -214,6 +214,19 @@ export async function extractSnapshot(opts: ExtractOpts): Promise<ExtractResult>
     throw new Error(`target directory already exists: ${targetDir}`);
   }
   mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+  // Deliberately NOT preservePaths, and deliberately NOT routed through
+  // src/lib/safe-snapshot-extract.ts. The snapshot path comes from the
+  // operator, so provenance here is no more controlled than the data-dir
+  // restore's — the difference is the flag, not the trust. With node-tar's
+  // defaults its own containment applies: it strips a leading "/" from entry
+  // paths, drops ".." entries, and refuses to write through a symlink,
+  // including one created earlier in the same archive. Verified against the
+  // pinned tar (7.5.20) on all four cases — absolute path, ".." traversal,
+  // in-archive symlink, pre-existing symlink in the target — each contained,
+  // with a benign control entry landing to prove the archives were valid.
+  // If `preservePaths` is ever added here, that containment is gone and this
+  // call MUST move to extractSnapshotSafely, which is why the data-dir
+  // restore needs the wrapper and this does not.
   await tarExtract({ file: opts.snapshotPath, cwd: targetDir });
 
   return { targetDir, entries };
