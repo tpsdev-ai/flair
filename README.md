@@ -421,6 +421,20 @@ curl -H "Authorization: TPS-Ed25519 mybot:$TS:$NONCE:$SIG" \
 
 Auth is Ed25519 — sign `agentId:timestamp:nonce:METHOD:/path` with your private key. See [SECURITY.md](SECURITY.md) for the full protocol.
 
+### Embedded in a Harper app (in-process)
+
+Flair *is* a Harper component. If your application already runs on Harper, load Flair into the same instance and call its resources directly — a method call instead of an HTTP round trip, with per-agent scoping preserved by the context you pass.
+
+```javascript
+import { server } from "harper";
+
+const Memory = server.resources.get("Memory").Resource;   // the resource, not the table
+const h = new Memory(undefined, { request: { tpsAgent: "mybot" } });
+await h.post({ agentId: "mybot", content: "...", durability: "standard" });
+```
+
+The distinction that matters: `databases.flair.Memory` is the **table** (raw storage), while the exported `Memory` class is the **resource** — auth, read-scoping, visibility and embedding all live on the resource. Full guide, including the multi-agent identity model and the trap where a context-less call runs unfiltered: **[docs/embedding-in-a-harper-app.md](docs/embedding-in-a-harper-app.md)**.
+
 ### Auth across surfaces
 
 The default, secure path everywhere is **Ed25519 per-agent**: each agent holds its own key (`~/.flair/keys/<agent>.key`) and signs every request. That guarantees write isolation (no agent can write as another) and identity-verified reads — it does **not** mean cross-agent reads are refused: within one Flair instance, any verified agent can read any other agent's non-private memory by design (open-within-org read; the hard boundary is the federation edge, not intra-instance reads — see [SECURITY.md](SECURITY.md)). The CLI, the `flair-mcp` server, and the OpenClaw / pi / Hermes plugins all use this model.
