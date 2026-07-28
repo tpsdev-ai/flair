@@ -257,9 +257,18 @@ function verify(expected) {
   // Positive control. The inventory files themselves declare `expected`, so a
   // scan that finds nothing at all did not run correctly — an unrun check must
   // not look like a pass.
-  if (hits.length === 0) {
+  //
+  // Conditioned on the inventory being clean, and that condition is load-bearing.
+  // When `expected` comes from an argument rather than from package.json — the
+  // tag-time gate, `--publish`, the post-bump re-check — a tree that simply is
+  // not at that version ALSO produces zero hits. Reporting "the scan is broken"
+  // there would send the operator after the instrument instead of the tag.
+  // Tagging v0.99.0 against a 0.31.0 tree hit exactly that. If the inventory
+  // check already found problems, those explain the zero hits; report them.
+  if (hits.length === 0 && problems.length === 0) {
     console.error(`❌ Scanned ${files.length} tracked files and found no declaration of ${expected} anywhere,`);
-    console.error(`   not even in package.json. The scan is broken, not the tree.`);
+    console.error(`   not even in package.json, yet every known site reported the right version.`);
+    console.error(`   Those cannot both be true: the scan is broken, not the tree.`);
     process.exit(1);
   }
 
