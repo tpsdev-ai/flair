@@ -369,6 +369,9 @@ jobs:
       # runner image ever does drop a Chromium library, Playwright fails here
       # with an explicit "missing dependencies … install-deps" message in
       # seconds, which is a better signal than a multi-minute mirror stall.
+      # Cache-effectiveness note: on a cold key this downloads Chrome for
+      # Testing, FFmpeg and the headless shell (~10s from cdn.playwright.dev);
+      # on a warm key it verifies the existing install and downloads nothing.
       - name: Install Playwright browsers
         run: bunx playwright install chromium
       - name: Playwright E2E tests
