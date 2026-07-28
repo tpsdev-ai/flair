@@ -1,0 +1,16 @@
+[Unit]
+Description=Flair federation sync timer (every {{INTERVAL_SECONDS}}s)
+
+[Timer]
+# Sync shortly after the timer starts (enable, and every boot thereafter), so
+# `enable` visibly works instead of leaving the operator waiting out a whole
+# interval. The launchd side gets this from RunAtLoad.
+OnActiveSec=10s
+# Then repeat, measured from the END of the previous run — a slow sync delays
+# the next one rather than overlapping with it.
+OnUnitActiveSec={{INTERVAL_SECONDS}}s
+AccuracySec=30s
+Unit=flair-federation-sync.service
+
+[Install]
+WantedBy=timers.target

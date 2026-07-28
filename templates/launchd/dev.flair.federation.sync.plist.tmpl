@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.flair.federation.sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{SHIM_PATH}}</string>
+  </array>
+
+  <!-- Periodic one-shot. NOT KeepAlive: the sync carries no state between
+       runs, and KeepAlive restarts a process that exits while doing nothing
+       for one that hangs. See src/federation/scheduler.ts. -->
+  <key>StartInterval</key>
+  <integer>{{INTERVAL_SECONDS}}</integer>
+
+  <!-- Sync once as soon as the job is loaded, so `enable` visibly works
+       instead of leaving the operator waiting out a whole interval. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>{{HOME}}/.flair/logs/federation-sync.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>{{HOME}}/.flair/logs/federation-sync.stderr.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>{{HOME}}</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>{{HOME}}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- A PATH to the password file, never the password. -->
+    <key>FLAIR_ADMIN_PASS_FILE</key>
+    <string>{{ADMIN_PASS_FILE}}</string>
+    <key>FLAIR_TARGET</key>
+    <string>{{FLAIR_TARGET}}</string>
+  </dict>
+</dict>
+</plist>
