@@ -12,15 +12,24 @@
 # reciprocal (federation sync is push-only, one direction per call).
 #
 # Scoped narrowly on purpose (per the issue): just this one compat suite, not
-# a re-run of the whole integration suite. No embedding model predownload —
-# the round-trip check reads back via the ops API rather than semantic
-# search, so it doesn't depend on embeddings being loaded.
+# a re-run of the whole integration suite. The federation round-trip itself
+# reads back via the ops API rather than semantic search, so it does not depend
+# on embeddings — the model predownload below is for the flair#905 suite, whose
+# `flair init` runs the semantic-search verification.
 #
 # Also runs test/compat/downgrade-boot.test.ts (flair#637) — a second, related
 # but distinct compat check that joined this same `bun test test/compat/`
 # scope rather than getting its own workflow: does the last npm-published
 # `@tpsdev-ai/flair` boot against a data directory the CURRENT build already
 # wrote to? Backs the downgrade compatibility claim in docs/upgrade.md.
+#
+# And test/compat/upgrade-restart-liveness.test.ts (flair#905): does a REAL
+# `flair upgrade` across a real published version boundary leave a REACHABLE
+# instance? Same reason it lives here rather than in its own workflow — it is
+# a cross-version question answered by installing published packages, which is
+# what this job is already set up to do. It is the heaviest suite in the job
+# (two full global installs of the flair tree), which is what the timeout below
+# accounts for.
 name: Federation Mixed-Version Compat
 
 on:
@@ -64,7 +73,10 @@ jobs:
   federation-compat:
     name: Mixed-Version Federation Pairing + Sync
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Raised from 20 for the flair#905 upgrade-liveness suite: it resolves and
+    # installs the full flair dependency tree twice (the driver, then the
+    # published upgrade target) on top of the two suites already here.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
@@ -114,5 +126,13 @@ jobs:
       - name: Build Flair resources and CLI
         run: bun run build && bun run build:cli
 
-      - name: Run compat suite (federation mixed-version + downgrade boot)
+      # For the flair#905 upgrade-liveness suite only: its `flair init` runs the
+      # semantic-search verification, so a model has to be on disk. Resolves
+      # cache → first-party GitHub release mirror → HuggingFace (last), with
+      # sha256 verification regardless of source (flair#715 — a bare HF curl has
+      # taken unrelated lanes red for hours, #463/#465).
+      - name: Pre-download embedding model
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+
+      - name: Run compat suite (federation mixed-version + downgrade boot + upgrade liveness)
         run: bun test test/compat/

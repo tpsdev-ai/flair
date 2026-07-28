@@ -1009,28 +1009,140 @@ function flairPackageDir(): string {
   return join(import.meta.dirname ?? __dirname, "..");
 }
 
-function harperBin(): string | null {
-  // Resolve relative to this file's location (dist/cli.js → ../node_modules/...).
-  //
-  // flair#870: flair depends on the BARE `harper` package name. The scoped
-  // `@harperfast/harper` segments are kept as a fallback so an in-place upgrade
-  // over a pre-#870 install (whose node_modules still holds the scoped copy,
-  // and whose Harper is the one currently serving the data dir) keeps booting
-  // until the next clean install. Bare name is tried first so a tree that has
-  // BOTH resolves to the one flair actually declares.
-  const roots = [
-    join(import.meta.dirname ?? __dirname, ".."),
-    process.cwd(),
-  ];
-  const pkgSegments = [["harper"], ["@harperfast", "harper"]];
-  const candidates: string[] = [];
+/**
+ * Harper npm package names this build knows about, newest-convention first.
+ *
+ * flair#870: flair depends on the BARE `harper` package name. The scoped
+ * `@harperfast/harper` name is kept as a fallback so an in-place upgrade over
+ * a pre-#870 install (whose node_modules still holds the scoped copy, and
+ * whose Harper is the one currently serving the data dir) keeps booting until
+ * the next clean install. Bare name is tried first so a tree that has BOTH
+ * resolves to the one flair actually declares.
+ *
+ * This list is a FALLBACK, not the authority — see declaredHarperPackageNames.
+ */
+const KNOWN_HARPER_PACKAGE_NAMES = ["harper", "@harperfast/harper"] as const;
+
+/**
+ * The Harper package name(s) the install at `packageRoot` actually declares,
+ * read fresh off disk on every call.
+ *
+ * flair#905: `flair upgrade` replaces this package tree while the CLI is
+ * executing out of it, so anything the running code "knows" about the tree
+ * describes the tree that WAS there, not the one that is. That is exactly how
+ * the 0.29.0 → 0.30.0 upgrade broke: 0.30.0 renamed its Harper dependency
+ * `@harperfast/harper` → `harper` (flair#870), 0.29.0's resolver only ever
+ * probed the scoped name, and the post-swap tree no longer had it — so the
+ * restart reported "Harper binary not found" against an install that was
+ * perfectly intact. Deriving the name from the package.json sitting at
+ * `packageRoot` reads the POST-swap truth instead of a compiled-in guess, so a
+ * future rename cannot break the same way.
+ *
+ * Matches `harper` and `@scope/harper` only — never `harper-fabric-embeddings`
+ * or any other `harper`-prefixed dependency.
+ */
+export function declaredHarperPackageNames(packageRoot: string): string[] {
+  try {
+    const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf-8")) as {
+      dependencies?: Record<string, string>;
+    };
+    return Object.keys(pkg.dependencies ?? {}).filter((n) => /^(@[^/]+\/)?harper$/.test(n));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Locate a Harper binary under `roots`, and report every path that was tried.
+ *
+ * The `searched` list is not decoration: "Harper binary not found" with no
+ * paths is unactionable, and the message it replaced named the wrong remedy
+ * (flair#905). Callers surface these paths verbatim.
+ */
+export function resolveHarperBin(roots: string[]): { path: string | null; searched: string[] } {
+  const searched: string[] = [];
   for (const root of roots) {
-    for (const segs of pkgSegments) {
-      candidates.push(join(root, "node_modules", ...segs, "dist", "bin", "harper.js"));
+    const names = [...declaredHarperPackageNames(root), ...KNOWN_HARPER_PACKAGE_NAMES];
+    for (const name of names) {
+      const candidate = join(root, "node_modules", ...name.split("/"), "dist", "bin", "harper.js");
+      if (searched.includes(candidate)) continue;
+      searched.push(candidate);
+      if (existsSync(candidate)) return { path: candidate, searched };
     }
   }
-  for (const c of candidates) if (existsSync(c)) return c;
-  return null;
+  return { path: null, searched };
+}
+
+/**
+ * Roots under which a Harper install is looked for: this package's own
+ * directory (dist/cli.js → ../node_modules/...) then the caller's cwd.
+ *
+ * Recomputed per call rather than captured at module load — see
+ * declaredHarperPackageNames for why anything cached across a package swap is
+ * a bug waiting to happen.
+ */
+function harperSearchRoots(): string[] {
+  return [flairPackageDir(), process.cwd()];
+}
+
+/**
+ * The operator-facing message for "we looked for Harper and it isn't there".
+ *
+ * flair#905: the text this replaces was `Harper binary not found. Run 'flair
+ * init' first.` — which is wrong twice over on an initialised instance. It
+ * names no path, so there is nothing to check; and `flair init` cannot fix a
+ * missing Harper (init resolves the same binary the same way) while it CAN be
+ * mistaken for "re-provision my instance" by someone reading it at 3am. A
+ * missing binary is an incomplete package tree, so the remedy is a reinstall.
+ */
+export function harperBinNotFoundMessage(searched: string[]): string {
+  return [
+    "Harper binary not found — this Flair package tree looks incomplete.",
+    "   Searched:",
+    ...searched.map((p) => `     ${p}`),
+    "   Reinstall the package: npm install -g @tpsdev-ai/flair@latest",
+    "   Your data in ~/.flair is untouched — `flair init` will NOT fix this (it resolves the same binary).",
+  ].join("\n");
+}
+
+function harperBin(): string | null {
+  return resolveHarperBin(harperSearchRoots()).path;
+}
+
+/**
+ * Parse `lsof -ti` output into PIDs safe to signal as "the thing on this port".
+ *
+ * Two filters, both load-bearing (flair#800, extended by flair#905):
+ *
+ * A bare `lsof -ti :<port>` matches CLIENT sockets as well as the listening
+ * server — including the calling process's OWN keep-alive connections, left by
+ * anything that has spoken HTTP to that port in this run (the version-handshake
+ * nudge on every command, a health probe, a caller's `fetch`). `-sTCP:LISTEN`
+ * on the command narrows it to the server; this function is the second half:
+ * never return our own PID, whatever lsof said. flair#800 was that exact
+ * self-SIGTERM in `flair upgrade`'s stop step; the same unfiltered pattern
+ * survived in `flair stop`, `flair uninstall` and `flair doctor`, where it can
+ * kill the caller, kill an unrelated client, or tell an operator to `kill` the
+ * PID of the shell they are typing into.
+ */
+export function parseListeningPids(lsofOutput: string, selfPid: number): number[] {
+  return (lsofOutput ?? "")
+    .trim()
+    .split("\n")
+    .map((s) => Number(s.trim()))
+    .filter((pid) => Number.isFinite(pid) && pid > 0 && pid !== selfPid);
+}
+
+/**
+ * PIDs LISTENING on `port`, never this process. Empty when nothing is there or
+ * lsof is unavailable — callers treat that as "not running".
+ */
+function listeningPidsOnPort(port: number, exec: (cmd: string) => string): number[] {
+  try {
+    return parseListeningPids(exec(`lsof -ti :${port} -sTCP:LISTEN`), process.pid);
+  } catch {
+    return [];
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -9579,14 +9691,116 @@ program
     console.log("\nRestarting Flair...");
     const port = upgradePort;
     // baseUrl was hoisted above (pre-flight, fix #1) — same URL, no redeclaration.
+
+    /**
+     * Roll @tpsdev-ai/flair back to `toVersion`, restart on it, re-verify, and
+     * exit. Shared by the two ways an upgrade can fail after the package swap:
+     * the restart itself (flair#905) and post-restart verification (flair#635).
+     *
+     * flair#905 found the restart leg wired straight to `process.exit(1)` — so
+     * `docs/upgrade.md`'s "install → restart → verify → rollback-on-failure, in
+     * one step" was only ever true for the verify leg. An upgrade that installed
+     * new packages and then failed to start them left the operator on the new
+     * version with nothing running and no rollback, which is the one outcome the
+     * whole transaction exists to prevent.
+     */
+    const rollbackTo = async (toVersion: string, reason: string): Promise<never> => {
+      console.log(`\nRolling back @tpsdev-ai/flair to ${toVersion}...`);
+      try {
+        execFileSync("npm", ["install", "-g", `@tpsdev-ai/flair@${toVersion}`], { stdio: "pipe" });
+      } catch (err: any) {
+        console.error(`❌ rollback install failed: ${err.message}`);
+        console.error(`   Flair is currently on the FAILED version (${expectedFlairVersion ?? "unknown"}) and is NOT running.`);
+        console.error(`   Recover by hand: npm install -g @tpsdev-ai/flair@${toVersion} && flair start`);
+        process.exit(1);
+      }
+      // Same post-swap rule as the upgrade restart above: the rolled-back
+      // version's own CLI is the thing that knows how to start it.
+      const rolledBackCli = resolveInstalledFlairCli(flairPackageDir(), toVersion);
+      try {
+        await restartAfterUpgrade(port, upgradeDataDir, rolledBackCli.ok ? rolledBackCli : null);
+      } catch (err: any) {
+        console.error(`❌ rollback restart failed: ${err.message}`);
+        console.error(`   @tpsdev-ai/flair@${toVersion} is installed but NOT running. Start it with: flair start`);
+        console.error("   Then check: flair status");
+        process.exit(1);
+      }
+
+      const rollbackVerify = await probeInstance(baseUrl, {
+        expectVersion: toVersion,
+        timeoutMs: STARTUP_TIMEOUT_MS,
+        authedGet: (path) => verifyAuthedGet(baseUrl, path, defaultKeysDir()),
+      });
+      const rollbackVerdict = decideAfterRollbackVerify(rollbackVerify);
+      if (rollbackVerdict.kind === "rolled-back") {
+        console.error(`❌ upgrade failed and was rolled back to @tpsdev-ai/flair@${toVersion} (running, verified).`);
+        console.error(`   Original failure: ${reason}`);
+        process.exit(1);
+      }
+
+      console.error(`❌❌ ROLLBACK ALSO FAILED VERIFICATION: ${rollbackVerdict.reason}`);
+      // flair#741 fix #3: this is the exact incident report — a 403 from a
+      // responding, healthy server (credentials-only failure) was printed as
+      // "state UNKNOWN — do not assume data integrity" for BOTH the upgrade
+      // verify AND the rollback re-verify, because the same missing-auth-
+      // material condition rejects both. Reserve the UNKNOWN/do-not-assume
+      // text for failures where the instance's real state genuinely can't be
+      // determined (connection refused, timeout, 5xx) — a credential-only
+      // failure here means the rollback likely landed fine and the checker
+      // simply can't prove it.
+      if (isCredentialOnlyFailure(rollbackVerify)) {
+        console.error("   The instance is up and responding — the verifier could not authenticate (credentials, not the rollback, are the problem).");
+        console.error("   Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key, then check: flair doctor");
+      } else {
+        console.error("   Instance state is UNKNOWN — do not assume data integrity.");
+      }
+      // This double-failure isn't auto-recoverable yet (flair#637) — but if a
+      // pre-upgrade snapshot landed, point at the CONCRETE path instead of
+      // just the issue number, so recovery doesn't start with a GitHub search.
+      if (snapshotPath) {
+        console.error(`   A pre-upgrade snapshot is available: ${snapshotPath}`);
+        console.error(`   Restore: flair snapshot restore "${snapshotPath}" (or see docs/upgrade.md#downgrade).`);
+      } else {
+        console.error("   No pre-upgrade snapshot was taken for this run (snapshot is opt-in — pass --snapshot next time, or ~/.flair/data didn't exist yet).");
+        console.error("   Check `flair snapshot list` for a manual one, or restore from a `flair backup` JSON export. See docs/upgrade.md#downgrade.");
+      }
+      process.exit(1);
+    };
+
+    // flair#905: hand the restart to the CLI that was just installed, resolved
+    // from disk AFTER the swap. `null` (flair itself wasn't swapped, or the new
+    // tree can't be verified) falls back to an in-process restart, announced.
+    const flairWasSwapped = flairIsUpgrading && !flairInstallFailed;
+    let newCli: { cliPath: string; version: string } | null = null;
+    if (flairWasSwapped) {
+      const resolved = resolveInstalledFlairCli(flairPackageDir(), expectedFlairVersion);
+      if (resolved.ok === false) {
+        console.error(`warning: could not verify the newly installed CLI (${resolved.reason}) — restarting with this process's own code instead.`);
+      } else {
+        newCli = { cliPath: resolved.cliPath, version: resolved.version };
+      }
+    }
+
+    let restartWasDelegated = false;
     try {
-      await restartFlair(port, upgradeDataDir);
+      restartWasDelegated = await restartAfterUpgrade(port, upgradeDataDir, newCli);
     } catch (err: any) {
       console.error(`❌ restart failed: ${err.message}`);
-      console.error("   Flair may be partially down. Check: flair doctor");
+      console.error("   Flair is NOT running. Your data in ~/.flair was not touched by this upgrade.");
+      if (flairWasSwapped && previousFlairVersion) {
+        await rollbackTo(previousFlairVersion, `restart failed: ${err.message}`);
+      }
+      // Not reached when a rollback ran — rollbackTo always exits. Say WHICH of
+      // the two "no rollback" cases this is; "nothing to roll back" is not the
+      // same statement as "we don't know what to roll back to".
+      console.error(flairWasSwapped
+        ? "   Cannot roll back automatically: the previously-installed @tpsdev-ai/flair version is unknown."
+        : "   Nothing to roll back: @tpsdev-ai/flair itself was not changed by this upgrade.");
+      console.error("   Start it with: flair start   — then check: flair status");
       process.exit(1);
     }
-    console.log("✅ Flair restarted");
+    // The delegated `flair restart` printed its own success line; don't say it twice.
+    if (!restartWasDelegated) console.log("✅ Flair restarted");
 
     if (!shouldVerify) {
       console.log("  (--no-verify: skipping post-restart verification)");
@@ -9636,61 +9850,7 @@ program
       process.exit(1);
     }
 
-    console.log(`\nRolling back @tpsdev-ai/flair to ${verdict.toVersion}...`);
-    try {
-      execFileSync("npm", ["install", "-g", `@tpsdev-ai/flair@${verdict.toVersion}`], { stdio: "pipe" });
-    } catch (err: any) {
-      console.error(`❌ rollback install failed: ${err.message}`);
-      console.error(`   Flair is currently running the FAILED version (${expectedFlairVersion ?? "unknown"}). Manual intervention required.`);
-      process.exit(1);
-    }
-    try {
-      await restartFlair(port, upgradeDataDir);
-    } catch (err: any) {
-      console.error(`❌ rollback restart failed: ${err.message}`);
-      console.error("   Instance state is UNKNOWN — it may be down entirely. Check: flair doctor");
-      process.exit(1);
-    }
-
-    const rollbackVerify = await probeInstance(baseUrl, {
-      expectVersion: verdict.toVersion,
-      timeoutMs: STARTUP_TIMEOUT_MS,
-      authedGet: (path) => verifyAuthedGet(baseUrl, path, defaultKeysDir()),
-    });
-    const rollbackVerdict = decideAfterRollbackVerify(rollbackVerify);
-    if (rollbackVerdict.kind === "rolled-back") {
-      console.error(`❌ upgrade failed verification and was rolled back to @tpsdev-ai/flair@${verdict.toVersion}.`);
-      console.error(`   Original failure: ${verdict.reason}`);
-      process.exit(1);
-    }
-
-    console.error(`❌❌ ROLLBACK ALSO FAILED VERIFICATION: ${rollbackVerdict.reason}`);
-    // flair#741 fix #3: this is the exact incident report — a 403 from a
-    // responding, healthy server (credentials-only failure) was printed as
-    // "state UNKNOWN — do not assume data integrity" for BOTH the upgrade
-    // verify AND the rollback re-verify, because the same missing-auth-
-    // material condition rejects both. Reserve the UNKNOWN/do-not-assume
-    // text for failures where the instance's real state genuinely can't be
-    // determined (connection refused, timeout, 5xx) — a credential-only
-    // failure here means the rollback likely landed fine and the checker
-    // simply can't prove it.
-    if (isCredentialOnlyFailure(rollbackVerify)) {
-      console.error("   The instance is up and responding — the verifier could not authenticate (credentials, not the rollback, are the problem).");
-      console.error("   Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key, then check: flair doctor");
-    } else {
-      console.error("   Instance state is UNKNOWN — do not assume data integrity.");
-    }
-    // This double-failure isn't auto-recoverable yet (flair#637) — but if a
-    // pre-upgrade snapshot landed, point at the CONCRETE path instead of
-    // just the issue number, so recovery doesn't start with a GitHub search.
-    if (snapshotPath) {
-      console.error(`   A pre-upgrade snapshot is available: ${snapshotPath}`);
-      console.error(`   Restore: flair snapshot restore "${snapshotPath}" (or see docs/upgrade.md#downgrade).`);
-    } else {
-      console.error("   No pre-upgrade snapshot was taken for this run (snapshot is opt-in — pass --snapshot next time, or ~/.flair/data didn't exist yet).");
-      console.error("   Check `flair snapshot list` for a manual one, or restore from a `flair backup` JSON export. See docs/upgrade.md#downgrade.");
-    }
-    process.exit(1);
+    await rollbackTo(verdict.toVersion, verdict.reason);
   });
 
 // ─── flair stop ───────────────────────────────────────────────────────────────
@@ -9720,14 +9880,16 @@ program
       }
     }
 
-    // Fallback: find process by port
+    // Fallback: find process by port. Listening sockets only, never our own
+    // PID — see parseListeningPids (flair#800/flair#905): this used to SIGTERM
+    // every process holding ANY socket on the port, so `flair stop` could kill
+    // itself (leaving Flair running) or kill an unrelated client of it.
     try {
       const { execSync } = await import("node:child_process");
-      const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
-      if (lsof) {
-        const pids = lsof.split("\n").map(p => p.trim()).filter(Boolean);
+      const pids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+      if (pids.length > 0) {
         for (const pid of pids) {
-          process.kill(Number(pid), "SIGTERM");
+          try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
         }
         console.log(`✅ Flair stopped (killed PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")})`);
       } else {
@@ -9785,11 +9947,12 @@ program
     }
 
     // Direct start (Linux, or macOS fallback when no launchd plist)
-    const bin = harperBin();
-    if (!bin) {
-      console.error("❌ Harper binary not found. Run 'flair init' first.");
+    const harper = resolveHarperBin(harperSearchRoots());
+    if (!harper.path) {
+      console.error(`❌ ${harperBinNotFoundMessage(harper.searched)}`);
       process.exit(1);
     }
+    const bin = harper.path;
 
     const adminPass = process.env.HDB_ADMIN_PASSWORD || process.env.FLAIR_ADMIN_PASS || "";
     // flair#670/#863: this fallback path (no launchd plist) sets no
@@ -9964,24 +10127,18 @@ async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
   // Port-based stop (Linux, or macOS fallback when no launchd plist)
   console.log("Stopping...");
   const { execSync } = await import("node:child_process");
-  let listening = "";
-  try {
-    // -sTCP:LISTEN: match the LISTENING server only — a bare `lsof -ti :port`
-    // also matches CLIENT sockets referencing the port, including THIS CLI's
-    // own keep-alive connections left by the credential pre-flight's
-    // probeInstance() HTTP calls (flair#741). Without the filter, the upgrade
-    // path SIGTERM'd its own process mid-restart — "Stopping..." then death
-    // (exit 143) before "Starting..." ever ran, leaving the server down
-    // (flair#800, deterministic on the Linux/non-launchd default path).
-    listening = execSync(`lsof -ti :${port} -sTCP:LISTEN`, { encoding: "utf-8" }).trim();
-  } catch { /* lsof exits non-zero when nothing matches — not running */ }
-  if (!listening) return;
-
-  const targets = listening
-    .split("\n")
-    .map((pid) => Number(pid.trim()))
-    // Belt-and-suspenders: never SIGTERM ourselves, whatever lsof says.
-    .filter((pid) => Number.isFinite(pid) && pid !== process.pid);
+  // -sTCP:LISTEN plus a self-PID guard, both inside listeningPidsOnPort: a bare
+  // `lsof -ti :port` also matches CLIENT sockets referencing the port, including
+  // THIS CLI's own keep-alive connections left by the credential pre-flight's
+  // probeInstance() HTTP calls (flair#741). Without the filter, the upgrade
+  // path SIGTERM'd its own process mid-restart — "Stopping..." then death
+  // (exit 143) before "Starting..." ever ran, leaving the server down
+  // (flair#800, deterministic on the Linux/non-launchd default path).
+  // flair#905 moved both halves into that one helper because the same
+  // unfiltered pattern had survived in `flair stop`, `flair uninstall` and
+  // `flair doctor` — one guarded resolver is what keeps the next site honest.
+  // It returns [] when lsof matches nothing, which is this path's "not running".
+  const targets = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
   if (targets.length === 0) return;
 
   // Deliberately outside any catch: a refusal must reach the caller, not be
@@ -10030,10 +10187,11 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
   }
 
   console.log("Starting...");
-  const bin = harperBin();
-  if (!bin) {
-    throw new Error("Harper binary not found. Run 'flair init' first.");
+  const harper = resolveHarperBin(harperSearchRoots());
+  if (!harper.path) {
+    throw new Error(harperBinNotFoundMessage(harper.searched));
   }
+  const bin = harper.path;
 
   // Match `flair start`: accept either HDB_ADMIN_PASSWORD or FLAIR_ADMIN_PASS.
   // Without this, `flair init --admin-pass X` (which only exports HDB_*
@@ -10105,6 +10263,134 @@ async function restartFlair(port: number, dataDir: string): Promise<void> {
   } catch { /* best-effort — never fail a restart over cache cleanup */ }
 }
 
+// ─── Post-swap restart (flair#905) ─────────────────────────────────────────
+// `flair upgrade` replaces @tpsdev-ai/flair's package tree WHILE the CLI is
+// executing out of it. Everything after that point runs old code against a new
+// tree, and the old code's picture of that tree is whatever was true at the
+// version it was compiled from. flair#905 is the concrete cost: 0.30.0 renamed
+// its Harper dependency (flair#870), 0.29.0's in-process restart probed only
+// the old name, and the upgrade reported "Harper binary not found" on a
+// perfectly intact install — leaving the instance DOWN with an error naming
+// `flair init` as the remedy.
+//
+// The rule that follows from that, and the reason these two helpers exist: the
+// restart after a package swap is performed by the NEWLY INSTALLED CLI, not by
+// the process that did the installing. Only version N's own code knows how
+// version N starts. This generalises past the dependency-rename that exposed
+// it — spawn arguments, required env, config templates and the launchd plist
+// shape are all things a release may change, and all of them are things the
+// pre-swap process would get wrong in exactly the same silent way.
+
+/**
+ * Locate the `dist/cli.js` of the flair package installed at `packageRoot`,
+ * reading version identity off disk rather than trusting the running process.
+ *
+ * `packageRoot` is normally `flairPackageDir()` — and the subtlety worth being
+ * explicit about is that this path was never the stale thing. An in-place
+ * `npm install -g` replaces the CONTENTS of that directory, so post-swap it
+ * holds the new version's files; it is the loaded JavaScript, not the path,
+ * that is frozen at the old version. Reading package.json back and comparing
+ * it against `expectVersion` is what turns "the path exists" into "the new
+ * version is really there", and catches the case where npm reported success
+ * but installed somewhere else entirely (a custom prefix, a shadowed global).
+ */
+export type InstalledFlairCli =
+  | { ok: true; cliPath: string; version: string }
+  | { ok: false; reason: string };
+
+export function resolveInstalledFlairCli(
+  packageRoot: string,
+  expectVersion: string | null,
+  deps: {
+    exists?: (p: string) => boolean;
+    read?: (p: string) => string;
+  } = {},
+): InstalledFlairCli {
+  const exists = deps.exists ?? existsSync;
+  const read = deps.read ?? ((p: string) => readFileSync(p, "utf-8"));
+  const cliPath = join(packageRoot, "dist", "cli.js");
+  if (!exists(cliPath)) return { ok: false, reason: `no dist/cli.js at ${cliPath}` };
+  let version: string;
+  try {
+    version = (JSON.parse(read(join(packageRoot, "package.json"))) as { version?: string }).version ?? "";
+  } catch (err: any) {
+    return { ok: false, reason: `could not read ${join(packageRoot, "package.json")}: ${err?.message ?? err}` };
+  }
+  if (!version) return { ok: false, reason: `${join(packageRoot, "package.json")} declares no version` };
+  if (expectVersion && version !== expectVersion) {
+    return { ok: false, reason: `${packageRoot} holds ${version}, expected ${expectVersion}` };
+  }
+  return { ok: true, cliPath, version };
+}
+
+/**
+ * Restart Flair after a package swap, through the newly installed CLI when one
+ * could be located and in-process otherwise.
+ *
+ * The in-process fallback is deliberate and is NOT a silent one: it announces
+ * which path it took and why. A missing/unverifiable new CLI means the swap
+ * itself is suspect, and refusing to restart at all would turn a recoverable
+ * upgrade into a guaranteed outage — but a fallback nobody can see in the
+ * output is how "it restarted fine" and "it restarted with the wrong code"
+ * become indistinguishable after the fact.
+ *
+ * Delegation is limited to the DEFAULT data directory, and that limit is not
+ * incidental. The child is `flair restart`, which has no `--data-dir` and
+ * therefore restarts `defaultDataDir()` — handing it a `dataDir` that is not
+ * the default would restart a different instance and then wait for health on
+ * `port` and watch the wrong one answer. That is flair#902 exactly, and the
+ * required `dataDir` parameter here exists so the condition is checkable rather
+ * than assumed. Today the upgrade path only ever operates on the default
+ * install, so this never triggers; if that changes, `flair restart` needs a
+ * `--data-dir` before this may delegate.
+ *
+ * Throws on failure; the caller owns the rollback decision. Returns whether the
+ * restart was delegated, so the caller can leave the success line to whichever
+ * process actually printed one.
+ */
+async function restartAfterUpgrade(
+  port: number,
+  dataDir: string,
+  newCliArg: { cliPath: string; version: string } | null,
+): Promise<boolean> {
+  let newCli = newCliArg;
+  if (newCli && resolve(dataDir) !== defaultDataDir()) {
+    console.error(
+      `warning: not delegating the restart to ${newCli.cliPath} — it would restart ${defaultDataDir()}, ` +
+      `not ${resolve(dataDir)}. Restarting with this process's own code instead.`,
+    );
+    newCli = null;
+  }
+  if (!newCli) {
+    await restartFlair(port, dataDir);
+    return false;
+  }
+  console.log(`  (restarting via the newly installed CLI: ${newCli.cliPath} @ ${newCli.version})`);
+  const { spawnSync } = await import("node:child_process");
+  const res = spawnSync(process.execPath, [newCli.cliPath, "restart", "--port", String(port)], {
+    encoding: "utf-8",
+    // The child runs the same stop→start→waitForHealth sequence this process
+    // would have; give it the full startup budget plus slack for the stop leg
+    // rather than killing a restart that is merely slow.
+    timeout: STARTUP_TIMEOUT_MS * 3,
+    env: process.env,
+  });
+  if (res.stdout) process.stdout.write(res.stdout);
+  if (res.stderr) process.stderr.write(res.stderr);
+  if (res.error) {
+    throw new Error(`could not run the newly installed CLI (${newCli.cliPath}): ${res.error.message}`);
+  }
+  if (res.status !== 0) {
+    const detail = (res.stderr ?? "").trim().split("\n").filter(Boolean).pop();
+    throw new Error(
+      `the newly installed CLI (@tpsdev-ai/flair@${newCli.version}) failed to restart Flair` +
+      `${res.signal ? ` (killed by ${res.signal})` : ` (exit ${res.status})`}` +
+      `${detail ? `: ${detail}` : ""}`,
+    );
+  }
+  return true;
+}
+
 program
   .command("restart")
   .description("Restart the Flair (Harper) instance")
@@ -10154,13 +10440,15 @@ program
       }
       if (removedAny) console.log("✅ Launchd service removed");
     }
-    // Kill any process still on the port (covers direct-start, no-service, or failed unload)
+    // Kill any process still on the port (covers direct-start, no-service, or
+    // failed unload). Listening sockets only, never our own PID — see
+    // parseListeningPids (flair#800/flair#905).
     try {
       const { execSync } = await import("node:child_process");
-      const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
-      if (lsof) {
-        for (const pid of lsof.split("\n")) {
-          try { process.kill(Number(pid.trim()), "SIGTERM"); } catch {}
+      const pids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+      if (pids.length > 0) {
+        for (const pid of pids) {
+          try { process.kill(pid, "SIGTERM"); } catch {}
         }
         // Wait for process to release file handles (RocksDB)
         await new Promise(r => setTimeout(r, 2000));
@@ -10936,8 +11224,13 @@ program
         // Check if something else grabbed the port
         try {
           const { execSync } = await import("node:child_process");
-          const lsof = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
-          if (lsof) {
+          // Listening sockets only, never our own PID — doctor has already
+          // probed this port over HTTP, so a bare lsof reports doctor's own
+          // process as the squatter and tells the operator to kill it
+          // (flair#905; see parseListeningPids).
+          const pids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+          if (pids.length > 0) {
+            const lsof = pids.join(" ");
             console.log(`  ${render.icons.error} Nothing responding on port ${port} ${render.wrap(render.c.dim, `(port occupied by PID ${lsof})`)}`);
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} kill ${lsof} && flair restart`);
           } else {
