@@ -2,7 +2,12 @@ import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 // @ts-expect-error — plain .mjs helper, no type declarations by design.
-import { isVulnerable, validateAllowlist, flattenAdvisories } from "../../scripts/audit-gate.mjs";
+import {
+  isVulnerable,
+  validateAllowlist,
+  flattenAdvisories,
+  registryUrlFor,
+} from "../../scripts/audit-gate.mjs";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const ALLOWLIST = JSON.parse(
@@ -156,6 +161,36 @@ describe("flattenAdvisories", () => {
 
   it("handles an empty audit result", () => {
     expect(flattenAdvisories({})).toEqual([]);
+  });
+});
+
+// ─── Registry URL construction ───────────────────────────────────────────────
+
+describe("registryUrlFor", () => {
+  const PREFIX = "https://registry.npmjs.org/";
+
+  it("leaves no bare slash in the package segment of a scoped name", () => {
+    // The bug this replaced was `pkg.replace("/", "%2F")`, which rewrites only
+    // the FIRST match. The assertion is on the resulting segment, not on the
+    // call, so it fails for a half-escape as well as for no escape at all.
+    const segment = registryUrlFor("@fastify/static").slice(PREFIX.length).replace("/latest", "");
+    expect(segment).not.toContain("/");
+    expect(segment).toBe("%40fastify%2Fstatic");
+  });
+
+  it("escapes every slash, not just the first", () => {
+    // A name with two slashes is not valid on npm, but it is exactly the input
+    // that distinguishes a complete escape from the original one-shot replace.
+    const segment = registryUrlFor("a/b/c").slice(PREFIX.length).replace("/latest", "");
+    expect(segment).not.toContain("/");
+  });
+
+  it("still builds the expected url for an unscoped name", () => {
+    expect(registryUrlFor("lodash")).toBe("https://registry.npmjs.org/lodash/latest");
+  });
+
+  it("keeps the /latest suffix as a real path segment", () => {
+    expect(registryUrlFor("@scope/pkg").endsWith("/latest")).toBe(true);
   });
 });
 

@@ -290,8 +290,20 @@ export function validateAllowlist(allowlist, today) {
  * Fixability drift (check 7)                                          *
  * ------------------------------------------------------------------ */
 
+/**
+ * `encodeURIComponent`, not `pkg.replace("/", "%2F")` — a string-pattern
+ * `replace` rewrites only the FIRST match, so it was a half-escape that happened
+ * to be right only because npm names carry at most one slash. Encoding the whole
+ * segment is the tool that actually fits the job and covers every character that
+ * needs escaping. Verified against the registry: the fully-encoded scoped form
+ * (%40scope%2Fname) resolves identically to the literal one.
+ */
+export function registryUrlFor(pkg) {
+  return `https://registry.npmjs.org/${encodeURIComponent(pkg)}/latest`;
+}
+
 async function latestPublishedVersion(pkg) {
-  const url = `https://registry.npmjs.org/${pkg.replace("/", "%2F")}/latest`;
+  const url = registryUrlFor(pkg);
   const res = await fetch(url, { headers: { accept: "application/json" } });
   if (!res.ok) throw new Error(`registry returned HTTP ${res.status} for ${pkg}`);
   const body = await res.json();
