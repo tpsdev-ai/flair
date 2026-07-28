@@ -8964,7 +8964,9 @@ snapshotCmd
     // point-in-time-consistent guarantee, not a weaker one.
     let stoppedForSnapshot = false;
     try {
-      await stopFlairProcess(port);
+      // `dataDir`, not the default (flair#902) — quiesce the instance this
+      // command was pointed at, never whichever one owns ~/.flair/data.
+      await stopFlairProcess(port, dataDir);
       stoppedForSnapshot = true;
       const snapshot = await createDataSnapshot(dataDir);
       const removed = pruneOldSnapshots();
@@ -8975,12 +8977,12 @@ snapshotCmd
     } catch (err: any) {
       console.error(`❌ snapshot failed: ${err.message}`);
       if (stoppedForSnapshot) {
-        try { await startFlairProcess(port); } catch { /* best effort — surface the original snapshot error, not this */ }
+        try { await startFlairProcess(port, dataDir); } catch { /* best effort — surface the original snapshot error, not this */ }
       }
       process.exit(1);
     }
     try {
-      await startFlairProcess(port);
+      await startFlairProcess(port, dataDir);
     } catch (err: any) {
       console.error(`❌ the snapshot succeeded but Flair failed to restart: ${err.message}`);
       console.error("   Check: flair doctor");
@@ -9057,7 +9059,11 @@ snapshotCmd
     }
 
     try {
-      await stopFlairProcess(port);
+      // `dataDir`, not the default (flair#902) — the whole point of this
+      // command's --data-dir is that it may name a scratch directory, and
+      // stopping the default instance instead is how a cautious inspect-a-
+      // snapshot-somewhere-else took production down.
+      await stopFlairProcess(port, dataDir);
     } catch (err: any) {
       console.error(`❌ failed to stop Flair: ${err.message}`);
       process.exit(1);
@@ -9093,7 +9099,7 @@ snapshotCmd
     }
 
     try {
-      await startFlairProcess(port);
+      await startFlairProcess(port, dataDir);
     } catch (err: any) {
       console.error(`❌ restore succeeded but Flair failed to restart: ${err.message}`);
       console.error("   Check: flair doctor");
@@ -9309,6 +9315,13 @@ program
     const { restart: shouldRestart, verify: shouldVerify, deprecatedRestartFlagUsed } =
       resolveUpgradeRestartVerify(opts);
     const upgradePort = resolveHttpPort({});
+    // The instance this upgrade is about, named once next to its port
+    // (flair#902). `flair upgrade` has no --data-dir, so this IS the default
+    // install — but stop/start/restart now take the directory explicitly, so
+    // the choice is made here in the open rather than assumed inside them.
+    // A default that happens to be right is the same defect waiting for the
+    // next caller.
+    const upgradeDataDir = defaultDataDir();
     // Hoisted so the pre-flight check (below) and the post-restart/rollback
     // verification steps (further down) all target the same URL — upgrade
     // never restarts Flair onto a different port.
@@ -9393,11 +9406,10 @@ program
     // the exact same mechanism as a standalone command for anyone who wants
     // one without wrapping it around an upgrade.
     const flairIsUpgrading = npmUpgrades.some((u) => u.pkg === "@tpsdev-ai/flair");
-    const snapshotDataDir = defaultDataDir();
     const snapshotDecision = decideUpgradeSnapshotAction(
       flairIsUpgrading,
       !!opts.snapshot,
-      existsSync(snapshotDataDir),
+      existsSync(upgradeDataDir),
     );
     let snapshotPath: string | null = null;
     if (snapshotDecision === "nudge") {
@@ -9409,7 +9421,7 @@ program
       console.log("");
       for (const line of UPGRADE_SNAPSHOT_NUDGE_LINES) console.log(render.wrap(render.c.dim, line));
     } else if (snapshotDecision === "no-data") {
-      console.log(`\n(no data directory at ${snapshotDataDir} yet — nothing to snapshot)`);
+      console.log(`\n(no data directory at ${upgradeDataDir} yet — nothing to snapshot)`);
     } else if (snapshotDecision === "snapshot") {
       console.log("\nSnapshotting data before upgrade...");
       // Consistency: a running Harper's data dir can be mid-write, and a
@@ -9427,9 +9439,9 @@ program
       // the server being up).
       let stoppedForSnapshot = false;
       try {
-        await stopFlairProcess(upgradePort);
+        await stopFlairProcess(upgradePort, upgradeDataDir);
         stoppedForSnapshot = true;
-        const snapshot = await createDataSnapshot(snapshotDataDir);
+        const snapshot = await createDataSnapshot(upgradeDataDir);
         snapshotPath = snapshot.path;
         const removed = pruneOldSnapshots();
         console.log(`✅ Snapshot: ${snapshotPath} (${humanBytes(snapshot.bytes)})`);
@@ -9441,12 +9453,12 @@ program
         console.error(`❌ snapshot failed: ${err.message}`);
         console.error("   Aborting upgrade — no packages were changed. Omit --snapshot to proceed without one (not recommended).");
         if (stoppedForSnapshot) {
-          try { await startFlairProcess(upgradePort); } catch { /* best effort — surface the original snapshot error, not this */ }
+          try { await startFlairProcess(upgradePort, upgradeDataDir); } catch { /* best effort — surface the original snapshot error, not this */ }
         }
         process.exit(1);
       }
       try {
-        await startFlairProcess(upgradePort);
+        await startFlairProcess(upgradePort, upgradeDataDir);
       } catch (err: any) {
         console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
         console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
@@ -9524,7 +9536,7 @@ program
     const port = upgradePort;
     // baseUrl was hoisted above (pre-flight, fix #1) — same URL, no redeclaration.
     try {
-      await restartFlair(port);
+      await restartFlair(port, upgradeDataDir);
     } catch (err: any) {
       console.error(`❌ restart failed: ${err.message}`);
       console.error("   Flair may be partially down. Check: flair doctor");
@@ -9589,7 +9601,7 @@ program
       process.exit(1);
     }
     try {
-      await restartFlair(port);
+      await restartFlair(port, upgradeDataDir);
     } catch (err: any) {
       console.error(`❌ rollback restart failed: ${err.message}`);
       console.error("   Instance state is UNKNOWN — it may be down entirely. Check: flair doctor");
@@ -9772,6 +9784,86 @@ program
 // ─── flair restart ────────────────────────────────────────────────────────────
 
 /**
+ * Refuse to act on a launchd service that belongs to a DIFFERENT data
+ * directory than the one the command is operating on (flair#902).
+ *
+ * `resolveLaunchdLabel`'s instance-scoped label is a hash of the data dir,
+ * so it can never address another instance — but its pre-flair#693 legacy
+ * fallback CAN: `ai.tpsdev.flair` is a single global label, returned for
+ * ANY data dir whenever that plist exists. On a host that still has one,
+ * `flair snapshot restore --data-dir <scratch>` would resolve the legacy
+ * service and stop whatever install it actually belongs to.
+ *
+ * The plist records the instance it was written for (`ROOTPATH`), so the
+ * check is exact. Refuses ONLY on positive contradiction: a plist with no
+ * ROOTPATH (hand-written, or some other writer's) is no evidence and is
+ * left alone rather than blocking a legitimate stop.
+ *
+ * Never logs plist contents — the plist embeds HDB_ADMIN_PASSWORD. Only the
+ * extracted ROOTPATH path ever reaches a message.
+ */
+function assertLaunchdServiceOwnedBy(
+  dataDir: string,
+  label: string,
+  plistPath: string,
+  action: "stop" | "start",
+): void {
+  let declared: string | null = null;
+  try {
+    const raw = readFileSync(plistPath, "utf-8");
+    const m = raw.match(/<key>ROOTPATH<\/key>\s*<string>([^<]*)<\/string>/);
+    declared = m ? m[1] : null;
+  } catch {
+    return; // unreadable — no evidence, don't block
+  }
+  if (declared === null) return;
+  if (resolve(declared) === resolve(dataDir)) return;
+
+  throw new Error(
+    `refusing to ${action} launchd service ${label}: its plist (${plistPath}) is registered to data directory ` +
+      `${resolve(declared)}, not ${resolve(dataDir)} — that is a different Flair instance. ` +
+      `Re-run with --data-dir ${resolve(declared)} to act on that one, or run ` +
+      `'flair init --data-dir ${resolve(dataDir)}' to register a service for this one.`,
+  );
+}
+
+/**
+ * Refuse a port-based SIGTERM that cannot be attributed to `dataDir`
+ * (flair#902).
+ *
+ * The port fallback below identifies its target by port number and nothing
+ * else, so `--data-dir <scratch>` with a port that scratch instance does not
+ * serve signals whichever instance DOES serve it. That is the whole of this
+ * bug on Linux, where there is no launchd path at all.
+ *
+ * Scoped deliberately to a non-default data dir. For the default install the
+ * port genuinely is that instance's port by every convention in this CLI
+ * (`writeConfig`/`readPortFromConfig`), and the only evidence available here
+ * — `<dataDir>/hdb.pid` vs the listening PIDs — is not something we can
+ * require without risking a false refusal on a working install whose PID file
+ * is missing or whose listener is a worker. So the default path keeps today's
+ * behavior exactly, and the residual gap is stated rather than papered over:
+ * a default-dir port stop is still unattributed. The new refusal can only
+ * fire for a caller that explicitly named another data dir — the case that is
+ * wrong today whenever the port does not match.
+ */
+function assertPortInstanceOwnedBy(port: number, dataDir: string, listeningPids: number[]): void {
+  if (resolve(dataDir) === defaultDataDir()) return;
+  const expected = readHarperPid(dataDir);
+  if (expected !== null && listeningPids.includes(expected)) return;
+
+  const why =
+    expected === null
+      ? `no hdb.pid under that directory, so it does not look like a running instance`
+      : `its recorded PID ${expected} is not the process listening on ${port}`;
+  throw new Error(
+    `refusing to stop the process listening on port ${port}: it cannot be attributed to ${resolve(dataDir)} (${why}). ` +
+      `Stopping by port alone would signal a different Flair instance. ` +
+      `Pass --port with the port ${resolve(dataDir)} actually serves, or omit --data-dir to operate on the default install.`,
+  );
+}
+
+/**
  * Stop the local Flair (Harper) process — launchd `stop` on darwin when a
  * plist is present (falling back on failure), otherwise a manual SIGTERM by
  * port. Split out of the old monolithic `restartFlair` (flair#637) so the
@@ -9779,19 +9871,34 @@ program
  * start without duplicating this logic — `restartFlair` is now just
  * `stopFlairProcess` followed by `startFlairProcess`.
  *
+ * `dataDir` is REQUIRED and names the instance to stop — it is not a
+ * convenience parameter. It used to be resolved internally from
+ * `defaultDataDir()`, which meant `flair snapshot create|restore --data-dir
+ * <elsewhere>` stopped the DEFAULT instance and reported success
+ * (flair#902). A port alone does not identify an instance to launchd; the
+ * data dir does, via `resolveLaunchdLabel`.
+ *
  * Idempotent-ish: stopping an already-stopped instance is a harmless no-op
  * on both paths (launchctl stop on an unloaded/idle service, or an empty
  * `lsof` match).
+ *
+ * Throws when the resolved target provably belongs to a different instance
+ * — see assertLaunchdServiceOwnedBy / assertPortInstanceOwnedBy. Callers
+ * already treat a failed stop as fatal, which is the point: refusing beats
+ * quiescing the wrong install.
  */
-async function stopFlairProcess(port: number): Promise<void> {
+async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
   if (process.platform === "darwin") {
-    const dataDir = defaultDataDir();
     // resolveLaunchdLabel (flair#693) finds whichever label this data dir
     // is currently registered under (new instance-scoped, or a
     // pre-flair#693 legacy install) — stop only needs to operate on
     // whichever exists, no migration.
     const { label, plistPath } = resolveLaunchdLabel(dataDir);
     if (existsSync(plistPath)) {
+      // Outside the try below: an ownership refusal must NOT degrade into
+      // the port-based fallback, which would go on to signal by port the
+      // very instance we just refused to touch.
+      assertLaunchdServiceOwnedBy(dataDir, label, plistPath, "stop");
       try {
         const { execSync } = await import("node:child_process");
         // Ensure the service is loaded (init writes the plist but doesn't load it)
@@ -9812,8 +9919,9 @@ async function stopFlairProcess(port: number): Promise<void> {
 
   // Port-based stop (Linux, or macOS fallback when no launchd plist)
   console.log("Stopping...");
+  const { execSync } = await import("node:child_process");
+  let listening = "";
   try {
-    const { execSync } = await import("node:child_process");
     // -sTCP:LISTEN: match the LISTENING server only — a bare `lsof -ti :port`
     // also matches CLIENT sockets referencing the port, including THIS CLI's
     // own keep-alive connections left by the credential pre-flight's
@@ -9821,32 +9929,50 @@ async function stopFlairProcess(port: number): Promise<void> {
     // path SIGTERM'd its own process mid-restart — "Stopping..." then death
     // (exit 143) before "Starting..." ever ran, leaving the server down
     // (flair#800, deterministic on the Linux/non-launchd default path).
-    const lsof = execSync(`lsof -ti :${port} -sTCP:LISTEN`, { encoding: "utf-8" }).trim();
-    if (lsof) {
-      for (const pid of lsof.split("\n")) {
-        const target = Number(pid.trim());
-        // Belt-and-suspenders: never SIGTERM ourselves, whatever lsof says.
-        if (!Number.isFinite(target) || target === process.pid) continue;
-        try { process.kill(target, "SIGTERM"); } catch {}
-      }
-      // Wait briefly for shutdown
-      await new Promise(r => setTimeout(r, 2000));
-    }
-  } catch { /* not running */ }
+    listening = execSync(`lsof -ti :${port} -sTCP:LISTEN`, { encoding: "utf-8" }).trim();
+  } catch { /* lsof exits non-zero when nothing matches — not running */ }
+  if (!listening) return;
+
+  const targets = listening
+    .split("\n")
+    .map((pid) => Number(pid.trim()))
+    // Belt-and-suspenders: never SIGTERM ourselves, whatever lsof says.
+    .filter((pid) => Number.isFinite(pid) && pid !== process.pid);
+  if (targets.length === 0) return;
+
+  // Deliberately outside any catch: a refusal must reach the caller, not be
+  // swallowed as "not running" and reported as a successful stop.
+  assertPortInstanceOwnedBy(port, dataDir, targets);
+
+  for (const target of targets) {
+    try { process.kill(target, "SIGTERM"); } catch {}
+  }
+  // Wait briefly for shutdown
+  await new Promise((r) => setTimeout(r, 2000));
 }
 
 /**
  * Start the local Flair (Harper) process — launchd `start` on darwin when a
  * plist is present (falling back on failure), otherwise a direct spawn.
  * Counterpart to `stopFlairProcess`; see that function's doc comment.
+ *
+ * `dataDir` is REQUIRED for the same reason it is on `stopFlairProcess`
+ * (flair#902): it, not the port, is what identifies the instance. This
+ * function resolved it internally from `defaultDataDir()` too, so the
+ * snapshot commands' restart leg brought the DEFAULT instance back up after
+ * operating on a `--data-dir` elsewhere.
  */
-async function startFlairProcess(port: number): Promise<void> {
-  const dataDir = defaultDataDir();
+async function startFlairProcess(port: number, dataDir: string): Promise<void> {
   if (process.platform === "darwin") {
     // resolveLaunchdLabel (flair#693) finds whichever label this data dir
     // is currently registered under before we attempt anything.
-    const { plistPath } = resolveLaunchdLabel(dataDir);
+    const { label, plistPath } = resolveLaunchdLabel(dataDir);
     if (existsSync(plistPath)) {
+      // Same ownership gate as the stop path (flair#902), and outside the
+      // try for the same reason: starting the wrong service would then wait
+      // for health on `port`, see the OTHER instance answer, and report
+      // success.
+      assertLaunchdServiceOwnedBy(dataDir, label, plistPath, "start");
       try {
         const { execSync } = await import("node:child_process");
         ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
@@ -9914,15 +10040,22 @@ async function startFlairProcess(port: number): Promise<void> {
  * Throws on failure instead of calling process.exit — callers decide how to
  * react (`flair restart` exits 1; `flair upgrade` treats a failed restart as
  * an upgrade failure and may attempt a rollback).
+ *
+ * Takes `dataDir` explicitly (flair#902) so the instance being bounced is
+ * named at the call site rather than assumed from `defaultDataDir()` two
+ * frames down.
  */
-async function restartFlair(port: number): Promise<void> {
-  await stopFlairProcess(port);
-  await startFlairProcess(port);
+async function restartFlair(port: number, dataDir: string): Promise<void> {
+  await stopFlairProcess(port, dataDir);
+  await startFlairProcess(port, dataDir);
   // Bust the version-handshake cache so the next preAction nudge re-fetches
   // the LIVE version instead of the pre-restart cached one (the false
   // "server is running <old>" users hit for up to 60s post-upgrade+restart).
   // Same (rootPath, serverUrl) key the preAction hook computes (~line 2189)
-  // — must match exactly, or this busts the wrong cache file.
+  // — must match exactly, or this busts the wrong cache file. Deliberately
+  // NOT `dataDir`: the key is whatever the preAction hook computed for THIS
+  // process, and using the restarted instance's dir instead would bust a
+  // different cache file (or none) and leave the stale entry in place.
   try {
     invalidateHandshakeCache(process.env.ROOTPATH ?? defaultDataDir(), `http://127.0.0.1:${port}`);
   } catch { /* best-effort — never fail a restart over cache cleanup */ }
@@ -9934,8 +10067,11 @@ program
   .option("--port <port>", "Harper HTTP port")
   .action(async (opts) => {
     const port = resolveHttpPort(opts);
+    // Explicit, not defaulted inside restartFlair (flair#902): `flair
+    // restart` has no --data-dir, so the default install IS what it means —
+    // and saying so here is what keeps that true when someone adds one.
     try {
-      await restartFlair(port);
+      await restartFlair(port, defaultDataDir());
       console.log("✅ Flair restarted");
     } catch (err: any) {
       console.error(`❌ Flair failed to restart: ${err?.message ?? err}`);
