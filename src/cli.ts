@@ -39,7 +39,8 @@ import {
   type FleetSweepResult,
 } from "./fleet-verify.js";
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
-import { detectClients, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
+import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, type ClientId } from "./install/clients.js";
+import { flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "./lib/mcp-spec.js";
 import {
   resolveAgentKeyPath,
   loadEd25519PrivateKeyFromFile,
@@ -2315,46 +2316,17 @@ async function runSoulWizard(agentId: string): Promise<SoulEntries> {
 
 // ─── Program ─────────────────────────────────────────────────────────────────
 
-// Read version from package.json at the package root
-const __pkgDir = join(import.meta.dirname ?? __dirname, "..");
-const __pkgVersion = (() => {
-  try { return JSON.parse(readFileSync(join(__pkgDir, "package.json"), "utf-8")).version; }
-  catch { return "unknown"; }
-})();
+// This CLI's own version. Resolution lives in src/lib/mcp-spec.ts so that the
+// client-wiring code (src/install/clients.ts) shares ONE definition of both
+// the version and the MCP spec derived from it — see flair#907 for what
+// happened when the pin lived next to a single call site.
+const __pkgVersion = flairCliVersion();
 
-/**
- * The `@tpsdev-ai/flair-mcp` spec written into a client's MCP config.
- *
- * PINNED, deliberately. A bare `npx -y @tpsdev-ai/flair-mcp` re-resolves to
- * whatever is currently published on EVERY agent session — so a single bad
- * publish (stolen credentials, a malicious commit that clears review, or a
- * compromised dependency of the MCP package) reaches every wired user
- * silently, with no lockfile and no review step in the path. The postmark-mcp
- * incident was exactly this shape: a legitimate publish by the legitimate
- * owner, propagating for 16 days before anyone noticed. Worse, a yank does
- * not help — unpinned clients keep resolving latest.
- *
- * Our publish side is already hardened (OIDC staged publish, human 2FA at the
- * release gate), but that defends against credential theft, not against a bad
- * version being published legitimately. The consumer side is where that gap
- * closes, and pinning is what closes it: a wired client keeps running the
- * exact version that was current when it was wired, and moving forward
- * becomes a deliberate act.
- *
- * flair and flair-mcp ship in version lockstep from this monorepo, so the
- * running CLI's own version is the correct pin. `flair init` re-run rewires
- * to the then-current version; see the upgrade-rewire follow-up issue for
- * making `flair upgrade` do the same.
- *
- * Falls back to the unpinned spec only when the version can't be read, which
- * is the same condition under which `--version` reports "unknown" — a broken
- * install, where a working MCP wiring matters more than a precise pin.
- */
-export function mcpServerSpec(version: string = __pkgVersion): string {
-  return version && version !== "unknown"
-    ? `@tpsdev-ai/flair-mcp@${version}`
-    : "@tpsdev-ai/flair-mcp";
-}
+// mcpServerSpec now lives in src/lib/mcp-spec.ts alongside the version
+// resolution it depends on, so every writer shares it. Re-exported here
+// because it is part of this module's public surface (tests and callers
+// import it from src/cli.ts).
+export { mcpServerSpec };
 
 const program = new Command();
 program.name("flair").version(__pkgVersion, "-v, --version");
@@ -3088,14 +3060,35 @@ program
       // skips wiring entirely; `--client <name>` targets one client; the
       // default (no flag) wires every detected client.
       const mcpEnv: { FLAIR_AGENT_ID: string; FLAIR_URL: string } = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
-      const wiringResults: { client: string; message: string }[] = [];
+      // `wired` is the load-bearing field (flair#906): it separates "a config
+      // file was actually written" from "we printed something and moved on".
+      // Both outcomes used to be pushed here indistinguishably as far as the
+      // user was concerned, so `--client all` reported success for a client it
+      // had not wired.
+      const wiringResults: { client: ClientId | string; message: string; wired: boolean }[] = [];
+      // Human-readable labels + the clients `--client all` passed over because
+      // they aren't installed, so the closing summary can account for every
+      // client the user asked for rather than only the ones we tried.
+      const clientLabels = new Map<string, string>();
+      const skippedUndetected: string[] = [];
 
       if (!noMcp && clientOpt !== "none") {
+        // A spec we cannot pin is a security property quietly downgraded, so
+        // say so BEFORE writing it and again in the summary below (flair#907).
+        // stderr: this must survive `flair init | tee`, and it is a warning,
+        // not part of the command's normal output.
+        const pinWarning = unpinnedSpecWarning();
+        if (pinWarning) {
+          console.error("");
+          for (const line of pinWarning.split("\n")) console.error(`   ⚠ ${line}`);
+        }
+
         // Determine which clients to wire.
         let clients = detectClients();
         if (selectedClients.length > 0) {
           clients = clients.filter(c => selectedClients.includes(c.id));
         }
+        for (const c of clients) clientLabels.set(c.id, c.label);
         const detected = clients.filter(c => c.detected);
 
         if (!clientOpt) {
@@ -3111,6 +3104,15 @@ program
           : selectedClients.length > 0
             ? selectedClients
             : clients.filter(c => c.detected).map(c => c.id);
+
+        // `--client all` is a promise about every client, so the ones it
+        // passed over have to be accounted for too — silently omitting them
+        // is how "all" reports success for work it never did (flair#906).
+        if (clientOpt === "all") {
+          for (const c of clients) {
+            if (!c.detected) skippedUndetected.push(c.label);
+          }
+        }
 
         for (const clientId of toWire) {
           if (clientId === "claude-code") {
@@ -3129,29 +3131,43 @@ program
               // provenance.claimed.client = "claude-code".
               env: { ...mcpEnv, FLAIR_CLIENT: "claude-code" },
             };
+            // ~/.claude.json exists once Claude Code has been RUN, not once it
+            // is installed — so gating the write on it skipped every user who
+            // installed Claude Code and Flair in the same sitting (flair#906).
+            // The file is Claude Code's own and creating it with a single
+            // `mcpServers` key is exactly what `claude mcp add` does, so an
+            // absent file is created rather than turned into a printed snippet
+            // the user has to notice and act on.
             try {
-              if (existsSync(claudeJsonPath)) {
-                const claudeJson = JSON.parse(readFileSync(claudeJsonPath, "utf-8"));
-                const existing = claudeJson.mcpServers?.flair;
-                if (existing && existing.env?.FLAIR_URL === httpUrl && existing.env?.FLAIR_AGENT_ID === agentId) {
-                  console.log(`   ✓ Claude Code already wired in ~/.claude.json`);
-                  wiringResults.push({ client: "claude-code", message: "already wired" });
-                } else {
-                  claudeJson.mcpServers = claudeJson.mcpServers || {};
-                  claudeJson.mcpServers.flair = flairMcpConfig;
-                  writeFileSync(claudeJsonPath, JSON.stringify(claudeJson, null, 2));
-                  console.log(`   ✓ Claude Code wired in ~/.claude.json (restart Claude Code to pick it up)`);
-                  wiringResults.push({ client: "claude-code", message: "wired ~/.claude.json" });
-                }
+              const claudeJsonExisted = existsSync(claudeJsonPath);
+              const claudeJson = claudeJsonExisted
+                ? JSON.parse(readFileSync(claudeJsonPath, "utf-8"))
+                : {};
+              const existing = claudeJson.mcpServers?.flair;
+              if (existing && existing.env?.FLAIR_URL === httpUrl && existing.env?.FLAIR_AGENT_ID === agentId) {
+                console.log(`   ✓ Claude Code already wired in ~/.claude.json`);
+                wiringResults.push({ client: "claude-code", message: "already wired", wired: true });
               } else {
-                console.log(`   MCP config (add to ~/.claude.json):`);
-                console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
-                wiringResults.push({ client: "claude-code", message: "snippet printed (no ~/.claude.json)" });
+                claudeJson.mcpServers = claudeJson.mcpServers || {};
+                claudeJson.mcpServers.flair = flairMcpConfig;
+                writeFileSync(claudeJsonPath, JSON.stringify(claudeJson, null, 2));
+                const how = claudeJsonExisted ? "wired in ~/.claude.json" : "wired in ~/.claude.json (created)";
+                console.log(`   ✓ Claude Code ${how} (restart Claude Code to pick it up)`);
+                wiringResults.push({
+                  client: "claude-code",
+                  message: claudeJsonExisted ? "wired ~/.claude.json" : "created and wired ~/.claude.json",
+                  wired: true,
+                });
               }
-            } catch {
+            } catch (err: unknown) {
+              // Only a genuine read/parse/write failure lands here now (bad
+              // permissions, malformed existing JSON) — never merely "the file
+              // does not exist yet".
+              const reason = err instanceof Error ? err.message : String(err);
+              console.log(`   ${render.icons.warn} Claude Code: could not write ~/.claude.json (${reason})`);
               console.log(`   MCP config (add manually to ~/.claude.json):`);
               console.log(`     { "mcpServers": { "flair": ${JSON.stringify(flairMcpConfig)} } }`);
-              wiringResults.push({ client: "claude-code", message: "snippet printed" });
+              wiringResults.push({ client: "claude-code", message: `snippet printed (${reason})`, wired: false });
             }
 
             // ── CLAUDE.md bootstrap line (flair#597) ──────────────────────────
@@ -3188,7 +3204,7 @@ program
               case "cursor": result = wireCursor({ ...mcpEnv, FLAIR_CLIENT: "cursor" }); break;
               default: result = { ok: false, message: `Unknown client: ${clientId}` };
             }
-            wiringResults.push({ client: clientId, message: result.message });
+            wiringResults.push({ client: clientId, message: result.message, wired: result.ok });
             console.log(`   ${result.ok ? "✓" : "•"} ${result.message}`);
           }
         }
@@ -3253,6 +3269,34 @@ program
           const message = err instanceof Error ? err.message : String(err);
           console.log(`   ⚠ MCP smoke test failed: ${message}`);
           console.log("   Use --skip-smoke to bypass.");
+        }
+      }
+
+      // ── MCP wiring summary (flair#906) ───────────────────────────────────
+      // LAST thing init prints, deliberately. Every fact below was already
+      // available mid-run, but a client that was not wired appeared only as a
+      // snippet in the middle of a wall of output, after a success line — so
+      // the user's next action was to open their client and find nothing
+      // there, with no reason to suspect init. A client the user asked for and
+      // did NOT get must still be on screen when the command finishes.
+      if (!noMcp && clientOpt !== "none") {
+        // The pin warning repeats here for the same reason the summary exists:
+        // a warning only in scrollback is a warning the user acts on never.
+        const summaryLines = renderWiringSummary(wiringResults, {
+          labels: clientLabels,
+          skippedUndetected,
+          rewireHint: `flair init --agent ${agentId} --client all`,
+          unpinned: unpinnedSpecWarning() !== null,
+        });
+        for (const line of summaryLines) {
+          const icon =
+            line.level === "ok" ? render.icons.ok :
+            line.level === "error" ? render.icons.error :
+            line.level === "warn" ? render.icons.warn :
+            line.level === "muted" ? render.icons.bullet :
+            null;
+          if (line.level === "heading") console.log(`\n   ${line.text}`);
+          else console.log(`   ${icon} ${line.text}`);
         }
       }
     } else {
@@ -11008,6 +11052,16 @@ program
     } else {
       let claudeCodeAgentId: string | undefined;
       let anyKnownAgentId: string | undefined;
+
+      // `doctor --fix` writes client configs through the same wire functions
+      // init does, so it owes the user the same warning when the spec it would
+      // write cannot be pinned (flair#907).
+      if (autoFix) {
+        const pinWarning = unpinnedSpecWarning();
+        if (pinWarning) {
+          for (const line of pinWarning.split("\n")) console.log(`  ${render.icons.warn} ${line}`);
+        }
+      }
 
       for (const client of detectedClients) {
         const block = readClientMcpBlock(client.id, homedir());

@@ -38,7 +38,9 @@ Flair runs as a local server at `http://127.0.0.1:19926` by default. The MCP ser
 
 Pick whichever you use. The MCP server is the same package; only the config syntax differs.
 
-> **Pin the version.** The snippets below use the bare package name for readability. `flair init` wires clients to a **pinned** spec (`@tpsdev-ai/flair-mcp@<version>`) on purpose: an unpinned reference re-resolves to whatever is currently published on every agent session, so any future publish reaches your machine silently. If you wire by hand, append the version you intend to run — `@tpsdev-ai/flair-mcp@0.28.0` — and bump it deliberately. `flair init` is the easier path and does this for you.
+> **Pin the version.** An unpinned `@tpsdev-ai/flair-mcp` re-resolves to whatever is currently published on *every* agent session, so any future publish reaches your machine silently, with no lockfile and no review step in the path. `flair init` wires clients to a **pinned** spec on purpose, and every MCP-server config snippet below is written the same way: `@tpsdev-ai/flair-mcp@<version>`.
+>
+> Replace `<version>` with the version you intend to run — the one you already have is `flair --version` — and bump it deliberately. Leaving the literal `<version>` in place fails loudly at `npx`, which is the intended failure: better than a config that looks pinned and isn't. `flair init` is the easier path and fills this in for you.
 
 ### Claude Code
 
@@ -47,14 +49,14 @@ The canonical approach is the `claude mcp add` CLI (writes to `~/.claude.json`):
 ```bash
 claude mcp add flair --scope user \
   -e FLAIR_AGENT_ID=my-project \
-  -- npx -y @tpsdev-ai/flair-mcp
+  -- npx -y @tpsdev-ai/flair-mcp@<version>
 ```
 
 Verify:
 
 ```bash
 claude mcp list
-# → flair (stdio, npx -y @tpsdev-ai/flair-mcp)
+# → flair (stdio, npx -y @tpsdev-ai/flair-mcp@<version>)
 ```
 
 Or, if you prefer the project-scoped `.mcp.json` checked into your repo:
@@ -64,7 +66,7 @@ Or, if you prefer the project-scoped `.mcp.json` checked into your repo:
   "mcpServers": {
     "flair": {
       "command": "npx",
-      "args": ["-y", "@tpsdev-ai/flair-mcp"],
+      "args": ["-y", "@tpsdev-ai/flair-mcp@<version>"],
       "env": {
         "FLAIR_AGENT_ID": "my-project"
       }
@@ -116,7 +118,14 @@ Or wire it by hand — add a `SessionStart` hook to `~/.claude/settings.json`:
 }
 ```
 
-Swap `me` for your `FLAIR_AGENT_ID`. The hook reads Claude Code's SessionStart
+Swap `me` for your `FLAIR_AGENT_ID`. Unlike the MCP-server snippets above, this
+one is shown **unpinned**, because that is what `flair hook install` writes and
+what the tooling recognises: `flair hook status` matches the exact unpinned
+command, so a hand-pinned hook reports `wired: false` there (while `flair
+doctor` still sees it). Pinning this line is therefore not yet supported —
+prefer `flair hook install`.
+
+The hook reads Claude Code's SessionStart
 payload on stdin, calls Flair's `bootstrap` (soul + relevant memories +
 predicted context, scoped to your project by the session's working directory),
 and emits it as `hookSpecificOutput.additionalContext` — which Claude Code
@@ -143,7 +152,7 @@ Edit `~/.gemini/settings.json` (create it if absent):
   "mcpServers": {
     "flair": {
       "command": "npx",
-      "args": ["-y", "@tpsdev-ai/flair-mcp"],
+      "args": ["-y", "@tpsdev-ai/flair-mcp@<version>"],
       "env": {
         "FLAIR_AGENT_ID": "my-project"
       }
@@ -165,7 +174,7 @@ Edit `~/.codex/config.toml` (create it if absent):
 ```toml
 [mcp_servers.flair]
 command = "npx"
-args = ["-y", "@tpsdev-ai/flair-mcp"]
+args = ["-y", "@tpsdev-ai/flair-mcp@<version>"]
 
 [mcp_servers.flair.env]
 FLAIR_AGENT_ID = "my-project"
