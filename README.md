@@ -490,6 +490,8 @@ Good for teams with multiple machines or always-on agents.
 
 Deploy Flair on [Harper Fabric](https://www.harperdb.io/) for managed hosting with multi-region replication and failover. Federation runs against Harper Fabric hubs (e.g. `flair.your-org.harperfabric.com`) — pair your local instance to sync memories across nodes.
 
+Full guide: **[docs/deploying-on-fabric.md](docs/deploying-on-fabric.md)**.
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for the full security model, threat analysis, and recommendations.

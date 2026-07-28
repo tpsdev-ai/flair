@@ -81,6 +81,11 @@ flair federation pair https://<fabric-node>:19926/<instance-name> --token-from .
 
 Replace `<fabric-node>`, `<instance-name>`, and `<hub-admin-password>` with your actual values.
 
+Running the hub on Fabric has its own considerations — port derivation against a managed
+`443` endpoint, why the sync driver can only be installed on a machine you control, and
+the observability limits of a node you have no shell on. See
+[`docs/deploying-on-fabric.md`](deploying-on-fabric.md).
+
 ## Sync
 
 Push local changes to the hub, once:
