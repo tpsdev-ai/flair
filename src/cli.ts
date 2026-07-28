@@ -9398,13 +9398,16 @@ snapshotCmd
   .option("--port <port>", "Harper HTTP port (used to quiesce Flair around the snapshot)")
   .action(async (opts) => {
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir();
-    // flair#914: the port of the instance NAMED here, never the per-user
-    // file's — refuses rather than guessing when that directory has no record.
-    const port = resolveHttpPortForDataDir(opts);
+    // Existence first, THEN the port. A directory that isn't there has a more
+    // specific diagnosis than "it doesn't say which port it serves", and the
+    // caller should get the one that names the actual problem (flair#914).
     if (!existsSync(dataDir)) {
       console.error(`Error: data directory does not exist: ${dataDir}`);
       process.exit(1);
     }
+    // flair#914: the port of the instance NAMED here, never the per-user
+    // file's — refuses rather than guessing when that directory has no record.
+    const port = resolveHttpPortForDataDir(opts);
 
     console.log(`Snapshotting ${dataDir}...`);
     console.log("(Flair will be briefly stopped for a point-in-time-consistent copy, then restarted.)");
