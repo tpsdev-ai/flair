@@ -230,26 +230,64 @@ describe("resolveHttpPort", () => {
     expect(result).toBe(7777);
   });
 
-  // The two tests below name a data directory on purpose (flair#914).
+  // The tests below name a data directory on purpose (flair#914).
   // `homedir()` is baked in at module load and cannot be overridden in
   // process, so a bare `resolveHttpPort({})` here resolves the DEVELOPER's
-  // own install — it used to merely READ their ~/.flair/config.yaml, and now
-  // it would also migrate their live data directory as a side effect of
-  // running the unit suite. Naming a throwaway directory keeps the assertion
-  // about the resolver instead of about whoever is running it.
-  function tmpInstanceDir(port: number): string {
+  // own install. Naming a throwaway directory keeps the assertion about the
+  // resolver instead of about whoever is running it.
+  //
+  // The fixture writes HARPER's config, in the nested shape Harper writes it —
+  // that file is the per-instance record (flair#914), and the nesting is why it
+  // is parsed as YAML rather than line-matched.
+  function tmpInstanceDir(port: number, filename = "harper-config.yaml"): string {
     const dir = makeTmpDir();
-    writeFileSync(join(dir, "flair-instance.yaml"), `port: ${port}\n`);
+    writeFileSync(join(dir, filename), `rootPath: ${dir}\nhttp:\n  port: ${port}\n  cors: true\n`);
     return dir;
   }
 
-  test("ignores zero port and falls through to the instance's own config", () => {
+  test("ignores zero port and falls through to Harper's config for the instance", () => {
     delete process.env.FLAIR_URL;
     const dir = tmpInstanceDir(20123);
     try {
-      // Not a valid port, so it falls through — to the instance-local config,
-      // not to a default.
+      // Not a valid port, so it falls through — to Harper's config in the data
+      // directory, not to a default.
       expect(resolveHttpPort({ port: 0, dataDir: dir })).toBe(20123);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("reads Harper's legacy config filename when that is the one present", () => {
+    delete process.env.FLAIR_URL;
+    const dir = tmpInstanceDir(20125, "harperdb-config.yaml");
+    try {
+      expect(resolveHttpPort({ dataDir: dir })).toBe(20125);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a non-default data directory Harper has written no config into", () => {
+    delete process.env.FLAIR_URL;
+    const dir = makeTmpDir();
+    try {
+      // Never a silent default, and never the per-user file — that would be
+      // some OTHER instance's port. The message has to carry the directory and
+      // a remedy, or the operator cannot act on it.
+      expect(() => resolveHttpPort({ dataDir: dir })).toThrow(/cannot determine which port/);
+      expect(() => resolveHttpPort({ dataDir: dir })).toThrow(/--port/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("'create' mode takes the default for a directory that is not an instance yet", () => {
+    delete process.env.FLAIR_URL;
+    const dir = makeTmpDir();
+    try {
+      // `flair init` is establishing the instance rather than looking one up,
+      // so it must not be refused the way an addressing command is.
+      expect(resolveHttpPort({ dataDir: dir }, "create")).toBe(DEFAULT_PORT);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -290,6 +328,27 @@ describe("resolveHttpPort", () => {
       expect(result).toBe(20124);
       expect(result).toBeGreaterThan(0);
       expect(Number.isInteger(result)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Harper persists `http.port` as a bare number, but writes the ops API's port
+  // as `host:port` (opsNetworkPortValue) and accepts that form for either. The
+  // parse has to survive both, and an IPv6 literal, without mistaking the host
+  // for the port.
+  test.each([
+    ["a bare number", 20130, 20130],
+    ["a numeric string", "20131", 20131],
+    ["a host-qualified value", "127.0.0.1:20132", 20132],
+    ["an all-interfaces host-qualified value", "0.0.0.0:20133", 20133],
+    ["an IPv6 literal", "[::1]:20134", 20134],
+  ])("harperPortValue reads %s", (_label, written, expected) => {
+    delete process.env.FLAIR_URL;
+    const dir = makeTmpDir();
+    try {
+      writeFileSync(join(dir, "harper-config.yaml"), `rootPath: ${dir}\nhttp:\n  port: "${written}"\n`);
+      expect(resolveHttpPort({ dataDir: dir })).toBe(expected);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
