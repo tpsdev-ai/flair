@@ -137,12 +137,19 @@ function trackedFiles() {
   return out.split("\0").filter(Boolean);
 }
 
+/**
+ * Decode as UTF-8 unconditionally. There is deliberately NO binary sniff: the
+ * obvious one — "contains a NUL byte" — excluded `src/mcp-client-assertion.ts`,
+ * a real TypeScript file that embeds literal NULs as a cache-key delimiter.
+ * A source file quietly dropped from the scan is precisely the failure this
+ * script exists to prevent. Binary files are harmless to scan: a GIF cannot
+ * accidentally contain the ASCII text of a version declaration. Only the size
+ * cap skips anything, and skips are reported.
+ */
 function readTextOrNull(abs) {
   try {
     if (statSync(abs).size > MAX_SCAN_BYTES) return null;
-    const buf = readFileSync(abs);
-    if (buf.includes(0)) return null; // binary
-    return buf.toString("utf8");
+    return readFileSync(abs).toString("utf8");
   } catch {
     return null;
   }
@@ -222,10 +229,17 @@ function verify(expected) {
 
   const pattern = declarationPattern(expected);
   const hits = [];
+  const skipped = [];
   for (const path of files) {
     if (isExcluded(path)) continue;
     const text = readTextOrNull(join(REPO_ROOT, path));
-    if (text === null) continue;
+    // Binary or oversized. Report rather than skip silently — a file the scan
+    // could not read is not a file the scan cleared. No tracked file hits this
+    // today; if one starts to, it should be visible, not absorbed.
+    if (text === null) {
+      skipped.push(path);
+      continue;
+    }
     if (pattern.test(text)) hits.push(path);
   }
 
@@ -259,6 +273,10 @@ function verify(expected) {
     process.exit(1);
   }
 
+  if (skipped.length > 0) {
+    console.log(`  note: ${skipped.length} unreadable (binary/oversized) file(s) not scanned:`);
+    for (const p of skipped.slice(0, 10)) console.log(`    ${p}`);
+  }
   console.log(
     `✓ Version ${expected} consistent across ${INVENTORY.size} declaration sites; ` +
       `no unknown sites in ${files.length} tracked files.`,
