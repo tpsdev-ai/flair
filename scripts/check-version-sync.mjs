@@ -85,7 +85,8 @@ const SOURCE_VERSION_FILES = [
     // Matches: export const TOOL_VERSION = "X.Y.Z";
     // Illustrative comments use a placeholder deliberately — a real version
     // here would be a declaration site, and discovery below would flag it.
-    pattern: /(\bTOOL_VERSION\s*=\s*")([^"]*)(")/,
+    // Global so occurrences can be counted; see readDeclared.
+    pattern: /(\bTOOL_VERSION\s*=\s*")([^"]*)(")/g,
   },
 ];
 
@@ -110,23 +111,26 @@ const isExcluded = (p) =>
 
 const MAX_SCAN_BYTES = 2 * 1024 * 1024;
 
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /**
- * A version *declaration* carrying `version`: an identifier ending in
- * "version" (case-insensitive, so both `version` and `TOOL_VERSION` match),
- * optionally quoted, then `:` or `=`, then the version. The trailing
- * lookahead stops "0.30.0" from matching inside "0.30.01".
+ * A version *declaration*: an identifier ending in "version" (case-insensitive,
+ * so both `version` and `TOOL_VERSION` match), optionally quoted, then `:` or
+ * `=`, then a semver. Capture group 1 is the declared version.
+ *
+ * This is a fixed literal rather than a pattern built around the version we are
+ * looking for. Interpolating the version would mean escaping it, and would
+ * build a RegExp from a non-literal — which Semgrep blocks, correctly. Matching
+ * every declaration and comparing the captured value with `===` is both safer
+ * and more exact: no escaping, no regex metacharacter surface, and no chance of
+ * "0.30.0" matching inside "0.30.01".
  */
-function declarationPattern(version) {
-  return new RegExp(
-    String.raw`(?:^|\W)['"]?[\w$]*version[\w$]*['"]?\s*[:=]\s*['"]?` +
-      escapeRegExp(version) +
-      String.raw`(?![\d.])`,
-    "i",
-  );
+const VERSION_DECLARATION =
+  /(?:^|\W)['"]?[\w$]*version[\w$]*['"]?\s*[:=]\s*['"]?(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)(?![\d.])/gi;
+
+function declaresVersion(text, expected) {
+  for (const m of text.matchAll(VERSION_DECLARATION)) {
+    if (m[1] === expected) return true;
+  }
+  return false;
 }
 
 function trackedFiles() {
@@ -165,41 +169,42 @@ function readTextOrNull(abs) {
 // --- Modes -------------------------------------------------------------------
 
 /**
- * `--write` rewrites the FIRST match only, so a file carrying two declarations
- * would be half-bumped and the second left stale — invisible to the discovery
- * scan, which only asks whether a file is in the inventory, not whether every
- * declaration in it agrees. Require exactly one.
+ * Both callers require EXACTLY ONE declaration per listed file. A file carrying
+ * two is ambiguous: `readDeclared` would have to pick one to report, and the
+ * discovery scan would not catch a disagreement between them — it only asks
+ * whether a file is in the inventory, not whether every declaration inside it
+ * agrees. Refusing beats guessing.
  */
-function countMatches(src, pattern) {
-  return (src.match(new RegExp(pattern.source, pattern.flags + "g")) ?? []).length;
+function matchesIn(src, pattern) {
+  return [...src.matchAll(pattern)];
 }
 
 function readDeclared(file) {
   const abs = join(REPO_ROOT, file.path);
   const src = readFileSync(abs, "utf8");
-  const n = countMatches(src, file.pattern);
-  if (n === 0) {
+  const m = matchesIn(src, file.pattern);
+  if (m.length === 0) {
     return { ok: false, reason: `no ${file.label} declaration matched in ${file.path}` };
   }
-  if (n > 1) {
+  if (m.length > 1) {
     return {
       ok: false,
-      reason: `${file.path} has ${n} ${file.label} declarations; --write rewrites only the first. Reduce it to one.`,
+      reason: `${file.path} has ${m.length} ${file.label} declarations; expected exactly 1.`,
     };
   }
-  return { ok: true, version: src.match(file.pattern)[2] };
+  return { ok: true, version: m[0][2] };
 }
 
 function write(version) {
   for (const file of SOURCE_VERSION_FILES) {
     const abs = join(REPO_ROOT, file.path);
     const src = readFileSync(abs, "utf8");
-    const n = countMatches(src, file.pattern);
+    const n = matchesIn(src, file.pattern).length;
     if (n !== 1) {
       console.error(
         n === 0
           ? `❌ ${file.path}: no ${file.label} declaration to rewrite. The pattern in scripts/check-version-sync.mjs no longer matches this file.`
-          : `❌ ${file.path}: ${n} ${file.label} declarations, expected exactly 1. Rewriting would leave ${n - 1} stale.`,
+          : `❌ ${file.path}: ${n} ${file.label} declarations, expected exactly 1. Refusing to rewrite an ambiguous file.`,
       );
       process.exit(1);
     }
@@ -234,7 +239,6 @@ function verify(expected) {
     process.exit(1);
   }
 
-  const pattern = declarationPattern(expected);
   const hits = [];
   const skipped = [];
   for (const path of files) {
@@ -247,7 +251,7 @@ function verify(expected) {
       skipped.push(path);
       continue;
     }
-    if (pattern.test(text)) hits.push(path);
+    if (declaresVersion(text, expected)) hits.push(path);
   }
 
   // Positive control. The inventory files themselves declare `expected`, so a
