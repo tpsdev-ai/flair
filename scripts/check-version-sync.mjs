@@ -130,10 +130,17 @@ function declarationPattern(version) {
 }
 
 function trackedFiles() {
-  const out = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "-z"], {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  let out;
+  try {
+    out = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "-z"], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (err) {
+    console.error(`❌ Could not list tracked files (git ls-files failed: ${err.message.trim()}).`);
+    console.error("   The discovery scan cannot run, and must not pass silently.");
+    process.exit(1);
+  }
   return out.split("\0").filter(Boolean);
 }
 
@@ -233,9 +240,9 @@ function verify(expected) {
   for (const path of files) {
     if (isExcluded(path)) continue;
     const text = readTextOrNull(join(REPO_ROOT, path));
-    // Binary or oversized. Report rather than skip silently — a file the scan
-    // could not read is not a file the scan cleared. No tracked file hits this
-    // today; if one starts to, it should be visible, not absorbed.
+    // Over the size cap, or unreadable. Report rather than skip silently — a
+    // file the scan could not read is not a file the scan cleared. No tracked
+    // file hits this today; if one starts to, it should be visible.
     if (text === null) {
       skipped.push(path);
       continue;
