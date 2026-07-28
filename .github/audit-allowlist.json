@@ -1,0 +1,193 @@
+{
+  "$schema": "./audit-allowlist.schema.json",
+  "$documentation": [
+    "Enumerated exceptions for the blocking dependency-audit gate (scripts/audit-gate.mjs,",
+    "run by the `audit` job in .github/workflows/test.yml). Policy narrative lives in",
+    "docs/supply-chain-policy.md section 7.",
+    "",
+    "Every advisory `bun audit` reports must either be FIXED or appear here. There is no",
+    "third option and no global escape hatch: this file replaced a `continue-on-error` +",
+    "`|| echo` pair whose justification ('all in harper transitive deps') was true when it",
+    "was written, carried no expiry, and was still silently passing the build long after it",
+    "had stopped being true.",
+    "",
+    "Adding an entry is a REVIEWED act, not a way to get green. Each one must carry the",
+    "advisory id, what pulls it in, why it cannot be fixed from this repo, a hard expiry",
+    "date, and the concrete condition that retires it. The gate enforces all of that",
+    "mechanically, including a severity-scaled cap on how long an entry may live — you",
+    "cannot park a critical for a year.",
+    "",
+    "When an entry expires the build FAILS and a human re-decides. That is the mechanism",
+    "working. Re-dating an entry without re-reading its reason is how this file rots back",
+    "into the thing it replaced."
+  ],
+  "policy": {
+    "maxLifetimeDaysBySeverity": {
+      "critical": 30,
+      "high": 60,
+      "moderate": 180,
+      "low": 180
+    },
+    "classes": {
+      "no-patch-published": "No fixed version exists on the registry yet. Verified by the gate on every run: if a patched version ships, this entry fails and must be actioned.",
+      "vendor-pinned": "A patched version exists upstream, but the vulnerable copy is resolved inside a vendored dependency whose tree we do not control. Retired by moving the vendor, not by bumping the leaf.",
+      "remediation-available": "A patched version exists AND we could take it. Deliberately deferred to a separate, test-gated dependency PR so a security gate lands independently of a lockfile change. Shortest leash of the three."
+    }
+  },
+  "entries": [
+    {
+      "ghsa": "GHSA-fjxv-7rqg-78g4",
+      "package": "form-data",
+      "severity": "critical",
+      "class": "remediation-available",
+      "introducedBy": "workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> form-data",
+      "reason": "Reached by a first-party workspace package, NOT a harper transitive — the exact case the old blanket warning wrongly claimed did not exist. form-data 4.0.6 fixes it. Held out of this PR only so the gate change stays reviewable on its own and does not carry a lockfile bump; taking the fix is the next action, not a someday.",
+      "added": "2026-07-27",
+      "expires": "2026-08-26",
+      "removeWhen": "The dependency PR raising the resolved form-data to >=4.0.6 merges. Delete this entry in that same PR; the gate fails on a stale entry, so it cannot be left behind."
+    },
+    {
+      "ghsa": "GHSA-hmw2-7cc7-3qxx",
+      "package": "form-data",
+      "severity": "high",
+      "class": "remediation-available",
+      "introducedBy": "workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> form-data",
+      "reason": "Same dependency edge and same fix as GHSA-fjxv-7rqg-78g4; form-data 4.0.6 clears both advisories in one bump.",
+      "added": "2026-07-27",
+      "expires": "2026-08-26",
+      "removeWhen": "The dependency PR raising the resolved form-data to >=4.0.6 merges — the same bump that retires GHSA-fjxv-7rqg-78g4."
+    },
+    {
+      "ghsa": "GHSA-r292-9mhp-454m",
+      "package": "tar",
+      "severity": "moderate",
+      "class": "remediation-available",
+      "introducedBy": "direct dependency, plus @types/tar, workspace @tpsdev-ai/openclaw-flair -> openclaw, and workspace @tpsdev-ai/flair-bench -> node-llama-cpp",
+      "reason": "tar is a DIRECT dependency of this repo pinned at a version inside the vulnerable range; tar 7.5.22 is published and fixes it. Deferred to the dependency PR only because the pin is shared with three other consumers and moving it wants its own test run.",
+      "added": "2026-07-27",
+      "expires": "2026-08-26",
+      "removeWhen": "The dependency PR raising tar to >=7.5.21 across the direct pin and the three transitive consumers merges."
+    },
+    {
+      "ghsa": "GHSA-frvp-7c67-39w9",
+      "package": "@hono/node-server",
+      "severity": "moderate",
+      "class": "remediation-available",
+      "introducedBy": "workspace @tpsdev-ai/flair-mcp -> @modelcontextprotocol/sdk -> @hono/node-server",
+      "reason": "Pulled in through a first-party workspace package, not harper. @hono/node-server 2.0.5 and later fix it; the fix arrives by bumping @modelcontextprotocol/sdk in packages/flair-mcp. Also note the advisory is Windows-specific and flair's supported deployment targets are macOS and Linux, which lowers urgency but does not make the entry unnecessary.",
+      "added": "2026-07-27",
+      "expires": "2026-08-26",
+      "removeWhen": "packages/flair-mcp bumps @modelcontextprotocol/sdk to a release that resolves @hono/node-server >=2.0.5."
+    },
+    {
+      "ghsa": "GHSA-86vw-mfpg-wwv9",
+      "package": "jsonata",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> jsonata",
+      "reason": "harper is pinned to an unreleased v5 build (see docs/supply-chain-policy.md section 1a, keep-current allow-list) and resolves jsonata itself. jsonata 2.2.0 fixes this upstream, but forcing it under harper means a global bun override — bun overrides are flat and cannot be scoped to one dependency edge, so it would silently re-resolve jsonata for every consumer including harper's own internal expression engine. That is a correctness risk taken to fix a DoS in a code path flair does not call.",
+      "added": "2026-07-27",
+      "expires": "2026-09-25",
+      "removeWhen": "harper ships a v5 build resolving jsonata >=2.2.0, or flair stops depending on harper. Re-check at each harper bump."
+    },
+    {
+      "ghsa": "GHSA-83w8-p2f5-377r",
+      "package": "@fastify/static",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> @fastify/static",
+      "reason": "Resolved inside harper's pinned unreleased v5 build. @fastify/static 10.1.2 fixes it upstream, but the resolution belongs to harper's HTTP layer and overriding it globally would change the static-file server harper itself mounts. flair does not serve user-supplied paths through it.",
+      "added": "2026-07-27",
+      "expires": "2026-09-25",
+      "removeWhen": "harper ships a v5 build resolving @fastify/static >=10.1.2, or flair stops depending on harper."
+    },
+    {
+      "ghsa": "GHSA-8pvw-jcv7-9cmj",
+      "package": "@fastify/static",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> @fastify/static",
+      "reason": "Same vendored edge and same upstream fix as GHSA-83w8-p2f5-377r; both clear when harper's pinned build moves to @fastify/static 10.1.2.",
+      "added": "2026-07-27",
+      "expires": "2026-10-25",
+      "removeWhen": "harper ships a v5 build resolving @fastify/static >=10.1.2 — the same move that retires GHSA-83w8-p2f5-377r."
+    },
+    {
+      "ghsa": "GHSA-r5fr-rjxr-66jc",
+      "package": "lodash",
+      "severity": "high",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
+      "reason": "Two independent edges resolve the same vulnerable lodash, one of them inside harper's pinned build. lodash 4.18.1 fixes it, but a bun override is global — it would move harper's copy too, and lodash 4.18 is a minor bump across a package harper uses pervasively. The vulnerable API (_.template with attacker-controlled imports keys) is not reachable from flair's own code.",
+      "added": "2026-07-27",
+      "expires": "2026-09-25",
+      "removeWhen": "harper ships a v5 build resolving lodash >=4.18.1 AND n8n-workflow does the same, or the n8n-nodes-flair workspace package is dropped. Both edges must clear."
+    },
+    {
+      "ghsa": "GHSA-xxjr-mmjv-4gpg",
+      "package": "lodash",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
+      "reason": "Same two vendored edges as GHSA-r5fr-rjxr-66jc; prototype pollution in _.unset/_.omit, neither of which flair calls with attacker-controlled paths.",
+      "added": "2026-07-27",
+      "expires": "2026-10-25",
+      "removeWhen": "Both lodash edges (harper and n8n-workflow) resolve >=4.18.1 — the same move that retires GHSA-r5fr-rjxr-66jc."
+    },
+    {
+      "ghsa": "GHSA-f23m-r3pf-42rh",
+      "package": "lodash",
+      "severity": "moderate",
+      "class": "vendor-pinned",
+      "introducedBy": "harper -> lodash, and workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> lodash",
+      "reason": "Same two vendored edges as GHSA-r5fr-rjxr-66jc; array-path bypass variant of the _.unset/_.omit prototype pollution.",
+      "added": "2026-07-27",
+      "expires": "2026-10-25",
+      "removeWhen": "Both lodash edges (harper and n8n-workflow) resolve >=4.18.1 — the same move that retires GHSA-r5fr-rjxr-66jc."
+    },
+    {
+      "ghsa": "GHSA-jfgx-wxx8-mp94",
+      "package": "@mariozechner/pi-coding-agent",
+      "severity": "high",
+      "class": "no-patch-published",
+      "introducedBy": "workspace @tpsdev-ai/pi-flair -> @mariozechner/pi-coding-agent",
+      "reason": "No fixed release exists: the latest published version is itself inside the vulnerable range, so there is nothing to upgrade to. The advisory describes local privilege escalation via predictable temp paths on SHARED Linux hosts, which is not how pi-flair is deployed. The gate re-checks the registry on every run and will fail this entry the moment a fixed version ships.",
+      "added": "2026-07-27",
+      "expires": "2026-09-25",
+      "removeWhen": "@mariozechner/pi-coding-agent publishes a release outside the vulnerable range, or the pi-flair workspace package is dropped. The gate detects the former automatically."
+    },
+    {
+      "ghsa": "GHSA-r95r-rj6r-c39x",
+      "package": "@mariozechner/pi-coding-agent",
+      "severity": "low",
+      "class": "no-patch-published",
+      "introducedBy": "workspace @tpsdev-ai/pi-flair -> @mariozechner/pi-coding-agent",
+      "reason": "No fixed release exists; latest published is still in range. Same upstream package as GHSA-jfgx-wxx8-mp94 and clears with the same release.",
+      "added": "2026-07-27",
+      "expires": "2026-10-25",
+      "removeWhen": "@mariozechner/pi-coding-agent publishes a release outside the vulnerable range, or the pi-flair workspace package is dropped."
+    },
+    {
+      "ghsa": "GHSA-7v5m-pr3q-6453",
+      "package": "@mariozechner/pi-coding-agent",
+      "severity": "low",
+      "class": "no-patch-published",
+      "introducedBy": "workspace @tpsdev-ai/pi-flair -> @mariozechner/pi-coding-agent",
+      "reason": "No fixed release exists; latest published is still in range. Affects HTML session exports, which flair does not generate. Clears with the same upstream release as the other two pi-coding-agent entries.",
+      "added": "2026-07-27",
+      "expires": "2026-10-25",
+      "removeWhen": "@mariozechner/pi-coding-agent publishes a release outside the vulnerable range, or the pi-flair workspace package is dropped."
+    },
+    {
+      "ghsa": "GHSA-rv73-9c8w-jp4c",
+      "package": "validate.js",
+      "severity": "moderate",
+      "class": "no-patch-published",
+      "introducedBy": "harper -> validate.js",
+      "reason": "No fixed release exists — the latest published validate.js is itself inside the vulnerable range, and the package is effectively unmaintained. It is also resolved inside harper's pinned build, so even a future fix arrives via harper rather than directly. ReDoS in a validator flair does not invoke.",
+      "added": "2026-07-27",
+      "expires": "2026-10-25",
+      "removeWhen": "validate.js publishes a fixed release AND harper picks it up, or flair stops depending on harper. The gate flags the first half automatically."
+    }
+  ]
+}

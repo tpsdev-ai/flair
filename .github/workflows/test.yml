@@ -49,7 +49,15 @@ jobs:
           fi
       - name: "Check for compiled artifacts in resources/"
         run: |
-          JS_FILES=$(find resources -name '*.js' -not -path 'resources/node_modules/*' 2>/dev/null)
+          # The `2>/dev/null` this used to carry meant a missing or unreadable
+          # resources/ made find print nothing, leaving JS_FILES empty and the
+          # check passing vacuously — it could only ever go green. Assert the
+          # directory is there so the check fails when it cannot actually run.
+          if [ ! -d resources ]; then
+            echo "ERROR: resources/ not found — this check cannot run, and must not pass silently"
+            exit 1
+          fi
+          JS_FILES=$(find resources -name '*.js' -not -path 'resources/node_modules/*')
           if [ -n "$JS_FILES" ]; then
             echo "ERROR: compiled .js files found in resources/ — these should not be committed"
             echo "$JS_FILES"
@@ -497,7 +505,22 @@ jobs:
 
           # 1. Stock install + restart: loopback, and doctor's finding is gone.
           assert_ops_bind "^127\.0\.0\.1:${OPS_PORT}\$" "stock init + restart"
-          $FLAIR doctor --port $PORT > /tmp/flair863-doctor.txt 2>&1 || true
+          # `flair doctor` exits non-zero on ANY finding and a tarball-smoke env
+          # legitimately has unrelated ones, so its exit code is deliberately not
+          # the signal here — the ABSENCE of the flair#863 finding is. But the
+          # bare `|| true` this used to carry also swallowed a doctor that
+          # crashed or never ran: an empty report contains no finding either, so
+          # the grep below passed vacuously. Assert doctor actually produced a
+          # report before drawing a conclusion from its contents.
+          set +e
+          $FLAIR doctor --port $PORT > /tmp/flair863-doctor.txt 2>&1
+          DOCTOR_STATUS=$?
+          set -e
+          if [ ! -s /tmp/flair863-doctor.txt ]; then
+            echo "FAIL: flair doctor produced no output (exit ${DOCTOR_STATUS}) — the flair#863"
+            echo "      assertion below would have passed vacuously. Investigate doctor itself."
+            exit 1
+          fi
           if grep -q "Ops API bound to all interfaces" /tmp/flair863-doctor.txt; then
             echo "FAIL: doctor still reports the all-interfaces ops bind after init + restart (flair#863)"
             cat /tmp/flair863-doctor.txt
@@ -958,9 +981,46 @@ jobs:
       - name: sfw bun install (frozen — 5 min guard against sfw hangs, ops-fumh)
         timeout-minutes: 5
         run: sfw bun install --frozen-lockfile
-      - name: Run audit (advisory-only for transitive deps)
-        run: bun audit || echo "::warning::Audit found vulnerabilities — all in harper transitive deps (unreleased v5 build)"
-        continue-on-error: true
+      # BLOCKING. Do not add `continue-on-error`, `|| true` or `|| echo` here.
+      #
+      # This step used to be:
+      #     run: bun audit || echo "::warning::Audit found vulnerabilities — all
+      #          in harper transitive deps (unreleased v5 build)"
+      #     continue-on-error: true
+      #
+      # Two independent mechanisms each guaranteed a pass. `|| echo` already
+      # forced exit 0, so `continue-on-error` was dead config that could never
+      # even fire — the step reported success no matter what `bun audit` found.
+      # The justification was true the day it was written and carried no expiry,
+      # so it outlived its reason: by the time it was removed, "all in harper
+      # transitive deps" was false — a critical advisory was reaching users
+      # through a first-party workspace package and this gate said nothing.
+      #
+      # Same lesson release-publish.yml already recorded when it dropped
+      # continue-on-error from the flair-bench staging step: a step marked
+      # continue-on-error reports `conclusion: success` even when it failed, so
+      # the workflow summary stops being evidence about that step at all.
+      #
+      # Exceptions are now enumerated, justified and DATED in
+      # .github/audit-allowlist.json, and scripts/audit-gate.mjs fails the build
+      # on an unlisted advisory, an expired entry, a stale entry, or an entry
+      # whose "no patch exists" claim has since become false. Policy narrative:
+      # docs/supply-chain-policy.md section 7.
+      #
+      # PROMOTION CRITERION — the standing rule this gate exists to enforce:
+      # any check in this repo that is advisory-only MUST carry, in a comment at
+      # its own definition, (a) what would make it blocking and (b) when that
+      # gets re-evaluated. "Advisory" is a terminating state with a defined
+      # promotion event, never a resting place. This gate has no such comment
+      # because it is not advisory — it blocks. The one degradation it allows is
+      # narrow and documented in scripts/audit-gate.mjs: if the npm registry is
+      # unreachable the upstream-fixability re-check warns instead of failing,
+      # while the enumerated/expiry/staleness checks still gate the build.
+      # Run under bun, not ambient node: this job already pins bun to an exact
+      # version via setup-bun above and has no setup-node step, so bun is the
+      # deterministic choice here. The script runs identically under both.
+      - name: Dependency audit gate (blocking — allowlist in .github/audit-allowlist.json)
+        run: bun scripts/audit-gate.mjs --explain
 
   sast-semgrep:
     name: Semgrep SAST
