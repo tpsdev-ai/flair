@@ -137,6 +137,7 @@ file, which means review. A gate that can be widened silently is not a gate.
 | Field | Privacy rationale |
 |---|---|
 | `recordCount` | A count. Every fraction in this document is relative to it. |
+| `recordsWithoutEmbedding` | Records handed in that carried no vector and were dropped. Non-zero means the denominator above is smaller than the corpus it claims to describe, so it is emitted rather than left implicit — a denominator that shrinks silently is the failure this whole issue is about. |
 | `distinctAgentCount` | A count of writers. No identity. |
 | `recordsPerAgentSorted` | Descending counts with the identities dropped. Order carries no mapping back to an agent. |
 | `distinctEmbeddingModelCount` | A count. `> 1` means mixed spaces — see "Refusals". |

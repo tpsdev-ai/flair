@@ -142,6 +142,14 @@ export interface CorpusProfile {
   };
   scale: {
     recordCount: number;
+    /**
+     * Records handed to the profiler that carried no vector and were dropped.
+     * Non-zero means every fraction in this profile has a smaller denominator
+     * than the corpus it claims to describe — so it is emitted rather than
+     * left implicit. A denominator that shrinks silently is the failure this
+     * whole issue is about.
+     */
+    recordsWithoutEmbedding: number;
     distinctAgentCount: number;
     /** Records per agent, DESCENDING. No agent identity, only the shape. */
     recordsPerAgentSorted: number[];
@@ -412,11 +420,13 @@ export function computeProfile(records: ProfileRecord[], opts: ComputeOptions = 
 
   // A record with no vector cannot participate in any geometric statistic, so
   // including it would silently change the denominator of every fraction below.
-  // Dropped here and reported via scale.recordCount, which is the count that
-  // every other number in this profile is relative to.
+  // Dropped here, and the drop COUNT is emitted (scale.recordsWithoutEmbedding)
+  // rather than left implicit — otherwise a corpus half of which failed to
+  // embed would produce a confident profile of the other half.
   const withVectors = records.filter(
     (r) => r.embedding != null && (r.embedding as ArrayLike<number>).length > 0,
   );
+  const recordsWithoutEmbedding = records.length - withVectors.length;
 
   const n = withVectors.length;
   if (n < 2) throw new Error(`corpus profiler needs at least 2 records with embeddings, got ${n}`);
@@ -770,6 +780,7 @@ export function computeProfile(records: ProfileRecord[], opts: ComputeOptions = 
     },
     scale: {
       recordCount: n,
+      recordsWithoutEmbedding,
       distinctAgentCount: agentCounts.size,
       recordsPerAgentSorted: [...agentCounts.values()].sort((a, b) => b - a),
       distinctEmbeddingModelCount: models.size,

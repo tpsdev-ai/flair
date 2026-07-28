@@ -13,6 +13,7 @@
   },
   "scale": {
     "recordCount": 251,
+    "recordsWithoutEmbedding": 0,
     "distinctAgentCount": 1,
     "recordsPerAgentSorted": [
       251
