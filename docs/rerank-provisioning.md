@@ -1,13 +1,41 @@
 # Reranker model provisioning
 
 Flair's optional cross-encoder rerank stage (`resources/rerank-provider.ts`, gated
-behind `FLAIR_RERANK_ENABLED`) loads its model GGUF **in-process** via the same
-node-llama-cpp engine the embedding engine ships. The GGUF is **not** committed to
-the repo (`*.gguf` is gitignored) — it is provisioned into `models/` manually,
-exactly like the embedding model.
+behind `FLAIR_RERANK_ENABLED`) loads its model GGUF **in-process** via llama.cpp.
+The GGUF is **not** committed to the repo (`*.gguf` is gitignored) — it is
+provisioned into `models/` manually, exactly like the embedding model.
 
-The reranker is **OFF by default**. You only need to provision a GGUF if you are
-turning it on (`FLAIR_RERANK_ENABLED=true`) or running the recall-bench A/B.
+The reranker is **OFF by default**. Turning it on takes **two** provisioning
+steps, both of which a default install deliberately skips:
+
+1. install the `node-llama-cpp` engine (below), and
+2. download a reranker GGUF (below).
+
+## Engine — `node-llama-cpp` is an optional peer dependency
+
+Reranking is the **only** consumer of the `node-llama-cpp` package, it is
+imported lazily, and the feature is off by default — so flair declares it as an
+**optional peer dependency** and a default install does not download it. That
+keeps roughly 700 MB of llama.cpp prebuilds (including CUDA and Vulkan variants
+that install on any Linux x64 host, GPU or not) off every install that never
+reranks.
+
+Install it explicitly when you turn reranking on:
+
+```sh
+npm install node-llama-cpp@3.18.1
+```
+
+The version is pinned exactly because the rerank path depends on version-specific
+context-size semantics (see `resources/rerank-provider.ts`'s file header).
+
+This does **not** affect embeddings. Embeddings run through
+`harper-fabric-embeddings`, which loads the `@node-llama-cpp/<platform>` native
+addon directly and declares those platform packages as its own optional
+dependencies — they still install by default, on every platform, unchanged.
+
+If `node-llama-cpp` is not installed, the provider logs one warning and recall
+falls back to vector order; search keeps working.
 
 ## Models
 
@@ -77,10 +105,10 @@ only so a truncated rerank input isn't a surprise.
 
 ## Why this serving path (not Ollama, not a microservice)
 
-- **In-process node-llama-cpp** is the same engine the embedding engine already
-  ships — no new infra, no network hop, no auth boundary. The reranker GGUF lives
-  next to the embedding GGUF and loads via the same addon-discovery pattern as
-  `embeddings-provider.ts`.
+- **In-process llama.cpp** is the same engine the embedding path already runs on
+  (embeddings reach it through `harper-fabric-embeddings`' native addon; rerank
+  reaches it through the `node-llama-cpp` wrapper) — no new infra, no network hop,
+  no auth boundary. The reranker GGUF lives next to the embedding GGUF.
 - **Ollama is out:** it has no rerank endpoint and silently drops next-token
   logprobs, so it can serve neither the jina rank path nor the Qwen3 generative
   yes/no path. (Verified live against newton's Ollama 0.30.10.)
