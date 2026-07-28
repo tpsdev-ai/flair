@@ -50,13 +50,25 @@ actually running:
   stage the new packages without bouncing the process yet (the old
   opt-in `--restart` flag still parses but is now a no-op — restart is the
   default).
+- **The restart runs through the newly installed CLI** (flair#905), not the
+  process that did the installing. Only version N's own code knows how version
+  N starts — spawn arguments, required environment, config templates and the
+  Harper dependency's own package name are all things a release may change, and
+  the pre-swap process would get every one of them wrong the same silent way.
+  The output names the CLI it handed the restart to. If that CLI can't be found
+  or its version can't be confirmed, the upgrade says so and restarts in-process
+  rather than refusing to start anything.
 - **Post-restart verification** (skip with `--no-verify`) confirms the
   restarted instance answers `/Health`, that an authenticated request
   round-trips, and that the reported running version matches what was just
   installed.
-- **On verification failure**, `flair upgrade` automatically reinstalls the
-  previously-running `@tpsdev-ai/flair` version, restarts again, and
-  re-verifies — then exits nonzero with a clear report of what failed. If the
+- **On a failed restart OR a failed verification**, `flair upgrade`
+  automatically reinstalls the previously-running `@tpsdev-ai/flair` version,
+  restarts again, and re-verifies — then exits nonzero with a clear report of
+  what failed. Until flair#905 the rollback was wired to the *verification* leg
+  only: an upgrade that installed new packages and then failed to start them
+  exited 1 and left the operator on the new version with nothing running, which
+  is the single outcome this transaction exists to prevent. If the
   rollback itself fails verification, it says so loudly and points at the
   concrete pre-upgrade snapshot path (see "Pre-upgrade snapshot" below)
   instead of retrying in a loop — see [Downgrade](#downgrade) for the
@@ -394,6 +406,39 @@ reason as above: the restart is performed by the *old*, already-installed CLI.
   keep-alive sockets trigger the self-kill (validated end-to-end).
 - If you already hit it (upgrade "finished" but the server is down): run
   `flair start` — not `restart` — and you're on the new version. Nothing was lost.
+
+### Known issue — upgrading *from* 0.29.0 stops with a false "Harper binary not found"
+
+0.30.0 renamed its Harper dependency from `@harperfast/harper` to the bare
+`harper` package (flair#870, a real ~104 MB saving — the two names are the same
+engine and no package manager can dedupe across them). `flair upgrade` replaces
+the package tree *while the CLI is executing out of it*, and 0.29.0's restart
+step only ever probes the old name — so once the swap lands, the name it is
+looking for is genuinely gone:
+
+```
+Restarting Flair...
+Stopping...
+Starting...
+❌ restart failed: Harper binary not found. Run 'flair init' first.
+   Flair may be partially down. Check: flair doctor
+```
+
+The error is false twice over. The install is complete and Harper is present
+under its new name; and `flair init` is the wrong remedy — on an initialised
+instance it is not what you want to reach for, and it could not have fixed a
+missing binary anyway.
+
+**Workaround when upgrading from 0.29.0:** run `flair start`. The new version is
+installed and correct; only the old CLI's restart step failed. `flair status`
+should then report 0.30.0 and healthy. Nothing was lost — the upgrade never
+touches `~/.flair/data`.
+
+Forward-only, for the same reason as the two issues above: the code that
+performs the restart is the version you are upgrading *from*. From flair#905
+onward the restart is handed to the newly installed CLI and the Harper package
+name is read from the post-swap `package.json` instead of being compiled in, so
+a future dependency rename cannot reproduce it.
 
 ## Downgrade
 
