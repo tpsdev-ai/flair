@@ -182,7 +182,15 @@ jobs:
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 30, not 20 (#948). This is headroom, NOT the fix — the fix is dropping
+    # `--with-deps` from the Playwright step below, which removed this job's
+    # dependency on the Ubuntu apt mirror. Kept deliberately generous because
+    # the dominant cost here is `Run integration tests` at ~12 min (measured
+    # over four runs on 2026-07-28: 11m39s / 11m46s / 12m08s / 12m19s), which
+    # left only ~6 min of slack against the old ceiling. If total job time
+    # starts creeping toward this number, the integration suite is what to
+    # look at — raising this again would just hide the trend.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -313,8 +321,66 @@ jobs:
         env:
           FLAIR_PORT: "9926"
           FLAIR_ADMIN_PASS: admin123
+      # Cache key must track the resolved Playwright version, because a given
+      # Playwright release pins specific browser builds (1.59.1 → chromium
+      # v1217). Derived from package.json rather than hardcoded, so it cannot
+      # go stale silently on a version bump — same single-source-of-truth
+      # pattern as `Resolve Harper image tag` above (#625).
+      - name: Resolve Playwright version (browser cache key)
+        id: playwright-version
+        run: |
+          VER=$(node -p "require('./package.json').devDependencies['@playwright/test']")
+          case "$VER" in
+            [0-9]*) : ;; # exact pin — safe to key a browser cache on
+            *) echo "::error::@playwright/test is '$VER' in package.json — not an exact version pin, so a browser cache keyed on it could serve builds from a different Playwright"; exit 1 ;;
+          esac
+          echo "Playwright $VER — caching browsers under that key"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      # NO `restore-keys` on purpose. A prefix fallback would let browsers
+      # downloaded for an older Playwright satisfy a newer one, which is
+      # exactly the browser/version mismatch this cache must not create —
+      # Playwright resolves browsers by build number and fails obscurely when
+      # the expected build is absent. Exact key or cold miss, nothing between.
+      - name: Cache Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browsers-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
+      # `--with-deps` REMOVED (#948) — it was the actual cause of the 20-minute
+      # timeout that read as `cancelled` on flair#946, and no browser cache
+      # would have prevented it.
+      #
+      # Measured from that job's own log: every library Chromium needs was
+      # already present on ubuntu-latest — apt reported libnss3, libgbm1,
+      # libcairo2, libpango-1.0-0, libatk*, libx*, libasound2t64, libcups2t64,
+      # xvfb, fonts-liberation and fonts-noto-color-emoji all "already the
+      # newest version". The only 9 packages `--with-deps` actually installed
+      # were 21.1 MB of CJK/Thai/Cyrillic and X11 bitmap FONTS
+      # (fonts-ipafont-gothic, fonts-wqy-zenhei, fonts-unifont, xfonts-*),
+      # which Chromium does not need to launch and which our E2E suite — six
+      # English-language admin pages — never renders a glyph from.
+      #
+      # On a good run that apt fetch took ~1.5s (17.2 MB/s). On the failing run
+      # the Azure Ubuntu mirror degraded to ~45 kB/s and it was still fetching
+      # fonts 7 minutes later when the job timeout killed it, discarding
+      # integration and E2E CLI results that had ALREADY passed. Dropping the
+      # flag removes an unbounded dependency on a mirror we don't control;
+      # the browser download itself (~10s from cdn.playwright.dev) is what the
+      # cache above covers.
+      #
+      # Run unconditionally rather than gating on a cache hit: with the cache
+      # warm this is a fast no-op verification, and a partial or corrupted
+      # cache entry repairs itself instead of failing the E2E step. If a future
+      # runner image ever does drop a Chromium library, Playwright fails here
+      # with an explicit "missing dependencies … install-deps" message in
+      # seconds, which is a better signal than a multi-minute mirror stall.
+      # Cache-effectiveness note: on a cold key this downloads Chrome for
+      # Testing, FFmpeg and the headless shell (~10s from cdn.playwright.dev);
+      # on a warm key it verifies the existing install and downloads nothing.
       - name: Install Playwright browsers
-        run: bunx playwright install --with-deps chromium
+        run: bunx playwright install chromium
       - name: Playwright E2E tests
         run: bunx playwright test
         env:
