@@ -3,8 +3,8 @@
 // Extracted from resources/SemanticSearch.ts's post() (Kern-approved
 // refactor, flair#695). Before this module existed,
 // SemanticSearch.post() was one function entangling auth resolution,
-// rate-limiting, HNSW/BM25 retrieval, post-retrieval filtering, the
-// cross-encoder reranker, AND retrievalCount/lastRetrieved hit-tracking side
+// rate-limiting, HNSW/BM25 retrieval, post-retrieval filtering, AND
+// retrievalCount/lastRetrieved hit-tracking side
 // effects — so the ONLY way for MemoryBootstrap (resources/MemoryBootstrap.ts)
 // to get bounded, HNSW-pushed-down candidates was to duplicate the retrieval
 // logic or trip the side effects (an internal bootstrap call spuriously
@@ -16,7 +16,7 @@
 // the HNSW leg query construction (sort/select/conditions/limit), the BM25 +
 // union-RRF hybrid fusion, the per-record temporal/expiry/supersede filters,
 // and the scope.isAllowed() defense-in-depth re-check. It does NOT own: auth
-// resolution, rate-limiting, the reranker, or the retrievalCount/lastRetrieved
+// resolution, rate-limiting, or the retrievalCount/lastRetrieved
 // hit-tracking side effects — those stay in SemanticSearch.post()'s wrapper
 // (resources/SemanticSearch.ts) so an internal caller (bootstrap) never trips
 // them.
@@ -32,7 +32,8 @@
 // Returns results AFTER all filters, sorted best-first by `_score` — bounded
 // ONLY by the `limit` the caller chose to push down (the core never
 // multiplies `limit` internally; any overfetch policy — SemanticSearch's
-// CANDIDATE_MULTIPLIER, rerank-topN widening — is the CALLER's decision, made
+// CANDIDATE_MULTIPLIER, MemoryBootstrap's K formula — is the CALLER's
+// decision, made
 // before calling in). Never exposes which internal leg (BM25+RRF hybrid vs.
 // legacy HNSW-only vs. keyword-only fallback) produced a given result — the
 // output shape is identical regardless of `hybrid`.
@@ -89,9 +90,9 @@ export interface RetrieveCandidatesParams {
   conditions: any[];
   /** The literal Harper query `limit` for the HNSW/BM25 legs — the exact
    *  candidate-pool depth fetched. The core does NOT multiply this
-   *  internally; SemanticSearch's overfetch policy (CANDIDATE_MULTIPLIER,
-   *  rerank-topN widening) and MemoryBootstrap's K formula are both computed
-   *  by the caller BEFORE calling in. */
+   *  internally; SemanticSearch's overfetch policy (CANDIDATE_MULTIPLIER) and
+   *  MemoryBootstrap's K formula are both computed by the caller BEFORE
+   *  calling in. */
   limit: number;
   /** Field selection override. Defaults to DEFAULT_SELECT (no raw
    *  embedding). */
@@ -135,8 +136,8 @@ export interface RetrieveCandidatesParams {
    * exactly the kind of unbounded scan this PR removes bootstrap's need for.
    * HNSW-leg-only for bootstrap is also the K&S-ratified default: BM25 for a
    * one-shot session-load has a different (likely worse) cost profile than
-   * SemanticSearch's per-query BM25, and the reranker is a generative call
-   * per candidate — both are explicit opt-in follow-ons, not this PR.
+   * SemanticSearch's per-query BM25 — turning it on is an explicit opt-in
+   * follow-on, not this PR.
    */
   hybrid: boolean;
   /** Request context, for withDetachedTxn — both SemanticSearch and

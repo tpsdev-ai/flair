@@ -11,6 +11,10 @@ import { classifyDelta, MRR_RESOLUTION_RR_POINTS } from "../bench/recall-harness
 // smaller than one query. The first real rerank measurement landed exactly
 // there (ΔMRR = +0.003 at ±0.000 SE), and calling that a win would have been
 // the same species of error as reporting a config you never ran.
+//
+// The reranker itself was removed on that evidence (flair#893). The numbers
+// below are kept verbatim as the canonical case this rule has to get right —
+// they are a real measurement from a real instrument, not a hypothetical.
 
 const V2_QUERIES = 126;
 

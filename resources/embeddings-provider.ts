@@ -165,7 +165,7 @@ const EMBEDDING_PREFIXES_ENABLED = true; // Phase 2 prefix flip ON — re-baseli
  * embedding call, so this lets it override the ONE thing that matters
  * (whether `models.embed` receives `inputType`, and whether `getModelId()`
  * stamps the suffix) via the env var it already forwards to `startHarper()`
- * (the same mechanism `FLAIR_HYBRID_RETRIEVAL`/`FLAIR_RERANK_ENABLED` use).
+ * (the same mechanism `FLAIR_HYBRID_RETRIEVAL` uses).
  *
  * Bidirectional, not two separate force-on/force-off hatches: THE GATE has
  * flipped direction once already (off→on, this PR) and may again in the
@@ -254,12 +254,15 @@ async function getModelsApi(): Promise<HarperModelsApi> {
 /**
  * Resolve the directory the embeddings model lives in / downloads into.
  *
- * Implementation moved to `resources/models-dir.ts` (flair#815) so the
- * reranker can share the exact same resolution without importing this module
- * (several unit-isolated tests `mock.module()` this file wholesale — see
- * models-dir.ts's header). Re-exported here so existing consumers keep their
- * import site: `resources/embeddings-boot.ts` (flair#694), which builds the
- * `modelsDir` it passes to harper-fabric-embeddings' `register()`, and
+ * Implementation lives in `resources/models-dir.ts` (extracted in flair#815)
+ * so any model consumer can share the exact same resolution without importing
+ * this module — several unit-isolated tests `mock.module()` this file
+ * wholesale, and an incomplete stub then breaks every file that imports it.
+ * See models-dir.ts's header for why that hazard makes the tiny standalone
+ * module worth keeping even now that embeddings are its only consumer.
+ * Re-exported here so existing consumers keep their import site:
+ * `resources/embeddings-boot.ts` (flair#694), which builds the `modelsDir` it
+ * passes to harper-fabric-embeddings' `register()`, and
  * test/unit/embeddings-models-dir.test.ts, which pins the resolution order.
  */
 export { resolveModelsDir } from "./models-dir.js";

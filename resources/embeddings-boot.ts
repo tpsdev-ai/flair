@@ -100,19 +100,17 @@ const MODEL_NAME = "nomic-embed-text";
  * table for the exact contract this PR bumps to).
  *
  * "mean" is nomic-embed-text-v1.5's actual pooling type — NOT assumed from
- * the model's reputation, directly confirmed against the shipped GGUF:
- * `node_modules/.bin/node-llama-cpp inspect gguf
- * ~/.flair/data/models/nomic-embed-text-v1.5.Q4_K_M.gguf` reports
- * `"nomic-bert": { pooling_type: 1 }`, and llama.cpp's
+ * the model's reputation, directly confirmed against the shipped GGUF by
+ * reading its metadata: `"nomic-bert": { pooling_type: 1 }`, and llama.cpp's
  * `enum llama_pooling_type` maps 1 -> `LLAMA_POOLING_TYPE_MEAN` (0 = none,
- * 1 = mean, 2 = cls, 3 = last, 4 = rank). nomic-embed-text is a
- * NomicBertModel architecture, not Qwen3 (last-token) — flair registers no
- * Qwen3-class embedding model today (the Qwen3-Reranker-0.6B in
- * resources/rerank-provider.ts is a SEPARATE code path that calls
- * node-llama-cpp directly for generative yes/no scoring, never goes through
- * HFE's register()/init(), and has no embedding-pooling context at all — see
- * that file's header). If a Qwen3-class (last-token-pooling) embedding model
- * is ever registered here, it must declare `pooling: "last"`, not "mean".
+ * 1 = mean, 2 = cls, 3 = last, 4 = rank). (That reading was originally taken
+ * with `node-llama-cpp inspect gguf`, which flair no longer depends on —
+ * flair#893. Any GGUF inspector reports the same metadata field; install the
+ * CLI ad hoc if the check needs repeating.) nomic-embed-text is a
+ * NomicBertModel architecture, not Qwen3 (last-token), and flair registers no
+ * Qwen3-class embedding model today. If a Qwen3-class (last-token-pooling)
+ * embedding model is ever registered here, it must declare `pooling: "last"`,
+ * not "mean".
  *
  * Applies to the bench-only `modelPath` override too (`benchModelPathOverride()`
  * below): `FLAIR_RECALL_HARNESS_MODEL_PATH` lets an operator point this

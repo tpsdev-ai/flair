@@ -17,7 +17,7 @@ import {
 // The bounded HNSW candidate-pool retrieval for the task-relevant/teammate/
 // collision surfaces (flair-bootstrap-scale-fix) — the SAME pure core
 // SemanticSearch.ts's post() wraps, called bare here so an internal
-// bootstrap call never trips SemanticSearch's rate-limit/reranker/
+// bootstrap call never trips SemanticSearch's rate-limit or
 // retrievalCount hit-tracking side effects (see resources/
 // semantic-retrieval-core.ts's module doc for the full boundary).
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
@@ -648,12 +648,11 @@ export class BootstrapMemories extends Resource {
           queryEmbedding,
           conditions: [scope.condition],
           limit: candidatePoolK,
-          // HNSW-leg pushdown ONLY (K&S verdict): no BM25 fusion, no
-          // reranker for bootstrap — a different cost profile (BM25 over the
-          // org corpus for a one-shot session-load could be MORE expensive
-          // than HNSW-only unless cached across sessions; the reranker is a
-          // generative call per candidate). Both are explicit opt-in
-          // follow-ons, gated on their own harness runs.
+          // HNSW-leg pushdown ONLY (K&S verdict): no BM25 fusion for
+          // bootstrap — a different cost profile, since BM25 over the org
+          // corpus for a one-shot session-load could be MORE expensive than
+          // HNSW-only unless cached across sessions. Turning it on is an
+          // explicit opt-in follow-on, gated on its own harness run.
           hybrid: false,
           // Per-set (this K-bounded pool only, never cross-applied to the
           // permanent/recent/predicted sets above) — see this function's
@@ -709,7 +708,7 @@ export class BootstrapMemories extends Resource {
         // `candidates` are already `_score`-sorted best-first, so filtering
         // preserves that order). `retrieveCandidates()`'s cosine similarity
         // replaces the raw JS dot product as the ranking signal (HNSW-only,
-        // no BM25/rerank) — the K&S-ratified, closest-to-a-wash choice; the
+        // no BM25) — the K&S-ratified, closest-to-a-wash choice; the
         // recall harness gates any regression from this ranking-signal
         // change (magnitude-sensitive dot product → normalized cosine).
         const scored = candidates

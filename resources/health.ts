@@ -3,7 +3,6 @@ import { promises as fsp, existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getRerankStatus, rerankWarnings } from "./rerank-provider.js";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { getMigrationStatusSnapshot } from "./migrations/status.js";
 import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
@@ -610,15 +609,6 @@ export class HealthDetail extends Resource {
         };
       }
     } catch { stats.bridges = null; }
-
-    // ── Reranker ──
-    // Cross-encoder rerank stage. Reports flag/model/mode + live counters so we
-    // can see if it's silently degrading (fallbackCount climbing) in prod.
-    try {
-      const rr = getRerankStatus();
-      stats.rerank = rr;
-      warnings.push(...rerankWarnings(rr));
-    } catch { stats.rerank = null; }
 
     // ── Warnings ──
     stats.warnings = warnings;
