@@ -436,18 +436,66 @@ server.http(async (request: any, nextLayer: any) => {
       }
     }
 
-    // Soul PUT: only owner or admin
-    if (url.pathname.startsWith("/Soul") && (method === "PUT" || method === "POST")) {
+    // Soul mutations: only the owner or an admin may write a soul entry.
+    //
+    // This guard had two independent holes, either of which alone let one agent
+    // rewrite another's identity data:
+    //
+    //   1. THE VERB LIST enumerated PUT and POST only. Its three siblings above
+    //      (OrgEvent, WorkspaceState, Memory) all include PATCH, and Memory
+    //      includes DELETE; this one did neither. Harper routes PATCH to a
+    //      resource method that carries no ownership check of its own
+    //      (Soul.ts's enforceWriteAuth covers post()/put()), and DELETE reached
+    //      the table with no per-record check at all. Both were live.
+    //
+    //   2. IT COMPARED THE BODY, not the target. `body.agentId` is the owner
+    //      the CALLER claims, and the check only fired when that field was
+    //      present and mismatched — so a body omitting it, which a partial
+    //      write naturally does, was compared against nothing and passed
+    //      whatever record the URL pointed at. The resource-level check behind
+    //      it is "validate-truthy" attribution, which by design also passes an
+    //      ABSENT owner field, so nothing downstream caught it either. (A PUT
+    //      happened to fail anyway, but on `agentId: String!` schema
+    //      validation — a 400 for the wrong reason, not an authorization
+    //      decision, and not a defence to rely on.)
+    //
+    // Closing one hole leaves the other reachable through the remaining verbs,
+    // so both are closed here: every mutating verb is covered, and ownership is
+    // resolved from the STORED RECORD named by the path. That is the same shape
+    // as the Memory ownership guard below, which is the resource in this file
+    // that already had it right — worth copying rather than reinventing.
+    //
+    // The path test stays `startsWith("/Soul")` so sibling routes keep the
+    // body check they already had; the record lookup is scoped to the real
+    // `/Soul/<id>` collection so it never resolves an unrelated id.
+    if (url.pathname.startsWith("/Soul") &&
+        (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE")) {
       if (!request.tpsAgentIsAdmin) {
-        let bodyAgentId: string | null = null;
-        try {
-          const clone = request.clone();
-          const body = await clone.json();
-          bodyAgentId = body?.agentId ?? null;
-        } catch {}
-        if (bodyAgentId && bodyAgentId !== agentId) {
-          return new Response(JSON.stringify({ error: "forbidden: non-admin cannot modify another agent's soul" }), { status: 403 });
+        // (a) A PRESENT, mismatched body agentId is a forged attribution.
+        if (method !== "DELETE") {
+          let bodyAgentId: string | null = null;
+          try {
+            const clone = request.clone();
+            const body = await clone.json();
+            bodyAgentId = body?.agentId ?? null;
+          } catch {}
+          if (bodyAgentId && bodyAgentId !== agentId) {
+            return new Response(JSON.stringify({ error: "forbidden: non-admin cannot modify another agent's soul" }), { status: 403 });
+          }
         }
+
+        // (b) The owner of the record actually being written. Catches every
+        // body that simply leaves agentId out.
+        try {
+          const pathParts = url.pathname.split("/").filter(Boolean);
+          const soulId = pathParts[0] === "Soul" && pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
+          if (soulId) {
+            const record = await (databases as any).flair.Soul.get(soulId);
+            if (record && record.agentId && record.agentId !== agentId) {
+              return new Response(JSON.stringify({ error: "forbidden: non-admin cannot modify another agent's soul" }), { status: 403 });
+            }
+          }
+        } catch {}
       }
     }
 
