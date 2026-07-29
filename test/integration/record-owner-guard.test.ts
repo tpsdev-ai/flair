@@ -204,6 +204,36 @@ describe("shared record-ownership guard", () => {
     }, 30_000);
   });
 
+  // Two flows a blunter rule would have broken, called out explicitly because
+  // they are the ones most likely to be quietly lost in a refactor: a heartbeat
+  // is a collection POST that repeats forever, and a grant is the one place a
+  // record legitimately names an agent OTHER than its owner.
+  describe("flows a blunter ownership rule would have broken", () => {
+    test("Presence: an agent's own heartbeat still succeeds", async () => {
+      const path = "/Presence";
+      const res = await fetch(`${harper.httpURL}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "POST", path) },
+        body: JSON.stringify({ agentId: owner.id, activity: "reviewing", currentTask: "heartbeat" }),
+      });
+      expect(res.status, `heartbeat returned ${res.status}: ${await res.text()}`).toBeLessThan(400);
+    }, 30_000);
+
+    test("MemoryGrant: an owner can still create a grant naming ANOTHER agent as grantee", async () => {
+      const id = `rog-grant-new-${randomUUID().slice(0, 8)}`;
+      const path = `/MemoryGrant/${id}`;
+      const res = await fetch(`${harper.httpURL}${path}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "PUT", path) },
+        // granteeId is deliberately someone else — that is what a grant IS.
+        body: JSON.stringify({ id, ownerId: owner.id, granteeId: other.id, scope: "all", createdAt: NOW }),
+      });
+      expect(res.status, `cross-agent grant returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
+      const rec = await rawRec(harper, "MemoryGrant", id, ["id", "ownerId", "granteeId"]);
+      expect(rec?.granteeId, "the grant did not persist its grantee").toBe(other.id);
+    }, 30_000);
+  });
+
   describe("a ledger whose rule is stricter than ownership", () => {
     // MemoryUsage is append-only: even the OWNER may not rewrite a row. The
     // shared guard permits an owner's write, so this resource has to enforce

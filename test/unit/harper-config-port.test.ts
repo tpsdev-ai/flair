@@ -422,6 +422,123 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
     expect(existsSync(join(defaultDataDir, "DEFAULT-INSTANCE-MARKER"))).toBe(true);
   }, 60_000);
 
+  // ─── 4b. flair#928 — a BARE init must not renumber an existing instance ──
+  //
+  // `init`'s `--port` carried a commander default of DEFAULT_PORT. Commander
+  // cannot distinguish "the user passed the default value" from "the user
+  // passed nothing", so `opts.port` was ALWAYS set and resolution returned on
+  // the flag rung — a bare `flair init` restated DEFAULT_PORT and moved an
+  // instance that was serving a custom one.
+  //
+  // It was the only one of ~50 `--port` declarations in the CLI with a default,
+  // and it was on the one command where a default is destructive rather than
+  // convenient: `init` is `flair doctor`'s standing remedy and is recommended
+  // in ten places, so the command handed to an operator whose install is
+  // already wrong was the one that quietly renumbered it.
+  //
+  // These run with `--skip-start`, so no Harper is spawned and Harper's own
+  // config is the fixture's. That is the right seam: the defect is in
+  // RESOLUTION, and what a real init does with the resolved number (force-set
+  // `http.port` via HARPER_SET_CONFIG, then persist the per-user coordinates)
+  // follows from it.
+
+  /**
+   * The port an existing instance is already serving. Distinct from BOTH
+   * DEFAULT_PORT and LEGACY_PER_USER_PORT on purpose: each of the three
+   * possible answers here — preserve, default, or read the wrong file — is a
+   * different number, so a single assertion says which one the code gave.
+   */
+  const CUSTOM_PORT = 20771;
+
+  test("a bare init does not renumber an existing custom-port default install", async () => {
+    // The install already serves a custom port, recorded where Harper records
+    // it and where the per-user file records it. Both agree; neither says
+    // DEFAULT_PORT.
+    writeLegacyPerUserConfig(CUSTOM_PORT);
+    writeHarperConfig(defaultDataDir, { httpPort: CUSTOM_PORT });
+    const harperBefore = readFileSync(join(defaultDataDir, "harper-config.yaml"), "utf-8");
+
+    // No --port. This is `flair doctor`'s standing remedy, typed verbatim.
+    const { stdout, exitCode } = await runCli(["init", "--skip-start", "--no-mcp"]);
+    expect(exitCode).toBe(0);
+
+    // The instance still serves the port it served. The assertion is on
+    // DEFAULT_PORT's ABSENCE as much as the custom port's presence: a renumber
+    // writes a specific wrong number, and naming it is what makes this fail
+    // loudly if the default ever comes back.
+    expect(perUserConfig()).toContain(`port: ${CUSTOM_PORT}`);
+    expect(perUserConfig()).not.toContain(String(DEFAULT_PORT));
+    // Harper's own record — the authority — was not rewritten.
+    expect(readFileSync(join(defaultDataDir, "harper-config.yaml"), "utf-8")).toBe(harperBefore);
+    // And what the operator is TOLD matches what is on disk. A correct file
+    // under a summary announcing DEFAULT_PORT would still send them to the
+    // wrong URL.
+    expect(stdout).toContain(`127.0.0.1:${CUSTOM_PORT}`);
+    expect(stdout).not.toContain(`127.0.0.1:${DEFAULT_PORT}`);
+
+    expect(existsSync(join(defaultDataDir, "DEFAULT-INSTANCE-MARKER"))).toBe(true);
+    expect(flairOwnedPortFiles(defaultDataDir)).toEqual([]);
+  }, 60_000);
+
+  test("a bare init does not renumber an existing custom-port NAMED instance", async () => {
+    // Same defect through `--data-dir`, which is the addressable form. The
+    // per-user file carries a different number again, so an answer of
+    // LEGACY_PER_USER_PORT would also be wrong and is distinguishable from
+    // both the right answer and the defaulted one.
+    writeLegacyPerUserConfig();
+    const before = perUserConfig();
+    const instance = newScratchDataDir();
+    writeHarperConfig(instance, { httpPort: CUSTOM_PORT });
+    const harperBefore = readFileSync(join(resolve(instance), "harper-config.yaml"), "utf-8");
+
+    const { stdout, exitCode } = await runCli(["init", "--skip-start", "--no-mcp", "--data-dir", instance]);
+    expect(exitCode).toBe(0);
+
+    expect(stdout).toContain(`127.0.0.1:${CUSTOM_PORT}`);
+    expect(stdout).not.toContain(`127.0.0.1:${DEFAULT_PORT}`);
+    expect(stdout).not.toContain(`127.0.0.1:${LEGACY_PER_USER_PORT}`);
+    expect(readFileSync(join(resolve(instance), "harper-config.yaml"), "utf-8")).toBe(harperBefore);
+    // flair#914 still holds: a named init leaves the per-user file alone.
+    expect(perUserConfig()).toBe(before);
+  }, 60_000);
+
+  test("an explicit --port still wins over the recorded port", async () => {
+    // The other half of the fix. Removing the default must not make `--port`
+    // advisory — an operator MOVING an instance deliberately is exactly what
+    // the flag is for, and a fix that only ever preserved would be as wrong as
+    // one that only ever defaulted.
+    writeLegacyPerUserConfig(CUSTOM_PORT);
+    writeHarperConfig(defaultDataDir, { httpPort: CUSTOM_PORT });
+
+    const { stdout, exitCode } = await runCli(["init", "--skip-start", "--no-mcp", "--port", "20993"]);
+    expect(exitCode).toBe(0);
+    expect(perUserConfig()).toContain("port: 20993");
+    expect(stdout).toContain("127.0.0.1:20993");
+  }, 60_000);
+
+  test("a bare init on a directory no instance has ever used still takes DEFAULT_PORT", async () => {
+    // What the commander default was actually for. A brand-new install has no
+    // port to preserve, and the "create" rung supplies one — so removing the
+    // default did not turn a first-run `flair init` into a refusal.
+    const fresh = newScratchDataDir();
+    rmSync(resolve(fresh), { recursive: true, force: true });
+
+    const { stdout, exitCode } = await runCli(["init", "--skip-start", "--no-mcp", "--data-dir", fresh]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain(`127.0.0.1:${DEFAULT_PORT}`);
+  }, 60_000);
+
+  test("`--port` carries no commander default", async () => {
+    // The mechanism, pinned directly rather than only through its consequence:
+    // a default printed in `init --help` is a default commander is substituting
+    // for absence, which is the defect. Help text is the one place the
+    // declaration is observable without running an init.
+    const { stdout } = await runCli(["init", "--help"]);
+    const portLine = stdout.split("\n").find((l) => l.trimStart().startsWith("--port"));
+    expect(portLine).toBeDefined();
+    expect(portLine).not.toContain(`(default: "${DEFAULT_PORT}")`);
+  }, 30_000);
+
   // ─── 5. flair#910's guard, on a port that now comes from Harper ─────────
 
   test("the flair#910 attribution guard passes when Harper's recorded port is the one this instance serves", async () => {
