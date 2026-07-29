@@ -629,15 +629,14 @@ function readOpsPortFromConfig(path: string = configPath()): number | null {
  *     a clean install has always done, instead of the refusal that would make
  *     `flair init --data-dir <new>` impossible.
  *
- * Note that `init`'s own `--port` option carries a commander default of
- * DEFAULT_PORT, so in practice `opts.port` is always set there and this
- * function returns on the first rung — including when re-initialising an
- * instance that already serves a different port, which is silently renumbered
- * to DEFAULT_PORT. That is pre-existing (it is equally true of the default
- * install on a custom port, where re-running init is `flair doctor`'s standing
- * remedy) and is tracked separately; the "create" rung is what this function
- * would answer if that default were removed, and is what keeps the mode
- * distinction honest rather than hypothetical.
+ * The "create" rung is load-bearing rather than hypothetical (flair#928).
+ * `init`'s `--port` used to carry a commander default of DEFAULT_PORT, so
+ * `opts.port` was ALWAYS set there and this function returned on the first rung
+ * — including when re-initialising an instance already serving a different
+ * port, which was silently renumbered to DEFAULT_PORT. Commander cannot tell
+ * "the user passed the default" from "the user passed nothing", so the default
+ * was the bug. It is gone; a bare `init` now falls through to the ladder, and
+ * only a directory no instance has ever been served from reaches DEFAULT_PORT.
  *
  * Nothing is copied, migrated or written here. Harper's config already IS the
  * per-instance record, so there is no second file to keep in step — which is
@@ -2792,7 +2791,12 @@ program
   .description("One-command Flair setup — bootstrap the instance, register an agent, and wire MCP clients")
   .option("--agent-id <id>", "Agent ID to register (omit to bootstrap instance without agent)")
   .option("--agent <id>", "Alias for --agent-id")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  // No commander default (flair#928). A default here is indistinguishable from
+  // the user typing it, so a BARE `flair init` used to state DEFAULT_PORT and
+  // renumber an instance already serving a custom one. Absent means absent, and
+  // resolveHttpPort's "create" ladder supplies DEFAULT_PORT for a genuinely new
+  // instance — which is the only case that ever wanted one.
+  .option("--port <port>", "Harper HTTP port (default: this instance's current port, or 19926 for a new one)")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--ops-bind <addr>", "Harper ops API bind address (env: FLAIR_OPS_BIND; default: 127.0.0.1 loopback-only for single-host — pass e.g. 0.0.0.0 for multi-host/Fabric remote admin)")
   .option("--admin-pass <pass>", "Admin password (generated if omitted)")
@@ -3006,9 +3010,14 @@ program
     // directory with no recorded port is a new instance taking the default,
     // not the hard error every other caller gets — otherwise `flair init
     // --data-dir <new>` could never succeed. `dataDir` is resolved first so
-    // this is never asked before the instance is known. (`--port` carries a
-    // commander default, so this usually returns on the flag rung; see
-    // resolveHttpPort's doc comment.)
+    // this is never asked before the instance is known.
+    //
+    // flair#928: `--port` deliberately carries NO commander default, so a bare
+    // `init` reaches the ladder below instead of restating DEFAULT_PORT and
+    // renumbering an instance that already serves a custom port. `init` is
+    // `flair doctor`'s standing remedy and is recommended in ten places, so the
+    // command handed to an operator whose install is already wrong must not be
+    // the one that moves their port.
     const httpPort = resolveHttpPort(opts, "create");
     // The already-resolved port is handed to the ops resolver rather than
     // letting it re-resolve — its last rung is `resolveHttpPort(opts) - 1`,
