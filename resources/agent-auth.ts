@@ -250,9 +250,76 @@ export async function allowAdmin(context: any): Promise<boolean> {
   return a.kind === "internal" || (a.kind === "agent" && a.isAdmin);
 }
 
+/**
+ * flair#936 — the `internal` verdict is TRUSTED and UNFILTERED, and it is also
+ * what a caller gets for supplying no context at all. Nothing distinguishes
+ * "I am flair's own maintenance code" from "I am an application developer who
+ * did not know a context was required": both spell it `new Memory()`, both
+ * succeed, and both return plausible data. It surfaces months later as memories
+ * that were never scoped.
+ *
+ * This does not change the verdict — every authorization outcome is byte-
+ * identical — it ends the SILENCE. A deliberate elevated call says so with
+ * `internalContext()` (resources/in-process.ts), whose `__flairInternal` marker
+ * is read here and nowhere else; anything else that lands on `internal` gets one
+ * warning per process, with the stack, so the condition is observable where it
+ * was previously invisible.
+ *
+ * MEASURED, and the reason this is worth having: flair itself has NO in-process
+ * caller that relies on the omission — every maintenance, migration, federation
+ * and boot path goes through the raw `databases.flair.*` table accessor, which
+ * bypasses this resolver entirely rather than defaulting through it. So a
+ * warning from this line is, in practice, always either an embedding
+ * application that forgot a context or a flair call site that should be naming
+ * its intent. Neither is noise.
+ *
+ * The marker is read off `context`, NOT off `c`: `c` is rebound to
+ * `context.request` on the line below, and internalContext() carries the marker
+ * on the outer object.
+ */
+let warnedInternalByOmission = false;
+
+/**
+ * Was this elevated call DELIBERATE — i.e. did the caller name the authority
+ * with `internalContext()` rather than land on it by leaving a context off?
+ *
+ * Exported because it is the whole decision, and a decision worth testing is
+ * worth testing directly: the warning itself is latched once per process, which
+ * makes any test of the side effect order-dependent (bun shares one module
+ * registry across the whole run, so whichever file resolves a context-less call
+ * first consumes the latch and every later assertion silently passes). Pinning
+ * the predicate instead is deterministic.
+ *
+ * Grants nothing and is never consulted for an authorization decision — the
+ * verdict is identical either way.
+ */
+export function isDeliberateInternalCall(context: any): boolean {
+  return context?.__flairInternal === true;
+}
+
+/** The advisory text, exported so its content is pinned without tripping the latch. */
+export const INTERNAL_BY_OMISSION_WARNING =
+  "[flair-auth] a resource was invoked with NO caller context and resolved to the trusted " +
+  "`internal` verdict: reads are UNFILTERED across every agent, writes are unattributed, and " +
+  "the admin-only gate passes. If this is your application's code, pass agentContext(<id>) from " +
+  "@tpsdev-ai/flair's in-process seam so the call is scoped and attributed. If the elevated " +
+  "authority is genuinely intended, say so with internalContext() and this warning will stop. " +
+  "Fires once per process.";
+
+function noteInternalVerdict(context: any): void {
+  if (warnedInternalByOmission) return;
+  if (isDeliberateInternalCall(context)) return; // deliberate, and said so
+  warnedInternalByOmission = true;
+  const stack = (new Error().stack ?? "").split("\n").slice(2, 7).join("\n");
+  console.error(INTERNAL_BY_OMISSION_WARNING + "\n" + stack);
+}
+
 export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> {
   const c = context?.request ?? context;
-  if (!c) return { kind: "internal" };
+  if (!c) {
+    noteInternalVerdict(context);
+    return { kind: "internal" };
+  }
 
   if (c.tpsAnonymous === true) return { kind: "anonymous" };
 
@@ -288,5 +355,6 @@ export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> 
     return { kind: "anonymous" };
   }
 
+  noteInternalVerdict(context);
   return { kind: "internal" };
 }
