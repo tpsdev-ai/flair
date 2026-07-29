@@ -629,15 +629,14 @@ function readOpsPortFromConfig(path: string = configPath()): number | null {
  *     a clean install has always done, instead of the refusal that would make
  *     `flair init --data-dir <new>` impossible.
  *
- * Note that `init`'s own `--port` option carries a commander default of
- * DEFAULT_PORT, so in practice `opts.port` is always set there and this
- * function returns on the first rung — including when re-initialising an
- * instance that already serves a different port, which is silently renumbered
- * to DEFAULT_PORT. That is pre-existing (it is equally true of the default
- * install on a custom port, where re-running init is `flair doctor`'s standing
- * remedy) and is tracked separately; the "create" rung is what this function
- * would answer if that default were removed, and is what keeps the mode
- * distinction honest rather than hypothetical.
+ * The "create" rung is load-bearing rather than hypothetical (flair#928).
+ * `init`'s `--port` used to carry a commander default of DEFAULT_PORT, so
+ * `opts.port` was ALWAYS set there and this function returned on the first rung
+ * — including when re-initialising an instance already serving a different
+ * port, which was silently renumbered to DEFAULT_PORT. Commander cannot tell
+ * "the user passed the default" from "the user passed nothing", so the default
+ * was the bug. It is gone; a bare `init` now falls through to the ladder, and
+ * only a directory no instance has ever been served from reaches DEFAULT_PORT.
  *
  * Nothing is copied, migrated or written here. Harper's config already IS the
  * per-instance record, so there is no second file to keep in step — which is
@@ -2746,6 +2745,15 @@ export { mcpServerSpec };
 const program = new Command();
 program.name("flair").version(__pkgVersion, "-v, --version");
 
+// flair#926: an option declared on a parent is consumed by the PARENT even when
+// it appears after a subcommand name, so a subcommand must NOT redeclare one —
+// the duplicate never receives a value, it only makes the flag look local.
+// Removing those duplicates would have hidden working flags from the
+// subcommand's help, so the help is taught to show inherited options instead.
+// This is commander's own answer to the problem, and it applies to every
+// subcommand at once rather than one hand-maintained list of exceptions.
+program.configureHelp({ showGlobalOptions: true });
+
 // ─── CLI↔server version handshake (flair#695 §B) ────────────────────────────
 // Every command invocation gets a cheap, cached (~60s), short-timeout check
 // of the running server's version against this CLI's own — catches the
@@ -2792,7 +2800,12 @@ program
   .description("One-command Flair setup — bootstrap the instance, register an agent, and wire MCP clients")
   .option("--agent-id <id>", "Agent ID to register (omit to bootstrap instance without agent)")
   .option("--agent <id>", "Alias for --agent-id")
-  .option("--port <port>", "Harper HTTP port", String(DEFAULT_PORT))
+  // No commander default (flair#928). A default here is indistinguishable from
+  // the user typing it, so a BARE `flair init` used to state DEFAULT_PORT and
+  // renumber an instance already serving a custom one. Absent means absent, and
+  // resolveHttpPort's "create" ladder supplies DEFAULT_PORT for a genuinely new
+  // instance — which is the only case that ever wanted one.
+  .option("--port <port>", "Harper HTTP port (default: this instance's current port, or 19926 for a new one)")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--ops-bind <addr>", "Harper ops API bind address (env: FLAIR_OPS_BIND; default: 127.0.0.1 loopback-only for single-host — pass e.g. 0.0.0.0 for multi-host/Fabric remote admin)")
   .option("--admin-pass <pass>", "Admin password (generated if omitted)")
@@ -3006,9 +3019,14 @@ program
     // directory with no recorded port is a new instance taking the default,
     // not the hard error every other caller gets — otherwise `flair init
     // --data-dir <new>` could never succeed. `dataDir` is resolved first so
-    // this is never asked before the instance is known. (`--port` carries a
-    // commander default, so this usually returns on the flag rung; see
-    // resolveHttpPort's doc comment.)
+    // this is never asked before the instance is known.
+    //
+    // flair#928: `--port` deliberately carries NO commander default, so a bare
+    // `init` reaches the ladder below instead of restating DEFAULT_PORT and
+    // renumbering an instance that already serves a custom port. `init` is
+    // `flair doctor`'s standing remedy and is recommended in ten places, so the
+    // command handed to an operator whose install is already wrong must not be
+    // the one that moves their port.
     const httpPort = resolveHttpPort(opts, "create");
     // The already-resolved port is handed to the ops resolver rather than
     // letting it re-resolve — its last rung is `resolveHttpPort(opts) - 1`,
@@ -6945,23 +6963,32 @@ federationSync
   .command("enable")
   .description("Install the sync driver (launchd on macOS, systemd timer on Linux)")
   .option("--interval <seconds>", `Seconds between syncs (default ${FEDERATION_SYNC_DEFAULT_INTERVAL})`, String(FEDERATION_SYNC_DEFAULT_INTERVAL))
-  .option("--admin-pass-file <path>", "Path to a 0600 file holding the admin password (default ~/.flair/admin-pass when it exists). The PATH is stored in the unit — never the password.")
   // Deliberately NOT `--no-admin-pass-file`: commander treats a `--no-x` flag
   // as the negation of `--x`, and declaring both on one command makes the
   // POSITIVE option silently parse to undefined — `--admin-pass-file /path`
   // would be accepted and dropped, producing a driver that fails auth every
   // cycle with no error anywhere. Verified against commander 14.
   .option("--no-credentials", "Do not wire any credential file into the unit")
-  .option("--target <url>", "Remote Flair URL to sync (default: the local instance)")
+  // `--admin-pass-file` and `--target` are NOT redeclared here (flair#926).
+  // The parent `flair federation sync` owns both, and commander matches an
+  // option against the parent's list before dispatching — so a duplicate
+  // declaration here never receives a value, it only makes the option LOOK
+  // local. Both flags still work on this command; they arrive via
+  // optsWithGlobals() below and are listed under "Global Options" in --help.
+  .addHelpText(
+    "after",
+    "\nCredentials:\n"
+      + "  --admin-pass-file defaults to ~/.flair/admin-pass when that file exists.\n"
+      + "  The PATH is stored in the unit — never the password.\n",
+  )
   .action(async (_opts, cmd) => {
     // optsWithGlobals(), NOT the action's first argument: `--admin-pass-file`
-    // and `--target` are declared on BOTH this subcommand and its parent
-    // (`flair federation sync`), and when a parent declares the same option
-    // name commander binds the value to the PARENT — the subcommand's own
-    // opts come back undefined. Reading only the local opts silently dropped
-    // `--admin-pass-file <path>` here, which would have installed a driver
+    // and `--target` are declared on the PARENT (`flair federation sync`), and
+    // commander binds their values there. The subcommand's own opts() has no
+    // entry for them at all. Reading only the local opts silently dropped
+    // `--admin-pass-file <path>` here (flair#923), which installed a driver
     // that failed auth every cycle with no error anywhere. Verified against
-    // commander 14.
+    // commander 14; test/unit/cli-option-collisions.test.ts pins the rule.
     const opts = cmd.optsWithGlobals();
     const intervalSeconds = Number(opts.interval);
     if (!Number.isFinite(intervalSeconds)) {
@@ -7025,12 +7052,14 @@ federationSync
 federationSync
   .command("status")
   .description("Show whether a sync driver is installed and genuinely active")
-  .option("--port <port>", "Harper HTTP port")
-  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+  // `--port` and `--target` are NOT redeclared here (flair#926) — the parent
+  // `flair federation sync` owns them and commander binds them there. They
+  // still work on this command, via optsWithGlobals() below.
   .option("--json", "Emit JSON")
   .action(async (_opts, cmd) => {
-    // See the comment on `enable` above: `--target`/`--port` are declared on
-    // the parent too, so commander binds them there.
+    // See the comment on `enable` above: `--target`/`--port` live on the
+    // parent, so commander binds them there and only optsWithGlobals() sees
+    // them.
     const opts = cmd.optsWithGlobals();
     const { schedulerStatus, formatStatusReport, assessDriver } = await import("./federation/scheduler.js");
     try {
@@ -9295,7 +9324,9 @@ async function runFabricUpgrade(opts: any): Promise<void> {
   const upgradeOpts = {
     target: opts.target as string,
     project: opts.project,
-    version: opts.version,
+    // flair#926: `--flair-version`, never `opts.version` — that attribute name
+    // belongs to the program's `-v, --version` and never reaches this action.
+    version: opts.flairVersion,
     harperVersion: opts.harperVersion,
     fabricUser,
     fabricPassword,
@@ -9864,7 +9895,14 @@ program
   .option("--fabric-user <user>", "Fabric admin username — for --target (env: FABRIC_USER preferred; inline leaks to shell history)")
   .option("--fabric-password <pass>", "Fabric admin password — for --target (prefer FABRIC_PASSWORD env or --fabric-password-file; inline leaks to shell history)")
   .option("--fabric-password-file <path>", "Read the Fabric admin password from a file (chmod 600) — for --target")
-  .option("--version <semver>", "Flair version to deploy with --target (default: latest published @tpsdev-ai/flair)")
+  // NOT `--version` (flair#926). The program declares `-v, --version`, and
+  // commander matches an option against the PARENT's list before dispatching to
+  // the subcommand — so `flair upgrade --target X --version 1.2.3` printed the
+  // CLI's own version and exited 0, never running the Fabric upgrade at all.
+  // A colliding name is normally recoverable via optsWithGlobals(); this one is
+  // not, because commander's version listener exits the process. The name had
+  // to change. `--harper-version` below is the symmetry this follows.
+  .option("--flair-version <semver>", "Flair version to deploy with --target (default: latest published @tpsdev-ai/flair)")
   .option("--harper-version <semver>", "Pin harper to this version for --target (default: registry latest, floored at the flair#513 fix)")
   .option("--project <name>", "Fabric component name for --target", "flair")
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
