@@ -4,6 +4,7 @@ import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { resolveReadScope } from "./memory-read-scope.js";
+import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -367,6 +368,37 @@ server.http(async (request: any, nextLayer: any) => {
   const method = request.method.toUpperCase();
   const isMutation = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
 
+  // ── THE record-ownership rule, for every table, on every mutating verb ─────
+  //
+  // One enforcement point rather than one per resource. See
+  // resources/record-owner-guard.ts for why this is not written into each
+  // resource's put(): Harper maps verbs to methods one-to-one, so a rule living
+  // in put() is enforced on PUT alone, and nearly every resource wrote its rules
+  // there. Doing this per-resource would be N chances to get one wrong and would
+  // still leave the next resource broken by default.
+  //
+  // Ownership is read from the STORED record named by the path — never from the
+  // request body, which is the caller's claim about who owns the row and was how
+  // a body that simply omitted the field passed unchecked.
+  //
+  // Deliberately scoped to records that ALREADY EXIST: creation is left to each
+  // resource's own no-forge attribution. That keeps this incapable of breaking a
+  // create, a self-write, or a legitimate cross-agent field like MemoryGrant's
+  // granteeId — it can only narrow mutation of another agent's stored row.
+  if (isMutation && !request.tpsAgentIsAdmin) {
+    const guarded = resolveGuardedRecord(url.pathname);
+    if (guarded) {
+      try {
+        const record = await (databases as any).flair[guarded.table]?.get(guarded.id);
+        if (isForbiddenOwnerMutation(record, guarded.ownerField, agentId)) {
+          return new Response(JSON.stringify({
+            error: `forbidden: cannot modify ${guarded.table} owned by another principal`,
+          }), { status: 403, headers: { "Content-Type": "application/json" } });
+        }
+      } catch { /* unreadable row → fall through to the resource's own rules */ }
+    }
+  }
+
   if (isMutation) {
     // OrgEvent: authorId must match authenticated agent
     if ((url.pathname === "/OrgEvent" || url.pathname.startsWith("/OrgEvent/")) &&
@@ -484,18 +516,11 @@ server.http(async (request: any, nextLayer: any) => {
           }
         }
 
-        // (b) The owner of the record actually being written. Catches every
-        // body that simply leaves agentId out.
-        try {
-          const pathParts = url.pathname.split("/").filter(Boolean);
-          const soulId = pathParts[0] === "Soul" && pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
-          if (soulId) {
-            const record = await (databases as any).flair.Soul.get(soulId);
-            if (record && record.agentId && record.agentId !== agentId) {
-              return new Response(JSON.stringify({ error: "forbidden: non-admin cannot modify another agent's soul" }), { status: 403 });
-            }
-          }
-        } catch {}
+        // (b) The owner of the record actually being written — the half that
+        // catches a body simply leaving agentId out — is now the shared
+        // record-ownership rule at the top of this block, which applies it to
+        // every table on every mutating verb. Deliberately NOT repeated here:
+        // one condition enforced in two places is how the two drift apart.
       }
     }
 
@@ -518,21 +543,22 @@ server.http(async (request: any, nextLayer: any) => {
       }
     }
 
-    // Memory PUT/DELETE: ownership check (non-admin can only modify their own memories)
+    // Memory DELETE: permanent memories are admin-only to purge.
+    //
+    // The OWNERSHIP half of this guard — which was the model the shared
+    // record-ownership rule above was built from, and the only one in this file
+    // that already covered PATCH — now lives there and covers every table. What
+    // remains here is the part that is NOT about ownership: durability. An agent
+    // owning a permanent memory still may not purge it.
     if (((url.pathname === "/Memory" || url.pathname.startsWith("/Memory/") || url.pathname === "/memory" || url.pathname.startsWith("/memory/"))) &&
-        (method === "PUT" || method === "DELETE" || method === "PATCH")) {
+        method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
         try {
           const pathParts = url.pathname.split("/").filter(Boolean);
           const memId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
           if (memId) {
             const record = await (databases as any).flair.Memory.get(memId);
-            if (record && record.agentId && record.agentId !== agentId) {
-              return new Response(JSON.stringify({
-                error: `forbidden: cannot modify memory owned by ${record.agentId}`
-              }), { status: 403 });
-            }
-            if (method === "DELETE" && record?.durability === "permanent") {
+            if (record?.durability === "permanent") {
               return new Response(JSON.stringify({
                 error: "forbidden: only admins can purge permanent memories"
               }), { status: 403 });

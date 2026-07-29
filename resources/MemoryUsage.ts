@@ -98,6 +98,24 @@ export class MemoryUsage extends (databases as any).flair.MemoryUsage {
     return FORBIDDEN("forbidden: MemoryUsage rows are immutable once written");
   }
 
+  /**
+   * PATCH — same rule as put(), because this ledger's invariant is IMMUTABILITY,
+   * not ownership.
+   *
+   * The shared record-ownership guard (resources/record-owner-guard.ts) covers
+   * this table for cross-agent writes, but it cannot express this rule: it
+   * permits an agent to modify a row it owns, and here even the OWNER must not.
+   * Measured before this override existed: the owning agent rewrote its own
+   * row's attribution with a PATCH and got 204, because Harper routes PATCH to
+   * patch() and put()'s check never ran. A resource whose rule is stricter than
+   * "you own it" still has to say so on every verb.
+   */
+  async patch(content: any, query?: any) {
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) return super.patch(content, query);
+    return FORBIDDEN("forbidden: MemoryUsage rows are immutable once written");
+  }
+
   async delete(id: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());
     if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) return super.delete(id);
