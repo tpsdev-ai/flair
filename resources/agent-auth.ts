@@ -17,6 +17,7 @@
  */
 import { databases } from "harper";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
+import { ADMIN_ROLE, agentRecordIsAdmin } from "./agent-admin.js";
 
 /**
  * Shared Harper user that verified Ed25519 agents resolve to (least-privilege
@@ -35,8 +36,14 @@ export const FLAIR_AGENT_USERNAME = "flair-agent";
 
 // ─── Admin resolution ─────────────────────────────────────────────────────────
 // Admin agents come from FLAIR_ADMIN_AGENTS (comma-separated) OR Agent records
-// with role === "admin". OR-combined, cached 60s. Distinct from Harper's
-// super_user — admin here gates flair-policy decisions (promotions, raw ops).
+// whose `role` is the admin sentinel. OR-combined, cached 60s. Distinct from
+// Harper's super_user — admin here gates flair-policy decisions (promotions,
+// raw ops).
+//
+// The record half of that union is the ONE place the Agent table is consulted
+// for an authorization decision, and it resolves through
+// resources/agent-admin.ts's shared predicate so it cannot drift from the
+// reporters or from the MCP surface (flair#941 — they had drifted).
 
 let adminCacheExpiry = 0;
 let adminCache: Set<string> = new Set();
@@ -47,12 +54,35 @@ async function getAdminAgents(): Promise<Set<string>> {
   const fromEnv = (process.env.FLAIR_ADMIN_AGENTS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const fromDb: string[] = [];
   try {
-    const results = await (databases as any).flair.Agent.search([{ attribute: "role", value: "admin", condition: "equals" }]);
-    for await (const row of results) if (row?.id) fromDb.push(row.id);
+    const results = await (databases as any).flair.Agent.search([{ attribute: "role", value: ADMIN_ROLE, condition: "equals" }]);
+    for await (const row of results) if (row?.id && agentRecordIsAdmin(row)) fromDb.push(row.id);
   } catch { /* Agent table may be empty */ }
   adminCache = new Set([...fromEnv, ...fromDb]);
   adminCacheExpiry = now + 60_000;
   return adminCache;
+}
+
+/**
+ * Drop the memoised admin set so the NEXT isAdmin() re-reads the Agent table.
+ *
+ * The 60s TTL is a load optimisation, but on its own it makes a privilege
+ * change take up to a minute to appear — which reads as "the change didn't
+ * work", and is exactly the confusion flair#941 is about: an operator grants
+ * admin, tests it, sees a denial, and starts changing other things. The write
+ * path knows precisely when a principal's admin status changed, so it says so
+ * and the grant is effective on the caller's very next request.
+ *
+ * Deliberately NOT a distributed invalidation: Harper runs N worker threads,
+ * each with its own module instance and its own cache, so a promotion applied
+ * on thread A still takes up to the TTL to be seen by thread B. Making that
+ * exact would mean a shared invalidation channel, which is a much larger change
+ * than the confusion warrants — the bound stays 60s, unchanged, and the common
+ * single-threaded/dev case becomes immediate. Called by resources/Agent.ts's
+ * write paths.
+ */
+export function invalidateAdminCache(): void {
+  adminCacheExpiry = 0;
+  adminCache = new Set();
 }
 
 export async function isAdmin(agentId: string): Promise<boolean> {

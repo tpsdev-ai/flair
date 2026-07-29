@@ -18,7 +18,8 @@
  */
 
 import { Resource, databases } from "harper";
-import { isAdmin, allowAdmin } from "./agent-auth.js";
+import { isAdmin, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
+import { reconcileAdminFields } from "./agent-admin.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -69,8 +70,15 @@ export class AgentSeed extends Resource {
     const existingAgent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
     let agent = existingAgent;
     if (!existingAgent) {
-      agent = { id: agentId, name, role, publicKey: "pending", createdAt: now, updatedAt: now };
+      // flair#941 — this writes the RAW table, so resources/Agent.ts's post()
+      // never runs and its field reconciliation does not apply here. Seeding
+      // role:"admin" without the mirror was the one path in the product that
+      // produced a genuine administrator every reporter displayed as an
+      // ordinary agent. Admin-only path (allowCreate + the isAdmin re-check
+      // above), so this normalises an authorized intent.
+      agent = reconcileAdminFields({ id: agentId, name, role, publicKey: "pending", createdAt: now, updatedAt: now });
       await (databases as any).flair.Agent.put(agent);
+      invalidateAdminCache();
     }
 
     // ── Soul entries ──────────────────────────────────────────────────────────

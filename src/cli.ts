@@ -3962,7 +3962,8 @@ agent
       console.log(render.kv("status", render.wrap(statusColor, String(out.status))));
     }
     if (out.defaultTrustTier) console.log(render.kv("trust tier", String(out.defaultTrustTier)));
-    if (out.admin) console.log(render.kv("admin", render.wrap(render.c.magenta, "yes")));
+    // flair#941 — read the authority, not the mirror. See `principal show`.
+    if (agentRecordIsAdmin(out)) console.log(render.kv("admin", render.wrap(render.c.magenta, "yes")));
     if (out.runtime) console.log(render.kv("runtime", String(out.runtime)));
     if (out.publicKey) console.log(render.kv("publicKey", render.wrap(render.c.dim, String(out.publicKey))));
     if (out.createdAt) console.log(render.kv("created", `${render.relativeTime(out.createdAt)} ${render.wrap(render.c.dim, `(${out.createdAt})`)}`));
@@ -5393,6 +5394,24 @@ mcp
 // 1.0 identity management. The Principal model extends Agent — this is the
 // preferred CLI surface for managing identities going forward.
 
+/**
+ * The exact `role` value that denotes a flair administrator, and the predicate
+ * that reads it.
+ *
+ * DUPLICATED FROM resources/agent-admin.ts on purpose — the same deliberate
+ * copy as the federation crypto helpers above: src/cli.ts must not import from
+ * resources/, because those imports don't survive npm packaging. The two must
+ * stay in sync.
+ *
+ * flair#941: `role` is the authority and `admin` is its mirror. The CLI used to
+ * both write and display ONLY the mirror, so `principal add --admin` created a
+ * principal the gate refuses and `principal show` printed "admin: yes" for it.
+ */
+const ADMIN_ROLE = "admin";
+function agentRecordIsAdmin(record: any): boolean {
+  return record?.role === ADMIN_ROLE;
+}
+
 const principal = program.command("principal").description("Manage principals (humans and agents)");
 
 principal
@@ -5468,6 +5487,11 @@ principal
       status: "active",
       publicKey: pubKeyB64url,
       defaultTrustTier: trustTier,
+      // flair#941 — write BOTH. This is an ops-API upsert, so the Agent
+      // resource's reconciliation never runs; writing only the `admin` mirror
+      // is what made `--admin` a no-op at the gate for every principal this
+      // command has ever created.
+      role: isAdmin ? ADMIN_ROLE : "agent",
       admin: isAdmin,
       runtime: runtime ?? null,
       createdAt: new Date().toISOString(),
@@ -5523,7 +5547,10 @@ principal
         table: "Agent",
         operator: "and",
         conditions,
-        get_attributes: ["id", "name", "kind", "status", "defaultTrustTier", "admin", "runtime", "createdAt"],
+        // `role` is the authority behind admin status (flair#941); the
+        // projection used to omit it, so this listing could only ever report
+        // the mirror.
+        get_attributes: ["id", "name", "kind", "status", "defaultTrustTier", "role", "admin", "runtime", "createdAt"],
       }),
     });
     if (!res.ok) {
@@ -5558,7 +5585,14 @@ principal
       {
         label: "admin",
         key: "admin",
-        format: (v) => (v ? render.wrap(render.c.red, "yes") : render.wrap(render.c.dim, "no")),
+        // Report the status the gate will apply, and flag a record whose two
+        // fields disagree rather than picking a side silently (flair#941).
+        format: (_v, row) => {
+          const isAdmin = agentRecordIsAdmin(row);
+          const mismatch = isAdmin !== (row.admin === true);
+          const base = isAdmin ? render.wrap(render.c.red, "yes") : render.wrap(render.c.dim, "no");
+          return mismatch ? `${base} ${render.wrap(render.c.yellow, "(!)")}` : base;
+        },
       },
       {
         label: "status",
@@ -5598,7 +5632,12 @@ principal
       console.log(render.kv("status", render.wrap(statusColor, String(result.status))));
     }
     if (result.defaultTrustTier) console.log(render.kv("trust tier", String(result.defaultTrustTier)));
-    if (result.admin) console.log(render.kv("admin", render.wrap(render.c.red, "yes")));
+    // flair#941 — read the authority, not the mirror, and say so when the two
+    // disagree (only reachable via a raw table write).
+    if (agentRecordIsAdmin(result)) console.log(render.kv("admin", render.wrap(render.c.red, "yes")));
+    if (agentRecordIsAdmin(result) !== (result.admin === true)) {
+      console.log(render.kv("admin", render.wrap(render.c.yellow, `record is inconsistent (role=${result.role ?? "unset"}, admin=${result.admin ?? "unset"}) — re-issue the grant to repair`)));
+    }
     if (result.runtime) console.log(render.kv("runtime", String(result.runtime)));
     if (result.email) console.log(render.kv("email", String(result.email)));
     if (result.publicKey) console.log(render.kv("publicKey", render.wrap(render.c.dim, String(result.publicKey))));

@@ -209,9 +209,21 @@ describe("resolveAgentFromSub", () => {
 
   it("admin Agent record → isAdmin true", async () => {
     credentials = [{ principalId: "agt_admin", kind: "idp", idpSubject: "sub-admin", status: "active" }];
-    agents["agt_admin"] = { id: "agt_admin", admin: true };
+    agents["agt_admin"] = { id: "agt_admin", role: "admin", admin: true };
     const agent = await resolveAgentFromSub("sub-admin");
     expect(agent).toEqual({ agentId: "agt_admin", isAdmin: true });
+  });
+
+  // flair#941 — this surface used to OR the two admin fields together while the
+  // primary HTTP gate read only `role`, so the SAME record was an administrator
+  // here and an ordinary agent there. Both now resolve through the one shared
+  // predicate. A record carrying only the `admin` mirror was never an admin on
+  // the HTTP gate, and is no longer one here either.
+  it("a record carrying ONLY the admin mirror is NOT an admin — both surfaces agree", async () => {
+    credentials = [{ principalId: "agt_mirror", kind: "idp", idpSubject: "sub-mirror", status: "active" }];
+    agents["agt_mirror"] = { id: "agt_mirror", admin: true };
+    const agent = await resolveAgentFromSub("sub-mirror");
+    expect(agent).toEqual({ agentId: "agt_mirror", isAdmin: false });
   });
 
   it("revoked Credential is skipped", async () => {

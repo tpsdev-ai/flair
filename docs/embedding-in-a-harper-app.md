@@ -124,7 +124,7 @@ export async function registerAgent(id, { publicKey = "pending", admin = false }
     id, name: id, displayName: id,
     publicKey,                            // a placeholder is fine — see below
     runtime: "headless",
-    ...(admin ? { role: "admin", admin: true } : {}),   // role is what actually grants admin
+    ...(admin ? { admin: true } : {}),    // sets role:"admin" too — see below
   });
 }
 ```
@@ -133,7 +133,9 @@ Verified against a real instance: that lands `kind: "agent"`, `status: "active"`
 
 > **Prefer this to `databases.flair.Agent.put()`.** The raw table applies **no** defaults, so a hand-written literal has to reproduce every field above and then stay in step with Flair as the Principal model grows. Records written that way are missing `kind`/`status`/`defaultTrustTier` and read as under-specified Principals in the admin surfaces.
 
-> **`isAdmin()` reads `role === "admin"`, not the `admin` boolean.** They are separate fields and only `role` grants admin rights; set both to keep the record self-consistent. Admin lookups are cached for 60 seconds, so a newly-created admin is not effective immediately.
+> **Admin is one meaning with one answer.** `role === "admin"` is the authority; the `admin` boolean is a mirror of it that the server maintains. Write **either** through the `Agent` resource and both are set — you no longer have to know which one is real, and a record cannot be stored saying one thing in one field and the opposite in the other. Nothing reads the mirror to make an authorization decision, and a promotion applied through the resource takes effect on the next request rather than after the 60-second admin-lookup cache expires.
+>
+> A record written straight to the table (`databases.flair.Agent.put()`, an ops-API insert, a federation merge) skips that reconciliation and can still carry a mismatch. `flair principal show` and the admin dashboard flag such a record rather than silently picking a side; re-issuing the grant repairs it.
 
 `publicKey` is non-nullable in the schema, but it does not have to be a real key. An agent that only ever acts in-process never authenticates, and Flair's own paths write placeholders — `"pending"` when seeding, `mcp-oauth:<sub>` for token-authenticated agents. Give an agent a real key only if it must also authenticate **over HTTP**, which your app can do without any CLI:
 
