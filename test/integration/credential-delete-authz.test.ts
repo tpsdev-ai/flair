@@ -27,9 +27,23 @@
 // (Credential's own get() override at ~line 47 relies on this exact mechanism:
 // it too calls `super.get()` with no args and reads `result.principalId` off
 // the bound record — independent corroboration the no-arg pattern resolves the
-// target here.) Confirmed: the cross-agent DELETE below returns exactly the
-// ownership guard's own 403 body, not a generic Harper RBAC denial, proving
-// the guard's `existing.principalId` really is the target's owner.
+// target here.) Originally confirmed by this test: the cross-agent DELETE
+// returned exactly the ownership guard's own 403 body, not a generic Harper
+// RBAC denial, proving the guard's `existing.principalId` really is the
+// target's owner.
+//
+// ─── That evidence now comes from one layer up ───────────────────────────────
+// The shared record-ownership guard (resources/record-owner-guard.ts, applied
+// in resources/auth-middleware.ts) runs BEFORE any resource method and denies
+// this same request first, so the resource guard's wording no longer reaches
+// the wire and this test can no longer be the thing that proves the #569
+// mechanism.
+//
+// The resource guard is NOT dead, and that was measured rather than assumed:
+// with the shared guard taken out of the DELETE path, this file passes in full
+// — Credential.delete()'s own guard still resolves the target record and still
+// returns its own 403. It remains defense-in-depth for the paths the HTTP
+// middleware does not sit on, in-process calls in particular.
 //
 // NOTE on setup: flair-agent is intentionally NOT provisioned, so verified
 // agents fall back to admin super_user at the Harper RBAC layer (see
@@ -151,7 +165,19 @@ describe("Credential.delete() cross-agent authorization (follow-up to the Relati
     // super_user-fallback table gate would let this delete succeed → status
     // 200/204 and `after` null, failing here.
     expect(delRes.status, `cross-agent DELETE by non-owner returned ${delRes.status}: ${delText.slice(0, 300)}`).toBe(403);
-    expect(delText, `403 must be the resource guard's own message, not a generic RBAC denial`).toContain("only admin principals can revoke");
+    // The 403 must be FLAIR's own authorization decision, not a generic Harper
+    // RBAC denial — that distinction is the whole point of this test (see the
+    // header). Either of flair's two ownership guards satisfies it: the shared
+    // record-ownership guard in resources/auth-middleware.ts now runs BEFORE the
+    // resource and denies first, so the resource guard's wording no longer
+    // reaches the wire. Both are accepted rather than pinning whichever happens
+    // to be in front, so this test asserts the security property instead of the
+    // layering.
+    expect(
+      delText.includes("only admin principals can revoke") ||
+        delText.includes("cannot modify Credential owned by another principal"),
+      `403 must come from a flair ownership guard, not a generic RBAC denial. Got: ${delText.slice(0, 300)}`,
+    ).toBe(true);
     expect(after, "record must still exist after a blocked cross-agent delete").not.toBeNull();
     expect(after?.principalId).toBe(owner.id);
   }, 30_000);
