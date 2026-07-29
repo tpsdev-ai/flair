@@ -275,8 +275,21 @@ if (isMain) {
             `top-level '- ' item. Split it into one file per entry.`,
         );
       }
+      // `loc ? ... : []` used to mean "no [Unreleased] header ⇒ no stray entries
+      // ⇒ ✓". That made the PR-time check strictly WEAKER than the release-time
+      // one, which throws on the same condition (see promote) — so a mangled
+      // header sailed through CI green and detonated mid-release-cut instead
+      // (flair#953). The stray-entry rule cannot be evaluated without the
+      // header, and a rule that could not be evaluated is not a rule that
+      // passed.
       const loc = locateUnreleased(readFileSync(CHANGELOG_PATH, "utf8").split("\n"));
-      const stray = loc ? strayUnreleasedEntries(loc.body) : [];
+      if (!loc) {
+        throw new FragmentError(
+          `CHANGELOG.md has no '## [Unreleased]' section, so the stray-entry check could not run — and ` +
+            `'promote' will refuse for the same reason at release time. Restore the header.`,
+        );
+      }
+      const stray = strayUnreleasedEntries(loc.body);
       if (stray.length > 0) {
         throw new FragmentError(
           `CHANGELOG.md '## [Unreleased]' has ${stray.length} hand-written entr${stray.length === 1 ? "y" : "ies"}; ` +

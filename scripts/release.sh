@@ -136,32 +136,54 @@ if [[ "$MODE" == "--publish" ]]; then
   echo "  Publishing @tpsdev-ai/flair..."
   (cd "$ROOT" && npm publish) || { echo "❌ flair publish failed"; exit 1; }
 
-  echo "  Publishing @tpsdev-ai/openclaw-flair..."
-  (cd "$ROOT/packages/openclaw-flair" && npm publish) || { echo "⚠️  openclaw-flair publish failed (may need build step)"; }
+  # The five leaf packages below soft-fail so a break-glass publish of the core
+  # three isn't blocked by, say, flair-bench's one-time Trusted Publisher
+  # bootstrap (docs/releasing.md). That is a reasonable trade — but it used to
+  # end with `git tag` and `✅ published and tagged` regardless, which is not
+  # (flair#953). A partial publish rendered identically to a complete one, and
+  # the tag then said a release shipped that a consumer cannot install: the root
+  # package pins its internal deps at the exact version, so a missing leaf is a
+  # broken install, not a missing extra.
+  #
+  # They still soft-fail individually. What changed is that the failures are
+  # counted, named at the end, and block the tag.
+  SOFT_FAILED=()
+  soft_publish() {
+    local dir="$1" name="$2" hint="${3:-}"
+    echo "  Publishing ${name}..."
+    if ! (cd "$ROOT/$dir" && npm publish); then
+      echo "⚠️  ${name} publish failed${hint:+ ($hint)}"
+      SOFT_FAILED+=("$name")
+    fi
+  }
 
-  echo "  Publishing @tpsdev-ai/pi-flair..."
-  (cd "$ROOT/packages/pi-flair" && npm publish) || { echo "⚠️  pi-flair publish failed (may need build step)"; }
+  soft_publish "packages/openclaw-flair"  "@tpsdev-ai/openclaw-flair"  "may need build step"
+  soft_publish "packages/pi-flair"        "@tpsdev-ai/pi-flair"        "may need build step"
+  soft_publish "packages/n8n-nodes-flair" "@tpsdev-ai/n8n-nodes-flair"
+  soft_publish "packages/langgraph-flair" "@tpsdev-ai/langgraph-flair" "may need build step"
+  # Until the one-time bootstrap in docs/releasing.md is done (first manual
+  # publish + npm Trusted Publisher registration), this is expected to fail on a
+  # brand-new install of the package.
+  soft_publish "packages/flair-bench"     "@tpsdev-ai/flair-bench"     "may need build step, or first-publish bootstrap — see docs/releasing.md"
 
-  echo "  Publishing @tpsdev-ai/n8n-nodes-flair..."
-  (cd "$ROOT/packages/n8n-nodes-flair" && npm publish) || { echo "⚠️  n8n-nodes-flair publish failed"; }
-
-  echo "  Publishing @tpsdev-ai/langgraph-flair..."
-  (cd "$ROOT/packages/langgraph-flair" && npm publish) || { echo "⚠️  langgraph-flair publish failed (may need build step)"; }
-
-  echo "  Publishing @tpsdev-ai/flair-bench..."
-  # NOTE: until the one-time bootstrap in docs/releasing.md is done (first
-  # manual publish + npm Trusted Publisher registration for this package),
-  # this is expected to fail on brand-new installs of the package — see PR
-  # that added this line for context. Soft-fail like the other prepublishOnly
-  # leaf packages above so a break-glass publish of the other 7 isn't blocked.
-  (cd "$ROOT/packages/flair-bench" && npm publish) || { echo "⚠️  flair-bench publish failed (may need build step, or first-publish bootstrap — see docs/releasing.md)"; }
+  if (( ${#SOFT_FAILED[@]} > 0 )); then
+    echo ""
+    echo "❌ ${#SOFT_FAILED[@]} package(s) did NOT publish:"
+    for p in "${SOFT_FAILED[@]}"; do echo "     - $p"; done
+    echo ""
+    echo "   NOT tagging v${VERSION}. A tag asserts that this version shipped; it did not."
+    echo "   The core packages above ARE published — this is a partial release."
+    echo "   Publish the packages listed above, then re-run to tag, or tag by hand"
+    echo "   once you have decided the partial release is what you want."
+    exit 1
+  fi
 
   echo "🏷️  Tagging v${VERSION} on main..."
   git -C "$ROOT" tag -a "v${VERSION}" -m "Release v${VERSION}"
   git_push_auth "v${VERSION}"
 
   echo ""
-  echo "✅ Flair v${VERSION} published and tagged."
+  echo "✅ Flair v${VERSION} published and tagged (all 8 packages)."
   exit 0
 fi
 
