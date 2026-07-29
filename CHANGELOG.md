@@ -18,6 +18,224 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.31.1] - 2026-07-29
+
+### Added
+
+- **Flair warns when a resource is called with no caller context.** Constructing
+  a resource without a context resolves to Flair's trusted internal verdict and
+  runs unfiltered — every read unscoped, every write unattributed — which is
+  correct for Flair's own maintenance work and a silent, invisible mistake in an
+  embedding application. The verdict is unchanged; it is no longer silent. A
+  call that means to take that authority declares it with `internalContext()`
+  and stays quiet; anything else logs once per process with the stack.
+
+  The embedding guide's note that reads do not need `collectionResource()` has
+  been corrected: reads do not need the collection binding, but they do still
+  need the context. A search with the context argument omitted, running outside
+  a request scope, returns every agent's private records — and on that path the
+  resource's own gate is never consulted.
+
+### Changed
+
+- **A promotion or demotion applies on the principal's next request.** Admin
+  lookups are cached for 60 seconds, so granting admin used to appear not to
+  work for up to a minute — long enough to conclude the grant had failed and
+  start changing other things. The write path now drops the cached set when it
+  changes a principal, so the new status is in force immediately. The cache is
+  per worker thread, so a grant applied on one thread can still take up to the
+  same 60 seconds to be seen on another; the bound is unchanged.
+
+### Fixed
+
+- **The `admin` field on a principal now means what it says.** A principal record
+  carried two fields that both read as "is this an administrator" — `role`
+  (admin when the value is `admin`) and an `admin` boolean — and they were
+  consulted by different parts of the system. The authorization gate read
+  `role`; the CLI, the admin dashboard and every creation path used `admin`. So
+  `flair principal add --admin` stored a field the gate never read and granted
+  nothing, while `flair principal show` reported "admin: yes" for a principal
+  that admin-only endpoints reject.
+
+  `role` remains the authority and no existing principal's rights change. The
+  boolean is now a server-maintained mirror of it: write either one through the
+  `Agent` resource, `flair principal add --admin`, or agent seeding, and both
+  are set together, so a record can no longer be stored saying one thing in one
+  field and the opposite in the other. Every surface that decides or displays
+  admin status now resolves through one shared predicate.
+
+  Records written straight to the table (an ops-API insert, a federation merge)
+  bypass that reconciliation and can still carry a mismatch. Nothing changes
+  about what they are allowed to do — `flair principal show`, `flair principal
+  list` and the admin dashboard now flag them as inconsistent instead of
+  silently picking a side. Re-issuing the grant repairs the record.
+
+- **A docs-freshness check that could not run no longer reports as passing
+  (flair#953).** `cli-command-descriptions` introspects the CLI's command tree
+  from the built `dist/cli.js`. On any machine where the CLI had not been built
+  it printed "skipping", returned no failures, and the runner rendered it as
+  `✓ pass` beneath a summary reading "All docs-freshness checks passed" — six
+  ticks, one of which had verified nothing. The defect was never in a check; it
+  was in what the runner does when a check cannot execute.
+
+  The gate now carries three states — `✓ pass`, `⊘ DID NOT RUN`, `✗ fail` —
+  through the per-check line, the summary tally and the exit code. A skip is
+  never counted toward the pass total, so the tally cannot read `6/6` while
+  something sat out, and the process exits `2` (distinct from `1` for real
+  findings, so a wrapper can tell "your docs are stale" from "your environment
+  is wrong"; both are non-zero, so CI treats them identically). Each skip names
+  the unmet prerequisite and its remedy, and is emitted as a CI annotation
+  rather than buried in the log.
+
+  Two silent variants are closed at the same time. A check that examined **zero
+  items** is now automatically a skip: passing checks report their corpus size
+  (`✓ port-drift (26 prose docs scanned)`), so a glob or `existsSync` filter
+  that empties after a rename shows up as `examined 0 prose docs` instead of
+  being indistinguishable from a clean scan. And the gate refuses to report at
+  all if a check fails to register, because a gate that runs zero checks
+  announces success exactly as loudly as one that runs six.
+
+  Nothing changes in CI, which builds the CLI and checks out full history before
+  invoking the gate — that is the point: the gate was already passing there for
+  real, and only ever went dark where nobody was looking. Running it locally
+  without building the CLI first will now tell you so.
+
+- **Five gates that could report success without checking anything (flair#953,
+  sweep).** Auditing the class behind the docs-freshness skip — the absence of a
+  result rendering identically to a passing result — turned up these, each
+  verified against real CI logs or a reproduced failure rather than by reading
+  the code:
+
+  - **250 tests in `test/*.test.ts` were run by no CI job and no release gate.**
+    Every `bun test` invocation in every workflow is directory-scoped, and a
+    directory filter does not match root-level files, so twelve suites — six of
+    them security-scoping (auth scoping, data scoping, content safety, key
+    rotation, agent grants, backup/restore) — were never executed by CI. A bare
+    `bun test`, which `CONTRIBUTING.md` tells contributors to run, does pick them
+    up, so they passed locally and were enforced nowhere. Confirmed by grepping
+    28.6 MB of historical CI logs for each suite's `describe()` name: zero hits
+    each, against positive controls from `test/unit/` at 192 and 240 hits. They
+    are now in the unit lane and all 250 pass.
+
+  - **The implementation-term leak gate reported clean when its scan failed.**
+    `grep`'s exit status was discarded with `|| true`, collapsing "grep itself
+    failed" (unreadable file, argument-list overflow) into "no matches found";
+    the file list was word-split, so a path containing a space was silently never
+    scanned; and an empty corpus printed "No files to search." and exited 0. All
+    three now fail loudly, and the file count is reported so a shrinking corpus
+    is visible.
+
+  - **`release.sh` tagged a partial publish as a complete release.** Five of the
+    eight packages soft-fail on publish so a break-glass release of the core
+    three isn't blocked — but the script then tagged and printed "published and
+    tagged" regardless. Since the root package pins its internal dependencies at
+    the exact version, a missing package is a broken install rather than a
+    missing extra. The soft-fails are retained; they are now counted, named, and
+    block the tag.
+
+  - **A workspace package with no `tsconfig.json` was silently exempt from type
+    checking.** It printed one "Skipping" line into a folded log and left the job
+    green, so a package that lost its tsconfig in a refactor would have had zero
+    type coverage with the same signal as a clean check. Exclusions are now an
+    explicit allowlist, an unlisted skip fails, and a run that type-checks zero
+    packages fails.
+
+  - **`changelog-fragments check` skipped its stray-entry rule when the
+    `## [Unreleased]` header was missing**, making the PR-time check strictly
+    weaker than the release-time one, which refuses on the same condition. A
+    mangled header passed CI and detonated mid-release-cut instead. It now fails
+    where `promote` would.
+
+  `test/unit/ci-gate-coverage.test.ts` pins these as invariants rather than as
+  string matches: it enumerates every test file on disk and asserts CI reaches
+  all of them, and enumerates every workspace package and asserts each is
+  type-checked or explicitly excused. Adding a test directory no job runs, or a
+  package nobody type-checks, fails there.
+
+- **`flair init` no longer renumbers an instance that serves a custom port.** A
+  bare `flair init` used to rewrite the port to 19926, because `--port` carried a
+  commander default and commander cannot tell "the user passed the default" from
+  "the user passed nothing". It was the only one of ~50 `--port` declarations in
+  the CLI with a default, on the one command where a default is destructive:
+  `init` is `flair doctor`'s standing suggestion and is recommended as the remedy
+  in ten other places, so the command handed to an operator whose install was
+  already wrong was the one that quietly moved their port.
+
+  A bare `init` now resolves the port the way every other command does — explicit
+  `--port`, then `FLAIR_URL`, then the port Harper records for that data
+  directory, then the per-user config — and only reaches 19926 for a data
+  directory no instance has ever been served from. An explicit `--port` still
+  moves the instance, and a first-run `flair init` still lands on 19926.
+
+- **Options a parent command owns now work on its subcommands as documented.**
+  Where a subcommand redeclared an option its parent already had — `--target`,
+  `--port` and `--admin-pass-file` on `flair federation sync enable|status` —
+  the duplicate never received a value; it only made the flag look local. The
+  duplicates are gone, the flags still work on those subcommands, and
+  subcommand `--help` now lists inherited flags under a **Global Options**
+  heading so nothing became less discoverable.
+
+  A test walks the whole command tree and fails on any subcommand that
+  redeclares an option name an ancestor already owns, so this class of silent
+  drop cannot return the next time a subcommand grows a flag.
+
+- **Changing a principal's admin status is restricted to administrators on every
+  HTTP verb.** The principal table's per-record rules — you may only modify your
+  own record, and only an administrator may change admin status — were enforced
+  on one write path and not on the partial-update path, which reached the table
+  with only a "is this a verified agent" check. Both paths now share one
+  authorization helper, and a change to a principal's admin status is refused
+  for a non-administrator on either. In-process maintenance and administrators
+  are unaffected.
+
+- **`flair upgrade --target <url> --version <semver>` silently upgraded nothing.**
+  Commander matches an option against a parent command's own list before
+  dispatching to the subcommand, so `--version` was caught by the program's
+  global `-v, --version`: the CLI printed its own version and exited 0 without
+  ever running the Fabric upgrade. The flag is now **`--flair-version <semver>`**
+  (matching the existing `--harper-version`). `--version` keeps its usual
+  meaning of printing the CLI version.
+
+### Security
+
+- **The public presence roster no longer discloses which principals are
+  administrators.** The roster is readable without authentication and included a
+  principal's `role`, which is also the field that denotes an administrator —
+  handing an unauthenticated reader the list of privileged accounts. Admin
+  principals are now presented on the roster as ordinary agents. The field is a
+  display label there and nothing authorizes on it.
+
+- **Record ownership is enforced on every write verb, for every table.** Only a
+  record's owner (or an administrator) may modify it. That rule was written into
+  each resource's `put()` handler — but Flair's HTTP layer maps verbs to
+  resource methods one-to-one, so a rule living in `put()` was enforced on `PUT`
+  and nothing else, and no resource implemented the partial-update verb. Any
+  verified agent could therefore modify records belonging to another agent,
+  across most of the API surface, including credentials and memory grants.
+
+  Where a check did run, it compared the owner named in the *request body* — the
+  value the caller supplied — rather than the owner stored on the record being
+  written, so a request that simply omitted that field was checked against
+  nothing.
+
+  Both are now enforced in one shared guard that runs on every mutating verb and
+  reads ownership from stored state. Creating records, writing your own records,
+  and administrator access are all unchanged. A test enumerates the schema and
+  fails the build if a table with an owner column is ever added without being
+  covered, so this cannot silently regress.
+
+- **Soul entries are owner-scoped on every write verb.** Only a principal (or an
+  administrator) may write its own soul entries. That rule was enforced by a
+  guard with two independent gaps, either of which alone let any verified agent
+  rewrite or delete another agent's identity data: it ran on `PUT` and `POST`
+  but not `PATCH` or `DELETE`, and it compared the `agentId` in the request body
+  rather than the owner of the record being written — so a body that simply
+  omitted the field was checked against nothing.
+
+  Both are closed. The guard now runs on every mutating verb and resolves
+  ownership from the stored record named in the path. Writing your own soul is
+  unchanged, and administrators are unaffected.
+
 ## [0.31.0] - 2026-07-28
 
 ### Added
