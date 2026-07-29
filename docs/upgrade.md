@@ -188,7 +188,7 @@ FABRIC_USER=<admin> FABRIC_PASSWORD=<pass> \
 
 (or `--fabric-password-file <path>` instead of the `FABRIC_PASSWORD` env var — reads the
 password from a file, chmod 600). This resolves the target version (latest published
-`@tpsdev-ai/flair`, or pin one with `--version`), stages a clean deployable with the
+`@tpsdev-ai/flair`, or pin one with `--flair-version`), stages a clean deployable with the
 required `harper` version pin applied (`--harper-version` to override),
 confirms the staged Harper build before deploying, then reuses `flair deploy` to push it
 and verifies the result. `--check` shows the version diff and plan without deploying
