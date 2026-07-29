@@ -121,11 +121,15 @@ export function agentRecordIsAdmin(record: unknown): boolean {
  */
 export function reconcileAdminFields<T extends Record<string, any>>(content: T): T {
   if (!content || typeof content !== "object") return content;
-  if (content.role === ADMIN_ROLE || content.admin === true) {
-    content.role = ADMIN_ROLE;
-    content.admin = true;
+  // Widened locally: `content` is generic so TypeScript will not accept writes
+  // to named properties on it, but the whole point here is to normalise those
+  // two properties in place and hand the caller back its own object.
+  const record = content as Record<string, any>;
+  if (record.role === ADMIN_ROLE || record.admin === true) {
+    record.role = ADMIN_ROLE;
+    record.admin = true;
   } else {
-    content.admin = false;
+    record.admin = false;
   }
   return content;
 }
