@@ -17,6 +17,7 @@
  */
 import { databases } from "harper";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
+import { ADMIN_ROLE, agentRecordIsAdmin } from "./agent-admin.js";
 
 /**
  * Shared Harper user that verified Ed25519 agents resolve to (least-privilege
@@ -35,8 +36,14 @@ export const FLAIR_AGENT_USERNAME = "flair-agent";
 
 // ─── Admin resolution ─────────────────────────────────────────────────────────
 // Admin agents come from FLAIR_ADMIN_AGENTS (comma-separated) OR Agent records
-// with role === "admin". OR-combined, cached 60s. Distinct from Harper's
-// super_user — admin here gates flair-policy decisions (promotions, raw ops).
+// whose `role` is the admin sentinel. OR-combined, cached 60s. Distinct from
+// Harper's super_user — admin here gates flair-policy decisions (promotions,
+// raw ops).
+//
+// The record half of that union is the ONE place the Agent table is consulted
+// for an authorization decision, and it resolves through
+// resources/agent-admin.ts's shared predicate so it cannot drift from the
+// reporters or from the MCP surface (flair#941 — they had drifted).
 
 let adminCacheExpiry = 0;
 let adminCache: Set<string> = new Set();
@@ -47,12 +54,35 @@ async function getAdminAgents(): Promise<Set<string>> {
   const fromEnv = (process.env.FLAIR_ADMIN_AGENTS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const fromDb: string[] = [];
   try {
-    const results = await (databases as any).flair.Agent.search([{ attribute: "role", value: "admin", condition: "equals" }]);
-    for await (const row of results) if (row?.id) fromDb.push(row.id);
+    const results = await (databases as any).flair.Agent.search([{ attribute: "role", value: ADMIN_ROLE, condition: "equals" }]);
+    for await (const row of results) if (row?.id && agentRecordIsAdmin(row)) fromDb.push(row.id);
   } catch { /* Agent table may be empty */ }
   adminCache = new Set([...fromEnv, ...fromDb]);
   adminCacheExpiry = now + 60_000;
   return adminCache;
+}
+
+/**
+ * Drop the memoised admin set so the NEXT isAdmin() re-reads the Agent table.
+ *
+ * The 60s TTL is a load optimisation, but on its own it makes a privilege
+ * change take up to a minute to appear — which reads as "the change didn't
+ * work", and is exactly the confusion flair#941 is about: an operator grants
+ * admin, tests it, sees a denial, and starts changing other things. The write
+ * path knows precisely when a principal's admin status changed, so it says so
+ * and the grant is effective on the caller's very next request.
+ *
+ * Deliberately NOT a distributed invalidation: Harper runs N worker threads,
+ * each with its own module instance and its own cache, so a promotion applied
+ * on thread A still takes up to the TTL to be seen by thread B. Making that
+ * exact would mean a shared invalidation channel, which is a much larger change
+ * than the confusion warrants — the bound stays 60s, unchanged, and the common
+ * single-threaded/dev case becomes immediate. Called by resources/Agent.ts's
+ * write paths.
+ */
+export function invalidateAdminCache(): void {
+  adminCacheExpiry = 0;
+  adminCache = new Set();
 }
 
 export async function isAdmin(agentId: string): Promise<boolean> {
@@ -220,9 +250,76 @@ export async function allowAdmin(context: any): Promise<boolean> {
   return a.kind === "internal" || (a.kind === "agent" && a.isAdmin);
 }
 
+/**
+ * flair#936 — the `internal` verdict is TRUSTED and UNFILTERED, and it is also
+ * what a caller gets for supplying no context at all. Nothing distinguishes
+ * "I am flair's own maintenance code" from "I am an application developer who
+ * did not know a context was required": both spell it `new Memory()`, both
+ * succeed, and both return plausible data. It surfaces months later as memories
+ * that were never scoped.
+ *
+ * This does not change the verdict — every authorization outcome is byte-
+ * identical — it ends the SILENCE. A deliberate elevated call says so with
+ * `internalContext()` (resources/in-process.ts), whose `__flairInternal` marker
+ * is read here and nowhere else; anything else that lands on `internal` gets one
+ * warning per process, with the stack, so the condition is observable where it
+ * was previously invisible.
+ *
+ * MEASURED, and the reason this is worth having: flair itself has NO in-process
+ * caller that relies on the omission — every maintenance, migration, federation
+ * and boot path goes through the raw `databases.flair.*` table accessor, which
+ * bypasses this resolver entirely rather than defaulting through it. So a
+ * warning from this line is, in practice, always either an embedding
+ * application that forgot a context or a flair call site that should be naming
+ * its intent. Neither is noise.
+ *
+ * The marker is read off `context`, NOT off `c`: `c` is rebound to
+ * `context.request` on the line below, and internalContext() carries the marker
+ * on the outer object.
+ */
+let warnedInternalByOmission = false;
+
+/**
+ * Was this elevated call DELIBERATE — i.e. did the caller name the authority
+ * with `internalContext()` rather than land on it by leaving a context off?
+ *
+ * Exported because it is the whole decision, and a decision worth testing is
+ * worth testing directly: the warning itself is latched once per process, which
+ * makes any test of the side effect order-dependent (bun shares one module
+ * registry across the whole run, so whichever file resolves a context-less call
+ * first consumes the latch and every later assertion silently passes). Pinning
+ * the predicate instead is deterministic.
+ *
+ * Grants nothing and is never consulted for an authorization decision — the
+ * verdict is identical either way.
+ */
+export function isDeliberateInternalCall(context: any): boolean {
+  return context?.__flairInternal === true;
+}
+
+/** The advisory text, exported so its content is pinned without tripping the latch. */
+export const INTERNAL_BY_OMISSION_WARNING =
+  "[flair-auth] a resource was invoked with NO caller context and resolved to the trusted " +
+  "`internal` verdict: reads are UNFILTERED across every agent, writes are unattributed, and " +
+  "the admin-only gate passes. If this is your application's code, pass agentContext(<id>) from " +
+  "@tpsdev-ai/flair's in-process seam so the call is scoped and attributed. If the elevated " +
+  "authority is genuinely intended, say so with internalContext() and this warning will stop. " +
+  "Fires once per process.";
+
+function noteInternalVerdict(context: any): void {
+  if (warnedInternalByOmission) return;
+  if (isDeliberateInternalCall(context)) return; // deliberate, and said so
+  warnedInternalByOmission = true;
+  const stack = (new Error().stack ?? "").split("\n").slice(2, 7).join("\n");
+  console.error(INTERNAL_BY_OMISSION_WARNING + "\n" + stack);
+}
+
 export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> {
   const c = context?.request ?? context;
-  if (!c) return { kind: "internal" };
+  if (!c) {
+    noteInternalVerdict(context);
+    return { kind: "internal" };
+  }
 
   if (c.tpsAnonymous === true) return { kind: "anonymous" };
 
@@ -258,5 +355,6 @@ export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> 
     return { kind: "anonymous" };
   }
 
+  noteInternalVerdict(context);
   return { kind: "internal" };
 }

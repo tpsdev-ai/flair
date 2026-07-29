@@ -33,6 +33,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { resolveAgentAuth, verifyAgentRequest } from "./agent-auth.js";
+import { agentRecordIsAdmin } from "./agent-admin.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -384,7 +385,13 @@ export class Presence extends (databases as any).flair.Presence {
         const entry: Record<string, unknown> = {
           id: agentId,
           displayName: agent?.displayName ?? agent?.name ?? agentId,
-          role: agent?.role ?? "agent",
+          // `role` is a human label on a PUBLIC roster (allowRead() is `true`),
+          // and it is also the field that decides administrator status
+          // (resources/agent-admin.ts). Publishing the admin sentinel would
+          // hand an unauthenticated reader the list of privileged principals —
+          // so the roster reports admins as ordinary agents. It is a display
+          // label here and nothing authorizes on it (flair#941).
+          role: agentRecordIsAdmin(agent) ? "agent" : (agent?.role ?? "agent"),
           runtime: agent?.runtime ?? null,
           // Current activity — only truthful while fresh; "idle" once decayed.
           activity: activityFresh ? rawActivity : "idle",

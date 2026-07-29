@@ -1,6 +1,7 @@
 import { Resource, databases } from "harper";
 import { layout, htmlResponse, esc } from "./admin-layout.js";
 import { allowAdmin } from "./agent-auth.js";
+import { adminFieldsDisagree, agentRecordIsAdmin } from "./agent-admin.js";
 
 /**
  * GET /AdminPrincipals — list all principals with kind, trust, status.
@@ -42,7 +43,15 @@ export class AdminPrincipals extends Resource {
         const statusBadge = status === "active"
           ? `<span class="badge badge-green">${status}</span>`
           : `<span class="badge badge-gray">${status}</span>`;
-        const admin = p.admin ? "yes" : "";
+        // flair#941 — report the status the GATE will actually apply, not the
+        // `admin` mirror. This column used to read the mirror alone, so a
+        // principal created by `flair principal add --admin` showed "yes" while
+        // allowAdmin() rejected it. A record whose two fields disagree (only
+        // reachable by a raw table write) is flagged rather than silently
+        // resolved, so an operator can see that it needs repairing.
+        const admin = agentRecordIsAdmin(p)
+          ? (adminFieldsDisagree(p) ? "yes <small>(inconsistent record)</small>" : "yes")
+          : (adminFieldsDisagree(p) ? "no <small>(inconsistent record)</small>" : "");
         const created = p.createdAt?.slice(0, 10) ?? "—";
 
         tableRows += `

@@ -27,6 +27,7 @@
 import { databases } from "harper";
 import { randomBytes } from "node:crypto";
 import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
+import { agentRecordIsAdmin } from "./agent-admin.js";
 
 // The MCP protocol revision we implement (initialize handshake).
 const PROTOCOL_VERSION = "2025-06-18";
@@ -167,14 +168,23 @@ async function jitProvisionPrincipal(sub: string): Promise<string> {
 }
 
 /**
- * Is this Principal a flair admin? Reads the Agent record's `admin`/`role`
- * fields. A MCP-OAuth agent is NON-admin unless an operator has explicitly
- * marked its Agent record admin — the MCP surface never elevates on its own.
+ * Is this Principal a flair admin? A MCP-OAuth agent is NON-admin unless an
+ * operator has explicitly marked its Agent record admin — the MCP surface never
+ * elevates on its own.
+ *
+ * flair#941: this used to OR the two admin fields together while the primary
+ * HTTP gate (resources/agent-auth.ts's isAdmin) read only `role`, so the same
+ * record could be an administrator here and an ordinary agent there. It now
+ * resolves through the one shared predicate, so both surfaces answer
+ * identically. A record carrying `admin: true` alone — which no flair write
+ * path produces, and which was never an admin on the HTTP gate — is no longer
+ * an admin here either; see resources/agent-admin.ts for the remedy. This
+ * surface is gated behind FLAIR_MCP_OAUTH and is default-OFF.
  */
 async function isAgentAdmin(principalId: string): Promise<boolean> {
   try {
     const agent = await (databases as any).flair.Agent.get(principalId);
-    return agent?.admin === true || agent?.role === "admin";
+    return agentRecordIsAdmin(agent);
   } catch {
     return false;
   }
