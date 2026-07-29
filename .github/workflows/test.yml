@@ -99,7 +99,15 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
-      - run: bun test test/unit/
+      # test/*.test.ts — 12 files, 250 cases — were run by NO CI command
+      # (flair#953). Every `bun test` invocation in every workflow targets a
+      # subdirectory, and a subdirectory filter does not pick up root-level test
+      # files. They pass locally under a bare `bun test`, which is what
+      # CONTRIBUTING.md tells contributors to run, so they looked covered from
+      # both ends while being enforced from neither. They are pure-logic suites
+      # (auth scoping, data scoping, REM runner/scheduler/snapshot, content
+      # safety, key rotation) with no live-service reason to be excluded.
+      - run: bun test test/unit/ test/*.test.ts
       # test/unit-isolated/ holds files that `mock.module` a process-global
       # shared module (embeddings-provider). `mock.module` is first-wins and
       # unrestored, so these files poison not only the real-importer files in
@@ -1009,20 +1017,50 @@ jobs:
       # Workspace packages: check every package that has a tsconfig.json.
       # Collect all failures so the full picture is visible, then hard-fail
       # if any package had type errors.
+      #
+      # A package without a tsconfig.json used to print one "Skipping" line into
+      # a folded log and leave the job green — so a TS package that lost its
+      # tsconfig in a refactor got ZERO type coverage with the same signal as a
+      # clean check, and a `packages/*/` glob that matched nothing would have
+      # passed outright (flair#953). Skips are now enumerated against an explicit
+      # allowlist: an unlisted skip fails, and so does a zero-package run.
       - name: Type check workspace packages
         run: |
+          # Packages deliberately outside the TypeScript typecheck. Add a package
+          # here only with a reason; removing its tsconfig without saying so is
+          # the failure this list exists to catch.
+          #   hermes-flair — Python plugin, no TypeScript sources.
+          ALLOWED_UNTYPED="hermes-flair"
+
           FAIL=0
+          CHECKED=0
+          UNEXPECTED=""
           for pkg in packages/*/; do
+            name=$(basename "$pkg")
             if [ -f "$pkg/tsconfig.json" ]; then
               echo "::group::Type check: $pkg"
               (cd "$pkg" && npx tsc --noEmit) || FAIL=1
               echo "::endgroup::"
+              CHECKED=$((CHECKED + 1))
+            elif echo " $ALLOWED_UNTYPED " | grep -q " $name "; then
+              echo "Skipping $name (allowlisted: no TypeScript sources)"
             else
-              echo "Skipping $pkg (no tsconfig.json)"
+              echo "::error::$name has no tsconfig.json and is not allowlisted — it received NO type checking"
+              UNEXPECTED="$UNEXPECTED $name"
+              FAIL=1
             fi
           done
+
+          echo "Type-checked $CHECKED workspace package(s)."
+          if [ "$CHECKED" -eq 0 ]; then
+            echo "::error::Type-checked 0 workspace packages — the scan found nothing, so nothing was verified"
+            exit 1
+          fi
+          if [ -n "$UNEXPECTED" ]; then
+            echo "::error::Untypechecked package(s) outside the allowlist:$UNEXPECTED"
+          fi
           if [ "$FAIL" -ne 0 ]; then
-            echo "::error::One or more workspace packages have type errors"
+            echo "::error::One or more workspace packages have type errors or are untypechecked"
             exit 1
           fi
 
