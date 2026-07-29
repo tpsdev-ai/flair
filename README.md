@@ -40,7 +40,19 @@ Self-hosted on [Harper](https://harper.fast) as a single process. No sidecars, n
 
 ## Quick start
 
-Needs **Node.js 22+** and a **user-writable npm global prefix**.
+Two front doors. Pick by where your code already runs.
+
+### Already on Harper? Load Flair as a component
+
+Flair *is* a Harper component. Deploy it into the instance your application already runs in and call its resources directly — `await h.post({ agentId, content })` is a **method call**, not a network call. No second service to operate, no HTTP round trip, and no key to distribute: a caller in the same process is already inside the trust boundary and names the agent it is acting as, per call.
+
+Adding it takes nothing away. The HTTP surface keeps serving MCP clients and remote agents exactly as before.
+
+**→ [Embedding Flair in a Harper app](docs/embedding-in-a-harper-app.md)** — the whole in-process contract, measured against a real instance: resolving the resource, the table-vs-resource distinction that decides whether your memories are scoped at all, N agents in one process, and registering agents with no shell on the node.
+
+### Everywhere else — install the CLI
+
+A laptop, a VPS, an MCP client, or any language over HTTP. Needs **Node.js 22+** and a **user-writable npm global prefix**.
 
 > ⚠️ **Never `sudo npm install -g @tpsdev-ai/flair`.** A root-owned install can't write the embedding model into its own package directory, so semantic search silently degrades to keyword-only. `flair init` and `flair doctor` will warn you loudly. Use `nvm`, or point npm at your home directory: `npm config set prefix ~/.npm-global` and add `~/.npm-global/bin` to `PATH`.
 
@@ -72,6 +84,14 @@ That trailing figure is a rank score, normalized so the top hit is always near 1
 > **Pass `--agent`.** A bare `flair init` bootstraps the instance and stops there — no agent, no keypair, no MCP wiring.
 
 Full walkthrough with expected output at every step: **[docs/quickstart.md](docs/quickstart.md)**.
+
+### Where the agent's key lives
+
+`flair init --agent mybot` writes the private key to `~/.flair/keys/mybot.key` (mode `0600`) and the public half beside it as `mybot.pub`. Only the **public** key is registered on the instance; the private key never leaves the machine. `--keys-dir` writes both somewhere else.
+
+**Back that file up — it is the agent's identity, and there is one copy.** Memories are not encrypted with it, so losing it costs the identity, not the data: the agent can no longer sign, and every HTTP call it makes fails. Recovery is `flair agent rotate-key mybot`, which mints a new pair and re-registers the public half — it needs the admin password `flair init` wrote to `~/.flair/admin-pass`, so back that up too. Otherwise treat the key like an SSH key: one per agent per host, never copied between machines ([docs/secrets-and-keys.md](docs/secrets-and-keys.md)).
+
+**The in-process path needs no key at all.** Keys are how an agent *outside* the process proves who it is. Code running inside the same Harper instance asserts identity through the call context instead — `agentContext("mybot")` — which Flair reads and acts on with no signature, no `Agent`-table lookup and no registration. That is deliberate: same-process code could write the storage tables directly, so demanding a signature from it would be theatre. It is also why that id must come from your own server-side state and never from request data.
 
 ### Useful flags
 
@@ -278,23 +298,29 @@ Sign `agentId:timestamp:nonce:METHOD:/path` with the agent's private key. Protoc
 
 ### Embedded in a Harper app (in-process)
 
-Flair *is* a Harper component. If your application already runs on Harper, load Flair into the same instance and call its resources directly — a method call instead of an HTTP round trip.
+Flair *is* a Harper component. If your application already runs on Harper, load Flair into the same instance and call its resources directly — a method call instead of an HTTP round trip, and no key anywhere.
 
 ```javascript
 import { server } from "harper";
+import { agentContext, collectionResource } from "@tpsdev-ai/flair/dist/resources/in-process.js";
 
-const Memory = server.resources.get("Memory").Resource;   // the resource, not the table
-const h = new Memory(undefined, { request: { tpsAgent: "mybot" } });
+// The RESOURCE — auth, read-scoping, visibility, embedding.
+// Registry keys carry no leading slash: get("Memory"), never get("/Memory").
+const Memory = server.resources.get("Memory").Resource;
+
+const h = await collectionResource(Memory, agentContext("mybot"));
 await h.post({ agentId: "mybot", content: "...", durability: "standard" });
 ```
 
-`databases.flair.Memory` is the **table** (raw storage); the exported `Memory` class is the **resource**, where auth, read-scoping, visibility and embedding live. A context-less call runs unfiltered. Full guide: **[docs/embedding-in-a-harper-app.md](docs/embedding-in-a-harper-app.md)**.
+`databases.flair.Memory` is the **table** (raw storage); the exported `Memory` class is the **resource**, where auth, read-scoping, visibility and embedding live. `new Memory(...)` is not a substitute for `collectionResource` — a create needs a collection-bound instance only Harper can produce. Both helpers refuse a missing agent id rather than defaulting it, because a resource invoked with no context resolves to Flair's trusted `internal` verdict and runs unfiltered across every agent. Full guide: **[docs/embedding-in-a-harper-app.md](docs/embedding-in-a-harper-app.md)**.
 
 ### Auth across surfaces
 
-The default everywhere is **Ed25519 per-agent**: each agent holds its own key at `~/.flair/keys/<agent>.key` and signs every request. That gives write isolation — no agent can write as another — and identity-verified reads. It does *not* refuse cross-agent reads: within one instance, any verified agent can read any other agent's non-private memory by design. The hard boundary is the federation edge, not intra-instance reads. See [SECURITY.md](SECURITY.md).
+For every caller that reaches Flair over the network the default is **Ed25519 per-agent**: each agent holds its own key at `~/.flair/keys/<agent>.key` and signs every request. That gives write isolation — no agent can write as another — and identity-verified reads. It does *not* refuse cross-agent reads: within one instance, any verified agent can read any other agent's non-private memory by design. The hard boundary is the federation edge, not intra-instance reads. See [SECURITY.md](SECURITY.md).
 
 One exception: the **`n8n-nodes-flair`** node authenticates with the Harper **admin password** (Basic auth), which bypasses agent scoping entirely — it can read other agents' `visibility: private` memories and write as anyone. That is acceptable only on a single-tenant, operator-controlled n8n with trusted workflow inputs. Otherwise prefer the Ed25519 path. Full breakdown in **[docs/auth.md](docs/auth.md#auth-across-surfaces-read-this-first)**.
+
+In-process callers are a different model, not an exception to this one: they never sign, because identity is asserted through the call context rather than proven. Co-location *is* the grant — which is why Flair beside untrusted co-tenants on a shared instance is a different proposition to Flair inside your own app.
 
 ## Deployment
 
