@@ -7,11 +7,11 @@ Flair owns **identity**. Flair does **not** own arbitrary secrets. This page dra
 For each registered agent, Flair stores:
 
 - A **public key** in the `Agent` table (server-side; used to verify signed requests).
-- A **private key** at `~/.flair/keys/<agent>.key` on the host that owns that agent (PKCS8 base64). Created by `flair agent add <id>`. Mode `0600`.
+- A **private key** at `~/.flair/keys/<agent>.key` on the host that owns that agent — the raw 32-byte Ed25519 seed. Created by `flair init --agent <id>` or `flair agent add <id>`. Mode `0600`.
 
 Agents sign every request to Flair with this key. Flair refuses unsigned requests and refuses signatures that don't match the registered public key. The signed payload is `<agentId>:<timestamp>:<nonce>:<METHOD>:<path>` with a 30-second replay window and nonce dedup — replays inside that window are rejected.
 
-**This is the only secret material Flair manages.** Lose the key file and the agent is locked out (`flair agent rotate <id>` to issue a new pair).
+**This is the only secret material Flair manages.** Lose the key file and the agent is locked out (`flair agent rotate-key <id>` to issue a new pair).
 
 ## Flair admin password (Harper instance)
 - If not provided via `--admin-pass`, `--admin-pass-file`, `FLAIR_ADMIN_PASS`, or `HDB_ADMIN_PASSWORD`, a random password is generated and written to `~/.flair/admin-pass` (mode `0o600`). The password is **not** printed to the console.
@@ -140,7 +140,7 @@ Hermes uses `~/.hermes/.env` for provider API keys (managed by `hermes auth`). T
 
 - **Stays on the host that owns the agent.** If your agent runs on a given host, the key lives on that host. If you spin up the same agent on another machine, **don't copy the key** — register a new agent identity (`flair agent add <id>-on-<other-host>`) on that machine. Different identities, same Flair instance can store memories for both, you decide cross-agent visibility.
 - **`chmod 600` enforced** by `flair agent add`. Don't relax it.
-- **Don't check it into git.** `.gitignore` should already exclude `~/.flair/keys/`; if you're ever tempted to share keys for "convenience," rotate first (`flair agent rotate <id>`).
+- **Don't check it into git.** `.gitignore` should already exclude `~/.flair/keys/`; if you're ever tempted to share keys for "convenience," rotate first (`flair agent rotate-key <id>`).
 - **Backup separately**, encrypted. The `flair backup` command excludes private keys by default. Roll your own backup of `~/.flair/keys/` via age-encrypted archive if you want offsite recovery.
 
 ## What about a `flair secret` CLI?
@@ -153,7 +153,7 @@ If you find yourself wanting one anyway, your agent can call `security find-gene
 
 | Asset | Owned by | If compromised → |
 |---|---|---|
-| Flair agent private key (`~/.flair/keys/<agent>.key`) | Flair (you, on the host) | Attacker can **write** memories under that agent's identity and read that agent's **`private`**-marked memories until you rotate. Use `flair agent rotate <id>`. Other agents' write identity is unaffected — they can't be impersonated with this key. |
+| Flair agent private key (`~/.flair/keys/<agent>.key`) | Flair (you, on the host) | Attacker can **write** memories under that agent's identity and read that agent's **`private`**-marked memories until you rotate. Use `flair agent rotate-key <id>`. Other agents' write identity is unaffected — they can't be impersonated with this key. |
 | LLM provider API keys (Anthropic, OpenAI, etc.) | OS keyring / 1Password | Standard provider revocation: rotate the key in the provider's console, update keyring entry. |
 | Cross-host secrets (1Password vault, age-sops) | The secret manager itself | Trust falls back to that manager's MFA / key handling. Document recovery in your team's ops runbook. |
 | Memory contents | Flair (server-side) | Write access requires the owning agent's key → see "Per-agent write isolation, org-wide non-private read" below. |
