@@ -10,6 +10,7 @@ import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync }
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
+import { spawnSync } from "node:child_process";
 import { readAdminPassFileSecure } from "../src/cli.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -425,5 +426,52 @@ describe("readAdminPassFileSecure", () => {
     writeFileSync(passFile, "   \n\t\n", "utf-8");
     chmodSync(passFile, 0o600);
     expect(() => readAdminPassFileSecure(passFile)).toThrow(/empty or contains only whitespace/);
+  });
+});
+
+// ─── flair#968: backup with redirected stdout and no --output must fail ───────
+
+describe("flair backup — non-TTY stdout guard", () => {
+  const CLI_SOURCE = join(import.meta.dirname, "..", "src", "cli.ts");
+
+  function runBackupCLI(args: string[], envExtras: Record<string, string> = {}): {
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+  } {
+    const r = spawnSync("bun", [CLI_SOURCE, "backup", ...args], {
+      env: { ...process.env, FLAIR_ADMIN_PASS: "test-dummy", ...envExtras },
+      timeout: 10_000,
+      encoding: "utf8",
+      // spawnSync with stdio: 'pipe' means stdout is NOT a TTY — this is the
+      // exact shape the guard must catch.
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return {
+      exitCode: r.status,
+      stdout: r.stdout ?? "",
+      stderr: r.stderr ?? "",
+    };
+  }
+
+  it("refuses when stdout is not a TTY and --output is not specified", () => {
+    const r = runBackupCLI([]);
+    expect(r.exitCode).not.toBe(0);
+    const output = r.stderr + r.stdout;
+    expect(output).toContain("stdout is not a terminal");
+    expect(output).toContain("--output");
+  });
+
+  it("succeeds past the guard when --output IS specified (non-TTY stdout)", () => {
+    // With --output, the guard should not trigger. The command will still fail
+    // because there's no real Harper instance, but it should get PAST the guard
+    // (i.e. the error should be about connecting, not about stdout/TTY).
+    const r = runBackupCLI(["--output", "/tmp/flair-test-backup.json"]);
+    // The guard must not fire — the error should be a connection failure, not
+    // the non-TTY message.
+    const output = r.stderr + r.stdout;
+    expect(output).not.toContain("stdout is not a terminal");
+    // Should fail trying to connect (no Harper running), not from the guard.
+    expect(r.exitCode).not.toBe(0);
   });
 });

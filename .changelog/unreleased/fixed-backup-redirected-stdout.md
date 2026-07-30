@@ -1,0 +1,1 @@
+- **`flair backup` refuses when stdout is not a terminal and `--output` is not specified.** The backup archive is written to `--output`, not stdout — redirecting stdout with `>` captured the progress report, producing a plausible-looking file of a few hundred bytes that was not a backup. The command now exits with an actionable error telling you to use `--output` instead.

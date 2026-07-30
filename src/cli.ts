@@ -15347,6 +15347,23 @@ program
       process.exit(1);
     }
 
+    // flair#968: `flair backup > file.json` captures the progress report, not
+    // the archive (which goes to --output, defaulting to ~/.flair/backups/...).
+    // The result is exit 0 and a plausible-looking file of a few hundred bytes —
+    // a false success immediately before a destructive upgrade. Refuse this
+    // shape so the mistake is impossible rather than documented.
+    if (!process.stdout.isTTY && !opts.output) {
+      console.error(
+        "Error: stdout is not a terminal and --output was not specified. " +
+          "The backup archive is written to --output, not stdout — redirecting " +
+          "stdout captures the progress report, not the backup.\n" +
+          "\n" +
+          "Use --output to specify where the archive should go:\n" +
+          `  flair backup --output ~/flair-backup-$(date +%Y%m%d).json`,
+      );
+      process.exit(1);
+    }
+
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
     async function adminGet(path: string): Promise<any> {
