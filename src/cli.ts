@@ -407,6 +407,82 @@ function migrateLegacyLaunchdLabel(
 }
 
 /**
+ * Result of attempting to clean up a legacy (pre-flair#693) launchd plist
+ * during init. The plist is only touched when it belongs to this data dir.
+ */
+type LegacyCleanupResult =
+  | { action: "none" }
+  | { action: "unloaded"; unloadFailed?: string; deleteFailed?: string }
+  | { action: "skipped-foreign"; foreignDataDir: string }
+  | { action: "skipped-unknown" };
+
+/**
+ * Clean up a pre-flair#693 legacy launchd plist (ai.tpsdev.flair) during
+ * init, but ONLY when it belongs to the data dir being initialised.
+ *
+ * flair#966: the legacy plist is a single global label — init must not
+ * unload/delete it unless ROOTPATH proves it serves this data dir.
+ *
+ * `runLaunchctl` is injected so tests can record/mock without touching
+ * real launchd. The caller (init) passes a real execSync wrapper; tests
+ * pass a recording stub.
+ */
+function cleanupLegacyLaunchdPlist(
+  dataDir: string,
+  plistDir: string,
+  runLaunchctl: LaunchctlRunner,
+): LegacyCleanupResult {
+  const legacyPlistPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, plistDir);
+  if (!existsSync(legacyPlistPath)) return { action: "none" };
+
+  const legacyRootPath = readPlistRootPath(legacyPlistPath);
+  const legacyOwnedByUs = legacyRootPath !== null && resolve(legacyRootPath) === resolve(dataDir);
+
+  if (legacyOwnedByUs) {
+    let unloadFailed: string | undefined;
+    let deleteFailed: string | undefined;
+    try {
+      runLaunchctl(`launchctl unload "${legacyPlistPath}"`);
+    } catch (err: any) {
+      unloadFailed = err?.message ?? String(err);
+      console.error(
+        `Failed to unload legacy launchd service (${LEGACY_LAUNCHD_LABEL}): ` +
+          `${unloadFailed}. ` +
+          `The plist at ${legacyPlistPath} may still be loaded — ` +
+          `unload it manually with: launchctl unload "${legacyPlistPath}"`,
+      );
+    }
+    try {
+      unlinkSync(legacyPlistPath);
+      console.log(`Migrated off legacy launchd label (${LEGACY_LAUNCHD_LABEL}) ✓`);
+    } catch (err: any) {
+      deleteFailed = err?.message ?? String(err);
+      console.error(
+        `Failed to remove legacy launchd plist at ${legacyPlistPath}: ` +
+          `${deleteFailed}. Remove it manually.`,
+      );
+    }
+    return { action: "unloaded", unloadFailed, deleteFailed };
+  }
+
+  if (legacyRootPath !== null) {
+    console.log(
+      `Skipped legacy launchd cleanup: the plist at ${legacyPlistPath} ` +
+        `belongs to data dir ${resolve(legacyRootPath)}, not ${resolve(dataDir)} — ` +
+        `that is a different Flair instance.`,
+    );
+    return { action: "skipped-foreign", foreignDataDir: resolve(legacyRootPath) };
+  }
+
+  console.log(
+    `Skipped legacy launchd cleanup: could not determine which data dir ` +
+      `the plist at ${legacyPlistPath} serves. ` +
+      `If it is yours, remove it manually with: rm "${legacyPlistPath}"`,
+  );
+  return { action: "skipped-unknown" };
+}
+
+/**
  * Load + start `dataDir`'s launchd service, migrating off a pre-flair#693
  * legacy registration FIRST if one is found (migrateLegacyLaunchdLabel
  * above). Call order is load-bearing — unload legacy -> load new -> start
@@ -3299,21 +3375,20 @@ program
           mkdirSync(plistDir, { recursive: true });
           const plistPath = launchdPlistPath(label, plistDir);
 
-          // flair#693 migration: a pre-flair#693 install registered under
+          // flair#693 + flair#966: a pre-flair#693 install registered under
           // the bare LEGACY_LAUNCHD_LABEL. init always writes fresh plist
           // content below (it has the current ports/creds in hand), so
           // migration here is just "clean up the old registration" —
           // unload + remove it BEFORE writing the new one, so re-running
           // init never leaves two services behind for this data dir.
-          const legacyPlistPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, plistDir);
-          if (existsSync(legacyPlistPath)) {
-            try {
-              const { execSync } = await import("node:child_process");
-              execSync(`launchctl unload "${legacyPlistPath}"`, { stdio: "pipe" });
-            } catch { /* best effort */ }
-            try { unlinkSync(legacyPlistPath); } catch { /* best effort */ }
-            console.log(`Migrated off legacy launchd label (${LEGACY_LAUNCHD_LABEL}) ✓`);
-          }
+          //
+          // flair#966: the legacy plist is NOT scoped to this data dir —
+          // it is a single global label. cleanupLegacyLaunchdPlist reads
+          // ROOTPATH to establish ownership before touching it.
+          cleanupLegacyLaunchdPlist(dataDir, plistDir, (cmd) => {
+            const { execSync } = require("node:child_process");
+            execSync(cmd, { stdio: "pipe" });
+          });
 
           const opsSocket = join(dataDir, "operations-server");
           // authorizeLocal: false (flair#654) — same posture as the initial spawn
@@ -10665,24 +10740,34 @@ program
  * Never logs plist contents — the plist embeds HDB_ADMIN_PASSWORD. Only the
  * extracted ROOTPATH path ever reaches a message.
  */
+
+/**
+ * Read the ROOTPATH declared in a launchd plist, or null if it cannot be
+ * determined (file missing, unreadable, or no ROOTPATH key).
+ *
+ * The plist stores this XML-escaped (buildLaunchdPlist), so the returned
+ * value is decoded through unescapeXml before being returned — a data dir
+ * containing `&` is on disk as `&amp;` and this returns the literal `&`.
+ *
+ * Never logs plist contents — the plist embeds HDB_ADMIN_PASSWORD.
+ */
+export function readPlistRootPath(plistPath: string): string | null {
+  try {
+    const raw = readFileSync(plistPath, "utf-8");
+    const m = raw.match(/<key>ROOTPATH<\/key>\s*<string>([^<]*)<\/string>/);
+    return m ? unescapeXml(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function assertLaunchdServiceOwnedBy(
   dataDir: string,
   label: string,
   plistPath: string,
   action: "stop" | "start",
 ): void {
-  let declared: string | null = null;
-  try {
-    const raw = readFileSync(plistPath, "utf-8");
-    const m = raw.match(/<key>ROOTPATH<\/key>\s*<string>([^<]*)<\/string>/);
-    // The plist stores this XML-escaped (buildLaunchdPlist), so a data dir
-    // containing `&` is on disk as `&amp;`. Decode before comparing, or the
-    // path would never equal itself and this guard would refuse a legitimate
-    // stop/start on any instance whose path contains an escaped character.
-    declared = m ? unescapeXml(m[1]) : null;
-  } catch {
-    return; // unreadable — no evidence, don't block
-  }
+  const declared = readPlistRootPath(plistPath);
   if (declared === null) return;
   if (resolve(declared) === resolve(dataDir)) return;
 
@@ -16485,6 +16570,7 @@ export {
   LEGACY_LAUNCHD_LABEL,
   launchdLabel,
   launchdPlistPath,
+  cleanupLegacyLaunchdPlist,
   resolveLaunchdLabel,
   migrateLegacyLaunchdLabel,
   ensureLaunchdServiceLoaded,
