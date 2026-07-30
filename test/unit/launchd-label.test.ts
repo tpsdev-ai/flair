@@ -26,6 +26,7 @@ import {
   LEGACY_LAUNCHD_LABEL,
   launchdLabel,
   launchdPlistPath,
+  readPlistRootPath,
   resolveLaunchdLabel,
   migrateLegacyLaunchdLabel,
   ensureLaunchdServiceLoaded,
@@ -241,5 +242,81 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
     // Exactly one: `const LEGACY_LAUNCHD_LABEL = "ai.tpsdev.flair";`
     expect(literalOccurrences.length).toBe(1);
     expect(src).toContain('const LEGACY_LAUNCHD_LABEL = "ai.tpsdev.flair";');
+  });
+
+  // flair#966: init must not unload/delete a legacy plist that belongs to
+  // a DIFFERENT data dir. The ownership test reads ROOTPATH from the plist
+  // via readPlistRootPath (the same helper the init code uses).
+  test("readPlistRootPath: matches own data dir, rejects foreign", () => {
+    const dataDirA = "/Users/alice/.flair/data";
+    const dataDirB = "/Users/bob/.flair/data";
+
+    // A plist whose ROOTPATH declares it belongs to dataDirA.
+    function plistWithRootPath(label: string, rootPath: string): string {
+      return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${label}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ROOTPATH</key><string>${rootPath}</string>
+  </dict>
+</dict>
+</plist>`;
+    }
+
+    const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+    writeFileSync(legacyPath, plistWithRootPath(LEGACY_LAUNCHD_LABEL, dataDirA));
+
+    const declared = readPlistRootPath(legacyPath);
+    expect(declared).not.toBeNull();
+
+    const { resolve } = require("node:path");
+    // It matches its own data dir.
+    expect(resolve(declared!) === resolve(dataDirA)).toBe(true);
+    // It does NOT match a different data dir — this is the assertion that
+    // would have caught flair#966.
+    expect(resolve(declared!) === resolve(dataDirB)).toBe(false);
+  });
+
+  test("readPlistRootPath: plist with no ROOTPATH key returns null", () => {
+    // A hand-written or foreign plist that lacks ROOTPATH entirely.
+    const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+    writeFileSync(legacyPath, fakePlist(LEGACY_LAUNCHD_LABEL));
+
+    expect(readPlistRootPath(legacyPath)).toBeNull();
+  });
+
+  test("readPlistRootPath: missing file returns null", () => {
+    const nonexistent = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+    expect(readPlistRootPath(nonexistent)).toBeNull();
+  });
+
+  test("readPlistRootPath: XML-escaped ROOTPATH is decoded before return", () => {
+    // The real data dir contains a literal ampersand.
+    const dataDirWithAmpersand = "/Users/alice/Flair & Data";
+    // The plist stores this XML-escaped: & -> &amp;
+    const escapedRootPath = "/Users/alice/Flair &amp; Data";
+
+    function plistWithEscapedRootPath(label: string, escapedPath: string): string {
+      return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${label}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ROOTPATH</key><string>${escapedPath}</string>
+  </dict>
+</dict>
+</plist>`;
+    }
+
+    const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+    writeFileSync(legacyPath, plistWithEscapedRootPath(LEGACY_LAUNCHD_LABEL, escapedRootPath));
+
+    const declared = readPlistRootPath(legacyPath);
+    expect(declared).toBe(dataDirWithAmpersand);
   });
 });
