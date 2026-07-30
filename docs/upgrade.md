@@ -17,7 +17,11 @@ There are two things you might be upgrading:
 
 ```bash
 # 1. Back up first, always
-flair backup > ~/flair-backup-$(date +%Y%m%d).json
+#    --admin-pass-file keeps the secret out of ps and shell history.
+#    --output is required — the archive goes to a file, not stdout.
+flair backup \
+  --output ~/flair-backup-$(date +%Y%m%d).json \
+  --admin-pass-file ~/.flair/admin-pass
 
 # 2. Check what's outdated (doesn't install anything)
 flair upgrade --check
@@ -352,7 +356,7 @@ npm install -g @tpsdev-ai/flair@<previous-version>
 flair restart
 
 # If data looks wrong, restore from your pre-upgrade backup
-flair restore < ~/flair-backup-<date>.json
+flair restore ~/flair-backup-<date>.json
 ```
 
 `flair upgrade` does this automatically on a failed post-restart verification — see

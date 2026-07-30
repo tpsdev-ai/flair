@@ -15347,6 +15347,20 @@ program
       process.exit(1);
     }
 
+    // flair#968: `flair backup > file.json` captures the progress report, not
+    // the archive (which goes to --output, defaulting to ~/.flair/backups/...).
+    // The result was exit 0 and a plausible-looking file of a few hundred bytes —
+    // a false success immediately before a destructive upgrade.
+    //
+    // When stdout is not a TTY, route progress output to stderr. The archive
+    // still goes to --output / the default path. This makes `flair backup >
+    // file.json` produce an EMPTY file — unmistakably not a valid archive —
+    // while leaving default-path callers (schedulers, cron) completely
+    // unaffected.
+    const log = process.stdout.isTTY
+      ? console.log.bind(console)
+      : console.error.bind(console);
+
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
     async function adminGet(path: string): Promise<any> {
@@ -15361,12 +15375,12 @@ program
       return res.json();
     }
 
-    console.log("Fetching agents...");
+    log("Fetching agents...");
     const allAgents: any[] = await adminGet("/Agent/");
     const filterIds = opts.agents ? opts.agents.split(",").map((s: string) => s.trim()) : null;
     const agents: any[] = filterIds ? allAgents.filter((a: any) => filterIds.includes(a.id)) : allAgents;
 
-    console.log(`Fetching memories for ${agents.length} agent(s)...`);
+    log(`Fetching memories for ${agents.length} agent(s)...`);
     const memories: any[] = [];
     for (const agent of agents) {
       try {
@@ -15377,7 +15391,7 @@ program
       }
     }
 
-    console.log("Fetching souls...");
+    log("Fetching souls...");
     const souls: any[] = [];
     for (const agent of agents) {
       try {
@@ -15407,11 +15421,11 @@ program
     writeFileSync(tmp, JSON.stringify(backup, null, 2) + "\n", "utf-8");
     renameSync(tmp, outputPath);
 
-    console.log(`\n${render.icons.ok} ${render.wrap(render.c.green, "Backup complete")}`);
-    console.log(render.kv("Agents", render.wrap(render.c.bold, String(agents.length))));
-    console.log(render.kv("Memories", render.wrap(render.c.bold, String(memories.length))));
-    console.log(render.kv("Souls", render.wrap(render.c.bold, String(souls.length))));
-    console.log(render.kv("Output", render.wrap(render.c.dim, outputPath)));
+    log(`\n${render.icons.ok} ${render.wrap(render.c.green, "Backup complete")}`);
+    log(render.kv("Agents", render.wrap(render.c.bold, String(agents.length))));
+    log(render.kv("Memories", render.wrap(render.c.bold, String(memories.length))));
+    log(render.kv("Souls", render.wrap(render.c.bold, String(souls.length))));
+    log(render.kv("Output", render.wrap(render.c.dim, outputPath)));
   });
 
 // ─── flair restore ────────────────────────────────────────────────────────────
