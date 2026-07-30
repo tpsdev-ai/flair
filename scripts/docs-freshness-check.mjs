@@ -169,6 +169,7 @@ const EXPECTED_CHECKS = [
   "package-name-drift",
   "changelog-unreleased",
   "cli-command-descriptions",
+  "broken-backup-restore-docs",
 ];
 
 // ── Check 1: stale install pin of the root package ──────────────────────────────
@@ -450,6 +451,36 @@ defineCheck("cli-command-descriptions", "CLI command", async () => {
   // commands and finds zero problems — identical output to a healthy scan. The
   // runner promotes scanned === 0 to a skip.
   return { failures, scanned };
+});
+
+// ── Check 7: broken backup/restore commands in docs ────────────────────────────
+// FAILS on `flair backup >` (backup writes to --output, not stdout) and
+// `flair restore <` (restore reads argv, not stdin). Both produce exit 0 with a
+// plausible-looking file that is not a backup — a silent false success.
+// flair#968, flair#977.
+defineCheck("broken-backup-restore-docs", "prose doc", () => {
+  const failures = [];
+  const brokenBackupRe = /flair backup\s*>/;
+  const brokenRestoreRe = /flair restore\s*</;
+  for (const doc of PROSE_DOCS) {
+    const lines = linesOf(doc);
+    lines.forEach((line, i) => {
+      if (hasAllow(lines, i)) return;
+      if (brokenBackupRe.test(line)) {
+        failures.push({
+          file: doc, line: i + 1,
+          msg: `'flair backup >' redirects stdout, but backup writes the archive to --output (default ~/.flair/backups/). Use 'flair backup --output <path> --admin-pass-file ~/.flair/admin-pass' instead.`,
+        });
+      }
+      if (brokenRestoreRe.test(line)) {
+        failures.push({
+          file: doc, line: i + 1,
+          msg: `'flair restore <' pipes stdin, but restore reads a positional path from argv. Use 'flair restore <path>' instead.`,
+        });
+      }
+    });
+  }
+  return { failures, scanned: PROSE_DOCS.length };
 });
 
 // ─── Run ────────────────────────────────────────────────────────────────────────

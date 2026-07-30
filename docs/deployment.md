@@ -192,10 +192,10 @@ Set these in the Flair process environment (`~/Library/LaunchAgents/ai.tpsdev.fl
 
 ```bash
 # Backup all data (agents, memories, souls)
-flair backup > ~/flair-backup-$(date +%Y%m%d).json
+flair backup --output ~/flair-backup-$(date +%Y%m%d).json --admin-pass-file ~/.flair/admin-pass
 
 # Restore to a fresh instance
-flair restore < ~/flair-backup-20260405.json
+flair restore ~/flair-backup-20260405.json
 ```
 
 Always backup before upgrades.
