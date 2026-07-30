@@ -6,11 +6,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { readAdminPassFileSecure } from "../src/cli.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -429,49 +429,116 @@ describe("readAdminPassFileSecure", () => {
   });
 });
 
-// ─── flair#968: backup with redirected stdout and no --output must fail ───────
+// ─── flair#968: non-TTY stdout routes progress to stderr, archive to file ────
+//
+// `flair backup > file.json` used to capture the progress report, not the
+// archive — exit 0, plausible-looking file, false success. The fix routes
+// progress to stderr when stdout is not a TTY, so the redirect produces an
+// EMPTY file (unmistakably not a valid archive) while leaving default-path
+// callers (schedulers, cron) completely unaffected.
 
-describe("flair backup — non-TTY stdout guard", () => {
+describe("flair backup — non-TTY stdout routes progress to stderr", () => {
   const CLI_SOURCE = join(import.meta.dirname, "..", "src", "cli.ts");
 
-  function runBackupCLI(args: string[], envExtras: Record<string, string> = {}): {
-    exitCode: number | null;
-    stdout: string;
-    stderr: string;
-  } {
-    const r = spawnSync("bun", [CLI_SOURCE, "backup", ...args], {
-      env: { ...process.env, FLAIR_ADMIN_PASS: "test-dummy", ...envExtras },
-      timeout: 10_000,
-      encoding: "utf8",
-      // spawnSync with stdio: 'pipe' means stdout is NOT a TTY — this is the
-      // exact shape the guard must catch.
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    return {
-      exitCode: r.status,
-      stdout: r.stdout ?? "",
-      stderr: r.stderr ?? "",
-    };
-  }
+  let tmpHome: string;
 
-  it("refuses when stdout is not a TTY and --output is not specified", () => {
-    const r = runBackupCLI([]);
-    expect(r.exitCode).not.toBe(0);
-    const output = r.stderr + r.stdout;
-    expect(output).toContain("stdout is not a terminal");
-    expect(output).toContain("--output");
+  beforeEach(() => {
+    tmpHome = makeTmpDir();
   });
 
-  it("succeeds past the guard when --output IS specified (non-TTY stdout)", () => {
-    // With --output, the guard should not trigger. The command will still fail
-    // because there's no real Harper instance, but it should get PAST the guard
-    // (i.e. the error should be about connecting, not about stdout/TTY).
-    const r = runBackupCLI(["--output", "/tmp/flair-test-backup.json"]);
-    // The guard must not fire — the error should be a connection failure, not
-    // the non-TTY message.
-    const output = r.stderr + r.stdout;
-    expect(output).not.toContain("stdout is not a terminal");
-    // Should fail trying to connect (no Harper running), not from the guard.
-    expect(r.exitCode).not.toBe(0);
+  afterEach(() => {
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  /** Spawn a process and return a promise that resolves with stdout/stderr/exitCode. */
+  function spawnAsync(
+    cmd: string,
+    args: string[],
+    opts: { env?: Record<string, string>; timeoutMs?: number } = {},
+  ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(cmd, args, {
+        env: { ...process.env, ...opts.env },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.on("data", (d: Buffer) => (stdout += d.toString("utf-8")));
+      child.stderr?.on("data", (d: Buffer) => (stderr += d.toString("utf-8")));
+      const timer = opts.timeoutMs
+        ? setTimeout(() => { child.kill(); reject(new Error("timeout")); }, opts.timeoutMs)
+        : null;
+      child.on("close", (code) => {
+        if (timer) clearTimeout(timer);
+        resolve({ exitCode: code, stdout, stderr });
+      });
+      child.on("error", (err) => {
+        if (timer) clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  it("writes archive to default path and progress to stderr when stdout is not a TTY (scheduler / flair#968 regression)", async () => {
+    // Start a dedicated mock server for this test to rule out beforeEach
+    // lifecycle issues.
+    const srv = await startMockServer((req, _body, res) => {
+      if (req.url === "/Agent/") return jsonRes(res, 200, AGENTS);
+      if (req.url?.startsWith("/Memory/?agentId=")) return jsonRes(res, 200, []);
+      if (req.url?.startsWith("/Soul/?agentId=")) return jsonRes(res, 200, []);
+      jsonRes(res, 404, { error: "not found" });
+    });
+
+    const r = await spawnAsync("bun", [CLI_SOURCE, "backup", "--url", srv.url], {
+      env: { FLAIR_ADMIN_PASS: "test-dummy", HOME: tmpHome },
+      timeoutMs: 10_000,
+    });
+
+    await stopServer(srv.server);
+
+    // Must succeed — this is the legitimate scheduler case.
+    expect(r.exitCode).toBe(0);
+
+    // stdout must be empty — progress went to stderr.
+    expect(r.stdout.trim()).toBe("");
+
+    // stderr must contain the progress report.
+    expect(r.stderr).toContain("Backup complete");
+    expect(r.stderr).toContain("Agents");
+
+    // Archive must exist at the default path.
+    const backupsDir = join(tmpHome, ".flair", "backups");
+    const files = readdirSync(backupsDir);
+    expect(files.length).toBe(1);
+    expect(files[0]).toMatch(/^flair-backup-/);
+
+    const archive = JSON.parse(readFileSync(join(backupsDir, files[0]), "utf-8"));
+    expect(archive.version).toBe(1);
+    expect(Array.isArray(archive.agents)).toBe(true);
+  });
+
+  it("writes archive to --output path and progress to stderr when stdout is not a TTY", async () => {
+    const srv = await startMockServer((req, _body, res) => {
+      if (req.url === "/Agent/") return jsonRes(res, 200, AGENTS);
+      if (req.url?.startsWith("/Memory/?agentId=")) return jsonRes(res, 200, []);
+      if (req.url?.startsWith("/Soul/?agentId=")) return jsonRes(res, 200, []);
+      jsonRes(res, 404, { error: "not found" });
+    });
+
+    const outputPath = join(tmpHome, "my-backup.json");
+    const r = await spawnAsync("bun", [CLI_SOURCE, "backup", "--url", srv.url, "--output", outputPath], {
+      env: { FLAIR_ADMIN_PASS: "test-dummy", HOME: tmpHome },
+      timeoutMs: 10_000,
+    });
+
+    await stopServer(srv.server);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe("");
+    expect(r.stderr).toContain("Backup complete");
+
+    expect(existsSync(outputPath)).toBe(true);
+    const archive = JSON.parse(readFileSync(outputPath, "utf-8"));
+    expect(archive.version).toBe(1);
   });
 });
