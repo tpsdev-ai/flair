@@ -48,7 +48,7 @@ flair init --skip-smoke            # skip the MCP smoke test
 flair init --port 8000             # use a non-default port
 ```
 
-> **Non-interactive shell:** bare `flair init` with no `--agent` bootstraps the instance only and silently skips agent registration, MCP client wiring, and the smoke test. Pass flags explicitly: `flair init --agent <id> --client all`.
+> **Non-interactive shell:** bare `flair init` with no `--agent` bootstraps the instance only and skips agent registration, MCP client wiring, and the smoke test. Pass flags explicitly: `flair init --agent <id> --client all`.
 
 ### 3. Lifecycle management
 
@@ -64,15 +64,9 @@ On macOS the service is a launchd plist at `~/Library/LaunchAgents/ai.tpsdev.fla
 
 ### Docker
 
-```dockerfile
-FROM node:22-slim
-RUN npm install -g @tpsdev-ai/flair
-RUN flair init --skip-soul
-EXPOSE 19926
-CMD ["flair", "start", "--foreground"]
-```
+Flair does not have a foreground daemon mode today (`flair start` has no `--foreground` option and `flair init` always installs a service manager unit). There is no supported Docker recipe — run Flair directly on the host or use [Harper Fabric](https://www.harperdb.io/) for managed hosting.
 
-Embeddings run on CPU in Docker (no Metal acceleration). Performance is acceptable for small-to-medium memory stores (< 10K memories).
+Embeddings run on CPU in any containerized environment (no Metal acceleration). Performance is acceptable for small-to-medium memory stores (< 10K memories).
 
 See also: [system-requirements.md](system-requirements.md) for measured resource usage.
 
@@ -186,7 +180,7 @@ See [troubleshooting.md](troubleshooting.md) for common issues and fixes.
 
 ```bash
 # 1. Back up first, always
-flair backup > ~/flair-backup-$(date +%Y%m%d).json
+flair backup --output ~/flair-backup-$(date +%Y%m%d).json --admin-pass-file ~/.flair/admin-pass
 
 # 2. Check what's outdated (doesn't install anything)
 flair upgrade --check
@@ -209,10 +203,10 @@ See [upgrade.md](upgrade.md) for the full walkthrough including re-embedding, ro
 
 ```bash
 # Backup all data (agents, memories, souls)
-flair backup > ~/flair-backup-$(date +%Y%m%d).json
+flair backup --output ~/flair-backup-$(date +%Y%m%d).json
 
 # Restore to a fresh instance
-flair restore < ~/flair-backup-20260405.json
+flair restore ~/flair-backup-20260405.json
 ```
 
 Always backup before upgrades. `flair backup` excludes private keys.
@@ -225,13 +219,13 @@ Available. Pair a local instance as a hub or spoke with another Flair instance:
 
 ```bash
 # On the hub — generate a one-time pairing token triple
-flair federation token --admin-pass <hub-admin-pass> > triple.json
+FLAIR_ADMIN_PASS=<hub-admin-password> flair federation token > triple.json
 
 # On the spoke — pair to the hub
 flair federation pair <hub-url> --token-from ./triple.json
 
 # Sync (one-shot)
-flair federation sync --admin-pass <password>
+flair federation sync --admin-pass-file ~/.flair/admin-pass
 ```
 
 Full walkthrough: [federation.md](federation.md).
