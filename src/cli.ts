@@ -407,6 +407,82 @@ function migrateLegacyLaunchdLabel(
 }
 
 /**
+ * Result of attempting to clean up a legacy (pre-flair#693) launchd plist
+ * during init. The plist is only touched when it belongs to this data dir.
+ */
+type LegacyCleanupResult =
+  | { action: "none" }
+  | { action: "unloaded"; unloadFailed?: string; deleteFailed?: string }
+  | { action: "skipped-foreign"; foreignDataDir: string }
+  | { action: "skipped-unknown" };
+
+/**
+ * Clean up a pre-flair#693 legacy launchd plist (ai.tpsdev.flair) during
+ * init, but ONLY when it belongs to the data dir being initialised.
+ *
+ * flair#966: the legacy plist is a single global label — init must not
+ * unload/delete it unless ROOTPATH proves it serves this data dir.
+ *
+ * `runLaunchctl` is injected so tests can record/mock without touching
+ * real launchd. The caller (init) passes a real execSync wrapper; tests
+ * pass a recording stub.
+ */
+function cleanupLegacyLaunchdPlist(
+  dataDir: string,
+  plistDir: string,
+  runLaunchctl: LaunchctlRunner,
+): LegacyCleanupResult {
+  const legacyPlistPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, plistDir);
+  if (!existsSync(legacyPlistPath)) return { action: "none" };
+
+  const legacyRootPath = readPlistRootPath(legacyPlistPath);
+  const legacyOwnedByUs = legacyRootPath !== null && resolve(legacyRootPath) === resolve(dataDir);
+
+  if (legacyOwnedByUs) {
+    let unloadFailed: string | undefined;
+    let deleteFailed: string | undefined;
+    try {
+      runLaunchctl(`launchctl unload "${legacyPlistPath}"`);
+    } catch (err: any) {
+      unloadFailed = err?.message ?? String(err);
+      console.error(
+        `Failed to unload legacy launchd service (${LEGACY_LAUNCHD_LABEL}): ` +
+          `${unloadFailed}. ` +
+          `The plist at ${legacyPlistPath} may still be loaded — ` +
+          `unload it manually with: launchctl unload "${legacyPlistPath}"`,
+      );
+    }
+    try {
+      unlinkSync(legacyPlistPath);
+      console.log(`Migrated off legacy launchd label (${LEGACY_LAUNCHD_LABEL}) ✓`);
+    } catch (err: any) {
+      deleteFailed = err?.message ?? String(err);
+      console.error(
+        `Failed to remove legacy launchd plist at ${legacyPlistPath}: ` +
+          `${deleteFailed}. Remove it manually.`,
+      );
+    }
+    return { action: "unloaded", unloadFailed, deleteFailed };
+  }
+
+  if (legacyRootPath !== null) {
+    console.log(
+      `Skipped legacy launchd cleanup: the plist at ${legacyPlistPath} ` +
+        `belongs to data dir ${resolve(legacyRootPath)}, not ${resolve(dataDir)} — ` +
+        `that is a different Flair instance.`,
+    );
+    return { action: "skipped-foreign", foreignDataDir: resolve(legacyRootPath) };
+  }
+
+  console.log(
+    `Skipped legacy launchd cleanup: could not determine which data dir ` +
+      `the plist at ${legacyPlistPath} serves. ` +
+      `If it is yours, remove it manually with: rm "${legacyPlistPath}"`,
+  );
+  return { action: "skipped-unknown" };
+}
+
+/**
  * Load + start `dataDir`'s launchd service, migrating off a pre-flair#693
  * legacy registration FIRST if one is found (migrateLegacyLaunchdLabel
  * above). Call order is load-bearing — unload legacy -> load new -> start
@@ -3307,49 +3383,12 @@ program
           // init never leaves two services behind for this data dir.
           //
           // flair#966: the legacy plist is NOT scoped to this data dir —
-          // it is a single global label. Read its ROOTPATH to establish
-          // ownership before touching it. If it belongs to a different
-          // instance, leave it alone and say so.
-          const legacyPlistPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, plistDir);
-          if (existsSync(legacyPlistPath)) {
-            const legacyRootPath = readPlistRootPath(legacyPlistPath);
-            const legacyOwnedByUs = legacyRootPath !== null && resolve(legacyRootPath) === resolve(dataDir);
-
-            if (legacyOwnedByUs) {
-              try {
-                const { execSync } = await import("node:child_process");
-                execSync(`launchctl unload "${legacyPlistPath}"`, { stdio: "pipe" });
-              } catch (err: any) {
-                console.error(
-                  `Failed to unload legacy launchd service (${LEGACY_LAUNCHD_LABEL}): ` +
-                    `${err?.message ?? err}. ` +
-                    `The plist at ${legacyPlistPath} may still be loaded — ` +
-                    `unload it manually with: launchctl unload "${legacyPlistPath}"`,
-                );
-              }
-              try {
-                unlinkSync(legacyPlistPath);
-                console.log(`Migrated off legacy launchd label (${LEGACY_LAUNCHD_LABEL}) ✓`);
-              } catch (err: any) {
-                console.error(
-                  `Failed to remove legacy launchd plist at ${legacyPlistPath}: ` +
-                    `${err?.message ?? err}. Remove it manually.`,
-                );
-              }
-            } else if (legacyRootPath !== null) {
-              console.log(
-                `Skipped legacy launchd cleanup: the plist at ${legacyPlistPath} ` +
-                  `belongs to data dir ${resolve(legacyRootPath)}, not ${resolve(dataDir)} — ` +
-                  `that is a different Flair instance.`,
-              );
-            } else {
-              console.log(
-                `Skipped legacy launchd cleanup: could not determine which data dir ` +
-                  `the plist at ${legacyPlistPath} serves. ` +
-                  `If it is yours, remove it manually with: rm "${legacyPlistPath}"`,
-              );
-            }
-          }
+          // it is a single global label. cleanupLegacyLaunchdPlist reads
+          // ROOTPATH to establish ownership before touching it.
+          cleanupLegacyLaunchdPlist(dataDir, plistDir, (cmd) => {
+            const { execSync } = require("node:child_process");
+            execSync(cmd, { stdio: "pipe" });
+          });
 
           const opsSocket = join(dataDir, "operations-server");
           // authorizeLocal: false (flair#654) — same posture as the initial spawn
@@ -16531,6 +16570,7 @@ export {
   LEGACY_LAUNCHD_LABEL,
   launchdLabel,
   launchdPlistPath,
+  cleanupLegacyLaunchdPlist,
   resolveLaunchdLabel,
   migrateLegacyLaunchdLabel,
   ensureLaunchdServiceLoaded,
