@@ -122,8 +122,8 @@ describe("docs-freshness gate, everything present", () => {
   });
 
   test("reports every check as passed", () => {
-    expect(res.out).toContain("6/6 checks passed");
-    expect(res.out).toContain("All 6 docs-freshness checks ran and passed.");
+    expect(res.out).toContain("7/7 checks passed");
+    expect(res.out).toContain("All 7 docs-freshness checks ran and passed.");
   });
 
   test("reports nothing as skipped", () => {
@@ -165,12 +165,12 @@ describe("cli-command-descriptions with dist/cli.js absent", () => {
   });
 
   test("never claims all checks passed", () => {
-    expect(res.out).not.toContain("All 6 docs-freshness checks ran and passed.");
-    expect(res.out).not.toMatch(/6\/6 checks passed/);
+    expect(res.out).not.toContain("All 7 docs-freshness checks ran and passed.");
+    expect(res.out).not.toMatch(/7\/7 checks passed/);
   });
 
   test("the tally excludes it from the pass count and names it separately", () => {
-    expect(res.out).toContain("5/6 checks passed");
+    expect(res.out).toContain("6/7 checks passed");
     expect(res.out).toContain("1 DID NOT RUN");
   });
 });
