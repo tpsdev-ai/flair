@@ -84,11 +84,13 @@ import {
   inferSoleAgentId,
   fixCommandAgentHint,
   describeAgentGateFinding,
+  embeddingsSkipRemedy,
   classifyKeyFile,
   resolveCollisionSafeName,
   pruneDateStamp,
   PRUNED_DIR_NAME,
   type AgentGateState,
+  type SemanticSkipReason,
   type KeyPruneClass,
 } from "./doctor-client.js";
 import {
@@ -109,6 +111,7 @@ import {
   resolveKeyPath,
   buildEd25519Auth,
   authFetch,
+  KeyLoadError,
   isLocalBase,
   authedRequest,
 } from "./lib/auth-resolve.js";
@@ -1662,7 +1665,12 @@ async function waitForHealth(httpPort: number, adminUser: string, adminPass: str
 export type SemanticVerifyResult =
   | { state: "ok"; score: number }
   | { state: "degraded"; detail: string }
-  | { state: "skipped"; detail: string };
+  // flair#1023: `skipped` covers several unrelated situations, and the
+  // renderer used to print ONE remedy ("pass --agent") for all of them —
+  // advice that cannot fix a key that won't decode, or an HTTP 500 from the
+  // probe. `reason` is what lets the caller pick a remedy that is actually
+  // reachable from the failure, instead of a remedy-shaped sentence.
+  | { state: "skipped"; reason: SemanticSkipReason; detail: string };
 
 /**
  * Verify that semantic search ACTUALLY works by storing a memory with a
@@ -1693,7 +1701,7 @@ export async function verifySemanticSearch(
     } catch { /* keysDir missing */ }
   }
   if (!agentId) {
-    return { state: "skipped", detail: "no agent id or key found" };
+    return { state: "skipped", reason: "no-agent", detail: "no agent id or key found" };
   }
   // Find the signing key. Prefer the standard locations (resolveKeyPath), but
   // fall back to the keysDir we were handed — `flair init` keys live there and
@@ -1704,7 +1712,7 @@ export async function verifySemanticSearch(
     if (existsSync(candidate)) keyPath = candidate;
   }
   if (!keyPath) {
-    return { state: "skipped", detail: `no private key for agent '${agentId}'` };
+    return { state: "skipped", reason: "no-key", detail: `no private key for agent '${agentId}'` };
   }
 
   // Distinctive content vs. a PARAPHRASE query with deliberately ZERO shared
@@ -1726,7 +1734,7 @@ export async function verifySemanticSearch(
     });
     if (!writeRes.ok && writeRes.status !== 204) {
       const text = await writeRes.text().catch(() => "");
-      return { state: "skipped", detail: `could not write probe memory: HTTP ${writeRes.status} ${text.slice(0, 80)}` };
+      return { state: "skipped", reason: "probe-failed", detail: `could not write probe memory: HTTP ${writeRes.status} ${text.slice(0, 80)}` };
     }
     stored = true;
 
@@ -1741,7 +1749,7 @@ export async function verifySemanticSearch(
     });
     if (!searchRes.ok) {
       const text = await searchRes.text().catch(() => "");
-      return { state: "skipped", detail: `SemanticSearch failed: HTTP ${searchRes.status} ${text.slice(0, 80)}` };
+      return { state: "skipped", reason: "probe-failed", detail: `SemanticSearch failed: HTTP ${searchRes.status} ${text.slice(0, 80)}` };
     }
     const data = await searchRes.json() as { results?: any[]; _warning?: string };
 
@@ -1769,8 +1777,15 @@ export async function verifySemanticSearch(
     }
     return { state: "ok", score };
   } catch (err: unknown) {
+    // flair#1023: distinguish "your key will not load" from "the probe
+    // request failed". The former is raised before any request leaves the
+    // process, so it is never evidence about the instance — and "pass
+    // --agent" cannot fix it.
+    if (err instanceof KeyLoadError) {
+      return { state: "skipped", reason: "key-load", detail: err.message };
+    }
     const message = err instanceof Error ? err.message : String(err);
-    return { state: "skipped", detail: `probe error: ${message.slice(0, 100)}` };
+    return { state: "skipped", reason: "probe-failed", detail: `probe error: ${message.slice(0, 100)}` };
   } finally {
     // Best-effort cleanup of the ephemeral probe memory.
     if (stored) {
@@ -1816,6 +1831,11 @@ export async function probeFlairReachable(url: string, timeoutMs = 2000): Promis
  *   any other status, or a network error/timeout -> "unreachable" (could not
  *     verify one way or the other — e.g. a bare 401/403/500 doesn't tell us
  *     whether the agent exists, so we don't claim NOT registered on those)
+ *   the key file exists but will not load -> "key-unreadable" (flair#1023 —
+ *     signing happens strictly before the request, so authFetch can only
+ *     raise KeyLoadError while the instance is still untouched. This USED to
+ *     land in the catch below and be reported as "instance unreachable",
+ *     which doctor printed directly beneath its own "Harper responding" tick)
  *   no local key found for agentId (checked resolveKeyPath, then keysDir) -> "no-key"
  *     (can't sign the request at all — distinct from "unreachable" so the
  *     caller can print an accurate reason)
@@ -1843,7 +1863,7 @@ export async function checkAgentRegistered(
   baseUrl: string,
   agentId: string,
   keysDir: string,
-): Promise<{ state: "registered" | "not-registered" | "unreachable" | "no-key"; detail?: string }> {
+): Promise<{ state: AgentGateState; detail?: string }> {
   let keyPath = resolveKeyPath(agentId);
   if (!keyPath) {
     const candidate = join(keysDir, `${agentId}.key`);
@@ -1862,6 +1882,13 @@ export async function checkAgentRegistered(
     }
     return { state: "unreachable", detail: `HTTP ${res.status} ${text.slice(0, 80)}` };
   } catch (err: unknown) {
+    // flair#1023: a key that will not load is NOT a reachability fact. It is
+    // raised before the request is sent, so reporting it as "unreachable"
+    // sends the operator to firewalls and ports for a problem that is on
+    // their own disk.
+    if (err instanceof KeyLoadError) {
+      return { state: "key-unreadable", detail: err.message };
+    }
     const message = err instanceof Error ? err.message : String(err);
     return { state: "unreachable", detail: `instance unreachable: ${message.slice(0, 100)}` };
   }
@@ -4440,7 +4467,13 @@ export async function classifyKeysDir(keysDir: string, baseUrl: string): Promise
         entries: [],
       };
     }
-    const decision = classifyKeyFile(c.agentId, true, { state: reg.state, detail: reg.detail }, baseUrl);
+    // flair#1023 added "key-unreadable". It cannot occur here — this key's
+    // seed already parsed via isValidPrivateKeySeedFile above — but is
+    // handled explicitly rather than folded into the else: a key that will
+    // not load means exactly what prune already calls "invalid".
+    const decision = reg.state === "key-unreadable"
+      ? classifyKeyFile(c.agentId, false, null, baseUrl)
+      : classifyKeyFile(c.agentId, true, { state: reg.state, detail: reg.detail }, baseUrl);
     entries.push({ name: c.name, class: decision.class, reason: decision.reason, agentId: c.agentId });
   }
 
@@ -12347,13 +12380,20 @@ program
           console.log(`     ${render.wrap(render.c.dim, "See:")} docs/troubleshooting.md ${render.wrap(render.c.dim, "→ \"Semantic search DEGRADED\"")}`);
           issues++;
           break;
-        case "skipped":
-          // Could not run the round-trip (no agent / no key). Don't claim
-          // all-clear — surface that the check was skipped, but don't count it
-          // as a hard issue since the user may simply not have an agent yet.
+        case "skipped": {
+          // Could not run the round-trip. Don't claim all-clear — surface that
+          // the check was skipped, but don't count it as a hard issue since
+          // the user may simply not have an agent yet.
+          //
+          // flair#1023: the remedy is chosen from the classified reason
+          // (embeddingsSkipRemedy, src/doctor-client.ts) instead of being
+          // printed unconditionally. A key that will not decode gets no
+          // "pass --agent" advice, because following it changes nothing.
           console.log(`  ${render.icons.warn} Embeddings: not verified ${render.wrap(render.c.dim, `(${semanticStatus.detail})`)}`);
-          console.log(`     ${render.wrap(render.c.dim, "Pass --agent <id> (or set FLAIR_AGENT_ID) so doctor can run a real semantic round-trip.")}`);
+          const remedy = embeddingsSkipRemedy(semanticStatus.reason);
+          if (remedy) console.log(`     ${render.wrap(render.c.dim, remedy)}`);
           break;
+        }
       }
     }
 
@@ -12508,7 +12548,11 @@ program
           console.log(`        ${render.wrap(render.c.dim, "Fix:")} flair agent add ${block.agentId}`);
           issues++;
         } else {
-          console.log(`     ${render.icons.warn} could not verify agent registration ${render.wrap(render.c.dim, `(${reg.detail})`)}`);
+          // flair#1023: `reachable` was just established two lines above, so
+          // reuse the same self-inconsistency guard the agent gates use
+          // rather than echoing a detail that may claim the opposite.
+          const finding = describeAgentGateFinding(block.agentId!, reg.state, reg.detail, { instanceReachable: reachable });
+          console.log(`     ${render.icons.warn} ${finding?.message ?? `could not verify agent registration (${reg.detail})`}`);
         }
       }
 
@@ -12594,7 +12638,10 @@ program
     for (const id of verifiedReadAgentIds) {
       const reg = await checkAgentRegistered(baseUrl, id, defaultKeysDir());
       agentGates.push({ id, state: reg.state, detail: reg.detail });
-      const finding = describeAgentGateFinding(id, reg.state, reg.detail);
+      // harperResponding is necessarily true here (verifiedReadAgentIds is
+      // empty otherwise), so an "unreachable" verdict from this loop is
+      // always a self-contradiction — flair#1023. Hand the guard the fact.
+      const finding = describeAgentGateFinding(id, reg.state, reg.detail, { instanceReachable: harperResponding });
       if (finding?.isIssue) issues++;
     }
 
@@ -12605,7 +12652,7 @@ program
     // agent and moves on to the next (failure isolation).
     function renderAgentGateHeader(gate: { id: string; state: AgentGateState; detail?: string }): boolean {
       console.log(`    ${render.wrap(render.c.dim, `Agent: ${gate.id}`)}`);
-      const finding = describeAgentGateFinding(gate.id, gate.state, gate.detail);
+      const finding = describeAgentGateFinding(gate.id, gate.state, gate.detail, { instanceReachable: harperResponding });
       if (!finding) return true;
       const icon = finding.icon === "error" ? render.icons.error : render.icons.warn;
       console.log(`      ${icon} ${finding.message}`);
@@ -12787,7 +12834,7 @@ program
       if (agentGates.length === 0) {
         console.log(`  ${render.icons.info} Pass --agent <id> (with a matching key in ~/.flair/keys) to see migration state — requires a verified read, same as Fleet presence above.`);
       } else {
-        const passedGates = agentGates.filter((g) => describeAgentGateFinding(g.id, g.state, g.detail) === null);
+        const passedGates = agentGates.filter((g) => describeAgentGateFinding(g.id, g.state, g.detail, { instanceReachable: harperResponding }) === null);
         for (const gate of passedGates) {
           renderAgentGateHeader(gate);
           const keyPath = resolveKeyPath(gate.id) ?? join(defaultKeysDir(), `${gate.id}.key`);

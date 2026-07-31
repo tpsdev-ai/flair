@@ -214,7 +214,110 @@ export function buildEd25519Auth(agentId: string, method: string, path: string, 
   return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${sig}`;
 }
 
-/** Authenticated fetch against Flair using Ed25519. */
+// ─── Key-load failures, told apart from transport failures (flair#1023) ─────
+//
+// An unparseable key file used to reach callers as a bare Error out of
+// authFetch, indistinguishable from `fetch` rejecting. Every caller with a
+// single `catch` around "sign, then send" therefore attributed it to the
+// network — `flair doctor` reported an operator's undecodable key as
+// "instance unreachable", six lines under its own `✓ Harper responding`.
+//
+// The fix is structural, not a better guess: signing STRICTLY precedes the
+// request, so the phase that failed is already known at the point of failure
+// and no longer has to be inferred from the error text. authFetch wraps only
+// the signing half in KeyLoadError; anything thrown after that is genuinely
+// transport. A caller that wants to tell them apart does `instanceof`, and
+// one that doesn't keeps working — KeyLoadError is an Error whose `message`
+// is strictly more informative than what it replaces.
+
+/**
+ * Why a key file could not be turned into a usable signing key.
+ *
+ * "unknown" is a real, load-bearing member, not a fallback to tidy up later:
+ * an unrecognised failure must stay unrecognised so callers report the raw
+ * error instead of asserting a cause they haven't established (flair#1023).
+ */
+export type KeyLoadFailureKind = "not-found" | "unreadable" | "decode" | "unknown";
+
+/**
+ * Classify a throw from `buildEd25519Auth`.
+ *
+ * Keyed on the STRUCTURED `code` property rather than on message text,
+ * because the message is not stable across crypto backends. Probed directly
+ * on the same 60-byte malformed input:
+ *
+ *   Node (OpenSSL)   ERR_OSSL_UNSUPPORTED       error:1E08010C:DECODER routines::unsupported
+ *                    ERR_OSSL_ASN1_WRONG_TAG    error:068000A8:asn1 encoding routines::wrong tag
+ *   Bun (BoringSSL)  ERR_OSSL_NO_START_LINE     error:0900006e:PEM routines:...:NO_START_LINE
+ *                    ERR_OSSL_WRONG_TAG         error:0c0000be:ASN.1 encoding routines:...:WRONG_TAG
+ *
+ * The first line is the error in flair#1023, and matching it alone would have
+ * left the tests (bun) and the shipped CLI (node) classifying differently.
+ * So the rule is the `ERR_OSSL_` family as a whole — sound here because
+ * buildEd25519Auth does no I/O beyond reading the file: any crypto-backend
+ * error it raises is about the key, never about the instance. Message text is
+ * a secondary signal only, for a backend that reports no code we recognise.
+ */
+export function classifyKeyLoadFailure(err: unknown): KeyLoadFailureKind {
+  const code = typeof (err as { code?: unknown })?.code === "string" ? (err as { code: string }).code : "";
+  if (code === "ENOENT") return "not-found";
+  if (code === "EACCES" || code === "EPERM" || code === "EISDIR") return "unreadable";
+  if (code.startsWith("ERR_OSSL")) return "decode";
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  // `asn\.?1` because the two backends punctuate it differently:
+  // "asn1 encoding routines" (OpenSSL) vs "ASN.1 encoding routines" (BoringSSL).
+  if (/DECODER routines|asn\.?1 encoding routines|PEM routines/i.test(message)) return "decode";
+  return "unknown";
+}
+
+/** A signing key could not be loaded — distinct from the instance being down. */
+export class KeyLoadError extends Error {
+  /** The file we tried to read. Known at the point of failure; used to be discarded. */
+  readonly keyPath: string;
+  readonly kind: KeyLoadFailureKind;
+  /** The underlying error's message, preserved verbatim for the operator. */
+  readonly underlying: string;
+
+  constructor(keyPath: string, kind: KeyLoadFailureKind, underlying: string) {
+    super(describeKeyLoadFailure(keyPath, kind, underlying));
+    this.name = "KeyLoadError";
+    this.keyPath = keyPath;
+    this.kind = kind;
+    this.underlying = underlying;
+  }
+
+  static from(keyPath: string, err: unknown): KeyLoadError {
+    const underlying = err instanceof Error ? err.message : String(err ?? "");
+    return new KeyLoadError(keyPath, classifyKeyLoadFailure(err), underlying);
+  }
+}
+
+/**
+ * One line an operator can act on: what we were doing, which file, and — only
+ * when it has actually been established — why. The "unknown" arm deliberately
+ * states no cause and shows the raw error instead (flair#1023 requirement 1).
+ */
+export function describeKeyLoadFailure(keyPath: string, kind: KeyLoadFailureKind, underlying: string): string {
+  switch (kind) {
+    case "not-found":
+      return `signing key ${keyPath} does not exist`;
+    case "unreadable":
+      return `signing key ${keyPath} could not be read (${underlying})`;
+    case "decode":
+      return `signing key ${keyPath} could not be parsed as an Ed25519 private key (${underlying})`;
+    case "unknown":
+      // No cause is asserted — we genuinely do not know one.
+      return `signing key ${keyPath} could not be loaded: ${underlying}`;
+  }
+}
+
+/**
+ * Authenticated fetch against Flair using Ed25519.
+ *
+ * Throws {@link KeyLoadError} if the key could not be loaded — a failure that
+ * provably happened BEFORE any byte hit the network, so no caller need guess
+ * whether the instance is reachable. Anything else thrown here is transport.
+ */
 export async function authFetch(
   baseUrl: string,
   agentId: string,
@@ -223,7 +326,12 @@ export async function authFetch(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  const auth = buildEd25519Auth(agentId, method, path, keyPath);
+  let auth: string;
+  try {
+    auth = buildEd25519Auth(agentId, method, path, keyPath);
+  } catch (err: unknown) {
+    throw KeyLoadError.from(keyPath, err);
+  }
   const headers: Record<string, string> = { Authorization: auth };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   return fetch(`${baseUrl}${path}`, {
