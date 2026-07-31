@@ -33,6 +33,13 @@ so a hand-written entry here is lost.
   has `main` and `exports` fields so `import { Flair } from "@tpsdev-ai/flair"`
   resolves directly.
 
+  **Breaking for deep importers.** Adding an `exports` map makes it an allowlist:
+  paths under `@tpsdev-ai/flair/dist/*` no longer resolve. Import
+  `@tpsdev-ai/flair` for the facade, or `@tpsdev-ai/flair/server` for the raw
+  primitives; `@tpsdev-ai/flair/package.json` also remains available. This is a
+  0.x release and reaching into `dist/` was never a supported path, but the
+  change is called out here rather than left to be discovered at import time.
+
 ### Changed
 
 - **The README quick start now forks Harper-native first.** Readers whose application already runs on Harper reach the in-process path in one click instead of finding it two-thirds of the way down the page, and the CLI quick start keeps its own branch immediately below — nothing was removed. Over HTTP Flair is one memory API among many; loaded as a component it is a method call with no network hop and no second service to operate, and the front door now says so.
