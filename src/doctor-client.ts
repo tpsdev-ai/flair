@@ -883,8 +883,39 @@ export function fixCommandAgentHint(keyAgentIds: string[]): string {
 }
 
 /** checkAgentRegistered's (src/cli.ts) result states — duplicated here as a
- *  type only (no import) to keep this module network/crypto-free. */
-export type AgentGateState = "registered" | "not-registered" | "unreachable" | "no-key";
+ *  type only (no import) to keep this module network/crypto-free.
+ *
+ *  "key-unreadable" (flair#1023) is deliberately its own member rather than a
+ *  flavour of "unreachable": the two have opposite locations (their disk vs
+ *  the network), opposite remedies, and — because signing precedes the
+ *  request — are never ambiguous at the point they are raised. */
+export type AgentGateState = "registered" | "not-registered" | "unreachable" | "no-key" | "key-unreadable";
+
+/** Why verifySemanticSearch (src/cli.ts) returned `skipped` — duplicated here
+ *  as a type only (no import), same convention as AgentGateState. */
+export type SemanticSkipReason = "no-agent" | "no-key" | "key-load" | "probe-failed";
+
+/**
+ * The remedy line to print under doctor's "Embeddings: not verified" warning,
+ * or null when no remedy applies (flair#1023 requirement 4).
+ *
+ * doctor used to print "Pass --agent <id> ..." for EVERY skip reason. That
+ * sentence only fixes the two cases where no agent identity was resolved. It
+ * cannot fix a key that will not decode — following it produces the identical
+ * error — and it cannot fix an HTTP failure from the probe itself. Printing a
+ * remedy that provably will not change the outcome spends the operator's time
+ * and is worse than printing nothing, so those cases now print nothing.
+ */
+export function embeddingsSkipRemedy(reason: SemanticSkipReason): string | null {
+  switch (reason) {
+    case "no-agent":
+    case "no-key":
+      return "Pass --agent <id> (or set FLAIR_AGENT_ID) so doctor can run a real semantic round-trip.";
+    case "key-load":
+    case "probe-failed":
+      return null;
+  }
+}
 
 /** AgentGateState minus "unreachable", for the parts of the surface (like
  *  classifyKeyFile below) that only ever see it once instance reachability
@@ -908,6 +939,21 @@ export interface AgentGateFinding {
 }
 
 /**
+ * What the run has already established about the instance, at the moment this
+ * finding is rendered (flair#1023).
+ *
+ * `instanceReachable: true` means an earlier check in the SAME run got a
+ * response — the state doctor is in whenever it reaches the agent gates at
+ * all, since it only enumerates agents when Harper answered. Passing it makes
+ * the contradiction in flair#1023 unrepresentable rather than merely fixed:
+ * no arrangement of inputs can produce a message claiming the instance is
+ * unreachable underneath a tick saying it responded.
+ */
+export interface RunReachability {
+  instanceReachable?: boolean;
+}
+
+/**
  * Render decision for one agent's registration-gate outcome, ahead of a
  * verified-read section (Fleet presence / Migrations). Returns null when the
  * agent is registered — the caller should proceed with its actual signed
@@ -915,10 +961,43 @@ export interface AgentGateFinding {
  * agent's subsection; the caller must still move on to the next agent
  * (failure isolation, flair#722) rather than aborting the whole section.
  */
-export function describeAgentGateFinding(agentId: string, state: AgentGateState, detail?: string): AgentGateFinding | null {
+export function describeAgentGateFinding(
+  agentId: string,
+  state: AgentGateState,
+  detail?: string,
+  reachability?: RunReachability,
+): AgentGateFinding | null {
+  // Self-inconsistency guard. "unreachable" is a legitimate state — a bare
+  // 500, a timeout — but it must never be ASSERTED after this run has already
+  // watched the instance answer. When it is, report the honest thing: the
+  // check failed, and we know it was not connectivity.
+  if (state === "unreachable" && reachability?.instanceReachable === true) {
+    // Strip the caller's own "instance unreachable:" prefix before quoting the
+    // detail — that prefix IS the claim being disclaimed, and leaving it in
+    // would reassert it in the same sentence that denies it.
+    const raw = detail?.replace(/^instance unreachable:\s*/i, "").trim();
+    return {
+      icon: "warn",
+      message:
+        `could not verify agent '${agentId}' registration — the instance responded to this run, ` +
+        `so this is not a connectivity problem${raw ? ` (${raw})` : ""}`,
+      isIssue: false,
+    };
+  }
   switch (state) {
     case "registered":
       return null;
+    case "key-unreadable":
+      return {
+        icon: "warn",
+        // Names the file and the operation. No cause is invented and no fix
+        // hint is offered: the failure classes that land here (a corrupt key,
+        // a file that is not an agent key at all) have different remedies and
+        // we cannot tell them apart from the bytes. A remedy we cannot stand
+        // behind is the flair#1023 defect, not a fix for it.
+        message: `could not verify agent '${agentId}' registration — ${detail ?? "its signing key could not be loaded"}`,
+        isIssue: false,
+      };
     case "no-key":
       return {
         icon: "warn",

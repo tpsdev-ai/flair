@@ -104,6 +104,42 @@ date
 
 If using the MCP server, restart Claude Code after rotating keys.
 
+### "signing key ... could not be parsed as an Ed25519 private key"
+
+**Symptoms:** `flair doctor` reports, naming the file:
+
+```
+⚠️ could not verify agent 'my-agent' registration — signing key
+   /home/you/.flair/keys/my-agent.key could not be parsed as an Ed25519 private key
+   (error:1E08010C:DECODER routines::unsupported)
+```
+
+**This is not a connectivity problem.** The failure happens locally, before any
+request is sent — the instance is untouched. Checking ports, firewalls or the
+Flair URL will not help. (Before #1023 doctor reported exactly this as
+`instance unreachable`, and separately suggested passing `--agent`; neither was
+the cause.)
+
+**Causes:** the bytes in that file are not a private key Flair can read. Most
+often either the file is truncated or corrupt, or it is not an agent key at all
+— `~/.flair/keys/<id>.key` is also where the federation keystore writes its own
+**encrypted** key files, which are not loadable as plain Ed25519 seeds.
+
+**Fix:** identify which it is before touching the file — the two have opposite
+remedies, and the wrong one loses a key.
+
+```bash
+# Is this id an agent, or a federation instance?
+flair agent list
+flair federation status
+
+# If it IS an agent and the file is corrupt, re-register a fresh keypair:
+flair agent rotate-key <agent-id>
+```
+
+If the id does not appear as an agent, leave the file alone — it belongs to the
+keystore, and doctor simply has no business signing with it.
+
 ### Port conflict
 
 **Symptoms:** `flair start` fails, "address already in use".
