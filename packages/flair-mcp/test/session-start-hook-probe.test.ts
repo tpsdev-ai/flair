@@ -21,12 +21,29 @@ import { isProbeMode } from "../src/session-start-hook.ts";
  */
 
 const NOOP = "{}";
-/** The hook's ENTRY POINT, spawned as its own process. Deliberately the source
- *  and not dist/: this suite's CI lane builds @tpsdev-ai/flair-client (which
- *  the hook imports by its built dist) but never builds this package, and a
- *  test that needs an artifact CI does not produce is a test that fails for
- *  the wrong reason. The property under test lives in main(), which the
- *  --noCheck TypeScript build does not transform. */
+/**
+ * The hook's ENTRY POINT, spawned as its own process — deliberately the
+ * SOURCE, not dist/.
+ *
+ * The CI lane that runs this suite (`cd packages/flair-mcp && bun test`)
+ * builds @tpsdev-ai/flair-client, because the hook imports it by its built
+ * dist — but it never builds THIS package. dist/ is nonetheless usually
+ * present, because a sibling file (mcp-node-preflight.test.ts) runs
+ * `npm run build` from its own `beforeAll` when the shim is missing. That
+ * makes dist/ an artifact of which test file bun happens to reach first, not
+ * something this lane guarantees: targeting it here failed on all four Node
+ * legs while passing locally, where a previous build had left dist/ behind.
+ *
+ * Copying that build-if-absent hook here would trade the ordering dependency
+ * for a second `tsc` invocation racing the first, to gain nothing: the
+ * property under test is the short-circuit at the top of main(), and the
+ * --noCheck build is a straight transpile of it. Whether the shipped artifact
+ * is well-formed is a different question, already asked by
+ * mcp-node-preflight.test.ts and by the pack-smoke lane.
+ *
+ * The existence assertion below is kept as a hard failure rather than a skip:
+ * if this path is ever wrong, that must be loud.
+ */
 const ENTRY = join(import.meta.dir, "..", "src", "session-start-hook.ts");
 
 const ORIGINAL_AGENT_ID = process.env.FLAIR_AGENT_ID;
