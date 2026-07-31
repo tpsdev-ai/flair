@@ -1,20 +1,18 @@
-// in-process-api.test.ts — flair#956. Tests the public Flair facade the way
-// a CONSUMER would import it: from the package entry point, not a relative
-// path into src. That is the only test that proves the thing this PR exists
-// to fix.
+// in-process-api.test.ts — flair#956. Fast unit tests for the Flair facade
+// that run without a build step (import from TypeScript source).
 //
 // The unit tests cover:
-//   1. Import shape — Flair is exported from the entry point
+//   1. Import shape — Flair is exported from the module
 //   2. as() guards — empty, blank, undefined, null, non-string all throw
 //   3. Construction — new Flair(server) stores the server
 //   4. Admin/Internal — separate, greppable properties exist
 //
-// Integration tests (test/integration/in-process-api.test.ts) cover the
-// full Harper round-trip: write, read, search, recall, admin register,
-// cross-agent scoping.
+// The EXPORTS MAP is tested in test/integration/in-process-api.test.ts,
+// which imports from "@tpsdev-ai/flair" (the package name) and therefore
+// proves that `main` and `exports` in package.json resolve correctly.
 
 import { describe, it, expect } from "bun:test";
-import { Flair, AgentHandle, AdminHandle, InternalHandle, InProcessContextError } from "../../dist/resources/in-process-api.js";
+import { Flair, AgentHandle, AdminHandle, InternalHandle, InProcessContextError } from "../../resources/in-process-api.ts";
 
 // A minimal fake server that looks enough like Harper's Server to satisfy
 // the facade's resource-resolution path.
