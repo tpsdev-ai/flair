@@ -37,6 +37,43 @@ if (!resource || !action) {
 
 const table = resource.charAt(0).toUpperCase() + resource.slice(1);
 
+// Every flag this script understands, in any command. Used to catch a flag passed to a
+// command that does not take it — which is the bug this whole helper exists to prevent:
+// `search "q" --limit 20` used to fold the unparsed flag into the query and search for the
+// literal text "q --limit 20".
+const KNOWN_FLAGS = new Set(['--durability', '--supersedes', '--used', '--limit']);
+
+/**
+ * Split `args` into `--flag value` pairs and free text.
+ *
+ * A flag with no value is a HARD ERROR rather than being folded into the free text.
+ * Silently folding it in is precisely the defect this replaced: the argument stops being
+ * an instruction and becomes content, and the caller gets a plausible wrong answer instead
+ * of a refusal. A flag that belongs to a different command errors for the same reason.
+ */
+function extractFlags(args, wanted) {
+  const values = Object.create(null);
+  const positional = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (wanted.includes(a)) {
+      const v = args[i + 1];
+      if (v === undefined || v === '' || KNOWN_FLAGS.has(v)) {
+        console.error(`${a} requires a value`);
+        process.exit(1);
+      }
+      values[a] = v;
+      i++;
+    } else if (KNOWN_FLAGS.has(a)) {
+      console.error(`${a} is not a valid flag for '${action}' (accepts: ${wanted.join(', ') || 'none'})`);
+      process.exit(1);
+    } else {
+      positional.push(a);
+    }
+  }
+  return { values, positional };
+}
+
 try {
   let result;
   switch (action) {
@@ -48,17 +85,13 @@ try {
       break;
     case 'write': {
       // Support --durability <level>, --supersedes <id>, and --used <csv> flags
-      const filteredRest = [];
-      let durability = 'standard';
-      let supersedes;
-      let usedMemoryIds;
-      for (let i = 0; i < rest.length; i++) {
-        if (rest[i] === '--durability' && rest[i + 1]) { durability = rest[++i]; }
-        else if (rest[i] === '--supersedes' && rest[i + 1]) { supersedes = rest[++i]; }
-        else if (rest[i] === '--used' && rest[i + 1]) { usedMemoryIds = rest[++i].split(',').map(s => s.trim()).filter(Boolean); }
-        else filteredRest.push(rest[i]);
-      }
-      const content = filteredRest.join(' ');
+      const { values, positional } = extractFlags(rest, ['--durability', '--supersedes', '--used']);
+      const durability = values['--durability'] ?? 'standard';
+      const supersedes = values['--supersedes'];
+      const usedMemoryIds = values['--used']
+        ? values['--used'].split(',').map((s) => s.trim()).filter(Boolean)
+        : undefined;
+      const content = positional.join(' ');
       const id = `${AGENT_ID}-${Date.now()}`;
       const body = { id, agentId: AGENT_ID, content, durability, createdAt: new Date().toISOString() };
       if (supersedes) body.supersedes = supersedes;
@@ -80,9 +113,22 @@ try {
       result = await flairFetch('DELETE', `/${table}/${rest[0]}`);
       break;
     case 'search': {
-      const query = rest.join(' ');
+      // Support --limit <n>. It was previously neither parsed nor passed: the flag and its
+      // value fell through into rest.join(' '), so `search "foo" --limit 20` searched for the
+      // literal string "foo --limit 20" and always returned the hardcoded 5 results.
+      const { values, positional } = extractFlags(rest, ['--limit']);
+      let limit = 5;
+      if (values['--limit'] !== undefined) {
+        const n = Number(values['--limit']);
+        if (!Number.isFinite(n) || n < 1) {
+          console.error(`--limit must be a positive number, got: ${values['--limit']}`);
+          process.exit(1);
+        }
+        limit = Math.floor(n);
+      }
+      const query = positional.join(' ');
       // Server generates query embedding in-process — no sidecar needed
-      result = await flairFetch('POST', '/SemanticSearch', { agentId: AGENT_ID, q: query, limit: 5 });
+      result = await flairFetch('POST', '/SemanticSearch', { agentId: AGENT_ID, q: query, limit });
       if (result.results) {
         for (const r of result.results) {
           const date = r.createdAt?.slice(0, 10) || '?';
