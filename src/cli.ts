@@ -10615,14 +10615,37 @@ program
     // PID — see parseListeningPids (flair#800/flair#905): this used to SIGTERM
     // every process holding ANY socket on the port, so `flair stop` could kill
     // itself (leaving Flair running) or kill an unrelated client of it.
+    //
+    // Attribution guard (flair#915): the port is not an identity. Refuse to
+    // SIGTERM a PID that cannot be attributed to this instance.
     try {
       const { execSync } = await import("node:child_process");
       const pids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
       if (pids.length > 0) {
-        for (const pid of pids) {
-          try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+        const dataDir = defaultDataDir();
+        const harperPid = readHarperPid(dataDir);
+        if (harperPid !== null && !pids.includes(harperPid)) {
+          console.error(
+            `⚠️  Process(es) on port ${port} (PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")}) `
+              + `do not match this Flair instance (PID ${harperPid}). `
+              + `Not stopping — cannot attribute the process to this instance. `
+              + `Stop the process manually if it is not Flair.`,
+          );
+          process.exit(1);
+        } else if (harperPid === null) {
+          console.error(
+            `⚠️  Process(es) on port ${port} (PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")}) `
+              + `but no PID file in data directory — not a running Flair instance. `
+              + `Not stopping — cannot attribute the process to this instance. `
+              + `Stop the process manually if it is not Flair.`,
+          );
+          process.exit(1);
+        } else {
+          for (const pid of pids) {
+            try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+          }
+          console.log(`✅ Flair stopped (killed PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")})`);
         }
-        console.log(`✅ Flair stopped (killed PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")})`);
       } else {
         console.log("Flair is not running.");
       }
@@ -10800,18 +10823,32 @@ export function assertLaunchdServiceOwnedBy(
  * wrong today whenever the port does not match.
  */
 function assertPortInstanceOwnedBy(port: number, dataDir: string, listeningPids: number[]): void {
-  if (resolve(dataDir) === defaultDataDir()) return;
+  // (flair#915) Apply the attribution check for ALL data directories, not
+  // just non-default ones. The default-dir bypass was the residual gap that
+  // #910 left behind — it allowed an unattributed SIGTERM on the default
+  // install's port. The old concern (false refusal when hdb.pid is missing)
+  // is actually the RIGHT behavior: no PID file means we cannot attribute the
+  // listener, so we refuse. That is safer than killing the wrong process.
   const expected = readHarperPid(dataDir);
-  if (expected !== null && listeningPids.includes(expected)) return;
+  // No PID file — Harper is not (or was not) running in this directory.
+  // The port is stale or held by something else; refuse to SIGTERM it.
+  if (expected === null) {
+    throw new Error(
+      `refusing to stop the process listening on port ${port}: no hdb.pid under `
+        + `${resolve(dataDir)}, so that is not a running instance. `
+        + `Stopping by port alone would signal a process we cannot attribute. `
+        + `If it is not Flair, stop it manually.`,
+    );
+  }
+  // PID file exists — the PID on the port must be Harper.
+  if (listeningPids.includes(expected)) return;
 
-  const why =
-    expected === null
-      ? `no hdb.pid under that directory, so it does not look like a running instance`
-      : `its recorded PID ${expected} is not the process listening on ${port}`;
   throw new Error(
-    `refusing to stop the process listening on port ${port}: it cannot be attributed to ${resolve(dataDir)} (${why}). ` +
-      `Stopping by port alone would signal a different Flair instance. ` +
-      `Pass --port with the port ${resolve(dataDir)} actually serves, or omit --data-dir to operate on the default install.`,
+    `refusing to stop the process listening on port ${port}: its recorded PID ${expected} `
+      + `is not the process listening on ${port}. `
+      + `Stopping by port alone would signal a different instance. `
+      + `Pass --port with the port ${resolve(dataDir)} actually serves, `
+      + `or stop the process manually.`,
   );
 }
 
@@ -11162,7 +11199,11 @@ program
   .option("--purge", "Also remove data and keys (destructive)")
   .action(async (opts) => {
     const platform = process.platform;
-    const port = readPortFromConfig() ?? DEFAULT_PORT;
+    // Use the unified resolver: Harper's config > per-user config > default.
+    // A default of 19926 that is "present but wrong" beats the actual port
+    // Harper is serving on (flair#819). resolveHttpPort reads Harper's own
+    // config in the data directory, which is authoritative.
+    const port = resolveHttpPort({}, "address");
 
     // Stop first: remove launchd service(s) on macOS, then kill by port on
     // all platforms. Removes BOTH the new instance-scoped plist and a
@@ -11188,50 +11229,88 @@ program
     // Kill any process still on the port (covers direct-start, no-service, or
     // failed unload). Listening sockets only, never our own PID — see
     // parseListeningPids (flair#800/flair#905).
+    //
+    // Guard (flair#917): refuse to SIGTERM a PID that cannot be attributed to
+    // this Flair instance. A port is not an identity — something else can hold
+    // it. Killing the wrong PID and then purging data is the whole bug.
+        let refusedKill = false;
     try {
       const { execSync } = await import("node:child_process");
       const pids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
       if (pids.length > 0) {
-        for (const pid of pids) {
-          try { process.kill(pid, "SIGTERM"); } catch {}
+        // Verify ownership before killing: the PID must match this instance's
+        // recorded PID (hdb.pid). If no PID file exists, Harper is already
+        // stopped and the port is stale — safe to skip.
+        const dataDir = defaultDataDir();
+        const harperPid = readHarperPid(dataDir);
+        if (harperPid !== null) {
+          // PID file exists — the PID on the port must be Harper or we refuse.
+          if (!pids.includes(harperPid)) {
+            console.log(
+              `⚠️  Process(es) on port ${port} (PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")}) `
+                + `do not match this Flair instance (PID ${harperPid}). `
+                + `Not killing — cannot attribute the process to this instance. `
+                + `Stop the process manually if it is not Flair.`,
+            );
+            refusedKill = true;
+          } else {
+            for (const pid of pids) {
+              try { process.kill(pid, "SIGTERM"); } catch {}
+            }
+            await new Promise(r => setTimeout(r, 2000));
+            console.log("✅ Flair process stopped");
+          }
+        } else {
+          // No PID file — Harper is not (or was not) running here.
+          // The port may be stale or held by something else; don't risk killing it.
+          console.log(
+            `⚠️  Process(es) on port ${port} (PID${pids.length > 1 ? "s" : ""}: ${pids.join(", ")}) `
+              + `but no PID file in data directory — not a running Flair instance. `
+              + `Not killing — stop the process manually if it is not Flair.`,
+          );
+          refusedKill = true;
         }
-        // Wait for process to release file handles (RocksDB)
-        await new Promise(r => setTimeout(r, 2000));
-        console.log("✅ Flair process stopped");
       }
     } catch { /* not running */ }
 
-    // Remove config
-    const cfgPath = configPath();
-    if (existsSync(cfgPath)) {
-      const { unlinkSync } = await import("node:fs");
-      unlinkSync(cfgPath);
-      console.log("✅ Config removed");
+    // Always remove per-user config on uninstall.
+    {
+      const cfgPath = configPath();
+      if (existsSync(cfgPath)) {
+        const { unlinkSync } = await import("node:fs");
+        unlinkSync(cfgPath);
+        console.log("✅ Config removed");
+      }
     }
 
     if (opts.purge) {
-      const { rmSync } = await import("node:fs");
-      const dataDir = defaultDataDir();
-      const keysDir = defaultKeysDir();
-      const flairDir = join(homedir(), ".flair");
+      if (refusedKill) {
+        console.log("\n⚠️  Skipping purge: could not attribute the process on port — data preserved.");
+        console.log("Stop the process manually, then re-run: flair uninstall --purge");
+      } else {
+        const { rmSync } = await import("node:fs");
+        const dataDir = defaultDataDir();
+        const keysDir = defaultKeysDir();
+        const flairDir = join(homedir(), ".flair");
 
-      if (existsSync(dataDir)) {
-        rmSync(dataDir, { recursive: true, force: true });
-        console.log("✅ Data removed: " + dataDir);
-      }
-      if (existsSync(keysDir)) {
-        rmSync(keysDir, { recursive: true, force: true });
-        console.log("✅ Keys removed: " + keysDir);
-      }
-      // Remove .flair dir if empty
-      try {
-        const { readdirSync, rmdirSync } = await import("node:fs");
-        if (existsSync(flairDir) && readdirSync(flairDir).length === 0) {
-          rmdirSync(flairDir);
+        if (existsSync(dataDir)) {
+          rmSync(dataDir, { recursive: true, force: true });
+          console.log("✅ Data removed: " + dataDir);
         }
-      } catch { /* non-empty, that's fine */ }
+        if (existsSync(keysDir)) {
+          rmSync(keysDir, { recursive: true, force: true });
+          console.log("✅ Keys removed: " + keysDir);
+        }
+        // Remove .flair dir if empty
+        try {
+          const { readdirSync, rmdirSync } = await import("node:fs");
+          if (existsSync(flairDir) && readdirSync(flairDir).length === 0) {
+            rmdirSync(flairDir);
+          }
+        } catch { /* non-empty, that's fine */ }
 
-      console.log("\n🗑️  Flair fully purged");
+        console.log("\n🗑️  Flair fully purged");
+      }
     } else {
       console.log("\nData and keys preserved at ~/.flair/");
       console.log("To remove everything: flair uninstall --purge");
@@ -11895,23 +11974,36 @@ program
       console.log(`  ${render.icons.ok} flair ${__pkgVersion} is current`);
     }
 
-    // Helper: try to reach Harper on a given port
+    // Helper: try to reach Harper on a given port.
+    // Must return true ONLY when Harper's /Health endpoint returns 200 OK.
+    // A generic HTTP status > 0 (flair#862) would accept 404 from a Node
+    // inspector on 9229 or any other service — "present but wrong" beats
+    // "absent but correct".
     async function probePort(p: number): Promise<boolean> {
       try {
         const res = await fetch(`http://127.0.0.1:${p}/Health`, { signal: AbortSignal.timeout(3000) });
-        return res.status > 0;
+        return res.ok; // 200-299 only — /Health returns { ok: true } on 200
       } catch { return false; }
     }
 
-    // Helper: discover what port a Harper PID is listening on
+    // Helper: discover what port a Harper PID is listening on.
+    // Scans ALL listening ports for this PID and returns the first one that
+    // responds to /Health with 200 OK. This avoids picking a debug port (9229)
+    // or any non-Flair listener that happens to share the process (flair#862).
     async function discoverPortFromPid(pid: string): Promise<number | null> {
       // Defense-in-depth: caller already validates, but re-check here
       if (!/^\d+$/.test(pid)) return null;
       try {
         const { execSync } = await import("node:child_process");
         const out = execSync(`lsof -aPi -p ${pid} -sTCP:LISTEN -Fn 2>/dev/null || true`, { encoding: "utf-8" });
-        const match = out.match(/:(\d+)$/m);
-        if (match) return Number(match[1]);
+        // Extract all ports from lsof -Fn output (lines like "n127.0.0.1:PORT")
+        const ports = [...out.matchAll(/n(?:\S+):(\d+)/g)].map(m => Number(m[1]));
+        if (ports.length === 0) return null;
+        // Try each port until one responds to /Health with 200 OK
+        for (const port of ports) {
+          if (await probePort(port)) return port;
+        }
+        return null; // No port responded to /Health
       } catch { /* ignore */ }
       return null;
     }
