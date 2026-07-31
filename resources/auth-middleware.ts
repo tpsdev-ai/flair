@@ -5,6 +5,7 @@ import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
+import { checkHttpRateLimit } from "./rate-limit.js";
 
 // --- Admin credentials ---
 // Admin auth is sourced exclusively from Harper's own environment variables
@@ -69,6 +70,26 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
 
 server.http(async (request: any, nextLayer: any) => {
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
+
+  // ── Rate limiting, FIRST ───────────────────────────────────────────────────
+  // Before the public-path passthrough below (the OAuth endpoints all sit on it,
+  // so a hook placed after it would never run for them), and before anything
+  // reads a credential.
+  //
+  // Ordering is a security property, not tidiness. The counter is consumed for
+  // every request to a throttled endpoint whether or not the credential that
+  // came with it was any good — if only failures were counted, "did this consume
+  // budget" would answer "was that credential valid", which is a cleaner
+  // enumeration oracle than the 400 the endpoint already returns. Because the
+  // decision is made here, a limited request carries no information about what
+  // it was carrying: a valid authorization code and a garbage one get the same
+  // 429 and the same body.
+  //
+  // Only the OAuth endpoints named in rate-limit.ts's PATH_POLICY are affected.
+  // Every other path — /Memory, /Presence, /FederationSync, everything agents
+  // actually use — returns null here and is untouched.
+  const limited = checkHttpRateLimit(request, url.pathname);
+  if (limited) return limited;
 
   // A2A discovery endpoints: GET returns public agent-card metadata (per
   // A2A spec, cards are intentionally public). POST invokes JSON-RPC

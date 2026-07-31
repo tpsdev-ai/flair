@@ -20,6 +20,7 @@
 
 import * as harper from "harper";
 import { mcpOAuthEnabled, mcpAuthConfig } from "./mcp-oauth-flag.js";
+import { checkMcpRateLimit } from "./rate-limit.js";
 // NOTE: mcpHandler is intentionally NOT statically imported here — it's resolved
 // lazily (deps.mcpHandler ?? dynamic import) inside registerMcpOAuthRoute, same
 // as loadWithMCPAuth below. A static `import { mcpHandler } from "./mcp-handler.js"`
@@ -116,6 +117,33 @@ async function defaultLoadWithMCPAuth(): Promise<(handler: any, options?: any) =
   return mod.withMCPAuth;
 }
 
+/**
+ * Wrap the /mcp handler in the per-subject rate limit.
+ *
+ * Placed INSIDE `withMCPAuth` — i.e. the guard runs first and this runs second —
+ * so the key is the RS256-verified `sub` from the token rather than a network
+ * address. That is the identity worth limiting on for an authenticated surface:
+ * it is the authorization server's own assertion, it survives the caller
+ * changing address, and it is exactly the thing "a valid token can hammer the
+ * tools" is about. Authentication is not a rate limit.
+ *
+ * The consequence of that placement, stated rather than left implicit: requests
+ * bearing an INVALID token are rejected by `withMCPAuth` before this runs and so
+ * are not counted here. Those cost one JWT verification against a locally-cached
+ * key and touch no flair table or tool, which is a materially cheaper path than
+ * a tool call — but it is not zero, and it is not throttled at this layer.
+ *
+ * Exported for tests: the limiter's behaviour is asserted directly on this
+ * wrapper, without needing the plugin present.
+ */
+export function rateLimitedMcpHandler(handler: (request: any) => Promise<any>): (request: any) => Promise<any> {
+  return async (request: any) => {
+    const limited = checkMcpRateLimit(request);
+    if (limited) return limited;
+    return handler(request);
+  };
+}
+
 export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<boolean> {
   if (!mcpOAuthEnabled()) {
     // OFF → no route, no import, no side effects.
@@ -184,7 +212,7 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
   // resolves a different node_modules copy of the plugin (docs/mcp-oauth.md
   // §"Using withMCPAuth from a different component").
   srv.http(
-    withMCPAuth(handler, {
+    withMCPAuth(rateLimitedMcpHandler(handler), {
       getConfig: () => mcpAuthConfig(),
     }),
     { urlPath: "/mcp" },
