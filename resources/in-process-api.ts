@@ -427,6 +427,7 @@ class InternalAgentTable {
  */
 export class Flair {
   #server: FlairServer;
+  #adminHandle?: AdminHandle;
 
   constructor(server: FlairServer) {
     this.#server = server;
@@ -453,7 +454,10 @@ export class Flair {
     // AdminHandle requires an agentId for attribution. We use a sentinel
     // that makes the admin identity visible in audit logs. The caller
     // should use a real admin agent id when possible.
-    return new AdminHandle(this.#server, "_admin");
+    // Cached: the getter returns the same handle on every access so
+    // flair.admin === flair.admin is true (flair#981).
+    this.#adminHandle ??= new AdminHandle(this.#server, "_admin");
+    return this.#adminHandle;
   }
 
   /**

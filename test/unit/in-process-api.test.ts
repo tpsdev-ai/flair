@@ -110,6 +110,10 @@ describe("Flair (public in-process API)", () => {
     it("is a property, not a method", () => {
       expect(typeof flair.admin).toBe("object");
     });
+
+    it("returns the same handle on every access (flair#981)", () => {
+      expect(flair.admin).toBe(flair.admin);
+    });
   });
 
   describe("flair.internal", () => {

@@ -21,6 +21,7 @@ Embedding *adds* the in-process path; `rest: true` keeps serving MCP clients and
 **2. Import the facade and write a memory.**
 
 ```javascript
+import { server } from "harper";
 import { Flair } from "@tpsdev-ai/flair";
 
 const flair = new Flair(server);
@@ -61,6 +62,8 @@ console.log([...server.resources.keys()].sort());   // what Flair registered
 
 One handle per Harper instance. Resolves resources lazily on first use — no lookup at construction time.
 
+**The handle owns nothing.** It holds a reference to the Harper server the caller already owns and acquires no timers, connections, or file handles. There is no `close()` or `dispose()` method. If a future version acquires something releasable, that is a breaking change and will be versioned as one.
+
 ### `flair.as(agentId)`
 
 Returns an `AgentHandle` scoped to that agent. The `agentId` is runtime-validated: missing, empty, blank, or non-string throws `InProcessContextError`.
@@ -84,6 +87,8 @@ planner.agentId;  // "planner"
 ### `flair.admin`
 
 Admin operations — unfiltered reads, cross-agent writes. Every call site is greppable via `git grep "flair.admin"`.
+
+**The handle is cached** — `flair.admin === flair.admin` is `true`. Access it once and reuse the reference, or access it inline; either is fine.
 
 | Method | Description |
 |---|---|
@@ -301,7 +306,7 @@ The facade wraps a lower-level API that is still available for callers who need 
 import { agentContext, adminContext, internalContext, collectionResource } from "@tpsdev-ai/flair/server";
 ```
 
-This is the same seam Flair's own MCP handler and internal tooling use. You should not need it for ordinary agent operations — the facade covers those. Use the primitives when you are building your own abstraction on top of Flair's resources.
+This is the same seam Flair's own MCP handler and internal tooling use. **You should not need it for ordinary agent operations** — the facade covers those. Reach for the primitives when you are building your own abstraction on top of Flair's resources, or when you need the context helpers (`agentContext`, `adminContext`, `internalContext`) to pass into a resource call directly.
 
 ### Resolving a resource
 
