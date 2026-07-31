@@ -204,6 +204,37 @@ async function memoryStore(agent: ResolvedAgent, args: any) {
   // consumes-and-strips this before the row is written, then credits each
   // id post-commit through the shared usage ledger).
   if (Array.isArray(args?.usedMemoryIds)) body.usedMemoryIds = args.usedMemoryIds;
+  // flair#991 writer-controlled sharing intent. Forwarded ONLY when the caller
+  // actually supplied it, so an omitted visibility delegates a byte-identical
+  // body and Memory.post() applies its durability-keyed default.
+  //
+  // ── Why an unrecognized value is REJECTED, not dropped and not passed on ──
+  // `visibility` is a free-form String in schemas/memory.graphql, and the read
+  // scope asks `isPrivateVisibility()` — an exact match on the literal
+  // "private" — so EVERY other string, typos included, reads as non-private
+  // and is returned to every agent on the instance. Both of the softer
+  // options therefore fail in the unsafe direction:
+  //   - forwarding it: `visibility: "prvate"` persists a row the caller
+  //     believes is owner-only and that every agent can in fact read;
+  //   - silently dropping it: falls back to the durability-keyed default,
+  //     which for a permanent/persistent write is `shared` — same outcome,
+  //     with no argument left in the record to explain it.
+  // A misspelled argument must never widen who can read a memory, so the tool
+  // call fails and says so. The allowlist is deliberately not derived from
+  // isPrivateVisibility(): that predicate must stay "is it exactly private"
+  // for the no-visibility-field migration invariant (see
+  // resources/memory-visibility.ts), which is a READ-side rule and cannot
+  // double as a WRITE-side allowlist.
+  if (args?.visibility !== undefined && args?.visibility !== null) {
+    if (args.visibility !== "private" && args.visibility !== "shared") {
+      return {
+        error: "invalid_visibility",
+        status: 400,
+        message: `visibility must be "private" or "shared" (got: ${JSON.stringify(args.visibility)}). Omit it to use the durability-keyed default: permanent/persistent -> shared, standard/ephemeral -> private.`,
+      };
+    }
+    body.visibility = args.visibility;
+  }
   return unwrap(await h.post(body));
 }
 
@@ -476,6 +507,16 @@ export const TOOLS: Record<string, ToolEntry> = {
           type: { type: "string", enum: ["session", "lesson", "decision", "preference", "fact", "goal"], description: "Memory type (default session)" },
           durability: { type: "string", enum: ["permanent", "persistent", "standard", "ephemeral"], description: "permanent > persistent > standard > ephemeral (default standard)" },
           tags: { type: "array", items: { type: "string" }, description: "Tag strings" },
+          visibility: {
+            type: "string",
+            enum: ["private", "shared"],
+            description:
+              "Writer-controlled sharing intent. Omit to use the server's durability-keyed default: " +
+              "permanent/persistent -> shared, standard/ephemeral -> private. " +
+              "private — owner-only, never visible to another agent, even one holding a memory grant. " +
+              "shared — visible to the owner and every other agent on this instance. " +
+              "The visibility the write actually landed on is returned in the result.",
+          },
           usedMemoryIds: { type: "array", items: { type: "string" }, description: "IDs of memories that informed this write (citation-on-write). Credited via the same deduped usage ledger as record_usage. Optional." },
         },
         required: ["content"],

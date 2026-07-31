@@ -61,11 +61,23 @@ instance, so the design target is **open read within the org**. The only hard ac
 boundary is the **org edge** — federation, sync between separate Flair instances — because
 that's the only place two genuinely different trust boundaries meet.
 
-`private` still exists, but as the rare, deliberate exception opted into for a real secret
-(an EA's personal-principal context, a confidential project mid-flight) — not as the
-default, and not as a scoping tool for "this is someone else's concern." Reaching for
-`private` to keep noise down is the mistake described above; reaching for it to protect an
-actual secret is exactly what it's for.
+"Open read within the org" is a claim about the memories an agent *contributes* to the org,
+not a claim that every row an agent writes is org-visible the moment it exists. Visibility is
+stamped at write time from durability — `permanent`/`persistent` → `shared`,
+`standard`/`ephemeral` → `private` — and `standard` is the durability a write gets when it
+names none. So the memories that carry a deliberate signal of lasting worth are open to the
+org by default, while working context and scratch state stay with the agent that produced
+them until someone says otherwise. The proxy is imperfect and deliberately cheap: durability
+is a judgement the writer already had to make, so this costs no extra knob (see "zero knobs"
+below), and an explicit `visibility` on the write overrides it in both directions.
+
+`private` as an explicit choice is the rare, deliberate exception opted into for a real secret
+(an EA's personal-principal context, a confidential project mid-flight) — and it is not a
+scoping tool for "this is someone else's concern." Reaching for `private` on a durable memory
+to keep noise down is the mistake described above; reaching for it to protect an actual secret
+is exactly what it's for. The durability-keyed default is not an instance of that mistake: it
+does not touch the `permanent`/`persistent` writes the org reads from, and it never overrides
+a writer who said what they wanted.
 
 Opening within-org read is deliberately sequenced *after* the federation edge is hardened
 — an org boundary that isn't actually enforced at the edge would make "open within org"

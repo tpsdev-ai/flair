@@ -321,6 +321,94 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
     expect(lastCall?.ctx.request.tpsAgent).toBe("agt_bob");
   });
 
+  // ─── flair#991: writer-controlled visibility on the native /mcp surface ────
+  //
+  // Before this, `grep -c visibility resources/mcp-tools.ts` returned 0: an
+  // agent on the built-in /mcp endpoint could not express sharing intent at
+  // all, so every memory it wrote took the durability-keyed default (private
+  // for the standard durability memory_store sends) with no argument able to
+  // change it. The whole writer-controlled sharing model was unreachable from
+  // the surface, while packages/flair-mcp's stdio server exposed it fine.
+  describe("flair#991 — memory_store carries writer-controlled visibility", () => {
+    it("advertises visibility on the tools/list schema, enumerated to the two implemented values", async () => {
+      const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
+      const body = await parse(res);
+      const store = body.result.tools.find((t: any) => t.name === "memory_store");
+      const vis = store.inputSchema.properties.visibility;
+      expect(vis).toBeDefined();
+      // The enum is the discoverability half: an agent reading the schema
+      // must not have to guess that "office"/"public" are not tiers.
+      expect(vis.enum).toEqual(["private", "shared"]);
+      // The durability-keyed default is the thing a caller cannot infer from
+      // anywhere else, so the describe string has to name it.
+      expect(vis.description).toContain("permanent/persistent -> shared");
+      expect(vis.description).toContain("standard/ephemeral -> private");
+      // visibility must stay OPTIONAL — requiring it would break every
+      // existing caller and force a decision the server already makes well.
+      expect(store.inputSchema.required).toEqual(["content"]);
+    });
+
+    it("forwards visibility: shared to the Memory write body", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: "a team-visible note", visibility: "shared" } } },
+        { sub: "sub-bob" },
+      ));
+      expect(lastCall?.resource).toBe("Memory.post");
+      expect(lastCall?.args.visibility).toBe("shared");
+    });
+
+    it("forwards visibility: private to the Memory write body", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: "an owner-only note", visibility: "private" } } },
+        { sub: "sub-bob" },
+      ));
+      expect(lastCall?.args.visibility).toBe("private");
+    });
+
+    it("omitting visibility leaves it absent from the body entirely (server applies its durability-keyed default)", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: "no sharing intent expressed" } } },
+        { sub: "sub-bob" },
+      ));
+      expect(lastCall?.resource).toBe("Memory.post");
+      // Not `undefined` — absent. A key present with an undefined value would
+      // still be a body change for a call that expressed no intent.
+      expect(lastCall?.args).not.toHaveProperty("visibility");
+    });
+
+    // ── A typo must never widen who can read a memory ──────────────────────
+    // isPrivateVisibility() is an exact match on "private", so every other
+    // string reads as non-private and goes to every agent on the instance.
+    // Forwarding an unrecognized value writes an org-readable row the caller
+    // believes is owner-only; silently dropping it falls back to the
+    // durability default, which for a permanent write is `shared` — the same
+    // outcome with nothing left in the record to explain it. Reject.
+    for (const bad of ["prvate", "office", "public", "Private", "", 1, true]) {
+      it(`rejects visibility ${JSON.stringify(bad)} and performs no write`, async () => {
+        lastCall = null;
+        const res = await mcpHandler(post(
+          { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: "misspelled sharing intent", visibility: bad } } },
+          { sub: "sub-bob" },
+        ));
+        const body = await parse(res);
+        const payload = body.result.structuredContent ?? body.result;
+        expect(JSON.stringify(payload)).toContain("invalid_visibility");
+        // The load-bearing half: nothing reached the Memory resource. A guard
+        // that reports an error AFTER writing has prevented nothing.
+        expect(lastCall).toBeNull();
+      });
+    }
+
+    it("an explicit visibility: null is treated as 'no intent expressed', not as an invalid value", async () => {
+      await mcpHandler(post(
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: "explicit null", visibility: null } } },
+        { sub: "sub-bob" },
+      ));
+      expect(lastCall?.resource).toBe("Memory.post");
+      expect(lastCall?.args).not.toHaveProperty("visibility");
+    });
+  });
+
   // ─── flair#718 authorship-provenance: OAuth client_id → claimedClient ──────
   describe("flair#718 authorship-provenance — claimedClient stamped from the OAuth token's client_id", () => {
     it("memory_store: request.mcp.client_id flows into the body as claimedClient", async () => {

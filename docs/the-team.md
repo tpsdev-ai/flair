@@ -15,7 +15,7 @@ If you're trying to run your own multi-agent team using Flair as the memory laye
 | **Pulse** | EA / intel scanning / coordination | OpenClaw | Claude API | cloud VM |
 | **Nathan** | Founder / product owner / human-in-the-loop | (human) | (human) | wherever |
 
-Every agent has its own Ed25519 identity in Flair. They sign every memory write and every read. **Writes are isolated at the Flair API layer** — Sherlock can't accidentally (or maliciously) write into Pulse's memory, because the signature won't verify for anyone but Pulse. Reads are a different story: within one Flair instance, any verified agent can read any other agent's **non-private** memory — that's the shipped model (open-within-org read, no grant needed), not a gap. An agent keeps something genuinely sensitive owner-only by writing it with `visibility: private`. The hard access boundary is the **federation edge** (a separate Flair instance), not reads within one.
+Every agent has its own Ed25519 identity in Flair. They sign every memory write and every read. **Writes are isolated at the Flair API layer** — Sherlock can't accidentally (or maliciously) write into Pulse's memory, because the signature won't verify for anyone but Pulse. Reads are a different story: within one Flair instance, any verified agent can read any other agent's **non-private** memory — that's the shipped model (open-within-org read, no grant needed), not a gap. Which memories are non-private is decided at write time: visibility defaults from durability, so `permanent`/`persistent` writes land `shared` and `standard`/`ephemeral` writes land `private`. A teammate's scratch context is therefore owner-only until someone shares it deliberately, and an agent keeps something genuinely sensitive owner-only regardless of durability by writing it with `visibility: private`. The hard access boundary is the **federation edge** (a separate Flair instance), not reads within one.
 
 ## How memory flows
 
@@ -41,10 +41,14 @@ Every agent has its own Ed25519 identity in Flair. They sign every memory write 
                                    │
                        (every agent can read every other
                         agent's non-private memories —
-                        `visibility: private` stays owner-only)
+                        permanent/persistent land shared,
+                        standard/ephemeral land private,
+                        and private stays owner-only)
 ```
 
-No agent can write into another agent's memory — that's enforced server-side by signature verification, no exceptions. Reads are intentionally open within the org: when Flint commits a piece of strategy, any agent can find it on `memory_search` unless Flint marked it `private`. **By design** — the goal is relevance and findability across the team, not secrecy between roles. An agent that genuinely needs something to stay owner-only (a draft not ready for the team, a sensitive finding pre-disclosure) marks it `visibility: private`; everything else is fair game for any teammate to search.
+No agent can write into another agent's memory — that's enforced server-side by signature verification, no exceptions. Reads are intentionally open within the org: when Flint commits a piece of strategy as a `permanent` or `persistent` memory, it lands `shared` and any agent can find it on `memory_search`. **By design** — the goal is relevance and findability across the team, not secrecy between roles.
+
+The reverse also holds, and it is the part worth internalising: a `standard` or `ephemeral` write lands `private`, so an agent's day-to-day working context is *not* team-searchable by default. Commit something at `permanent`/`persistent` durability, or pass `visibility: shared`, when you mean the team to find it. An agent that needs something owner-only whatever its durability (a draft not ready for the team, a sensitive finding pre-disclosure) marks it `visibility: private` explicitly.
 
 When agents need to *coordinate* — a direct, targeted handoff rather than ambient searchable memory — they pass **explicit messages** through TPS mail (a separate signed delivery channel; see [tpsdev-ai/cli](https://github.com/tpsdev-ai/cli)). That's a different concern from memory visibility: TPS mail is for "I need you, specifically, to see this now"; Flair memory is the shared, searchable record everyone (except where `private`) can draw on later.
 
@@ -106,7 +110,7 @@ The MCP server (`@tpsdev-ai/flair-mcp`) is what makes this orchestrator-agnostic
 
 ## What we deliberately don't do
 
-- **No shared write identity.** Every memory is written and owned by exactly one agent's Ed25519 key — there's no merged "team" identity that can write on another agent's behalf. Reads are a separate story: within the org, any agent can search any other's non-private memory by default (see [SECURITY.md](../SECURITY.md)) — that's intentional, not a leak. TPS mail is still how agents route a message to a *specific* teammate; it's for targeted delivery, not for gating ambient visibility.
+- **No shared write identity.** Every memory is written and owned by exactly one agent's Ed25519 key — there's no merged "team" identity that can write on another agent's behalf. Reads are a separate story: within the org, any agent can search any other's non-private memory by default (see [SECURITY.md](../SECURITY.md)) — that's intentional, not a leak. "Non-private" is set at write time from durability, not by a per-pair grant. TPS mail is still how agents route a message to a *specific* teammate; it's for targeted delivery, not for gating ambient visibility.
 - **No silent LLM-driven memory extraction.** Each agent decides what it remembers. No background "summarize and persist" on every turn — that's how memory drifts away from intent.
 - **No multiple agents on one identity.** "Anvil" and "Anvil-2" would be two separate agentIds with two separate keys. Same workload, different identities, separately-owned memories.
 - **No replay-safe-but-otherwise-unsigned reads.** Every Flair request is Ed25519-signed and verified, including reads. Even on a private network we don't trust the network.

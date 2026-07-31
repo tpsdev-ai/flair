@@ -129,19 +129,32 @@ function memorySearchGen(query: any) {
 }
 
 class BaseMemory {
+  // ── post()/put() return what REAL Harper returns, not the record ──────────
+  // node_modules/harper/dist/resources/Resource.js's `async post(target,
+  // newRecord)` returns `resource.#id` (or `newRecord?.[primaryKey]` on the
+  // loadAsInstance===false branch) — the PRIMARY KEY, a string. Table does not
+  // override post, and its put() resolves the write, never an echo of the
+  // record. Either way `buildWriteResponse`'s `typeof result === "object"`
+  // guard discards it and `base` is `{}`, so the response is composed purely
+  // from the fields Memory.ts sets explicitly.
+  //
+  // These doubles used to return `{ ...content }`. That was more permissive
+  // than the real class in exactly the way this file's own mock doc warns
+  // about: every stored field appeared to be echoed back in the write
+  // response for free, so an assertion on `response.visibility` passed
+  // whether or not Memory.ts actually put it there. Returning the real shape
+  // is what makes those assertions mean something.
   async post(content: any) {
     const id = content.id ?? `mock-${++idCounter}`;
     content.id = id; // mutate in place — matches real Harper create() semantics
     callOrder.push(`post:${id}`);
-    const rec = { ...content };
-    memoryStore.set(id, rec);
-    return rec;
+    memoryStore.set(id, { ...content });
+    return id;
   }
   async put(content: any) {
     callOrder.push(`put:${content.id}`);
-    const rec = { ...content };
-    memoryStore.set(content.id, rec);
-    return rec;
+    memoryStore.set(content.id, { ...content });
+    return undefined;
   }
   async get(target: any) {
     // Real Harper's get() receives a RequestTarget object (pathname, search,
@@ -1082,6 +1095,66 @@ describe("durability-keyed default visibility (write path)", () => {
 
     const after = await BaseMemory.get("legacy-1");
     expect(after.visibility).toBeUndefined(); // NOT stamped to "private" (standard's default)
+  });
+});
+
+// ─── The write RESPONSE names the visibility the row landed on (flair#991) ───
+//
+// Every test above asserts the stamped default by re-reading the row out of
+// the store. A caller cannot do that: it gets only the write response, and
+// that response used to be `{ id, written, deduplicated }` — no visibility
+// field anywhere. So the one property of a memory that is decided by a rule
+// the writer never typed was also the one property the writer could not
+// observe. `flair memory add` printed that response verbatim (docs/
+// quickstart.md's step 4 output block is a literal copy of it), the native
+// /mcp memory_store returned it unchanged, and packages/flair-mcp read
+// `result.visibility` to print an "effective visibility" line — reading a
+// field that was never there, so it always rendered "(server default)".
+describe("write response reports the landed visibility (flair#991)", () => {
+  it("Memory.post: a bare standard write reports visibility: private in the RESPONSE, not just in the stored row", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "A bare write with no visibility argument at all." });
+    expect(r.visibility).toBe("private");
+    // and it agrees with what was actually persisted
+    expect((await BaseMemory.get(r.id)).visibility).toBe("private");
+  });
+
+  it("Memory.post: a persistent write reports visibility: shared in the RESPONSE", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "A durable lesson, long enough for the gate.", durability: "persistent" });
+    expect(r.visibility).toBe("shared");
+    expect((await BaseMemory.get(r.id)).visibility).toBe("shared");
+  });
+
+  it("Memory.post: an explicit visibility is echoed back, so the caller can confirm the override took", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "Explicitly private despite the durability.", durability: "permanent", visibility: "private" });
+    expect(r.visibility).toBe("private");
+  });
+
+  it("Memory.put (fresh id): the response reports the stamped default too", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.put({ id: "agent-1-response-visibility", agentId: "agent-1", content: "Fresh PUT create, long enough for the gate.", durability: "permanent" });
+    expect(r.visibility).toBe("shared");
+  });
+
+  it("the base write-response fields are unchanged — visibility is additive, never a replacement", async () => {
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.post({ agentId: "agent-1", content: "Base response shape must not regress." });
+    expect(r.id).toBeTruthy();
+    expect(r.written).toBe(true);
+    expect(r.deduplicated).toBe(false);
+  });
+
+  it("a pre-migration record patched through put() reports NO visibility key rather than null", async () => {
+    // Absent means "non-private" to isPrivateVisibility(); reporting `null`
+    // here would read to a caller as "owner-only", the exact inversion of
+    // what the migration invariant guarantees. Omit the key instead.
+    memoryStore.set("legacy-resp", { id: "legacy-resp", agentId: "agent-1", content: "Pre-migration content." });
+    const existing = await BaseMemory.get("legacy-resp");
+    const m = makeMemory(agentCtx("agent-1"));
+    const r = await m.put({ ...existing, content: "Patched pre-migration content.", updatedAt: new Date().toISOString() });
+    expect(r).not.toHaveProperty("visibility");
   });
 });
 

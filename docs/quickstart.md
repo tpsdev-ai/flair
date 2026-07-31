@@ -112,11 +112,34 @@ flair memory add --agent local "Harper v5 sandbox blocks node:module but process
 {
   "id": "local-1785277247486",
   "written": true,
-  "deduplicated": false
+  "deduplicated": false,
+  "visibility": "private"
 }
 ```
 
 Flair embedded the text locally on write. No network calls.
+
+### Who can read it
+
+`visibility: private` means **only `local` can read this memory** — no other agent on the instance can search it, fetch it by id, or receive it in a bootstrap.
+
+You didn't ask for that, and it isn't a setting you have to remember. Flair derives the default from the memory's **durability**, because how long a memory is meant to last is a good proxy for who it was meant for:
+
+| Durability | Default visibility |
+|---|---|
+| `permanent`, `persistent` | `shared` — a fact or decision worth keeping is worth the team being able to find |
+| `standard`, `ephemeral` — including a bare write with no `--durability` | `private` — working context and scratch state belong to the agent that produced them |
+
+So sharing is a deliberate act, and it takes one flag:
+
+```bash
+flair memory add --agent local --visibility shared \
+  "Release tags are cut from main, never from a release branch"
+```
+
+`--visibility` takes exactly `private` or `shared` and overrides the durability rule in both directions. The `visibility` field in the response is always the value the memory actually landed on — read it rather than assuming.
+
+Once a memory is `shared`, **every** agent on this instance can read it, with no grant to set up. That is the shipped model: reads open within one instance, closed at the federation edge. Full picture in [SECURITY.md](../SECURITY.md).
 
 ## 5. Find it back by meaning
 
@@ -162,7 +185,7 @@ With the MCP server wired up — `flair init` does this automatically for every 
 | You want to... | Go to |
 |----------------|-------|
 | Add more agents to the same instance | `flair agent add <id>` |
-| Keep a memory owner-only | `flair memory add --visibility private` — reads are otherwise open to every agent on the instance ([auth.md](auth.md)) |
+| Share a memory with your other agents | `flair memory add --visibility shared` — a bare write lands `private`, see [step 4](#who-can-read-it); a shared one is readable by every agent on the instance, no grant needed ([auth.md](auth.md)) |
 | Import memories from agentic-stack / Mem0 / etc. | [bridges.md](bridges.md) |
 | Sync memories across machines | [federation.md](federation.md) |
 | Integrate with OpenClaw, Claude Code, Cursor | [README.md#integration](../README.md#integration) |

@@ -69,6 +69,13 @@ centralized read-scope rule), not application logic:
 **Private memories are strictly owner-only** — a memory written with
 `visibility: private` is returned only to its author, never to another agent.
 
+**A write that does not name a visibility gets one anyway.** The server derives
+it from the memory's durability: `permanent`/`persistent` → `shared`,
+`standard`/`ephemeral` → `private`. Durability itself defaults to `standard`,
+so a write naming neither is stamped `private` and is owner-only. An explicit
+`visibility` on the write always overrides the rule; the write response reports
+the value the record actually landed on.
+
 ### Cross-Agent Access (within an org)
 
 Within an org, an agent reads every non-private memory directly — no grant
