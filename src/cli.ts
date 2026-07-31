@@ -14408,6 +14408,94 @@ function parseRelativeOrIso(input: string | undefined): string | null {
   return new Date(Date.now() - n * (multMs[unit] ?? 0)).toISOString();
 }
 
+// ─── --explain score breakdown (flair#992) ───────────────────────────────────
+//
+// One builder feeds BOTH output modes. Before #992 the breakdown was assembled
+// inline inside the human-rendering branch, which sits after an early `return`
+// on json mode — and non-TTY stdout resolves to json mode (render.ts
+// resolveOutputMode). So `--explain` was inert for every script, agent, CI job
+// and pipe, with no error. Sharing one builder is what keeps the two modes from
+// drifting apart again.
+//
+// What this can and cannot report:
+//
+//   - It reports what the SERVER sent. `--explain` is client-side: the
+//     /SemanticSearch request carries no `explain` key and the resource has no
+//     such parameter, so the durability WEIGHT, recency DECAY and usage BOOST
+//     that compositeScore() multiplies are not available here.
+//   - It deliberately does NOT recompute those weights client-side. They depend
+//     on floors read from the SERVER's environment
+//     (FLAIR_COMPOSITE_RELEVANCE_FLOOR / FLAIR_COMPOSITE_DISCOUNT_FLOOR), so a
+//     client-side recomputation would print confident numbers the ranking never
+//     used. Reporting the ranking INPUTS the server returned on the record is
+//     honest; inventing the weights is not.
+//   - Under `--scoring raw` the server puts the raw score in `_score` and omits
+//     `_rawScore`. Labelling `_score` "composite" in that mode — as the pre-#992
+//     block did — mislabels a raw score.
+//   - retrievalCount is NOT reported. flair#683 replaced retrievalBoost with
+//     usageBoost outright; retrievalCount no longer participates in the score,
+//     and a breakdown must not name a term the ranking stopped using.
+export type SearchScoringMode = "raw" | "composite";
+
+export type SearchExplain = {
+  scoring: SearchScoringMode;
+  formula: string;
+  raw?: number;
+  composite?: number;
+  durability: string;
+  ageDays?: number;
+  usageCount: number;
+};
+
+export function searchScoringFormula(scoring: SearchScoringMode): string {
+  return scoring === "composite"
+    ? "semantic × durability-weight × recency-decay × usage-boost"
+    : "cosine similarity only";
+}
+
+export function buildSearchExplain(record: any, scoring: SearchScoringMode, now: number = Date.now()): SearchExplain {
+  const score = typeof record?._score === "number" ? record._score : undefined;
+  const rawScore = typeof record?._rawScore === "number" ? record._rawScore : undefined;
+
+  // composite mode: server sends both (_rawScore = pre-composite semantic).
+  // raw mode: server sends only _score, and that IS the raw score.
+  const raw = scoring === "composite" ? rawScore : score;
+  const composite = scoring === "composite" ? score : undefined;
+
+  let ageDays: number | undefined;
+  if (record?.createdAt) {
+    const created = new Date(String(record.createdAt)).getTime();
+    if (Number.isFinite(created)) ageDays = Math.max(0, Math.floor((now - created) / 86_400_000));
+  }
+
+  const explain: SearchExplain = {
+    scoring,
+    formula: searchScoringFormula(scoring),
+    durability: record?.durability ?? "standard",
+    usageCount: typeof record?.usageCount === "number" ? record.usageCount : 0,
+  };
+  if (typeof raw === "number") explain.raw = raw;
+  if (typeof composite === "number") explain.composite = composite;
+  if (typeof ageDays === "number") explain.ageDays = ageDays;
+  return explain;
+}
+
+// Human one-liner for a hit's breakdown. Scoring terms come from the shared
+// builder; the trailing tags/subject/supersedes are record context that json
+// mode already carries at top level, so they're appended here only.
+export function formatSearchExplain(explain: SearchExplain, record: any): string {
+  const parts: string[] = [];
+  if (typeof explain.raw === "number") parts.push(`raw=${explain.raw.toFixed(3)}`);
+  if (typeof explain.composite === "number") parts.push(`composite=${explain.composite.toFixed(3)}`);
+  parts.push(`durability=${explain.durability}`);
+  if (typeof explain.ageDays === "number") parts.push(`age=${explain.ageDays}d`);
+  parts.push(`usage=${explain.usageCount}`);
+  if (Array.isArray(record?.tags) && record.tags.length > 0) parts.push(`tags=[${record.tags.join(",")}]`);
+  if (record?.subject) parts.push(`subject=${record.subject}`);
+  if (record?.supersedes) parts.push(`supersedes=${record.supersedes}`);
+  return parts.join(" · ");
+}
+
 program
   .command("search <query>")
   .description("Search memories by meaning (shortcut for memory search) — filterable, with --explain ranking")
@@ -14430,7 +14518,7 @@ program
   .option("--durability <level>", "Filter to permanent|persistent|standard|ephemeral (client-side)")
   .option("--source <name>", "Filter by source/agentId (client-side)")
   // Output modes
-  .option("--explain", "Show score breakdown (composite, raw, durability, age, retrieval) per hit")
+  .option("--explain", "Show score breakdown (raw, composite, durability, age, usage) per hit — also added to --json output as _explain")
   .option("--json", "Output raw JSON array")
   .action(async (query, opts) => {
     try {
@@ -14485,8 +14573,17 @@ program
       }
 
       const mode = render.resolveOutputMode(opts);
+      const scoringMode: SearchScoringMode = payload.scoring === "composite" ? "composite" : "raw";
       if (mode === "json") {
-        console.log(render.asJSON(results));
+        // flair#992: --explain must be honoured here, not silently dropped.
+        // This branch is what every non-TTY caller lands in. The breakdown
+        // rides ALONG the json contract as an opt-in `_explain` key — present
+        // only when the caller typed --explain, so default output is unchanged
+        // — rather than switching output mode behind the caller's back.
+        const out = opts.explain
+          ? results.map((r) => ({ ...r, _explain: buildSearchExplain(r, scoringMode) }))
+          : results;
+        console.log(render.asJSON(out));
         return;
       }
 
@@ -14530,29 +14627,17 @@ program
         console.log(`  ${r.content}`);
         if (meta) console.log(`  ${render.wrap(render.c.dim, "(")} ${meta} ${render.wrap(render.c.dim, ")")}`);
         if (opts.explain) {
-          const parts: string[] = [];
-          if (typeof r._rawScore === "number") parts.push(`raw=${r._rawScore.toFixed(3)}`);
-          if (typeof r._score === "number") parts.push(`composite=${r._score.toFixed(3)}`);
-          if (typeof r.retrievalCount === "number" && r.retrievalCount > 0) parts.push(`retrievals=${r.retrievalCount}`);
-          if (r.tags && Array.isArray(r.tags) && r.tags.length > 0) parts.push(`tags=[${r.tags.join(",")}]`);
-          if (r.subject) parts.push(`subject=${r.subject}`);
-          if (r.supersedes) parts.push(`supersedes=${r.supersedes}`);
-          if (parts.length > 0) {
-            console.log(
-              `    ${render.wrap(render.c.gray, "└─")} ${render.wrap(render.c.dim, parts.join(" · "))}`,
-            );
+          const line = formatSearchExplain(buildSearchExplain(r, scoringMode), r);
+          if (line) {
+            console.log(`    ${render.wrap(render.c.gray, "└─")} ${render.wrap(render.c.dim, line)}`);
           }
         }
         console.log();
       }
 
       if (opts.explain) {
-        const formula =
-          payload.scoring === "composite"
-            ? "semantic × durability-weight × recency-decay × retrieval-boost"
-            : "cosine similarity only";
         console.log(
-          `${render.wrap(render.c.dim, "Scoring:")} ${render.wrap(render.c.bold, payload.scoring)}  ${render.wrap(render.c.dim, `(${formula})`)}`,
+          `${render.wrap(render.c.dim, "Scoring:")} ${render.wrap(render.c.bold, scoringMode)}  ${render.wrap(render.c.dim, `(${searchScoringFormula(scoringMode)})`)}`,
         );
       }
     } catch (err: any) {
