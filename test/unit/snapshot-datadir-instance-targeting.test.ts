@@ -15,12 +15,23 @@
 //     Bun's `os.homedir()` ignores an in-process `process.env.HOME`
 //     mutation (same rule as upgrade-data-snapshot.test.ts).
 //   - `launchctl` is a recording shim on PATH. Nothing is loaded, started or
-//     stopped for real; the assertions are on the LABEL the CLI resolved,
+//     stopped for real; the assertions are on the INSTANCE the CLI resolved,
 //     never on an actual stop.
 //   - The one test that lets the CLI reach a port-based SIGTERM points it at
 //     a listener this test spawned and then asserts that listener is STILL
 //     SERVING — a killed listener fails the test instead of taking anything
 //     else down.
+//
+// The launchd assertions deliberately say nothing about which VERB the CLI
+// uses. They used to pin `stop <label>`/`start <label>`, and then failed when
+// quiescing moved to `unload`/`load` (flair#874: `launchctl stop` alone does
+// not hold a KeepAlive job down; flair#872: launchd caches a loaded job's
+// environment, so a rewritten plist needs an unload before the load). That
+// change preserved the targeting these tests exist to protect and broke them
+// anyway — a test asserting mechanism where the safety property is "which
+// instance". What is pinned instead is that property, via
+// expectLaunchctlNamedOnly below: every invocation names the instance
+// `--data-dir` pointed at, and none names the default install.
 //
 // The launchd tests are darwin-only because `stopFlairProcess`'s launchd
 // branch is itself gated on `process.platform === "darwin"`. CI runs on
@@ -111,6 +122,44 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
     return existsSync(launchctlLog) ? readFileSync(launchctlLog, "utf-8") : "";
   }
 
+  /** Each launchctl invocation the CLI issued, one per element, blanks dropped. */
+  function launchctlLines(): string[] {
+    return launchctlInvocations()
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  }
+
+  /**
+   * The flair#902 property, asserted on WHICH INSTANCE each launchctl
+   * invocation names rather than on the verb it uses:
+   *
+   *   1. it issued some launchd traffic at all — a universal quantifier over
+   *      an empty log is vacuously true, so an implementation that stopped
+   *      quiescing entirely must fail here rather than pass by doing nothing;
+   *   2. every invocation names the target instance's label (the plist path
+   *      embeds it, so `unload <path>` satisfies this the same way
+   *      `start <label>` does);
+   *   3. none names the `forbiddenLabel` — the load-bearing half. This is the
+   *      assertion that fails if snapshot commands go back to acting on the
+   *      default install while claiming to honour `--data-dir`;
+   *   4. every `.plist` argument is EXACTLY the target's plist path. Stronger
+   *      than a substring check on the forbidden path: it also rejects the
+   *      real ~/Library/LaunchAgents, the legacy global plist, and any other
+   *      instance's, rather than only the one this test thought to name.
+   */
+  function expectLaunchctlNamedOnly(
+    target: { label: string; plistPath: string },
+    forbiddenLabel: string,
+  ): void {
+    const lines = launchctlLines();
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.filter((line) => !line.includes(target.label))).toEqual([]);
+    expect(lines.filter((line) => line.includes(forbiddenLabel))).toEqual([]);
+    const plistArgs = lines.flatMap((line) => line.split(/\s+/).filter((arg) => arg.endsWith(".plist")));
+    expect(plistArgs.filter((arg) => arg !== target.plistPath)).toEqual([]);
+  }
+
   /**
    * A stand-in for "an instance is listening on this port". Runs in its own
    * process so that a SIGTERM the CLI should never have sent kills only this
@@ -158,10 +207,11 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
       const scratchLabel = launchdLabel(scratchDataDir);
       const defaultLabel = launchdLabel(defaultDataDir);
       expect(scratchLabel).not.toBe(defaultLabel);
+      const scratchPlistPath = launchdPlistPath(scratchLabel, launchAgentsDir);
 
       // Both instances are registered with launchd, which is what makes the
       // resolution a real choice rather than a lucky miss.
-      writeFileSync(launchdPlistPath(scratchLabel, launchAgentsDir), plistFor(scratchLabel, scratchDataDir));
+      writeFileSync(scratchPlistPath, plistFor(scratchLabel, scratchDataDir));
       writeFileSync(launchdPlistPath(defaultLabel, launchAgentsDir), plistFor(defaultLabel, defaultDataDir));
 
       // A real snapshot, taken from a third directory, so the restore has
@@ -182,12 +232,9 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Restored");
 
-      // The whole point: every launchd verb the CLI issued names the scratch
-      // instance. The default install's label never appears at all.
-      const invocations = launchctlInvocations();
-      expect(invocations).toContain(`stop ${scratchLabel}`);
-      expect(invocations).toContain(`start ${scratchLabel}`);
-      expect(invocations).not.toContain(defaultLabel);
+      // The whole point: every launchd invocation the CLI issued names the
+      // scratch instance. The default install never appears at all.
+      expectLaunchctlNamedOnly({ label: scratchLabel, plistPath: scratchPlistPath }, defaultLabel);
 
       // And the default data directory is untouched — restore replaced the
       // directory it was pointed at, not ~/.flair/data.
@@ -201,7 +248,8 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
     async () => {
       const scratchLabel = launchdLabel(scratchDataDir);
       const defaultLabel = launchdLabel(defaultDataDir);
-      writeFileSync(launchdPlistPath(scratchLabel, launchAgentsDir), plistFor(scratchLabel, scratchDataDir));
+      const scratchPlistPath = launchdPlistPath(scratchLabel, launchAgentsDir);
+      writeFileSync(scratchPlistPath, plistFor(scratchLabel, scratchDataDir));
       writeFileSync(launchdPlistPath(defaultLabel, launchAgentsDir), plistFor(defaultLabel, defaultDataDir));
       writeFileSync(join(scratchDataDir, "harper-config.yaml"), "some: config\n");
 
@@ -215,10 +263,7 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
       expect(exitCode).toBe(0);
       expect(stdout).toContain("✅ Snapshot:");
 
-      const invocations = launchctlInvocations();
-      expect(invocations).toContain(`stop ${scratchLabel}`);
-      expect(invocations).toContain(`start ${scratchLabel}`);
-      expect(invocations).not.toContain(defaultLabel);
+      expectLaunchctlNamedOnly({ label: scratchLabel, plistPath: scratchPlistPath }, defaultLabel);
     },
   );
 
