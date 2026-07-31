@@ -286,7 +286,7 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
     ]);
 
     expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("cannot be attributed");
+    expect(stderr).toContain("cannot attribute");
     expect(stderr).toContain(resolve(scratchDataDir));
 
     // The instance on that port is still serving — it was never this

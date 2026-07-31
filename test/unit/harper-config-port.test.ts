@@ -222,12 +222,12 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
 
     // It found the stub's port — which it can only have got from Harper's
     // config in that directory — and then refused to signal it, because the
-    // flair#910 attribution guard could not tie that listener to this
-    // directory (no hdb.pid). Both halves matter: the port is instance-correct
-    // AND the guard still fires on it.
+    // attribution guard could not tie that listener to this directory (no
+    // hdb.pid). Both halves matter: the port is instance-correct AND the guard
+    // still fires on it.
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain(`port ${stub.port}`);
-    expect(stderr).toContain("cannot be attributed");
+    expect(stderr).toContain("cannot attribute");
     expect(stderr).toContain(resolve(scratch));
     expect(stderr).not.toContain(String(LEGACY_PER_USER_PORT));
 
@@ -250,7 +250,7 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
 
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain(`port ${stub.port}`);
-    expect(stderr).toContain("cannot be attributed");
+    expect(stderr).toContain("cannot attribute");
     expect(await stub.alive()).toBe(true);
   }, 30_000);
 
