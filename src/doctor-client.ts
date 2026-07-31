@@ -552,14 +552,6 @@ export interface AgentGateFinding {
 }
 
 /**
- * Render decision for one agent's registration-gate outcome, ahead of a
- * verified-read section (Fleet presence / Migrations). Returns null when the
- * agent is registered — the caller should proceed with its actual signed
- * read for that agent. Otherwise returns the finding to print for THAT
- * agent's subsection; the caller must still move on to the next agent
- * (failure isolation, flair#722) rather than aborting the whole section.
- */
-/**
  * What the run has already established about the instance, at the moment this
  * finding is rendered (flair#1023).
  *
@@ -574,6 +566,14 @@ export interface RunReachability {
   instanceReachable?: boolean;
 }
 
+/**
+ * Render decision for one agent's registration-gate outcome, ahead of a
+ * verified-read section (Fleet presence / Migrations). Returns null when the
+ * agent is registered — the caller should proceed with its actual signed
+ * read for that agent. Otherwise returns the finding to print for THAT
+ * agent's subsection; the caller must still move on to the next agent
+ * (failure isolation, flair#722) rather than aborting the whole section.
+ */
 export function describeAgentGateFinding(
   agentId: string,
   state: AgentGateState,
@@ -585,11 +585,15 @@ export function describeAgentGateFinding(
   // watched the instance answer. When it is, report the honest thing: the
   // check failed, and we know it was not connectivity.
   if (state === "unreachable" && reachability?.instanceReachable === true) {
+    // Strip the caller's own "instance unreachable:" prefix before quoting the
+    // detail — that prefix IS the claim being disclaimed, and leaving it in
+    // would reassert it in the same sentence that denies it.
+    const raw = detail?.replace(/^instance unreachable:\s*/i, "").trim();
     return {
       icon: "warn",
       message:
         `could not verify agent '${agentId}' registration — the instance responded to this run, ` +
-        `so this is not a connectivity problem${detail ? ` (${detail})` : ""}`,
+        `so this is not a connectivity problem${raw ? ` (${raw})` : ""}`,
       isIssue: false,
     };
   }

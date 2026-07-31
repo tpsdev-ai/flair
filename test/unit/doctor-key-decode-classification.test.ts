@@ -238,6 +238,10 @@ describe("describeAgentGateFinding reachability guard", () => {
     expect(f!.message).toContain("the instance responded");
     expect(f!.message).toContain("not a connectivity problem");
     expect(f!.isIssue).toBe(false);
+    // The disclaimed claim must not survive inside the quoted detail, or the
+    // sentence reasserts what it just denied. The raw error is still shown.
+    expect(f!.message).not.toContain("instance unreachable");
+    expect(f!.message).toContain("fetch failed");
   });
 
   test("without an established reachability fact, 'unreachable' is still reportable", () => {
