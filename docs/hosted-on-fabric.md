@@ -53,7 +53,7 @@ On Fabric, configuration goes through the component's environment, not a local `
 
 | Variable | What it does | When to set it |
 |----------|--------------|----------------|
-| `FLAIR_PUBLIC_URL` | The URL operators reach this Flair on. Surfaced in OAuth metadata and A2A discovery. | **Always set** — or clients see a loopback address. |
+| `FLAIR_PUBLIC_URL` | The URL operators reach this Flair on. Surfaced in OAuth metadata and A2A discovery. | **`flair deploy` sets it** to the deploy target, in the component's `.env`. Set it yourself only to advertise a different host (CDN / proxy / vanity domain) — a value you set is never overwritten. |
 | `HDB_ADMIN_PASSWORD` | Bootstrap password for the embedded Harper. | Set at install time. |
 | `FLAIR_KEY_PASSPHRASE` | Passphrase for federation key encryption. | Set for production federation deployments. |
 

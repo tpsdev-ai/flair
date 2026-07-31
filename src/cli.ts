@@ -27,7 +27,15 @@ import { createRequire } from "node:module";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
 import { keystore } from "./keystore.js";
-import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl } from "./deploy.js";
+import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl, resolveDeployPublicUrl } from "./deploy.js";
+import {
+  COMPONENT_ENV_FILENAME,
+  PUBLIC_URL_KEY,
+  assertNoSecretKeysAdded,
+  describePublicUrlFinding,
+  planComponentEnv,
+  readEnvValue,
+} from "./component-env.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
 import { checkVersion, formatVersionNudge, primeVersionCheckCache, FLAIR_PKG_NAME } from "./version-check.js";
 import { checkServerHandshake, formatHandshakeNudge, invalidateHandshakeCache } from "./version-handshake.js";
@@ -2032,9 +2040,37 @@ export async function callOpsApi(
   return res.json();
 }
 
+/**
+ * Build the component tarball `flair init --remote` uploads via the ops API.
+ *
+ * ── What was wrong here (flair#1005 item 2) ─────────────────────────────────
+ * This function wrote a `.env` into its temp directory and then packed an
+ * EXPLICIT entries list that did not contain it, so the file was discarded with
+ * the temp directory on every call. It had been that way since the writer landed:
+ * a writer whose output nothing consumed. `.env` is now in the list, which is the
+ * whole of the fix — and `init-remote-ops.test.ts` asserts the entry is present
+ * in a real tarball, because "the file was written" was never evidence of
+ * anything.
+ *
+ * ── Why `publicUrl` replaced the password parameter (flair#1011) ────────────
+ * The discarded file assigned `HDB_ADMIN_PASSWORD` and `FLAIR_ADMIN_PASSWORD`.
+ * Shipping it as-is would have made a latent hazard live, for two independent
+ * reasons: Harper composes its own configuration before a component's `.env`
+ * loads, so `HDB_ADMIN_PASSWORD` set this way is a credential Harper is
+ * structurally unable to honour while flair reads it — two sources, one name,
+ * nothing comparing them; and the payload is ingested into Harper's
+ * `hdb_deployment` record, which is replicated to every node and retained for
+ * rollback, so anything in it is persisted cluster-wide.
+ *
+ * The parameter is REMOVED rather than validated. A caller cannot pass a password
+ * to a function that has nowhere to put one, and no future edit can reintroduce
+ * one without also reintroducing the parameter. The admin credential still
+ * reaches the instance the way it always actually did — `add_user`/`alter_user`
+ * over the ops API in `provisionFabric`.
+ */
 export async function buildDeployTarball(
   projectRoot: string,
-  flairAdminPass: string,
+  publicUrl: string | null,
 ): Promise<{ tarballB64: string }> {
   const tmpDir = mkdtempSync(join(tmpdir(), "flair-deploy-"));
   try {
@@ -2050,13 +2086,21 @@ export async function buildDeployTarball(
       }
     }
 
-    // Write .env with 600 permissions
-    const envContent = [
-      `HDB_ADMIN_PASSWORD=${flairAdminPass}`,
-      `FLAIR_ADMIN_PASSWORD=${flairAdminPass}`,
-      "",
-    ].join("\n");
-    writeFileSync(join(tmpDir, ".env"), envContent, { mode: 0o600 });
+    // The component's environment. Harper reads this file only because
+    // config.yaml declares its `loadEnv` plugin (flair#1010) — without that
+    // declaration the file is present and inert, which is what made flair#1000
+    // hard to see. An existing `.env` in the project root is merged, never
+    // replaced; planComponentEnv keeps an operator's own value for the key.
+    const existingEnvPath = join(projectRoot, COMPONENT_ENV_FILENAME);
+    const existingEnv = existsSync(existingEnvPath) ? readFileSync(existingEnvPath, "utf8") : null;
+    const plan = planComponentEnv(existingEnv, publicUrl);
+    for (const notice of plan.notices) console.warn(`⚠ flair init --remote: ${notice}`);
+    const envText = plan.text ?? existingEnv;
+    if (envText !== null) {
+      assertNoSecretKeysAdded(existingEnv, envText);
+      writeFileSync(join(tmpDir, COMPONENT_ENV_FILENAME), envText, { mode: 0o600 });
+      entries.push(COMPONENT_ENV_FILENAME);
+    }
 
     // Build compressed tarball
     const tarballPath = join(tmpDir, "deploy.tar.gz");
@@ -2109,9 +2153,12 @@ export async function provisionFabric(
 ): Promise<void> {
   const projectRoot = process.cwd();
 
-  // 1. Build and deploy component tarball
+  // 1. Build and deploy component tarball. `target` is the served URL this
+  // function verifies against in step 2 — the same value the component must
+  // advertise in OAuth/A2A discovery, so it is what FLAIR_PUBLIC_URL is set from
+  // (flair#1005). A loopback target supplies nothing: see resolveDeployPublicUrl.
   console.log("Building deploy tarball...");
-  const { tarballB64 } = await buildDeployTarball(projectRoot, flairAdminPass);
+  const { tarballB64 } = await buildDeployTarball(projectRoot, resolveDeployPublicUrl(target));
 
   console.log("Deploying via ops API...");
   await callOpsApi(opsTarget, {
@@ -12228,6 +12275,53 @@ program
         }
       }
     } catch { /* best-effort — a stat failure shouldn't fail doctor */ }
+
+    // 3d. The URL this instance tells the world to use (flair#1005, flair#1000).
+    //
+    // Asks the instance for its OWN discovery document rather than inferring
+    // anything from config: /OAuthMetadata's `issuer` is the exact field that was
+    // wrong in flair#1000, and it is the only thing that proves what a client
+    // will actually be handed. describePublicUrlFinding (src/component-env.ts) is
+    // pure decision logic, unit-tested, and documents in its own header why the
+    // detectable condition is DRIFT rather than "unset on a public instance" —
+    // doctor reaches this instance over loopback and cannot observe whether it is
+    // also reachable at a public address.
+    if (harperResponding) {
+      let advertisedIssuer: string | null = null;
+      try {
+        const res = await fetch(`${baseUrl}/OAuthMetadata`, { signal: AbortSignal.timeout(5000) });
+        if (res.ok) {
+          const doc = (await res.json()) as { issuer?: unknown };
+          if (typeof doc?.issuer === "string" && doc.issuer !== "") advertisedIssuer = doc.issuer;
+        }
+      } catch { /* unreachable/unparseable → null → the finding is skipped, not passed */ }
+
+      // The component directory for a local install is the flair package itself:
+      // `flair start` spawns `harper run .` with cwd = flairPackageDir().
+      const componentEnvPath = join(flairPackageDir(), COMPONENT_ENV_FILENAME);
+      let componentEnvValue: string | null = null;
+      try {
+        if (existsSync(componentEnvPath)) {
+          componentEnvValue = readEnvValue(readFileSync(componentEnvPath, "utf-8"), PUBLIC_URL_KEY);
+        }
+      } catch { /* unreadable → treat as absent */ }
+
+      const finding = describePublicUrlFinding({
+        advertisedIssuer,
+        componentEnvValue,
+        processEnvValue: process.env.FLAIR_PUBLIC_URL ?? null,
+        componentEnvPath,
+      });
+      if (finding) {
+        const icon =
+          finding.icon === "ok" ? render.icons.ok
+          : finding.icon === "warn" ? render.icons.warn
+          : render.icons.error;
+        console.log(`  ${icon} ${finding.message}`);
+        if (finding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
+        if (finding.isIssue) issues++;
+      }
+    }
 
     // 4. Embeddings check — REAL semantic round-trip (only if Harper is responding).
     //

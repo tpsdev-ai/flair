@@ -78,8 +78,41 @@ export FLAIR_URL=https://<cluster>.<org>.harperfabric.com
 flair agent add mybot --target "$FLAIR_URL" --ops-target <ops-url>
 ```
 
-Also set `FLAIR_PUBLIC_URL` to that URL in the component's environment — OAuth metadata
-and A2A discovery advertise it, or clients see a loopback address.
+### `FLAIR_PUBLIC_URL` — set for you, and how to override it
+
+OAuth metadata and A2A discovery advertise `FLAIR_PUBLIC_URL`; with it unset, every
+URL a client is handed points at loopback and no remote client can authorize.
+
+`flair deploy` ships it. The deploy already knows the URL — it is the target it
+verifies the served API against immediately afterwards — so it writes
+`FLAIR_PUBLIC_URL=<target>` into a `.env` in the component payload, and then checks
+`GET <target>/OAuthMetadata` really does advertise a non-loopback issuer. That check
+fails the deploy if it does not.
+
+To advertise something other than the deploy target — a CDN, a reverse proxy, a
+vanity domain — put your own `.env` in the package root:
+
+```
+FLAIR_PUBLIC_URL=https://flair.example.com
+```
+
+A value you set is never overwritten; the deploy prints the disagreement and keeps
+yours. Any other keys in that file are carried through untouched.
+
+Three things worth knowing about that file:
+
+- Harper reads a component's `.env` **only** because flair's `config.yaml` declares
+  its `loadEnv` plugin, above `jsResource`. Without that declaration the file is
+  present and inert.
+- A variable already set in the instance's **process environment** outranks the
+  file. Harper's `loadEnv` skips any key already present in `process.env` (and logs
+  an "Environment variable conflict" warning) unless `override` is declared, which
+  flair does not declare. So a value you set through Fabric's own environment
+  mechanism is what the instance uses, and a deploy cannot replace it.
+- The deploy payload is stored in Harper's deployment record and replicated to every
+  node, so anything in `.env` is persisted cluster-wide. flair puts no credential
+  there. `HDB_ADMIN_PASSWORD` in particular cannot work from a component `.env` at
+  all — Harper composes its own configuration before component env files load.
 
 ---
 
