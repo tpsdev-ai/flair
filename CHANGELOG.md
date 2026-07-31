@@ -18,6 +18,39 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.32.0] - 2026-07-31
+
+### Added
+
+- **Deployment-shapes chooser + two new guides.** Added `docs/deployment-shapes.md` — a single-page chooser that links to the three deployment shapes: standalone local, hosted on Harper Fabric, and embedded in a Harper app. Two new guides accompany it: `docs/standalone-local.md` (full lifecycle for the default `flair init` path) and `docs/hosted-on-fabric.md` (Fabric component deployment with `flair deploy`). The third shape — embedded in a Harper app — is the pre-existing `docs/embedding-in-a-harper-app.md`.
+
+- **Public in-process API (`new Flair(server)`).** A facade that hides internal
+  implementation details (deep imports, `server.resources` keying, `.Resource`
+  wrapping, `collectionResource()`, double-passing `agentId`) while preserving
+  the security boundary. One handle per Harper instance, lazy resource
+  resolution, agent-scoped handles via `flair.as(id)`, admin operations via
+  `flair.admin`, and internal operations via `flair.internal`. The package now
+  has `main` and `exports` fields so `import { Flair } from "@tpsdev-ai/flair"`
+  resolves directly.
+
+### Changed
+
+- **The README quick start now forks Harper-native first.** Readers whose application already runs on Harper reach the in-process path in one click instead of finding it two-thirds of the way down the page, and the CLI quick start keeps its own branch immediately below — nothing was removed. Over HTTP Flair is one memory API among many; loaded as a component it is a method call with no network hop and no second service to operate, and the front door now says so.
+
+  The same section gains an honest answer to "where does the agent key go?": the path `flair init` writes it to, what backing it up buys, what losing it costs (the identity, not the memories — recovery is `flair agent rotate-key`, which needs the admin password), and the fact that the in-process path needs **no key at all**, because identity there is asserted through the call context rather than proven with a signature.
+
+### Fixed
+
+- **`flair backup` routes progress output to stderr when stdout is not a terminal.** `flair backup > file.json` used to capture the progress report, producing a plausible-looking file of a few hundred bytes that was not a backup. Now the redirect produces an empty file — unmistakably not a valid archive — while default-path callers (schedulers, cron) are completely unaffected. The archive still goes to `--output` / the default path.
+
+- **`docs/deployment.md` backup/restore commands corrected.** The documented `flair backup >` and `flair restore <` forms were wrong — backup writes to `--output`, not stdout, and restore reads a positional path from argv, not stdin. Both now match the correct forms already in `docs/upgrade.md`. A new docs-freshness lint rule (`broken-backup-restore-docs`) rejects the broken shapes repo-wide so they cannot re-enter documentation.
+
+- **`flair init` no longer touches a legacy launchd plist that belongs to a different instance.** The pre-flair#693 `ai.tpsdev.flair` plist is a single global label — `init` now reads its `ROOTPATH` to establish which data dir it serves, and only unloads/deletes it when that matches the instance being initialised. A plist owned by another instance is left alone with a message. Errors during unload or delete are surfaced instead of swallowed.
+
+- **The README's in-process example could not have worked.** It built the resource with `new Memory(undefined, ctx)` and called `post()` on it, which returns `405 The Memory does not have a post method implemented` — a create needs a collection-bound instance, and that mark is a private field only Harper's own `getResource()` can set. The snippet now uses the shipped `collectionResource()` / `agentContext()` seam, matching `docs/embedding-in-a-harper-app.md` and the integration fixture that is actually run against a real instance.
+
+- **`docs/secrets-and-keys.md` named a command that does not exist.** It told readers to recover a lost or leaked agent key with `flair agent rotate <id>`, in three places; the command is `flair agent rotate-key <id>`. It also described the private key file as PKCS8 base64, when `flair init` and `flair agent add` write the raw 32-byte Ed25519 seed. Corrected because the README now links this page from its key section.
+
 ## [0.31.1] - 2026-07-29
 
 ### Added
