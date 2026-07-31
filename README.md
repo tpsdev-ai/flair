@@ -6,55 +6,11 @@
 
 > **The identity and memory substrate for AI agents. Crypto-pinned. Federated. Self-hosted.**
 
-Every agent framework gives you chat history. None give you *identity*. Flair gives an agent three things that survive a restart and follow it between orchestrators:
-
-- **Identity** — an Ed25519 keypair. The agent signs every request. No shared secrets.
-- **Memory** — persistent knowledge with semantic search, embedded in-process. No API calls.
-- **Soul** — the personality, values and procedures that make it *that* agent.
-
-Self-hosted on [Harper](https://harper.fast) as a single process. No sidecars, no vector database, no embedding API.
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  same agent, same memory, every harness                          │
-│                                                                  │
-│  Claude Code  ─┐                                                 │
-│  Cursor       ─┤                                                 │
-│  Codex CLI    ─┼─[ flair-mcp ]─┐                                 │
-│  Gemini CLI   ─┤               │                                 │
-│  Continue.dev ─┤               │   ┌──────────────────────┐      │
-│  Goose        ─┘               ├─▶ │  Flair (self-hosted) │      │
-│  LangGraph   ─[ langgraph-flair ]──│  Ed25519 / HNSW /    │      │
-│  OpenClaw    ─[ openclaw-flair  ]──│  Soul + Memory       │      │
-│  n8n         ─[ n8n-nodes-flair ]──└──────────┬───────────┘      │
-│  Hermes      ─[ hermes-flair    ]─┘           │ federation       │
-│  Pi agent    ─[ pi-flair        ]─┘           │ (hub/spoke)      │
-│                                               ▼                  │
-│                                    ┌──────────────────────┐      │
-│                                    │  Flair (Fabric hub)  │      │
-│                                    └──────────────────────┘      │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-11 harness surfaces today. Pick whichever you're shipping in; the memory layer doesn't care. **[Full integrations catalog →](docs/integrations.md)**
+Every agent framework gives you chat history. None give you *identity*. Flair gives an agent three things that survive a restart and follow it between orchestrators: an **identity** it proves with an Ed25519 keypair, **memory** it searches by meaning rather than by keyword, and a **soul** — the personality, values and procedures that make it *that* agent.
 
 ## Quick start
 
-Two front doors. Pick by where your code already runs.
-
-### Already on Harper? Load Flair as a component
-
-Flair *is* a Harper component. Deploy it into the instance your application already runs in and call its resources directly — `await h.post({ agentId, content })` is a **method call**, not a network call. No second service to operate, no HTTP round trip, and no key to distribute: a caller in the same process is already inside the trust boundary and names the agent it is acting as, per call.
-
-Adding it takes nothing away. The HTTP surface keeps serving MCP clients and remote agents exactly as before.
-
-**→ [Embedding Flair in a Harper app](docs/embedding-in-a-harper-app.md)** — the whole in-process contract, measured against a real instance: resolving the resource, the table-vs-resource distinction that decides whether your memories are scoped at all, N agents in one process, and registering agents with no shell on the node.
-
-### Everywhere else — install the CLI
-
-A laptop, a VPS, an MCP client, or any language over HTTP. Needs **Node.js 22+** and a **user-writable npm global prefix**.
-
-> ⚠️ **Never `sudo npm install -g @tpsdev-ai/flair`.** A root-owned install can't write the embedding model into its own package directory, so semantic search silently degrades to keyword-only. `flair init` and `flair doctor` will warn you loudly. Use `nvm`, or point npm at your home directory: `npm config set prefix ~/.npm-global` and add `~/.npm-global/bin` to `PATH`.
+Runs on a laptop, a VPS, or anywhere Node does. Needs **Node.js 22+**.
 
 ```bash
 # 1. Install the CLI (no sudo)
@@ -79,11 +35,22 @@ Step 4 finds the memory you never keyword-matched:
 
 That trailing figure is a rank score, normalized so the top hit is always near 100% — ordering, not confidence.
 
-`flair init` installs and starts Harper, creates the agent's Ed25519 keypair, verifies semantic search actually works, wires every MCP client it detects (Claude Code, Cursor, Codex CLI, Gemini CLI) to `npx -y @tpsdev-ai/flair-mcp`, and runs a smoke test. Restart your MCP client afterwards, then ask the agent *"what do you remember about me?"*
+`flair init` installs and starts Harper, creates the agent's Ed25519 keypair, verifies semantic search actually works, wires every MCP client it detects (Claude Code, Cursor, Codex CLI, Gemini CLI), and runs a smoke test. Restart your MCP client afterwards, then ask the agent *"what do you remember about me?"*
 
 > **Pass `--agent`.** A bare `flair init` bootstraps the instance and stops there — no agent, no keypair, no MCP wiring.
 
 Full walkthrough with expected output at every step: **[docs/quickstart.md](docs/quickstart.md)**.
+
+### One install, one binary
+
+`npm install -g @tpsdev-ai/flair` puts a single command on your `PATH`: `flair`. That is the whole install, and it needs a **user-writable npm global prefix** — which is why step 1 says *no sudo*. A root-owned install can't write the embedding model into its own package directory, so semantic search silently degrades to keyword-only. Use `nvm`, or point npm at your home directory — `npm config set prefix ~/.npm-global`, then add `~/.npm-global/bin` to `PATH`. `flair init` and `flair doctor` both check for this and say so loudly.
+
+Two different things get called "MCP" here, and you get them differently:
+
+- **The server has an MCP surface built in.** `/mcp` is a JSON-RPC endpoint exposing 12 curated tools, guarded by OAuth bearer tokens. It ships inside the package — and it is **off by default**: until you set `FLAIR_MCP_OAUTH` *and* a public issuer (`FLAIR_MCP_ISSUER`, falling back to `FLAIR_PUBLIC_URL`), no `/mcp` route is registered and the path returns 404. No documented client setup uses it today.
+- **What your MCP client actually talks to is a separate package** — `@tpsdev-ai/flair-mcp`, a stdio adapter — and that one is deliberately not installed globally. `flair init` writes `npx -y @tpsdev-ai/flair-mcp@<version>` into each client's config, pinned to the CLI's own version, so the client fetches it on demand and there is no second global package to keep in step.
+
+`@tpsdev-ai/flair-client` is likewise its own package: add it to a project when you want to call Flair from your own code ([JavaScript / TypeScript](#javascript--typescript)).
 
 ### Where the agent's key lives
 
@@ -91,7 +58,7 @@ Full walkthrough with expected output at every step: **[docs/quickstart.md](docs
 
 **Back that file up — it is the agent's identity, and there is one copy.** Memories are not encrypted with it, so losing it costs the identity, not the data: the agent can no longer sign, and every HTTP call it makes fails. Recovery is `flair agent rotate-key mybot`, which mints a new pair and re-registers the public half — it needs the admin password `flair init` wrote to `~/.flair/admin-pass`, so back that up too. Otherwise treat the key like an SSH key: one per agent per host, never copied between machines ([docs/secrets-and-keys.md](docs/secrets-and-keys.md)).
 
-**The in-process path needs no key at all.** Keys are how an agent *outside* the process proves who it is. Code running inside the same Harper instance asserts identity through the call context instead — `agentContext("mybot")` — which Flair reads and acts on with no signature, no `Agent`-table lookup and no registration. That is deliberate: same-process code could write the storage tables directly, so demanding a signature from it would be theatre. It is also why that id must come from your own server-side state and never from request data.
+Keys are how an agent *outside* the process proves who it is. Code running inside the same Harper instance needs no key at all — see [Embedded in a Harper app](#embedded-in-a-harper-app-in-process).
 
 ### Useful flags
 
@@ -138,9 +105,35 @@ Write a memory, then find it by meaning. The same memory is visible to every har
 
 One Ed25519 identity, one memory store, three MCP-capable CLIs. A memory written from Claude Code is retrievable from Codex CLI and Gemini CLI a moment later. Identity and history aren't bound to one orchestrator's runtime.
 
+## One agent, every harness
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  same agent, same memory, every harness                          │
+│                                                                  │
+│  Claude Code  ─┐                                                 │
+│  Cursor       ─┤                                                 │
+│  Codex CLI    ─┼─[ flair-mcp ]─┐                                 │
+│  Gemini CLI   ─┤               │                                 │
+│  Continue.dev ─┤               │   ┌──────────────────────┐      │
+│  Goose        ─┘               ├─▶ │  Flair (self-hosted) │      │
+│  LangGraph   ─[ langgraph-flair ]──│  Ed25519 / HNSW /    │      │
+│  OpenClaw    ─[ openclaw-flair  ]──│  Soul + Memory       │      │
+│  n8n         ─[ n8n-nodes-flair ]──└──────────┬───────────┘      │
+│  Hermes      ─[ hermes-flair    ]─┘           │ federation       │
+│  Pi agent    ─[ pi-flair        ]─┘           │ (hub/spoke)      │
+│                                               ▼                  │
+│                                    ┌──────────────────────┐      │
+│                                    │  Flair (Fabric hub)  │      │
+│                                    └──────────────────────┘      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+11 harness surfaces today. Pick whichever you're shipping in; the memory layer doesn't care. **[Full integrations catalog →](docs/integrations.md)**
+
 ## How it works
 
-Flair is a native [Harper v5](https://harper.fast) application. Harper handles HTTP, persistence (RocksDB), and application logic in one process.
+Flair is a native [Harper v5](https://harper.fast) application. Harper handles HTTP, persistence (RocksDB), and application logic in one process — self-hosted, with no sidecars, no vector database and no embedding API.
 
 ```
 Agent ──[Ed25519-signed request]──▶ Flair (Harper)
@@ -178,24 +171,22 @@ See **[DESIGN.md](DESIGN.md)** for the invariants behind the three primitives �
 | **Web admin** | Server-rendered UI for principals, connectors, IdPs and instance config. No separate dashboard service. |
 | **Benchmarks** | [`flair-bench`](packages/flair-bench/README.md) scores candidate embedding models against the same recall corpus Flair's CI gates on. Runs standalone — no Flair install, no server. |
 
-Trust-graded recall reaches the authenticated HTTP API and the native `/mcp` tools today; CLI, `@tpsdev-ai/flair-client` and `flair-mcp` exposure is a follow-up. REM needs a configured generative backend (Ollama, OpenAI, Anthropic, …) — without one, `flair rem rapid` fails with `Reflection error: No generative backend configured`.
+Trust-graded recall reaches the authenticated HTTP API and the built-in `/mcp` tools today — the latter being off by default, see [One install, one binary](#one-install-one-binary). CLI, `@tpsdev-ai/flair-client` and `flair-mcp` exposure is a follow-up. REM needs a configured generative backend (Ollama, OpenAI, Anthropic, …) — without one, `flair rem rapid` fails with `Reflection error: No generative backend configured`.
 
 ## How Flair compares
 
-| | Flair | Mem0 | Honcho | Letta (MemGPT) | Built-ins (OAI/Anthropic/Google) |
-|---|---|---|---|---|---|
-| **Identity model** | **Ed25519 per agent (crypto-pinned)** | tenant-isolation | per-user soft tenant | runtime-bound | account-scoped |
-| **Federation (peer-to-peer)** | **yes — hub/spoke validated** | no | no | no | no |
-| **Cross-orchestrator** | **11+ harnesses, same memory** | several | several | runtime-bound | vendor-locked |
-| **Soul / persistent character** | **first-class** | optional | persona-shaped | optional | no |
+Every product here does semantic recall over stored memories. These are the dimensions they actually differ on.
 
-Parity rows are omitted: Mem0, Honcho and Letta are all open-source, self-hostable, and do semantic search. Those are table stakes here.
+| | Flair | Mem0 | Honcho | Letta (MemGPT) | [SageOx](https://sageox.ai) | Built-ins (OAI/Anthropic/Google) |
+|---|---|---|---|---|---|---|
+| **Where memories live** | infrastructure you run | self-host or Mem0 Cloud | self-host or hosted API | self-host or Letta Cloud | SageOx cloud | vendor cloud |
+| **Memory is scoped to** | the agent, via an Ed25519 keypair | tenant / user | per-user tenant | the runtime | the team | the account |
+| **Reaches other orchestrators** | 11 harnesses, incl. workflow and agent frameworks | several | several | Letta's runtime | 14+ coding agents and editors, via hooks, plugins and instruction files | no |
+| **Sync between instances you run** | hub/spoke federation | no | no | no | one hosted service | one hosted service |
+| **Captures in-person conversation** | no | no | no | no | yes — Ox Dot | no |
+| **Per-agent persistent character** | first-class (Soul) | optional | persona-shaped | optional | team context, not per-agent | no |
 
-The honest gaps — if you need one of these specifically, use that tool:
-
-- Mem0's **cloud sync UX** is more polished, if you're happy with their hosting.
-- Honcho's **persona model** is more developed, if rich personality modeling is the priority.
-- Letta's **runtime integration** is tighter, if you're building on their agent loop.
+**Where Flair loses.** [SageOx's Ox Dot](https://sageox.ai) records in-person meetings, standups and whiteboard sessions and pipes them into shared context; Flair has no ambient capture of anything that isn't already text in a tool. Mem0's hosted sync is more polished. Honcho's persona model is more developed. Letta's integration with its own agent loop is tighter than anything Flair offers. And there is no Flair-operated cloud — running it is your job.
 
 ## Integration
 
@@ -298,7 +289,11 @@ Sign `agentId:timestamp:nonce:METHOD:/path` with the agent's private key. Protoc
 
 ### Embedded in a Harper app (in-process)
 
-Flair *is* a Harper component. If your application already runs on Harper, load Flair into the same instance and call its resources directly — a method call instead of an HTTP round trip, and no key anywhere.
+The second front door, and the one to take if your code already runs on Harper.
+
+Flair *is* a Harper component. Deploy it into the instance your application already runs in and call its resources directly — `await h.post({ agentId, content })` is a **method call**, not a network call. No second service to operate, no HTTP round trip, and no key to distribute: a caller in the same process is already inside the trust boundary and names the agent it is acting as, per call.
+
+Adding it takes nothing away. The HTTP surface keeps serving MCP clients and remote agents exactly as before.
 
 ```javascript
 import { server } from "harper";
@@ -312,7 +307,11 @@ const h = await collectionResource(Memory, agentContext("mybot"));
 await h.post({ agentId: "mybot", content: "...", durability: "standard" });
 ```
 
-`databases.flair.Memory` is the **table** (raw storage); the exported `Memory` class is the **resource**, where auth, read-scoping, visibility and embedding live. `new Memory(...)` is not a substitute for `collectionResource` — a create needs a collection-bound instance only Harper can produce. Both helpers refuse a missing agent id rather than defaulting it, because a resource invoked with no context resolves to Flair's trusted `internal` verdict and runs unfiltered across every agent. Full guide: **[docs/embedding-in-a-harper-app.md](docs/embedding-in-a-harper-app.md)**.
+`databases.flair.Memory` is the **table** (raw storage); the exported `Memory` class is the **resource**, where auth, read-scoping, visibility and embedding live. `new Memory(...)` is not a substitute for `collectionResource` — a create needs a collection-bound instance only Harper can produce. Both helpers refuse a missing agent id rather than defaulting it, because a resource invoked with no context resolves to Flair's trusted `internal` verdict and runs unfiltered across every agent.
+
+**This path needs no key at all.** Keys are how an agent *outside* the process proves who it is. Code running inside the same Harper instance asserts identity through the call context instead — `agentContext("mybot")` — which Flair reads and acts on with no signature, no `Agent`-table lookup and no registration. That is deliberate: same-process code could write the storage tables directly, so demanding a signature from it would be theatre. It is also why that id must come from your own server-side state and never from request data.
+
+**→ [Embedding Flair in a Harper app](docs/embedding-in-a-harper-app.md)** — the whole in-process contract, measured against a real instance: resolving the resource, the table-vs-resource distinction that decides whether your memories are scoped at all, N agents in one process, and registering agents with no shell on the node.
 
 ### Auth across surfaces
 
