@@ -7,16 +7,20 @@
 // but no CLAUDE.md line; or no SessionStart hook) that silently no-op, with
 // no way to tell "is Flair working for my agent?" short of an incident.
 //
-// This module is pure filesystem logic (no network, no crypto) so it's fast
-// and fully unit-testable in isolation — mirrors test/unit/client-wiring.test.ts's
+// This module is filesystem logic (no network, no crypto) so it's fast and
+// fully unit-testable in isolation — mirrors test/unit/client-wiring.test.ts's
 // technique of overriding process.env.HOME to a temp dir. The two
 // network-dependent checks (reachability + agent registration) live in
-// src/cli.ts alongside authFetch/resolveKeyPath, which they reuse.
+// src/cli.ts alongside authFetch/resolveKeyPath, which they reuse. The one
+// exception to "filesystem only" is probeSessionStartHookCommand (flair#1007),
+// which spawns a bounded subprocess — it takes an injectable runner so every
+// caller in the test suite stays hermetic.
 //
 // Every read here is try/catch-wrapped: a missing or malformed config file is
 // "not present", never a thrown error — doctor must never crash or hang on a
 // broken client config.
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { clientConfigPath, type ClientId } from "./install/clients.js";
@@ -29,6 +33,139 @@ const CLAUDE_MD_BOOTSTRAP_LINE = "At the start of every session, run mcp__flair_
 // The exact substring identifying a Flair SessionStart hook command (see
 // docs/mcp-clients.md "Auto-recall on session start").
 export const SESSION_START_HOOK_MARKER = "flair-session-start";
+
+// ── the canonical SessionStart hook command (flair#1007) ───────────────────
+//
+// ONE builder, three call sites: `flair doctor --fix` (fixSessionStartHook),
+// `flair init`'s copy-paste hint (sessionStartHookHint), and `flair hook
+// install` (src/hook-install.ts's buildHookCommand, which delegates here).
+// Before #1007 each of those carried its own literal copy of the string, so a
+// change to the invocation's failure behaviour had to be made in three places
+// and could be tested in none of them.
+//
+// WHY THE INVOCATION IS WRAPPED
+// -----------------------------
+// The hook runs `npx -y @tpsdev-ai/flair-mcp flair-session-start`: it resolves
+// a package binary through whatever Node runtime the user's shell happens to
+// expose. Under a Node version manager, globally installed packages are
+// per-runtime-version, so a routine and entirely unrelated runtime upgrade
+// orphans that binary. The command then stops resolving and the harness
+// reports a hook error on EVERY session, indefinitely, in wording that names
+// neither Flair nor a remedy. It also outlives Flair itself: uninstalling the
+// CLI does not remove the hook, so the error survives the tool it exists to
+// serve (flair#1007).
+//
+// packages/flair-mcp/src/session-start-hook.ts already guarantees
+// no-op-on-any-failure — but that guarantee lives INSIDE the binary which, in
+// this failure, never runs. The guard is behind the door it is meant to guard.
+// The only layer that still exists when the binary does not is the command
+// string itself, so that is where the silence has to be enforced.
+//
+// WHY `sh -c '...'` RATHER THAN A BARE FRAGMENT
+// ---------------------------------------------
+// Claude Code runs a `type: "command"` hook as `/bin/sh -c "<command>"` — it
+// spawns with `shell: true` and never consults $SHELL (verified against the
+// 2.1.220 bundle; the settings schema's claim that `"shell": "bash"` uses your
+// $SHELL is not what the code does on POSIX). So a bare POSIX fragment would
+// in fact be enough for the one harness we support today.
+//
+// It is still wrapped, because this string is not private to that harness:
+// SUPPORTED_HARNESSES (src/hook-install.ts) is a registry meant to grow, and
+// docs/mcp-clients.md publishes this exact command for hand-wiring. Measured
+// across sh, bash, zsh, dash, ksh, fish and tcsh:
+//   - the wrapped form is uniform — stdout passed through byte-for-byte on
+//     success; empty stdout, empty stderr and exit 0 on every failure;
+//   - a bare `out=$(...) && ... || true` fragment is a SYNTAX ERROR in fish and
+//     csh/tcsh — silent on some shells, LOUDER than before on others, which is
+//     not a fix;
+//   - the unwrapped pre-#1007 command is already broken outright in csh/tcsh
+//     ("FLAIR_AGENT_ID=me: Command not found."), which the wrapper fixes.
+// The cost is one extra process at session start; the benefit is that the
+// silence is a property of the string rather than of who runs it.
+//
+// WHY STDOUT IS CAPTURED, NOT JUST STDERR DISCARDED
+// -------------------------------------------------
+// Exit code alone is not the whole surface. In the same bundle, a SessionStart
+// hook's stdout is consumed two ways EVEN AT EXIT 0:
+//   - stdout that does not start with `{` is injected into the model's context
+//     verbatim, as a `<hook> hook success: <stdout>` meta message;
+//   - stdout that starts with `{` but fails to parse/validate is reported as a
+//     hook error — at exit 0, presented as exit 1.
+// So a failing resolver that happens to print on stdout would either become
+// silently injected context or produce the exact error class this issue is
+// about, no matter what the exit code says. Capturing stdout and emitting it
+// only on success closes both; discarding stderr alone would close neither.
+
+/**
+ * Values interpolated into the hook command are constrained by a strict
+ * allow-list rather than escaped. The command is a single-quoted `sh -c`
+ * argument and correct single-quote escaping is NOT uniform across the shells
+ * above (fish and csh disagree with POSIX), so "cannot contain a quote" is
+ * enforced by shape instead of handled by quoting. This is also strictly
+ * safer than the pre-#1007 command, where an agent id containing a space or a
+ * `;` was a command injection into the user's settings file.
+ */
+const HOOK_VALUE_SAFE_RE = /^[A-Za-z0-9._:/-]+$/;
+
+export function isHookCommandValueSafe(value: string): boolean {
+  return typeof value === "string" && HOOK_VALUE_SAFE_RE.test(value);
+}
+
+/**
+ * Build the exact `command` string to register as a SessionStart hook.
+ * Throws (rather than emitting a quoted approximation) when a value cannot be
+ * represented safely — see HOOK_VALUE_SAFE_RE.
+ */
+export function buildSessionStartHookCommand(agentId: string, flairUrl?: string): string {
+  if (!isHookCommandValueSafe(agentId)) {
+    throw new Error(
+      `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+    );
+  }
+  if (flairUrl != null && flairUrl !== "" && !isHookCommandValueSafe(flairUrl)) {
+    throw new Error(
+      `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+    );
+  }
+  const env = flairUrl ? `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl}` : `FLAIR_AGENT_ID=${agentId}`;
+  const invocation = `${env} npx -y @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`;
+  return `sh -c 'out=$(${invocation} 2>/dev/null) && printf %s "$out" || true'`;
+}
+
+/**
+ * Does this command absorb a failure instead of surfacing it? Checked as two
+ * independent PROPERTIES (stderr discarded, non-zero exit absorbed) rather
+ * than by string equality with what we currently emit, so a hand-rolled
+ * command that genuinely achieves both is not nagged about.
+ */
+export function hookCommandIsSilenced(command: string): boolean {
+  if (typeof command !== "string") return false;
+  const discardsStderr = command.includes("2>/dev/null") || command.includes("2>&-");
+  const absorbsFailure = /\|\|\s*(?:true|:)(?:\s|'|$)/.test(command) || /;\s*(?:true|:)\s*'?\s*$/.test(command);
+  return discardsStderr && absorbsFailure;
+}
+
+/**
+ * The EXACT unwrapped shape Flair wrote before #1007. Recognising it precisely
+ * (not "anything containing the marker") is what lets `flair doctor --fix`
+ * upgrade a hook we know we authored while never rewriting one a user placed
+ * or edited themselves.
+ */
+const LEGACY_SESSION_START_HOOK_RE =
+  /^FLAIR_AGENT_ID=([^\s'"]+)(?: FLAIR_URL=([^\s'"]+))? npx -y @tpsdev-ai\/flair-mcp flair-session-start$/;
+
+export function parseLegacySessionStartHookCommand(command: string): { agentId: string; flairUrl?: string } | null {
+  if (typeof command !== "string") return null;
+  const m = command.trim().match(LEGACY_SESSION_START_HOOK_RE);
+  if (!m) return null;
+  return { agentId: m[1]!, flairUrl: m[2] };
+}
+
+/** Does this command invoke the Flair adapter at all (pinned or not)? Only
+ *  such a command is ever probed or rewritten. */
+export function isFlairHookCommand(command: string): boolean {
+  return typeof command === "string" && command.includes("@tpsdev-ai/flair-mcp") && command.includes(SESSION_START_HOOK_MARKER);
+}
 
 // ── shared helpers ──────────────────────────────────────────────────────────
 
@@ -233,6 +370,10 @@ export function fixClaudeMdBootstrap(cwd: string): { ok: boolean; path: string; 
 export interface SessionStartHookCheckResult {
   present: boolean;
   path: string;
+  /** The registered command, when one was found. Additive since #1007 — the
+   *  hook's PRESENCE was never the problem; whether the command it names can
+   *  still execute is, and answering that needs the command itself. */
+  command?: string;
 }
 
 /**
@@ -253,7 +394,7 @@ export function checkSessionStartHook(homeDir: string): SessionStartHookCheckRes
       if (!Array.isArray(hooks)) continue;
       for (const hook of hooks) {
         if (typeof hook?.command === "string" && hook.command.includes(SESSION_START_HOOK_MARKER)) {
-          return { present: true, path };
+          return { present: true, path, command: hook.command };
         }
       }
     }
@@ -280,6 +421,13 @@ export function fixSessionStartHook(homeDir: string, agentId: string | undefined
       message: "no agent id known — pass --agent <id> (or set FLAIR_AGENT_ID) so doctor knows which agent to wire the hook to",
     };
   }
+  if (!isHookCommandValueSafe(agentId)) {
+    return {
+      ok: false,
+      path,
+      message: `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+    };
+  }
   try {
     let config: any = {};
     const raw = readTextFile(path);
@@ -301,7 +449,7 @@ export function fixSessionStartHook(homeDir: string, agentId: string | undefined
       hooks: [
         {
           type: "command",
-          command: `FLAIR_AGENT_ID=${agentId} npx -y @tpsdev-ai/flair-mcp flair-session-start`,
+          command: buildSessionStartHookCommand(agentId),
         },
       ],
     });
@@ -312,6 +460,243 @@ export function fixSessionStartHook(homeDir: string, agentId: string | undefined
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return { ok: false, path, message: `could not write ${path}: ${reason}` };
+  }
+}
+
+// ── check 4b: does the registered hook command still execute? (flair#1007) ──
+//
+// Presence was never the problem. In the reported failure the settings entry
+// was perfectly well-formed — what changed was the environment around it, and
+// nothing checked that the command it names can still run. These three
+// functions are that check, split so the decision logic stays hermetic:
+//
+//   probeSessionStartHookCommand — spawns the command (injectable runner)
+//   classifyHookProbe            — pure: probe outcome -> verdict
+//   upgradeSessionStartHookCommand — the ONE repair doctor is willing to make
+//
+// The probe runs the command with FLAIR_HOOK_PROBE=1, which
+// packages/flair-mcp/src/session-start-hook.ts honours by printing its inert
+// output and exiting immediately — no network, no presence write, no memory
+// read. An adapter too old to know that variable still answers the only
+// question being asked (it prints SOMETHING and exits 0), it just does a real
+// bootstrap first, so the two short timeouts below bound that case too.
+//
+// The verdict keys off a property the adapter guarantees and a broken
+// resolution cannot fake: the adapter ALWAYS writes a non-empty payload (at
+// minimum its inert `{}`) and always exits 0. So "exit 0 with empty stdout" is
+// precisely the signature of the silenced wrapper swallowing a command that
+// never ran — which is why the wrapper does not make this failure less
+// diagnosable, it makes it MORE so.
+
+/** Bounded outcome of running a registered hook command once. */
+export interface HookProbeOutcome {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  /** Set when the probe process could not be started at all. */
+  spawnError: string | null;
+}
+
+export type HookExecutionState = "runs" | "broken" | "unknown";
+
+export interface HookProbeVerdict {
+  execution: HookExecutionState;
+  detail?: string;
+}
+
+/** Injectable so unit tests never spawn a shell. */
+export type HookProbeRunner = (command: string, timeoutMs: number) => HookProbeOutcome;
+
+/** Default probe budget. Generous: a cold `npx` may have to reach the registry
+ *  before it can answer, and a slow answer must never be reported as a broken
+ *  hook — that is what the "unknown" verdict is for. */
+export const HOOK_PROBE_TIMEOUT_MS = 20_000;
+
+/** Package-manager chatter that is never the reason a hook failed. The harness
+ *  itself reports the FIRST stderr line, which on a modern npm is one of these
+ *  — so doctor deliberately does better than repeating the symptom back. */
+const NOISE_LINE_RE = /^(?:npm|yarn|pnpm|bun)\s+(?:notice|warn|info|http|verb)\b/i;
+
+/** The most informative single line of a failed probe's output. */
+export function evidenceLine(s: string, max = 200): string {
+  const lines = (s || "").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const line = lines.find((l) => !NOISE_LINE_RE.test(l)) ?? lines[0] ?? "";
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+const defaultProbeRunner: HookProbeRunner = (command, timeoutMs) => {
+  // `/bin/sh -c` is not a guess: it is exactly how Claude Code runs a
+  // `type: "command"` hook (spawn with `shell: true`, $SHELL never consulted).
+  // Probing through any other shell would answer a question the user never
+  // asked.
+  const res = spawnSync("/bin/sh", ["-c", command], {
+    input: "",
+    encoding: "utf-8",
+    timeout: timeoutMs,
+    env: {
+      ...process.env,
+      // Tell a #1007-or-later adapter to answer without side effects.
+      FLAIR_HOOK_PROBE: "1",
+      // Bound an OLDER adapter, which will do a real bootstrap + presence
+      // heartbeat because it has never heard of FLAIR_HOOK_PROBE.
+      FLAIR_HOOK_TIMEOUT_MS: "1500",
+      FLAIR_PRESENCE_TIMEOUT_MS: "500",
+    },
+  });
+  const timedOut = (res as { signal?: string | null }).signal === "SIGTERM" && res.status === null;
+  return {
+    exitCode: res.status,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+    timedOut,
+    spawnError: res.error && !timedOut ? res.error.message : null,
+  };
+};
+
+/**
+ * Run a registered hook command once, bounded, with probe-mode env set.
+ * Only ever called for commands isFlairHookCommand() recognises — doctor does
+ * not execute a stranger's hook to find out what it does.
+ */
+export function probeSessionStartHookCommand(
+  command: string,
+  opts: { timeoutMs?: number; runner?: HookProbeRunner } = {},
+): HookProbeOutcome {
+  const timeoutMs = opts.timeoutMs ?? HOOK_PROBE_TIMEOUT_MS;
+  const runner = opts.runner ?? defaultProbeRunner;
+  try {
+    return runner(command, timeoutMs);
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { exitCode: null, stdout: "", stderr: "", timedOut: false, spawnError: reason };
+  }
+}
+
+/** Pure: probe outcome -> verdict. See the section doc for why "exit 0, no
+ *  output" is a definite failure rather than an ambiguous one. */
+export function classifyHookProbe(outcome: HookProbeOutcome): HookProbeVerdict {
+  if (outcome.timedOut) {
+    return { execution: "unknown", detail: "the command did not answer in time" };
+  }
+  if (outcome.spawnError) {
+    return { execution: "unknown", detail: `could not run the command (${outcome.spawnError})` };
+  }
+  if (outcome.exitCode !== 0) {
+    const evidence = evidenceLine(outcome.stderr) || evidenceLine(outcome.stdout);
+    return {
+      execution: "broken",
+      detail: evidence ? `exited ${outcome.exitCode}: ${evidence}` : `exited ${outcome.exitCode}`,
+    };
+  }
+  if (!outcome.stdout.trim()) {
+    return {
+      execution: "broken",
+      detail: "the command produced no output — the flair-session-start binary never ran",
+    };
+  }
+  return { execution: "runs" };
+}
+
+/** What doctor knows about the registered hook, beyond "is it there". */
+export interface SessionStartHookCommandReport {
+  path: string;
+  present: boolean;
+  command?: string;
+  /** Does this command invoke the Flair adapter (so probing/repair applies)? */
+  ours: boolean;
+  /** Does it absorb its own failures? */
+  silenced: boolean;
+  /** Is it the exact unwrapped shape Flair itself wrote before #1007, and so
+   *  safe for `--fix` to rewrite in place? */
+  upgradable: boolean;
+  execution: HookExecutionState | null;
+  detail?: string;
+}
+
+/**
+ * Full report for the registered hook: presence (as before), plus whether its
+ * command still executes and whether it would fail quietly if it stopped.
+ * `probe` is injectable and defaults to the real bounded spawn; pass a stub
+ * (or null via `{ probe: false }`) to keep a caller hermetic.
+ */
+export function inspectSessionStartHook(
+  homeDir: string,
+  opts: { probe?: HookProbeRunner | false; timeoutMs?: number } = {},
+): SessionStartHookCommandReport {
+  const found = checkSessionStartHook(homeDir);
+  if (!found.present || !found.command) {
+    return { path: found.path, present: false, ours: false, silenced: false, upgradable: false, execution: null };
+  }
+  const command = found.command;
+  const ours = isFlairHookCommand(command);
+  const silenced = hookCommandIsSilenced(command);
+  const upgradable = parseLegacySessionStartHookCommand(command) !== null;
+
+  if (!ours || opts.probe === false) {
+    return { path: found.path, present: true, command, ours, silenced, upgradable, execution: null };
+  }
+
+  const outcome = probeSessionStartHookCommand(command, {
+    timeoutMs: opts.timeoutMs,
+    runner: opts.probe || undefined,
+  });
+  const verdict = classifyHookProbe(outcome);
+  return { path: found.path, present: true, command, ours, silenced, upgradable, execution: verdict.execution, detail: verdict.detail };
+}
+
+/**
+ * Rewrite an existing Flair-authored hook command to the current canonical
+ * form, in place, preserving the agent id and URL the entry already carries —
+ * so this never needs --agent and never re-points a hook at a different agent.
+ *
+ * Deliberately narrow: it refuses unless the registered command is the EXACT
+ * unwrapped string Flair used to write. A hook the user hand-wrote or pinned
+ * is theirs; doctor reports on it and leaves it alone. And it never REMOVES a
+ * hook — an unresolvable command is an environment that changed, not a
+ * decision to un-wire ambient memory, and `flair hook uninstall` is the
+ * command for that when the user does decide.
+ */
+export function upgradeSessionStartHookCommand(homeDir: string): { ok: boolean; path: string; message: string; changed: boolean } {
+  const path = join(homeDir, ".claude", "settings.json");
+  try {
+    const raw = readTextFile(path);
+    if (!raw || !raw.trim()) return { ok: false, path, changed: false, message: `no ${path} to update` };
+    const config = JSON.parse(raw);
+    const groups = config?.hooks?.SessionStart;
+    if (!Array.isArray(groups)) return { ok: false, path, changed: false, message: `no SessionStart hooks in ${path}` };
+
+    for (const group of groups) {
+      const hooks = group?.hooks;
+      if (!Array.isArray(hooks)) continue;
+      for (const hook of hooks) {
+        if (typeof hook?.command !== "string" || !hook.command.includes(SESSION_START_HOOK_MARKER)) continue;
+        // Already absorbing its own failures — nothing to repair, whether we
+        // wrote it or the user did. Checked BEFORE the legacy match so a second
+        // run is a clean no-op rather than "that isn't the command we wrote".
+        if (hookCommandIsSilenced(hook.command)) {
+          return { ok: true, path, changed: false, message: `SessionStart hook in ${path} is already current` };
+        }
+        const legacy = parseLegacySessionStartHookCommand(hook.command);
+        if (!legacy) {
+          return {
+            ok: false,
+            path,
+            changed: false,
+            message: `the SessionStart hook in ${path} is not the command Flair wrote — leaving it untouched`,
+          };
+        }
+        const next = buildSessionStartHookCommand(legacy.agentId, legacy.flairUrl);
+        if (next === hook.command) return { ok: true, path, changed: false, message: `SessionStart hook in ${path} is already current` };
+        hook.command = next;
+        writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
+        return { ok: true, path, changed: true, message: `rewrote the SessionStart hook in ${path} so a failure to resolve stays silent` };
+      }
+    }
+    return { ok: false, path, changed: false, message: `no Flair SessionStart hook found in ${path}` };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false, path, changed: false, message: `could not update ${path}: ${reason}` };
   }
 }
 
@@ -383,7 +768,9 @@ function sessionStartHookHint(agentId: string, path: string): string {
           hooks: [
             {
               type: "command",
-              command: `FLAIR_AGENT_ID=${agentId} npx -y @tpsdev-ai/flair-mcp flair-session-start`,
+              command: isHookCommandValueSafe(agentId)
+                ? buildSessionStartHookCommand(agentId)
+                : buildSessionStartHookCommand("me"),
             },
           ],
         },

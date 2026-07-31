@@ -27,6 +27,23 @@
  * A hard timeout (FLAIR_HOOK_TIMEOUT_MS, default 8s) wraps the bootstrap call
  * so a stalled Flair daemon can't hang session startup; on timeout we no-op.
  *
+ * That guarantee covers everything from the moment this binary starts running.
+ * It cannot cover the case where the binary never runs at all — an `npx`
+ * invocation that stops resolving after a Node runtime change (flair#1007) —
+ * because the guard would be behind the door it is meant to guard. That half
+ * is owned by the command string registered in settings.json; see
+ * buildSessionStartHookCommand in the CLI's src/doctor-client.ts.
+ *
+ * PROBE MODE (flair#1007)
+ * ----------------------
+ * `flair doctor` needs to answer "does the command registered in settings.json
+ * still resolve and execute?" — the check whose absence turned an orphaned
+ * shim into an opaque, unattributed error on every session. Setting
+ * FLAIR_HOOK_PROBE makes this binary answer that and nothing else: it prints
+ * its inert output and exits immediately, before reading stdin, constructing a
+ * client, touching the network or writing presence. Being reached at all IS
+ * the answer.
+ *
  * AUTO-PRESENCE (flair#598)
  * -------------------------
  * A session starting is the clearest "this agent is alive" signal flair-mcp
@@ -44,13 +61,15 @@
  *   FLAIR_KEY_PATH   (default ~/.flair/keys/<agent>.key via flair-client)
  *   FLAIR_HOOK_TIMEOUT_MS (default 8000; clamped 500..30000)
  *   FLAIR_PRESENCE_TIMEOUT_MS (default 3000; clamped 500..10000 — see ./presence.ts)
+ *   FLAIR_HOOK_PROBE (unset by default — see PROBE MODE above)
  *
- * USAGE — register in ~/.claude/settings.json:
+ * USAGE — register with `flair hook install`, or by hand in
+ * ~/.claude/settings.json:
  *   {
  *     "hooks": {
  *       "SessionStart": [
  *         { "hooks": [ { "type": "command",
- *           "command": "FLAIR_AGENT_ID=me npx -y @tpsdev-ai/flair-mcp flair-session-start" } ] }
+ *           "command": "sh -c 'out=$(FLAIR_AGENT_ID=me npx -y @tpsdev-ai/flair-mcp flair-session-start 2>/dev/null) && printf %s \"$out\" || true'" } ] }
  *       ]
  *     }
  *   }
@@ -94,6 +113,16 @@ interface BootstrapClient extends Partial<PresencePoster> {
     channel?: string;
     subjects?: string[];
   }): Promise<{ context?: string } | undefined>;
+}
+
+/**
+ * Probe mode (flair#1007) — see the module doc. Any non-empty value other
+ * than "0" enables it, so `FLAIR_HOOK_PROBE=1` and `FLAIR_HOOK_PROBE=true`
+ * both work and an accidentally-empty variable does not.
+ */
+export function isProbeMode(env: Record<string, string | undefined> = process.env): boolean {
+  const raw = env.FLAIR_HOOK_PROBE;
+  return typeof raw === "string" && raw !== "" && raw !== "0";
 }
 
 /** Resolve the bootstrap timeout from env, clamped to a sane range. */
@@ -234,6 +263,13 @@ function defaultClientFactory(agentId: string): BootstrapClient {
 /** Entry point. Reads stdin, runs the hook, prints the result, exits 0.
  *  Wrapped so that even an unexpected throw degrades to a no-op. */
 async function main(): Promise<void> {
+  // Probe mode short-circuits BEFORE readStdin() — reaching this line is the
+  // entire answer doctor is looking for, and a probe must cost nothing and
+  // change nothing (no stdin wait, no client, no bootstrap, no presence).
+  if (isProbeMode()) {
+    process.stdout.write(NOOP_OUTPUT);
+    return;
+  }
   let output = NOOP_OUTPUT;
   try {
     output = await runHook(await readStdin());

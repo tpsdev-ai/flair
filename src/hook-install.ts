@@ -41,15 +41,26 @@
 //      FlairClient's plain global `fetch`, no rejectUnauthorized/NODE_TLS_*
 //      bypass anywhere — test/unit/hook-install.test.ts asserts that
 //      statically).
-//   5. Silent-fast degradation — also owned by session-start-hook.ts (hard
-//      timeout, no-op-on-any-failure); this module only writes the pointer
-//      to it.
+//   5. Silent-fast degradation — SPLIT, deliberately, since flair#1007.
+//      session-start-hook.ts owns it once the binary is running (hard
+//      timeout, no-op-on-any-failure). It cannot own the case where the
+//      binary never runs at all — an orphaned global install after a Node
+//      runtime change — because in that case its guard is behind the door it
+//      is meant to guard. That half is owned by the command string this
+//      module writes, which is built by doctor-client.ts's
+//      buildSessionStartHookCommand (see its section doc for the shell
+//      analysis and why the wrapper is `sh -c`, not a bare fragment).
 //   6. Size-budgeted payload — also owned by session-start-hook.ts, which
 //      reuses bootstrap's own maxTokens machinery.
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { SESSION_START_HOOK_MARKER } from "./doctor-client.js";
+import {
+  SESSION_START_HOOK_MARKER,
+  buildSessionStartHookCommand,
+  hookCommandIsSilenced,
+  isHookCommandValueSafe,
+} from "./doctor-client.js";
 
 // ── harness registry ────────────────────────────────────────────────────────
 
@@ -86,9 +97,16 @@ export function hookBackupPath(settingsPath: string): string {
 /** The exact `command` string written into the SessionStart hook entry.
  *  Always carries both FLAIR_AGENT_ID and FLAIR_URL (see module doc above)
  *  and always contains SESSION_START_HOOK_MARKER verbatim, so doctor's
- *  existing checkSessionStartHook recognizes it unchanged. */
+ *  existing checkSessionStartHook recognizes it unchanged.
+ *
+ *  Since flair#1007 this is a thin wrapper over doctor-client.ts's
+ *  buildSessionStartHookCommand — ONE builder for every path that writes this
+ *  string (`flair hook install`, `flair doctor --fix`, `flair init`'s hint),
+ *  so the invocation's failure behaviour is defined and tested in one place
+ *  instead of drifting across three literals. Throws when agentId/flairUrl
+ *  cannot be represented safely; installHook() checks first and reports. */
 export function buildHookCommand(agentId: string, flairUrl: string): string {
-  return `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl} npx -y @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`;
+  return buildSessionStartHookCommand(agentId, flairUrl);
 }
 
 /** Best-effort recovery of the agentId/flairUrl a previously-wired hook
@@ -267,6 +285,20 @@ export function installHook(opts: InstallHookOptions): HookMutationResult {
   const dryRun = !!opts.dryRun;
   const path = hookSettingsPath(homeDir, harness);
 
+  // The command is a single-quoted shell argument (flair#1007) and quoting
+  // rules are not uniform across the shells a harness might use, so unsafe
+  // values are REFUSED rather than escaped — checked before anything is
+  // backed up or written, so a bad input never half-mutates the file.
+  for (const [label, value] of [["agent id", agentId], ["Flair URL", flairUrl]] as const) {
+    if (!isHookCommandValueSafe(value)) {
+      return {
+        ok: false, path, harness, dryRun,
+        message: `${label} '${value}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -) — refusing to write it`,
+        backupPath: null, delta: null,
+      };
+    }
+  }
+
   if (dryRun) {
     const read = readSettingsFile(path);
     if (read.parseError) {
@@ -404,6 +436,9 @@ export interface HookStatusResult {
    *  just a loose marker substring match (a hand-edited/partial entry still
    *  counts as `wired` for doctor-compat purposes but not `correctShape`). */
   correctShape: boolean;
+  /** Does the wired command absorb its own failures, or would a command that
+   *  stopped resolving print an error on every session start (flair#1007)? */
+  silenced: boolean;
   agentId?: string;
   flairUrl?: string;
   command?: string;
@@ -416,18 +451,22 @@ export function hookStatus(homeDir: string, harness: Harness): HookStatusResult 
   const path = hookSettingsPath(homeDir, harness);
   const read = readSettingsFile(path);
   if (read.parseError) {
-    return { harness, path, wired: false, correctShape: false, parseError: read.parseError };
+    return { harness, path, wired: false, correctShape: false, silenced: false, parseError: read.parseError };
   }
 
   const config = read.parsed ?? {};
   const existing = findHookEntry(config);
   if (!existing) {
-    return { harness, path, wired: false, correctShape: false, parseError: null };
+    return { harness, path, wired: false, correctShape: false, silenced: false, parseError: null };
   }
 
   const hookEntry = config.hooks.SessionStart[existing.groupIndex].hooks[existing.hookIndex];
   const command: string = typeof hookEntry?.command === "string" ? hookEntry.command : "";
   const correctShape = hookEntry?.type === "command" && command.includes(`npx -y @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`);
   const env = parseHookCommandEnv(command);
-  return { harness, path, wired: true, correctShape, agentId: env.agentId, flairUrl: env.flairUrl, command, parseError: null };
+  return {
+    harness, path, wired: true, correctShape,
+    silenced: hookCommandIsSilenced(command),
+    agentId: env.agentId, flairUrl: env.flairUrl, command, parseError: null,
+  };
 }

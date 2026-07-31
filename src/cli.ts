@@ -74,7 +74,8 @@ import {
 import {
   readClientMcpBlock,
   checkClaudeMdBootstrap,
-  checkSessionStartHook,
+  inspectSessionStartHook,
+  upgradeSessionStartHookCommand,
   fixClaudeMdBootstrap,
   fixSessionStartHook,
   applyOrReportClaudeMdBootstrap,
@@ -4679,6 +4680,13 @@ hook
     console.log(`  ${status.correctShape ? render.icons.ok : render.icons.warn} wired${status.correctShape ? "" : " (unexpected shape — was it hand-edited?)"}`);
     console.log(`     ${render.wrap(render.c.dim, "Agent:")}     ${status.agentId ?? render.wrap(render.c.dim, "(unknown — could not parse command)")}`);
     console.log(`     ${render.wrap(render.c.dim, "Flair URL:")} ${status.flairUrl ?? render.wrap(render.c.dim, "(unknown — could not parse command)")}`);
+    // flair#1007 — whether a command that stopped resolving would fail quietly
+    // or print an error on every session start.
+    if (status.silenced) {
+      console.log(`     ${render.wrap(render.c.dim, "On failure:")} silent (exit 0, no output)`);
+    } else {
+      console.log(`     ${render.icons.warn} ${render.wrap(render.c.dim, "On failure:")} prints an error on every session — run \`flair hook install\` to adopt the silent form`);
+    }
     console.log("");
   });
 
@@ -12539,9 +12547,59 @@ program
           issues++;
         }
 
-        const hook = checkSessionStartHook(homedir());
+        // flair#1007: presence was never the problem — the failing entry was
+        // perfectly well-formed. inspectSessionStartHook() additionally RUNS
+        // the registered command (bounded, side-effect-free via
+        // FLAIR_HOOK_PROBE) so doctor can tell "wired" from "wired and still
+        // works", and reports the shell-level silencing separately so an
+        // already-installed loud hook can be upgraded rather than only
+        // diagnosed.
+        const hook = inspectSessionStartHook(homedir());
         if (hook.present) {
-          console.log(`  ${render.icons.ok} SessionStart hook: flair-session-start wired in ${render.wrap(render.c.dim, hook.path)}`);
+          if (hook.execution === "broken") {
+            console.log(`  ${render.icons.error} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)}, but its command no longer runs`);
+            console.log(`     ${render.wrap(render.c.dim, hook.detail ?? "")}`);
+            console.log(`     ${render.wrap(render.c.dim, "This usually means the Node runtime changed and the globally installed")}`);
+            console.log(`     ${render.wrap(render.c.dim, "@tpsdev-ai/flair-mcp no longer resolves for it.")}`);
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} npm install -g @tpsdev-ai/flair-mcp ${render.wrap(render.c.dim, "(reinstall for the runtime you use now)")}`);
+            console.log(`     ${render.wrap(render.c.dim, "Or, if you no longer want ambient memory:")} flair hook uninstall`);
+            issues++;
+          } else if (hook.execution === "unknown") {
+            console.log(`  ${render.icons.warn} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)}, but could not be verified ${render.wrap(render.c.dim, `(${hook.detail ?? "no detail"})`)}`);
+          } else if (!hook.ours) {
+            console.log(`  ${render.icons.ok} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "(custom command — not verified, not modified)")}`);
+          } else {
+            console.log(`  ${render.icons.ok} SessionStart hook: flair-session-start wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "and still runs")}`);
+          }
+
+          // Independent of whether it runs today: would it stay quiet if it
+          // stopped? Only offered as a repair when the command is the exact
+          // string Flair itself wrote — a hand-edited or pinned hook is the
+          // user's, and doctor reports on it rather than rewriting it.
+          if (!hook.silenced && hook.ours) {
+            console.log(`  ${render.icons.warn} SessionStart hook: a failure would print an error on every session (this command predates the silent-failure fix)`);
+            if (hook.upgradable) {
+              if (autoFix) {
+                if (dryRun) {
+                  console.log(`     ${render.wrap(render.c.dim, "Would rewrite the hook command in")} ${hook.path}`);
+                } else {
+                  const proceed = await confirmFix(`  Rewrite the Flair SessionStart hook in ${hook.path} so failures stay silent? [y/N] `);
+                  if (!proceed) {
+                    console.log(`     Skipped.`);
+                  } else {
+                    const upgrade = upgradeSessionStartHookCommand(homedir());
+                    console.log(`     ${upgrade.ok ? render.icons.ok : render.icons.warn} ${upgrade.message}`);
+                    if (upgrade.ok && upgrade.changed) fixed++;
+                  }
+                }
+              } else {
+                console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites the hook command in place — same agent, same instance)")}`);
+              }
+            } else {
+              console.log(`     ${render.wrap(render.c.dim, "This hook was hand-edited, so Flair will not rewrite it. To adopt the current form:")} flair hook install`);
+            }
+            issues++;
+          }
         } else {
           console.log(`  ${render.icons.error} SessionStart hook: not found in ${render.wrap(render.c.dim, hook.path)}`);
           if (autoFix) {
