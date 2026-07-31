@@ -2,12 +2,13 @@ import { Resource, databases } from "harper";
 import { createHash, randomBytes } from "node:crypto";
 import { handleJwtBearerGrant } from "./XAA.js";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { buildAuthorizationServerMetadata } from "./oauth-discovery.js";
 
 /**
  * OAuth 2.1 Authorization Server for Flair.
  *
  * Endpoints (all mapped via Harper's resource routing):
- *   GET  /OAuthMetadata           → /.well-known/oauth-authorization-server
+ *   GET  /OAuthMetadata           → alias of /.well-known/oauth-authorization-server
  *   POST /OAuthRegister           → /oauth/register (DCR)
  *   GET  /OAuthAuthorize          → /oauth/authorize (consent screen)
  *   POST /OAuthToken              → /oauth/token (token exchange)
@@ -66,6 +67,19 @@ function redirectTo(url: string, status: 302 | 303 = 302): Response {
 
 // ─── Discovery metadata ──────────────────────────────────────────────────────
 
+/**
+ * `/OAuthMetadata` — an ALIAS of `/.well-known/oauth-authorization-server`
+ * (flair#1000), not a second implementation.
+ *
+ * The document body moved verbatim to `buildAuthorizationServerMetadata()` in
+ * resources/oauth-discovery.ts and BOTH paths now call it. The well-known path
+ * is the one RFC 8414 defines and the one every client probes; this path is
+ * kept because it is what shipped, is referenced by docs/auth.md and by
+ * deployed callers, and costs one delegating line. Keeping it as an alias
+ * rather than as an independent handler is the whole point: two endpoints that
+ * can drift apart is the failure mode, and after this change there is no code
+ * path that can produce one document without producing the other.
+ */
 export class OAuthMetadata extends Resource {
   // OAuth discovery metadata is intentionally public — RFC 8414 § 3 requires
   // it be accessible without authentication so clients can bootstrap their
@@ -75,30 +89,7 @@ export class OAuthMetadata extends Resource {
   allowRead() { return true; }
 
   async get() {
-    const baseUrl = process.env.FLAIR_PUBLIC_URL || `http://127.0.0.1:${process.env.HTTP_PORT || 19926}`;
-    return {
-      issuer: baseUrl,
-      authorization_endpoint: `${baseUrl}/OAuthAuthorize`,
-      token_endpoint: `${baseUrl}/OAuthToken`,
-      registration_endpoint: `${baseUrl}/OAuthRegister`,
-      revocation_endpoint: `${baseUrl}/OAuthRevoke`,
-      response_types_supported: ["code"],
-      grant_types_supported: [
-        "authorization_code",
-        "refresh_token",
-        "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      ],
-      token_endpoint_auth_methods_supported: ["none", "client_secret_basic"],
-      code_challenge_methods_supported: ["S256"],
-      scopes_supported: [
-        "memory:read", "memory:write", "memory:admin",
-        "principal:read", "principal:admin",
-        "connector:read", "connector:admin",
-      ],
-      extensions_supported: [
-        "io.modelcontextprotocol/enterprise-managed-authorization",
-      ],
-    };
+    return buildAuthorizationServerMetadata();
   }
 }
 

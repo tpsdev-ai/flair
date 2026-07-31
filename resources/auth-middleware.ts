@@ -97,6 +97,11 @@ server.http(async (request: any, nextLayer: any) => {
     url.pathname === "/OAuthAuthorize" ||
     url.pathname === "/OAuthToken" ||
     url.pathname === "/OAuthRevoke" ||
+    // Belt-and-braces since flair#1000: `/.well-known/oauth-authorization-server`
+    // is served from its OWN urlPath mount (resources/oauth-wellknown.ts), which
+    // gets its own dispatch chain — this middleware never sees a request for it.
+    // The entry stays so the path is still public if that mount ever moves back
+    // onto the default chain.
     url.pathname === "/.well-known/oauth-authorization-server" ||
     url.pathname === "/OAuthMetadata" ||
     // Presence roster is public-safe (field-allowlisted); GET serves the
