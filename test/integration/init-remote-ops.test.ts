@@ -79,9 +79,43 @@ afterAll(() => {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
+const PUBLIC_URL = "https://flair.example.com";
+
+/** Entry names inside a base64 tarball, sorted. */
+async function tarballEntries(tarballB64: string): Promise<string[]> {
+  const dir = mkdtempSync(join(tmpdir(), "flair-tarball-"));
+  try {
+    const p = join(dir, "payload.tar.gz");
+    writeFileSync(p, Buffer.from(tarballB64, "base64"));
+    const { list } = await import("tar");
+    const names: string[] = [];
+    await list({ file: p, onReadEntry: (e: any) => names.push(String(e.path).replace(/^\.\//, "")) });
+    return names.filter((n) => n !== "" && n !== ".").sort();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** The `.env` inside a base64 tarball, or null when it carries none. */
+async function tarballEnvText(tarballB64: string): Promise<string | null> {
+  const dir = mkdtempSync(join(tmpdir(), "flair-tarball-"));
+  try {
+    const p = join(dir, "payload.tar.gz");
+    writeFileSync(p, Buffer.from(tarballB64, "base64"));
+    const out = join(dir, "x");
+    mkdirSync(out, { recursive: true });
+    const { extract } = await import("tar");
+    await extract({ file: p, cwd: out });
+    const envPath = join(out, ".env");
+    return existsSync(envPath) ? readFileSync(envPath, "utf8") : null;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe("buildDeployTarball", () => {
-  test("builds a gzip tarball with .env baked in", async () => {
-    const { tarballB64 } = await buildDeployTarball(tmpDir, TEST_OPTS.flairAdminPass);
+  test("builds a gzip tarball", async () => {
+    const { tarballB64 } = await buildDeployTarball(tmpDir, PUBLIC_URL);
     expect(typeof tarballB64).toBe("string");
     expect(tarballB64.length).toBeGreaterThan(100);
 
@@ -92,21 +126,67 @@ describe("buildDeployTarball", () => {
     expect(buf[1]).toBe(0x8b);
   });
 
+  // ── flair#1005 item 2 ───────────────────────────────────────────────────────
+  // The test above used to be titled "…with .env baked in" and asserted two
+  // gzip magic bytes. It passed for the entire period during which this function
+  // wrote a `.env` into a temp directory and then packed an entries list that did
+  // not contain it — the file was discarded on every call. These assert the
+  // PACKED payload, because that is the only thing a deployed instance ever sees.
+  test("THE DEFECT: .env is actually IN the tarball", async () => {
+    const { tarballB64 } = await buildDeployTarball(tmpDir, PUBLIC_URL);
+    expect(await tarballEntries(tarballB64)).toContain(".env");
+  });
+
+  test("the packed .env carries FLAIR_PUBLIC_URL from the deploy target", async () => {
+    const { tarballB64 } = await buildDeployTarball(tmpDir, PUBLIC_URL);
+    expect(await tarballEnvText(tarballB64)).toBe(`FLAIR_PUBLIC_URL=${PUBLIC_URL}\n`);
+  });
+
+  test("no credential is ever packed (flair#1011)", async () => {
+    // The deploy payload is ingested into Harper's hdb_deployment record and
+    // replicated to every node, so a password in it is persisted cluster-wide —
+    // and `loadEnv` runs after Harper has composed its own configuration, so
+    // HDB_ADMIN_PASSWORD could not configure Harper from there even if that were
+    // acceptable. buildDeployTarball has no password parameter at all now; this
+    // asserts the outcome rather than the signature.
+    const { tarballB64 } = await buildDeployTarball(tmpDir, PUBLIC_URL);
+    const env = (await tarballEnvText(tarballB64)) ?? "";
+    for (const key of ["HDB_ADMIN_PASSWORD", "FLAIR_ADMIN_PASSWORD", "FLAIR_ADMIN_PASS"]) {
+      expect(env).not.toContain(key);
+    }
+  });
+
+  test("packs no .env when there is no public URL to advertise", async () => {
+    const { tarballB64 } = await buildDeployTarball(tmpDir, null);
+    expect(await tarballEntries(tarballB64)).not.toContain(".env");
+  });
+
+  test("keeps an operator's own .env value and does not rewrite their file", async () => {
+    const operatorFile = join(tmpDir, ".env");
+    const original = "# operator\nFLAIR_PUBLIC_URL=https://cdn.example.com\n";
+    writeFileSync(operatorFile, original);
+
+    const { tarballB64 } = await buildDeployTarball(tmpDir, PUBLIC_URL);
+    expect(readFileSync(operatorFile, "utf8")).toBe(original);
+    expect(await tarballEnvText(tarballB64)).toBe(original);
+  });
+
+  test("merges the key into an operator's .env that does not set it", async () => {
+    writeFileSync(join(tmpDir, ".env"), "FLAIR_MCP_OAUTH=1\n");
+    const { tarballB64 } = await buildDeployTarball(tmpDir, PUBLIC_URL);
+    expect(await tarballEnvText(tarballB64)).toBe(`FLAIR_MCP_OAUTH=1\nFLAIR_PUBLIC_URL=${PUBLIC_URL}\n`);
+  });
+
   test("excludes ui/ directory when absent", async () => {
-    const { tarballB64 } = await buildDeployTarball(tmpDir, TEST_OPTS.flairAdminPass);
-    const buf = Buffer.from(tarballB64, "base64");
-    // Should still produce valid gzip without ui/
-    expect(buf[0]).toBe(0x1f);
-    expect(buf[1]).toBe(0x8b);
+    const { tarballB64 } = await buildDeployTarball(tmpDir, PUBLIC_URL);
+    expect(await tarballEntries(tarballB64)).not.toContain("ui");
   });
 
   test("includes ui/ directory when present", async () => {
     mkdirSync(join(tmpDir, "ui"), { recursive: true });
     writeFileSync(join(tmpDir, "ui/index.html"), "<html></html>");
-    const { tarballB64 } = await buildDeployTarball(tmpDir, TEST_OPTS.flairAdminPass);
-    const buf = Buffer.from(tarballB64, "base64");
-    expect(buf[0]).toBe(0x1f);
-    expect(buf[1]).toBe(0x8b);
+    const { tarballB64 } = await buildDeployTarball(tmpDir, PUBLIC_URL);
+    expect(await tarballEntries(tarballB64)).toContain("ui/index.html");
   });
 });
 

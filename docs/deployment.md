@@ -180,7 +180,7 @@ Set these in the Flair process environment (`~/Library/LaunchAgents/ai.tpsdev.fl
 
 | Variable | What it does | When to set it |
 |----------|--------------|----------------|
-| `FLAIR_PUBLIC_URL` | The URL operators reach this Flair on (e.g. `https://flair.example.com`). Surfaced in the AdminInstance pane's Endpoints table and used by OAuth metadata + A2A discovery so external clients see a reachable URL. | **Always set on remote / Fabric / VPS deployments.** Local-only installs can leave it unset. |
+| `FLAIR_PUBLIC_URL` | The URL operators reach this Flair on (e.g. `https://flair.example.com`). Surfaced in the AdminInstance pane's Endpoints table and used by OAuth metadata + A2A discovery so external clients see a reachable URL. | **Always set on remote / VPS deployments** — unset means every URL a client is handed points at loopback. On Fabric, `flair deploy` sets it from the deploy target and verifies the result; see [deploying-on-fabric.md](deploying-on-fabric.md). Local-only installs can leave it unset. |
 | `HDB_ADMIN_PASSWORD` | Bootstrap password for the embedded Harper. After first start, the persisted user record is the source of truth; rotate via the Harper ops API, not by changing this env var. | Set at install time. See [secrets-and-keys.md](secrets-and-keys.md) for rotation. |
 | `FLAIR_KEY_PASSPHRASE` | Passphrase used to derive the AES-256-GCM key that wraps federation private-key seeds at rest. Auto-generated to `~/.flair/keys/.passphrase` if unset. | Set explicitly for production federation deployments so the passphrase isn't auto-generated and lost on disk wipe. |
 | `HTTP_PORT` | Override the Harper HTTP port. Useful for sandboxes; production deployments should configure the port in `config.yaml` instead. | Rare. |

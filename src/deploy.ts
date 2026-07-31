@@ -1,8 +1,17 @@
 import { spawn } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import {
+  COMPONENT_ENV_FILENAME,
+  PUBLIC_URL_KEY,
+  isLoopbackUrl,
+  planComponentEnv,
+  publicUrlRemedy,
+  type ComponentEnvPlan,
+} from "./component-env.js";
 import {
   awaitOriginQuiescent,
   awaitReplicationConvergence,
@@ -789,6 +798,202 @@ async function verifyResourcesServing(
   }
 }
 
+// ─── The component `.env` the deploy ships (flair#1005 item 2) ────────────────
+//
+// `harper deploy` packs its own CWD — every file under it except `node_modules`
+// (harper/dist/bin/cliOperations.js sets `skip_node_modules` unless explicitly
+// disabled, and harper/dist/components/packageComponent.js's `isExcluded` is the
+// only other filter). So a `.env` sitting in the deploy root ships; there is no
+// entries list to add it to, and no `.env` is special-cased away. Verified by
+// running harper's own packer over a directory containing one.
+//
+// What this must NOT do is write into `packageRoot`. That directory is an
+// npm-installed package — frequently not writable by the deploying user, shared by
+// every deploy from this machine, and, when the operator has put their own `.env`
+// there, theirs. So when flair has a key to add, it copies the deploy root to a
+// temp directory, writes the merged file THERE, and points harper at the copy. The
+// operator's tree is read and never written.
+//
+// The copy skips `node_modules` for the obvious reason (it can be gigabytes) and
+// for the correctness one: harper excludes it at pack time regardless, so the
+// resulting payload is identical. `deploy-staging.test.ts` asserts that identity
+// with harper's real packer rather than trusting this paragraph.
+
+const STAGING_PREFIX = "flair-deploy-";
+
+export interface StagedDeployRoot {
+  /** Directory harper should pack — either the staged copy or `packageRoot` itself. */
+  dir: string;
+  plan: ComponentEnvPlan;
+  /** Removes the staged copy. A no-op when nothing was staged. */
+  cleanup: () => void;
+}
+
+/** True for any path inside a `node_modules` directory under `root`. */
+function isNodeModulesPath(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel !== "" && rel.split(sep).includes("node_modules");
+}
+
+/**
+ * Resolve the value `FLAIR_PUBLIC_URL` should carry for this deploy, or null.
+ *
+ * The deploy already knows this: `url` is the target it hands to harper AND the
+ * base URL it verifies the served API against immediately afterwards. A loopback
+ * target yields null — baking `http://127.0.0.1:...` into a shipped `.env` is
+ * precisely the misconfiguration flair#1000 is about, so it is never generated.
+ *
+ * Anything that is not an absolute http(s) URL also yields null. `--target` is
+ * operator-supplied and reaches here before harper has had a chance to reject it,
+ * and a value that is not a URL cannot be the base of a discovery document — so
+ * "cannot be determined" is answered by supplying nothing rather than by baking in
+ * a string that would make every advertised endpoint malformed.
+ */
+export function resolveDeployPublicUrl(url: string): string | null {
+  const trimmed = String(url ?? "").replace(/\/+$/, "");
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  return isLoopbackUrl(trimmed) ? null : trimmed;
+}
+
+/**
+ * Prepare the directory harper will pack, supplying `FLAIR_PUBLIC_URL` when the
+ * payload does not already carry it. Returns `packageRoot` unchanged (and a no-op
+ * cleanup) whenever there is nothing to add — the common cases being a loopback
+ * target and an operator who has already set the key.
+ */
+export function stageDeployRoot(packageRoot: string, publicUrl: string | null): StagedDeployRoot {
+  const envPath = join(packageRoot, COMPONENT_ENV_FILENAME);
+  const existing = existsSync(envPath) ? readFileSync(envPath, "utf8") : null;
+  const plan = planComponentEnv(existing, publicUrl);
+
+  if (plan.text === null) {
+    return { dir: packageRoot, plan, cleanup: () => {} };
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), STAGING_PREFIX));
+  try {
+    cpSync(packageRoot, dir, {
+      recursive: true,
+      dereference: false,
+      verbatimSymlinks: true,
+      filter: (src) => !isNodeModulesPath(packageRoot, src),
+    });
+    // 0600 even though the generated content is a public URL: an operator's own
+    // keys may have been merged through, and the file's permissions should not
+    // depend on what happens to be in it.
+    writeFileSync(join(dir, COMPONENT_ENV_FILENAME), plan.text, { mode: 0o600 });
+  } catch (err) {
+    rmSync(dir, { recursive: true, force: true });
+    throw err;
+  }
+  return { dir, plan, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+// ─── Post-deploy: is the instance advertising a URL a client can reach? ───────
+//
+// This is the check that makes the writer above testable in production rather than
+// merely present. flair#1000 was a deploy that reported success while the served
+// OAuth discovery document named `http://127.0.0.1:9980` for every endpoint, so a
+// remote client followed discovery to its own loopback. Nothing in the deploy
+// noticed, because nothing looked.
+//
+// A failure here fails the command even though the component IS deployed — the same
+// contract as verifyResourcesServing above ("the tool must not be able to lie"). A
+// deploy that leaves an instance no client can authorize against is not a success,
+// and the operator needs to hear that at deploy time rather than from a user.
+//
+// An unreadable document is NOT treated as a pass: it is reported as a check that
+// did not run, with the reason.
+//
+// It POLLS rather than reading once. A Fabric restart is rolling, so for a while
+// after `harper deploy` returns, a request to the cluster can be answered by a node
+// that has not restarted yet and is still running the previous environment. Reading
+// once would turn that race into a failed deploy for a change that was fine. The
+// poll only ever converts a "not yet" into a wait — a genuinely misconfigured
+// instance still fails, at the deadline.
+
+export const OAUTH_METADATA_PATH = "/OAuthMetadata";
+export const DEFAULT_ISSUER_CHECK_TIMEOUT_MS = 60_000;
+export const ISSUER_CHECK_POLL_INTERVAL_MS = 5_000;
+
+export interface VerifyPublicIssuerOptions {
+  baseUrl: string;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  fetchImpl?: typeof fetch;
+  onProgress?: (msg: string) => void;
+}
+
+export interface PublicIssuerResult {
+  /** false when the document could not be read — never rendered as a pass. */
+  checked: boolean;
+  issuer: string | null;
+  detail: string;
+}
+
+/** One read of the discovery document. `issuer: null` means "could not be read". */
+async function readAdvertisedIssuer(
+  url: string,
+  fetchImpl: typeof fetch,
+): Promise<{ issuer: string | null; detail: string }> {
+  try {
+    const res = await fetchImpl(url, { method: "GET", signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return { issuer: null, detail: `HTTP ${res.status} from ${url}` };
+    const doc = (await res.json()) as { issuer?: unknown };
+    if (typeof doc?.issuer !== "string" || doc.issuer === "") {
+      return { issuer: null, detail: `${url} returned no issuer` };
+    }
+    return { issuer: doc.issuer, detail: `issuer ${doc.issuer}` };
+  } catch (err: any) {
+    return { issuer: null, detail: `${url} could not be read: ${err?.message ?? err}` };
+  }
+}
+
+export async function verifyPublicIssuer(o: VerifyPublicIssuerOptions): Promise<PublicIssuerResult> {
+  const {
+    baseUrl,
+    timeoutMs = DEFAULT_ISSUER_CHECK_TIMEOUT_MS,
+    pollIntervalMs = ISSUER_CHECK_POLL_INTERVAL_MS,
+    fetchImpl = fetch,
+    onProgress,
+  } = o;
+  const base = baseUrl.replace(/\/+$/, "");
+  const url = `${base}${OAUTH_METADATA_PATH}`;
+  onProgress?.(`checking ${OAUTH_METADATA_PATH} advertises a reachable issuer...`);
+
+  const deadline = Date.now() + timeoutMs;
+  let last = await readAdvertisedIssuer(url, fetchImpl);
+  for (;;) {
+    if (last.issuer !== null && !isLoopbackUrl(last.issuer)) {
+      return { checked: true, issuer: last.issuer, detail: last.detail };
+    }
+    if (Date.now() >= deadline) break;
+    onProgress?.(
+      last.issuer === null
+        ? `${OAUTH_METADATA_PATH} not readable yet (${last.detail}) — retrying...`
+        : `${OAUTH_METADATA_PATH} still advertises ${last.issuer} — the restart may not have reached every node yet, retrying...`,
+    );
+    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+    last = await readAdvertisedIssuer(url, fetchImpl);
+  }
+
+  if (last.issuer !== null) {
+    throw new Error(
+      `deploy verification: ${url} advertises issuer ${last.issuer} — a loopback address, which ` +
+        `every remote client will follow to its own machine (flair#1000). ${PUBLIC_URL_KEY} is ` +
+        `not reaching the deployed component's process.env. Fix: ` +
+        `${publicUrlRemedy(`${COMPONENT_ENV_FILENAME} in the deploy root`, base)}, then re-deploy.`,
+    );
+  }
+  return { checked: false, issuer: null, detail: last.detail };
+}
+
 // The tool must not be able to lie. harper's deploy CLI can print
 // "Successfully deployed" for an empty component — the only way to know the
 // deploy actually worked is to curl the served API and check it isn't 404.
@@ -852,15 +1057,35 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     CLI_TARGET_PASSWORD: opts.fabricPassword,
   };
 
-  const { replicationWarning, convergedAfterReplicationError } = await runHarperDeploy(
-    harperBin,
-    args,
-    packageRoot,
-    childEnv,
-    opts,
-    url,
-    project,
-  );
+  // flair#1005 item 2: supply FLAIR_PUBLIC_URL to the component being deployed.
+  // `deployRoot` is packageRoot itself whenever there is nothing to add.
+  const publicUrl = resolveDeployPublicUrl(url);
+  const staged = stageDeployRoot(packageRoot, publicUrl);
+  for (const notice of staged.plan.notices) {
+    console.warn(`⚠ flair deploy: ${notice}`);
+    opts.onProgress?.(notice);
+  }
+  if (staged.plan.action === "added") {
+    opts.onProgress?.(
+      `shipping ${COMPONENT_ENV_FILENAME} with ${PUBLIC_URL_KEY}=${staged.plan.effectiveValue}`,
+    );
+  }
+
+  let replicationWarning: boolean;
+  let convergedAfterReplicationError: boolean;
+  try {
+    ({ replicationWarning, convergedAfterReplicationError } = await runHarperDeploy(
+      harperBin,
+      args,
+      staged.dir,
+      childEnv,
+      opts,
+      url,
+      project,
+    ));
+  } finally {
+    staged.cleanup();
+  }
 
   // harper can print "Successfully deployed" for a component that isn't
   // actually serving anything (the incident this closes: an empty deploy,
@@ -876,6 +1101,22 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
       timeoutMs: opts.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
       onProgress: opts.onProgress,
     });
+
+    // Only meaningful for a target that is not loopback: a local Harper SHOULD
+    // advertise loopback, and asserting otherwise there would be wrong.
+    if (publicUrl) {
+      const issuerCheck = await verifyPublicIssuer({ baseUrl: url, onProgress: opts.onProgress });
+      if (issuerCheck.checked) {
+        opts.onProgress?.(`discovery advertises ${issuerCheck.issuer}`);
+      } else {
+        // Not a pass. Say which check did not run, and why.
+        console.warn(
+          `⚠ flair deploy: could not verify the advertised OAuth issuer — ${issuerCheck.detail}. ` +
+            `This check did NOT run; ${PUBLIC_URL_KEY} may or may not have taken effect.`,
+        );
+        opts.onProgress?.(`issuer check did not run — ${issuerCheck.detail}`);
+      }
+    }
   }
 
   return {
