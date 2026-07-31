@@ -18,6 +18,179 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.33.0] - 2026-07-31
+
+### Added
+
+- **`memory_store` on the server's built-in `/mcp` endpoint can set `visibility`.**
+  The tool had no visibility argument of any kind, and sends `durability:
+  "standard"` when the caller names none — so every memory written through that
+  surface was stamped `private` with nothing the caller could pass to change it.
+  An agent wired to the built-in endpoint could not write a memory another agent
+  was able to read, while the stdio adapter `@tpsdev-ai/flair-mcp` exposed the
+  argument all along. Pass `visibility: "private" | "shared"`; omit it and the
+  durability-keyed default applies exactly as before.
+
+  Only those two values are accepted — anything else fails the tool call rather
+  than reaching the record. Visibility is a free-form string in the schema and
+  the read scope tests it by exact match against `private`, so any other value,
+  a typo included, reads as non-private and goes to every agent on the instance.
+  Passing an unrecognised value through would write a memory the caller believes
+  is owner-only that everyone can read, and silently dropping it would fall back
+  to a default that is `shared` for a durable write. A misspelled argument must
+  not widen who can read a memory.
+
+- **Every memory write now reports the visibility it landed on.** The write
+  response was `{ id, written, deduplicated }`, so the one field on a memory
+  most likely to have been decided by a rule the writer never typed was also the
+  one field the writer could not observe without a second read. It now carries
+  `visibility` as well, on every surface at once: the JSON `flair memory add`
+  prints, the REST write response, and the `memory_store` result on both MCP
+  surfaces — including the stdio adapter's "effective visibility" line, which
+  read this field all along and had nothing to read, so it always rendered
+  "(server default)".
+
+  Additive: `id`, `written`, `deduplicated` and the dedup collision fields are
+  unchanged. The key is omitted, rather than reported as `null`, for a patch of
+  a record written before the field existed — absent visibility reads as
+  non-private, so reporting `null` there would suggest the opposite.
+
+### Changed
+
+- **`flair memory add --visibility` accepts only `private` or `shared`.** It
+  previously forwarded whatever it was given. Because the read scope tests
+  visibility by exact match against `private`, every other value — `prvate`,
+  `Private`, `office` — was treated as non-private and returned to every agent
+  on the instance. A typo in the flag whose entire purpose is to keep a memory
+  owner-only produced a memory that was not, silently and with a zero exit code.
+  Unrecognised values now exit non-zero, naming the two valid ones, before any
+  write leaves the CLI.
+
+  This retires `--visibility office`, which was a real read-scope tier when the
+  flag shipped and was removed as a read leak. Nothing in the read path has
+  branched on it since, so an office-stamped memory is indistinguishable from a
+  shared one — `--visibility shared` is the value that means what it used to
+  mean. Scripts passing it get an error naming the replacement rather than a
+  tier the server stopped implementing.
+
+- **`How Flair compares` states positions instead of scoring them.** The old
+  table won every row and then admitted it omitted the rows it would not have
+  won; the three concessions under it each gave with the first clause and took it
+  back with the second. The table now covers the dimensions products actually
+  differ on — where memories live, what memory is scoped to, orchestrator reach,
+  instance-to-instance sync, in-person capture and per-agent character — with no
+  qualifying clauses and no emphasis on our own column.
+
+  SageOx is included, and it holds the row Flair loses: Ox Dot captures in-person
+  meetings, standups and whiteboard sessions, and Flair has no ambient capture of
+  anything that is not already text in a tool.
+
+- **The README leads with a quick start you can copy-paste.** The lede is now two
+  sentences on identity, memory and soul, and the first runnable command sits on
+  line 17 instead of line 61. The quick start is a single path — install the CLI,
+  init, write a memory, search it back — rather than a fork the reader has to
+  choose between before they have run anything.
+
+  Nothing was dropped. The harness diagram moved below the quick start into its
+  own section, Harper moved from the opening pitch into `How it works`, and the
+  Harper-component path is now a clearly-labelled second door under
+  `Integration → Embedded in a Harper app (in-process)`, where it carries the
+  full in-process contract it used to share with the top of the file. The
+  `sudo` caveat now follows the working install command instead of preceding it.
+
+### Fixed
+
+- **`--durability` describes itself in `--help` again.** `flair memory add` and
+  `flair soul set` both passed the intended default as Commander's second
+  argument, which is the description, not the default (that is the third). So
+  `flair memory add --help` rendered the option as `--durability <d>  standard`
+  and `flair soul set --help` as `--durability <d>  permanent` — the word alone,
+  with no indication of what the flag does or what else it takes. Both now name
+  the four tiers, and `memory add` also names the visibility each one defaults
+  to. Behaviour is unchanged: the real defaults were always supplied separately.
+
+- **`scripts/flair-client.mjs` no longer folds an unparsed flag into free text.**
+  `search` accepted `--limit` but never parsed it, so the flag and its value became
+  part of the query — `--limit 20` searched for the literal text "<query> --limit 20"
+  and still returned the hardcoded 5 results. Flags are now extracted before the free
+  text is assembled, and a flag with no value, an invalid value, or one belonging to a
+  different command is a hard error rather than silently becoming content.
+
+- **A `.env` in a deployed Flair component is now actually read.** Harper does
+  not load a component's `.env` implicitly — it loads env files only for
+  components that declare its `loadEnv` plugin, and Flair's `config.yaml` never
+  did. So a `.env` sitting next to `config.yaml` on a deployed instance was
+  inert: the file arrived intact and its values never reached `process.env`. The
+  visible symptom was a public deployment whose OAuth discovery document (and
+  A2A agent card) kept advertising a `127.0.0.1` issuer and endpoints even
+  though `FLAIR_PUBLIC_URL` was set in the component's `.env`, so no external
+  client could complete an authorization flow against it (#1000, #1005).
+
+  Nothing to do on an existing install, and nothing changes for one. A `.env` is
+  optional: when the file is absent — which is the normal case for a local
+  install driven by a launchd plist or a systemd unit — the plugin never fires
+  and boot is line-for-line identical to before. Deployments that want to set
+  `FLAIR_PUBLIC_URL` (or any other `FLAIR_*` variable) this way can now do so by
+  putting a `.env` in the app root.
+
+  Application variables only. Harper composes its own configuration before
+  component `.env` files load, so Harper's own settings — `HDB_ADMIN_PASSWORD`,
+  `HTTP_PORT` — must still come from the process environment, and
+  `HARPER_CONFIG` / `HARPER_DEFAULT_CONFIG` / `HARPER_SET_CONFIG` are refused
+  outright by Harper with a warning at boot. `.env.example` said Flair never
+  read a `.env` at all; it now describes which process reads what, and where
+  the boundary is.
+
+- **The docs said reads are open unless you opt out; a bare write is `private`.**
+  `docs/quickstart.md` told a first-time reader that `flair memory add
+  --visibility private` was how to keep a memory owner-only and that "reads are
+  otherwise open to every agent on the instance". Reads within an instance
+  genuinely are open — for `shared` memories. But visibility is stamped at write
+  time from durability (`permanent`/`persistent` -> `shared`,
+  `standard`/`ephemeral` -> `private`), and a write naming no durability is
+  `standard`, so the bare write the quickstart demonstrates lands `private`. The
+  rule appeared in `flair memory add --help` and nowhere in the documentation
+  tree at all.
+
+  The quickstart now names the visibility at the moment of the first write,
+  gives the durability rule as a table, and shows `--visibility shared` as the
+  one-flag way to share on purpose. `README.md`, `SECURITY.md`, `DESIGN.md`,
+  `docs/mcp-clients.md`, `docs/the-team.md` and `docs/troubleshooting.md` carried
+  the same "private is opt-in" implicature and now state the rule. No behaviour
+  changed: private-by-default for non-durable writes is the intended design, and
+  the documentation is what was wrong.
+
+- **A rewritten launchd plist is now re-read on restart.** `ensureLaunchdServiceLoaded` now unloads the service before loading it, so launchd picks up changes to the plist on disk. Previously a config change followed by `flair restart` could silently keep the old environment.
+
+- **`flair stop` no longer reports success while a KeepAlive job respawns.** The launchd stop path now uses `launchctl unload` instead of `launchctl stop`, which both stops the process and prevents launchd from immediately restarting it. This also fixes `flair restart`, `flair upgrade`, and `flair snapshot` — all of which compose stop-then-start through the same helper.
+
+- **Legacy launchd plist migration now validates the plist before rewriting it.** If the legacy plist does not contain the expected Label key, migration refuses with a named remedy instead of silently propagating a malformed document. The Label replacement also uses a `$`-safe function replacer, closing a latent bug that could fire if the label format ever changes.
+
+- **`docs/quickstart.md` no longer claims one install gives you three things.**
+  It said `npm install -g @tpsdev-ai/flair` provides `flair`, `flair-mcp` and the
+  client library; the package declares one binary and neither of the other two as
+  a dependency.
+
+  Both the quickstart and the README now separate the two things called "MCP":
+  the server's own `/mcp` endpoint, which ships inside the package but registers
+  no route unless `FLAIR_MCP_OAUTH` and a public issuer are set, and the stdio
+  adapter `@tpsdev-ai/flair-mcp`, which is what MCP clients are actually wired to
+  and is fetched on demand via `npx` rather than installed globally.
+
+- **`flair search --explain` now works when stdout is not a terminal.** Previously
+  the flag was accepted and silently did nothing for every script, agent, CI job
+  or `| less` — a non-TTY stdout selects JSON output, and the JSON path returned
+  before the breakdown was ever rendered. The breakdown now rides along the JSON
+  as an `_explain` object on each hit, so non-interactive callers get it too.
+  Output without `--explain` is unchanged.
+
+  The breakdown itself is also more truthful: it no longer labels a raw score
+  `composite=` under the default `--scoring raw`, and it no longer reports
+  `retrievalCount`, which stopped participating in the composite formula when
+  usage replaced retrieval as the reinforcement signal. It now reports the
+  ranking inputs the server actually returned — raw score, composite score under
+  `--scoring composite`, durability, age and usage count.
+
 ## [0.32.0] - 2026-07-31
 
 ### Added
