@@ -25,6 +25,12 @@
     "llm",
     "openclaw"
   ],
+  "main": "./dist/resources/in-process-api.js",
+  "exports": {
+    ".": "./dist/resources/in-process-api.js",
+    "./server": "./dist/resources/in-process.js",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "flair": "dist/cli-shim.cjs"
   },

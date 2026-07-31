@@ -21,7 +21,7 @@ import { Resource, server } from "harper";
 // The in-process call seam. Deep-imported from the installed package the same
 // way an application would — Flair ships `dist/`, and this module has no
 // dependencies of its own.
-import { agentContext, adminContext, internalContext, collectionResource } from "@tpsdev-ai/flair/dist/resources/in-process.js";
+import { agentContext, adminContext, internalContext, collectionResource } from "@tpsdev-ai/flair/server";
 
 /**
  * Resolve a Flair RESOURCE by its REST path.

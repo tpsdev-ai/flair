@@ -18,88 +18,86 @@ Embedding *adds* the in-process path; `rest: true` keeps serving MCP clients and
 
 **1. Add Flair to your instance.** Deploy `@tpsdev-ai/flair` as a component the way you deploy your own — Fabric's component deploy, Studio, or your pipeline. Its tables are declared `@table(database: "flair")`, so they never collide with yours.
 
-**2. Resolve the resource and write a memory.**
+**2. Import the facade and write a memory.**
 
 ```javascript
-import { server } from "harper";
-// Flair ships these two helpers so you do not have to get either of them right
-// by hand. They are the whole in-process contract.
-import { agentContext, internalContext, collectionResource } from "@tpsdev-ai/flair/dist/resources/in-process.js";
+import { Flair } from "@tpsdev-ai/flair";
 
-// The RESOURCE — carries auth, scoping, visibility, embedding.
-// NOT databases.flair.Memory: that is the raw table, and enforces none of it.
-// Keys carry NO leading slash: get("Memory"), never get("/Memory").
-const flair = (path) => server.resources.get(path).Resource;
+const flair = new Flair(server);
+const planner = flair.as("planner");
 
-export async function remember(agentId, content, opts = {}) {
-  // A create needs a COLLECTION-bound instance. `new Cls(...)` does not give
-  // you one, and cannot be made to — see the note below.
-  const h = await collectionResource(flair("Memory"), agentContext(agentId));
-  return h.post({
-    agentId,                                // required — an absent one is never filled in
-    content,
-    durability: opts.durability ?? "standard",
-  });
-}
+await planner.memory.write("deploy runs at 0200 UTC", { durability: "standard" });
 ```
 
-> ### Why `collectionResource`, and not `new Memory()`
->
-> A resource's `post()` only works on an instance Harper has marked as a **collection**, and that mark is a *private* field only Harper's own `getResource()` can set. The public `isCollection` is a getter with no setter, so the obvious spelling fails two different ways, neither of which names the cause:
->
-> ```javascript
-> const h = new (flair("Memory"))(undefined, agentContext(agentId));
-> h.isCollection = true;   // TypeError: Cannot set property isCollection ... which has only a getter
-> h.post({ ... });         // without the line above: 405 "The Memory does not have a post method implemented"
-> ```
->
-> `collectionResource(Cls, context)` is a two-line wrapper over the supported call — `Cls.getResource({}, context, { isCollection: true })` — and exists so this is written once. **Reads do not need it:** `Cls.get(id, context)` and `Cls.search(query, context)` thread the context themselves.
->
-> They do still need the **context**. Only the collection binding is unnecessary for a read, never the identity — `Cls.search(query)` with the second argument left off resolves to the trusted `internal` verdict when it runs outside a request scope (a boot hook, a timer, a queue worker, a detached promise) and returns every agent's private records. On that path the resource's `allow*` gate is not consulted at all. Pass the context to every call, read and write.
-
-> ### ⚠️ A resource with no context is an administrator
->
-> A resource built without a context resolves to Flair's trusted `internal` verdict and runs **unfiltered** — every read unscoped, every write unowned. Silently. No error, no warning, no trace.
->
-> Measured, not inferred: a context-less `Memory.search()` returns every agent's `private` records, and so does a context-less `SemanticSearch`.
->
-> Correct for Flair's own maintenance passes. In your app it is a data leak you find months later.
->
-> **Make `agentId` a required argument, as above.** Never export a version that defaults it.
+That is the whole API. No deep import, no `server.resources`, no `.Resource`, no `collectionResource()`, no double-passing `agentId`. The facade stamps `agentId` from the handle's context onto the body internally — you pass it once, at `flair.as(id)`.
 
 **3. Read it back, scoped to that agent.**
 
 ```javascript
-export async function recall(agentId, query, limit = 5) {
-  const h = await collectionResource(flair("SemanticSearch"), agentContext(agentId));
-  return h.post({ q: query, limit });
-}
+const hits = await planner.recall("deploy schedule", { limit: 5 });
+const record = await planner.memory.get(hits[0].id);
 ```
 
-**4. Verify it worked, still in-process.**
+**4. Register an agent, no CLI.**
 
 ```javascript
-await remember("agent-alpha", "deploy runs at 0200 UTC");
-console.log(await recall("agent-alpha", "deploy schedule"));
+await flair.admin.registerAgent("planner", { publicKey: "pending" });
+```
+
+> **`flair.admin` is a root shell.** Every call site is greppable via `git grep "flair.admin"`. Use for provisioning and maintenance only, never as a request handler's default.
+
+**5. Verify it worked.**
+
+```javascript
+console.log(await planner.memory.search({ limit: 10 }));
 console.log([...server.resources.keys()].sort());   // what Flair registered
 ```
 
-> ### What we measured, so you do not have to
->
-> Run end to end on **Harper 5.1.22**, from a second component loaded into the same instance — the exact shape above. `test/integration/in-process-agents.test.ts` in the Flair repo is that run, and `test/fixtures/inproc-app` is the component it drives.
->
-> | Claim | Result |
-> |---|---|
-> | `server.resources.get("Memory")` from another component | Returns an **entry object** `{ Resource, path, exportTypes, hasSubPaths, relativeURL }` — `.Resource` is required, it is not the class itself |
-> | `.Resource` is Flair's resource, not the raw table | Confirmed: prototype chain `Memory → Memory → Resource`, and it is **not** `databases.flair.Memory` |
-> | Key format | **No leading slash.** `get("Memory")` hits; `get("/Memory")` returns `undefined` |
-> | `getMatch` | `getMatch("Memory")` hits. **`getMatch("/Memory")` misses** — do not use the slashed form |
-> | When the lookup becomes valid | Flair's resources were already registered at the app component's **module top level** (55 entries, `Memory` and `Agent` present). The only entry missing at that moment was the app's *own*, still mid-registration. Resolving lazily, as above, is still the advice — it costs nothing and does not depend on component load order |
-> | Per-agent scoping through `SemanticSearch` | Holds. Querying as `agent-beta` for a topic only `agent-alpha` has written returns **beta's own** memory, never alpha's private one — with real 768-dim embeddings attached, not a degraded path |
-> | Cross-agent by-id read | `Memory.get(<beta's private id>)` as alpha returns **404**, never 403 — a denied caller cannot enumerate ids |
-> | Context-less call | Unfiltered across all agents, via both `search` and `SemanticSearch` (see the warning above) |
+---
 
-Handlers return a `Response` for `401`/`403`/`400` rather than throwing — check for one. `Memory.post()` is in-process only; over HTTP the schema exposes `PUT`.
+## The facade
+
+### `new Flair(server)`
+
+One handle per Harper instance. Resolves resources lazily on first use — no lookup at construction time.
+
+### `flair.as(agentId)`
+
+Returns an `AgentHandle` scoped to that agent. The `agentId` is runtime-validated: missing, empty, blank, or non-string throws `InProcessContextError`.
+
+```javascript
+const planner = flair.as("planner");
+planner.agentId;  // "planner"
+```
+
+**Security:** In-process identity is asserted, not verified — co-location IS the grant. Build the `agentId` from your own server-side state, never from request data. If an agent id can reach `flair.as()` from user input — a body field, a query param, a header you did not verify yourself — that is privilege escalation with **no error, no 403 and no trace**.
+
+### `AgentHandle`
+
+| Method | Description |
+|---|---|
+| `handle.memory.write(content, opts?)` | Write a memory as this agent. `agentId` is stamped from the handle — the caller never passes it. |
+| `handle.memory.get(id)` | Read a memory by id, scoped to this agent. |
+| `handle.memory.search(opts?)` | Search memories scoped to this agent. |
+| `handle.recall(query, opts?)` | Semantic search scoped to this agent. |
+
+### `flair.admin`
+
+Admin operations — unfiltered reads, cross-agent writes. Every call site is greppable via `git grep "flair.admin"`.
+
+| Method | Description |
+|---|---|
+| `flair.admin.registerAgent(id, opts?)` | Register an agent through the Agent resource (full Principal shape). |
+| `flair.admin.memory.get(id)` | Read any memory by id, unfiltered. |
+| `flair.admin.memory.write(asAgentId, content, opts?)` | Write a memory attributed to another agent. |
+
+### `flair.internal`
+
+Trusted, unattributed, unfiltered operations — Flair's `internal` verdict. Every call site is greppable via `git grep "flair.internal"`.
+
+| Method | Description |
+|---|---|
+| `flair.internal.agentTable.put(record)` | Write directly to the Agent resource (bypasses admin gate). |
 
 ---
 
@@ -109,7 +107,8 @@ Handlers return a `Response` for `401`/`403`/`400` rather than throwing — chec
 
 ```javascript
 for (const id of ["planner", "researcher", "reviewer"]) {
-  await remember(id, `${id} came online`);
+  const agent = flair.as(id);
+  await agent.memory.write(`${id} came online`);
 }
 ```
 
@@ -117,18 +116,14 @@ for (const id of ["planner", "researcher", "reviewer"]) {
 
 ### Registering agents, no CLI
 
-Go through the `Agent` **resource**, with no context — provisioning is infrastructure work your app has already authorised, and `Agent.post()` fills in the whole Principal shape for you:
+Go through `flair.admin.registerAgent()` — it goes through the `Agent` **resource**, which fills in the whole Principal shape for you:
 
 ```javascript
-export async function registerAgent(id, { publicKey = "pending", admin = false } = {}) {
-  const h = await collectionResource(flair("Agent"), internalContext());   // provisioning is infrastructure, not an agent's write
-  return h.post({
-    id, name: id, displayName: id,
-    publicKey,                            // a placeholder is fine — see below
-    runtime: "headless",
-    ...(admin ? { admin: true } : {}),    // sets role:"admin" too — see below
-  });
-}
+await flair.admin.registerAgent("researcher", {
+  publicKey: "pending",
+  displayName: "Research Agent",
+  admin: false,
+});
 ```
 
 Verified against a real instance: that lands `kind: "agent"`, `status: "active"`, `displayName`, `admin: false`, `defaultTrustTier: "unverified"`, `type: "agent"`, `createdAt`/`updatedAt` and the federation `originatorInstanceId` stamp — without you naming any of them.
@@ -146,7 +141,7 @@ import { generateKeyPairSync } from "node:crypto";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const raw = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
-await registerAgent("remote-worker", { publicKey: raw.toString("hex") });
+await flair.admin.registerAgent("remote-worker", { publicKey: raw.toString("hex") });
 // keep `privateKey` in your own secret store — Flair never sees it
 ```
 
@@ -295,6 +290,106 @@ A `SyncLog` row reads `direction: "pull"` — the receiver's label for a push it
 | **`flair` CLI** | Pairing and key generation. Needs a shell. |
 
 **Trust-graded recall (`includeTrust`)** — provenance, author, usage, freshness, supersession — works in-process (`SemanticSearch.post({ q, includeTrust: true })`, `Memory.get(id, { includeTrust: true })`), over REST, and on the native `/mcp` handler. It is **not** exposed by the CLI, the stdio MCP server, or `FlairClient`'s typed methods.
+
+---
+
+## Appendix: the primitives layer
+
+The facade wraps a lower-level API that is still available for callers who need direct access. Import it from `@tpsdev-ai/flair/server`:
+
+```javascript
+import { agentContext, adminContext, internalContext, collectionResource } from "@tpsdev-ai/flair/server";
+```
+
+This is the same seam Flair's own MCP handler and internal tooling use. You should not need it for ordinary agent operations — the facade covers those. Use the primitives when you are building your own abstraction on top of Flair's resources.
+
+### Resolving a resource
+
+```javascript
+// The RESOURCE — carries auth, scoping, visibility, embedding.
+// NOT databases.flair.Memory: that is the raw table, and enforces none of it.
+// Keys carry NO leading slash: get("Memory"), never get("/Memory").
+const flair = (path) => server.resources.get(path).Resource;
+```
+
+### Writing a memory (primitives)
+
+```javascript
+export async function remember(agentId, content, opts = {}) {
+  // A create needs a COLLECTION-bound instance. `new Cls(...)` does not give
+  // you one, and cannot be made to — see the note below.
+  const h = await collectionResource(flair("Memory"), agentContext(agentId));
+  return h.post({
+    agentId,                                // required — an absent one is never filled in
+    content,
+    durability: opts.durability ?? "standard",
+  });
+}
+```
+
+> ### Why `collectionResource`, and not `new Memory()`
+>
+> A resource's `post()` only works on an instance Harper has marked as a **collection**, and that mark is a *private* field only Harper's own `getResource()` can set. The public `isCollection` is a getter with no setter, so the obvious spelling fails two different ways, neither of which names the cause:
+>
+> ```javascript
+> const h = new (flair("Memory"))(undefined, agentContext(agentId));
+> h.isCollection = true;   // TypeError: Cannot set property isCollection ... which has only a getter
+> h.post({ ... });         // without the line above: 405 "The Memory does not have a post method implemented"
+> ```
+>
+> `collectionResource(Cls, context)` is a two-line wrapper over the supported call — `Cls.getResource({}, context, { isCollection: true })` — and exists so this is written once. **Reads do not need it:** `Cls.get(id, context)` and `Cls.search(query, context)` thread the context themselves.
+>
+> They do still need the **context**. Only the collection binding is unnecessary for a read, never the identity — `Cls.search(query)` with the second argument left off resolves to the trusted `internal` verdict when it runs outside a request scope (a boot hook, a timer, a queue worker, a detached promise) and returns every agent's private records. On that path the resource's `allow*` gate is not consulted at all. Pass the context to every call, read and write.
+
+> ### ⚠️ A resource with no context is an administrator
+>
+> A resource built without a context resolves to Flair's trusted `internal` verdict and runs **unfiltered** — every read unscoped, every write unowned. Silently. No error, no warning, no trace.
+>
+> Measured, not inferred: a context-less `Memory.search()` returns every agent's `private` records, and so does a context-less `SemanticSearch`.
+>
+> Correct for Flair's own maintenance passes. In your app it is a data leak you find months later.
+>
+> **Make `agentId` a required argument, as above.** Never export a version that defaults it.
+
+### Reading back (primitives)
+
+```javascript
+export async function recall(agentId, query, limit = 5) {
+  const h = await collectionResource(flair("SemanticSearch"), agentContext(agentId));
+  return h.post({ q: query, limit });
+}
+```
+
+### Registering agents (primitives)
+
+```javascript
+export async function registerAgent(id, { publicKey = "pending", admin = false } = {}) {
+  const h = await collectionResource(flair("Agent"), internalContext());   // provisioning is infrastructure, not an agent's write
+  return h.post({
+    id, name: id, displayName: id,
+    publicKey,                            // a placeholder is fine — see below
+    runtime: "headless",
+    ...(admin ? { admin: true } : {}),    // sets role:"admin" too — see below
+  });
+}
+```
+
+### What we measured, so you do not have to
+
+Run end to end on **Harper 5.1.22**, from a second component loaded into the same instance — the exact shape above. `test/integration/in-process-agents.test.ts` in the Flair repo is that run, and `test/fixtures/inproc-app` is the component it drives.
+
+| Claim | Result |
+|---|---|
+| `server.resources.get("Memory")` from another component | Returns an **entry object** `{ Resource, path, exportTypes, hasSubPaths, relativeURL }` — `.Resource` is required, it is not the class itself |
+| `.Resource` is Flair's resource, not the raw table | Confirmed: prototype chain `Memory → Memory → Resource`, and it is **not** `databases.flair.Memory` |
+| Key format | **No leading slash.** `get("Memory")` hits; `get("/Memory")` returns `undefined` |
+| `getMatch` | `getMatch("Memory")` hits. **`getMatch("/Memory")` misses** — do not use the slashed form |
+| When the lookup becomes valid | Flair's resources were already registered at the app component's **module top level** (55 entries, `Memory` and `Agent` present). The only entry missing at that moment was the app's *own*, still mid-registration. Resolving lazily, as above, is still the advice — it costs nothing and does not depend on component load order |
+| Per-agent scoping through `SemanticSearch` | Holds. Querying as `agent-beta` for a topic only `agent-alpha` has written returns **beta's own** memory, never alpha's private one — with real 768-dim embeddings attached, not a degraded path |
+| Cross-agent by-id read | `Memory.get(<beta's private id>)` as alpha returns **404**, never 403 — a denied caller cannot enumerate ids |
+| Context-less call | Unfiltered across all agents, via both `search` and `SemanticSearch` (see the warning above) |
+
+Handlers return a `Response` for `401`/`403`/`400` rather than throwing — check for one. `Memory.post()` is in-process only; over HTTP the schema exposes `PUT`.
 
 ---
 
