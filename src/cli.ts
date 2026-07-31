@@ -396,10 +396,21 @@ function migrateLegacyLaunchdLabel(
   try { runLaunchctl(`launchctl unload "${resolved.plistPath}"`); } catch { /* best effort */ }
 
   const legacyContent = readFileSync(resolved.plistPath, "utf-8");
-  const newContent = legacyContent.replace(
-    `<key>Label</key><string>${LEGACY_LAUNCHD_LABEL}</string>`,
-    `<key>Label</key><string>${newLabel}</string>`,
-  );
+  // Use a function replacer to avoid $-sensitivity in the replacement
+  // string (flair#919). String.prototype.replace interprets $&, $', $`
+  // etc. in the replacement even when the search value is a plain string.
+  const labelSearch = `<key>Label</key><string>${LEGACY_LAUNCHD_LABEL}</string>`;
+  const labelReplacement = `<key>Label</key><string>${newLabel}</string>`;
+  const newContent = legacyContent.replace(labelSearch, () => labelReplacement);
+  // Refuse to propagate a malformed plist: if the Label wasn't found,
+  // the plist is not what we expect and migration must not write it.
+  if (newContent === legacyContent) {
+    throw new Error(
+      `Legacy plist at ${resolved.plistPath} does not contain the expected ` +
+      `Label key — it may be malformed or from an unknown Flair version. ` +
+      `Remove it manually and re-run 'flair init'.`,
+    );
+  }
   writeFileSync(newPlistPath, newContent);
   try { unlinkSync(resolved.plistPath); } catch { /* best effort */ }
 
@@ -499,6 +510,10 @@ function ensureLaunchdServiceLoaded(
   launchAgentsDir: string = defaultLaunchAgentsDir(),
 ): { label: string; plistPath: string; migrated: boolean } {
   const migration = migrateLegacyLaunchdLabel(dataDir, runLaunchctl, launchAgentsDir);
+  // Unload first so a rewritten plist is re-read (flair#872).
+  // launchd caches the environment of an already-loaded job; load
+  // alone does not pick up changes to the plist on disk.
+  try { runLaunchctl(`launchctl unload "${migration.plistPath}"`); } catch { /* not loaded, etc. — best effort */ }
   try { runLaunchctl(`launchctl load "${migration.plistPath}"`); } catch { /* already loaded, etc. — best effort */ }
   runLaunchctl(`launchctl start ${migration.label}`);
   return migration;
@@ -10853,14 +10868,14 @@ async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
       assertLaunchdServiceOwnedBy(dataDir, label, plistPath, "stop");
       try {
         const { execSync } = await import("node:child_process");
-        // Ensure the service is loaded (init writes the plist but doesn't load it)
-        try { execSync(`launchctl load "${plistPath}"`, { stdio: "pipe" }); } catch {}
-        // Capture the current PID *before* stopping so callers that
+        // Capture the current PID *before* unloading so callers that
         // immediately restart can verify exit. Without this, waitForHealth
         // can race against the still-shutting-down old process and return
-        // success before KeepAlive brings the new one up.
+        // success before the new one comes up.
         const oldPid = readHarperPid(dataDir);
-        try { execSync(`launchctl stop ${label}`, { stdio: "pipe" }); } catch {}
+        // unload stops the job AND prevents KeepAlive from respawning it.
+        // launchctl stop alone is insufficient for a KeepAlive job (flair#874).
+        try { execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" }); } catch {}
         if (oldPid) await waitForProcessExit(oldPid, STARTUP_TIMEOUT_MS);
         return;
       } catch (err: any) {

@@ -1,0 +1,1 @@
+- **A rewritten launchd plist is now re-read on restart.** `ensureLaunchdServiceLoaded` now unloads the service before loading it, so launchd picks up changes to the plist on disk. Previously a config change followed by `flair restart` could silently keep the old environment.
