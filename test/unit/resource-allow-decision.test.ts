@@ -222,7 +222,7 @@ const EARLY_RETURN_ENDPOINTS: Array<{ path: string; file: string; className: str
   { path: "/AgentCard*", file: "AgentCard.ts", className: "AgentCard", note: "public discovery metadata, per A2A spec" },
   { path: "/FederationSync", file: "Federation.ts", className: "FederationSync", note: "self-verifies via verifyBodySignatureFresh (Ed25519 body signature + anti-replay)" },
   { path: "/FederationPair", file: "Federation.ts", className: "FederationPair", note: "self-verifies via verifyBodySignatureFresh + one-time PairingToken" },
-  { path: "/OAuthRegister", file: "OAuth.ts", className: "OAuthRegister", note: "OAuth 2.1 dynamic client registration — spec requires no pre-auth" },
+  { path: "/OAuthRegister", file: "OAuth.ts", className: "OAuthRegister", note: "OAuth 2.1 dynamic client registration — self-gates in post() via resources/dcr-gate.ts: OFF unless FLAIR_OAUTH_DCR_TOKEN is set, and then the initial access token is required" },
   { path: "/OAuthAuthorize", file: "OAuth.ts", className: "OAuthAuthorize", note: "#609 fix: post() requires a real Authorization header present before trusting resolveAgentAuth" },
   { path: "/OAuthToken", file: "OAuth.ts", className: "OAuthToken", note: "authenticates via PKCE verifier / client_secret in the body, not agent identity" },
   { path: "/OAuthRevoke", file: "OAuth.ts", className: "OAuthRevoke", note: "OAuth 2.1 revocation — token itself is the credential" },

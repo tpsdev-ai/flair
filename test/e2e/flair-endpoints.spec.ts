@@ -131,7 +131,13 @@ test.describe("OAuth Discovery", () => {
     expect(body).toHaveProperty("token_endpoint");
   });
 
-  test("POST /OAuthRegister with valid client data returns client_id", async ({ request }) => {
+  test("POST /OAuthRegister is refused on an instance that has not opted in", async ({ request }) => {
+    // Dynamic client registration is now off unless the operator sets
+    // FLAIR_OAUTH_DCR_TOKEN, and this container does not. Being an admin does
+    // not help: the gate is the initial access token, not agent identity — so
+    // the admin credential below is exactly the "surely this still works"
+    // control. The enabled path is covered against a real spawn in
+    // test/integration/oauth-dcr-e2e.test.ts.
     const res = await request.post("/OAuthRegister", {
       headers: { ...adminAuth(), "Content-Type": "application/json" },
       data: {
@@ -140,11 +146,8 @@ test.describe("OAuth Discovery", () => {
         grant_types: ["authorization_code"],
       },
     });
-    expect(res.status()).toBe(200);
-    const body = await res.json();
-    expect(body).toHaveProperty("client_id");
-    expect(typeof body.client_id).toBe("string");
-    expect(body.client_id.length).toBeGreaterThan(0);
+    expect(res.status()).toBe(403);
+    expect((await res.json()).error).toBe("access_denied");
   });
 });
 

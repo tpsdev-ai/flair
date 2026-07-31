@@ -2,6 +2,7 @@ import { Resource, databases } from "harper";
 import { createHash, randomBytes } from "node:crypto";
 import { handleJwtBearerGrant } from "./XAA.js";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { decideRegistration } from "./dcr-gate.js";
 import { buildAuthorizationServerMetadata } from "./oauth-discovery.js";
 
 /**
@@ -99,9 +100,35 @@ export class OAuthRegister extends Resource {
   // Dynamic Client Registration (RFC 7591) — clients must be able to register
   // anonymously to bootstrap. Validation (redirect_uri allow-list, etc.)
   // happens in post(). Pattern matches FederationPair.allowCreate (#299).
+  //
+  // This stays `true` — it is Harper's ROLE gate, and returning false here would
+  // answer with Harper's own 403 body instead of an RFC 7591-shaped error. WHO
+  // may register is decided in post() via resources/dcr-gate.ts, in one place.
+  // Deliberately not enforced in both: one condition in two places is how the
+  // two drift apart.
   allowCreate() { return true; }
 
   async post(data: any) {
+    // Registration gate FIRST — before the redirect-URI policy is applied,
+    // before anything is read off the body, and before any write. A caller who
+    // may not register learns only that; running the redirect-URI check first
+    // would turn a closed endpoint into a probe for what this server accepts.
+    const decision = decideRegistration((this as any).getContext?.()?.request ?? (this as any).getContext?.());
+    if (!decision.allowed) {
+      if (decision.reason === "disabled") {
+        return new Response(JSON.stringify({
+          error: "access_denied",
+          error_description:
+            "dynamic client registration is not enabled on this server " +
+            "(set FLAIR_OAUTH_DCR_TOKEN to enable it)",
+        }), { status: 403, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({
+        error: "invalid_token",
+        error_description: "a valid initial access token is required to register a client",
+      }), { status: 401, headers: { "content-type": "application/json" } });
+    }
+
     const redirectUris: string[] = data?.redirect_uris ?? [];
     const clientName: string = data?.client_name ?? "Unknown Client";
 

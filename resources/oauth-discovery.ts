@@ -28,6 +28,7 @@
  */
 
 import { mcpOAuthEnabled } from "./mcp-oauth-flag.js";
+import { dcrEnabled } from "./dcr-gate.js";
 
 /** RFC 9728 §3.1 — Protected Resource Metadata well-known path. */
 export const PRM_PATH = "/.well-known/oauth-protected-resource";
@@ -71,13 +72,21 @@ export function mcpResourceUri(baseUrl: string = oauthPublicBaseUrl()): string {
  * `/OAuthRevoke`.
  *
  * Served at BOTH `/.well-known/oauth-authorization-server` and `/OAuthMetadata`.
+ *
+ * `registration_endpoint` is present ONLY while dynamic client registration is
+ * actually enabled (resources/dcr-gate.ts). RFC 8414 s2 makes the field
+ * OPTIONAL, and advertising an endpoint that refuses every request is a
+ * discovery document that misdirects: a client would follow it, be refused, and
+ * have learned nothing it can act on. Omitting it tells the truth — this server
+ * does not do dynamic registration — which is a state a spec-compliant client
+ * already knows how to handle.
  */
 export function buildAuthorizationServerMetadata(baseUrl: string = oauthPublicBaseUrl()) {
   return {
     issuer: baseUrl,
     authorization_endpoint: `${baseUrl}/OAuthAuthorize`,
     token_endpoint: `${baseUrl}/OAuthToken`,
-    registration_endpoint: `${baseUrl}/OAuthRegister`,
+    ...(dcrEnabled() ? { registration_endpoint: `${baseUrl}/OAuthRegister` } : {}),
     revocation_endpoint: `${baseUrl}/OAuthRevoke`,
     response_types_supported: ["code"],
     grant_types_supported: [
