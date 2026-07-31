@@ -16,12 +16,18 @@ import { isProbeMode } from "../src/session-start-hook.ts";
  * is read or any client exists.
  *
  * The predicate is unit-tested directly; the short-circuit is tested by
- * SPAWNING the built binary, because "it returns before constructing a client"
- * is a property of main(), not of an exported function.
+ * SPAWNING the entry point as its own process, because "it returns before
+ * constructing a client" is a property of main(), not of an exported function.
  */
 
 const NOOP = "{}";
-const BUILT = join(import.meta.dir, "..", "dist", "session-start-hook.js");
+/** The hook's ENTRY POINT, spawned as its own process. Deliberately the source
+ *  and not dist/: this suite's CI lane builds @tpsdev-ai/flair-client (which
+ *  the hook imports by its built dist) but never builds this package, and a
+ *  test that needs an artifact CI does not produce is a test that fails for
+ *  the wrong reason. The property under test lives in main(), which the
+ *  --noCheck TypeScript build does not transform. */
+const ENTRY = join(import.meta.dir, "..", "src", "session-start-hook.ts");
 
 const ORIGINAL_AGENT_ID = process.env.FLAIR_AGENT_ID;
 afterEach(() => {
@@ -44,12 +50,11 @@ describe("isProbeMode", () => {
   });
 });
 
-describe("probe mode short-circuits the whole hook (built binary)", () => {
-  // The built dist/ is produced by `bun run build` in this package, which CI
-  // runs before this suite. If it is missing, FAIL — an unrun check must not
-  // look like a pass.
-  test("the built binary exists to be probed", () => {
-    expect(existsSync(BUILT)).toBe(true);
+describe("probe mode short-circuits the whole hook (spawned entry point)", () => {
+  // If the entry point is not where this file thinks it is, FAIL loudly — an
+  // unrun check must never look like a pass.
+  test("the hook entry point exists to be probed", () => {
+    expect(existsSync(ENTRY)).toBe(true);
   });
 
   test("FLAIR_HOOK_PROBE with a real identity → inert output, exit 0, and the key file never opened", () => {
@@ -77,7 +82,7 @@ describe("probe mode short-circuits the whole hook (built binary)", () => {
         FLAIR_KEY_PATH: fifo,
       };
 
-      const probed = spawnSync(process.execPath, [BUILT], {
+      const probed = spawnSync(process.execPath, [ENTRY], {
         input: "{}",
         encoding: "utf-8",
         timeout: 15_000,
@@ -87,7 +92,7 @@ describe("probe mode short-circuits the whole hook (built binary)", () => {
       expect(probed.status).toBe(0);
       expect(probed.stdout).toBe(NOOP);
 
-      const normal = spawnSync(process.execPath, [BUILT], {
+      const normal = spawnSync(process.execPath, [ENTRY], {
         input: "{}",
         encoding: "utf-8",
         timeout: 3_000,
@@ -102,7 +107,7 @@ describe("probe mode short-circuits the whole hook (built binary)", () => {
   test("without FLAIR_HOOK_PROBE the binary still no-ops safely (regression guard)", () => {
     // The positive control for the two tests above: probe mode is an ADDITION,
     // it must not have become the only path.
-    const res = spawnSync(process.execPath, [BUILT], {
+    const res = spawnSync(process.execPath, [ENTRY], {
       input: "{}",
       encoding: "utf-8",
       timeout: 20_000,
