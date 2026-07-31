@@ -1,0 +1,1 @@
+- **`flair stop` no longer reports success while a KeepAlive job respawns.** The launchd stop path now uses `launchctl unload` instead of `launchctl stop`, which both stops the process and prevents launchd from immediately restarting it. This also fixes `flair restart`, `flair upgrade`, and `flair snapshot` — all of which compose stop-then-start through the same helper.

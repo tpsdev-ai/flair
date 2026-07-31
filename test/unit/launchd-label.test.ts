@@ -189,13 +189,15 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
     expect(result.migrated).toBe(true);
     expect(result.label).toBe(newLabel);
 
-    // Exactly 3 launchctl calls, in this order: unload legacy, load new, start new.
-    expect(calls.length).toBe(3);
+    // Exactly 4 launchctl calls, in this order: unload legacy, unload new, load new, start new.
+    expect(calls.length).toBe(4);
     expect(calls[0]).toContain("launchctl unload");
     expect(calls[0]).toContain(legacyPath);
-    expect(calls[1]).toContain("launchctl load");
+    expect(calls[1]).toContain("launchctl unload");
     expect(calls[1]).toContain(launchdPlistPath(newLabel, launchAgentsDir));
-    expect(calls[2]).toBe(`launchctl start ${newLabel}`);
+    expect(calls[2]).toContain("launchctl load");
+    expect(calls[2]).toContain(launchdPlistPath(newLabel, launchAgentsDir));
+    expect(calls[3]).toBe(`launchctl start ${newLabel}`);
 
     // There is never a moment with both registered: legacy file is gone,
     // new one exists, by the time this returns.
@@ -211,9 +213,11 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
     const result = ensureLaunchdServiceLoaded(dataDir, (cmd) => calls.push(cmd), launchAgentsDir);
 
     expect(result.migrated).toBe(false);
-    expect(calls.length).toBe(2);
-    expect(calls[0]).toContain("launchctl load");
-    expect(calls[1]).toBe(`launchctl start ${newLabel}`);
+    // flair#872: unload before load so a rewritten plist is re-read.
+    expect(calls.length).toBe(3);
+    expect(calls[0]).toContain("launchctl unload");
+    expect(calls[1]).toContain("launchctl load");
+    expect(calls[2]).toBe(`launchctl start ${newLabel}`);
   });
 
   test("ensureLaunchdServiceLoaded tolerates a load failure but propagates a start failure", () => {
@@ -228,8 +232,8 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
     };
 
     expect(() => ensureLaunchdServiceLoaded(dataDir, runLaunchctl, launchAgentsDir)).toThrow("could not find service");
-    // Both were attempted (load's failure didn't block the start attempt)
-    expect(calls.length).toBe(2);
+    // All three were attempted (unload + load failures didn't block the start attempt)
+    expect(calls.length).toBe(3);
   });
 
   test("no bare 'ai.tpsdev.flair' string literals remain in operational label call sites (structural)", async () => {
@@ -416,5 +420,65 @@ describe("resolveLaunchdLabel / migrateLegacyLaunchdLabel / ensureLaunchdService
 
     expect(result.action).toBe("none");
     expect(launchctlCalls.length).toBe(0);
+  });
+
+  // ── flair#919: migration must not propagate a malformed plist ──────
+
+  test("migrateLegacyLaunchdLabel: throws on a plist that does not contain the expected Label key", () => {
+    // A plist that is valid XML but has a different label — the replace
+    // won't match, and migration must refuse rather than write it unchanged.
+    const wrongLabel = "com.example.something-else";
+    const legacyPath = launchdPlistPath(LEGACY_LAUNCHD_LABEL, launchAgentsDir);
+    writeFileSync(legacyPath, fakePlist(wrongLabel));
+
+    const calls: string[] = [];
+    expect(() => migrateLegacyLaunchdLabel(dataDir, (cmd) => calls.push(cmd), launchAgentsDir))
+      .toThrow(/does not contain the expected Label key/);
+
+    // The legacy plist must still exist — we did NOT delete it on failure.
+    expect(existsSync(legacyPath)).toBe(true);
+    // No new plist was written.
+    const newLabel = launchdLabel(dataDir);
+    expect(existsSync(launchdPlistPath(newLabel, launchAgentsDir))).toBe(false);
+  });
+
+  // ── flair#874 / flair#872 structural guards ────────────────────────
+
+  test("stopFlairProcess uses launchctl unload, not launchctl stop, on the launchd path (flair#874)", async () => {
+    const src = await Bun.file(join(import.meta.dirname, "..", "..", "src", "cli.ts")).text();
+    // Find the stopFlairProcess function body.
+    const fnStart = src.indexOf("async function stopFlairProcess");
+    expect(fnStart).not.toBe(-1);
+    // The next function after stopFlairProcess is startFlairProcess.
+    const nextFn = src.indexOf("async function startFlairProcess", fnStart);
+    expect(nextFn).not.toBe(-1);
+    const fnBody = src.slice(fnStart, nextFn);
+
+    // Must contain launchctl unload (the fix).
+    expect(fnBody).toContain("launchctl unload");
+    // Must NOT contain launchctl stop as a shell command (the old, broken
+    // behaviour). The comment explaining the fix mentions "launchctl stop"
+    // but no execSync/runLaunchctl call should invoke it.
+    const cmdCalls = fnBody.match(/`launchctl \w+/g) ?? [];
+    const stopCalls = cmdCalls.filter((c: string) => c.includes("stop"));
+    expect(stopCalls.length).toBe(0);
+  });
+
+  test("migrateLegacyLaunchdLabel uses a function replacer, not a $-sensitive string replacement (flair#919)", async () => {
+    const src = await Bun.file(join(import.meta.dirname, "..", "..", "src", "cli.ts")).text();
+    // Find the migrateLegacyLaunchdLabel function body.
+    const fnStart = src.indexOf("function migrateLegacyLaunchdLabel");
+    expect(fnStart).not.toBe(-1);
+    // The next function after migrateLegacyLaunchdLabel is cleanupLegacyLaunchdPlist.
+    const nextFn = src.indexOf("function cleanupLegacyLaunchdPlist", fnStart);
+    expect(nextFn).not.toBe(-1);
+    const fnBody = src.slice(fnStart, nextFn);
+
+    // Must use a function replacer (() => ...) to avoid $-sensitivity.
+    expect(fnBody).toMatch(/\.replace\([^)]*,\s*\(\)\s*=>/);
+    // Must NOT use a bare string as the second argument to .replace().
+    // The only .replace call in this function should use the function form.
+    const replaceCalls = fnBody.match(/\.replace\(/g) ?? [];
+    expect(replaceCalls.length).toBe(1);
   });
 });
