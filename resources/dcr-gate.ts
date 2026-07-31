@@ -53,7 +53,7 @@
  * endpoint can actually support.
  */
 
-import { createHash, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 
 /** The header the initial access token arrives in. See the module header. */
 export const INITIAL_ACCESS_TOKEN_HEADER = "x-flair-initial-access-token";
@@ -68,11 +68,22 @@ export const INITIAL_ACCESS_TOKEN_HEADER = "x-flair-initial-access-token";
  */
 export const MIN_INITIAL_ACCESS_TOKEN_LEN = 32;
 
-let warnedShort = false;
+/**
+ * Longest accepted initial access token.
+ *
+ * A bound is needed because the constant-time comparison below works over
+ * fixed-width buffers; it is set far above any plausible token (508 bytes is
+ * ~15x a 32-byte base64 secret) so it constrains nothing real. A configured
+ * value outside the range disables registration and says so, rather than
+ * failing every comparison silently for a reason no operator could deduce.
+ */
+export const MAX_INITIAL_ACCESS_TOKEN_LEN = 508;
 
-/** Test-only: forget the one-shot short-token warning. */
+let warnedBadLength = false;
+
+/** Test-only: forget the one-shot bad-length warning. */
 export function __resetDcrWarningForTest(): void {
-  warnedShort = false;
+  warnedBadLength = false;
 }
 
 /**
@@ -86,12 +97,12 @@ export function __resetDcrWarningForTest(): void {
 export function initialAccessToken(): string | undefined {
   const raw = (process.env.FLAIR_OAUTH_DCR_TOKEN ?? "").trim();
   if (raw === "") return undefined;
-  if (raw.length < MIN_INITIAL_ACCESS_TOKEN_LEN) {
-    if (!warnedShort) {
-      warnedShort = true;
+  if (raw.length < MIN_INITIAL_ACCESS_TOKEN_LEN || Buffer.byteLength(raw, "utf8") > MAX_INITIAL_ACCESS_TOKEN_LEN) {
+    if (!warnedBadLength) {
+      warnedBadLength = true;
       console.error(
-        `[oauth-dcr] FLAIR_OAUTH_DCR_TOKEN is shorter than ${MIN_INITIAL_ACCESS_TOKEN_LEN} characters — ` +
-          `dynamic client registration stays DISABLED. Set a longer token to enable it.`,
+        `[oauth-dcr] FLAIR_OAUTH_DCR_TOKEN must be between ${MIN_INITIAL_ACCESS_TOKEN_LEN} and ` +
+          `${MAX_INITIAL_ACCESS_TOKEN_LEN} characters — dynamic client registration stays DISABLED.`,
       );
     }
     return undefined;
@@ -104,21 +115,65 @@ export function dcrEnabled(): boolean {
   return initialAccessToken() !== undefined;
 }
 
+/** Width of the comparison buffers: a 4-byte length prefix plus the token bytes. */
+const COMPARE_WIDTH = MAX_INITIAL_ACCESS_TOKEN_LEN + 4;
+
+/**
+ * Encode a value into a fixed-width buffer as `<uint32 byte length><bytes><zero
+ * padding>`, or null if it does not fit.
+ *
+ * The length prefix is what makes zero-padding safe. Padding alone would make
+ * `"abc"` and `"abc\0"` compare equal, because both pad to the same bytes;
+ * prefixing the length means two buffers are equal exactly when the two inputs
+ * are the same length AND the same bytes.
+ */
+function fixedWidth(value: string): Buffer | null {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length > MAX_INITIAL_ACCESS_TOKEN_LEN) return null;
+  const buf = Buffer.alloc(COMPARE_WIDTH);
+  buf.writeUInt32BE(bytes.length, 0);
+  bytes.copy(buf, 4);
+  return buf;
+}
+
 /**
  * Does the presented token match the configured one?
  *
- * Compared as SHA-256 digests so the comparison is over fixed-length buffers:
- * `timingSafeEqual` throws on a length mismatch, which would itself leak the
- * configured token's length, and comparing raw strings with `===` leaks a prefix
- * match through timing. Digesting first removes both. Returns false whenever
- * registration is disabled, so a caller cannot reach the compare at all.
+ * Both values are widened to the same fixed-size buffer and compared with
+ * `timingSafeEqual`. Equal width is not a convenience — it is the whole point:
+ *
+ *  - `timingSafeEqual` THROWS on a length mismatch, so handing it the raw values
+ *    would turn the configured token's length into an oracle (throw vs. false).
+ *  - `===` on strings short-circuits at the first differing byte, so it leaks a
+ *    prefix match through timing.
+ *
+ * Fixed-width buffers remove both, and the comparison touches every byte of the
+ * secret regardless of the input.
+ *
+ * DELIBERATELY NOT HASHED. An earlier revision digested both sides to get equal
+ * lengths. That works, but a hash of a credential sitting in an equality check
+ * reads — to a human and to a static analyser alike — as password-at-rest
+ * storage, which invites the obvious "why isn't this a KDF" question. The honest
+ * answer is that a KDF is the wrong primitive here: this is an equality check on
+ * a high-entropy machine credential on an unauthenticated request path, so
+ * deliberate per-request computational cost would be handing an attacker a
+ * cheap amplification lever on the exact endpoint the rate limiter exists to
+ * protect. Padding gets the same constant-time property with no hash to explain
+ * and no cost to exploit.
+ *
+ * Returns false whenever registration is disabled, so a caller cannot reach the
+ * comparison at all.
  */
 export function initialAccessTokenMatches(presented: unknown): boolean {
   const expected = initialAccessToken();
   if (expected === undefined) return false;
   if (typeof presented !== "string" || presented === "") return false;
-  const a = createHash("sha256").update(presented).digest();
-  const b = createHash("sha256").update(expected).digest();
+  const a = fixedWidth(presented);
+  const b = fixedWidth(expected);
+  // `b` cannot be null — initialAccessToken() already bounds the configured
+  // value — but null-checking both keeps this total rather than relying on that
+  // invariant holding in a future edit.
+  if (a === null || b === null) return false;
   return timingSafeEqual(a, b);
 }
 

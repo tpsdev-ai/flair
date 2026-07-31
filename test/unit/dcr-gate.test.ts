@@ -15,6 +15,7 @@ import {
   presentedInitialAccessToken,
   INITIAL_ACCESS_TOKEN_HEADER,
   MIN_INITIAL_ACCESS_TOKEN_LEN,
+  MAX_INITIAL_ACCESS_TOKEN_LEN,
   __resetDcrWarningForTest,
 } from "../../resources/dcr-gate.ts";
 
@@ -67,6 +68,24 @@ describe("registration is off unless an operator turns it on", () => {
     expect(dcrEnabled()).toBe(false);
   });
 
+  test("exactly the maximum length is accepted; one byte more is not", () => {
+    // The upper bound exists because the comparison is over fixed-width
+    // buffers. Out of range must DISABLE registration with a message, never
+    // silently fail every comparison for a reason no operator could deduce.
+    process.env.FLAIR_OAUTH_DCR_TOKEN = "x".repeat(MAX_INITIAL_ACCESS_TOKEN_LEN);
+    expect(dcrEnabled()).toBe(true);
+    __resetDcrWarningForTest();
+    process.env.FLAIR_OAUTH_DCR_TOKEN = "x".repeat(MAX_INITIAL_ACCESS_TOKEN_LEN + 1);
+    expect(dcrEnabled()).toBe(false);
+  });
+
+  test("the bound is on BYTES, not characters — a multi-byte token cannot slip past it", () => {
+    // "é" is two UTF-8 bytes, so this is under the limit by character count and
+    // over it by byte count. The buffer the comparison uses is sized in bytes.
+    process.env.FLAIR_OAUTH_DCR_TOKEN = "é".repeat(MAX_INITIAL_ACCESS_TOKEN_LEN - 10);
+    expect(dcrEnabled()).toBe(false);
+  });
+
   test("THE SHAPE: there is no value of the variable that enables registration WITHOUT a credential", () => {
     // Anything that switches registration on is, by construction, also the token
     // a caller has to present. Enumerating the interesting spellings that might
@@ -109,6 +128,18 @@ describe("when registration is enabled", () => {
 
   test("the token with anything appended is refused", () => {
     expect(initialAccessTokenMatches(GOOD + "x")).toBe(false);
+  });
+
+  test("PADDING COLLISION: the token with trailing NULs appended is refused", () => {
+    // The comparison widens both sides into a zero-padded fixed-size buffer. A
+    // length prefix is what stops "tok" and "tok\0" from producing identical
+    // buffers; without it this case would be accepted.
+    expect(initialAccessTokenMatches(GOOD + "\0")).toBe(false);
+    expect(initialAccessTokenMatches(GOOD + "\0\0\0")).toBe(false);
+  });
+
+  test("an over-long presentation is refused rather than throwing", () => {
+    expect(initialAccessTokenMatches("y".repeat(MAX_INITIAL_ACCESS_TOKEN_LEN + 100))).toBe(false);
   });
 
   test("non-string presentations are refused rather than coerced", () => {
