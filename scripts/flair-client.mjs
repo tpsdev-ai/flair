@@ -80,9 +80,21 @@ try {
       result = await flairFetch('DELETE', `/${table}/${rest[0]}`);
       break;
     case 'search': {
-      const query = rest.join(' ');
+      // Support --limit <n>. It was previously neither parsed nor passed: the flag and its
+      // value fell through into rest.join(' '), so `search "foo" --limit 20` searched for the
+      // literal string "foo --limit 20" and always returned the hardcoded 5 results.
+      const filteredRest = [];
+      let limit = 5;
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === '--limit' && rest[i + 1]) {
+          const n = Number(rest[++i]);
+          if (!Number.isFinite(n) || n < 1) { console.error(`--limit must be a positive number, got: ${rest[i]}`); process.exit(1); }
+          limit = Math.floor(n);
+        } else filteredRest.push(rest[i]);
+      }
+      const query = filteredRest.join(' ');
       // Server generates query embedding in-process — no sidecar needed
-      result = await flairFetch('POST', '/SemanticSearch', { agentId: AGENT_ID, q: query, limit: 5 });
+      result = await flairFetch('POST', '/SemanticSearch', { agentId: AGENT_ID, q: query, limit });
       if (result.results) {
         for (const r of result.results) {
           const date = r.createdAt?.slice(0, 10) || '?';
