@@ -22,7 +22,7 @@ import {
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname } from "node:path";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execFileSync, spawnSync, execSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
@@ -118,6 +118,17 @@ import {
 } from "./lib/auth-resolve.js";
 import { validateSnapshotArchive, extractSnapshotSafely } from "./lib/safe-snapshot-extract.js";
 import { escapeXml, unescapeXml } from "./lib/xml-escape.js";
+import {
+  assessLaunchdManagement,
+  diagnoseLaunchdPlistPaths,
+  isDetached,
+  pickInstancePid,
+  renderDetachedWarning,
+  renderVerifiedSummary,
+  LAUNCHCTL_QUERY_TIMEOUT_MS,
+  type LaunchctlLister,
+  type LaunchdManagement,
+} from "./lib/launchd-management.js";
 // Value-only static import so `--interval`'s advertised default cannot drift
 // from the one the scheduler actually validates against. The module itself is
 // still loaded lazily at call time (the `await import()`s below) for the
@@ -1899,6 +1910,16 @@ export async function checkAgentRegistered(
 // Used during restart to confirm the old Harper process actually exited before
 // we start polling /Health — otherwise the still-shutting-down old process can
 // answer and we'd declare restart success while a gap is still ahead.
+/**
+ * Is `pid` a process that exists right now? Signal 0 performs the permission
+ * and existence checks without delivering anything (flair#1022) — a `hdb.pid`
+ * left behind by a process that is gone is not evidence about a running
+ * instance, and treating it as such produces confident wrong answers.
+ */
+function isProcessAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
 async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -10636,8 +10657,29 @@ program
     // The delegated `flair restart` printed its own success line; don't say it twice.
     if (!restartWasDelegated) console.log("✅ Flair restarted");
 
+    // flair#1022 — the headline defect. The restart above is allowed to fall
+    // back off launchd to a plain detached spawn, and SHOULD be: a running
+    // instance beats a down one. What was missing is that the fallback changes
+    // whether anything brings this instance back after a reboot, and the
+    // verification below made no claim about it. `healthy, authenticated,
+    // running <new version>` was every word true of an instance that had just
+    // been orphaned.
+    //
+    // Observed here rather than reported by the restart, because
+    // `restartAfterUpgrade` may have delegated to the newly installed CLI in a
+    // CHILD PROCESS (flair#905) — no in-process flag crosses that boundary.
+    // Asking launchd is the one form of this check that is correct on both
+    // paths.
+    const management = observeLaunchdManagement(upgradeDataDir, port);
+    const detached = isDetached(management);
+
     if (!shouldVerify) {
       console.log("  (--no-verify: skipping post-restart verification)");
+      if (detached) {
+        for (const line of renderDetachedWarning(management, "Flair is running, but NOT under launchd.")) {
+          console.error(line);
+        }
+      }
       return;
     }
 
@@ -10656,7 +10698,17 @@ program
 
     const verdict = decideAfterVerify(verify, previousFlairVersion);
     if (verdict.kind === "ok") {
-      console.log(`✅ verified: healthy, authenticated${verify.version ? `, running ${verify.version}` : ""}`);
+      // flair#1022: the verified facts are unchanged and still stated — the
+      // upgrade did land. What changes is the MARKER and the claim around it.
+      // A run that ended up outside its process manager has not fully
+      // succeeded, so it does not get a ✅, and the line names the property
+      // that is wrong rather than only the ones that are right. The choice
+      // lives in renderVerifiedSummary so it is testable without performing an
+      // upgrade — no CI lane runs this darwin path.
+      const summary = renderVerifiedSummary(verify.version, management);
+      for (const line of summary.lines) {
+        if (summary.degraded) console.error(line); else console.log(line);
+      }
       return;
     }
 
@@ -10669,10 +10721,21 @@ program
     // "print an honest note but roll back anyway" branch that used to sit below
     // is gone — that credentials case can no longer reach the rollback path.)
     if (verdict.kind === "healthy-unverified") {
-      console.log(`✅ upgrade complete: the instance is up and healthy${expectedFlairVersion ? ` on @tpsdev-ai/flair@${expectedFlairVersion}` : ""}.`);
+      // flair#1022: same rule as the "ok" branch above — the ✅ is withheld
+      // when the run left the instance outside launchd, and the reason is
+      // named. This branch already qualifies the version claim; the process
+      // manager is a second, independent qualification.
+      console.log(detached
+        ? `⚠️  upgrade complete: the instance is up and healthy${expectedFlairVersion ? ` on @tpsdev-ai/flair@${expectedFlairVersion}` : ""}, but NOT under launchd.`
+        : `✅ upgrade complete: the instance is up and healthy${expectedFlairVersion ? ` on @tpsdev-ai/flair@${expectedFlairVersion}` : ""}.`);
       console.log(`   The version could not be verified — the checker couldn't authenticate to /HealthDetail (${verdict.reason}).`);
       console.log("   The server is confirmed running (public /Health passed); this is a verification gap, not an upgrade failure — nothing was rolled back.");
       console.log("   To enable full post-upgrade verification: set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key.");
+      if (detached) {
+        for (const line of renderDetachedWarning(management, "The instance is NOT running under launchd.")) {
+          console.error(line);
+        }
+      }
       return;
     }
 
@@ -10790,6 +10853,13 @@ program
       const { plistPath } = resolveLaunchdLabel(dataDir);
       if (existsSync(plistPath)) {
         try {
+          // flair#1022, same pre-flight as startFlairProcess: launchctl exits 0
+          // for a job it cannot exec, so a stale plist is only ever observable
+          // as a startup timeout unless the paths are checked first.
+          const stalePlist = diagnoseLaunchdPlistPaths(plistPath);
+          if (stalePlist) {
+            throw new Error(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
+          }
           const { execSync } = await import("node:child_process");
           const { label, migrated } = ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
           if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
@@ -10955,6 +11025,74 @@ function assertPortInstanceOwnedBy(port: number, dataDir: string, listeningPids:
   );
 }
 
+// ─── "is it still under launchd?" (flair#1022) ─────────────────────────────
+//
+// The pure logic lives in src/lib/launchd-management.ts; these two adapters
+// are the only places that talk to real launchd or the real filesystem, so a
+// test can exercise every branch above without either.
+
+/** `launchctl list <label>`, capped so an unreachable launchd cannot hang the CLI. */
+const realLaunchctlLister: LaunchctlLister = (label) => {
+  const res = spawnSync("launchctl", ["list", label], {
+    encoding: "utf-8",
+    timeout: LAUNCHCTL_QUERY_TIMEOUT_MS,
+  });
+  return { code: res.status, stdout: res.stdout ?? "" };
+};
+
+/**
+ * Which process is actually serving `dataDir` — Harper's own `hdb.pid` first,
+ * then the listener on `port`.
+ *
+ * `hdb.pid` is written by the Harper process itself on every boot regardless
+ * of who spawned it, which is exactly the property this needs: it is the same
+ * number on the launchd path and on the direct-spawn fallback, so comparing it
+ * against launchd's reported PID is a real comparison rather than a proxy.
+ * The port listener is the backstop for an install whose PID file is missing;
+ * `null` (neither available) is handled by the caller as "no evidence", never
+ * as "detached".
+ */
+function resolveInstanceServingPid(dataDir: string, port: number): number | null {
+  let listeningPids: number[] = [];
+  try {
+    listeningPids = listeningPidsOnPort(port, (cmd) => execSync(cmd, { encoding: "utf-8" }));
+  } catch { /* lsof unavailable — the PID file may still answer */ }
+  return pickInstancePid({
+    pidFilePid: readHarperPid(dataDir),
+    isAlive: isProcessAlive,
+    listeningPids,
+  });
+}
+
+/**
+ * Observe whether `dataDir`'s instance is running under launchd right now.
+ *
+ * Called AFTER a restart completes, by both `flair restart` and `flair
+ * upgrade` — see the module header for why this is an observation rather than
+ * a flag carried out of `startFlairProcess` (the upgrade's restart may happen
+ * in a child process, so no in-process flag survives).
+ */
+function observeLaunchdManagement(dataDir: string, port: number): LaunchdManagement {
+  // Answered without touching the filesystem or lsof off darwin — this runs on
+  // the success path of every restart and upgrade, including Linux's, where
+  // there is no launchd to have fallen back from.
+  if (process.platform !== "darwin") {
+    return { state: "not-applicable", detail: `${process.platform} does not use launchd` };
+  }
+  const { label, plistPath } = resolveLaunchdLabel(dataDir);
+  if (!existsSync(plistPath)) {
+    return { state: "no-service", detail: `no launchd service is registered for this instance (${plistPath})` };
+  }
+  return assessLaunchdManagement({
+    platform: process.platform,
+    label,
+    plistPath,
+    instancePid: resolveInstanceServingPid(dataDir, port),
+    plistExists: existsSync,
+    list: realLaunchctlLister,
+  });
+}
+
 /**
  * Stop the local Flair (Harper) process — launchd `stop` on darwin when a
  * plist is present (falling back on failure), otherwise a manual SIGTERM by
@@ -10998,9 +11136,47 @@ async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
         // can race against the still-shutting-down old process and return
         // success before the new one comes up.
         const oldPid = readHarperPid(dataDir);
+        // flair#1022: ask launchd whether the process we are about to wait on
+        // is even its job's, BEFORE unloading. When the instance is already
+        // running outside launchd — the state a previous fallback leaves
+        // behind, and the state a stale plist guarantees — the unload has
+        // nothing to signal, so waiting on `oldPid` burns the FULL startup
+        // budget and then reports the meaningless
+        // "Process <pid> did not exit within 60000ms". That was the first of
+        // the reported incident's two 60-second hangs. The unload still runs
+        // (a loaded-but-broken job must not be left able to respawn); only the
+        // wait is skipped, and the fallback is entered immediately with a
+        // reason that names the real condition.
+        //
+        // Gated on a LIVE recorded PID, and that gate is load-bearing: with no
+        // running process there is nothing to wait for and nothing to
+        // reattribute, and `stopFlairProcess` is documented as a harmless
+        // no-op when the instance is already stopped. Without the gate, an
+        // already-stopped instance takes the port fallback, which refuses when
+        // it cannot attribute a listener (flair#915) — turning an idempotent
+        // stop into a failed restart. Caught by the flair#902/#914 suites.
+        //
+        // Asked BEFORE the unload, because after it launchd no longer knows
+        // the label at all and every answer would be "detached".
+        const managed = oldPid !== null && isProcessAlive(oldPid)
+          ? assessLaunchdManagement({
+            platform: process.platform,
+            label,
+            plistPath,
+            instancePid: oldPid,
+            plistExists: existsSync,
+            list: realLaunchctlLister,
+          })
+          : null;
         // unload stops the job AND prevents KeepAlive from respawning it.
         // launchctl stop alone is insufficient for a KeepAlive job (flair#874).
         try { execSync(`launchctl unload "${plistPath}"`, { stdio: "pipe" }); } catch {}
+        if (managed && isDetached(managed)) {
+          throw new Error(
+            `launchd is not running this instance — ${managed.detail}`
+            + `${managed.remedy?.length ? ` Fix it with: ${managed.remedy.join(" && ")}` : ""}`,
+          );
+        }
         if (oldPid) await waitForProcessExit(oldPid, STARTUP_TIMEOUT_MS);
         return;
       } catch (err: any) {
@@ -11060,6 +11236,21 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
       // success.
       assertLaunchdServiceOwnedBy(dataDir, label, plistPath, "start");
       try {
+        // flair#1022: launchd will not tell us it cannot exec the job.
+        // `launchctl load` and `launchctl start` BOTH exit 0 for a plist whose
+        // ProgramArguments[0] does not exist (measured, see the module header),
+        // so the only way this loop learns anything is by waiting the full
+        // startup budget for a port that will never open — the reported
+        // incident's second 60-second hang, ending in "did not respond within
+        // 60000ms (120 attempts)", an error about a port that says nothing
+        // about the cause. The paths in the plist are absolute and checkable
+        // with an existsSync, so check them first and turn a two-minute silence
+        // into an immediate, named diagnosis. Still falls back — a running
+        // instance beats a down one — just without the wait or the mystery.
+        const stalePlist = diagnoseLaunchdPlistPaths(plistPath);
+        if (stalePlist) {
+          throw new Error(`${stalePlist.message} Fix it with: ${stalePlist.remedy.join(" && ")}`);
+        }
         const { execSync } = await import("node:child_process");
         ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
         await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
@@ -11287,6 +11478,18 @@ program
     // and saying so here is what keeps that true when someone adds one.
     try {
       await restartFlair(port, defaultDataDir());
+      // flair#1022: a restart that fell back off launchd left the instance
+      // running but unmanaged, and "✅ Flair restarted" was true of both
+      // outcomes. Ask launchd what it is actually running now — an
+      // observation, not a flag out of the restart, so it is right even when
+      // the detachment predates this command.
+      const managed = observeLaunchdManagement(defaultDataDir(), port);
+      if (isDetached(managed)) {
+        for (const line of renderDetachedWarning(managed, "Flair restarted, but it is NOT running under launchd.")) {
+          console.error(line);
+        }
+        return;
+      }
       console.log("✅ Flair restarted");
     } catch (err: any) {
       console.error(`❌ Flair failed to restart: ${err?.message ?? err}`);
@@ -17002,4 +17205,8 @@ export {
   resolveLaunchdLabel,
   migrateLegacyLaunchdLabel,
   ensureLaunchdServiceLoaded,
+
+  // launchd management observation (flair#1022)
+  observeLaunchdManagement,
+  resolveInstanceServingPid,
 };
