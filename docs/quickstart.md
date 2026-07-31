@@ -26,7 +26,9 @@ export PATH="$HOME/.npm-global/bin:$PATH"   # add this to ~/.zshrc or ~/.bashrc
 npm install -g @tpsdev-ai/flair
 ```
 
-One install gives you one command: `flair`. The MCP server is *not* installed — `flair init` wires each client to fetch it on demand with `npx -y @tpsdev-ai/flair-mcp@<version>`, so there is no second global package to keep in step. `@tpsdev-ai/flair-client` is a separate package you add to your own project when you want to call Flair from code.
+One install gives you one command: `flair`.
+
+The stdio adapter your MCP client talks to is a separate package, `@tpsdev-ai/flair-mcp`, and it is deliberately not installed globally — `flair init` wires each client to fetch it on demand with `npx -y @tpsdev-ai/flair-mcp@<version>`, so there is no second global package to keep in step. (The server also has its own `/mcp` endpoint built in, but it is off by default — it registers no route unless `FLAIR_MCP_OAUTH` and a public issuer are set — and no client setup in this guide uses it.) `@tpsdev-ai/flair-client` is a separate package you add to your own project when you want to call Flair from code.
 
 ## 2. Bootstrap Flair and register an agent
 

@@ -43,11 +43,14 @@ Full walkthrough with expected output at every step: **[docs/quickstart.md](docs
 
 ### One install, one binary
 
-`npm install -g @tpsdev-ai/flair` puts a single command on your `PATH`: `flair`. Nothing else is installed, and nothing else needs to be.
+`npm install -g @tpsdev-ai/flair` puts a single command on your `PATH`: `flair`. That is the whole install, and it needs a **user-writable npm global prefix** — which is why step 1 says *no sudo*. A root-owned install can't write the embedding model into its own package directory, so semantic search silently degrades to keyword-only. Use `nvm`, or point npm at your home directory — `npm config set prefix ~/.npm-global`, then add `~/.npm-global/bin` to `PATH`. `flair init` and `flair doctor` both check for this and say so loudly.
 
-The MCP adapter is deliberately *not* a second install. `flair init` writes `npx -y @tpsdev-ai/flair-mcp@<version>` into each client's config — pinned to the CLI's own version — so the client fetches the adapter on demand and there is no second global package to keep in step. `@tpsdev-ai/flair-client` is likewise its own package: add it to a project when you want to call Flair from your own code ([JavaScript / TypeScript](#javascript--typescript)).
+Two different things get called "MCP" here, and you get them differently:
 
-It needs a **user-writable npm global prefix**, which is why step 1 says *no sudo*. A root-owned install can't write the embedding model into its own package directory, so semantic search silently degrades to keyword-only. Use `nvm`, or point npm at your home directory — `npm config set prefix ~/.npm-global`, then add `~/.npm-global/bin` to `PATH`. `flair init` and `flair doctor` both check for this and say so loudly.
+- **The server has an MCP surface built in.** `/mcp` is a JSON-RPC endpoint exposing 12 curated tools, guarded by OAuth bearer tokens. It ships inside the package — and it is **off by default**: until you set `FLAIR_MCP_OAUTH` *and* a public issuer (`FLAIR_MCP_ISSUER`, falling back to `FLAIR_PUBLIC_URL`), no `/mcp` route is registered and the path returns 404. No documented client setup uses it today.
+- **What your MCP client actually talks to is a separate package** — `@tpsdev-ai/flair-mcp`, a stdio adapter — and that one is deliberately not installed globally. `flair init` writes `npx -y @tpsdev-ai/flair-mcp@<version>` into each client's config, pinned to the CLI's own version, so the client fetches it on demand and there is no second global package to keep in step.
+
+`@tpsdev-ai/flair-client` is likewise its own package: add it to a project when you want to call Flair from your own code ([JavaScript / TypeScript](#javascript--typescript)).
 
 ### Where the agent's key lives
 
@@ -168,7 +171,7 @@ See **[DESIGN.md](DESIGN.md)** for the invariants behind the three primitives �
 | **Web admin** | Server-rendered UI for principals, connectors, IdPs and instance config. No separate dashboard service. |
 | **Benchmarks** | [`flair-bench`](packages/flair-bench/README.md) scores candidate embedding models against the same recall corpus Flair's CI gates on. Runs standalone — no Flair install, no server. |
 
-Trust-graded recall reaches the authenticated HTTP API and the native `/mcp` tools today; CLI, `@tpsdev-ai/flair-client` and `flair-mcp` exposure is a follow-up. REM needs a configured generative backend (Ollama, OpenAI, Anthropic, …) — without one, `flair rem rapid` fails with `Reflection error: No generative backend configured`.
+Trust-graded recall reaches the authenticated HTTP API and the built-in `/mcp` tools today — the latter being off by default, see [One install, one binary](#one-install-one-binary). CLI, `@tpsdev-ai/flair-client` and `flair-mcp` exposure is a follow-up. REM needs a configured generative backend (Ollama, OpenAI, Anthropic, …) — without one, `flair rem rapid` fails with `Reflection error: No generative backend configured`.
 
 ## How Flair compares
 
@@ -178,7 +181,7 @@ Every product here does semantic recall over stored memories. These are the dime
 |---|---|---|---|---|---|---|
 | **Where memories live** | infrastructure you run | self-host or Mem0 Cloud | self-host or hosted API | self-host or Letta Cloud | SageOx cloud | vendor cloud |
 | **Memory is scoped to** | the agent, via an Ed25519 keypair | tenant / user | per-user tenant | the runtime | the team | the account |
-| **Reaches other orchestrators** | 11 harnesses | several | several | Letta's runtime | MCP assistants and its own CLI | no |
+| **Reaches other orchestrators** | 11 harnesses, incl. workflow and agent frameworks | several | several | Letta's runtime | 14+ coding agents and editors, via hooks, plugins and instruction files | no |
 | **Sync between instances you run** | hub/spoke federation | no | no | no | one hosted service | one hosted service |
 | **Captures in-person conversation** | no | no | no | no | yes — Ox Dot | no |
 | **Per-agent persistent character** | first-class (Soul) | optional | persona-shaped | optional | team context, not per-agent | no |
