@@ -30,7 +30,6 @@
  * is additive — existing code using the raw seam continues to work.
  */
 
-import type { Server } from "harper";
 import {
   agentContext,
   adminContext,
@@ -39,6 +38,22 @@ import {
   InProcessContextError,
   type CallContext,
 } from "./in-process.js";
+
+/**
+ * Minimal structural interface for a Harper server — only the members the
+ * facade actually touches. Structural rather than imported from "harper"
+ * because the package exports `server` as a value (not a type), and the
+ * `Server` interface in its internal typings is not part of the public API.
+ * A consumer passes the real `server` object and TypeScript structural
+ * compatibility accepts it.
+ */
+export interface FlairServer {
+  resources: {
+    get(name: string): { Resource: any } | undefined;
+    getMatch(name: string): { Resource: any } | undefined;
+    keys(): IterableIterator<string>;
+  };
+}
 
 // ─── Re-export for the "./server" entry point ────────────────────────────────
 export { agentContext, adminContext, internalContext, collectionResource, InProcessContextError };
@@ -109,7 +124,7 @@ export interface SearchResult {
  * Resolve a Flair resource class from the Harper server registry.
  * Throws with a helpful message listing available resources if not found.
  */
-function resolveResource(server: Server, name: string): any {
+function resolveResource(server: FlairServer, name: string): any {
   const entry = (server.resources as any).get?.(name) ?? server.resources.getMatch?.(name);
   if (!entry?.Resource) {
     const keys = [...(server.resources as any).keys()].sort();
@@ -138,10 +153,10 @@ function resolveResource(server: Server, name: string): any {
  */
 export class AgentHandle {
   readonly agentId: string;
-  #server: Server;
+  #server: FlairServer;
   #ctx: CallContext;
 
-  constructor(server: Server, agentId: string) {
+  constructor(server: FlairServer, agentId: string) {
     this.#server = server;
     this.agentId = agentId;
     // Throws InProcessContextError on missing/empty/blank id — see
@@ -182,11 +197,11 @@ export class AgentHandle {
 // ─── AgentMemory (per-agent memory operations) ───────────────────────────────
 
 class AgentMemory {
-  #server: Server;
+  #server: FlairServer;
   #ctx: CallContext;
   #agentId: string;
 
-  constructor(server: Server, ctx: CallContext, agentId: string) {
+  constructor(server: FlairServer, ctx: CallContext, agentId: string) {
     this.#server = server;
     this.#ctx = ctx;
     this.#agentId = agentId;
@@ -264,10 +279,10 @@ class AgentMemory {
  */
 export class AdminHandle {
   readonly agentId: string;
-  #server: Server;
+  #server: FlairServer;
   #ctx: CallContext;
 
-  constructor(server: Server, agentId: string) {
+  constructor(server: FlairServer, agentId: string) {
     this.#server = server;
     this.agentId = agentId;
     this.#ctx = adminContext(agentId);
@@ -303,11 +318,11 @@ export class AdminHandle {
 // ─── AdminMemory ─────────────────────────────────────────────────────────────
 
 class AdminMemory {
-  #server: Server;
+  #server: FlairServer;
   #ctx: CallContext;
   #agentId: string;
 
-  constructor(server: Server, ctx: CallContext, agentId: string) {
+  constructor(server: FlairServer, ctx: CallContext, agentId: string) {
     this.#server = server;
     this.#ctx = ctx;
     this.#agentId = agentId;
@@ -357,10 +372,10 @@ class AdminMemory {
  * Every call site is greppable via `git grep "flair.internal"`.
  */
 export class InternalHandle {
-  #server: Server;
+  #server: FlairServer;
   #ctx: CallContext;
 
-  constructor(server: Server) {
+  constructor(server: FlairServer) {
     this.#server = server;
     this.#ctx = internalContext();
   }
@@ -374,10 +389,10 @@ export class InternalHandle {
 // ─── InternalAgentTable ──────────────────────────────────────────────────────
 
 class InternalAgentTable {
-  #server: Server;
+  #server: FlairServer;
   #ctx: CallContext;
 
-  constructor(server: Server, ctx: CallContext) {
+  constructor(server: FlairServer, ctx: CallContext) {
     this.#server = server;
     this.#ctx = ctx;
   }
@@ -411,9 +426,9 @@ class InternalAgentTable {
  * deliberate escalation.
  */
 export class Flair {
-  #server: Server;
+  #server: FlairServer;
 
-  constructor(server: Server) {
+  constructor(server: FlairServer) {
     this.#server = server;
   }
 
