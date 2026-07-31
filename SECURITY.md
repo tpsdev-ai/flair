@@ -73,8 +73,8 @@ centralized read-scope rule), not application logic:
 it from the memory's durability: `permanent`/`persistent` → `shared`,
 `standard`/`ephemeral` → `private`. Durability itself defaults to `standard`,
 so a write naming neither is stamped `private` and is owner-only. An explicit
-`visibility` on the write always overrides the rule; the write response reports
-the value the record actually landed on.
+`visibility` on the write always overrides the rule, and the response to a
+create names the value the record actually landed on.
 
 ### Cross-Agent Access (within an org)
 

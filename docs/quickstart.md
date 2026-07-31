@@ -137,7 +137,7 @@ flair memory add --agent local --visibility shared \
   "Release tags are cut from main, never from a release branch"
 ```
 
-`--visibility` takes exactly `private` or `shared` and overrides the durability rule in both directions. The `visibility` field in the response is always the value the memory actually landed on — read it rather than assuming.
+`--visibility` takes exactly `private` or `shared` — a value it doesn't recognise is an error, not a guess — and overrides the durability rule in both directions. The `visibility` field in the response is the value the memory actually landed on, so read it rather than assuming.
 
 Once a memory is `shared`, **every** agent on this instance can read it, with no grant to set up. That is the shipped model: reads open within one instance, closed at the federation edge. Full picture in [SECURITY.md](../SECURITY.md).
 
