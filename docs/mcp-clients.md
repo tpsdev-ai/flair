@@ -203,7 +203,7 @@ Eleven tools, kept deliberately small:
 | Tool | What it does |
 |---|---|
 | `memory_search` | Semantic search across your agent's memories |
-| `memory_store` | Save a memory with type, durability, tags. Auto-dedups near-duplicates |
+| `memory_store` | Save a memory with type, durability, tags, visibility. Auto-dedups near-duplicates |
 | `memory_update` | Update an existing memory by ID — overwrite in place, or version it with `preserveHistory` |
 | `memory_get` | Fetch a specific memory by ID |
 | `memory_delete` | Remove a memory |
@@ -214,7 +214,9 @@ Eleven tools, kept deliberately small:
 | `flair_workspace_set` | Set your agent's current workspace state (ref/branch, phase, task) in the Office Space |
 | `flair_orgevent` | Publish an org-wide coordination event (claim/release/status) to the Office Space |
 
-Writes are scoped per-agent (your `FLAIR_AGENT_ID`) and enforced by Flair's server, not by client convention — you can't write as another agent. Reads are more open by design: any agent on the same Flair instance can read any other agent's non-private memories (open-within-org read; see [SECURITY.md](../SECURITY.md)). Mark a memory `visibility: private` to keep it owner-only.
+Writes are scoped per-agent (your `FLAIR_AGENT_ID`) and enforced by Flair's server, not by client convention — you can't write as another agent. Reads are more open by design: any agent on the same Flair instance can read any other agent's **non-private** memories, with no grant to set up (open-within-org read; see [SECURITY.md](../SECURITY.md)).
+
+Which memories are non-private is decided at write time, and the default is not "shared". `memory_store` defaults `durability` to `standard`, and the server derives visibility from durability — `permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private` — so **a bare `memory_store` call writes an owner-only memory that no other agent can read.** Pass `visibility: "shared"` (or `"private"`, to be explicit) to say what you mean; the tool reports the visibility the write actually landed on so an agent can confirm it rather than assume.
 
 ---
 

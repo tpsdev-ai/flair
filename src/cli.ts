@@ -13992,7 +13992,7 @@ memory.command("add [content]")
   .description("Write a new memory row for an agent (content via positional arg or --content)")
   .requiredOption("--agent <id>")
   .option("--content <text>", "memory content (alias for positional arg)")
-  .option("--durability <d>", "standard").option("--tags <csv>")
+  .option("--durability <d>", "permanent|persistent|standard|ephemeral (default standard). Also decides the default visibility when --visibility is omitted: permanent/persistent -> shared, standard/ephemeral -> private").option("--tags <csv>")
   .option("--summary <text>", "agent-set multi-sentence dense compression (3-tier chain: subject → summary → content)")
   .option("--subject <text>", "one-line title / entity this memory is about")
   .option("--derived-from <csv>", "Comma-separated source Memory IDs this memory was distilled/reflected from (sets Memory.derivedFrom; used by the `rem rapid` reflection loop)")
@@ -14008,7 +14008,21 @@ memory.command("add [content]")
     };
     if (opts.summary) body.summary = opts.summary;
     if (opts.subject) body.subject = opts.subject;
-    if (opts.visibility) body.visibility = String(opts.visibility).trim();
+    // flair#991: reject an unrecognized --visibility instead of writing it.
+    // `visibility` is a free-form String server-side and the read scope asks
+    // isPrivateVisibility() — an exact match on the literal "private" — so
+    // ANY other string, `--visibility prvate` included, persists a row the
+    // user believes is owner-only and that every agent on the instance can
+    // in fact read. A typo must never widen who can read a memory.
+    if (opts.visibility) {
+      const visibility = String(opts.visibility).trim();
+      if (visibility !== "private" && visibility !== "shared") {
+        console.error(`error: --visibility must be 'private' or 'shared' (got: ${visibility})`);
+        console.error("  omit it to use the durability-keyed default: permanent/persistent -> shared, standard/ephemeral -> private");
+        process.exit(1);
+      }
+      body.visibility = visibility;
+    }
     if (opts.derivedFrom) {
       body.derivedFrom = String(opts.derivedFrom).split(",").map((x: string) => x.trim()).filter(Boolean);
     }
@@ -14793,7 +14807,7 @@ soul.command("set")
   .requiredOption("--agent <id>")
   .requiredOption("--key <key>")
   .requiredOption("--value <value>")
-  .option("--durability <d>", "permanent")
+  .option("--durability <d>", "permanent|persistent|standard|ephemeral (default permanent — soul entries are identity, not working memory)")
   .option("--json", "Emit raw JSON response (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
     // PUT /Soul/{agentId:key} (upsert by id), matching flair-client's soul.set().

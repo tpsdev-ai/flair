@@ -274,8 +274,27 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
 }
 
 /** Build the final write response: always `written: true`, always includes
- *  `id`, and layers the dedup collision signal on top when present. Never a
- *  code path where a match suppresses these base fields. */
+ *  `id`, `visibility`, and layers the dedup collision signal on top when
+ *  present. Never a code path where a match suppresses these base fields.
+ *
+ *  ── Why `visibility` is in the write response (flair#991) ──────────────────
+ *  Visibility is the one field on a memory the caller most often does NOT
+ *  set and yet most needs to know: the durability-keyed default above stamps
+ *  `private` for a bare write and `shared` for a permanent/persistent one, so
+ *  "who can read this" is decided by a rule the writer never typed. Returning
+ *  it makes the landed value observable on EVERY write surface at once —
+ *  `flair memory add`'s printed JSON, the REST response, the native /mcp
+ *  `memory_store` result, and packages/flair-mcp's `effectiveVisibility` line
+ *  (which read this field all along and had nothing to read, so it always
+ *  rendered "(server default)").
+ *
+ *  Read from `content`, not from `base`: `content.visibility` is the value
+ *  that was actually persisted a few lines earlier, and assigning after the
+ *  `...base` spread means the persisted value wins over anything the storage
+ *  layer echoes back. Omitted (not `null`) when unset, which happens only on
+ *  the put()-over-an-existing-record path where a partial merge carried no
+ *  visibility — reporting `null` there would read as "no one but the owner",
+ *  the opposite of what an absent field means to `isPrivateVisibility()`. */
 function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | null): any {
   const base = result && typeof result === "object" && !Array.isArray(result) ? result : {};
   const response: any = {
@@ -284,6 +303,9 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
     written: true,
     deduplicated: !!dedupMatch,
   };
+  if (content.visibility !== undefined && content.visibility !== null) {
+    response.visibility = content.visibility;
+  }
   if (dedupMatch) {
     response.matchedId = dedupMatch.matchedId;
     response.matchConfidence = { cosine: dedupMatch.cosine, lexical: dedupMatch.lexical };

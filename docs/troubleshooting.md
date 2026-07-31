@@ -150,7 +150,7 @@ flair agent list
 **Possible causes:**
 1. **Hash-fallback embeddings:** Check `flair status` — if embeddings are in hash mode, semantic search won't work properly. Fix with `flair reembed`.
 2. **Content safety flags:** The memory might have been flagged. Search for it directly: `flair memory list --agent <id>`.
-3. **`visibility: private`:** Reads are open within the org by default — any agent can find any other agent's non-private memories. If the memory was written with `visibility: private`, only its author can find it; search as that agent instead.
+3. **`visibility: private`:** Only its author can find a `private` memory. This is the most common cause when one agent wrote the memory and another is searching for it, because **`private` is what a bare write lands on**: visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`), and a write with no `--durability` is `standard`. Check what the memory landed on with `flair memory list --agent <author> --json` (the table view doesn't show visibility, the JSON records do), then either search as its author, or rewrite it with `--visibility shared` so every agent on the instance can find it (no grant needed — non-private reads are open within the instance).
 4. **Dedup threshold:** If the content is very similar to an existing memory, it may have been deduplicated. Check with `flair memory list`.
 
 ### High memory usage
