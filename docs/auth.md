@@ -108,6 +108,57 @@ The protected-resource document is also served at the RFC 9728 §3.1
 path-appended URL `/.well-known/oauth-protected-resource/mcp`, which is the form
 MCP clients construct from the resource identifier.
 
+### Rate limiting
+
+The OAuth endpoints and the OAuth-guarded `/mcp` surface are rate limited. This
+is on by default; nothing needs configuring for it to apply.
+
+| Surface | Default | Window | Keyed on |
+|---------|---------|--------|----------|
+| `/OAuthToken`, `/OAuthAuthorize`, `/OAuthRevoke` (one shared budget) | 30 | 60s | Caller address |
+| `/OAuthRegister` | 5 | 300s | Caller address |
+| `/mcp` | 120 | 60s | The verified token subject |
+
+A rejected request gets `429` with a `Retry-After`, and a body that echoes
+nothing back. The counter is consumed *before* any credential is examined, so a
+`429` says nothing about the credential that came with it — a valid
+authorization code and a garbage one get byte-identical responses once a bucket
+is spent. No `RateLimit-*` headers are emitted on requests that are allowed;
+publishing a live remaining-count on a credential endpoint is a pacing aid for
+exactly the caller you don't want to help.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `FLAIR_RATE_LIMIT` | on | Set to `off` to disable rate limiting entirely. An unrecognised value leaves it **enabled**. |
+| `FLAIR_OAUTH_RATE_LIMIT` | `30` | Requests per 60s for the token/authorize/revoke budget. |
+| `FLAIR_OAUTH_REGISTER_RATE_LIMIT` | `5` | Registrations per 300s. |
+| `FLAIR_MCP_RATE_LIMIT` | `120` | `/mcp` calls per 60s per token subject. |
+| `FLAIR_TRUSTED_PROXY` | `0` | Number of trusted reverse-proxy hops in front of this instance. |
+
+A limit set to `0`, a negative number, or anything non-numeric is refused and the
+default is used, with a warning naming the variable — so a shell that expanded an
+unset variable cannot silently switch the control off.
+
+**`FLAIR_TRUSTED_PROXY` and NAT.** By default the key is the socket peer address
+and `X-Forwarded-For` is ignored completely, because that header is caller-supplied:
+an instance that honours it with no proxy in front can be bypassed by anyone
+willing to vary a header. Set `FLAIR_TRUSTED_PROXY` to the number of proxies that
+genuinely sit in front and append to `X-Forwarded-For`, and the key becomes the
+entry those hops wrote (counted from the right — never the leftmost entry, which
+the original caller controls). Keying on an address means a busy NAT shares one
+budget; the defaults leave roughly two orders of magnitude of headroom over real
+usage, and raising them is a one-variable change.
+
+**This limiter is per node.** The counter lives in the serving process. On a
+multi-node deployment the effective ceiling is the configured limit times the
+number of nodes, and the counters reset when a component reloads. That is a
+deliberate trade: a cluster-shared counter in a Harper table would make every
+counted request a durable replicated write on an authentication hot path, which
+is a worse denial-of-service shape than the one being defended against. The
+control here bounds how fast a caller can guess against 256-bit secrets, and a
+small constant multiplier does not change that. It does **not** defend against a
+distributed botnet, and it is not a capacity control.
+
 Every URL in every one of these documents derives from `FLAIR_PUBLIC_URL`,
 falling back to the loopback bind address. **Set `FLAIR_PUBLIC_URL` on any
 deployment reachable at something other than localhost** — otherwise the

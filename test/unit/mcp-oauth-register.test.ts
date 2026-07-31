@@ -40,7 +40,8 @@ mock.module("harper", () => ({
 // legitimately `await import(...)`s for real — that was the source of the
 // intermittent "35 tests failed" flake in mcp-handler.test.ts.
 
-const { registerMcpOAuthRoute, mcpRouteState } = await import("../../resources/mcp-oauth.ts");
+const { registerMcpOAuthRoute, mcpRouteState, rateLimitedMcpHandler } = await import("../../resources/mcp-oauth.ts");
+const { __resetBucketsForTest } = await import("../../resources/rate-limit.ts");
 
 const ENV = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_PUBLIC_URL"];
 function clearEnv() { for (const k of ENV) delete process.env[k]; }
@@ -110,6 +111,68 @@ describe("registerMcpOAuthRoute — flag-OFF no-op", () => {
       issuer: "https://flair.example.com",
       resource: "https://flair.example.com/mcp",
     });
+  });
+
+  it("the handler handed to withMCPAuth is the RATE-LIMITED one, not the bare handler", async () => {
+    // The wrapper has to sit INSIDE withMCPAuth so it can key on the verified
+    // token subject. If a future edit passes `handler` straight through, /mcp
+    // goes back to being unthrottled for anyone holding a valid token — with no
+    // other symptom. This asserts the composition, so that edit fails here.
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "1";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const deps = makeDeps();
+    await registerMcpOAuthRoute(deps);
+    expect(withMCPAuthCalls[0].handler).not.toBe(deps.mcpHandler);
+  });
+});
+
+describe("rateLimitedMcpHandler", () => {
+  const MCP_ENV = ["FLAIR_MCP_RATE_LIMIT", "FLAIR_RATE_LIMIT"];
+  let savedMcpEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    __resetBucketsForTest();
+    savedMcpEnv = {};
+    for (const k of MCP_ENV) { savedMcpEnv[k] = process.env[k]; delete process.env[k]; }
+  });
+
+  const restore = () => {
+    for (const k of MCP_ENV) {
+      if (savedMcpEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedMcpEnv[k];
+    }
+  };
+
+  const call = (sub: string) => ({ mcp: { sub, client_id: "cid" }, ip: "203.0.113.7" });
+
+  it("POSITIVE CONTROL: calls under the limit reach the real handler", async () => {
+    process.env.FLAIR_MCP_RATE_LIMIT = "3";
+    let reached = 0;
+    const wrapped = rateLimitedMcpHandler(async () => { reached++; return { status: 200 }; });
+    for (let i = 0; i < 3; i++) expect((await wrapped(call("s1"))).status).toBe(200);
+    expect(reached).toBe(3);
+    restore();
+  });
+
+  it("over the limit it returns 429 and the real handler is NEVER invoked", async () => {
+    process.env.FLAIR_MCP_RATE_LIMIT = "2";
+    let reached = 0;
+    const wrapped = rateLimitedMcpHandler(async () => { reached++; return { status: 200 }; });
+    for (let i = 0; i < 2; i++) await wrapped(call("s1"));
+    const res = await wrapped(call("s1"));
+    expect(res.status).toBe(429);
+    expect(reached).toBe(2); // the tool surface was not touched by the rejected call
+    restore();
+  });
+
+  it("a different verified subject is unaffected by another's exhausted budget", async () => {
+    process.env.FLAIR_MCP_RATE_LIMIT = "2";
+    const wrapped = rateLimitedMcpHandler(async () => ({ status: 200 }));
+    for (let i = 0; i < 3; i++) await wrapped(call("s1"));
+    expect((await wrapped(call("s1"))).status).toBe(429);
+    expect((await wrapped(call("s2"))).status).toBe(200);
+    restore();
   });
 });
 
