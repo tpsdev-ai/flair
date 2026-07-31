@@ -1,5 +1,6 @@
 import { Resource } from "harper";
-import { layout, htmlResponse } from "./admin-layout.js";
+import { layout, htmlResponse, esc } from "./admin-layout.js";
+import { mcpRouteState } from "./mcp-oauth.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -103,6 +104,24 @@ export class AdminInstance extends Resource {
     const request = ctx.request ?? ctx;
     const publicUrl = resolvePublicUrl(request);
 
+    // The MCP row (flair#1001). Every other row in the Endpoints table is a
+    // route this component always registers; `/mcp` is the one that may not be
+    // there — it is default-OFF, and even with FLAIR_MCP_OAUTH on it does not
+    // mount without an issuer. This page used to print the URL unconditionally,
+    // so a default install advertised an endpoint that 404s.
+    //
+    // The state comes from the router itself (mcp-oauth.ts records the outcome
+    // of its own mount decision) rather than from a second read of the flag
+    // here — a second read is a second source of truth, which is this bug one
+    // level up. The row is kept, not dropped: a missing row tells an operator
+    // nothing, while a named status and the variable that changes it is
+    // actionable and still teaches them the surface exists.
+    const mcp = mcpRouteState();
+    const mcpCell = mcp.mounted
+      ? `<code>${publicUrl}/mcp</code>`
+      : `<span class="badge badge-gray">${esc(mcp.status)}</span>` +
+        `<div style="margin-top:4px;color:#666;font-size:0.9em">${esc(mcp.reason)}</div>`;
+
     // Try to read instance public key
     let publicKey = "—";
     const keyDir = join(homedir(), ".flair", "keys");
@@ -144,7 +163,7 @@ export class AdminInstance extends Resource {
         <h3>Endpoints</h3>
         <table style="box-shadow:none">
           <tr><td>API</td><td><code>${publicUrl}/</code></td></tr>
-          <tr><td>MCP</td><td><code>${publicUrl}/mcp</code></td></tr>
+          <tr><td>MCP</td><td>${mcpCell}</td></tr>
           <tr><td>OAuth Discovery</td><td><code>${publicUrl}/OAuthMetadata</code></td></tr>
           <tr><td>OAuth Authorize</td><td><code>${publicUrl}/OAuthAuthorize</code></td></tr>
           <tr><td>OAuth Token</td><td><code>${publicUrl}/OAuthToken</code></td></tr>
