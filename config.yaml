@@ -6,6 +6,40 @@ rest: true
 # http:
 #   port: 19926
 
+# Harper does not read a component's `.env` implicitly — it only loads env
+# files a component ASKS for, via this plugin. Without this block a `.env`
+# sitting next to config.yaml is inert: the file is present and its values
+# never reach `process.env`. That is exactly what a deployed instance hit —
+# `FLAIR_PUBLIC_URL` was set in the deployed component's `.env` and OAuth
+# discovery kept advertising a loopback issuer (flair#1005, #1000).
+#
+# MUST STAY FIRST. Config keys are iterated in file order by Harper's
+# component loader, and each plugin's initial entry load is awaited before
+# the next key is processed — so declaring this above `jsResource` is what
+# guarantees `process.env` is populated before `dist/resources/*.js` are
+# imported. Most consumers read `process.env` per request and would not care
+# (resources/OAuth.ts, resources/AdminInstance.ts, resources/XAA.ts,
+# resources/a2a-url.ts), but `resources/mcp-oauth.ts` decides at MODULE LOAD
+# whether to mount `/mcp`; move this below `jsResource` and that decision is
+# made against an env that has not been loaded yet.
+#
+# No `.env` is required, which is the case for essentially every local
+# install: when the glob matches nothing the plugin never fires and emits
+# nothing. Measured — a boot log with this block and no `.env` differs from
+# one without the block only in the PID and in non-deterministic table-init
+# ordering. (A MALFORMED declaration is loud, not silent: a pattern
+# containing '..' produced both an `Ignoring invalid loadEnv files pattern`
+# warning and a `Could not load component 'loadEnv'` error, which is the
+# positive control for that silence.)
+#
+# Application variables only. Harper composes its OWN configuration before
+# component `.env` files load, so Harper-level settings cannot be set this
+# way; `HARPER_CONFIG` / `HARPER_DEFAULT_CONFIG` / `HARPER_SET_CONFIG` are
+# refused at the injection point and warned about (harper#1513). Those
+# belong in the process environment or harper-config.yaml.
+loadEnv:
+  files: '.env'
+
 graphqlSchema:
   files: schemas/*.graphql
 
