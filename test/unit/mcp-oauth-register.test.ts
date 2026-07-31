@@ -40,7 +40,7 @@ mock.module("harper", () => ({
 // legitimately `await import(...)`s for real — that was the source of the
 // intermittent "35 tests failed" flake in mcp-handler.test.ts.
 
-const { registerMcpOAuthRoute } = await import("../../resources/mcp-oauth.ts");
+const { registerMcpOAuthRoute, mcpRouteState } = await import("../../resources/mcp-oauth.ts");
 
 const ENV = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_PUBLIC_URL"];
 function clearEnv() { for (const k of ENV) delete process.env[k]; }
@@ -110,5 +110,57 @@ describe("registerMcpOAuthRoute — flag-OFF no-op", () => {
       issuer: "https://flair.example.com",
       resource: "https://flair.example.com/mcp",
     });
+  });
+});
+
+/**
+ * flair#1001 — the router publishes what it decided, so consumers that describe
+ * the surface (the admin Endpoints table) never have to re-read the flag and
+ * cannot disagree with the routing decision. These assertions pin the recorded
+ * state to the same branch that produced the `mounted` return value.
+ */
+describe("mcpRouteState — the router's own record of the mount decision", () => {
+  it("flag OFF → not mounted, and the status names the flag that would enable it", async () => {
+    clearEnv();
+    await registerMcpOAuthRoute(makeDeps());
+    const state = mcpRouteState();
+    expect(state.mounted).toBe(false);
+    expect((state as any).status).toBe("Not enabled");
+    expect((state as any).reason).toContain("FLAIR_MCP_OAUTH");
+  });
+
+  it("flag ON but no issuer → still not mounted, and the reason names the issuer variable", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "1";
+    await registerMcpOAuthRoute(makeDeps());
+    const state = mcpRouteState();
+    // The flag alone is not enough — this is why a consumer re-reading
+    // FLAIR_MCP_OAUTH would still advertise a /mcp that 404s.
+    expect(state.mounted).toBe(false);
+    expect((state as any).reason).toContain("FLAIR_MCP_ISSUER");
+  });
+
+  it("flag ON + issuer → mounted, matching the route that was actually registered", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "1";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    await registerMcpOAuthRoute(makeDeps());
+    expect(mcpRouteState().mounted).toBe(true);
+    expect(httpCalls[0].options).toEqual({ urlPath: "/mcp" });
+  });
+
+  it("the recorded state always agrees with the returned mounted value", async () => {
+    for (const env of [
+      {},
+      { FLAIR_MCP_OAUTH: "1" },
+      { FLAIR_MCP_OAUTH: "1", FLAIR_MCP_ISSUER: "https://flair.example.com" },
+      { FLAIR_MCP_OAUTH: "off", FLAIR_MCP_ISSUER: "https://flair.example.com" },
+    ] as Array<Record<string, string>>) {
+      clearEnv();
+      Object.assign(process.env, env);
+      const mounted = await registerMcpOAuthRoute(makeDeps());
+      expect(mcpRouteState().mounted).toBe(mounted);
+    }
+    clearEnv();
   });
 });
