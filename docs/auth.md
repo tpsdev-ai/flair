@@ -62,22 +62,64 @@ Flair includes a built-in OAuth 2.1 authorization server for client integrations
 
 ### Dynamic Client Registration
 
-Clients register automatically on first connection:
+**Registration is off by default.** `POST /OAuthRegister` answers `403
+access_denied`, and the discovery documents do not advertise a
+`registration_endpoint`. Nothing needs doing to be in this state — it is what a
+fresh install does, and it is what an internet-reachable instance should stay in
+unless there is a reason otherwise.
+
+`OAuthClient` rows are durable and replicated, and every one of them is a
+`client_id` that `/OAuthAuthorize` will subsequently honour, so an open
+registration endpoint on a public instance means anyone can fill that table.
+
+To turn registration on, set an initial access token (RFC 7591 §3.1):
+
+```sh
+FLAIR_OAUTH_DCR_TOKEN=$(openssl rand -base64 32)
+```
+
+That one variable is the whole interface. There is no separate "enable" switch,
+which is the point: enabling registration and supplying the credential that
+guards it are the same act, so "on, and open to the internet" is not a state you
+can reach by forgetting a setting — it does not exist in the configuration. A
+token shorter than 32 characters is refused and registration stays **off**, with
+a warning naming the variable; a weak shared secret on an unauthenticated public
+endpoint is nearer to open than to closed.
+
+Keep the token in the process environment. Do not put it in a component `.env`
+for `flair deploy` to ship — a deploy payload is stored in Harper's deployment
+record and replicated to every node. `flair deploy` refuses to generate one
+containing this key, and warns if your own file assigns it.
+
+Clients then present it in a request header:
 
 ```
 POST /OAuthRegister
 Content-Type: application/json
+X-Flair-Initial-Access-Token: <the token>
 
 {
   "client_name": "Claude Desktop",
-  "redirect_uris": ["http://localhost:3000/callback"],
+  "redirect_uris": ["https://claude.com/api/mcp/auth_callback"],
   "grant_types": ["authorization_code"],
   "response_types": ["code"],
   "token_endpoint_auth_method": "none"
 }
 ```
 
-Returns `client_id` and `client_secret` (if applicable).
+Returns `client_id`. A missing or wrong token answers `401 invalid_token`.
+
+**Why a header and not `Authorization: Bearer`,** which is what RFC 7591 §3.1
+specifies: Harper's own auth layer claims every `Authorization: Bearer …` header
+and validates it as a Harper operation token, so a Bearer-carrying request to
+`/OAuthRegister` is answered `401 {"error":"invalid token"}` before any Flair
+code runs. Measured, not assumed — no header returns 200, `Bearer <anything>`
+returns 401, a custom header returns 200.
+
+Registering clients ahead of time and leaving this off is the better shape where
+it is workable — the surface exists to serve one known client shape, and the
+`@harperfast/oauth` authorization server used by the `/mcp` surface takes CIMD
+rather than registration.
 
 ### Authorization Code Flow with PKCE
 
@@ -93,7 +135,7 @@ Standard OAuth 2.1 authorization code flow:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/OAuthRegister` | POST | Dynamic client registration |
+| `/OAuthRegister` | POST | Dynamic client registration — off unless `FLAIR_OAUTH_DCR_TOKEN` is set |
 | `/OAuthAuthorize` | GET/POST | Authorization endpoint |
 | `/OAuthToken` | POST | Token endpoint |
 | `/.well-known/oauth-authorization-server` | GET | Authorization server metadata (RFC 8414) |

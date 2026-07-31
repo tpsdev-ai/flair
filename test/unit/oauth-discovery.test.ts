@@ -13,7 +13,7 @@
  * clients or silently doesn't.
  */
 
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
   AS_METADATA_PATH,
   PRM_PATH,
@@ -69,8 +69,31 @@ describe("buildAuthorizationServerMetadata (RFC 8414)", () => {
     expect(doc.issuer).toBe(BASE);
     expect(doc.authorization_endpoint).toBe(`${BASE}/OAuthAuthorize`);
     expect(doc.token_endpoint).toBe(`${BASE}/OAuthToken`);
-    expect(doc.registration_endpoint).toBe(`${BASE}/OAuthRegister`);
     expect(doc.revocation_endpoint).toBe(`${BASE}/OAuthRevoke`);
+  });
+
+  // `registration_endpoint` is now conditional on dynamic client registration
+  // actually being enabled (resources/dcr-gate.ts). RFC 8414 §2 makes the field
+  // optional; advertising an endpoint that refuses every request would send a
+  // client down a path with no recovery. These two cases are the pair — the
+  // absent case alone would pass against a build that never emits the field.
+  describe("registration_endpoint tracks whether registration is enabled", () => {
+    let saved: string | undefined;
+    beforeEach(() => { saved = process.env.FLAIR_OAUTH_DCR_TOKEN; });
+    afterEach(() => {
+      if (saved === undefined) delete process.env.FLAIR_OAUTH_DCR_TOKEN;
+      else process.env.FLAIR_OAUTH_DCR_TOKEN = saved;
+    });
+
+    test("omitted when registration is off (the default)", () => {
+      delete process.env.FLAIR_OAUTH_DCR_TOKEN;
+      expect(buildAuthorizationServerMetadata(BASE).registration_endpoint).toBeUndefined();
+    });
+
+    test("POSITIVE CONTROL: present when an operator has opted in", () => {
+      process.env.FLAIR_OAUTH_DCR_TOKEN = "z".repeat(48);
+      expect(buildAuthorizationServerMetadata(BASE).registration_endpoint).toBe(`${BASE}/OAuthRegister`);
+    });
   });
 
   test("no endpoint can point somewhere other than the issuer origin", () => {

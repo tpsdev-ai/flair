@@ -60,6 +60,12 @@ export const NEVER_GENERATED_SECRET_KEYS = [
   "FABRIC_PASSWORD",
   "FLAIR_CLUSTER_ADMIN_PASS",
   "CLI_TARGET_PASSWORD",
+  // The DCR initial access token (resources/dcr-gate.ts). It is a bearer
+  // credential for an unauthenticated public endpoint, so it belongs in the
+  // process environment, never in a deploy payload — that payload is ingested
+  // into an hdb_deployment row and replicated to every node, per the argument
+  // at the top of this file.
+  "FLAIR_OAUTH_DCR_TOKEN",
 ] as const;
 
 /**

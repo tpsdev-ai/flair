@@ -97,8 +97,12 @@ describe("OAuth discovery at the well-known paths (real Harper)", () => {
       expect(doc.issuer).toBe(base);
       expect(doc.token_endpoint).toBe(`${base}/OAuthToken`);
       expect(doc.authorization_endpoint).toBe(`${base}/OAuthAuthorize`);
-      expect(doc.registration_endpoint).toBe(`${base}/OAuthRegister`);
       expect(doc.revocation_endpoint).toBe(`${base}/OAuthRevoke`);
+      // No `registration_endpoint`: dynamic client registration is off unless an
+      // operator sets FLAIR_OAUTH_DCR_TOKEN, and this instance has not. The
+      // enabled case is covered in test/integration/oauth-dcr-e2e.test.ts, which
+      // spawns an instance that has.
+      expect(doc.registration_endpoint).toBeUndefined();
       expect(doc.code_challenge_methods_supported).toEqual(["S256"]);
     }, 30_000);
 
