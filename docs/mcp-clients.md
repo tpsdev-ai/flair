@@ -109,7 +109,7 @@ Or wire it by hand — add a `SessionStart` hook to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "FLAIR_AGENT_ID=me npx -y @tpsdev-ai/flair-mcp flair-session-start"
+            "command": "sh -c 'out=$(FLAIR_AGENT_ID=me npx -y @tpsdev-ai/flair-mcp flair-session-start 2>/dev/null) && printf %s \"$out\" || true'"
           }
         ]
       }
@@ -124,6 +124,21 @@ what the tooling recognises: `flair hook status` matches the exact unpinned
 command, so a hand-pinned hook reports `wired: false` there (while `flair
 doctor` still sees it). Pinning this line is therefore not yet supported —
 prefer `flair hook install`.
+
+The `sh -c ... || true` wrapper is not decoration. The invocation resolves a
+package binary through whatever Node runtime your shell exposes, and under a
+Node version manager globally installed packages are per-runtime-version — so
+a routine, unrelated runtime upgrade can orphan it. Without the wrapper the
+hook then fails on *every* session, forever, with an error that names neither
+Flair nor a remedy, and it keeps doing so after Flair itself is uninstalled.
+The wrapper makes any failure to resolve or execute produce no output and exit
+0: ambient memory is a decoration on your session and must never be louder
+than the thing it decorates. Success is unaffected — the hook's output is
+passed through byte-for-byte.
+
+If you already have the older, unwrapped command, `flair doctor` reports it and
+`flair doctor --fix` rewrites it in place (same agent, same instance);
+`flair hook status` shows the same under **On failure**.
 
 The hook reads Claude Code's SessionStart
 payload on stdin, calls Flair's `bootstrap` (soul + relevant memories +
@@ -141,7 +156,14 @@ It honors the same env as the MCP server (`FLAIR_AGENT_ID`, `FLAIR_URL`,
 error, or a hung daemon (past the timeout) → the hook prints `{}` and exits 0.
 Claude Code treats that as "no context to add" and starts normally. The hook
 can never block or break session startup. The injected context is clamped to
-≤10,000 characters to keep the session-start payload small.
+≤10,000 characters to keep the session-start payload small. And if the command
+cannot resolve at all — so none of that code ever runs — the wrapper above
+still yields no output and exit 0.
+
+`flair doctor` verifies the second half by actually running the registered
+command with `FLAIR_HOOK_PROBE=1`, which makes the hook print its inert output
+and exit immediately: no bootstrap, no presence write, no network. Reaching it
+is the whole answer.
 
 ### Gemini CLI
 
