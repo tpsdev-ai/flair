@@ -682,6 +682,27 @@ export async function selfVerifyMcpMetadata(
     };
   }
 
+  // flair#1000: this path is now served by flair ITSELF when FLAIR_MCP_OAUTH is
+  // off, so a 200 no longer proves the plugin answered. flair's own document
+  // (resources/oauth-discovery.ts) is identifiable by its token endpoint —
+  // `<issuer>/OAuthToken`, where the plugin's is `<issuer>/oauth/mcp/token`.
+  // Name the real cause here: before this existed the operator got a 404 whose
+  // message already asked the right question, and falling through to the CIMD
+  // branch would send them to a plugin knob that is not the problem.
+  if (body.token_endpoint === `${normalizedIssuer}/OAuthToken`) {
+    return {
+      ok: false,
+      issuer: body.issuer,
+      registrationEndpoint: body.registration_endpoint,
+      tokenEndpoint: body.token_endpoint,
+      detail:
+        `${url} answered with flair's OWN OAuth 2.1 authorization server, not the MCP one ` +
+        `(token_endpoint=${body.token_endpoint}) — the /mcp surface is NOT enabled on that instance. ` +
+        `Is FLAIR_MCP_OAUTH actually set on the restarted instance, and is the '@harperfast/oauth' ` +
+        `component declared in its config.yaml?`,
+    };
+  }
+
   // flair#756: confirm CIMD is actually advertised (node_modules/@harperfast/
   // oauth/dist/lib/mcp/wellKnown.js:129-165's buildAuthorizationServerMetadata:
   // `client_id_metadata_document_supported` is set only when

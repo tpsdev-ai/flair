@@ -96,7 +96,23 @@ Standard OAuth 2.1 authorization code flow:
 | `/OAuthRegister` | POST | Dynamic client registration |
 | `/OAuthAuthorize` | GET/POST | Authorization endpoint |
 | `/OAuthToken` | POST | Token endpoint |
-| `/.well-known/oauth-authorization-server` | GET | Server metadata |
+| `/.well-known/oauth-authorization-server` | GET | Authorization server metadata (RFC 8414) |
+| `/.well-known/oauth-protected-resource` | GET | Protected resource metadata (RFC 9728) |
+| `/OAuthMetadata` | GET | Alias of `/.well-known/oauth-authorization-server` |
+
+Both well-known documents are public — RFC 8414 §3 and RFC 9728 §3 require them
+to be retrievable without authentication — and are served with
+`Access-Control-Allow-Origin: *` so browser-based MCP clients can read them.
+
+The protected-resource document is also served at the RFC 9728 §3.1
+path-appended URL `/.well-known/oauth-protected-resource/mcp`, which is the form
+MCP clients construct from the resource identifier.
+
+Every URL in every one of these documents derives from `FLAIR_PUBLIC_URL`,
+falling back to the loopback bind address. **Set `FLAIR_PUBLIC_URL` on any
+deployment reachable at something other than localhost** — otherwise the
+documents are well-formed and every URL in them points at the *client's* own
+localhost. See [deploying-on-fabric.md](deploying-on-fabric.md).
 
 ## XAA (Enterprise-Managed Authorization)
 

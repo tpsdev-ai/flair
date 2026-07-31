@@ -473,6 +473,31 @@ describe("selfVerifyMcpMetadata", () => {
     expect(result.ok).toBe(false);
     expect(result.cimdSupported).toBe(false);
   });
+
+  test("flair#1000: flair's OWN authorization-server document is named as such, not blamed on CIMD config", async () => {
+    // Since flair#1000, /.well-known/oauth-authorization-server is served by
+    // flair itself whenever FLAIR_MCP_OAUTH is off — so a 200 here no longer
+    // means the plugin answered. The operator's actual mistake is the flag (or
+    // the missing component declaration); sending them to
+    // clientIdMetadataDocuments.enabled would misdirect.
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          issuer: ISSUER,
+          registration_endpoint: `${ISSUER}/OAuthRegister`,
+          token_endpoint: `${ISSUER}/OAuthToken`,
+          token_endpoint_auth_methods_supported: ["none", "client_secret_basic"],
+          code_challenge_methods_supported: ["S256"],
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    const result = await selfVerifyMcpMetadata(ISSUER, { fetchImpl });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("FLAIR_MCP_OAUTH");
+    expect(result.detail).toContain("@harperfast/oauth");
+    // Must NOT blame CIMD configuration — that is the misdirection this guards.
+    expect(result.detail).not.toContain("clientIdMetadataDocuments");
+  });
 });
 
 describe("buildClaudePasteBlock", () => {
