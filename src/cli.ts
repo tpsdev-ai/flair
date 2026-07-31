@@ -12557,13 +12557,22 @@ program
         const hook = inspectSessionStartHook(homedir());
         if (hook.present) {
           if (hook.execution === "broken") {
-            console.log(`  ${render.icons.error} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)}, but its command no longer runs`);
+            // Reported in full, with the remedy — but NOT counted as an issue,
+            // so it never flips doctor's exit code on its own. This is a
+            // verification of the environment at the moment doctor runs (a
+            // cold `npx` cache, an offline machine, a slow registry), exactly
+            // like the FLAIR_URL reachability and agent-registration
+            // verifications above, which are warnings for the same reason. A
+            // fresh, correct install on a machine that simply has not fetched
+            // the adapter yet must not be told it is broken in the exit code.
+            // The unsilenced finding below IS counted: that one is a fact
+            // about the file, true regardless of the environment.
+            console.log(`  ${render.icons.warn} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)}, but its command did not run just now`);
             console.log(`     ${render.wrap(render.c.dim, hook.detail ?? "")}`);
-            console.log(`     ${render.wrap(render.c.dim, "This usually means the Node runtime changed and the globally installed")}`);
-            console.log(`     ${render.wrap(render.c.dim, "@tpsdev-ai/flair-mcp no longer resolves for it.")}`);
+            console.log(`     ${render.wrap(render.c.dim, "If this persists, the Node runtime probably changed and the globally")}`);
+            console.log(`     ${render.wrap(render.c.dim, "installed @tpsdev-ai/flair-mcp no longer resolves for it.")}`);
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} npm install -g @tpsdev-ai/flair-mcp ${render.wrap(render.c.dim, "(reinstall for the runtime you use now)")}`);
             console.log(`     ${render.wrap(render.c.dim, "Or, if you no longer want ambient memory:")} flair hook uninstall`);
-            issues++;
           } else if (hook.execution === "unknown") {
             console.log(`  ${render.icons.warn} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)}, but could not be verified ${render.wrap(render.c.dim, `(${hook.detail ?? "no detail"})`)}`);
           } else if (!hook.ours) {
