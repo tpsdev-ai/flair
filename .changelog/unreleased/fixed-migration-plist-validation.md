@@ -1,1 +1,0 @@
-- **Legacy launchd plist migration now validates the plist before rewriting it.** If the legacy plist does not contain the expected Label key, migration refuses with a named remedy instead of silently propagating a malformed document. The Label replacement also uses a `$`-safe function replacer, closing a latent bug that could fire if the label format ever changes.
