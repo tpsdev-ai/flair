@@ -82,9 +82,17 @@ That one variable is the whole interface. There is no separate "enable" switch,
 which is the point: enabling registration and supplying the credential that
 guards it are the same act, so "on, and open to the internet" is not a state you
 can reach by forgetting a setting — it does not exist in the configuration. A
-token shorter than 32 characters is refused and registration stays **off**, with
+token outside 32–508 characters is refused and registration stays **off**, with
 a warning naming the variable; a weak shared secret on an unauthenticated public
 endpoint is nearer to open than to closed.
+
+Registration is also rate limited, and the limiter runs **in front of** this
+gate: refused attempts spend budget too, so a flood against a closed endpoint is
+answered `429`, not `403`. That is deliberate — the limiter is the cheaper check
+and the one bounding volume — but it means a client retrying hard against an
+instance that has not opted in sees `429` and should read it as "stop", not as a
+different answer to the same question. The budget is 5 per five minutes by
+default (`FLAIR_OAUTH_REGISTER_RATE_LIMIT`).
 
 Keep the token in the process environment. Do not put it in a component `.env`
 for `flair deploy` to ship — a deploy payload is stored in Harper's deployment

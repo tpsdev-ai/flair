@@ -17,6 +17,11 @@ import { randomUUID } from "node:crypto";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
 
 const ALLOWED_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
+// Registration is gated (see resources/dcr-gate.ts); this instance opts in so
+// the registration path is reachable and its budget can actually be measured.
+// Generated, not a literal, so nothing token-shaped is committed to the repo.
+const DCR_TOKEN = randomUUID() + randomUUID();
+const DCR_HEADER = "x-flair-initial-access-token";
 
 // Small enough to exhaust in a handful of requests. The window is 60s, so once a
 // bucket is spent it STAYS spent for the rest of the file — the cases below are
@@ -53,13 +58,20 @@ const validCode = `code_${randomUUID()}`;
 describe("OAuth rate limiting (real Harper, real HTTP)", () => {
   beforeAll(async () => {
     // Set BEFORE the spawn — startHarper hands its own process.env to the child.
-    for (const k of ["FLAIR_OAUTH_RATE_LIMIT", "FLAIR_OAUTH_REGISTER_RATE_LIMIT", "FLAIR_RATE_LIMIT", "FLAIR_TRUSTED_PROXY"]) {
+    for (const k of ["FLAIR_OAUTH_RATE_LIMIT", "FLAIR_OAUTH_REGISTER_RATE_LIMIT", "FLAIR_RATE_LIMIT", "FLAIR_TRUSTED_PROXY", "FLAIR_OAUTH_DCR_TOKEN"]) {
       savedEnv[k] = process.env[k];
     }
     process.env.FLAIR_OAUTH_RATE_LIMIT = String(OAUTH_LIMIT);
     process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = String(REGISTER_LIMIT);
     delete process.env.FLAIR_RATE_LIMIT;
     delete process.env.FLAIR_TRUSTED_PROXY;
+    // Registration is closed unless an operator opts in, so this instance opts
+    // in. Without it every registration below is refused 403 by the DCR gate,
+    // and a test asking "did registration survive the token bucket being spent"
+    // could no longer tell a SEPARATE BUCKET from a CLOSED ENDPOINT — both
+    // answer non-429. The budget has to be reachable for a claim about the
+    // budget to mean anything.
+    process.env.FLAIR_OAUTH_DCR_TOKEN = DCR_TOKEN;
 
     harper = await startHarper();
 
@@ -178,25 +190,38 @@ describe("OAuth rate limiting (real Harper, real HTTP)", () => {
   test("registration has its OWN budget — it still works while the token bucket is spent", async () => {
     const res = await fetch(`${harper.httpURL}/OAuthRegister`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", [DCR_HEADER]: DCR_TOKEN },
       body: JSON.stringify({ client_name: "separate bucket", redirect_uris: [ALLOWED_REDIRECT_URI] }),
     });
     expect(res.status).not.toBe(429);
+    // A 200 with a real client_id, not merely "not 429": the point is that the
+    // registration budget was untouched by everything spent on /OAuthToken, and
+    // only a registration that actually SUCCEEDS demonstrates that.
+    expect(res.status).toBe(200);
     expect((await res.json() as any).client_id).toStartWith("flair_cl_");
   });
 
   test("registration is limited on its own, tighter budget", async () => {
-    let sawLimit = false;
+    // Credentialled, so this floods the path that really creates rows — the
+    // expensive thing the limiter exists to bound. Flooding with refused
+    // requests would show the limiter counting, but not that it protects the
+    // write.
+    const seen: number[] = [];
     for (let i = 0; i < REGISTER_LIMIT + 2; i++) {
       const res = await fetch(`${harper.httpURL}/OAuthRegister`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", [DCR_HEADER]: DCR_TOKEN },
         body: JSON.stringify({ client_name: `flood ${i}`, redirect_uris: [ALLOWED_REDIRECT_URI] }),
       });
-      if (res.status === 429) sawLimit = true;
+      seen.push(res.status);
       await res.text();
     }
-    expect(sawLimit).toBe(true);
+    // The budget was already partly spent by the test above, so the exact index
+    // where it flips is not fixed — but the tail must be limited, and a run that
+    // never limits at all (or limits from the very first call) is a failure.
+    expect(seen).toContain(429);
+    expect(seen.at(-1)).toBe(429);
+    expect(seen[0]).not.toBe(429);
   });
 
   test("UNTHROTTLED PATHS ARE UNTOUCHED: /Health still answers with both OAuth buckets spent", async () => {

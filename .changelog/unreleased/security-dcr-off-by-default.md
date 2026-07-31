@@ -9,7 +9,7 @@
   a discovery document that misdirects.
 
   **This changes behaviour for anyone relying on anonymous registration.** To
-  keep it, set `FLAIR_OAUTH_DCR_TOKEN` to an initial access token of at least 32
+  keep it, set `FLAIR_OAUTH_DCR_TOKEN` to an initial access token of 32 to 508
   characters (RFC 7591 §3.1) and have clients present it in an
   `X-Flair-Initial-Access-Token` header. Registering clients ahead of time and
   leaving registration off is the better shape where it is workable.
@@ -17,8 +17,12 @@
   That one variable is the whole interface: there is no separate enable switch,
   so enabling registration and supplying the credential that guards it are the
   same act, and "on, and open to the internet" is not a state reachable by
-  forgetting a setting. A token shorter than the minimum leaves registration
+  forgetting a setting. A token outside the accepted length leaves registration
   **off** rather than enabling it weakly, and says so by variable name.
+
+  Note that registration rate limiting runs in front of this gate, so refused
+  attempts spend budget and a flood against a closed endpoint is answered `429`
+  rather than `403`.
 
   The token belongs in the process environment. `flair deploy` will not generate
   a component `.env` containing it — a deploy payload is stored in Harper's
