@@ -247,7 +247,9 @@ export function buildRecoveryLines(snapshotDir?: string): string[] {
   return lines;
 }
 
-/** Read and sort snapshot files (.tar.gz) by mtime, newest first. */
+/** Read snapshot files (.tar.gz), newest first. Lexical sort = chronological, because the
+    filename carries an ISO 8601 timestamp (see upgradeSnapshotFileName). If that format ever
+    changes, this sort must be revisited. */
 function readSnapshotFiles(dir: string): Array<{ name: string; path: string }> {
   if (!existsSync(dir)) return [];
   try {
