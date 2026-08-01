@@ -154,4 +154,39 @@ describe("checkEngineVersionBackwards", () => {
     mkdirSync(join(tmpRoot, ENGINE_VERSION_STAMP), { recursive: true });
     expect(checkEngineVersionBackwards(tmpRoot, "5.1.22")).toBeNull();
   });
+
+  // ── flair#1047: pre-release versions must refuse, not allow ────────────
+  // Number("0-rc1") is NaN, and NaN < x / NaN > x are both false, so a
+  // pre-release segment on either side would fall through every branch and
+  // return ALLOW. That is a false ALLOW — unsafe.
+
+  it("refuses when the stamp contains a pre-release segment (e.g. 5.2.0-beta.4)", () => {
+    writeEngineVersionStamp(tmpRoot, "5.2.0-beta.4");
+    const err = checkEngineVersionBackwards(tmpRoot, "5.1.22");
+    expect(err).not.toBeNull();
+    expect(err!).toContain("5.2.0-beta.4");
+    expect(err!).toContain("5.1.22");
+  });
+
+  it("refuses when the running version contains a pre-release segment (e.g. 5.2.0-rc1)", () => {
+    writeEngineVersionStamp(tmpRoot, "5.2.1");
+    const err = checkEngineVersionBackwards(tmpRoot, "5.2.0-rc1");
+    expect(err).not.toBeNull();
+    expect(err!).toContain("5.2.1");
+    expect(err!).toContain("5.2.0-rc1");
+  });
+
+  it("refuses when both versions contain pre-release segments", () => {
+    writeEngineVersionStamp(tmpRoot, "5.2.0-beta.4");
+    const err = checkEngineVersionBackwards(tmpRoot, "5.2.0-rc1");
+    expect(err).not.toBeNull();
+  });
+
+  it("refuses when the stamp has a pre-release and running is a plain release (stamp 5.2.0-rc1 vs running 5.2.0)", () => {
+    // This is the exact scenario flint reproduced: stamp 5.2.1, running 5.2.0-rc1
+    // returned ALLOW because Number("0-rc1") is NaN.
+    writeEngineVersionStamp(tmpRoot, "5.2.1");
+    const err = checkEngineVersionBackwards(tmpRoot, "5.2.0-rc1");
+    expect(err).not.toBeNull();
+  });
 });

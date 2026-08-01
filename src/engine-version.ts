@@ -95,8 +95,31 @@ export function checkEngineVersionBackwards(
   // semver strings. A full semver library would handle pre-release tags
   // correctly, but the failure mode of a naive compare (treating "5.2.0-rc1"
   // as newer than "5.2.0") is a false REFUSAL — safe direction.
+  //
+  // However, Number("0-rc1") is NaN, and NaN < x / NaN > x are both false,
+  // so a pre-release segment on EITHER side would fall through every branch
+  // and return ALLOW. That is a false ALLOW — unsafe. An unparseable segment
+  // on either side must refuse.
   const stampParts = stamp.split(".").map(Number);
   const runningParts = runningVersion.split(".").map(Number);
+  if (stampParts.some(isNaN) || runningParts.some(isNaN)) {
+    return [
+      `This Flair install is running Harper ${runningVersion}, but the data directory at`,
+      `  ${dataDir}`,
+      `was last written by Harper ${stamp} — a newer engine version.`,
+      ``,
+      `An older Harper cannot safely read a store written by a newer one.`,
+      `The data may appear intact but can be silently unreadable.`,
+      ``,
+      `To recover:`,
+      `  1. Reinstall the newer version:  npm install -g @tpsdev-ai/flair@latest`,
+      `  2. Or restore from a pre-upgrade snapshot:`,
+      `     flair snapshot restore ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz`,
+      ``,
+      `This check only helps from the release that ships it onward — it cannot`,
+      `rescue a downgrade to a build that predates the stamp.`,
+    ].join("\n");
+  }
   const len = Math.max(stampParts.length, runningParts.length);
   for (let i = 0; i < len; i++) {
     const s = stampParts[i] ?? 0;

@@ -10507,6 +10507,7 @@ program
     // and prints what is being given up.
     const flairIsUpgrading = npmUpgrades.some((u) => u.pkg === "@tpsdev-ai/flair");
     const hasDataDir = existsSync(upgradeDataDir);
+    const flairFinding = findings.find((f) => f.name === "@tpsdev-ai/flair");
 
     // Determine whether the engine (Harper) version is changing.
     let engineVersionChanging = false;
@@ -10517,7 +10518,15 @@ program
       const targetFlairVersion = flairFinding?.latest;
       if (targetFlairVersion && currentEngineVersion) {
         targetEngineVersion = await fetchDeclaredHarperVersion(targetFlairVersion);
-        engineVersionChanging = targetEngineVersion !== null && targetEngineVersion !== currentEngineVersion;
+        if (targetEngineVersion === null) {
+          // Registry lookup failed — cannot determine the target Harper
+          // version. Assume it might change (safe default) and print why.
+          engineVersionChanging = true;
+          console.log(render.wrap(render.c.dim,
+            `Could not determine the target Harper version from the npm registry — forcing a pre-upgrade snapshot as a precaution.`));
+        } else {
+          engineVersionChanging = targetEngineVersion !== currentEngineVersion;
+        }
       } else {
         // Cannot determine — assume it might change (safe default).
         engineVersionChanging = true;
@@ -10604,7 +10613,6 @@ program
     // --restart is kept as a deprecated no-op for old muscle memory.
     // Upgrade = install → restart → verify → (rollback on failure), one
     // transaction — never report success on a broken restart.
-    const flairFinding = findings.find((f) => f.name === "@tpsdev-ai/flair");
     const previousFlairVersion = flairFinding?.installed ?? null;
     const expectedFlairVersion =
       flairFinding?.status === "outdated" && !flairInstallFailed
