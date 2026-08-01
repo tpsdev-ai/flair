@@ -47,6 +47,7 @@ function makeDeps() {
     server: { http: (_h: any, _o: any) => {} },
     loadWithMCPAuth: async () => (handler: any, _options: any) => handler,
     mcpHandler: () => ({ status: 200 }),
+    skipComponentGuard: true,
   };
 }
 
