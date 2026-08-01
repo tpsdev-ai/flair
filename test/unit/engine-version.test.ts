@@ -235,7 +235,7 @@ describe("buildRecoveryLines", () => {
     const fname = "flair-data-20260801T220000Z.tar.gz";
     writeFileSync(join(snapshotDir, fname), "dummy", "utf-8");
 
-    const lines = buildRecoveryLines(tmpRoot, snapshotDir);
+    const lines = buildRecoveryLines(snapshotDir);
     const msg = lines.join("\n");
 
     expect(msg).toContain(`flair snapshot restore ${join(snapshotDir, fname)}`);
@@ -247,7 +247,7 @@ describe("buildRecoveryLines", () => {
     writeFileSync(join(snapshotDir, "flair-data-20260801T100000Z.tar.gz"), "old", "utf-8");
     writeFileSync(join(snapshotDir, "flair-data-20260801T220000Z.tar.gz"), "new", "utf-8");
 
-    const lines = buildRecoveryLines(tmpRoot, snapshotDir);
+    const lines = buildRecoveryLines(snapshotDir);
     const msg = lines.join("\n");
 
     // Newest should appear
@@ -259,7 +259,7 @@ describe("buildRecoveryLines", () => {
   });
 
   it("with no snapshots: no 'snapshot restore' line anywhere", () => {
-    const lines = buildRecoveryLines(tmpRoot, snapshotDir);
+    const lines = buildRecoveryLines(snapshotDir);
     const msg = lines.join("\n");
 
     expect(msg).not.toContain("snapshot restore");

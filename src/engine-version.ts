@@ -18,11 +18,14 @@
 // the engine cannot boot, we still need to read it.
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 
 /** Filename of the engine-version stamp inside the data directory. */
 export const ENGINE_VERSION_STAMP = "engine-version.txt";
+
+/** Root directory for pre-upgrade snapshots (~/.flair/upgrade-snapshots). */
+export const UPGRADE_SNAPSHOT_ROOT = resolve(homedir(), ".flair", "upgrade-snapshots");
 
 /** Read the Harper version installed alongside this flair package. */
 export function readInstalledHarperVersion(packageRoot: string): string | null {
@@ -102,7 +105,7 @@ export function checkEngineVersionBackwards(
       `The engine version stamp could not be compared to the running version.`,
       `An older Harper cannot safely read a store written by a newer one.`,
       ``,
-      ...buildRecoveryLines(dataDir),
+      ...buildRecoveryLines(),
     ].join("\n");
   }
   if (parsed > 0) {
@@ -115,7 +118,7 @@ export function checkEngineVersionBackwards(
       `An older Harper cannot safely read a store written by a newer one.`,
       `The data may appear intact but can be silently unreadable.`,
       ``,
-      ...buildRecoveryLines(dataDir),
+      ...buildRecoveryLines(),
     ].join("\n");
   }
   return null; // running >= stamp — allowed
@@ -200,8 +203,8 @@ function parseVersion(v: string): ParsedVersion | null {
  * Inspects the snapshot directory so the operator gets a runnable command
  * (or a clear "nothing to restore" message) instead of a literal placeholder.
  */
-export function buildRecoveryLines(dataDir: string, snapshotDir?: string): string[] {
-  const effectiveSnapshotDir = snapshotDir ?? join(homedir(), ".flair", "upgrade-snapshots");
+export function buildRecoveryLines(snapshotDir?: string): string[] {
+  const effectiveSnapshotDir = snapshotDir ?? UPGRADE_SNAPSHOT_ROOT;
   const snapshots = readSnapshotFiles(effectiveSnapshotDir);
 
   if (snapshots.length === 0) {
