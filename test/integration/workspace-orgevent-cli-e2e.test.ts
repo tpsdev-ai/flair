@@ -116,19 +116,29 @@ afterAll(async () => {
 });
 
 describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
-  // Structural sanity check FIRST: confirms the 405 this issue is about is a
-  // real, current property of a real spawned Harper (not a stale claim) —
-  // same measurement test/integration/attention-query-e2e.test.ts already
-  // made for its own fixture seeding.
-  test("sanity: a bare POST /WorkspaceState collection write still 405s on this Harper", async () => {
+  // Structural sanity check FIRST, measured against the real spawned Harper
+  // rather than asserted from memory.
+  //
+  // THIS ASSERTION CHANGED AT HARPER 5.2 AND THE OLD ONE MUST NOT BE RESTORED.
+  // Through 5.1.x a bare collection POST answered 405 "does not have a post
+  // method", and this test asserted that. HarperFast/harper#1956 (merged
+  // 2026-07-29) restored v4-style behaviour: an instance `post()` override that
+  // delegates to `super.post()` now runs on the bare collection path, so the
+  // write succeeds with 201. Harper's default bare POST still 404s — this
+  // resource is not a default, it opted in by defining post().
+  //
+  // The 405 was an implementation detail of the old routing, never a contract.
+  // What matters — that a non-admin cannot forge attribution on such a write —
+  // is a property of WorkspaceState.post()'s stampAttribution call, not of the
+  // status code, and is covered in test/unit/coordination-write-auth.test.ts
+  // and test/unit/record-type-kit.test.ts.
+  test("sanity: a bare POST /WorkspaceState collection write is accepted on this Harper (harper#1956)", async () => {
     const res = await fetch(`${harper.httpURL}/WorkspaceState`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: adminAuthHeader() },
       body: JSON.stringify({ id: "should-never-write", agentId: "nobody", ref: "x", provider: "test", timestamp: new Date().toISOString(), createdAt: new Date().toISOString() }),
     });
-    expect(res.status).toBe(405);
-    const text = await res.text();
-    expect(text).toContain("does not have a post method");
+    expect(res.status).toBe(201);
   });
 
   test("workspace set writes via PUT /WorkspaceState/{id}, round-trips readable (#679)", async () => {
