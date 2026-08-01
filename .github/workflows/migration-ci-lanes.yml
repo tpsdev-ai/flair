@@ -168,6 +168,13 @@ jobs:
           HEAD_VERSION=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
           echo "Baseline (previously published): ${BASELINE_VERSION} — HEAD (PR build): ${HEAD_VERSION}"
 
+          # Property 2 of #1016: if baseline == HEAD, the lane installed the same
+          # binary twice and proved nothing. Fail loudly rather than reporting green.
+          if [[ "$BASELINE_VERSION" == "$HEAD_VERSION" ]]; then
+            echo "::error::downgrade proof did not run: baseline and HEAD are both ${HEAD_VERSION}. This lane installed the same binary twice and proved nothing. The baseline will not yield a real delta until the baseline source is changed (property 1 of #1016)."
+            exit 1
+          fi
+
           # ── 2. Init baseline, then seed the corpus AS the reserved
           # synthetic-migration test agent via the OPS API with Basic admin
           # auth — the version-stable authenticated write channel (see

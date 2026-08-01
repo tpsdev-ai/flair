@@ -1,0 +1,1 @@
+- **Migration downgrade-and-revert lane now fails when baseline and HEAD are the same version.** Previously, between releases the lane installed `@tpsdev-ai/flair@latest` which resolved to the same version as HEAD, reporting green without exercising a genuine downgrade. The lane now detects this equality and exits with an error (#1016).
