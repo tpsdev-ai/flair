@@ -10,6 +10,7 @@ import {
   writeEngineVersionStamp,
   readEngineVersionStamp,
   checkEngineVersionBackwards,
+  buildRecoveryLines,
 } from "../../src/engine-version.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -220,3 +221,50 @@ describe("checkEngineVersionBackwards", () => {
     expect(err!).toContain("could not be compared");
   });
 });
+
+// ─── buildRecoveryLines (flair#1051) ──────────────────────────────────────────
+
+describe("buildRecoveryLines", () => {
+  let snapshotDir: string;
+  beforeEach(() => {
+    snapshotDir = join(tmpRoot, "snapshots");
+    mkdirSync(snapshotDir, { recursive: true });
+  });
+
+  it("with one snapshot: names it in a runnable restore command", () => {
+    const fname = "flair-data-20260801T220000Z.tar.gz";
+    writeFileSync(join(snapshotDir, fname), "dummy", "utf-8");
+
+    const lines = buildRecoveryLines(snapshotDir);
+    const msg = lines.join("\n");
+
+    expect(msg).toContain(`flair snapshot restore ${join(snapshotDir, fname)}`);
+    expect(msg).not.toContain("<timestamp>");
+  });
+
+  it("with multiple snapshots: names the newest and mentions 'flair snapshot list'", () => {
+    // Two snapshots — second has a later timestamp (alphabetically greater)
+    writeFileSync(join(snapshotDir, "flair-data-20260801T100000Z.tar.gz"), "old", "utf-8");
+    writeFileSync(join(snapshotDir, "flair-data-20260801T220000Z.tar.gz"), "new", "utf-8");
+
+    const lines = buildRecoveryLines(snapshotDir);
+    const msg = lines.join("\n");
+
+    // Newest should appear
+    expect(msg).toContain("flair-data-20260801T220000Z.tar.gz");
+    // Oldest should NOT appear as the restore target
+    expect(msg).not.toContain("flair-data-20260801T100000Z.tar.gz");
+    // Should mention list command
+    expect(msg).toContain("flair snapshot list");
+  });
+
+  it("with no snapshots: no 'snapshot restore' line anywhere", () => {
+    const lines = buildRecoveryLines(snapshotDir);
+    const msg = lines.join("\n");
+
+    expect(msg).not.toContain("snapshot restore");
+    expect(msg).toContain("No pre-upgrade snapshot was found");
+  });
+});
+
+

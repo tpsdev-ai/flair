@@ -43,6 +43,7 @@ import {
   fetchDeclaredHarperVersion,
   writeEngineVersionStamp,
   checkEngineVersionBackwards,
+  UPGRADE_SNAPSHOT_ROOT,
 } from "./engine-version.js";
 import { checkServerHandshake, formatHandshakeNudge, invalidateHandshakeCache } from "./version-handshake.js";
 import { probeInstance, type ProbeResult } from "./probe.js";
@@ -9716,7 +9717,8 @@ async function runFabricUpgrade(opts: any): Promise<void> {
 // standalone filesystem utility). Rejected in favor of the file-level
 // snapshot below. See docs/upgrade.md for the restore procedure this
 // produces.
-const UPGRADE_SNAPSHOT_ROOT = resolve(homedir(), ".flair", "upgrade-snapshots");
+// UPGRADE_SNAPSHOT_ROOT is defined in engine-version.ts (the module that owns the path)
+// and imported from there for all callers.
 const UPGRADE_SNAPSHOT_RETAIN = 3;
 
 function upgradeSnapshotFileName(): string {
