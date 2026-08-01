@@ -17,8 +17,9 @@
 // data directory being moved and must not require a Harper query to read — if
 // the engine cannot boot, we still need to read it.
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 /** Filename of the engine-version stamp inside the data directory. */
 export const ENGINE_VERSION_STAMP = "engine-version.txt";
@@ -101,7 +102,7 @@ export function checkEngineVersionBackwards(
       `The engine version stamp could not be compared to the running version.`,
       `An older Harper cannot safely read a store written by a newer one.`,
       ``,
-      ...RECOVERY_LINES,
+      ...buildRecoveryLines(dataDir),
     ].join("\n");
   }
   if (parsed > 0) {
@@ -114,7 +115,7 @@ export function checkEngineVersionBackwards(
       `An older Harper cannot safely read a store written by a newer one.`,
       `The data may appear intact but can be silently unreadable.`,
       ``,
-      ...RECOVERY_LINES,
+      ...buildRecoveryLines(dataDir),
     ].join("\n");
   }
   return null; // running >= stamp — allowed
@@ -194,12 +195,65 @@ function parseVersion(v: string): ParsedVersion | null {
   return { core, pre };
 }
 
-const RECOVERY_LINES = [
-  `To recover:`,
-  `  1. Reinstall the newer version:  npm install -g @tpsdev-ai/flair@latest`,
-  `  2. Or restore from a pre-upgrade snapshot:`,
-  `     flair snapshot restore ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz`,
-  ``,
-  `This check only helps from the release that ships it onward — it cannot`,
-  `rescue a downgrade to a build that predates the stamp.`,
-];
+/**
+ * Build the recovery lines for a backwards-boot refusal message.
+ * Inspects the snapshot directory so the operator gets a runnable command
+ * (or a clear "nothing to restore" message) instead of a literal placeholder.
+ */
+export function buildRecoveryLines(dataDir: string, snapshotDir?: string): string[] {
+  const effectiveSnapshotDir = snapshotDir ?? join(homedir(), ".flair", "upgrade-snapshots");
+  const snapshots = readSnapshotFiles(effectiveSnapshotDir);
+
+  if (snapshots.length === 0) {
+    return [
+      `To recover:`,
+      `  No pre-upgrade snapshot was found.`,
+      `  1. Reinstall the newer version:  npm install -g @tpsdev-ai/flair@latest`,
+      `  2. Or restore from a flair backup export (if you have one).`,
+      ``,
+      `This check only helps from the release that ships it onward — it cannot`,
+      `rescue a downgrade to a build that predates the stamp.`,
+    ];
+  }
+
+  const newest = snapshots[0];
+  const lines: string[] = [`To recover:`];
+
+  if (snapshots.length > 1) {
+    lines.push(
+      `  1. Reinstall the newer version:  npm install -g @tpsdev-ai/flair@latest`,
+      `  2. Or restore from the newest pre-upgrade snapshot:`,
+      `     flair snapshot restore ${newest.path}`,
+      ``,
+      `     (To see all snapshots:  flair snapshot list)`,
+    );
+  } else {
+    lines.push(
+      `  1. Reinstall the newer version:  npm install -g @tpsdev-ai/flair@latest`,
+      `  2. Or restore from the pre-upgrade snapshot:`,
+      `     flair snapshot restore ${newest.path}`,
+    );
+  }
+
+  lines.push(
+    ``,
+    `This check only helps from the release that ships it onward — it cannot`,
+    `rescue a downgrade to a build that predates the stamp.`,
+  );
+
+  return lines;
+}
+
+/** Read and sort snapshot files (.tar.gz) by mtime, newest first. */
+function readSnapshotFiles(dir: string): Array<{ name: string; path: string }> {
+  if (!existsSync(dir)) return [];
+  try {
+    return readdirSync(dir)
+      .filter((f) => f.startsWith("flair-data-") && f.endsWith(".tar.gz"))
+      .sort() // alphabetical = chronological (flair-data-<timestamp>.tar.gz)
+      .reverse() // newest first
+      .map((f) => ({ name: f, path: join(dir, f) }));
+  } catch {
+    return [];
+  }
+}
