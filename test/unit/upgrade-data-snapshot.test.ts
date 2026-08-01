@@ -277,6 +277,34 @@ describe("decideUpgradeSnapshotAction — opt-in gating (2026-07-08 rewrite)", (
   test("opt-in with nothing to snapshot: upgrading, --snapshot passed, no data dir yet → no-data (not an abort)", () => {
     expect(decideUpgradeSnapshotAction(true, true, false)).toBe("no-data");
   });
+
+  // ── flair#1047: engine-version-change forces snapshot ──────────────────
+
+  test("engine version changing, no opt-out, data exists → engine-version-change (forced snapshot)", () => {
+    expect(decideUpgradeSnapshotAction(true, false, true, true, false)).toBe("engine-version-change");
+  });
+
+  test("engine version changing, no opt-out, no data dir → not-upgrading (nothing to snapshot)", () => {
+    expect(decideUpgradeSnapshotAction(true, false, false, true, false)).toBe("not-upgrading");
+  });
+
+  test("engine version changing, --no-engine-snapshot opt-out, data exists → nudge (back to default)", () => {
+    expect(decideUpgradeSnapshotAction(true, false, true, true, true)).toBe("nudge");
+  });
+
+  test("engine version changing, --snapshot also passed → engine-version-change (more specific reason wins)", () => {
+    // Both triggers fire — engine-version-change is the more specific reason.
+    // The snapshot runs either way; the message just names the right cause.
+    expect(decideUpgradeSnapshotAction(true, true, true, true, false)).toBe("engine-version-change");
+  });
+
+  test("engine version NOT changing, no --snapshot → nudge (unchanged default)", () => {
+    expect(decideUpgradeSnapshotAction(true, false, true, false, false)).toBe("nudge");
+  });
+
+  test("engine version changing, not upgrading flair → not-upgrading (engine change irrelevant)", () => {
+    expect(decideUpgradeSnapshotAction(false, false, true, true, false)).toBe("not-upgrading");
+  });
 });
 
 describe("UPGRADE_SNAPSHOT_NUDGE_LINES — the opt-out recommendation text", () => {
