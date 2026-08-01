@@ -174,7 +174,8 @@ jobs:
           }
           BASELINE_VERSION=$(echo "$PUBLISHED_VERSIONS" | node -e "
             // Pure semver lt — no external deps (semver not in package.json).
-            // Compares numeric x.y.z components; prerelease ignored (flair uses none).
+            // Compares numeric x.y.z components. Prerelease tags are excluded
+            // upstream (filter) so the lt function never sees them.
             const headVer = '$HEAD_VERSION';
             const lt = (a, b) => {
               const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
@@ -188,7 +189,7 @@ jobs:
             };
             const rsort = (a, b) => lt(b, a) ? -1 : lt(a, b) ? 1 : 0;
             let d = ''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => {
-              const older = JSON.parse(d).filter(v => lt(v, headVer));
+              const older = JSON.parse(d).filter(v => !v.includes('-') && lt(v, headVer));
               if (older.length === 0) {
                 console.error('::error::no published version of @tpsdev-ai/flair is strictly older than ' + headVer + ' — cannot determine a genuine downgrade baseline (flair#1016)');
                 process.exit(1);
