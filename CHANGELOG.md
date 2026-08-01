@@ -18,6 +18,201 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.34.0] - 2026-08-01
+
+### Added
+
+- **OAuth discovery is now served at the two well-known paths clients actually
+  probe.** `GET /.well-known/oauth-authorization-server` (RFC 8414) and
+  `GET /.well-known/oauth-protected-resource` (RFC 9728, which the MCP
+  authorization specification makes a MUST) both answer, unauthenticated, over
+  CORS. Flair published a correct document only at `/OAuthMetadata` — a path
+  nothing in the ecosystem asks for — and 404'd at both standard paths, so a
+  spec-compliant remote MCP client could not discover an instance at all.
+
+  The protected-resource document is also served at the RFC 9728 §3.1
+  path-appended URL `/.well-known/oauth-protected-resource/mcp`, which is the
+  form real MCP clients construct and the form the `/mcp` surface's own 401
+  challenge points at.
+
+  `/OAuthMetadata` is unchanged for existing callers and is now an **alias**:
+  both paths return the same document from the same builder, so they cannot
+  drift apart. Nothing about issuer derivation changed — set `FLAIR_PUBLIC_URL`
+  on any non-loopback deployment or every advertised URL still points at the
+  client's own localhost.
+
+  No authentication behaviour changed. Basic and Ed25519 callers, and the
+  response an uncredentialed request gets, are exactly as before; `/mcp` remains
+  behind `FLAIR_MCP_OAUTH`, still off by default.
+
+### Fixed
+
+- **The admin Instance page no longer advertises an MCP endpoint that isn't there.** The
+  Endpoints table printed `<public-url>/mcp` on every install, but that route is off by
+  default — so a default install's own dashboard pointed operators at a URL that returns
+  404, which reads as a broken install rather than a disabled feature. The row now shows
+  "Not enabled" plus the environment variable that turns the surface on, and shows the URL
+  only when the route is genuinely mounted. Nothing to do — the other rows are unchanged
+  and were already accurate.
+
+  The row renders from the state the route registration records about its own decision,
+  not from a second read of the feature flag, so the page cannot drift from what is
+  actually served. That matters because the flag alone was never sufficient: with the flag
+  on but no issuer configured, the route still does not mount.
+
+- **A deploy now supplies `FLAIR_PUBLIC_URL`, and proves it took effect.** A publicly-reachable
+  instance served an OAuth discovery document whose issuer and every endpoint were
+  `http://127.0.0.1:9980`, so remote clients followed discovery to their own loopback and no
+  authorization flow could complete (#1000). `flair deploy` and `flair init --remote` now ship a
+  `.env` in the component payload carrying `FLAIR_PUBLIC_URL`, taken from the target the deploy
+  already resolves and verifies against; after deploying, `flair deploy` reads
+  `GET <target>/OAuthMetadata` and fails if the advertised issuer is still loopback — an
+  unreadable document is reported as a check that did not run, never as a pass. `flair doctor`
+  reports the same misconfiguration locally, naming the file, the key and the `loadEnv`
+  requirement. An existing `.env` is merged and a value you set is never overwritten; the deploy
+  prints the disagreement and keeps yours, and your file on disk is never written to. The
+  `flair init --remote` tarball builder had written a `.env` since April and packed an entries
+  list that never contained it, so its output was discarded on every call — `.env` is now in that
+  list, and the tests assert against the packed payload rather than against a file on disk. That
+  builder's admin-password parameter is **removed** rather than validated: the deploy payload is
+  ingested into Harper's replicated deployment record, so it must carry no credential, and
+  `HDB_ADMIN_PASSWORD` could not configure Harper from a component `.env` in any case — Harper
+  composes its own configuration before component env files load (#1005, #1011).
+
+- **`flair doctor` no longer explains one unreadable key as two different wrong causes.** A key
+  file that OpenSSL could not decode surfaced twice in the same report — once as `Embeddings: not
+  verified` advising `Pass --agent <id>`, and once as `could not verify agent registration
+  (instance unreachable: ...)` printed six lines beneath doctor's own `✓ Harper responding` tick
+  (#1023). Neither was the cause: an agent had been selected, and the instance had demonstrably
+  answered. The operator was sent to check firewalls and ports for a file on their own disk. The
+  fix is structural rather than better wording — signing strictly precedes the request, so
+  `authFetch` now raises a distinct `KeyLoadError` for the signing half only, and no caller has to
+  infer from an error string whether the network was ever reached. Doctor names the file that
+  failed and that it could not be parsed as an Ed25519 private key; an unrecognised failure
+  reports the operation and the raw error and asserts **no** cause at all. `--agent` is suggested
+  only where it can actually resolve an identity — a remedy that cannot change the outcome is now
+  omitted rather than printed. Registration findings also carry the reachability the run already
+  established, so `unreachable` can no longer be claimed after this run watched the instance
+  respond. Key-decode failures are recognised by the crypto backend's structured error code
+  across both OpenSSL and BoringSSL, whose wording for the identical failure differs.
+
+- **`/mcp` reports its real version.** The `initialize` response hardcoded
+  `serverInfo.version` as `0.1.0`, which is the string a connecting client
+  displays and the one someone reads while diagnosing an incident. It now comes
+  from the package version.
+
+- **The SessionStart hook now fails quietly, and `flair doctor` notices when it stops working.** The
+  hook Flair registers resolves a package binary through your Node runtime, and under a Node version
+  manager globally installed packages are per-runtime-version — so a routine, unrelated runtime
+  upgrade could orphan it. The hook then failed on *every* session, indefinitely, with a message that
+  named neither Flair nor a remedy, and it kept doing so after Flair itself was gone (#1007). The
+  registered command is now wrapped so any failure to resolve or execute produces no output and exits
+  0, on every shell tested (sh, bash, zsh, dash, ksh, fish, tcsh — the previous form was broken
+  outright in the last two). The adapter's own no-op-on-failure guarantee could not cover this: it
+  lives inside the binary that never ran. `flair doctor` now *runs* the registered command — bounded,
+  and side-effect-free via a new `FLAIR_HOOK_PROBE` mode that makes the hook answer and exit without
+  touching the network — so a hook that no longer resolves is reported with a remedy instead of
+  staying invisible. `flair doctor --fix` rewrites an older, loud hook in place, keeping its agent and
+  instance; it never rewrites a hand-edited one and never removes a hook. `flair hook status` gained an
+  **On failure** line. Agent ids and URLs are now refused rather than escaped if they contain
+  characters that are not safe in a shell command.
+
+- **An upgrade that drops the instance out of launchd now says so, instead of reporting success.**
+  On macOS, `flair upgrade` and `flair restart` fall back to a plain detached start when a launchd
+  operation fails. The fallback is right — a running instance beats a down one — but it leaves the
+  process outside the manager that owns it, so it will not come back after a reboot, and the run
+  still finished with `✅ verified: healthy, authenticated, running <version>`. Every one of those
+  facts was true; none of them was the one that mattered (#1022). After a restart, both commands now
+  ask launchd what it is actually running and compare it against the process serving the instance.
+  A run that ends detached reports the verified facts **without** a success marker, names the job,
+  says the instance will not survive a reboot, and gives the commands that restore it. A clean run
+  prints exactly the line it always did.
+
+  The launchd start also no longer waits out its full startup budget to discover a plist it could
+  never have run. `launchctl load` and `launchctl start` both exit 0 for a job whose program does not
+  exist, so the only symptom was a 60-second timeout naming a port — twice, once for the stop and
+  once for the start. A plist records absolute paths, and switching Node runtimes moves all of them,
+  so those paths are now checked before launchd is asked to do anything: a stale one fails
+  immediately, naming the path that moved and the `flair init && flair restart` that re-points it.
+  Likewise, the stop leg asks whether launchd is running this instance before waiting a minute for a
+  process it does not control to exit. The fallbacks are unchanged; only the waiting and the
+  reporting are.
+
+### Security
+
+- **Dynamic client registration is now off unless an operator turns it on.**
+  `POST /OAuthRegister` used to accept anonymous registrations from anyone who
+  could reach the instance, gated only by a redirect-URI host match — so on a
+  publicly-reachable Flair, anyone could create rows in the durable, replicated
+  `OAuthClient` table, each one a `client_id` that `/OAuthAuthorize` would
+  subsequently honour. It now answers `403 access_denied` by default, and the
+  RFC 8414 / `/OAuthMetadata` discovery documents stop advertising a
+  `registration_endpoint`, because advertising one that refuses every request is
+  a discovery document that misdirects.
+
+  **This changes behaviour for anyone relying on anonymous registration.** To
+  keep it, set `FLAIR_OAUTH_DCR_TOKEN` to an initial access token of 32 to 508
+  characters (RFC 7591 §3.1) and have clients present it in an
+  `X-Flair-Initial-Access-Token` header. Registering clients ahead of time and
+  leaving registration off is the better shape where it is workable.
+
+  That one variable is the whole interface: there is no separate enable switch,
+  so enabling registration and supplying the credential that guards it are the
+  same act, and "on, and open to the internet" is not a state reachable by
+  forgetting a setting. A token outside the accepted length leaves registration
+  **off** rather than enabling it weakly, and says so by variable name.
+
+  Note that registration rate limiting runs in front of this gate, so refused
+  attempts spend budget and a flood against a closed endpoint is answered `429`
+  rather than `403`.
+
+  The token belongs in the process environment. `flair deploy` will not generate
+  a component `.env` containing it — a deploy payload is stored in Harper's
+  deployment record and replicated to every node.
+
+  RFC 7591 presents this token as `Authorization: Bearer`, which cannot work
+  here: Harper's own auth layer claims that header and answers `401` before any
+  Flair code runs. Hence the dedicated header. See
+  [docs/auth.md](docs/auth.md#dynamic-client-registration).
+
+- **`/mcp` now caps the request body at 256 KB.** The handler read the entire
+  request into memory with no limit, and Harper imposes none on this path —
+  `srv.http()` bypasses both Fastify's 1 GB `bodyLimit` and the contentTypes
+  handler's configurable default. Enforcement is two-phase: an oversized
+  `Content-Length` is rejected before a byte is read, and the streaming read
+  aborts mid-body, so a chunked request that omits or understates the header
+  cannot bypass it. This matters more here than the same pattern elsewhere
+  because `/mcp` is the first surface reachable by an open population of OAuth
+  clients rather than by agents we issued credentials to.
+
+- **The OAuth endpoints and `/mcp` are now rate limited.** `/OAuthToken`,
+  `/OAuthAuthorize` and `/OAuthRevoke` share a budget of 30 requests per minute
+  per caller; `/OAuthRegister` gets 5 per five minutes; `/mcp` gets 120 per
+  minute per verified token subject. A rejected request answers `429` with a
+  `Retry-After`. On by default — nothing to configure — and no other path is
+  affected.
+
+  The counter is consumed before any credential is examined, so a `429` reveals
+  nothing about what the request was carrying: a valid authorization code and a
+  garbage one get byte-identical responses once a bucket is spent. No
+  `RateLimit-*` headers are published on allowed requests.
+
+  Tunable via `FLAIR_OAUTH_RATE_LIMIT`, `FLAIR_OAUTH_REGISTER_RATE_LIMIT` and
+  `FLAIR_MCP_RATE_LIMIT`; `FLAIR_RATE_LIMIT=off` disables it entirely. A limit
+  of zero, a negative number or a non-numeric value is refused in favour of the
+  default, with a warning naming the variable — a shell that expanded an unset
+  variable cannot quietly switch the control off.
+
+  Keying is on the socket peer address. `X-Forwarded-For` is ignored unless
+  `FLAIR_TRUSTED_PROXY` names how many proxy hops genuinely sit in front, since
+  an instance that trusts that header without a proxy can be bypassed by varying
+  it. **The limiter is per node**: on a multi-node deployment the effective
+  ceiling is the limit times the node count, and counters reset on component
+  reload. A cluster-shared counter would turn every counted request into a
+  durable replicated write on an authentication hot path, which is a worse
+  denial-of-service shape than the one being defended against. See
+  [docs/auth.md](docs/auth.md) for what this does and does not protect against.
+
 ## [0.33.0] - 2026-07-31
 
 ### Added
