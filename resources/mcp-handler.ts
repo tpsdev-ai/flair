@@ -28,11 +28,117 @@ import { databases } from "harper";
 import { randomBytes } from "node:crypto";
 import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
+import { resolveVersion } from "./version.js";
 
 // The MCP protocol revision we implement (initialize handshake).
 const PROTOCOL_VERSION = "2025-06-18";
 
+// ─── Body size cap ───────────────────────────────────────────────────────────
+//
+// flair#1033 — the /mcp handler reads the entire request body into memory with
+// no size limit. Harper's HTTP layer imposes no cap on this path (the handler
+// is registered via srv.http() which goes through Harper's own HTTP chain, not
+// Fastify's 1 GB bodyLimit or the contentTypes handler's configurable 10 MB
+// default). /mcp is the first surface reachable by an open population of OAuth
+// clients rather than by Ed25519 agents we provisioned, so the reachability
+// story is materially different from the identical pattern on any other route.
+//
+// 256 KB is ~100x headroom over any legitimate MCP JSON-RPC request (a
+// memory_store with a large content field is a few KB; even a batch of 100
+// would be well under this). It is small enough that an attacker cannot
+// meaningfully consume memory through this path.
+const MAX_MCP_BODY_SIZE = 256 * 1024; // 256 KB
+
 const JSON_HEADERS = { "content-type": "application/json" };
+
+// ─── Body size cap helpers ───────────────────────────────────────────────────
+
+/**
+ * Read the request body into a string, enforcing a hard byte cap.
+ *
+ * Two-phase enforcement:
+ *   1. Content-Length check (reject before reading a single byte when the
+ *      client declares an oversized body).
+ *   2. Streaming read with a cap (catches chunked transfer encoding where
+ *      Content-Length is absent, and a client that lies about its declared
+ *      length).
+ *
+ * Handles three request shapes:
+ *   - Production: Harper Request with async-iterable `request.body` (RequestBody
+ *     wrapping Node IncomingMessage).
+ *   - Test doubles: `request.text()` as a function (returns pre-built string),
+ *     or `request.body` as a plain string.
+ *
+ * Throws an error with `code: "BODY_TOO_LARGE"` when the cap is exceeded, so
+ * the caller can distinguish a size rejection from a parse failure.
+ */
+async function readBodyCapped(request: any, maxBytes: number): Promise<string> {
+  // Phase 1: trust-but-verify the declared Content-Length.
+  const contentLength = request?.headers?.get?.("content-length");
+  if (contentLength != null) {
+    const declared = Number(contentLength);
+    if (!Number.isFinite(declared) || declared < 0) {
+      throw Object.assign(
+        new Error(`invalid Content-Length: ${contentLength}`),
+        { code: "BODY_TOO_LARGE" },
+      );
+    }
+    if (declared > maxBytes) {
+      throw Object.assign(
+        new Error(`request body too large: ${declared} bytes exceeds ${maxBytes}-byte limit`),
+        { code: "BODY_TOO_LARGE" },
+      );
+    }
+  }
+
+  // Phase 2: read with a cap.
+  const body = request.body;
+
+  // Test double: body is already a plain string.
+  if (typeof body === "string") {
+    if (Buffer.byteLength(body) > maxBytes) {
+      throw Object.assign(
+        new Error(`request body too large: exceeds ${maxBytes}-byte limit`),
+        { code: "BODY_TOO_LARGE" },
+      );
+    }
+    return body;
+  }
+
+  // Test double: request.text() is provided as a function (returns a string).
+  if (typeof request.text === "function") {
+    const text: string = await request.text();
+    if (typeof text === "string" && Buffer.byteLength(text) > maxBytes) {
+      throw Object.assign(
+        new Error(`request body too large: exceeds ${maxBytes}-byte limit`),
+        { code: "BODY_TOO_LARGE" },
+      );
+    }
+    return text;
+  }
+
+  // Production: Harper Request.body is a RequestBody (async-iterable, wraps
+  // Node IncomingMessage). Read chunk by chunk with a running cap.
+  if (body && typeof body[Symbol.asyncIterator] === "function") {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of body) {
+      const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      total += buf.length;
+      if (total > maxBytes) {
+        throw Object.assign(
+          new Error(`request body too large: exceeds ${maxBytes}-byte limit`),
+          { code: "BODY_TOO_LARGE" },
+        );
+      }
+      chunks.push(buf);
+    }
+    return Buffer.concat(chunks).toString("utf-8");
+  }
+
+  // Fallback: body is absent or an unrecognised shape.
+  return String(body ?? "");
+}
 
 // ─── JSON-RPC helpers ────────────────────────────────────────────────────────
 
@@ -207,12 +313,16 @@ export async function mcpHandler(request: any): Promise<any> {
     return rpcError(null, -32600, "method not allowed: /mcp accepts JSON-RPC POST only", 405);
   }
 
-  // Parse the JSON-RPC body. Harper's Request wraps a Node stream — read text.
+  // Parse the JSON-RPC body with a size cap. Harper's Request wraps a Node
+  // stream — read text, but never unbounded.
   let msg: any;
   try {
-    const text = typeof request.text === "function" ? await request.text() : request.body;
+    const text = await readBodyCapped(request, MAX_MCP_BODY_SIZE);
     msg = typeof text === "string" ? JSON.parse(text) : text;
-  } catch {
+  } catch (err: any) {
+    if (err?.code === "BODY_TOO_LARGE") {
+      return rpcError(null, -32000, err.message, 413);
+    }
     return rpcError(null, -32700, "parse error: invalid JSON");
   }
   if (!msg || typeof msg !== "object" || msg.jsonrpc !== "2.0" || typeof msg.method !== "string") {
@@ -226,7 +336,7 @@ export async function mcpHandler(request: any): Promise<any> {
       return rpcResult(id, {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: {} },
-        serverInfo: { name: "flair", version: "0.1.0" },
+        serverInfo: { name: "flair", version: resolveVersion() },
       });
 
     // Notifications (no id) — acknowledge with 202-ish empty 200; MCP clients send
