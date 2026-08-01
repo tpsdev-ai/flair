@@ -207,6 +207,16 @@ jobs:
             exit 1
           }
 
+          # ── Guard (flair#1055): refuse to install if BASELINE_VERSION
+          # does not match the strict x.y.z semver pattern. A malformed
+          # version string can survive the numeric lt comparison (NaN → 0)
+          # and land in a command substitution inside double quotes, enabling
+          # injection. This check is cheap and fails safe. ──
+          [[ "$BASELINE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::derived baseline does not match expected semver pattern — refusing to install"
+            exit 1
+          }
+
           BASE_DIR=$(mktemp -d)
           ( cd "$BASE_DIR" && npm init -y > /dev/null )
           ( cd "$BASE_DIR" && npm install "@tpsdev-ai/flair@${BASELINE_VERSION}" )
