@@ -155,20 +155,37 @@ describe("checkEngineVersionBackwards", () => {
     expect(checkEngineVersionBackwards(tmpRoot, "5.1.22")).toBeNull();
   });
 
-  // ── flair#1047: pre-release versions must refuse, not allow ────────────
-  // Number("0-rc1") is NaN, and NaN < x / NaN > x are both false, so a
-  // pre-release segment on either side would fall through every branch and
-  // return ALLOW. That is a false ALLOW — unsafe.
+  // ── flair#1047: pre-release version ordering ──────────────────────────
+  // Pre-releases must be ordered correctly, not blanket-refused.
+  // A version WITH a pre-release is LOWER than the same core without one.
+  // Harper published 5.2.0-beta.4 on 2026-07-31 and 5.2.0 on 2026-08-01 —
+  // anyone who ran the beta must be able to start the release.
 
-  it("refuses when the stamp contains a pre-release segment (e.g. 5.2.0-beta.4)", () => {
+  it("allows beta → release: stamp 5.2.0-beta.4, running 5.2.0", () => {
     writeEngineVersionStamp(tmpRoot, "5.2.0-beta.4");
-    const err = checkEngineVersionBackwards(tmpRoot, "5.1.22");
-    expect(err).not.toBeNull();
-    expect(err!).toContain("5.2.0-beta.4");
-    expect(err!).toContain("5.1.22");
+    expect(checkEngineVersionBackwards(tmpRoot, "5.2.0")).toBeNull();
   });
 
-  it("refuses when the running version contains a pre-release segment (e.g. 5.2.0-rc1)", () => {
+  it("allows rc → release: stamp 5.2.0-rc1, running 5.2.0", () => {
+    writeEngineVersionStamp(tmpRoot, "5.2.0-rc1");
+    expect(checkEngineVersionBackwards(tmpRoot, "5.2.0")).toBeNull();
+  });
+
+  it("allows earlier pre-release → later pre-release: stamp 5.2.0-beta.4, running 5.2.0-rc1", () => {
+    writeEngineVersionStamp(tmpRoot, "5.2.0-beta.4");
+    expect(checkEngineVersionBackwards(tmpRoot, "5.2.0-rc1")).toBeNull();
+  });
+
+  it("refuses release → pre-release: stamp 5.2.0, running 5.2.0-rc1", () => {
+    // Same core, but stamp has no pre-release → stamp is newer.
+    writeEngineVersionStamp(tmpRoot, "5.2.0");
+    const err = checkEngineVersionBackwards(tmpRoot, "5.2.0-rc1");
+    expect(err).not.toBeNull();
+    expect(err!).toContain("5.2.0");
+    expect(err!).toContain("5.2.0-rc1");
+  });
+
+  it("refuses when the stamp core is newer regardless of pre-release (stamp 5.2.1, running 5.2.0-rc1)", () => {
     writeEngineVersionStamp(tmpRoot, "5.2.1");
     const err = checkEngineVersionBackwards(tmpRoot, "5.2.0-rc1");
     expect(err).not.toBeNull();
@@ -176,17 +193,30 @@ describe("checkEngineVersionBackwards", () => {
     expect(err!).toContain("5.2.0-rc1");
   });
 
-  it("refuses when both versions contain pre-release segments", () => {
+  it("refuses when the stamp has a pre-release but the core is newer (stamp 5.2.0-beta.4, running 5.1.22)", () => {
     writeEngineVersionStamp(tmpRoot, "5.2.0-beta.4");
-    const err = checkEngineVersionBackwards(tmpRoot, "5.2.0-rc1");
+    const err = checkEngineVersionBackwards(tmpRoot, "5.1.22");
     expect(err).not.toBeNull();
+    expect(err!).toContain("5.2.0-beta.4");
+    expect(err!).toContain("5.1.22");
   });
 
-  it("refuses when the stamp has a pre-release and running is a plain release (stamp 5.2.0-rc1 vs running 5.2.0)", () => {
-    // This is the exact scenario flint reproduced: stamp 5.2.1, running 5.2.0-rc1
-    // returned ALLOW because Number("0-rc1") is NaN.
-    writeEngineVersionStamp(tmpRoot, "5.2.1");
-    const err = checkEngineVersionBackwards(tmpRoot, "5.2.0-rc1");
+  // ── Genuinely unparseable input ────────────────────────────────────────
+
+  it("refuses with its own message when the stamp is not N.N.N (does not claim ordering)", () => {
+    writeEngineVersionStamp(tmpRoot, "not-a-version");
+    const err = checkEngineVersionBackwards(tmpRoot, "5.1.22");
     expect(err).not.toBeNull();
+    // Must NOT claim "newer engine version" — we didn't determine ordering.
+    expect(err!).not.toContain("newer engine version");
+    expect(err!).toContain("could not be compared");
+  });
+
+  it("refuses with its own message when the running version is not N.N.N", () => {
+    writeEngineVersionStamp(tmpRoot, "5.1.22");
+    const err = checkEngineVersionBackwards(tmpRoot, "garbage");
+    expect(err).not.toBeNull();
+    expect(err!).not.toContain("newer engine version");
+    expect(err!).toContain("could not be compared");
   });
 });

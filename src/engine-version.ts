@@ -89,20 +89,23 @@ export function checkEngineVersionBackwards(
   const stamp = readEngineVersionStamp(dataDir);
   if (!stamp) return null; // no stamp — nothing to compare (pre-stamp install)
 
-  // Simple semver comparison: split on dots, compare numerically.
-  // This is deliberately NOT a full semver parse — the stamp and the running
-  // version both come from package.json `version` fields, which are always
-  // semver strings. A full semver library would handle pre-release tags
-  // correctly, but the failure mode of a naive compare (treating "5.2.0-rc1"
-  // as newer than "5.2.0") is a false REFUSAL — safe direction.
-  //
-  // However, Number("0-rc1") is NaN, and NaN < x / NaN > x are both false,
-  // so a pre-release segment on EITHER side would fall through every branch
-  // and return ALLOW. That is a false ALLOW — unsafe. An unparseable segment
-  // on either side must refuse.
-  const stampParts = stamp.split(".").map(Number);
-  const runningParts = runningVersion.split(".").map(Number);
-  if (stampParts.some(isNaN) || runningParts.some(isNaN)) {
+  const parsed = compareVersions(stamp, runningVersion);
+  if (parsed === null) {
+    // Genuinely unparseable — cannot determine ordering. Refuse with a
+    // message that does NOT claim one is newer than the other.
+    return [
+      `This Flair install is running Harper ${runningVersion}, but the data directory at`,
+      `  ${dataDir}`,
+      `was last written by Harper ${stamp}.`,
+      ``,
+      `The engine version stamp could not be compared to the running version.`,
+      `An older Harper cannot safely read a store written by a newer one.`,
+      ``,
+      ...RECOVERY_LINES,
+    ].join("\n");
+  }
+  if (parsed > 0) {
+    // stamp > running — backwards boot, refuse.
     return [
       `This Flair install is running Harper ${runningVersion}, but the data directory at`,
       `  ${dataDir}`,
@@ -111,38 +114,92 @@ export function checkEngineVersionBackwards(
       `An older Harper cannot safely read a store written by a newer one.`,
       `The data may appear intact but can be silently unreadable.`,
       ``,
-      `To recover:`,
-      `  1. Reinstall the newer version:  npm install -g @tpsdev-ai/flair@latest`,
-      `  2. Or restore from a pre-upgrade snapshot:`,
-      `     flair snapshot restore ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz`,
-      ``,
-      `This check only helps from the release that ships it onward — it cannot`,
-      `rescue a downgrade to a build that predates the stamp.`,
+      ...RECOVERY_LINES,
     ].join("\n");
   }
-  const len = Math.max(stampParts.length, runningParts.length);
-  for (let i = 0; i < len; i++) {
-    const s = stampParts[i] ?? 0;
-    const r = runningParts[i] ?? 0;
-    if (r < s) {
-      return [
-        `This Flair install is running Harper ${runningVersion}, but the data directory at`,
-        `  ${dataDir}`,
-        `was last written by Harper ${stamp} — a newer engine version.`,
-        ``,
-        `An older Harper cannot safely read a store written by a newer one.`,
-        `The data may appear intact but can be silently unreadable.`,
-        ``,
-        `To recover:`,
-        `  1. Reinstall the newer version:  npm install -g @tpsdev-ai/flair@latest`,
-        `  2. Or restore from a pre-upgrade snapshot:`,
-        `     flair snapshot restore ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz`,
-        ``,
-        `This check only helps from the release that ships it onward — it cannot`,
-        `rescue a downgrade to a build that predates the stamp.`,
-      ].join("\n");
-    }
-    if (r > s) break; // running is newer — allowed
-  }
-  return null;
+  return null; // running >= stamp — allowed
 }
+
+// ─── Version comparison (flair#1047) ─────────────────────────────────────────
+
+/**
+ * Compare two semver-like version strings.
+ * Returns negative when a < b, positive when a > b, zero when equal,
+ * or null when either version is genuinely unparseable (not N.N.N at all).
+ *
+ * Pre-release ordering follows semver: a version WITH a pre-release tag is
+ * LOWER than the same core without one (5.2.0-rc1 < 5.2.0). When both have
+ * pre-releases, identifiers are compared dot by dot — numeric parts
+ * numerically, the rest as strings.
+ */
+function compareVersions(a: string, b: string): number | null {
+  const pa = parseVersion(a);
+  const pb = parseVersion(b);
+  if (!pa || !pb) return null;
+
+  // Compare major.minor.patch (and any additional numeric components) numerically.
+  const coreLen = Math.max(pa.core.length, pb.core.length);
+  for (let i = 0; i < coreLen; i++) {
+    const ac = pa.core[i] ?? 0;
+    const bc = pb.core[i] ?? 0;
+    if (ac !== bc) return ac - bc;
+  }
+
+  // Cores are equal — compare pre-release tags.
+  if (pa.pre === null && pb.pre === null) return 0;
+  if (pa.pre === null) return 1;  // a has no pre-release → a > b
+  if (pb.pre === null) return -1; // b has no pre-release → a < b
+
+  // Both have pre-releases — compare identifiers dot by dot.
+  const len = Math.max(pa.pre.length, pb.pre.length);
+  for (let i = 0; i < len; i++) {
+    const ai = pa.pre[i];
+    const bi = pb.pre[i];
+    if (ai === undefined) return -1; // fewer identifiers → lower
+    if (bi === undefined) return 1;
+    const an = Number(ai);
+    const bn = Number(bi);
+    const aIsNum = !isNaN(an);
+    const bIsNum = !isNaN(bn);
+    if (aIsNum && bIsNum) {
+      if (an !== bn) return an - bn;
+    } else if (aIsNum) {
+      return -1; // numeric < string
+    } else if (bIsNum) {
+      return 1;
+    } else {
+      if (ai !== bi) return ai < bi ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+interface ParsedVersion {
+  core: number[];
+  pre: string[] | null; // null = no pre-release (release version)
+}
+
+function parseVersion(v: string): ParsedVersion | null {
+  // Split off pre-release: everything after the first hyphen.
+  const hyphenIdx = v.indexOf("-");
+  const coreStr = hyphenIdx === -1 ? v : v.slice(0, hyphenIdx);
+  const preStr = hyphenIdx === -1 ? null : v.slice(hyphenIdx + 1);
+
+  const coreParts = coreStr.split(".");
+  if (coreParts.length < 3) return null; // not at least N.N.N
+  const core = coreParts.map(Number);
+  if (core.some(isNaN)) return null; // non-numeric core component
+
+  const pre = preStr ? preStr.split(".") : null;
+  return { core, pre };
+}
+
+const RECOVERY_LINES = [
+  `To recover:`,
+  `  1. Reinstall the newer version:  npm install -g @tpsdev-ai/flair@latest`,
+  `  2. Or restore from a pre-upgrade snapshot:`,
+  `     flair snapshot restore ~/.flair/upgrade-snapshots/flair-data-<timestamp>.tar.gz`,
+  ``,
+  `This check only helps from the release that ships it onward — it cannot`,
+  `rescue a downgrade to a build that predates the stamp.`,
+];
