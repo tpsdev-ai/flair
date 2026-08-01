@@ -1008,6 +1008,19 @@ jobs:
       # Root CLI entry point (tsconfig.cli.json — strict: false, matches build:cli)
       - name: Type check root CLI
         run: npx tsc --noEmit -p tsconfig.cli.json
+      # Test suite (#1014). Nothing type-checked test/ before this: both project
+      # configs excluded it, so bun's transpiler — which strips types rather than
+      # checking them — was the only thing that ever read those files. A guard test
+      # could reference a deleted function or assert against a renamed property and
+      # the only signal was whether it happened to fail at runtime.
+      #
+      # tsconfig.test.check.json carries an explicit exclude list: a visible,
+      # shrinkable backlog rather than a blanket relaxation. Relaxing compiler
+      # options until the whole suite passed would have bought coverage of ~30 files
+      # by weakening the check on ~260, and the relaxation would then be invisible.
+      # Each file removed from that list is a small, reviewable PR.
+      - name: Type check test suite (strict, excl. known backlog — #1014)
+        run: npx tsc --noEmit -p tsconfig.test.check.json
       # Build flair-client so workspace consumers (n8n-nodes-flair, pi-flair,
       # openclaw-flair) can resolve @tpsdev-ai/flair-client emitted types.
       # Without this, workspace tsc fails with "Cannot find module" because
