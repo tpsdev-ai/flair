@@ -81,3 +81,20 @@ authentication:
   # own risk.
   authorizeLocal: false
   enableSessions: true
+
+# @harperfast/oauth — authorization server component declaration.
+# Commented out by default: the plugin is only needed when FLAIR_MCP_OAUTH=on.
+# When you enable the flag without uncommenting this block, the boot guard
+# (resources/mcp-oauth.ts) logs an error with the exact YAML to add — uncomment
+# the block below and add mcp.* config. The issuer is derived at runtime from
+# FLAIR_MCP_ISSUER / FLAIR_PUBLIC_URL; do not hardcode one here.
+#
+# "@harperfast/oauth":
+#   providers:
+#     default:
+#       authorizationEndpoint: "/OAuthAuthorize"
+#       tokenEndpoint: "/OAuthToken"
+#       revocationEndpoint: "/OAuthRevoke"
+#       registrationEndpoint: "/OAuthRegister"
+#       jwksUri: "/.well-known/jwks.json"
+#       discoveryEndpoint: "/.well-known/oauth-authorization-server"
