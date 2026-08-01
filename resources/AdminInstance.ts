@@ -118,7 +118,7 @@ export class AdminInstance extends Resource {
     // actionable and still teaches them the surface exists.
     const mcp = mcpRouteState();
     const mcpCell = mcp.mounted
-      ? `<code>${publicUrl}/mcp</code>`
+      ? `<code>${esc(publicUrl)}/mcp</code>`
       : `<span class="badge badge-gray">${esc(mcp.status)}</span>` +
         `<div style="margin-top:4px;color:#666;font-size:0.9em">${esc(mcp.reason)}</div>`;
 
@@ -147,7 +147,7 @@ export class AdminInstance extends Resource {
         </div>
         <div class="card">
           <h3>Public URL</h3>
-          <div style="font-family:monospace;font-size:0.9em;word-break:break-all">${publicUrl}</div>
+          <div style="font-family:monospace;font-size:0.9em;word-break:break-all">${esc(publicUrl)}</div>
         </div>
       </div>
 
@@ -162,12 +162,12 @@ export class AdminInstance extends Resource {
       <div class="card">
         <h3>Endpoints</h3>
         <table style="box-shadow:none">
-          <tr><td>API</td><td><code>${publicUrl}/</code></td></tr>
+          <tr><td>API</td><td><code>${esc(publicUrl)}/</code></td></tr>
           <tr><td>MCP</td><td>${mcpCell}</td></tr>
-          <tr><td>OAuth Discovery</td><td><code>${publicUrl}/OAuthMetadata</code></td></tr>
-          <tr><td>OAuth Authorize</td><td><code>${publicUrl}/OAuthAuthorize</code></td></tr>
-          <tr><td>OAuth Token</td><td><code>${publicUrl}/OAuthToken</code></td></tr>
-          <tr><td>Admin</td><td><code>${publicUrl}/AdminDashboard</code></td></tr>
+          <tr><td>OAuth Discovery</td><td><code>${esc(publicUrl)}/OAuthMetadata</code></td></tr>
+          <tr><td>OAuth Authorize</td><td><code>${esc(publicUrl)}/OAuthAuthorize</code></td></tr>
+          <tr><td>OAuth Token</td><td><code>${esc(publicUrl)}/OAuthToken</code></td></tr>
+          <tr><td>Admin</td><td><code>${esc(publicUrl)}/AdminDashboard</code></td></tr>
         </table>
       </div>
     `;
