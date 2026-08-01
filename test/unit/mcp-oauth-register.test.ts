@@ -27,10 +27,21 @@ process.env.FLAIR_MCP_NO_AUTOSTART = "1";
 // the safe shape.
 class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 const dbStub = new Proxy({}, { get: () => new Proxy({}, { get: () => NoopBase }) });
+
+// Mutable state so tests can toggle the @harperfast/oauth component
+// for the boot guard (flair#1021).
+let oauthComponentConfig: Record<string, any> | null = {};
 mock.module("harper", () => ({
   server: { http: () => {} },
   Resource: NoopBase,
   databases: { flair: dbStub },
+  app: {
+    config: {
+      get(key: string) {
+        return key === "@harperfast/oauth" ? oauthComponentConfig : undefined;
+      },
+    },
+  },
 }));
 // NO mock.module for ./mcp-handler.ts: mcp-oauth.ts no longer statically imports
 // it (it's resolved lazily / via deps.mcpHandler), so loading mcp-oauth.ts here
@@ -66,6 +77,10 @@ function makeDeps() {
     // Inject the /mcp handler directly (replaces the old process-global
     // mock.module of ./mcp-handler.ts) — same shape the mock used to return.
     mcpHandler: () => ({ status: 200 }),
+    // Skip the boot guard in existing tests: they use a Harper mock that
+    // doesn't exercise the real config.yaml path. The guard is tested
+    // explicitly in the "flair#1021 boot guard" describe block below.
+    skipComponentGuard: true,
   };
 }
 
@@ -225,5 +240,54 @@ describe("mcpRouteState — the router's own record of the mount decision", () =
       expect(mcpRouteState().mounted).toBe(mounted);
     }
     clearEnv();
+  });
+});
+
+/**
+ * flair#1021 — boot guard: FLAIR_MCP_OAUTH=on with no @harperfast/oauth
+ * component in config.yaml must FAIL LOUDLY at boot, not silently degrade.
+ *
+ * This test uses the real guard path (skipComponentGuard NOT set) and controls
+ * the Harper config via the mutable `oauthComponentConfig` in the mock.
+ */
+describe("flair#1021 — boot guard (loud failure when flag on but component absent)", () => {
+  beforeEach(() => {
+    // Default: component present (positive control). Individual tests
+    // that need the negative case set oauthComponentConfig = null explicitly.
+    oauthComponentConfig = { issuer: "https://flair.example.com" };
+  });
+
+  it("flag ON + component absent → throws with actor/state/remedy in the message", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "1";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    // Simulate: operator enabled the flag but has no @harperfast/oauth in config.yaml
+    oauthComponentConfig = null;
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard; // use the real guard path
+    await expect(registerMcpOAuthRoute(deps)).rejects.toThrow(
+      /FLAIR_MCP_OAUTH is enabled.*@harperfast\/oauth.*config\.yaml/i,
+    );
+  });
+
+  it("POSITIVE CONTROL: flag ON + component present + issuer → mounts without error", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "1";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    // oauthComponentConfig is already set in beforeEach (positive control)
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard; // use the real guard path
+    const mounted = await registerMcpOAuthRoute(deps);
+    expect(mounted).toBe(true);
+  });
+
+  it("flag OFF → guard is bypassed (no throw even with component absent)", async () => {
+    clearEnv();
+    // Flag is off
+    oauthComponentConfig = null; // component absent
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    const mounted = await registerMcpOAuthRoute(deps);
+    expect(mounted).toBe(false); // returns false, no error
   });
 });

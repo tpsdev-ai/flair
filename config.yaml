@@ -81,3 +81,19 @@ authentication:
   # own risk.
   authorizeLocal: false
   enableSessions: true
+
+# @harperfast/oauth — authorization server component declaration.
+# REQUIRED when FLAIR_MCP_OAUTH=on (the boot guard in resources/mcp-oauth.ts
+# will FAIL LOUDLY at startup if the flag is set but this component is absent).
+# Issuer is pinned to FLAIR_MCP_ISSUER / FLAIR_PUBLIC_URL at runtime via
+# mcpAuthConfig(); the value below is the canonical base for discovery/tokens.
+"@harperfast/oauth":
+  issuer: "https://flair.lifestylelab.ai"
+  providers:
+    default:
+      authorizationEndpoint: "/OAuthAuthorize"
+      tokenEndpoint: "/OAuthToken"
+      revocationEndpoint: "/OAuthRevoke"
+      registrationEndpoint: "/OAuthRegister"
+      jwksUri: "/.well-known/jwks.json"
+      discoveryEndpoint: "/.well-known/oauth-authorization-server"
