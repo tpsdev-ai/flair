@@ -10,7 +10,7 @@
 // MODEL: test/integration/oauth-authorize-authz.test.ts.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
 
 const ALLOWED_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
 const HEADER = "x-flair-initial-access-token";
