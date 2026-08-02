@@ -83,10 +83,12 @@ describe("every test file is reachable from a CI command", () => {
   });
 
   test("no test file sits in a directory CI never runs", () => {
-    // unit-isolated/ is run file-by-file in a loop (`bun test "$f"`), which the
-    // target parser sees as neither a dir nor the root glob — enumerate it here
-    // rather than teaching the parser about shell loops.
-    const loopRun = ["test/unit-isolated"];
+    // Both *-isolated/ directories are run file-by-file in a shell loop
+    // (`bun test "$f"` per file), which the target parser sees as neither a
+    // directory nor the root glob — enumerate them here rather than teaching
+    // the parser about shell loops. See flair#1063 (follow-up: derive this
+    // list conventionally from workflow or filesystem).
+    const loopRun = ["test/unit-isolated", "test/integration-isolated"];
     const covered = (f: string) =>
       (f.split("/").length === 2 && rootGlob) ||
       [...dirs, ...loopRun].some((d) => f.startsWith(`${d}/`));
