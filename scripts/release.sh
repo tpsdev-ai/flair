@@ -340,10 +340,17 @@ echo "🧪 Running tests..."
 # test/unit-isolated/ files mock.module a process-global shared module; each
 # MUST run in its own `bun test` process — they poison the real-importer
 # files AND each other otherwise (flair#691).
-(cd "$ROOT" && bun test test/unit/ test/integration/) || { echo "❌ Tests failed"; exit 1; }
+(cd "$ROOT" && bun test test/unit/ $(find test/integration -name '*.test.ts' ! -name 'oauth-dcr-e2e.test.ts' | sort)) || { echo "❌ Tests failed"; exit 1; }
 for f in "$ROOT"/test/unit-isolated/*.test.ts; do
   (cd "$ROOT" && bun test "$f") || { echo "❌ Tests failed ($f)"; exit 1; }
 done
+# oauth-dcr-e2e: isolated because mcp-client-credentials-e2e modifies config.yaml
+# and sets FLAIR_MCP_OAUTH=1; on macOS the env cleanup does not fully take effect
+# before the next test file's Harper spawn inherits the env, causing the well-known
+# handler to fall through (mcpOAuthEnabled() → true) while @harperfast/oauth is
+# no longer declared → 404. One process per file is the established remedy
+# (flair#691, test/unit-isolated/).
+(cd "$ROOT" && bun test test/integration/oauth-dcr-e2e.test.ts) || { echo "❌ Tests failed (oauth-dcr-e2e)"; exit 1; }
 echo "  ✓ Tests passed"
 
 # 6. Commit version bump (explicit paths — no -A)
