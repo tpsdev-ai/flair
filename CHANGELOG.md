@@ -18,6 +18,64 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.35.0] - 2026-08-02
+
+### Added
+
+- **Flair now stamps the data directory with the Harper engine version and refuses to boot when the store was written by a newer engine.** If an older Harper boots against a store written by a newer one, the error names both versions, the data directory, and the remedy — reinstall the newer version or restore from a pre-upgrade snapshot.
+
+  This only helps from the release that ships it onward: the check lives in the version being downgraded *to*, so it cannot rescue a downgrade to a build that predates the stamp.
+
+### Changed
+
+- **Pre-upgrade snapshots are now automatic when the Harper engine version changes.** The tested-downgrade guarantee that justified making snapshots opt-in does not hold across engine version boundaries — a Harper bump is the only realistic source of a cross-version boot break. Opting out requires `--no-engine-snapshot` and prints what is being given up.
+
+  Ordinary flair-version upgrades (same Harper) remain opt-in via `--snapshot`.
+
+### Fixed
+
+- **Turning on MCP OAuth without the authorization-server component now logs a visible error at boot.**
+  Enabling MCP OAuth is two steps, and the guard tells you the second one. `FLAIR_MCP_OAUTH=on`
+  requires the `@harperfast/oauth` component, which ships commented out in `config.yaml` so it loads
+  only on instances that use it. Turn the flag on without uncommenting and flair logs an error at
+  boot naming the flag, the missing component, and the exact YAML to uncomment, and records the
+  surface as not mounted (visible on the admin Instance page). The guard does not stop the boot — an
+  optional feature must not deny service to the core one. Previously the flag could be on with the
+  component absent and flair booted without error while `/mcp` silently rejected every request
+  (#1021).
+
+- **`flair keys prune` no longer archives a key file it cannot identify.** `~/.flair/keys/<id>.key`
+  is a namespace shared by two writers: plaintext Ed25519 seeds, and AES-256-GCM keystore blobs
+  written by `FileKeyStore`. A keystore blob does not parse as a seed, and prune classified any
+  unparseable file as `invalid` — which is prunable — so it would move a **live federation key**
+  into `.pruned/`. Recoverable, since prune archives rather than deletes, but wrong in the
+  direction of touching a key that is in use. Unparseable files are now classified
+  `unidentified`, reported for a human, and left where they are. "I could not parse this" and
+  "this is a stale agent key" are different findings, and only the second is safe to act on.
+
+- **Backwards-boot recovery message now names an actual snapshot file instead of a literal placeholder.** When a downgrade prevents Flair from starting, the error message inspects the pre-upgrade snapshot directory and prints a runnable `flair snapshot restore` command with the newest snapshot. If multiple snapshots exist it also mentions `flair snapshot list`. If no snapshot exists it says so plainly and omits the restore line entirely — suggesting a restore that cannot work is worse than being honest about having nothing to restore from.
+
+- **The test suite is now type-checked in CI.** Both project tsconfigs excluded `test/`, so
+  `tsc --noEmit` — what CI runs as its Type Check lane — never read a test file, and bun's
+  transpiler strips types rather than checking them. A guard test could call a function that
+  no longer exists, pass a wrong-shaped argument, or assert against a renamed property, and
+  the only signal was whether it happened to fail at runtime. That matters most for guard
+  tests, which are how we know a control still works. A new `tsconfig.test.check.json` covers
+  the suite under `strict`, with an explicit exclude list for the files carrying a known
+  backlog — a visible, shrinkable list rather than a blanket relaxation, since relaxing the
+  compiler options until everything passed would have bought coverage of ~30 files by
+  weakening the check on ~260.
+
+### Security
+
+- **The admin Instance page now HTML-escapes `publicUrl` in the Endpoints table and Public URL card.**
+  `FLAIR_PUBLIC_URL` is operator-set and not validated, and as of 0.34.0 the deploy step writes it
+  into the component's `.env` — so a value that used to be typed at a prompt now arrives through a
+  payload. The fix escapes on output at every interpolation site rather than sanitising the input,
+  which is the wrong layer. An operator setting a hostile value on their own instance is attacking
+  themselves; this is fixed because the shape is wrong and the input path widened, not because it
+  represents a meaningful external threat (#1029).
+
 ## [0.34.0] - 2026-08-01
 
 ### Added
