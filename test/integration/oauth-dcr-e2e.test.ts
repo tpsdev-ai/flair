@@ -179,6 +179,7 @@ describe("DCR when an operator has opted in (real Harper)", () => {
 
   test("discovery advertises the registration endpoint again", async () => {
     const res = await fetch(`${harper.httpURL}/.well-known/oauth-authorization-server`);
+    expect(res.status).toBe(200);
     const doc = await res.json() as any;
     expect(doc.registration_endpoint).toBe(`${doc.issuer}/OAuthRegister`);
   });
