@@ -160,14 +160,71 @@ jobs:
           PINNED_EMBEDDING_MODEL="downgrade-lane-pinned-model"
           PINNED_EMBEDDING_STAMP="${PINNED_EMBEDDING_MODEL}+searchprefix"
 
-          # ── 1. Install the previously-published baseline ──────────────────
+          # ── 1. Derive the baseline: most recent published version STRICTLY
+          # LESS THAN the repo's package.json version (flair#1016).
+          #
+          # Why npm registry (not git tags)? The registry is the authoritative
+          # source of truth for what operators actually install via `npm install`.
+          # Git tags may exist for versions never published, or tags may lag
+          # behind the registry after force-published patches. The downgrade
+          # lane simulates an operator downgrading via npm, so npm is the right
+          # data source.
+          HEAD_VERSION=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
+          PUBLISHED_VERSIONS=$(npm view @tpsdev-ai/flair versions --json) || {
+            echo "::error::cannot query npm registry for @tpsdev-ai/flair versions — network or package unavailable"
+            exit 1
+          }
+          BASELINE_VERSION=$(echo "$PUBLISHED_VERSIONS" | node -e "
+            // Pure semver lt — no external deps (semver not in package.json).
+            // Compares numeric x.y.z components. Prerelease tags are excluded
+            // upstream (filter) so the lt function never sees them.
+            const headVer = '$HEAD_VERSION';
+            const lt = (a, b) => {
+              const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+              const len = Math.max(pa.length, pb.length);
+              for (let i = 0; i < len; i++) {
+                const ca = pa[i] || 0, cb = pb[i] || 0;
+                if (ca < cb) return true;
+                if (ca > cb) return false;
+              }
+              return false;
+            };
+            const rsort = (a, b) => lt(b, a) ? -1 : lt(a, b) ? 1 : 0;
+            let d = ''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => {
+              const older = JSON.parse(d).filter(v => !v.includes('-') && lt(v, headVer));
+              if (older.length === 0) {
+                console.error('::error::no published version of @tpsdev-ai/flair is strictly older than ' + headVer + ' — cannot determine a genuine downgrade baseline (flair#1016)');
+                process.exit(1);
+              }
+              console.log(older.sort(rsort)[0]);
+            });
+          ")
+          echo "Baseline derivation: most recent npm-published version < ${HEAD_VERSION} = ${BASELINE_VERSION}"
+
+          # ── Guard (flair#1044): refuse to run when baseline == HEAD.
+          # This is the backstop for edge cases the derivation above cannot
+          # handle (e.g., package.json bumped but not yet published). A lane
+          # that compares a version to itself proves nothing (flair#1016). ──
+          [[ "$BASELINE_VERSION" != "$HEAD_VERSION" ]] || {
+            echo "::error::BASELINE_VERSION (${BASELINE_VERSION}) == HEAD_VERSION (${HEAD_VERSION}) — downgrade lane would compare a version to itself, which proves nothing (flair#1016). Refusing to run."
+            exit 1
+          }
+
+          # ── Guard (flair#1055): refuse to install if BASELINE_VERSION
+          # does not match the strict x.y.z semver pattern. A malformed
+          # version string can survive the numeric lt comparison (NaN → 0)
+          # and land in a command substitution inside double quotes, enabling
+          # injection. This check is cheap and fails safe. ──
+          [[ "$BASELINE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::derived baseline does not match expected semver pattern — refusing to install"
+            exit 1
+          }
+
           BASE_DIR=$(mktemp -d)
           ( cd "$BASE_DIR" && npm init -y > /dev/null )
-          ( cd "$BASE_DIR" && npm install @tpsdev-ai/flair@latest )
+          ( cd "$BASE_DIR" && npm install "@tpsdev-ai/flair@${BASELINE_VERSION}" )
           ( cd "$BASE_DIR" && npm install --no-save @node-llama-cpp/linux-x64@3 )
           BASE_FLAIR="node $BASE_DIR/node_modules/@tpsdev-ai/flair/dist/cli.js"
-          BASELINE_VERSION=$(node -p "require('$BASE_DIR/node_modules/@tpsdev-ai/flair/package.json').version")
-          HEAD_VERSION=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
           echo "Baseline (previously published): ${BASELINE_VERSION} — HEAD (PR build): ${HEAD_VERSION}"
 
           # ── 2. Init baseline, then seed the corpus AS the reserved
