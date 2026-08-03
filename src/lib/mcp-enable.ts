@@ -888,6 +888,9 @@ export interface EnableMcpResult {
  */
 export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {}): Promise<EnableMcpResult> {
   const steps: EnableStepResult[] = [];
+  // The step currently executing, so a throw is attributed to IT rather than to
+  // the last step that succeeded (flair#1087).
+  let currentStep: EnableStepName | undefined;
   const dryRun = Boolean(params.dryRun);
   const push = (step: EnableStepName, ok: boolean, detail: string) => steps.push({ step, ok, detail });
 
@@ -960,6 +963,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       idpClientId: params.idpClientId,
       idpClientSecret: params.idpClientSecret,
     });
+    currentStep = "secrets-provisioning";
     const secretsResult = provisionSecrets(params.instance, bundle, {
       mechanism: params.secretsMechanism,
       stagingPath: params.secretsStagingPath,
@@ -971,6 +975,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     );
 
     // ── Identity mapping (Credential kind:idp) ────────────────────────────────
+    currentStep = "identity-mapping";
     const mapping = await provisionIdpIdentityMapping(
       {
         opsPortOrUrl: params.instance,
@@ -1007,6 +1012,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     }
 
     // ── Apply config + restart ────────────────────────────────────────────────
+    currentStep = "apply-config-and-restart";
     await applyRemoteConfigAndRestart(
       { opsPortOrUrl: params.instance, adminUser: params.adminUser, adminPass: params.adminPass, configBlock },
       { fetchImpl: deps.fetchImpl },
@@ -1014,6 +1020,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     push("apply-config-and-restart", true, `set_configuration + restart succeeded against ${params.instance}`);
 
     // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
+    currentStep = "self-verify";
     const verify = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
     if (!verify.ok) {
       push("self-verify", false, `${verify.detail} — re-run \`flair mcp status\` to check current state, or \`flair mcp enable\` to retry the apply-config-and-restart step.`);
@@ -1042,9 +1049,20 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       callbackUrl,
     };
   } catch (err: any) {
-    const lastStep = steps.length > 0 ? steps[steps.length - 1].step : "signing-key";
-    push(lastStep, false, `unexpected error: ${err?.message ?? err}`);
-    return { ok: false, dryRun, steps, failedStep: lastStep };
+    // flair#1087: blame the step that was RUNNING, never the last one that
+    // succeeded. This read steps[steps.length - 1] — the last COMPLETED step —
+    // so a throw inside identity-mapping was reported against
+    // secrets-provisioning, which had just succeeded. An operator saw:
+    //
+    //     ✓ secrets-provisioning   ...apply these 5 vars in Fabric Studio, then re-run
+    //     ✗ secrets-provisioning   unexpected error: Identity mapping: ...
+    //
+    // Two results for one step, and the ✓ instructs several minutes of manual
+    // work in a web UI that the ✗ makes pointless. Read in order, you do the
+    // work first.
+    const failed = currentStep ?? "signing-key";
+    push(failed, false, `unexpected error: ${err?.message ?? err}`);
+    return { ok: false, dryRun, steps, failedStep: failed };
   }
 }
 
