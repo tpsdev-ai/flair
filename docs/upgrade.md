@@ -78,18 +78,23 @@ actually running:
   instead of retrying in a loop — see [Downgrade](#downgrade) for the
   restore procedure.
 
-### Pre-upgrade snapshot (opt-in)
+### Pre-upgrade snapshot (opt-in for same-engine, unconditional on engine change)
 
 flair#637 added a **physical**, byte-exact snapshot of `~/.flair/data` — the whole
 directory (RocksDB files, keys, config, `admin-pass`), not just the logical records a
-`flair backup` JSON export covers. As of 2026-07-08 this is **opt-in**: pass
-`--snapshot` to `flair upgrade` to take one before the package swap. It's off by
-default — matching how Harper's own upgrade CLI behaves (it recommends a backup before
-proceeding, but never auto-tars your data directory for you) — because the
-tested-downgrade guarantee below already covers the failure mode a snapshot exists
-for, and the old opt-out default meant every upgrade paid the cost (the data dir can
-be 800MB+; keep-last-3 retention meant up to ~2.5GB of snapshots sitting around)
-whether or not you wanted it.
+`flair backup` JSON export covers. As of 2026-07-08 this is **opt-in** for same-engine
+upgrades: pass `--snapshot` to `flair upgrade` to take one before the package swap.
+It's off by default — matching how Harper's own upgrade CLI behaves (it recommends a
+backup before proceeding, but never auto-tars your data directory for you) — because
+the downgrade-boot test (see below) covers same-engine downgrades, and the old opt-out
+default meant every upgrade paid the cost (the data dir can be 800MB+; keep-last-3
+retention meant up to ~2.5GB of snapshots sitting around) whether or not you wanted it.
+
+**When the engine (Harper) version changes** (flair#1047), the snapshot is
+**unconditional** — the tested-downgrade guarantee does not hold across engine version
+boundaries, and the backwards-boot refusal + snapshot recovery path is the invariant
+that applies. Opting out requires `--no-engine-snapshot` and prints what is being
+given up.
 
 ```bash
 flair upgrade --snapshot
@@ -488,6 +493,20 @@ from `.github/workflows/federation-compat.yml`'s `bun test test/compat/`): it bo
 current build, writes a memory and a presence row, stops it *without* wiping the data
 directory, then boots the last **npm-published** `@tpsdev-ai/flair` against that exact
 same directory and confirms it comes up healthy and can read both rows back.
+
+**The guarantee is now restated (flair#1050):** there is never a silent bad outcome.
+Either the old binary boots and serves the corpus correctly, **or** it refuses to start
+with a message naming what wrote the store, what is running, and how to recover — and a
+pre-upgrade snapshot exists to recover *from*. The first branch (clean boot) holds for
+same-engine upgrades; the second (refusal + snapshot) applies when the engine version
+changes, which is the case where downgrade was never ours to guarantee.
+
+**First known engine-version break:** Harper 5.1 → 5.2 (2026-08). 5.2.0 creates the
+`hdb_secret` store on first boot against an existing data directory, and the older binary
+will not start against it. Harper's 5.2.0 release notes document no rollback procedure.
+The backwards-boot refusal (flair#1049) catches this: the old binary refuses to start,
+naming both versions and the data directory, with recovery instructions. A pre-upgrade
+snapshot exists at the named path. Restoring it returns the store to a working state.
 
 **As observed when this suite was added (2026-07-08):** the npm-published baseline
 (0.21.0) boots cleanly against data written by a HEAD build roughly 14 commits ahead of
