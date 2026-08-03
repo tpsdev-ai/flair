@@ -50,8 +50,7 @@ function allTestFiles(dir = join(REPO_ROOT, "test")): string[] {
  * root-level glob is present. Derived from the workflow text so it cannot drift
  * from what CI runs.
  */
-function ciTestTargets(): { dirs: string[]; rootGlob: boolean } {
-  const text = workflowText();
+function ciTestTargetsFromText(text: string): { dirs: string[]; rootGlob: boolean } {
   const dirs = new Set<string>();
   let rootGlob = false;
   for (const m of text.matchAll(/bun test ((?:[^\s|&;`\n]+\s*)+)/g)) {
@@ -61,6 +60,42 @@ function ciTestTargets(): { dirs: string[]; rootGlob: boolean } {
     }
   }
   return { dirs: [...dirs], rootGlob };
+}
+
+function ciTestTargets(): { dirs: string[]; rootGlob: boolean } {
+  return ciTestTargetsFromText(workflowText());
+}
+
+/**
+ * Detect file-by-file shell loops that run test files in isolated directories.
+ *
+ * Pattern: `for f in test/<dir>/*.test.ts; do bun test "$f"` (in workflows)
+ *          `for f in "$ROOT"/test/<dir>/*.test.ts; do` (in release.sh)
+ *
+ * Returns the repo-relative directories these loops cover. This replaces the
+ * hand-maintained `loopRun` allowlist (flair#1063) — coverage is now derived
+ * from what CI actually does, not from a list someone must edit.
+ */
+function loopRunDirsFromText(workflowText: string, releaseScriptText: string): string[] {
+  const dirs = new Set<string>();
+
+  // Workflow: `for f in test/<dir>/*.test.ts; do` inside a YAML `run:` block
+  for (const m of workflowText.matchAll(/for f in (test\/[^\/]+)\/\*\.test\.ts; do/g)) {
+    dirs.add(m[1]);
+  }
+
+  // Release script: `for f in "$ROOT"/test/<dir>/*.test.ts; do`
+  for (const m of releaseScriptText.matchAll(/for f in "\$ROOT"\/(test\/[^\/]+)\/\*\.test\.ts; do/g)) {
+    dirs.add(m[1]);
+  }
+
+  return [...dirs].sort();
+}
+
+function loopRunDirs(): string[] {
+  const wf = workflowText();
+  const rs = readFileSync(join(REPO_ROOT, "scripts", "release.sh"), "utf8");
+  return loopRunDirsFromText(wf, rs);
 }
 
 describe("every test file is reachable from a CI command", () => {
@@ -83,18 +118,98 @@ describe("every test file is reachable from a CI command", () => {
   });
 
   test("no test file sits in a directory CI never runs", () => {
-    // Both *-isolated/ directories are run file-by-file in a shell loop
-    // (`bun test "$f"` per file), which the target parser sees as neither a
-    // directory nor the root glob — enumerate them here rather than teaching
-    // the parser about shell loops. See flair#1063 (follow-up: derive this
-    // list conventionally from workflow or filesystem).
-    const loopRun = ["test/unit-isolated", "test/integration-isolated"];
+    // Directories run file-by-file in a shell loop (`bun test "$f"` per file)
+    // are detected by parsing the actual workflow and release script for
+    // `for f in <dir>/*.test.ts; do` constructs. No hand-maintained list
+    // (flair#1063).
+    const loopDirs = loopRunDirs();
     const covered = (f: string) =>
       (f.split("/").length === 2 && rootGlob) ||
-      [...dirs, ...loopRun].some((d) => f.startsWith(`${d}/`));
+      [...dirs, ...loopDirs].some((d) => f.startsWith(`${d}/`));
 
     const orphans = files.filter((f) => !covered(f));
     expect(orphans).toEqual([]);
+  });
+
+  test("loop directory parser detects file-by-file loops from workflow + release.sh", () => {
+    // Proves the parser sees the actual loop constructs, not a hand-maintained list.
+    // Using synthetic text so the assertion is self-contained and cannot be
+    // invalidated by workflow refactors that move the loops elsewhere.
+    const syntheticWorkflow = `
+      run: |
+        for f in test/unit-isolated/*.test.ts; do
+          bun test "$f" || exit 1
+        done
+        for f in test/integration-isolated/*.test.ts; do
+          bun test "$f" || exit 1
+        done
+    `;
+    const syntheticRelease = `
+      for f in "$ROOT"/test/unit-isolated/*.test.ts; do
+        bun test "$f"
+      done
+    `;
+    const detected = loopRunDirsFromText(syntheticWorkflow, syntheticRelease);
+    expect(detected).toContain("test/unit-isolated");
+    expect(detected).toContain("test/integration-isolated");
+  });
+
+  test("dangerous staleness: removing a loop from CI leaves orphans (the guard fails)", () => {
+    // This is the core invariant that flair#1063 fixes. If a loop is removed
+    // from the workflow/release.sh but the directory still contains test files,
+    // the coverage guard MUST report them as orphans — not silently pass.
+    //
+    // We prove this with synthetic text that omits one loop. The test files
+    // we enumerate come from the real filesystem (allTestFiles()), so the
+    // orphan directory really exists with real .test.ts files in it.
+
+    // Synthetic workflow that has the unit-isolated loop but NOT the integration-isolated loop.
+    // (mimics: someone deleted the integration-isolated CI step but the directory still has files)
+    const workflowWithMissingLoop = `
+      - run: bun test test/unit/ test/*.test.ts
+      - name: "Isolated unit files"
+        run: |
+          for f in test/unit-isolated/*.test.ts; do
+            bun test "$f" || exit 1
+          done
+    `;
+    const releaseScriptWithBothLoops = `
+      for f in "$ROOT"/test/unit-isolated/*.test.ts; do
+        bun test "$f"
+      done
+      for f in "$ROOT"/test/integration-isolated/*.test.ts; do
+        bun test "$f"
+      done
+    `;
+
+    // Parse the synthetic workflow (missing integration-isolated loop) but keep
+    // release.sh with it — simulates workflow CI was trimmed but release script
+    // still has it. Files in test/integration-isolated/ are still covered via
+    // release.sh, so we need a scenario where NEITHER source has the loop.
+
+    // Better: remove the loop from BOTH sources to prove the dangerous case.
+    const releaseScriptAlsoMissing = `
+      for f in "$ROOT"/test/unit-isolated/*.test.ts; do
+        bun test "$f"
+      done
+    `;
+
+    const { dirs: _dirs, rootGlob: _rootGlob } = ciTestTargetsFromText(workflowWithMissingLoop);
+    const loopDirs = loopRunDirsFromText(workflowWithMissingLoop, releaseScriptAlsoMissing);
+
+    // test/integration-isolated/ must NOT be in loopDirs (the loop was removed from both sources)
+    expect(loopDirs).not.toContain("test/integration-isolated");
+
+    // But the directory still has real test files on disk
+    const isolatedFiles = allTestFiles(join(REPO_ROOT, "test", "integration-isolated"));
+    expect(isolatedFiles.length).toBeGreaterThan(0);
+
+    // Every file in that directory must now be an orphan
+    const covered = (f: string) =>
+      (f.split("/").length === 2 && _rootGlob) ||
+      [..._dirs, ...loopDirs].some((d) => f.startsWith(`${d}/`));
+    const orphans = isolatedFiles.filter((f) => !covered(f));
+    expect(orphans.length).toBeGreaterThan(0);
   });
 });
 
