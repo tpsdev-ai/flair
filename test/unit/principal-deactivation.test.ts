@@ -75,7 +75,8 @@ describe("isPrincipalDeactivated — the ONE shared predicate", () => {
   });
 
   it("record with no status field → false (pre-1.0 compat)", () => {
-    expect(isPrincipalDeactivated({ id: "old-agent", publicKey: "aa" })).toBe(false);
+    const oldAgent: Record<string, unknown> = { id: "old-agent", publicKey: "aa" };
+    expect(isPrincipalDeactivated(oldAgent)).toBe(false);
   });
 });
 
