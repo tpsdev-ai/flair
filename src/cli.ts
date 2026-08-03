@@ -5444,7 +5444,7 @@ mcp
   .option("--secrets-path <path>", "Override the secrets staging file path")
   .option("--cimd-allowed-hosts <hosts>", "Comma-separated clientIdMetadataDocuments.allowedHosts override (else claude.ai,claude.com)")
   .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
-  .option("--admin-pass <pass>", "Admin password for the target instance (or FLAIR_ADMIN_PASS)")
+  .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
   .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
   .option("--dry-run", "Generate keys/tokens/config and validate inputs; skip every remote call")
   .option("--json", "Print machine-readable JSON instead of a human summary")
@@ -5472,8 +5472,11 @@ mcp
     const adminPass = dryRun ? (opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "") : resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
     if (!dryRun && !adminPass) {
       console.error(
-        "Error: --admin-pass or FLAIR_ADMIN_PASS required (the operations API on the target instance needs it " +
-          "for identity mapping + set_configuration + restart).",
+        "Error: --admin-pass <pass> or --admin-pass-file <path> is required for a REMOTE target " +
+          "(the operations API on the target instance needs it for identity mapping + set_configuration + restart).\n" +
+          "  FLAIR_ADMIN_PASS and ~/.flair/admin-pass are deliberately NOT used here: they are THIS machine's " +
+          "local admin credentials, and sending them to another instance is how a local secret ends up on someone " +
+          "else's Harper. Pass the target's own admin password explicitly.",
       );
       process.exit(1);
     }
