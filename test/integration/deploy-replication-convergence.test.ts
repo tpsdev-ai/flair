@@ -124,7 +124,7 @@ function synthPackageRoot(behaviours: string[], peerNodeName: string): { root: s
     if (f.endsWith(".yaml")) writeFileSync(p, "port: 9926\n");
     else mkdirSync(p, { recursive: true });
   }
-  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test" }));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test", files: ["dist/", "schemas/", "templates/", "docs/", "config.yaml", "LICENSE", "README.md", "SECURITY.md"] }));
 
   const binDir = join(root, "node_modules", "harper", "dist", "bin");
   mkdirSync(binDir, { recursive: true });
