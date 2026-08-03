@@ -74,6 +74,33 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 
 const NODE_BIN = process.env.NODE_BIN ?? "node";
 
+// ─── Outcome classification (flair#1050) ────────────────────────────────────
+// The restated downgrade invariant names three outcomes:
+//   (a) old binary boots and serves correctly
+//   (b) old binary refuses loudly naming the engine change and how to recover
+//   (c) anything else — the silent bad outcome it forbids
+//
+// This function classifies a downgrade boot attempt from its exit code and
+// stderr.  It is pure (no side effects) so it can be unit-tested directly.
+
+export type DowngradeOutcome =
+  | { kind: "booted" }
+  | { kind: "refusal"; exitCode: number; stderr: string }
+  | { kind: "hung"; stderr: string };
+
+export function classifyDowngradeOutcome(
+  exitCode: number | null,
+  stderr: string,
+): DowngradeOutcome {
+  // Exit 124 is the timeout command's exit code: the process HUNG and was
+  // killed by the harness, it did not refuse.
+  if (exitCode === 124) return { kind: "hung", stderr };
+  // Exit 0 means the baseline booted successfully.
+  if (exitCode === 0) return { kind: "booted" };
+  // Any other non-zero exit is a refusal (outcome b).
+  return { kind: "refusal", exitCode: exitCode ?? -1, stderr };
+}
+
 // Generous but bounded — a fresh `npm install` from the public registry plus
 // two real Harper installs/boots easily takes 1-3 minutes on a cold cache
 // (same figure federation-mixed-version.test.ts uses for the same reason).
@@ -331,9 +358,19 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     if (engineVersionChanged) {
       // Engine version changed — either outcome is valid.
       if (baselineBootError) {
+        const msg = baselineBootError.message;
+
+        // Distinguish refusal (prompt non-zero exit) from hang (timeout).
+        // A hang is the silent-bad-outcome case the invariant forbids.
+        if (msg.includes("timed out") || msg.includes("did not respond within")) {
+          throw new Error(
+            `baseline HUNG (timeout) — this is the silent-bad-outcome case ` +
+            `the invariant forbids:\n${msg}`,
+          );
+        }
+
         // Baseline refused to boot. Assert the refusal message names the
         // engine version change and a recovery path (flair#1049/#1050).
-        const msg = baselineBootError.message;
         if (!msg.includes("Harper") || !msg.includes("data directory")) {
           throw new Error(
             `Engine version changed and baseline refused to boot, but the refusal ` +
@@ -389,4 +426,47 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     expect(entry).toBeDefined();
     expect(entry.presenceStatus).toBe("active");
   }, CLI_TIMEOUT_MS);
+});
+
+// ─── Classification unit tests (flair#1050) ─────────────────────────────────
+// The classifyDowngradeOutcome function is pure — these tests feed it
+// simulated exit codes and stderr to assert the classification itself,
+// independent of a real Harper boot.
+
+describe("classifyDowngradeOutcome", () => {
+  test("exit 0 → booted", () => {
+    expect(classifyDowngradeOutcome(0, "").kind).toBe("booted");
+  });
+
+  test("exit 124 → hung (the silent-bad-outcome case)", () => {
+    const result = classifyDowngradeOutcome(124, "some startup output");
+    expect(result.kind).toBe("hung");
+    if (result.kind === "hung") {
+      expect(result.stderr).toBe("some startup output");
+    }
+  });
+
+  test("exit null → refusal (process killed by signal, not a timeout)", () => {
+    const result = classifyDowngradeOutcome(null, "Killed\n");
+    expect(result.kind).toBe("refusal");
+    if (result.kind === "refusal") {
+      expect(result.exitCode).toBe(-1);
+    }
+  });
+
+  test("non-zero exit (not 124) → refusal", () => {
+    const result = classifyDowngradeOutcome(1, "Harper v5.2.0 wrote this data directory; you are running v5.1.17. Restore the pre-upgrade snapshot.");
+    expect(result.kind).toBe("refusal");
+    if (result.kind === "refusal") {
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Harper");
+    }
+  });
+
+  test("exit 124 with Harper-naming stderr is still hung, not refusal", () => {
+    // A hang is a hang regardless of what stderr says — exit 124 means
+    // the timeout command killed it, not that it printed a message and exited.
+    const result = classifyDowngradeOutcome(124, "Harper engine version mismatch");
+    expect(result.kind).toBe("hung");
+  });
 });
