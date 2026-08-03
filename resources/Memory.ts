@@ -21,6 +21,7 @@ import {
   makeAuthGate,
   makeReadScope,
   makeByIdReadGate,
+  makeScopedSearch,
   resolveAuthGate,
   stampAttribution,
   FORBIDDEN,
@@ -73,6 +74,7 @@ function wantsTrust(target: any, opts: { includeTrust?: boolean } | undefined): 
  */
 export const memoryReadScope = makeReadScope(RECORD_TYPES.Memory.readScope, RECORD_TYPES.Memory.ownerField);
 const memoryByIdReadGate = makeByIdReadGate(memoryReadScope);
+const memoryScopedSearch = makeScopedSearch(memoryReadScope);
 // See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
 // prototype method below, never a class-field assignment — Harper's
 // relationship-traversal RBAC path reads allowRead off the prototype.
@@ -580,27 +582,12 @@ export class Memory extends (databases as any).flair.Memory {
     // from RECORD_TYPES.Memory — see this file's header — delegating
     // "open-within-org" to memory-read-scope.ts's resolveReadScope()
     // unchanged) so get() above and search() here cannot drift.
-    const scope = await memoryReadScope(gate.agentId);
-    const agentIdCondition: any = scope.condition;
-
-    // Harper passes `query` as a RequestTarget (extends URLSearchParams) or a
-    // conditions array. For URL-based GET /Memory?... calls, URL params are no
-    // longer translated to conditions here — callers should use
-    // POST /Memory/search_by_conditions with an explicit conditions array.
-    // For programmatic calls with a conditions array, we wrap with the agentId scope.
-    if (query && typeof query === "object" && !Array.isArray(query)) {
-      if (Array.isArray(query.conditions) && query.conditions.length > 0) {
-        query.conditions = [agentIdCondition, ...query.conditions];
-        return withDetachedTxn(ctx, () => super.search(query));
-      }
-      // Fallback: no conditions array present — just scope and pass through
-    }
-
-    // Fallback: plain array or no query (internal calls)
-    const conditions = Array.isArray(query) && query.length > 0
-      ? [agentIdCondition, ...query]
-      : [agentIdCondition];
-    return withDetachedTxn(ctx, () => super.search(conditions));
+    //
+    // The scope condition is nested as the outermost AND block via
+    // makeScopedSearch (record-type-kit.ts) — same correct composition
+    // MemoryCandidate.search() already applies — so a caller-supplied
+    // `operator: "or"` cannot boolean-inject past the owner scope.
+    return memoryScopedSearch(gate.agentId, query, (q) => withDetachedTxn(ctx, () => super.search(q)));
   }
 
   async post(content: any, context?: any) {
