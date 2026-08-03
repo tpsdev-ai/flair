@@ -19,20 +19,27 @@ export class FeedMemories extends Resource {
       return UNAUTH();
     }
 
-    // No-forge attribution: use the kit's stampAttribution (stamp-default) to
-    // stamp agentId from the authenticated principal, never from the body.
-    // Mode choice: stamp-default (silent overwrite) over stamp-strict (reject
-    // 403 on mismatch). This endpoint is the ingestion path — callers are MCP
+    // No-forge attribution: use the kit's stampAttribution to stamp agentId
+    // from the authenticated principal, never from the body.
+    //
+    // Mode choice: stamp-strict (reject 403 on mismatch) over stamp-default
+    // (silent overwrite). This endpoint is the ingestion path — callers are MCP
     // clients and agent-side tool calls. The defect this fix addresses was
     // trusting a body-supplied identity; the correction is to always stamp from
-    // the authenticated principal. Silent overwrite is safe: the write always
-    // lands attributed to the real principal. It avoids a trade-off where
-    // probing attempts become indistinguishable from a buggy client echoing a
-    // field back AND breaks callers that harmlessly include agentId. A strict
-    // posture would reject those callers for no security gain — the write is
-    // already safe because we control attribution regardless of what the body
-    // says.
-    const attr = stampAttribution(auth, content, 'agentId', 'stamp-default', 'forbidden: cannot attribute a feed memory to another agent');
+    // the authenticated principal.
+    //
+    // Deciding point (adjudicated on PR #1071): a silent overwrite means a
+    // buggy client never learns it is buggy — it keeps sending the wrong
+    // agentId and keeps getting 200. A strict rejection surfaces the mismatch
+    // so the caller can fix it. The concern about breaking callers that
+    // harmlessly echo agentId back was checked: a full search of the repo and
+    // workspace for FeedMemories and /FeedMemories returns only the resource
+    // definition and its own tests — no SDK wrappers, no CLI commands, no
+    // internal callers construct requests with a body-supplied agentId. A
+    // caller echoing the correct agentId (matching the principal) passes
+    // through stamp-strict unchanged; a caller echoing a wrong one is exactly
+    // the bug this slice exists to prevent.
+    const attr = stampAttribution(auth, content, 'agentId', 'stamp-strict', 'forbidden: cannot attribute a feed memory to another agent');
     if (attr.denied) return attr.denied;
 
     // Guard against body-supplied id targeting another agent's record.

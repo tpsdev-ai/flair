@@ -55,7 +55,7 @@ describe("MemoryFeed IDOR guard (authz slice 4)", () => {
         operation: "insert", database: "flair", table: "Agent",
         records: [{ id: ag.id, name: ag.id, role: "agent", publicKey: ag.publicKey, createdAt: new Date().toISOString() }],
       });
-      expect(res.status, `register ${ag.id} → ${res.status}`).toBe(200);
+      expect(res.status).toBe(200);
     }
   }, 180_000);
 
@@ -72,11 +72,8 @@ describe("MemoryFeed IDOR guard (authz slice 4)", () => {
       headers: { Authorization: ed25519Header(agentA, "POST", path), "Content-Type": "application/json" },
       body: JSON.stringify({ agentId: agentB.id, content: "imposter memory" }),
     });
-    // stamp-default silently overwrites: the write succeeds, attributed to agentA.
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.agentId).toBe(agentA.id, "body-supplied agentId must be overridden to the authenticated principal");
-    expect(body.agentId).not.toBe(agentB.id);
+    // stamp-strict rejects body-supplied agentId mismatches as 403.
+    expect(res.status).toBe(403);
   }, 30_000);
 
   // ─── Guard: cannot target another agent's record via body id ────────────
@@ -90,7 +87,7 @@ describe("MemoryFeed IDOR guard (authz slice 4)", () => {
       headers: { Authorization: ed25519Header(agentB, "POST", path), "Content-Type": "application/json" },
       body: JSON.stringify({ id: bId, agentId: agentB.id, content: "agent b's memory" }),
     });
-    expect(createRes.status, `B's creation returned ${await createRes.text()}`).toBe(200);
+    expect(createRes.status).toBe(200);
 
     // Now agent A tries to feed a memory with agentB's id.
     const spoofRes = await fetch(`${harper.httpURL}${path}`, {
@@ -98,10 +95,9 @@ describe("MemoryFeed IDOR guard (authz slice 4)", () => {
       headers: { Authorization: ed25519Header(agentA, "POST", path), "Content-Type": "application/json" },
       body: JSON.stringify({ id: bId, agentId: agentA.id, content: "trying to overwrite b" }),
     });
-    const spoofText = await spoofRes.text();
 
     // The fix rejects this: existing record's agentId (agentB) ≠ stamped agentId (agentA).
-    expect(spoofRes.status, `A's spoof returned ${spoofRes.status}: ${spoofText}`).toBe(403);
+    expect(spoofRes.status).toBe(403);
   }, 30_000);
 
   // ─── Positive control: agent writing its own feed memory still works ────
@@ -131,7 +127,7 @@ describe("MemoryFeed IDOR guard (authz slice 4)", () => {
       headers: { Authorization: ed25519Header(agentA, "POST", path), "Content-Type": "application/json" },
       body: JSON.stringify({ id: aId, agentId: agentA.id, content: "agent a's memory" }),
     });
-    expect(createRes.status, `A's creation returned ${await createRes.text()}`).toBe(200);
+    expect(createRes.status).toBe(200);
 
     // Agent A feeds again with the same id (same content = dedup, returns existing).
     const updateRes = await fetch(`${harper.httpURL}${path}`, {
@@ -139,8 +135,10 @@ describe("MemoryFeed IDOR guard (authz slice 4)", () => {
       headers: { Authorization: ed25519Header(agentA, "POST", path), "Content-Type": "application/json" },
       body: JSON.stringify({ id: aId, agentId: agentA.id, content: "agent a's memory" }),
     });
-    const updateBody = await updateRes.json();
+    // Read body once — avoid double-read (ERR_BODY_ALREADY_USED).
+    const updateText = await updateRes.text();
     expect(updateRes.status).toBe(200);
+    const updateBody = JSON.parse(updateText);
     expect(updateBody.agentId).toBe(agentA.id);
   }, 30_000);
 
@@ -156,6 +154,6 @@ describe("MemoryFeed IDOR guard (authz slice 4)", () => {
     // allowCreate() (via allowVerified) rejects anonymous at the Harper resource
     // layer before post() is reached, so the observable response is 403 (AccessViolation).
     // The 401 check in post() is defense-in-depth for non-Harper callers.
-    expect(res.status, `anonymous returned ${await res.text()}`).toBe(403);
+    expect(res.status).toBe(403);
   }, 30_000);
 });
