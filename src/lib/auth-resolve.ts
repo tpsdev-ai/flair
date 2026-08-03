@@ -156,6 +156,25 @@ export function defaultKeysDir(): string {
  * local admin secret against someone else's Harper instance. Remote callers
  * keep requiring an explicit `--admin-pass`.
  *
+ * ── Both legs, not just the file (flair#1085) ────────────────────────────────
+ * An operator reported this as a bug: `--help` and the error both promised
+ * `FLAIR_ADMIN_PASS` would work, and for a remote target it silently did not.
+ * The promise was wrong, not the guard — but the codebase disagreed with itself,
+ * which is why it read as a defect. One call site's comment described the goal as
+ * blocking only the *file* fallback, this doc described blocking both, and the
+ * user-facing strings described neither.
+ *
+ * The env leg is skipped **deliberately**, and the reasoning is worth keeping:
+ * an exported `FLAIR_ADMIN_PASS` is not evidence of intent toward THIS target. It
+ * persists across a shell session, so an operator who set it for their local
+ * instance and later types `--instance https://someone-elses-host` would send a
+ * local admin credential to a third party — silently, and with no way to notice.
+ * "The operator exported it" and "the operator meant it for this host" are
+ * different claims, and only the explicit flag asserts the second.
+ *
+ * If that trade is ever revisited, revisit it here rather than at a call site:
+ * the guard is one line and the reasoning is not obvious from it.
+ *
  * Throws (via readAdminPassFileSecure) if the file exists but has unsafe
  * permissions, so a misconfigured file surfaces as an actionable chmod error
  * instead of a generic "admin pass required" message.
