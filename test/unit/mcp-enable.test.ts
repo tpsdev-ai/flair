@@ -271,6 +271,7 @@ function mockOpsFetch(opts: {
   existingPrincipal?: boolean;
   existingCredential?: { id: string } | null;
   failFind?: boolean;
+  failFindStatus?: number;
   failInsert?: boolean;
   failUpsert?: boolean;
 } = {}): { fetchImpl: typeof fetch; calls: any[] } {
@@ -279,7 +280,7 @@ function mockOpsFetch(opts: {
     const body = JSON.parse(String(init?.body ?? "{}"));
     calls.push({ url: String(url), body });
     if (body.operation === "search_by_value" && body.table === "Agent") {
-      if (opts.failFind) return new Response("boom", { status: 500 });
+      if (opts.failFind) return new Response("boom", { status: opts.failFindStatus ?? 500 });
       return new Response(JSON.stringify(opts.existingPrincipal ? [{ id: body.search_value }] : []), { status: 200 });
     }
     if (body.operation === "insert" && body.table === "Agent") {
@@ -342,9 +343,28 @@ describe("provisionIdpIdentityMapping", () => {
         { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
         { fetchImpl },
       ),
-    ).rejects.toThrow(/failed to look up principal/);
+    ).rejects.toThrow(/the ops API call to .* failed/);
+      // The old wording was "failed to look up principal '<x>'", which was wrong
+      // and expensive: a MISSING principal returns 200 [] and the code below
+      // creates it, so reaching this branch means the ops CALL failed. Blaming
+      // the principal sent a reader to inspect principals while the real cause
+      // was the endpoint. The guarantee under test — throws before any write —
+      // is unchanged.
     expect(calls).toHaveLength(1);
   });
+
+    test("a 404 names the served-origin cause and the flag that fixes it", async () => {
+      // The failure an operator actually hit: ops calls sent to the served
+      // origin, where the flair REST component owns "/" and answers 404. The old
+      // message pointed at principals; this one has to point at the port.
+      const { fetchImpl } = mockOpsFetch({ failFind: true, failFindStatus: 404 });
+      await expect(
+        provisionIdpIdentityMapping(
+          { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+          { fetchImpl },
+        ),
+      ).rejects.toThrow(/served origin rather than the ops API/);
+    });
 });
 
 // ─── apply config + restart ──────────────────────────────────────────────────

@@ -407,8 +407,49 @@ export function provisionSecrets(
 
 // ─── Identity mapping (Credential kind:idp) ─────────────────────────────────
 
+/**
+ * The ops API is NOT the served origin, and its port is NOT derivable.
+ *
+ * flair#1072-adjacent, found while enabling MCP against a hosted instance: this
+ * function used a string target verbatim, so `flair mcp enable --instance
+ * https://flair.example.harperfabric.com` posted its ops calls to **port 443**,
+ * where the flair REST component owns `/` and answers `404 Not found`. Measured
+ * against a live Fabric instance, same request both ways:
+ *
+ *     POST https://<host>/          -> HTTP 404  "Not found"
+ *     POST https://<host>:9925/     -> HTTP 200  []
+ *
+ * The codebase elsewhere documents "ops port = HTTP port - 1", which derives 442
+ * for a 443-served instance. Also measured: 442 and 19925 are both dead on
+ * Fabric. **That convention does not hold, and no arithmetic on the served port
+ * can be trusted — an operator can put the ops API anywhere.**
+ *
+ * So: never derive silently. An explicit target wins; otherwise the conventional
+ * hosted ops port is *tried*, and a caller that cannot reach it is told to pass
+ * one rather than being handed a 404 about something else.
+ */
+export const HOSTED_OPS_PORT = 9925;
+
+export function resolveOpsUrl(target: number | string, explicitOpsUrl?: string): string {
+  if (explicitOpsUrl) return `${explicitOpsUrl.replace(/\/+$/, "")}/`;
+  if (typeof target === "number") return `http://127.0.0.1:${target}/`;
+  // A string target is the SERVED origin. Its own port serves the REST surface,
+  // not the ops API, so reuse the host and apply the hosted ops port.
+  try {
+    const u = new URL(target.includes("://") ? target : `https://${target}`);
+    u.port = String(HOSTED_OPS_PORT);
+    u.pathname = "/";
+    u.search = "";
+    return u.toString();
+  } catch {
+    // Unparseable — preserve the old behaviour rather than inventing a URL, and
+    // let the caller's error path name the remedy.
+    return `${target.replace(/\/+$/, "")}/`;
+  }
+}
+
 function opsBaseUrl(opsPortOrUrl: number | string): string {
-  return typeof opsPortOrUrl === "number" ? `http://127.0.0.1:${opsPortOrUrl}/` : `${opsPortOrUrl.replace(/\/$/, "")}/`;
+  return resolveOpsUrl(opsPortOrUrl);
 }
 
 function basicAuthHeader(adminUser: string, adminPass: string): string {
@@ -463,7 +504,22 @@ export async function provisionIdpIdentityMapping(
   });
   if (!findRes.ok) {
     const text = await findRes.text().catch(() => "");
-    throw new Error(`Identity mapping: failed to look up principal '${params.principal}' (HTTP ${findRes.status}): ${text}`);
+    // A MISSING principal is not this branch. The ops API answers an empty
+    // search with 200 and [], and the code below creates the principal when the
+    // list is empty. Reaching here means the ops CALL failed, not that the
+    // identity is absent — and saying "failed to look up principal 'x'" sends
+    // the reader to look at principals, which is where an evening goes.
+    //
+    // 404 in particular almost always means the request reached the SERVED
+    // origin instead of the ops API: the flair REST component owns `/` there and
+    // answers 404. Say that, and name the flag that fixes it.
+    const hint =
+      findRes.status === 404
+        ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. Pass --ops-url <url> to point at it explicitly.`
+        : "";
+    throw new Error(
+      `Identity mapping: the ops API call to ${opsUrl} failed (HTTP ${findRes.status})${hint}${text ? `: ${text}` : ""}`,
+    );
   }
   const foundAgents = await findRes.json().catch(() => []);
   let principalCreated = false;
