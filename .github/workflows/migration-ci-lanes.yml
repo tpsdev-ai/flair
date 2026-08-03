@@ -5,10 +5,12 @@
 # upgrade-path CI with the two lanes Kern's design-review verdict called
 # non-negotiable:
 #
-#   - downgrade-and-revert: "the proof of invariant I" — a PR build that goes
-#     bad mid-migration must not brick the fleet; reinstalling the previously
-#     published release must boot cleanly against the partially-migrated
-#     store. Runs PER MIGRATION PR, not nightly-only.
+#   - downgrade-and-revert: "no silent bad outcome" (flair#1050) — a PR build
+#     that goes bad mid-migration must not brick the fleet; reinstalling the
+#     previously published release must either boot cleanly against the
+#     partially-migrated store, OR refuse loudly with a message naming both
+#     versions and a recovery path, with a pre-upgrade snapshot that restores
+#     the store to a working state.
 #   - snapshot-restore drill: invariant III ("a backup that has never been
 #     restored is a prayer") — proves the restore path actually recovers
 #     corrupted content, not just that a snapshot file gets written.
@@ -55,7 +57,7 @@ jobs:
   #      genuinely differed across versions) AND a real `flair memory search`
   #      CLI round-trip.
   downgrade-and-revert:
-    name: Migration downgrade-and-revert (invariant I proof)
+    name: Migration downgrade-and-revert (no silent bad outcome, flair#1050)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -260,6 +262,25 @@ jobs:
           [[ "$SEEDED_COUNT" == "$ROW_COUNT" ]] || { echo "::error::seeded ${SEEDED_COUNT} rows, expected ${ROW_COUNT} — setup broken, not a downgrade regression"; exit 1; }
           echo "Confirmed ${SEEDED_COUNT} seeded rows readable on baseline before the swap."
 
+          # ── 2a. Take a pre-upgrade snapshot (flair#1050) — the recovery
+          # path the backwards-boot refusal names. Taken BEFORE the PR build
+          # boots, while the store is still in the pre-migration state the
+          # baseline can read.
+          #
+          # Raw tar, not `flair snapshot create`: that command stops Flair,
+          # snapshots, then RESTARTS using the CLI's own Harper binary. If the
+          # CLI is the HEAD build, the restart would use HEAD's Harper, which
+          # would write an engine-version stamp — contaminating the data dir
+          # before the baseline ever boots against it. ──
+          echo "Taking pre-upgrade snapshot (engine-change recovery path)..."
+          SNAPSHOT_DIR="${HOME}/.flair/upgrade-snapshots"
+          mkdir -p "$SNAPSHOT_DIR"
+          SNAPSHOT_TS=$(date -u +%Y-%m-%dT%H-%M-%S-%3NZ)
+          SNAPSHOT_PATH="${SNAPSHOT_DIR}/flair-data-${SNAPSHOT_TS}.tar.gz"
+          tar -czf "$SNAPSHOT_PATH" -C "${HOME}/.flair" data
+          chmod 600 "$SNAPSHOT_PATH"
+          echo "Snapshot: ${SNAPSHOT_PATH}"
+
           # ── 3. Stop baseline. Confirm it actually exited (flair stop sends
           # SIGTERM and returns immediately — see src/cli.ts's own comment on
           # this race) before touching the data dir with a different binary. ──
@@ -303,6 +324,34 @@ jobs:
           $HEAD_FLAIR stop --port $PORT || true
           wait_for_http_down "${BASE_URL}/Health" 30 "PR-build Harper (post-kill)"
 
+          # ── 7a. Detect engine version change (flair#1050) ───────────────
+          # Compare the Harper version each install carries. When they differ,
+          # the old invariant ("downgrade always works") does not hold — the
+          # lane asserts the restated invariant instead.
+          BASELINE_HARPER=$(node -p "
+            const fs = require('fs');
+            for (const n of ['harper','@harperfast/harper']) {
+              const p = require('path').join('$BASE_DIR','node_modules',...n.split('/'),'package.json');
+              if (fs.existsSync(p)) { const v = JSON.parse(fs.readFileSync(p,'utf8')).version; if (v) { console.log(v); process.exit(0); } }
+            }
+            console.log('');
+          ")
+          HEAD_HARPER=$(node -p "
+            const fs = require('fs');
+            for (const n of ['harper','@harperfast/harper']) {
+              const p = require('path').join('$HEAD_DIR','node_modules',...n.split('/'),'package.json');
+              if (fs.existsSync(p)) { const v = JSON.parse(fs.readFileSync(p,'utf8')).version; if (v) { console.log(v); process.exit(0); } }
+            }
+            console.log('');
+          ")
+          ENGINE_VERSION_CHANGED=0
+          if [[ -n "$BASELINE_HARPER" && -n "$HEAD_HARPER" && "$BASELINE_HARPER" != "$HEAD_HARPER" ]]; then
+            ENGINE_VERSION_CHANGED=1
+            echo "Engine version changed: baseline Harper ${BASELINE_HARPER} → HEAD Harper ${HEAD_HARPER}"
+          else
+            echo "Engine version unchanged (baseline ${BASELINE_HARPER}, HEAD ${HEAD_HARPER}) — asserting original invariant"
+          fi
+
           # ── 8. Reinstall the previously-published release: start the SAME
           # already-installed baseline binary again against the now
           # partially-migrated data directory — exactly what a real operator
@@ -320,11 +369,170 @@ jobs:
           # read and rewriting embeddingModel on a nondeterministic few rows
           # (the "N rows lost the pinned embeddingModel stamp — isolation broken"
           # flake). Keeping the pin means the baseline's embedding-stamp finds
-          # nothing pending, so no re-embed runs. Zero effect on invariant I
+          # nothing pending, so no re-embed runs. Zero effect on the downgrade
           # (byte-identical content, real partial-migration state, clean old-binary
           # boot). The other two vars stay unset — the baseline doesn't know the
           # synthetic-migration gate anyway.
           unset FLAIR_ENABLE_TEST_MIGRATIONS FLAIR_MIGRATION_TEST_BATCH_DELAY_MS
+
+          if [[ "$ENGINE_VERSION_CHANGED" == "1" ]]; then
+            # ── Engine-change branch (flair#1050): the restated invariant ──
+            # The baseline either refuses to start (stamp-capable) or boots
+            # (pre-stamp baseline). Both are valid; the lane asserts the
+            # correct outcome for each.
+            echo "::group::Engine-change downgrade assertion"
+
+            # Try to boot the baseline — capture exit code and stderr.
+            # A refusal is prompt (non-zero within seconds), not a hang.
+            BASELINE_START_OUTPUT=$(mktemp)
+            set +e
+            timeout 30 $BASE_FLAIR start --port $PORT >"$BASELINE_START_OUTPUT" 2>&1
+            BASELINE_START_EXIT=$?
+            set -e
+            BASELINE_STDERR=$(cat "$BASELINE_START_OUTPUT")
+            rm -f "$BASELINE_START_OUTPUT"
+
+            if [[ "$BASELINE_START_EXIT" != "0" ]]; then
+              # ── Baseline refused — stamp-capable path ───────────────────
+              echo "Baseline refused to start (exit ${BASELINE_START_EXIT}) — stamp-capable baseline."
+
+              # Assert the refusal message names the engine version change
+              # and a recovery path.
+              if ! echo "$BASELINE_STDERR" | grep -q "Harper"; then
+                echo "::error::baseline refused but stderr does not name Harper — unexpected failure mode"
+                echo "--- stderr ---"; echo "$BASELINE_STDERR"; echo "---"
+                exit 1
+              fi
+              if ! echo "$BASELINE_STDERR" | grep -q "data directory"; then
+                echo "::error::baseline refused but stderr does not name the data directory"
+                echo "--- stderr ---"; echo "$BASELINE_STDERR"; echo "---"
+                exit 1
+              fi
+              echo "Refusal message names Harper and data directory — correct."
+
+              # Assert the pre-upgrade snapshot exists at the path the
+              # refusal names.
+              if [[ ! -f "$SNAPSHOT_PATH" ]]; then
+                echo "::error::pre-upgrade snapshot not found at ${SNAPSHOT_PATH}"
+                exit 1
+              fi
+              echo "Pre-upgrade snapshot exists: ${SNAPSHOT_PATH}"
+
+              # ── Restore the snapshot and verify the baseline serves ──────
+              echo "Restoring snapshot and verifying baseline serves correctly..."
+              # Raw tar restore, not `flair snapshot restore`: that command
+              # restarts using the CLI's own Harper, which would write a stamp.
+              rm -rf "${HOME}/.flair/data"
+              mkdir -p "${HOME}/.flair/data"
+              tar -xzf "$SNAPSHOT_PATH" -C "${HOME}/.flair"
+
+              cd "$BASE_DIR"
+              $BASE_FLAIR start --port $PORT
+              wait_for_http_ok "${BASE_URL}/Health" 90 "baseline Harper (post-snapshot-restore)"
+              wait_for_flair_status_running "$BASE_FLAIR" "$PORT" 60
+
+              # Verify the baseline serves the seeded rows correctly after
+              # snapshot restore — same byte-identity assertion the lane
+              # already makes (row content, exact count).
+              fetch_agent_memories_json "$OPS_URL" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" > "$DIAG_DIR/post-restore-rows.json"
+              RESTORE_COUNT=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$DIAG_DIR/post-restore-rows.json','utf8')).length)")
+              [[ "$RESTORE_COUNT" == "$ROW_COUNT" ]] || { echo "::error::post-restore row count ${RESTORE_COUNT} != expected ${ROW_COUNT}"; exit 1; }
+
+              MARKER="$SYNTHETIC_TARGET_MARKER" ROWS_FILE="$DIAG_DIR/post-restore-rows.json" EXPECTED_FILE="$EXPECTED_CONTENT_FILE" TOTAL="$ROW_COUNT" node -e '
+                const fs = require("fs");
+                const rows = JSON.parse(fs.readFileSync(process.env.ROWS_FILE, "utf8"));
+                const actual = rows.map((r) => r.content).sort();
+                const expected = fs.readFileSync(process.env.EXPECTED_FILE, "utf8").trim().split("\n").sort();
+                if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+                  console.error("content mismatch after snapshot restore — recovery path is broken");
+                  process.exit(1);
+                }
+                console.log("all " + rows.length + " seeded rows byte-identical after snapshot restore — recovery path verified");
+              '
+
+              echo "✅ engine-change downgrade: baseline refused (stamp-capable), snapshot restored, ${ROW_COUNT} seeded rows verified."
+            else
+              # ── Baseline booted — pre-stamp baseline (transition case) ───
+              echo "Baseline booted successfully — pre-stamp baseline (transition case)."
+
+              # The baseline booted, so data is readable. Assert the current
+              # byte-identity assertions (same as the same-engine path).
+              wait_for_http_ok "${BASE_URL}/Health" 90 "baseline Harper (post-downgrade)"
+              wait_for_flair_status_running "$BASE_FLAIR" "$PORT" 60
+
+              fetch_agent_memories_json "$OPS_URL" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" > "$DIAG_DIR/post-downgrade-rows.json"
+              ACTUAL_COUNT=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$DIAG_DIR/post-downgrade-rows.json','utf8')).length)")
+              [[ "$ACTUAL_COUNT" == "$ROW_COUNT" ]] || { echo "::error::post-downgrade row count ${ACTUAL_COUNT} != expected ${ROW_COUNT} — DATA LOSS across the downgrade"; exit 1; }
+
+              MARKER="$SYNTHETIC_TARGET_MARKER" PINNED="$PINNED_EMBEDDING_STAMP" ROWS_FILE="$DIAG_DIR/post-downgrade-rows.json" EXPECTED_FILE="$EXPECTED_CONTENT_FILE" TOTAL="$ROW_COUNT" node -e '
+                const fs = require("fs");
+                const rows = JSON.parse(fs.readFileSync(process.env.ROWS_FILE, "utf8"));
+                const total = Number(process.env.TOTAL);
+                const actual = rows.map((r) => r.content).sort();
+                const expected = fs.readFileSync(process.env.EXPECTED_FILE, "utf8").trim().split("\n").sort();
+                if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+                  console.error("content mismatch after downgrade — some seeded rows changed or were lost");
+                  process.exit(1);
+                }
+                const notPinned = rows.filter((r) => r.embeddingModel !== process.env.PINNED).length;
+                if (notPinned > 0) {
+                  console.error(notPinned + " rows lost the pinned embeddingModel stamp — embedding-stamp contended with the synthetic migration (isolation broken)");
+                  process.exit(1);
+                }
+                const stamped = rows.filter((r) => r.source === process.env.MARKER).length;
+                if (stamped === 0) {
+                  console.error("0 rows carry the migration marker post-kill — no migration write persisted before the kill (mid-flight observation was hollow)");
+                  process.exit(1);
+                }
+                if (stamped === total) {
+                  console.error("ALL " + total + " rows are migrated — the kill landed after completion, the store is not partially migrated; widen FLAIR_MIGRATION_TEST_BATCH_DELAY_MS or raise ROW_COUNT");
+                  process.exit(1);
+                }
+                console.log("all " + total + " seeded rows byte-identical after downgrade; store genuinely partial (" + stamped + "/" + total + " migrated); pinned-stamp isolation held (raw ops-API read through the old binary)");
+              '
+
+              # Also verify the snapshot-restore path works (pre-stamp
+              # baseline can't assert the refusal, but the recovery path
+              # must still be proven).
+              echo "Verifying snapshot-restore path (pre-stamp baseline)..."
+              if [[ ! -f "$SNAPSHOT_PATH" ]]; then
+                echo "::error::pre-upgrade snapshot not found at ${SNAPSHOT_PATH}"
+                exit 1
+              fi
+
+              $BASE_FLAIR stop --port $PORT || true
+              wait_for_http_down "${BASE_URL}/Health" 30 "baseline Harper (pre-restore-stop)"
+
+              # Raw tar restore — see refusal-path comment.
+              rm -rf "${HOME}/.flair/data"
+              mkdir -p "${HOME}/.flair/data"
+              tar -xzf "$SNAPSHOT_PATH" -C "${HOME}/.flair"
+
+              cd "$BASE_DIR"
+              $BASE_FLAIR start --port $PORT
+              wait_for_http_ok "${BASE_URL}/Health" 90 "baseline Harper (post-snapshot-restore)"
+
+              fetch_agent_memories_json "$OPS_URL" "$FLAIR_ADMIN_PASS" "$RESERVED_TEST_AGENT_ID" > "$DIAG_DIR/post-restore-rows.json"
+              RESTORE_COUNT=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$DIAG_DIR/post-restore-rows.json','utf8')).length)")
+              [[ "$RESTORE_COUNT" == "$ROW_COUNT" ]] || { echo "::error::post-restore row count ${RESTORE_COUNT} != expected ${ROW_COUNT}"; exit 1; }
+
+              ROWS_FILE="$DIAG_DIR/post-restore-rows.json" EXPECTED_FILE="$EXPECTED_CONTENT_FILE" node -e '
+                const fs = require("fs");
+                const rows = JSON.parse(fs.readFileSync(process.env.ROWS_FILE, "utf8"));
+                const actual = rows.map((r) => r.content).sort();
+                const expected = fs.readFileSync(process.env.EXPECTED_FILE, "utf8").trim().split("\n").sort();
+                if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+                  console.error("content mismatch after snapshot restore — recovery path is broken");
+                  process.exit(1);
+                }
+                console.log("all " + rows.length + " seeded rows byte-identical after snapshot restore — recovery path verified");
+              '
+
+              echo "✅ engine-change downgrade: baseline booted (pre-stamp), data readable, snapshot-restore path verified."
+            fi
+            echo "::endgroup::"
+          else
+            # ── Same-engine branch: original invariant (unchanged) ────────
           $BASE_FLAIR start --port $PORT
           wait_for_http_ok "${BASE_URL}/Health" 90 "baseline Harper (post-downgrade)"
           # Version-safe on the baseline: 0.21.0's `flair status` probes the
@@ -367,8 +575,8 @@ jobs:
               process.exit(1);
             }
 
-            // (c) The store is GENUINELY partially migrated — the scenario
-            // invariant I must survive. Some rows stamped (rowsDone>0 was
+            // (c) The store is GENUINELY partially migrated — the scenario the
+            // downgrade assertion must survive. Some rows stamped (rowsDone>0 was
             // observed pre-kill and those writes persist), some not (the
             // kill landed mid-flight). Fully-stamped means the kill landed
             // too late (widen FLAIR_MIGRATION_TEST_BATCH_DELAY_MS / raise
@@ -388,6 +596,7 @@ jobs:
           '
 
           echo "✅ downgrade-and-revert: old binary (${BASELINE_VERSION}) boots and serves ${ROW_COUNT} seeded rows correctly against the store PR build ${HEAD_VERSION} left partially migrated."
+          fi  # ENGINE_VERSION_CHANGED
 
           $BASE_FLAIR stop --port $PORT || true
 

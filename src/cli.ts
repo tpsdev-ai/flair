@@ -9858,10 +9858,14 @@ export function pruneOldSnapshots(
  * unit-testable instead of only reachable via a full `flair upgrade` run
  * (test/unit/upgrade-data-snapshot.test.ts).
  *
- * flair#1047: when the engine (Harper) version is changing, the snapshot is
- * unconditional — the tested-downgrade guarantee that justified making it
- * opt-in does not hold across engine version boundaries. Opting out of THAT
- * requires `--no-engine-snapshot` and prints what is being given up.
+ * flair#1047 / flair#1050: the opt-in default is correct for same-engine
+ * upgrades — the downgrade-boot test (test/compat/downgrade-boot.test.ts)
+ * covers those, and the restated invariant ("no silent bad outcome") holds.
+ * When the engine (Harper) version is changing, the snapshot is unconditional
+ * — the tested-downgrade guarantee does not hold across engine version
+ * boundaries, and the backwards-boot refusal + snapshot recovery path is the
+ * invariant that applies. Opting out of the engine-change snapshot requires
+ * `--no-engine-snapshot` and prints what is being given up.
  *
  *   - "not-upgrading": @tpsdev-ai/flair isn't one of the packages being
  *     upgraded (or --snapshot wasn't requested and there's no data dir to
