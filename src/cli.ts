@@ -37,7 +37,7 @@ import {
   readEnvValue,
 } from "./component-env.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
-import { checkVersion, formatVersionNudge, primeVersionCheckCache, FLAIR_PKG_NAME } from "./version-check.js";
+import { checkVersion, formatVersionNudge, primeVersionCheckCache, probeInstanceVersion, FLAIR_PKG_NAME } from "./version-check.js";
 import {
   readInstalledHarperVersion,
   fetchDeclaredHarperVersion,
@@ -12378,15 +12378,48 @@ program
     // since we don't have advisory data, only the version gap. A red gap
     // counts as an issue (exit 1); a quieter yellow gap (one minor, or
     // patch-only) is printed but doesn't fail doctor.
-    const versionCheckResult = await checkVersion(__pkgVersion);
-    const versionNudge = formatVersionNudge(versionCheckResult);
-    if (versionNudge) {
-      const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
-      const icon = versionNudge.severity === "red" ? render.wrap(render.c.red, "✗") : render.icons.warn;
-      console.log(`  ${icon} ${render.wrap(color, versionNudge.message)}`);
-      if (versionNudge.severity === "red") issues++;
-    } else if (versionCheckResult.latest) {
-      console.log(`  ${render.icons.ok} flair ${__pkgVersion} is current`);
+    // ── flair#1072: the currency claim must be about the INSTANCE ─────────────
+    //
+    // This check used to run `checkVersion(__pkgVersion)` — the version of the
+    // CLI you happen to have installed — and print "flair <x> is current". When
+    // FLAIR_URL or --url points at a deployed instance, every other line doctor
+    // prints is genuinely remote, so that sentence reads as a statement about
+    // the thing you are talking to. It was a statement about your laptop.
+    //
+    // Reported against an instance five minors behind, where doctor said
+    // "current". Telling you that is doctor's entire job.
+    //
+    // UNKNOWN MUST NOT FALL BACK TO THE LOCAL NUMBER. An older instance may not
+    // expose its version at all, and the tempting fix is to use the one already
+    // in hand — which is precisely how this bug reads today. If the instance
+    // version cannot be determined, say so and count it as an issue rather than
+    // answering from the wrong machine.
+    const instanceVersion = await probeInstanceVersion(baseUrl);
+    const versionSubject = instanceVersion ?? null;
+
+    if (versionSubject === null) {
+      console.log(
+        `  ${render.icons.warn} ${render.wrap(render.c.yellow, `could not determine the version running at ${baseUrl} — not reporting currency. ` +
+          `(The local CLI is ${__pkgVersion}; that is NOT the instance.)`)}`,
+      );
+      issues++;
+    } else {
+      const versionCheckResult = await checkVersion(versionSubject);
+      const versionNudge = formatVersionNudge(versionCheckResult);
+      if (versionNudge) {
+        const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
+        const icon = versionNudge.severity === "red" ? render.wrap(render.c.red, "✗") : render.icons.warn;
+        console.log(`  ${icon} ${render.wrap(color, versionNudge.message)}`);
+        if (versionNudge.severity === "red") issues++;
+      } else if (versionCheckResult.latest) {
+        console.log(`  ${render.icons.ok} instance at ${baseUrl} runs flair ${versionSubject} — current`);
+      }
+      if (versionSubject !== __pkgVersion) {
+        console.log(
+          `  ${render.icons.warn} ${render.wrap(render.c.yellow, `local CLI is ${__pkgVersion}, instance is ${versionSubject} — they differ. ` +
+            `Commands run through the CLI; the instance serves the data.`)}`,
+        );
+      }
     }
 
     // Helper: try to reach Harper on a given port.
