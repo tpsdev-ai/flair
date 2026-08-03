@@ -165,6 +165,23 @@ function instanceEnv(inst: HarperInstance): Record<string, string> {
     HOME: inst.installDir,
     FLAIR_URL: inst.httpURL,
     FLAIR_ADMIN_PASS: inst.admin.password,
+    // Pre-answer Harper's interactive downgrade prompt (HarperFast/harper#2046).
+    // An older Harper booting against a store written by a newer minor calls
+    // forceDowngradePrompt(), which blocks on stdin. The prompt and its version
+    // warning are written to stdout only — never the log — so a non-interactive
+    // run just stops, with nothing saying why.
+    //
+    // Without this the downgrade tests can only ever observe a timeout, which
+    // makes the invariant's "boots" and "refuses loudly" branches unreachable:
+    // the process never gets far enough to do either.
+    //
+    // MUST be lowercase "yes" or "y". Harper tests membership in
+    // UPGRADE_PROCEED = ['yes','y'] behind a case-sensitive /y(es)?$|n(o)?$/
+    // pattern; any other value (YES, true, 1, "yes ") fails validation, and the
+    // prompt library discards the invalid override and falls through to reading
+    // stdin — reproducing the exact hang this avoids. Measured against
+    // harper 5.1.22 with prompt 1.3.0.
+    CONFIRM_DOWNGRADE: "yes",
   };
 }
 
