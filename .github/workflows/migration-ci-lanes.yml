@@ -393,6 +393,16 @@ jobs:
             rm -f "$BASELINE_START_OUTPUT"
 
             if [[ "$BASELINE_START_EXIT" != "0" ]]; then
+              # ── Non-zero exit — classify: refusal vs hang ──────────────
+              # Exit 124 is the timeout command's exit code: the baseline
+              # HUNG, it did not refuse.  A hang is the silent-bad-outcome
+              # case the invariant forbids (outcome c).
+              if [[ "$BASELINE_START_EXIT" == "124" ]]; then
+                echo "::error::baseline HUNG (exit 124 from timeout) — this is the silent-bad-outcome case the invariant forbids"
+                echo "--- stderr ---"; echo "$BASELINE_STDERR"; echo "---"
+                exit 1
+              fi
+
               # ── Baseline refused — stamp-capable path ───────────────────
               echo "Baseline refused to start (exit ${BASELINE_START_EXIT}) — stamp-capable baseline."
 
