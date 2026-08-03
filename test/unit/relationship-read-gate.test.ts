@@ -74,7 +74,7 @@ const databasesMock = {
   },
 };
 
-mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: databasesMock, Resource: class {} }));
 
 const { Relationship } = await import("../../resources/Relationship.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");

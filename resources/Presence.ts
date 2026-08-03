@@ -32,7 +32,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { resolveAgentAuth, verifyAgentRequest } from "./agent-auth.js";
+import { resolveAgentAuth, verifyAgentRequest, isPrincipalDeactivated } from "./agent-auth.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 
@@ -528,6 +528,13 @@ export class Presence extends (databases as any).flair.Presence {
       }
 
       recordNonce(headerAgentId, nonce, ts);
+      // Deactivation guard — same predicate as the middleware Basic branches.
+      // A deactivated principal must not be allowed to heartbeat, even when
+      // the Ed25519 signature is valid.
+      const agentRecord = await (databases as any).flair.Agent.get(headerAgentId).catch(() => null);
+      if (isPrincipalDeactivated(agentRecord)) {
+        return new Response(JSON.stringify({ error: "principal_deactivated" }), { status: 401 });
+      }
       agentId = headerAgentId;
     }
 

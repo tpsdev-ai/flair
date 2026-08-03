@@ -20,7 +20,7 @@ import { describe, it, expect, mock } from "bun:test";
 // own fake table via createEmbeddingStampMigration's first argument). Same
 // workaround as migrations-ledger.test.ts: mock the module out before import
 // so the real package's import-time side effects never fire.
-mock.module("harper", () => ({ databases: {}, Resource: class {} }));
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { createEmbeddingStampMigration, EMBEDDING_STAMP_ID } = await import("../../resources/migrations/embedding-stamp.ts");
 

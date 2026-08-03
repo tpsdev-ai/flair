@@ -30,7 +30,7 @@ process.env.FLAIR_MCP_NO_AUTOSTART = "1";
 class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 const dbStub = new Proxy({}, { get: () => new Proxy({}, { get: () => NoopBase }) });
 mock.module("harper", () => ({
-  server: { http: () => {} },
+  server: { http: () => {}, getUser: async () => null },
   Resource: NoopBase,
   databases: { flair: dbStub },
 }));

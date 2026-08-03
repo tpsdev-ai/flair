@@ -1,4 +1,5 @@
 import { mock, describe, it, expect } from "bun:test";
+import { agentStore, serverStore, middlewareCapture } from "../helpers/harper-mock.js";
 
 // agent-auth.ts imports `databases` from harper, whose module chain
 // throws when loaded outside a Harper runtime. Mock it. Provide a thin
@@ -10,8 +11,26 @@ import { mock, describe, it, expect } from "bun:test";
 // reproducing it here would depend on which sibling file's harper
 // mock wins bun's process-global module registry, so it's deliberately left to
 // the integration harness.)
+//
+// The mock shape is kept identical to principal-deactivation.test.ts so that
+// whichever mock.module call wins the process-global race, both files see the
+// same agentStore / serverStore and the same API surface.
 mock.module("harper", () => ({
-  databases: { flair: { Agent: { get: async () => null, search: async function* () {} } } },
+  databases: {
+    flair: {
+      Agent: {
+        get: async (id: string) => agentStore.get(id) ?? null,
+        search: async function* () {},
+      },
+    },
+  },
+  server: {
+    getUser: async (_user: string, _pass: string | null, _request: any) => {
+      if (serverStore.getUserError) throw new Error("getUser failed");
+      return serverStore.getUserResult;
+    },
+    http: (fn: any, _opts?: any) => { middlewareCapture.value = fn; },
+  },
   Resource: class {},
 }));
 

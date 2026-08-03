@@ -29,6 +29,7 @@ import type { AgentAuthVerdict } from "../../resources/agent-auth.ts";
 // the injected `recordFn` seam, so this stub is never actually touched; it
 // exists purely so importing the module under test doesn't throw.
 mock.module("harper", () => ({
+  server: { http: () => {}, getUser: async () => null },
   databases: { flair: { Memory: { get: async () => null }, MemoryUsage: { get: async () => null, put: async () => {} } } },
   Resource: class {},
 }));

@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, mock } from "bun:test";
 
-mock.module("harper", () => ({ databases: {}, Resource: class {} }));
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { buildRegistry, MigrationRegistry } = await import("../../resources/migrations/registry.ts");
 const { EMBEDDING_STAMP_ID } = await import("../../resources/migrations/embedding-stamp.ts");

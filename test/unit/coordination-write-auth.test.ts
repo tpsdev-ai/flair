@@ -106,7 +106,7 @@ const databasesMock = {
   },
 };
 
-mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: databasesMock, Resource: class {} }));
 
 const { WorkspaceState } = await import("../../resources/WorkspaceState.ts");
 const { OrgEvent } = await import("../../resources/OrgEvent.ts");
