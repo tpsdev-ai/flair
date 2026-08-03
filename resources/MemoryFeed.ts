@@ -1,7 +1,7 @@
 import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
-import { FORBIDDEN, UNAUTH } from "./record-type-kit.js";
+import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -20,13 +20,14 @@ export class FeedMemories extends Resource {
     }
 
     // No-forge attribution: stamp agentId from the authenticated principal,
-    // never from the body. "stamp-default" — unconditional overwrite for
-    // non-admin agents; admin defaults-if-absent.
-    if (auth.kind === "agent" && !auth.isAdmin) {
-      content.agentId = auth.agentId;
-    } else if (auth.kind === "agent" && auth.isAdmin) {
-      content.agentId ||= auth.agentId;
-    }
+    // never from the body. "stamp-strict" — rejects body-supplied mismatches
+    // as 403 (this endpoint's defect was trusting body identity; a caller
+    // sending another agent's id is buggy or probing and both are worth seeing).
+    const attrResult = stampAttribution(
+      auth, content, 'agentId', 'stamp-strict',
+      'forbidden: cannot attribute a feed memory to another agent',
+    );
+    if (attrResult.denied) return attrResult.denied;
 
     // Guard against body-supplied id targeting another agent's record.
     if (content?.id) {
