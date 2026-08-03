@@ -61,7 +61,7 @@ async function loadMiddleware() {
 async function loadPresence() {
   if (!Presence) {
     const mod = await import("../../resources/Presence.ts");
-    Presence = mod.default;
+    Presence = mod.Presence;
   }
   return Presence;
 }
@@ -215,7 +215,7 @@ function makeRequest(overrides: any = {}) {
   const headers = new Map<string, string>();
   if (overrides.authorization) headers.set("authorization", overrides.authorization);
   headers.set("host", "localhost");
-  return {
+  const req: Record<string, any> = {
     url: overrides.url ?? "/Memory",
     method: overrides.method ?? "GET",
     headers: {
@@ -224,10 +224,8 @@ function makeRequest(overrides: any = {}) {
       asObject: {},
     },
     user: overrides.user ?? undefined,
-    tpsAgent: undefined,
-    tpsAgentIsAdmin: undefined,
-    tpsAnonymous: undefined,
   };
+  return req;
 }
 
 function nextLayer(_req?: any) {
