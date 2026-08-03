@@ -150,8 +150,11 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
     // Capture the real config.yaml checksum BEFORE anything touches it.
     configChecksum = sha256(CONFIG_PATH);
 
-    // Build a temp component tree: hard-link everything from the repo root
-    // (excluding .git), then replace config.yaml with our OAuth-augmented copy.
+    // Build a temp component tree: hard-link everything under the repo root
+    // (including .git and node_modules), then replace config.yaml with our
+    // OAuth-augmented copy.  The temp tree is removed with rm -rf in afterAll;
+    // that does not affect the originals because hard links are reference-counted
+    // — unlinking the temp copy leaves the repo file intact.
     // Hard links are transparent to the filesystem — Harper's component loader
     // sees a real directory tree, not symlinks.  Symlinks fail because Harper
     // resolves componentDirectory with realpathSync and its security loader
