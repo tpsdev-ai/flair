@@ -32,8 +32,10 @@ describe("MemoryFeed IDOR — unit mutation-verify", () => {
     if (mockAuth.kind === "agent" && !mockAuth.isAdmin) {
       content.agentId = mockAuth.agentId;
     }
-    expect(content.agentId).toBe("principal-x", "fixed version: agentId is stamped from principal");
-    expect(content.agentId).not.toBe("attacker-y", "fixed version: body-supplied agentId is overridden");
+    // fixed version: agentId is stamped from principal
+    expect(content.agentId).toBe("principal-x");
+    // fixed version: body-supplied agentId is overridden
+    expect(content.agentId).not.toBe("attacker-y");
   });
 
   test("body-trusting version would NOT override (defect documented)", () => {
@@ -43,7 +45,8 @@ describe("MemoryFeed IDOR — unit mutation-verify", () => {
     // the integration test (see procedure above).
     const content = { agentId: "attacker-y", content: "spoofed" };
     const brokenAgentId = String(content?.agentId ?? "");
-    expect(brokenAgentId).toBe("attacker-y", "broken version: agentId comes from body — the defect");
+    // broken version: agentId comes from body — the defect
+    expect(brokenAgentId).toBe("attacker-y");
   });
 
   test("body-supplied id ownership check: rejects cross-agent targets", () => {
@@ -58,7 +61,8 @@ describe("MemoryFeed IDOR — unit mutation-verify", () => {
     const isForbidden =
       !!mockExistingRecord && mockExistingRecord.agentId !== stampedAgentId;
 
-    expect(isForbidden).toBe(true, "cross-agent id target must be rejected");
+    // cross-agent id target must be rejected
+    expect(isForbidden).toBe(true);
   });
 
   test("body-supplied id ownership check: allows own record", () => {
@@ -70,6 +74,7 @@ describe("MemoryFeed IDOR — unit mutation-verify", () => {
     const isForbidden =
       !!mockExistingRecord && mockExistingRecord.agentId !== stampedAgentId;
 
-    expect(isForbidden).toBe(false, "own record id must be allowed");
+    // own record id must be allowed
+    expect(isForbidden).toBe(false);
   });
 });
