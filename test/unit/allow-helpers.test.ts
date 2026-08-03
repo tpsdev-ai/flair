@@ -6,6 +6,7 @@ import { mock, describe, it, expect } from "bun:test";
 // another test's well-formed-TPS path reaches verifyAgentRequest — Agent.get
 // returns null rather than throwing on `databases.flair` being undefined.
 mock.module("harper", () => ({
+  server: { http: () => {}, getUser: async () => null },
   databases: { flair: { Agent: { get: async () => null, search: async function* () {} } } },
   Resource: class {},
 }));

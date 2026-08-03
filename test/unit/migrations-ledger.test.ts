@@ -19,7 +19,7 @@ import type { LedgerEvent } from "../../resources/migrations/ledger.ts";
 // path" when merely imported outside one) — so, same technique as
 // test/unit/instance-identity.test.ts / test/unit/attention-query.test.ts,
 // the module is mocked out BEFORE ledger.ts is imported at all.
-mock.module("harper", () => ({ databases: {}, Resource: class {} }));
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { writeLedgerEvent, buildLedgerDetail } = await import("../../resources/migrations/ledger.ts");
 

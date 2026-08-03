@@ -16,7 +16,7 @@ import { describe, it, expect, mock } from "bun:test";
 // its own fake table via createVisibilityBackfillMigration's argument). Same
 // workaround as migrations-embedding-stamp.test.ts: mock the module out
 // before import so the real package's import-time side effects never fire.
-mock.module("harper", () => ({ databases: {}, Resource: class {} }));
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { createVisibilityBackfillMigration, deriveVisibilityFromDurability, VISIBILITY_BACKFILL_ID } = await import(
   "../../resources/migrations/visibility-backfill.ts"

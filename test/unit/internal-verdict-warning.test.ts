@@ -22,6 +22,7 @@
 import { mock, describe, it, expect } from "bun:test";
 
 mock.module("harper", () => ({
+  server: { http: () => {}, getUser: async () => null },
   databases: { flair: { Agent: { get: async () => null, search: async function* () {} } } },
   Resource: class {},
 }));

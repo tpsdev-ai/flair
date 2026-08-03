@@ -171,13 +171,22 @@ server.http(async (request: any, nextLayer: any) => {
   // ambient elevation alone. (The root-cause gate lives in resolveAgentAuth; see
   // agent-auth.ts hasCredentialEvidence.)
   if (header && request.user?.role?.permission?.super_user === true) {
-    request.tpsAgent = request.user.username ?? "admin";
-    request.tpsAgentIsAdmin = true;
-    try {
-      request.headers.set("x-tps-agent", request.tpsAgent);
-      if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = request.tpsAgent;
-    } catch { /* frozen headers — annotation on request object still applies */ }
-    return nextLayer(request);
+    const username = request.user.username ?? "admin";
+    // Deactivation guard — same predicate as the Ed25519 path.
+    // A deactivated principal must not receive a tpsAgent annotation, even
+    // when Harper's ambient auth already verified the credential.
+    const agentRecord = await (databases as any).flair.Agent.get(username).catch(() => null);
+    if (!isPrincipalDeactivated(agentRecord)) {
+      request.tpsAgent = username;
+      request.tpsAgentIsAdmin = true;
+      try {
+        request.headers.set("x-tps-agent", request.tpsAgent);
+        if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = request.tpsAgent;
+      } catch { /* frozen headers — annotation on request object still applies */ }
+      return nextLayer(request);
+    }
+    // Deactivated — fall through. The request continues through the
+    // middleware chain (Basic block → Ed25519 → anonymous) without tpsAgent.
   }
 
   // Skip re-entry: if we already swapped auth to Basic, pass through
@@ -199,16 +208,21 @@ server.http(async (request: any, nextLayer: any) => {
       // with exact HDB_ADMIN_PASSWORD. Non-match falls through to Path 2.
       const adminPass = getAdminPass();
       if (adminPass !== null && user === "admin" && pass === adminPass) {
-        // Mark as verified and set Harper user directly
-        (request as any)._tpsAuthVerified = true;
-        try {
-          request.user = await (server as any).getUser("admin", null, request);
-        } catch { /* fallback: let original Basic header pass through */ }
-        request.headers.set("x-tps-agent", "admin");
-        if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = "admin";
-        request.tpsAgent = "admin";
-        request.tpsAgentIsAdmin = true;
-        return nextLayer(request);
+        // Deactivation guard — same predicate, called before tpsAgent is stamped.
+        const agentRecord = await (databases as any).flair.Agent.get("admin").catch(() => null);
+        if (!isPrincipalDeactivated(agentRecord)) {
+          // Mark as verified and set Harper user directly
+          (request as any)._tpsAuthVerified = true;
+          try {
+            request.user = await (server as any).getUser("admin", null, request);
+          } catch { /* fallback: let original Basic header pass through */ }
+          request.headers.set("x-tps-agent", "admin");
+          if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = "admin";
+          request.tpsAgent = "admin";
+          request.tpsAgentIsAdmin = true;
+          return nextLayer(request);
+        }
+        // Deactivated — fall through to anonymous (end of Basic block).
       }
 
       // Path 2: Harper super_user check — any user with super_user:true
@@ -218,13 +232,18 @@ server.http(async (request: any, nextLayer: any) => {
       } catch { /* fall through — invalid creds, non-existent user, etc. */ }
 
       if (harperUser?.role?.permission?.super_user === true) {
-        (request as any)._tpsAuthVerified = true;
-        request.user = harperUser;
-        request.headers.set("x-tps-agent", user);
-        if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = user;
-        request.tpsAgent = user;
-        request.tpsAgentIsAdmin = true;
-        return nextLayer(request);
+        // Deactivation guard — same predicate, called before tpsAgent is stamped.
+        const agentRecord = await (databases as any).flair.Agent.get(user).catch(() => null);
+        if (!isPrincipalDeactivated(agentRecord)) {
+          (request as any)._tpsAuthVerified = true;
+          request.user = harperUser;
+          request.headers.set("x-tps-agent", user);
+          if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = user;
+          request.tpsAgent = user;
+          request.tpsAgentIsAdmin = true;
+          return nextLayer(request);
+        }
+        // Deactivated — fall through to anonymous (end of Basic block).
       }
 
       // Path 3: flair_pair_initiator — restricted to /FederationPair only.
@@ -240,13 +259,18 @@ server.http(async (request: any, nextLayer: any) => {
           pairUser?.role?.role === "flair_pair_initiator" &&
           pairUser?.active === true
         ) {
-          (request as any)._tpsAuthVerified = true;
-          request.user = pairUser;
-          request.headers.set("x-tps-agent", user);
-          if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = user;
-          request.tpsAgent = user;
-          request.tpsAgentIsAdmin = false;
-          return nextLayer(request);
+          // Deactivation guard — same predicate, called before tpsAgent is stamped.
+          const agentRecord = await (databases as any).flair.Agent.get(user).catch(() => null);
+          if (!isPrincipalDeactivated(agentRecord)) {
+            (request as any)._tpsAuthVerified = true;
+            request.user = pairUser;
+            request.headers.set("x-tps-agent", user);
+            if (request.headers.asObject) (request.headers.asObject as any)["x-tps-agent"] = user;
+            request.tpsAgent = user;
+            request.tpsAgentIsAdmin = false;
+            return nextLayer(request);
+          }
+          // Deactivated — fall through to anonymous (end of Basic block).
         }
       }
     } catch { /* fall through to anonymous */ }

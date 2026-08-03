@@ -110,7 +110,7 @@ const databasesMock = {
 
 class ResourceBase {}
 
-mock.module("harper", () => ({ databases: databasesMock, Resource: ResourceBase }));
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: databasesMock, Resource: ResourceBase }));
 
 const { AttentionQuery } = await import("../../resources/AttentionQuery.ts");
 

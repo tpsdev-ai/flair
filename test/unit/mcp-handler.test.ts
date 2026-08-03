@@ -113,7 +113,7 @@ const databasesMock = {
 // AttentionQuery.ts `extends Resource` (not a table subclass), so it needs no
 // databasesMock.flair entry of its own — only __setHandlers below, same as
 // SemanticSearch/BootstrapMemories.
-mock.module("harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {} } }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {}, getUser: async () => null } }));
 
 const { mcpHandler, resolveAgentFromSub } = await import("../../resources/mcp-handler.ts");
 const { __setHandlers } = await import("../../resources/mcp-tools.ts");
