@@ -15,6 +15,8 @@
 // just succeeded; the error was filed against secrets-provisioning.
 import { describe, test, expect } from "bun:test";
 import { enableMcp } from "../../src/lib/mcp-enable.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /** An ops API that answers 404 to everything — the shape that broke identity
  *  mapping in the field (calls hitting the served origin). */
@@ -73,5 +75,36 @@ describe("enableMcp — the failed step is the one that ran, not the one before 
     // A step that reports both ✓ and ✗ is un-skimmable: someone scanning for the
     // first ✗ finds a ✓ for that same name above it.
     expect(contradictory).toEqual([]);
+  });
+});
+
+// ─── The gap a review called "sufficient" ────────────────────────────────────
+//
+// The first version of this fix set `currentStep` before the four ASYNC
+// operations only. Four steps run before that — local-origin-check, signing-key,
+// config-block, idp-credentials — during which `currentStep` was undefined and
+// the catch fell back to the literal "signing-key".
+//
+// So a throw during idp-credentials would have been reported as a signing-key
+// failure: the same defect class this PR fixes, with a different wrong answer.
+// A partial fix for a defect class is how the class survives.
+describe("every step sets the tracker — no window attributes a throw elsewhere", () => {
+  const src = readFileSync(
+    join(import.meta.dir, "..", "..", "src", "lib", "mcp-enable.ts"),
+    "utf8",
+  );
+
+  test("each step name that can be pushed is also assigned to currentStep", () => {
+    const pushed = new Set(
+      [...src.matchAll(/push\(\s*"([a-z-]+)"/g)].map((m) => m[1]),
+    );
+    const tracked = new Set(
+      [...src.matchAll(/currentStep\s*=\s*"([a-z-]+)"/g)].map((m) => m[1]),
+    );
+    const untracked = [...pushed].filter((s) => !tracked.has(s));
+    // If a new step is added and pushed without setting currentStep, a throw
+    // inside it lands on whichever step was set last. This is the counting
+    // check that makes that fail rather than pass unnoticed.
+    expect(untracked).toEqual([]);
   });
 });

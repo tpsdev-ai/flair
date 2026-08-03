@@ -895,6 +895,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const push = (step: EnableStepName, ok: boolean, detail: string) => steps.push({ step, ok, detail });
 
   // ── Local-origin refusal (scenario addendum, binding) ─────────────────────
+  currentStep = "local-origin-check";
   const localCheck = checkLocalOriginRefusal(params.instance);
   if (localCheck.refused) {
     push("local-origin-check", false, localCheck.message);
@@ -909,11 +910,13 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
 
   try {
     // ── RS256 signing keypair ─────────────────────────────────────────────────
+    currentStep = "signing-key";
     const keyResult = ensureSigningKeyFile(params.signingKeyFilePath, { generate: deps.generateRsaKeyPair });
     push("signing-key", true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
 
     // ── @harperfast/oauth config block (CIMD-only; DCR explicitly disabled) ──
     const cimdAllowedHosts = params.cimdAllowedHosts ?? DEFAULT_CIMD_ALLOWED_HOSTS;
+    currentStep = "config-block";
     const configBlock = buildMcpOAuthConfigBlock({ idpProvider, cimdAllowedHosts });
     push(
       "config-block",
@@ -923,6 +926,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     );
 
     // ── IdP OAuth-app credential intake ───────────────────────────────────────
+    currentStep = "idp-credentials";
     const callbackUrl = idpCallbackUrl(issuer, idpProvider);
     if (!params.idpClientId || !params.idpClientSecret || !params.idpSubject) {
       const missing = [
