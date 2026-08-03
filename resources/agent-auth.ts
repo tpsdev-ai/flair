@@ -49,7 +49,9 @@ export const FLAIR_AGENT_USERNAME = "flair-agent";
  * it will fail on other checks (missing publicKey, unknown user, etc.).
  */
 export function isPrincipalDeactivated(agent: { status?: unknown } | null | undefined): boolean {
-  return agent?.status === "deactivated";
+  if (agent == null) return false;
+  if (agent.status === undefined) return false;
+  return agent.status !== "active";
 }
 
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────

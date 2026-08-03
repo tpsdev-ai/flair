@@ -78,6 +78,22 @@ describe("isPrincipalDeactivated — the ONE shared predicate", () => {
     const oldAgent: Record<string, unknown> = { id: "old-agent", publicKey: "aa" };
     expect(isPrincipalDeactivated(oldAgent)).toBe(false);
   });
+
+  it("'revoked' → true (word already used in this codebase)", () => {
+    expect(isPrincipalDeactivated({ status: "revoked" })).toBe(true);
+  });
+
+  it("'suspended' → true", () => {
+    expect(isPrincipalDeactivated({ status: "suspended" })).toBe(true);
+  });
+
+  it("'Deactivated' with capital D → true (case matters)", () => {
+    expect(isPrincipalDeactivated({ status: "Deactivated" })).toBe(true);
+  });
+
+  it("empty string → true (empty is not active)", () => {
+    expect(isPrincipalDeactivated({ status: "" })).toBe(true);
+  });
 });
 
 // ─── Basic/agent-auth path (resolveAgentAuth) ────────────────────────────────
