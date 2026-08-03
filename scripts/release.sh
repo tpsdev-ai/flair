@@ -340,8 +340,17 @@ echo "🧪 Running tests..."
 # test/unit-isolated/ files mock.module a process-global shared module; each
 # MUST run in its own `bun test` process — they poison the real-importer
 # files AND each other otherwise (flair#691).
-(cd "$ROOT" && bun test test/unit/ test/integration/) || { echo "❌ Tests failed"; exit 1; }
+(cd "$ROOT" && bun test test/unit/ $(find test/integration -name '*.test.ts' | sort)) || { echo "❌ Tests failed"; exit 1; }
+# test/unit-isolated/ files mock.module a process-global shared module; each
+# MUST run in its own `bun test` process — they poison the real-importer
+# files AND each other otherwise (flair#691).
 for f in "$ROOT"/test/unit-isolated/*.test.ts; do
+  (cd "$ROOT" && bun test "$f") || { echo "❌ Tests failed ($f)"; exit 1; }
+done
+# test/integration-isolated/: structurally excluded from the `find test/integration`
+# glob above; each file runs in its own process to prevent env cross-contamination
+# (flair#691, flair#1061).
+for f in "$ROOT"/test/integration-isolated/*.test.ts; do
   (cd "$ROOT" && bun test "$f") || { echo "❌ Tests failed ($f)"; exit 1; }
 done
 echo "  ✓ Tests passed"

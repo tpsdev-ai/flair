@@ -358,10 +358,25 @@ describe("fixSessionStartHook", () => {
 describe("classifyKeyFile", () => {
   const BASE_URL = "http://127.0.0.1:19926";
 
-  it("invalid seed → class 'invalid', regardless of any registration result", () => {
+  // flair#1026: an unparseable file is NOT prunable. `~/.flair/keys/<id>.key`
+  // is a namespace shared by two writers — plaintext Ed25519 seeds and
+  // AES-256-GCM keystore blobs — so "will not parse as a seed" does not imply
+  // "junk". It previously classified as "invalid", which prune archives, so a
+  // LIVE federation key could be moved.
+  it("unparseable seed → class 'unidentified', which prune must not act on", () => {
     const d = classifyKeyFile("stray", false, null, BASE_URL);
-    expect(d.class).toBe("invalid");
+    expect(d.class).toBe("unidentified");
+    expect(d.class).not.toBe("invalid");
     expect(d.reason).toContain("not a parseable Ed25519");
+    expect(d.reason).toContain("left in place");
+  });
+
+  // POSITIVE CONTROL for the above: the classifier must still be *able* to
+  // return a prunable class. A change that made everything unidentified would
+  // satisfy the assertion above while silently disabling prune entirely.
+  it("POSITIVE CONTROL: a parseable but unregistered key is still prunable ('stale')", () => {
+    const d = classifyKeyFile("stray", true, { state: "not-registered" }, BASE_URL);
+    expect(d.class).toBe("stale");
   });
 
   it("valid seed + registered → class 'keep'", () => {

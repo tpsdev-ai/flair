@@ -1,0 +1,60 @@
+{
+  "//": "Type-checks the test suite under strict. The exclude list is a VISIBLE, SHRINKABLE backlog \u2014 each file removed from it is a small reviewable PR. Two distinct causes are represented: (1) the majority carry genuine type rot (assertions and object literals that drifted from the shapes they mock) \u2014 114 errors across 29 files when this was written; (2) test/integration/in-process-api.test.ts and test/unit/changelog-fragments.test.ts fail only because they import untyped .js/.mjs modules, which is a property of the imported module rather than the test. Do not add to this list without recording which cause applies.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "types": [
+      "node",
+      "bun-types"
+    ],
+    "paths": {
+      "harper": [
+        "./types/harper.d.ts"
+      ]
+    }
+  },
+  "include": [
+    "test/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test/entity-vocab.test.ts",
+    "test/integration/bridge-markdown.test.ts",
+    "test/integration/federation-watch.test.ts",
+    "test/integration/in-process-api.test.ts",
+    "test/integration/init-remote-ops.test.ts",
+    "test/integration/presence-api.test.ts",
+    "test/unit-isolated/semantic-search-scoping.test.ts",
+    "test/unit/abstention.test.ts",
+    "test/unit/agent-admin.test.ts",
+    "test/unit/audit-gate.test.ts",
+    "test/unit/auth-middleware-spoke-sync.test.ts",
+    "test/unit/auth-middleware.test.ts",
+    "test/unit/bridges-runtime-formats.test.ts",
+    "test/unit/changelog-fragments.test.ts",
+    "test/unit/cli-target-flag.test.ts",
+    "test/unit/doctor-client-network.test.ts",
+    "test/unit/ed25519-auth.test.ts",
+    "test/unit/federation-bootstrap-user.test.ts",
+    "test/unit/federation-cleanup.test.ts",
+    "test/unit/keys-prune.test.ts",
+    "test/unit/local-no-auth.test.ts",
+    "test/unit/mcp-client-credentials-live-package.test.ts",
+    "test/unit/mcp-enable.test.ts",
+    "test/unit/mcp-grant-family.test.ts",
+    "test/unit/mcp-surface-tripwire.test.ts",
+    "test/unit/migrations-embedding-stamp.test.ts",
+    "test/unit/migrations-source-fields.test.ts",
+    "test/unit/record-types-registry.test.ts",
+    "test/unit/temporal-scoring.test.ts",
+    "test/unit/upgrade-probes.test.ts",
+    "test/unit/upgrade-verify-rollback.test.ts"
+  ]
+}

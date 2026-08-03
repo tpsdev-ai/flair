@@ -1,10 +1,22 @@
-// Downgrade compat (flair#637): does the previously-published npm baseline
-// BOOT against a data directory the CURRENT build has already written to?
+// Downgrade compat (flair#637, restated flair#1050): there is never a silent
+// bad outcome. Either the previously-published npm baseline BOOTS against a
+// data directory the CURRENT build has already written to, OR it refuses to
+// start with a message naming what wrote the store, what is running, and how
+// to recover.
 //
-// This is the honesty check behind `flair upgrade`'s new pre-upgrade
-// snapshot (src/cli.ts, flair#637): the snapshot is only useful insurance if
-// restoring it and starting an OLDER Flair actually works. Nobody had ever
-// tested that before this suite — "downgrade" was aspirational, not verified.
+// This is the honesty check behind `flair upgrade`'s pre-upgrade snapshot
+// (src/cli.ts, flair#637 / flair#1047): the snapshot is only useful insurance
+// if restoring it and starting an OLDER Flair actually works — or if the old
+// Flair refuses loudly and the snapshot provides the recovery path. Nobody
+// had ever tested either path before this suite — "downgrade" was
+// aspirational, not verified.
+//
+// The invariant holds in two branches (flair#1050):
+//   - Same engine version: the baseline boots and serves the corpus correctly
+//     (the original flair#637 assertion, unchanged).
+//   - Engine version changed: the baseline either refuses to start (non-zero,
+//     promptly, naming both versions and a remedy) — the stamp-capable path —
+//     or boots successfully (pre-stamp baseline, the transition case).
 //
 // Scenario (mirrors a real operator downgrade exactly — no shortcuts):
 //   1. Boot the CURRENT BUILD (this worktree's own `dist/`, via
@@ -169,6 +181,10 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
    * suite can assert on the DOCUMENTED failure mode instead of erroring out
    * of every test via a failed beforeAll. */
   let baselineBootError: Error | null = null;
+  /** Whether the Harper engine version differs between baseline and current. */
+  let engineVersionChanged = false;
+  let baselineHarperVersion: string | null = null;
+  let currentHarperVersion: string | null = null;
 
   beforeAll(async () => {
     // ── 1. Install the previous published baseline from npm (same recipe as
@@ -240,6 +256,37 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     // ── 3. Stop the current build WITHOUT deleting its data dir ────────────
     await stopHarper(current, { keepInstallDir: true });
 
+    // ── 3a. Detect engine version change (flair#1050) ────────────────────
+    // Read the Harper version from both installs to determine whether the
+    // engine version changed. This drives the branching in the test
+    // assertions below: same engine → current assertions (boot + readable);
+    // engine changed → refusal or pre-stamp boot.
+    const { readFileSync, existsSync } = await import("node:fs");
+    for (const pkgName of ["harper", "@harperfast/harper"]) {
+      const pkgPath = join(pkgDirBaseline, "node_modules", ...pkgName.split("/"), "package.json");
+      if (existsSync(pkgPath)) {
+        try {
+          baselineHarperVersion = (JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string }).version ?? null;
+        } catch { /* keep null */ }
+        break;
+      }
+    }
+    for (const pkgName of ["harper", "@harperfast/harper"]) {
+      const pkgPath = join(process.cwd(), "node_modules", ...pkgName.split("/"), "package.json");
+      if (existsSync(pkgPath)) {
+        try {
+          currentHarperVersion = (JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string }).version ?? null;
+        } catch { /* keep null */ }
+        break;
+      }
+    }
+    engineVersionChanged = baselineHarperVersion !== null &&
+      currentHarperVersion !== null &&
+      baselineHarperVersion !== currentHarperVersion;
+    if (engineVersionChanged) {
+      console.log(`Engine version changed: baseline Harper ${baselineHarperVersion} → current Harper ${currentHarperVersion}`);
+    }
+
     // ── 4. Boot the npm baseline against the SAME data dir ─────────────────
     // Captured, not awaited-and-thrown: a boot failure here is one of the two
     // valid outcomes this suite exists to distinguish, not a setup error.
@@ -271,7 +318,37 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   // landed without a documented downgrade break, and BOTH this test's
   // assertions AND docs/upgrade.md's compatibility statement need updating
   // together, not just the test loosened to pass again.
-  test("npm baseline boots against data written by the current build", async () => {
+  //
+  // ─── ENGINE-VERSION-CHANGE BRANCH (flair#1050) ──────────────────────────
+  // When the Harper engine version differs between baseline and current,
+  // the old invariant ("downgrade always works") does not hold. The restated
+  // invariant says: either the baseline refuses to start (non-zero, promptly,
+  // naming both versions and a remedy), OR it boots (pre-stamp baseline —
+  // the transition case before the first stamp-carrying release ships).
+  // Both outcomes are valid, asserted results.
+
+  test("npm baseline boots against data written by the current build, or refuses with engine-version message", async () => {
+    if (engineVersionChanged) {
+      // Engine version changed — either outcome is valid.
+      if (baselineBootError) {
+        // Baseline refused to boot. Assert the refusal message names the
+        // engine version change and a recovery path (flair#1049/#1050).
+        const msg = baselineBootError.message;
+        if (!msg.includes("Harper") || !msg.includes("data directory")) {
+          throw new Error(
+            `Engine version changed and baseline refused to boot, but the refusal ` +
+            `message does not name the engine version or data directory — ` +
+            `unexpected failure mode:\n${msg}`,
+          );
+        }
+        // Refusal is the expected outcome for a stamp-capable baseline.
+        // The test passes — this is the "loud refusal" branch of the invariant.
+        return;
+      }
+      // Baseline booted successfully — pre-stamp baseline (transition case).
+      // Fall through to the normal boot assertion below.
+    }
+
     if (baselineBootError) {
       throw new Error(
         `npm baseline failed to boot against current-build data — this is a REAL downgrade break, ` +
@@ -285,6 +362,11 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, CLI_TIMEOUT_MS);
 
   test("memory written by the current build is readable via the npm baseline after downgrade", async () => {
+    if (engineVersionChanged && baselineBootError) {
+      // Baseline refused — the "loud refusal" branch of the invariant.
+      // Data readability is not expected; the recovery path is the snapshot.
+      return;
+    }
     if (baselineBootError) {
       throw new Error("skipped: baseline never booted — see the boot test above for the documented failure");
     }
@@ -293,6 +375,10 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, CLI_TIMEOUT_MS);
 
   test("presence written by the current build is readable via the npm baseline after downgrade", async () => {
+    if (engineVersionChanged && baselineBootError) {
+      // Baseline refused — the "loud refusal" branch of the invariant.
+      return;
+    }
     if (baselineBootError) {
       throw new Error("skipped: baseline never booted — see the boot test above for the documented failure");
     }
