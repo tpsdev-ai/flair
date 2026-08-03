@@ -275,18 +275,20 @@ jobs:
           echo "Running integration suite ${repeats}x"
           for i in $(seq 1 "${repeats}"); do
             echo "::group::integration attempt ${i}/${repeats}"
-            bun test $(find test/integration -name '*.test.ts' ! -name 'oauth-dcr-e2e.test.ts' | sort)
+            bun test $(find test/integration -name '*.test.ts' | sort)
             echo "::endgroup::"
           done
-      # oauth-dcr-e2e: isolated because mcp-client-credentials-e2e modifies
-      # config.yaml and sets FLAIR_MCP_OAUTH=1; on macOS the env cleanup does
-      # not fully take effect before the next test file's Harper spawn inherits
-      # the env, causing the well-known handler to fall through
-      # (mcpOAuthEnabled() → true) while @harperfast/oauth is no longer
-      # declared → 404. One process per file is the established remedy
-      # (flair#691, test/unit-isolated/).
-      - name: Run isolated integration test (oauth-dcr-e2e)
-        run: bun test test/integration/oauth-dcr-e2e.test.ts
+      # test/integration-isolated/ holds files that must not share a bun test
+      # process with other integration files (env cross-contamination from
+      # mcp-client-credentials-e2e, see flair#691). Structurally excluded
+      # because `find test/integration` does not match `test/integration-isolated/`.
+      - name: Run isolated integration tests
+        run: |
+          for f in test/integration-isolated/*.test.ts; do
+            echo "::group::$f"
+            bun test "$f" || exit 1
+            echo "::endgroup::"
+          done
       # Single source of truth (#625): derive the Harper Docker image tag from the
       # harper version declared in package.json, so the Docker-based
       # E2E/Playwright validation can never drift behind the Harper that ships to
