@@ -15,6 +15,7 @@ import {
   makeAuthGate,
   makeReadScope,
   makeByIdReadGate,
+  makeScopedSearch,
   resolveAuthGate,
   stampAttribution,
   FORBIDDEN,
@@ -31,6 +32,7 @@ import { RECORD_TYPES } from "./record-types.js";
 // runtime consumer.
 export const workspaceReadScope = makeReadScope(RECORD_TYPES.WorkspaceState.readScope, RECORD_TYPES.WorkspaceState.ownerField);
 const workspaceByIdReadGate = makeByIdReadGate(workspaceReadScope);
+const workspaceScopedSearch = makeScopedSearch(workspaceReadScope);
 // See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
 // prototype method below, never a class-field assignment — Harper's
 // relationship-traversal RBAC path reads allowRead off the prototype.
@@ -91,23 +93,11 @@ export class WorkspaceState extends (databases as any).flair.WorkspaceState {
     if (gate.kind === "denied") return gate.response;
     if (gate.kind === "unfiltered") return super.search(query);
 
-    const scope = await workspaceReadScope(gate.agentId);
-    const agentIdCondition = scope.condition;
-
-    // Harper passes `query` as a request target object (pathname, id, isCollection…).
-    // Inject the scope condition into its `.conditions` array.
-    if (query && typeof query === "object" && !Array.isArray(query)) {
-      const existing = query.conditions ?? [];
-      query.conditions = Array.isArray(existing)
-        ? [agentIdCondition, ...existing]
-        : [agentIdCondition, existing];
-      return super.search(query);
-    }
-
-    const conditions = Array.isArray(query) && query.length > 0
-      ? [agentIdCondition, ...query]
-      : [agentIdCondition];
-    return super.search(conditions);
+    // Non-admin agent: scope to own records only.  The scope condition is
+    // nested as the outermost AND block via makeScopedSearch (record-type-kit.ts)
+    // — same correct composition MemoryCandidate.search() already applies — so a
+    // caller-supplied `operator: "or"` cannot boolean-inject past the owner scope.
+    return workspaceScopedSearch(gate.agentId, query, (q) => super.search(q));
   }
 
   async post(content: any) {

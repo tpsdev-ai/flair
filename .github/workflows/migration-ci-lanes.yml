@@ -384,15 +384,50 @@ jobs:
 
             # Try to boot the baseline — capture exit code and stderr.
             # A refusal is prompt (non-zero within seconds), not a hang.
+            #
+            # CONFIRM_DOWNGRADE=yes pre-answers Harper's interactive downgrade
+            # prompt (HarperFast/harper#2046).  Starting an older Harper against
+            # a store written by a newer minor calls forceDowngradePrompt(),
+            # which asks "proceed with using your downgraded HDB instance?
+            # (yes/no)" and BLOCKS ON STDIN.  Both the prompt and the
+            # accompanying version warning go to stdout only, never the log, so
+            # in CI the process simply stops with nothing explaining why — which
+            # this lane then correctly reports as a hang.
+            #
+            # Without the override the lane can only ever observe outcome (c).
+            # It can never distinguish "the old binary boots" from "the old
+            # binary refuses loudly", because it never gets past the prompt.
+            # That makes the invariant's other two branches untestable.
+            #
+            # The value MUST be lowercase "yes" or "y".  Harper matches it
+            # against an allowlist (UPGRADE_PROCEED = ['yes','y']) behind a
+            # case-sensitive pattern /y(es)?$|n(o)?$/; anything else — YES, Yes,
+            # true, 1, or a trailing space — fails validation, and the prompt
+            # library DISCARDS the invalid override and falls through to reading
+            # stdin.  So a typo here reproduces the exact hang this is meant to
+            # avoid.  Measured against harper 5.1.22 + prompt 1.3.0.
+            #
+            # The exit-124 check below is deliberately RETAINED: a hang that
+            # survives the override is a genuine hang and must still fail.
             BASELINE_START_OUTPUT=$(mktemp)
             set +e
-            timeout 30 $BASE_FLAIR start --port $PORT >"$BASELINE_START_OUTPUT" 2>&1
+            CONFIRM_DOWNGRADE=yes timeout 30 $BASE_FLAIR start --port $PORT >"$BASELINE_START_OUTPUT" 2>&1
             BASELINE_START_EXIT=$?
             set -e
             BASELINE_STDERR=$(cat "$BASELINE_START_OUTPUT")
             rm -f "$BASELINE_START_OUTPUT"
 
             if [[ "$BASELINE_START_EXIT" != "0" ]]; then
+              # ── Non-zero exit — classify: refusal vs hang ──────────────
+              # Exit 124 is the timeout command's exit code: the baseline
+              # HUNG, it did not refuse.  A hang is the silent-bad-outcome
+              # case the invariant forbids (outcome c).
+              if [[ "$BASELINE_START_EXIT" == "124" ]]; then
+                echo "::error::baseline HUNG (exit 124 from timeout) — this is the silent-bad-outcome case the invariant forbids. NOTE: CONFIRM_DOWNGRADE=yes was set, so this is NOT the known interactive-prompt block (HarperFast/harper#2046) — the baseline hung for some other reason."
+                echo "--- stderr ---"; echo "$BASELINE_STDERR"; echo "---"
+                exit 1
+              fi
+
               # ── Baseline refused — stamp-capable path ───────────────────
               echo "Baseline refused to start (exit ${BASELINE_START_EXIT}) — stamp-capable baseline."
 

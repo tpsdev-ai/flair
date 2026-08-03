@@ -7,6 +7,7 @@ import { scanFields, isStrictMode } from "./content-safety.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
+import { assertValidVisibility } from "./memory-visibility.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -21,6 +22,7 @@ import {
   makeAuthGate,
   makeReadScope,
   makeByIdReadGate,
+  makeScopedSearch,
   resolveAuthGate,
   stampAttribution,
   FORBIDDEN,
@@ -73,6 +75,7 @@ function wantsTrust(target: any, opts: { includeTrust?: boolean } | undefined): 
  */
 export const memoryReadScope = makeReadScope(RECORD_TYPES.Memory.readScope, RECORD_TYPES.Memory.ownerField);
 const memoryByIdReadGate = makeByIdReadGate(memoryReadScope);
+const memoryScopedSearch = makeScopedSearch(memoryReadScope);
 // See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
 // prototype method below, never a class-field assignment — Harper's
 // relationship-traversal RBAC path reads allowRead off the prototype.
@@ -580,27 +583,12 @@ export class Memory extends (databases as any).flair.Memory {
     // from RECORD_TYPES.Memory — see this file's header — delegating
     // "open-within-org" to memory-read-scope.ts's resolveReadScope()
     // unchanged) so get() above and search() here cannot drift.
-    const scope = await memoryReadScope(gate.agentId);
-    const agentIdCondition: any = scope.condition;
-
-    // Harper passes `query` as a RequestTarget (extends URLSearchParams) or a
-    // conditions array. For URL-based GET /Memory?... calls, URL params are no
-    // longer translated to conditions here — callers should use
-    // POST /Memory/search_by_conditions with an explicit conditions array.
-    // For programmatic calls with a conditions array, we wrap with the agentId scope.
-    if (query && typeof query === "object" && !Array.isArray(query)) {
-      if (Array.isArray(query.conditions) && query.conditions.length > 0) {
-        query.conditions = [agentIdCondition, ...query.conditions];
-        return withDetachedTxn(ctx, () => super.search(query));
-      }
-      // Fallback: no conditions array present — just scope and pass through
-    }
-
-    // Fallback: plain array or no query (internal calls)
-    const conditions = Array.isArray(query) && query.length > 0
-      ? [agentIdCondition, ...query]
-      : [agentIdCondition];
-    return withDetachedTxn(ctx, () => super.search(conditions));
+    //
+    // The scope condition is nested as the outermost AND block via
+    // makeScopedSearch (record-type-kit.ts) — same correct composition
+    // MemoryCandidate.search() already applies — so a caller-supplied
+    // `operator: "or"` cannot boolean-inject past the owner scope.
+    return memoryScopedSearch(gate.agentId, query, (q) => withDetachedTxn(ctx, () => super.search(q)));
   }
 
   async post(content: any, context?: any) {
@@ -656,6 +644,27 @@ export class Memory extends (databases as any).flair.Memory {
     // existing record's visibility" concern here. Explicit visibility on the
     // write ALWAYS overrides; only stamp the default when the caller left it
     // unset. permanent|persistent → shared; standard|ephemeral|absent → private.
+      // ── flair#1009: refuse an unrecognised visibility BEFORE defaulting ──
+      // isPrivateVisibility() is an exact match on "private", so on the READ
+      // side every other value (a typo, a wrong case, a retired tier like
+      // "office") resolves to non-private and is readable by every agent on the
+      // instance. #1006 closed that at the CLI flag and the MCP tool argument;
+      // REST and the in-process API reach here without passing either.
+      //
+      // Refusing, rather than dropping the key: dropping it falls through to the
+      // durability-keyed default below, which for a permanent or persistent
+      // write is "shared" - the same widening, arrived at silently. A misspelled
+      // argument must not decide who can read a memory.
+      {
+        const visibilityError = assertValidVisibility(content.visibility);
+        if (visibilityError) {
+          return new Response(
+            JSON.stringify({ error: "invalid_visibility", message: visibilityError }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+      }
+
     if (content.visibility === undefined || content.visibility === null) {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }
@@ -850,6 +859,27 @@ export class Memory extends (databases as any).flair.Memory {
     // Explicit visibility on the write ALWAYS overrides; only stamp the
     // default when the caller left it unset AND this is a fresh record.
     // permanent|persistent → shared; standard|ephemeral|absent → private.
+      // ── flair#1009: refuse an unrecognised visibility BEFORE defaulting ──
+      // isPrivateVisibility() is an exact match on "private", so on the READ
+      // side every other value (a typo, a wrong case, a retired tier like
+      // "office") resolves to non-private and is readable by every agent on the
+      // instance. #1006 closed that at the CLI flag and the MCP tool argument;
+      // REST and the in-process API reach here without passing either.
+      //
+      // Refusing, rather than dropping the key: dropping it falls through to the
+      // durability-keyed default below, which for a permanent or persistent
+      // write is "shared" - the same widening, arrived at silently. A misspelled
+      // argument must not decide who can read a memory.
+      {
+        const visibilityError = assertValidVisibility(content.visibility);
+        if (visibilityError) {
+          return new Response(
+            JSON.stringify({ error: "invalid_visibility", message: visibilityError }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+      }
+
     if (!preExisting && (content.visibility === undefined || content.visibility === null)) {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }

@@ -274,7 +274,62 @@ export function makeByIdReadGate(
   };
 }
 
-// ─── (c) No-forge attribution — stampAttribution ───────────────────────────
+// ─── (c) Scoped search — makeScopedSearch ────────────────────────────────
+
+/**
+ * Produces a scoped search() override that nests the caller's conditions
+ * inside the agent-scope condition as the OUTERMOST `and` block, so a
+ * caller-supplied `operator: "or"` cannot boolean-inject past the owner
+ * scope.
+ *
+ * This is the correct composition that MemoryCandidate.search() already
+ * applies (the only resource that got it right).  Memory.search() and
+ * WorkspaceState.search() both used a flat prepend — `[agentCondition,
+ * ...query.conditions]` — which lets a caller-supplied `query.operator`
+ * survive and turn the scope condition into one OR-branch.
+ *
+ * Every table that composes this gets the correct nesting by default;
+ * a fifth table added later cannot accidentally reintroduce the flat-
+ * prepend bug.
+ *
+ * `superSearch` is a caller-supplied closure so the class's own
+ * `super.search()` (which cannot be referenced from outside the class
+ * body) stays exactly where it was.
+ */
+export function makeScopedSearch(
+  readScope: (authAgentId: string) => Promise<RecordTypeReadScope>,
+): (agentId: string, query: any, superSearch: (q: any) => any) => any {
+  return async function scopedSearch(agentId: string, query: any, superSearch: (q: any) => any): Promise<any> {
+    const scope = await readScope(agentId);
+    const agentCondition = scope.condition;
+
+    // Object with a conditions array — nest caller's conditions inside the
+    // scope condition as the outermost AND block so a caller-supplied
+    // `operator: "or"` cannot boolean-inject past the owner scope.
+    if (query && typeof query === "object" && !Array.isArray(query)) {
+      if (Array.isArray(query.conditions) && query.conditions.length > 0) {
+        return superSearch({
+          ...query,
+          conditions: [agentCondition, { conditions: query.conditions, operator: query.operator || "and" }],
+          operator: "and",
+        });
+      }
+      // No (or empty) conditions array — just scope, preserving other query
+      // properties but NOT a caller-supplied operator (force "and").
+      const { conditions: _c, operator: _o, ...rest } = query;
+      return superSearch({ ...rest, conditions: [agentCondition], operator: "and" });
+    }
+
+    // Plain array or no query — wrap in an object with operator "and" so
+    // the scope condition is always the outermost AND.
+    const conditions = Array.isArray(query) && query.length > 0
+      ? [agentCondition, { conditions: query, operator: "and" }]
+      : [agentCondition];
+    return superSearch({ conditions, operator: "and" });
+  };
+}
+
+// ─── (d) No-forge attribution — stampAttribution ───────────────────────────
 
 /**
  * Four idioms observed verbatim across the five tables' write paths (post()/

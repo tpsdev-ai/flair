@@ -18,6 +18,98 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.36.0] - 2026-08-03
+
+### Changed
+
+- Restated the downgrade invariant (flair#1050): there is never a silent bad
+  outcome — either the old binary boots and serves the corpus correctly, OR it
+  refuses to start with a message naming what wrote the store, what is running,
+  and how to recover, with a pre-upgrade snapshot that restores the store to a
+  working state. The migration CI lane and downgrade-boot compat test now assert
+  both branches, and the snapshot-opt-in rationale in docs and CLI docstrings
+  reflects the restated guarantee.
+
+### Fixed
+
+- **A crashed test run no longer leaves `config.yaml` permanently modified.**
+  `mcp-client-credentials-e2e` wrote the OAuth component block into the repository's real
+  `config.yaml` and restored it in `afterAll`. A kill or crash mid-run left the block in place,
+  and the next real instance start would silently 404 on `/.well-known/oauth-authorization-server`
+  — the OAuth surface was absent with no error, because `@harperfast/oauth` is not a declared
+  dependency in the shipped config. The test now stages the block into a temp copy and points
+  Harper at it; the real `config.yaml` is never touched.
+
+- Deactivated principals are now rejected on both authentication paths
+  (Ed25519 and Basic/agent-auth).  A deactivated agent can no longer
+  authenticate with a new Ed25519 signature or a Basic credential.
+
+  **Known limit, and its actual scope:** already-issued OAuth Bearer tokens are not
+  checked against principal status.  **On a default deployment this is not an
+  exposure** — `/mcp` is the only surface that accepts a Flair-issued Bearer token,
+  it is not registered unless `FLAIR_MCP_OAUTH` is set, and Harper's own auth layer
+  claims any other `Bearer` header before a Flair resource sees it.
+
+  **If you have enabled MCP OAuth**, a deactivated agent's existing token keeps
+  working against `/mcp` until that token expires or is revoked, because the MCP
+  guard validates the JWT cryptographically without consulting the Agent table.
+  Until revocation-on-deactivation lands as a follow-up slice, deactivating an agent
+  on such a deployment should be paired with explicitly revoking its tokens.
+
+  So this slice covers "deactivation stops new authentications" everywhere, and
+  "deactivation stops all access" everywhere except an MCP-OAuth-enabled deployment.
+
+- **A hung old binary during a downgrade check is now reported as a hang, not as a clean refusal.**
+  The downgrade invariant names three outcomes — the old binary boots, it refuses loudly, or
+  anything else — and both enforcement points folded the third into the second. A timeout therefore
+  printed a diagnosis stating the opposite of what had happened: an unbounded hang reported as a
+  correct, loud refusal.
+
+  Timeouts are now classified before the refusal check and fail with their own message. A pure
+  `classifyDowngradeOutcome()` covers the three outcomes explicitly, so an invariant naming three
+  states no longer has two branches.
+
+### Security
+
+- **Creating a `Credential` is now gated and attributed to the authenticated principal.** The
+  resource declared a read gate and a cross-principal check on update, but no gate on creation — so
+  a `POST` to the collection reached the base implementation with no cross-principal check, and
+  `principalId` was taken from the request body.
+
+  Creation now requires a verified principal, and `principalId` is stamped from the authenticated
+  identity rather than trusted from the body. A non-admin agent can only create credentials
+  attributed to itself.
+
+  **Upgrading is recommended.** The gap was in creation only; existing credentials were never
+  readable across principals.
+
+- **`FeedMemories.post()` now attributes writes to the authenticated principal and refuses
+  mismatched ones.** It previously read `agentId` from the request body and passed it into a
+  full-record write, so a verified agent could write memories attributed to another agent, or target
+  an existing record by supplying its `id`.
+
+  `agentId` is now stamped from the authenticated principal; a body-supplied `agentId` that
+  disagrees is rejected with `403` rather than silently overwritten. A body-supplied `id` is checked
+  against the existing record's ownership before the write proceeds.
+
+  **Upgrading is recommended for multi-agent deployments.** This path was previously documented
+  in-code as deferred debt; it is now closed.
+
+- **Read-scope enforcement in `Memory.search()` and `WorkspaceState.search()` no longer depends on
+  the caller's query operator.** Both resources composed their ownership condition in a way that a
+  caller-supplied top-level operator could weaken, so an authenticated agent could receive records
+  belonging to other agents. Ownership is now enforced as the outer `AND` around the caller's own
+  query block, matching the composition `MemoryCandidate` already used.
+
+  **Upgrading is recommended for any deployment that serves more than one agent.** Exploitation
+  requires an authenticated principal — it is not reachable anonymously — but it crosses the
+  per-agent read boundary, which is the boundary Flair exists to hold.
+
+  The composition now lives in one place, `makeScopedSearch()` in `record-type-kit.ts`, rather than
+  being hand-rolled per resource. It had been written three times and was correct once; a shared
+  implementation is what stops the next resource from getting it wrong. Boolean-injection guard
+  tests now cover every scoped resource, not just the one that happened to be correct.
+
 ## [0.35.0] - 2026-08-02
 
 ### Added

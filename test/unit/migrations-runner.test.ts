@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-mock.module("harper", () => ({ databases: {}, Resource: class {} }));
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { runMigrationCycle } = await import("../../resources/migrations/runner.ts");
 const { MigrationRegistry } = await import("../../resources/migrations/registry.ts");
