@@ -44,10 +44,20 @@ so a hand-written entry here is lost.
   (Ed25519 and Basic/agent-auth).  A deactivated agent can no longer
   authenticate with a new Ed25519 signature or a Basic credential.
 
-  **Known limit:** already-issued OAuth Bearer tokens survive deactivation
-  until expiry or explicit revocation.  This slice covers "deactivation
-  stops new authentications" only.  Full coverage (Bearer token
-  revocation on deactivation) is a follow-up slice.
+  **Known limit, and its actual scope:** already-issued OAuth Bearer tokens are not
+  checked against principal status.  **On a default deployment this is not an
+  exposure** — `/mcp` is the only surface that accepts a Flair-issued Bearer token,
+  it is not registered unless `FLAIR_MCP_OAUTH` is set, and Harper's own auth layer
+  claims any other `Bearer` header before a Flair resource sees it.
+
+  **If you have enabled MCP OAuth**, a deactivated agent's existing token keeps
+  working against `/mcp` until that token expires or is revoked, because the MCP
+  guard validates the JWT cryptographically without consulting the Agent table.
+  Until revocation-on-deactivation lands as a follow-up slice, deactivating an agent
+  on such a deployment should be paired with explicitly revoking its tokens.
+
+  So this slice covers "deactivation stops new authentications" everywhere, and
+  "deactivation stops all access" everywhere except an MCP-OAuth-enabled deployment.
 
 - **A hung old binary during a downgrade check is now reported as a hang, not as a clean refusal.**
   The downgrade invariant names three outcomes — the old binary boots, it refuses loudly, or
