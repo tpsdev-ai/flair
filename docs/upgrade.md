@@ -2,7 +2,7 @@
 
 This page covers the mechanics of upgrading Flair — the general path, valid across
 versions. For **what changed in a specific release** (behavior changes, new surfaces,
-breaking changes), see [`CHANGELOG.md`](../CHANGELOG.md) — each version has its own
+breaking changes), see [`CHANGELOG.md`](https://github.com/tpsdev-ai/flair/blob/main/CHANGELOG.md) — each version has its own
 `## [X.Y.Z]` section. Check the CHANGELOG entries between your current version and the
 target version before upgrading anything you depend on in production.
 
@@ -370,7 +370,7 @@ flair restore ~/flair-backup-<date>.json
 
 ### Known issue — upgrading *from* an older version can still report a false rollback
 
-The 0.25.1 fix (see [`CHANGELOG.md`](../CHANGELOG.md)) makes `flair upgrade` resolve a
+The 0.25.1 fix (see [`CHANGELOG.md`](https://github.com/tpsdev-ai/flair/blob/main/CHANGELOG.md)) makes `flair upgrade` resolve a
 credentials-only post-restart-verification failure to `healthy-unverified` instead of
 rolling back. That fix is **forward-only**: it lives in the *new* CLI code, but an
 upgrade's post-restart verification is run by the CLI that was already installed
@@ -526,7 +526,7 @@ you haven't personally tested.
 
 ## See also
 
-- [`CHANGELOG.md`](../CHANGELOG.md) — what actually changed, version by version.
+- [`CHANGELOG.md`](https://github.com/tpsdev-ai/flair/blob/main/CHANGELOG.md) — what actually changed, version by version.
 - [`docs/releasing.md`](releasing.md) — how a release gets published in the first
   place (staged npm publish with 2FA approval), if you're curious why a new version
   shows up when it does.
