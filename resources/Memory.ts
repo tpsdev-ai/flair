@@ -7,6 +7,7 @@ import { scanFields, isStrictMode } from "./content-safety.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
+import { assertValidVisibility } from "./memory-visibility.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -643,6 +644,27 @@ export class Memory extends (databases as any).flair.Memory {
     // existing record's visibility" concern here. Explicit visibility on the
     // write ALWAYS overrides; only stamp the default when the caller left it
     // unset. permanent|persistent → shared; standard|ephemeral|absent → private.
+      // ── flair#1009: refuse an unrecognised visibility BEFORE defaulting ──
+      // isPrivateVisibility() is an exact match on "private", so on the READ
+      // side every other value (a typo, a wrong case, a retired tier like
+      // "office") resolves to non-private and is readable by every agent on the
+      // instance. #1006 closed that at the CLI flag and the MCP tool argument;
+      // REST and the in-process API reach here without passing either.
+      //
+      // Refusing, rather than dropping the key: dropping it falls through to the
+      // durability-keyed default below, which for a permanent or persistent
+      // write is "shared" - the same widening, arrived at silently. A misspelled
+      // argument must not decide who can read a memory.
+      {
+        const visibilityError = assertValidVisibility(content.visibility);
+        if (visibilityError) {
+          return new Response(
+            JSON.stringify({ error: "invalid_visibility", message: visibilityError }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+      }
+
     if (content.visibility === undefined || content.visibility === null) {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }
@@ -837,6 +859,27 @@ export class Memory extends (databases as any).flair.Memory {
     // Explicit visibility on the write ALWAYS overrides; only stamp the
     // default when the caller left it unset AND this is a fresh record.
     // permanent|persistent → shared; standard|ephemeral|absent → private.
+      // ── flair#1009: refuse an unrecognised visibility BEFORE defaulting ──
+      // isPrivateVisibility() is an exact match on "private", so on the READ
+      // side every other value (a typo, a wrong case, a retired tier like
+      // "office") resolves to non-private and is readable by every agent on the
+      // instance. #1006 closed that at the CLI flag and the MCP tool argument;
+      // REST and the in-process API reach here without passing either.
+      //
+      // Refusing, rather than dropping the key: dropping it falls through to the
+      // durability-keyed default below, which for a permanent or persistent
+      // write is "shared" - the same widening, arrived at silently. A misspelled
+      // argument must not decide who can read a memory.
+      {
+        const visibilityError = assertValidVisibility(content.visibility);
+        if (visibilityError) {
+          return new Response(
+            JSON.stringify({ error: "invalid_visibility", message: visibilityError }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+      }
+
     if (!preExisting && (content.visibility === undefined || content.visibility === null)) {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }
