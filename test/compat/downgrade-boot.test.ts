@@ -165,6 +165,20 @@ function instanceEnv(inst: HarperInstance): Record<string, string> {
     HOME: inst.installDir,
     FLAIR_URL: inst.httpURL,
     FLAIR_ADMIN_PASS: inst.admin.password,
+    // Defence in depth for CLI spawns only. This does NOT fix the baseline
+    // boot — startHarper() builds its env from process.env and never reads
+    // this, so the real override lives in beforeAll. Kept because runFlairCli()
+    // can also invoke commands that start Harper, and the same prompt would
+    // block those. See beforeAll for the mechanism and the review that caught
+    // the difference.
+    //
+    // MUST be lowercase "yes" or "y". Harper tests membership in
+    // UPGRADE_PROCEED = ['yes','y'] behind a case-sensitive /y(es)?$|n(o)?$/
+    // pattern; any other value (YES, true, 1, "yes ") fails validation, and the
+    // prompt library discards the invalid override and falls through to reading
+    // stdin — reproducing the exact hang this avoids. Measured against
+    // harper 5.1.22 with prompt 1.3.0.
+    CONFIRM_DOWNGRADE: "yes",
   };
 }
 
@@ -196,6 +210,7 @@ async function fetchAgentMemories(inst: HarperInstance, agentId: string): Promis
 }
 
 describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]", () => {
+  let priorConfirmDowngrade: string | undefined;
   let baselineDir: string;
   let pkgDirBaseline: string;
   let cliPathBaseline: string;
@@ -214,6 +229,23 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   let currentHarperVersion: string | null = null;
 
   beforeAll(async () => {
+    // ── 0. Pre-answer Harper's interactive downgrade prompt ────────────────
+    //
+    // MUST be set on `process.env`, not via instanceEnv(). `startHarper()` —
+    // which is what actually boots the baseline against the newer store —
+    // builds its own env as `{ ...process.env }` minus two token keys
+    // (test/helpers/harper-lifecycle.ts). It never calls instanceEnv(), whose
+    // only consumer is runFlairCli(). Setting the key there looks like it
+    // covers this and does not: the baseline spawn would still block on stdin.
+    //
+    // Caught in review by Kern, after I had put it in instanceEnv() and
+    // convinced myself the test was fixed. The lane and the compat test are two
+    // separate enforcement points and each needs the override on its own path.
+    //
+    // See migration-ci-lanes.yml for why the value must be lowercase.
+    priorConfirmDowngrade = process.env.CONFIRM_DOWNGRADE;
+    process.env.CONFIRM_DOWNGRADE = "yes";
+
     // ── 1. Install the previous published baseline from npm (same recipe as
     // federation-mixed-version.test.ts's beforeAll) ─────────────────────────
     baselineDir = await mkdtemp(join(tmpdir(), "flair-downgrade-baseline-"));
@@ -325,6 +357,12 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
+    // Restore CONFIRM_DOWNGRADE — this suite mutates the real process env, so
+    // leaving it set would silently pre-answer the prompt for anything else
+    // sharing this process.
+    if (priorConfirmDowngrade === undefined) delete process.env.CONFIRM_DOWNGRADE;
+    else process.env.CONFIRM_DOWNGRADE = priorConfirmDowngrade;
+
     // baseline never owns dataDir (passed explicitly via `installDir`), so
     // stopHarper(baseline) will not remove it — this suite owns and removes
     // the shared dir itself, once, regardless of which side last touched it.
