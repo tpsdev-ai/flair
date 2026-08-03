@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, envKeyNames, readEnvValue } from "../../src/component-env.js";
-import { OAUTH_METADATA_PATH, resolveDeployPublicUrl, stageDeployRoot, verifyPublicIssuer } from "../../src/deploy.js";
+import { OAUTH_METADATA_PATH, publishedEntryNames, resolveDeployPublicUrl, stageDeployRoot, verifyPublicIssuer } from "../../src/deploy.js";
 
 const require_ = createRequire(import.meta.url);
 
@@ -67,7 +67,15 @@ function makePackageRoot(): string {
   mkdirSync(join(root, "dist", "resources"), { recursive: true });
   mkdirSync(join(root, "schemas"), { recursive: true });
   mkdirSync(join(root, "node_modules", "harper"), { recursive: true });
-  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version: "0.0.0-test" }));
+  // `files` mirrors what a real npm-installed @tpsdev-ai/flair carries. The
+  // fixture omitted it before, which made it unfaithful to the thing it stands
+  // in for — an installed package always declares `files`, and stageDeployRoot
+  // now derives the payload from it.
+  writeFileSync(join(root, "package.json"), JSON.stringify({
+    name: "@tpsdev-ai/flair",
+    version: "0.0.0-test",
+    files: ["dist/", "schemas/", "templates/", "docs/", "config.yaml", "LICENSE", "README.md", "SECURITY.md"],
+  }));
   writeFileSync(join(root, "config.yaml"), "name: flair\nloadEnv:\n  files: '.env'\n");
   writeFileSync(join(root, "dist", "resources", "Memory.js"), "// resource\n");
   writeFileSync(join(root, "schemas", "schema.graphql"), "type Q { a: String }\n");
@@ -196,26 +204,33 @@ describe("stageDeployRoot — what harper actually uploads", () => {
     expect(envKeyNames(packed)).toEqual(["FLAIR_MCP_OAUTH", PUBLIC_URL_KEY]);
   });
 
-  test("an operator's own FLAIR_PUBLIC_URL is deployed unchanged, with nothing staged", async () => {
+  test("an operator's own FLAIR_PUBLIC_URL is carried through untouched", async () => {
     const root = makePackageRoot();
     writeFileSync(join(root, COMPONENT_ENV_FILENAME), "FLAIR_PUBLIC_URL=https://cdn.example.com\n");
 
     const staged = stageDeployRoot(root, "https://cluster.org.harperfabric.com");
     cleanups.push(staged.cleanup);
 
-    expect(staged.dir).toBe(root); // nothing copied at all
+    // Staging is now unconditional — the payload filter has to apply whether or
+    // not an .env needs writing, or a loopback deploy from a checkout would still
+    // ship .git. The operator's own value must survive the copy unmodified.
+    expect(staged.dir).not.toBe(root);
     expect(staged.plan.action).toBe("operator-value-kept");
-    expect(readEnvValue(await packedEnvText(root), PUBLIC_URL_KEY)).toBe("https://cdn.example.com");
+    expect(readEnvValue(await packedEnvText(staged.dir), PUBLIC_URL_KEY)).toBe("https://cdn.example.com");
   });
 
-  test("a loopback target stages nothing and ships no generated .env", async () => {
+  test("a loopback target ships no generated .env, but is still filtered", async () => {
     const root = makePackageRoot();
     const staged = stageDeployRoot(root, resolveDeployPublicUrl("http://127.0.0.1:9925"));
     cleanups.push(staged.cleanup);
 
-    expect(staged.dir).toBe(root);
+    // The .env contract is unchanged: a loopback target generates nothing.
     expect(staged.plan.action).toBe("unchanged");
-    expect(await packedEnvText(root)).toBeNull();
+    expect(await packedEnvText(staged.dir)).toBeNull();
+    // But the payload is still staged and filtered — this is the case that used
+    // to return packageRoot untouched and ship the whole working tree with it.
+    expect(staged.dir).not.toBe(root);
+    expect(existsSync(join(staged.dir, "node_modules"))).toBe(false);
   });
 
   test("the staged .env is written 0600", () => {
@@ -335,5 +350,86 @@ describe("verifyPublicIssuer", () => {
     });
     expect(result.checked).toBe(false);
     expect(result.detail).toContain("ECONNREFUSED");
+  });
+});
+
+// ─── flair#1020 and the private deploy-payload finding ────────────────────────
+//
+// harper packs the deploy root wholesale. When that root is an npm-installed
+// package the tree IS the published file set, which is the case the original
+// design assumed. Deploying from a git CHECKOUT — which our own deploy procedure
+// prescribes — silently shipped the entire working tree instead.
+//
+// Measured on the production Fabric origin 2026-08-03 at v0.36.0: 36 top-level
+// entries including .git, .env, models/ (80 MB), test/, packages/ and a scratch
+// pr-body.md. 96 MB against a 1.3 MB published tarball.
+//
+// These tests fail if the payload ever admits a top-level entry the published
+// package would not contain.
+describe("stageDeployRoot — the payload equals the published file set", () => {
+  function fixtureRoot(): string {
+    const root = mkdtempSync(join(tmpdir(), "flair-payload-fixture-"));
+    writeFileSync(join(root, "package.json"), JSON.stringify({
+      name: "@tpsdev-ai/flair",
+      version: "0.0.0-test",
+      files: ["dist/", "schemas/", "config.yaml", "README.md"],
+      workspaces: ["packages/*"],
+    }));
+    // published entries
+    for (const d of ["dist", "schemas"]) {
+      mkdirSync(join(root, d), { recursive: true });
+      writeFileSync(join(root, d, "keep.txt"), "published");
+    }
+    writeFileSync(join(root, "config.yaml"), "published: true");
+    writeFileSync(join(root, "README.md"), "# published");
+    // entries a checkout carries that MUST NOT ship
+    for (const d of [".git", "models", "packages", "test", "src", "scripts"]) {
+      mkdirSync(join(root, d), { recursive: true });
+      writeFileSync(join(root, d, "secret.txt"), "must not ship");
+    }
+    writeFileSync(join(root, "pr-body.md"), "scratch file left in the clone");
+    writeFileSync(join(root, "bun.lock"), "lock");
+    return root;
+  }
+
+  const roots: string[] = [];
+  afterEach(() => { for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });
+
+  test("drops every unpublished top-level entry, including .git and models", () => {
+    const root = fixtureRoot(); roots.push(root);
+    const staged = stageDeployRoot(root, "https://example.invalid");
+    const got = new Set(require("node:fs").readdirSync(staged.dir));
+    for (const forbidden of [".git", "models", "packages", "test", "src", "scripts", "pr-body.md", "bun.lock"]) {
+      expect(got.has(forbidden)).toBe(false);
+    }
+    staged.cleanup();
+  });
+
+  test("keeps every published entry — the filter must not be over-broad", () => {
+    const root = fixtureRoot(); roots.push(root);
+    const staged = stageDeployRoot(root, "https://example.invalid");
+    const got = new Set(require("node:fs").readdirSync(staged.dir));
+    for (const kept of ["dist", "schemas", "config.yaml", "README.md", "package.json"]) {
+      expect(got.has(kept)).toBe(true);
+    }
+    // and subtrees survive: only TOP-LEVEL entries are filtered
+    expect(existsSync(join(staged.dir, "dist", "keep.txt"))).toBe(true);
+    staged.cleanup();
+  });
+
+  test("refuses to deploy when files cannot be determined, rather than shipping everything or nothing", () => {
+    const root = mkdtempSync(join(tmpdir(), "flair-nofiles-")); roots.push(root);
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version: "0.0.0" }));
+    mkdirSync(join(root, ".git"), { recursive: true });
+    expect(() => stageDeployRoot(root, "https://example.invalid")).toThrow(/published file set/);
+  });
+
+  test("publishedEntryNames reads files from the root, not a hardcoded copy", () => {
+    const root = fixtureRoot(); roots.push(root);
+    const names = publishedEntryNames(root);
+    expect(names.has("dist")).toBe(true);
+    expect(names.has("schemas")).toBe(true);
+    expect(names.has("package.json")).toBe(true);
+    expect(names.has("models")).toBe(false);
   });
 });

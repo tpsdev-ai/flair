@@ -203,7 +203,7 @@ describe("flair deploy: dry-run end-to-end", () => {
     }
     writeFileSync(
       join(dir, "package.json"),
-      JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test" }),
+      JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test", files: ["dist/", "schemas/", "templates/", "docs/", "config.yaml", "LICENSE", "README.md", "SECURITY.md"] }),
     );
     return dir;
   }
@@ -421,7 +421,7 @@ describe("flair deploy: deploy() gating — --no-verify and --dry-run both skip 
     }
     writeFileSync(
       join(dir, "package.json"),
-      JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test" }),
+      JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test", files: ["dist/", "schemas/", "templates/", "docs/", "config.yaml", "LICENSE", "README.md", "SECURITY.md"] }),
     );
     return dir;
   }
@@ -590,7 +590,7 @@ describe("flair deploy: deploy() replication-flake retry + --ignore-replication-
     }
     writeFileSync(
       join(dir, "package.json"),
-      JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test" }),
+      JSON.stringify({ name: "@tpsdev-ai/flair", version: "9.9.9-test", files: ["dist/", "schemas/", "templates/", "docs/", "config.yaml", "LICENSE", "README.md", "SECURITY.md"] }),
     );
     return dir;
   }
