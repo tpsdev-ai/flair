@@ -27,6 +27,31 @@ import { ADMIN_ROLE, agentRecordIsAdmin } from "./agent-admin.js";
  */
 export const FLAIR_AGENT_USERNAME = "flair-agent";
 
+// ─── Principal deactivation guard (authz hardening slice 1) ─────────────────
+//
+// ONE predicate, called from BOTH verify paths (Ed25519 in doVerify + the
+// gate's own verify, and Basic/agent-auth in resolveAgentAuth) so the
+// deactivation check cannot drift between them.  Two independent checks would
+// inevitably diverge — one path tightened, the other forgotten — and this is
+// exactly the kind of control that must not.
+//
+// KNOWN LIMIT (slice 1b, NOT this slice): Harper's Bearer validation never
+// calls Agent.get(principalId), so already-issued Bearer tokens SURVIVE
+// deactivation.  This slice buys "deactivation stops new authentications" and
+// nothing more.  Existing tokens live until expiry or explicit revocation.
+// Do not read this as "deactivation now works" — it works for NEW auth only.
+
+/**
+ * Single shared predicate: is this principal deactivated?
+ *
+ * Called from BOTH verify paths (Ed25519 and Basic/agent-auth) so the
+ * deactivation check cannot drift.  A nonexistent agent is not "deactivated" —
+ * it will fail on other checks (missing publicKey, unknown user, etc.).
+ */
+export function isPrincipalDeactivated(agent: { status?: string } | null | undefined): boolean {
+  return agent?.status === "deactivated";
+}
+
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────
 // WINDOW_MS, isNonceReplay/recordNonce (the ONE shared nonce store), and
 // importEd25519Key all live in ./ed25519-auth.ts — the single
@@ -114,6 +139,10 @@ async function doVerify(request: any): Promise<AgentAuth | null> {
 
   const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
   if (!agent?.publicKey) return null;
+
+  // Deactivation guard — ONE predicate, same check as the Basic/agent-auth path
+  // in resolveAgentAuth below.  A deactivated principal cannot authenticate.
+  if (isPrincipalDeactivated(agent)) return null;
 
   // Canonical signed payload: id:ts:nonce:METHOD:pathname+search (must match the
   // TPS CLI signer exactly — changing this breaks every agent's auth).
@@ -341,10 +370,16 @@ export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> 
   const credentialed = hasCredentialEvidence(c);
   const user = context?.user ?? c.user;
   if (credentialed && user?.role?.permission?.super_user === true) {
-    return { kind: "agent", agentId: String(user.username ?? "admin"), isAdmin: true };
+    const agentId = String(user.username ?? "admin");
+    const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
+    if (isPrincipalDeactivated(agent)) return { kind: "anonymous" };
+    return { kind: "agent", agentId, isAdmin: true };
   }
   if (credentialed && user?.username && user.username !== FLAIR_AGENT_USERNAME) {
-    return { kind: "agent", agentId: String(user.username), isAdmin: false };
+    const agentId = String(user.username);
+    const agent = await (databases as any).flair.Agent.get(agentId).catch(() => null);
+    if (isPrincipalDeactivated(agent)) return { kind: "anonymous" };
+    return { kind: "agent", agentId, isAdmin: false };
   }
 
   // A raw request with headers is present → verify it; an HTTP request that

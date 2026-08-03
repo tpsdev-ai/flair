@@ -1,7 +1,7 @@
 import { patchRecord } from "./table-helpers.js";
 import { server, databases } from "harper";
 import { getEmbedding } from "./embeddings-provider.js";
-import { isAdmin, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
+import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
@@ -305,6 +305,12 @@ server.http(async (request: any, nextLayer: any) => {
 
   const agent = await (databases as any).flair.Agent.get(agentId);
   if (!agent) return new Response(JSON.stringify({ error: "unknown_agent" }), { status: 401 });
+
+  // Deactivation guard — same predicate as the per-resource verify path in
+  // agent-auth.ts.  A deactivated principal cannot authenticate.
+  if (isPrincipalDeactivated(agent)) {
+    return new Response(JSON.stringify({ error: "principal_deactivated" }), { status: 401 });
+  }
 
   try {
     const payload = `${agentId}:${tsRaw}:${nonce}:${request.method}:${url.pathname}${url.search}`;
