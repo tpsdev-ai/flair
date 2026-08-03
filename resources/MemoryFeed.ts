@@ -1,18 +1,42 @@
 import { Resource, databases } from "harper";
-import { allowVerified } from "./agent-auth.js";
+import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
+import { FORBIDDEN, UNAUTH } from "./record-type-kit.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
-  // gate's admin elevation). NOTE: post() trusts content.agentId from the body —
-  // closing that create-spoofing gap is tracked with the table-resource
-  // create-ownership work (Memory.allowCreate), not in this auth-coverage pass.
+  // gate's admin elevation).
   async allowCreate(): Promise<boolean> {
     return allowVerified((this as any).getContext?.());
   }
 
   async post(content: any) {
-    const agentId = String(content?.agentId ?? "");
+    const ctx = (this as any).getContext?.();
+    const auth = await resolveAgentAuth(ctx);
+
+    // Anonymous HTTP must NOT write.
+    if (auth.kind === "anonymous") {
+      return UNAUTH();
+    }
+
+    // No-forge attribution: stamp agentId from the authenticated principal,
+    // never from the body. "stamp-default" — unconditional overwrite for
+    // non-admin agents; admin defaults-if-absent.
+    if (auth.kind === "agent" && !auth.isAdmin) {
+      content.agentId = auth.agentId;
+    } else if (auth.kind === "agent" && auth.isAdmin) {
+      content.agentId ||= auth.agentId;
+    }
+
+    // Guard against body-supplied id targeting another agent's record.
+    if (content?.id) {
+      const existingRecord = await (databases as any).flair.Memory.get(content.id);
+      if (existingRecord && existingRecord.agentId !== content.agentId) {
+        return FORBIDDEN("forbidden: cannot write a feed memory owned by another agent");
+      }
+    }
+
+    const agentId = content.agentId;
     const body = String(content?.content ?? "");
     if (!agentId || !body) {
       return new Response(JSON.stringify({ error: "agentId and content are required" }), {
