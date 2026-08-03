@@ -74,15 +74,18 @@
 // `config.yaml`, exactly the pattern this file used to use for
 // `harper-fabric-embeddings` before flair#504/694 moved that to in-process
 // boot (see config.yaml's own history/comments). This test stages that
-// block into a TEMPORARY copy of config.yaml for its own lifetime only
-// (restored in `afterAll`, even on failure) — `bun test test/integration/`
-// runs test files sequentially in one process (this repo's CI invokes it as
-// a single `bun test test/integration/`), so this mutation window never
-// overlaps another integration test's own `startHarper()` config read.
+// block into a TEMPORARY copy of config.yaml for its own lifetime only —
+// the repository's real config.yaml is never touched. Harper is pointed at
+// the temp copy via `startHarper({ cwd: tempDir })`; the temp directory is
+// discarded in `afterAll`. A crash therefore leaves nothing behind.
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { generateKeyPairSync, type KeyObject } from "node:crypto";
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execSync } from "node:child_process";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import {
   signClientAssertion,
@@ -92,7 +95,8 @@ import {
   McpTokenRequestError,
 } from "../../src/mcp-client-assertion";
 
-const CONFIG_PATH = join(process.cwd(), "config.yaml");
+const REPO_ROOT = process.cwd();
+const CONFIG_PATH = join(REPO_ROOT, "config.yaml");
 const ISSUER = "https://cimd-test.flair-663.internal";
 const ALLOWED_HOST = "cimd-test.flair-663.internal";
 const AGENT_ID = "mcp-cc-e2e-agent";
@@ -119,11 +123,16 @@ const OAUTH_COMPONENT_BLOCK = `
         - '${ALLOWED_HOST}'
 `;
 
-let originalConfig: string;
+let configChecksum: string;
+let tempDir: string;
 let harper: HarperInstance;
 let clientId: string;
 let tokenEndpoint: string;
 let agentPrivateKey: KeyObject;
+
+function sha256(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
 
 async function adminOp(op: Record<string, any>): Promise<Response> {
   return fetch(harper.opsURL, {
@@ -138,13 +147,30 @@ async function adminOp(op: Record<string, any>): Promise<Response> {
 
 describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 component", () => {
   beforeAll(async () => {
-    originalConfig = readFileSync(CONFIG_PATH, "utf8");
-    writeFileSync(CONFIG_PATH, originalConfig + OAUTH_COMPONENT_BLOCK);
+    // Capture the real config.yaml checksum BEFORE anything touches it.
+    configChecksum = sha256(CONFIG_PATH);
+
+    // Build a temp component tree: hard-link everything under the repo root
+    // (including .git and node_modules), then replace config.yaml with our
+    // OAuth-augmented copy.  The temp tree is removed with rm -rf in afterAll;
+    // that does not affect the originals because hard links are reference-counted
+    // — unlinking the temp copy leaves the repo file intact.
+    // Hard links are transparent to the filesystem — Harper's component loader
+    // sees a real directory tree, not symlinks.  Symlinks fail because Harper
+    // resolves componentDirectory with realpathSync and its security loader
+    // (checkAllowedModulePath) rejects paths that don't start with the
+    // realpath'd directory.
+    tempDir = await mkdtemp(join(tmpdir(), "flair-test-"));
+    execSync(`cp -al "${REPO_ROOT}"/. "${tempDir}"/`, { stdio: "pipe" });
+    // Remove the hard-linked config.yaml and write our augmented copy.
+    execSync(`rm -f "${tempDir}/config.yaml"`);
+    writeFileSync(join(tempDir, "config.yaml"), readFileSync(CONFIG_PATH, "utf8") + OAUTH_COMPONENT_BLOCK);
 
     process.env.FLAIR_MCP_OAUTH = "1";
     process.env.FLAIR_MCP_ISSUER = ISSUER;
 
-    harper = await startHarper();
+    // Point Harper at the temp tree — it reads config.yaml from its cwd.
+    harper = await startHarper({ cwd: tempDir });
 
     // Seed the agent MCPClientMetadata.ts will serve a CIMD document for.
     const agentKeyPair = generateKeyPairSync("ed25519");
@@ -164,9 +190,16 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-    writeFileSync(CONFIG_PATH, originalConfig);
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true, maxRetries: 4 });
+    }
     delete process.env.FLAIR_MCP_OAUTH;
     delete process.env.FLAIR_MCP_ISSUER;
+  });
+
+  test("the repository's config.yaml is never mutated during this test run", () => {
+    const after = sha256(CONFIG_PATH);
+    expect(after).toBe(configChecksum);
   });
 
   test("the plugin mounts for real: /.well-known/oauth-authorization-server advertises client_credentials + private_key_jwt + EdDSA", async () => {
