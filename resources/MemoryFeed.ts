@@ -19,15 +19,21 @@ export class FeedMemories extends Resource {
       return UNAUTH();
     }
 
-    // No-forge attribution: stamp agentId from the authenticated principal,
-    // never from the body. "stamp-strict" — rejects body-supplied mismatches
-    // as 403 (this endpoint's defect was trusting body identity; a caller
-    // sending another agent's id is buggy or probing and both are worth seeing).
-    const attrResult = stampAttribution(
-      auth, content, 'agentId', 'stamp-strict',
-      'forbidden: cannot attribute a feed memory to another agent',
-    );
-    if (attrResult.denied) return attrResult.denied;
+    // No-forge attribution: use the kit's stampAttribution (stamp-default) to
+    // stamp agentId from the authenticated principal, never from the body.
+    // Mode choice: stamp-default (silent overwrite) over stamp-strict (reject
+    // 403 on mismatch). This endpoint is the ingestion path — callers are MCP
+    // clients and agent-side tool calls. The defect this fix addresses was
+    // trusting a body-supplied identity; the correction is to always stamp from
+    // the authenticated principal. Silent overwrite is safe: the write always
+    // lands attributed to the real principal. It avoids a trade-off where
+    // probing attempts become indistinguishable from a buggy client echoing a
+    // field back AND breaks callers that harmlessly include agentId. A strict
+    // posture would reject those callers for no security gain — the write is
+    // already safe because we control attribution regardless of what the body
+    // says.
+    const attr = stampAttribution(auth, content, 'agentId', 'stamp-default', 'forbidden: cannot attribute a feed memory to another agent');
+    if (attr.denied) return attr.denied;
 
     // Guard against body-supplied id targeting another agent's record.
     if (content?.id) {
