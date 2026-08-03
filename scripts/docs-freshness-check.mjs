@@ -405,6 +405,56 @@ defineCheck("changelog-unreleased", null, () => {
       msg: `no changelog fragments staged, but ${commitsSinceTag} feat/fix commit(s) have landed since the last release tag. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md describing what changed (categories: ${CATEGORIES.join(", ")}).`,
     });
   }
+
+  // ── Per-change rule (flair#1036) ─────────────────────────────────────────────
+  // The rule above asks whether the DIRECTORY is non-empty, which makes it nearly
+  // inert: once any one PR contributes a fragment, every subsequent PR satisfies
+  // it until the next release empties the directory again. Its only live window
+  // is the first PR after a cut.
+  //
+  // Measured, not hypothetical: on 2026-08-03, PRs #1068, #1069, #1070 and #1071
+  // all merged with no fragment while the directory held three from earlier work.
+  // The gate passed on every one of them, and v0.36.0 was assembled with release
+  // notes omitting three authz security fixes — the entire reason to upgrade.
+  // They were backfilled by hand at the release cut, which is exactly the moment
+  // this check exists to make unnecessary.
+  //
+  // So ask the question about THIS change instead: did the commits under review
+  // add a fragment? A fragment must be ADDED (--diff-filter=A) — editing someone
+  // else's staged entry is not writing your own.
+  const baseRef = process.env.GITHUB_BASE_REF
+    ? `origin/${process.env.GITHUB_BASE_REF}`
+    : "origin/main";
+  try {
+    const base = execFileSync("git", ["merge-base", "HEAD", baseRef],
+      { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    if (base) {
+      const range = `${base}..HEAD`;
+      const subjects = execFileSync("git", ["log", range, "--pretty=%s"],
+        { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+      const changeCommits = subjects
+        ? subjects.split("\n").filter((s) => /^(feat|fix)(\(|!|:)/.test(s)).length
+        : 0;
+      const added = execFileSync("git",
+        ["diff", "--diff-filter=A", "--name-only", range, "--", `${FRAGMENT_DIR_REL}/`],
+        { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+      const addedCount = added ? added.split("\n").filter((p) => !/\/README\.md$/.test(p)).length : 0;
+
+      if (changeCommits > 0 && addedCount === 0) {
+        failures.push({
+          file: `${FRAGMENT_DIR_REL}/`, line: 1,
+          msg: `this change has ${changeCommits} feat/fix commit(s) since ${baseRef} but adds no changelog fragment. The directory being non-empty is not enough — an entry already there belongs to someone else's change. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md (categories: ${CATEGORIES.join(", ")}).`,
+        });
+      }
+    }
+  } catch {
+    // No base ref reachable — a shallow clone, a detached build, or a repo with
+    // no `origin`. The since-tag rule above still ran, so coverage is partial
+    // rather than absent, and the release-cut case is still guarded. Deliberately
+    // not a skip: skips suppress the whole check, and the half that DID run is
+    // the half that catches an empty directory at a release.
+  }
+
   return failures;
 });
 
