@@ -4,6 +4,9 @@ dist/
 .DS_Store
 package-lock.json
 *.gguf
+# Harper writes this placeholder while a model downloads; a killed run leaves
+# it behind as an untracked file (flair#1066). *.gguf does not cover it.
+*.gguf.downloading
 resources/*.js
 test-results/
 playwright-report/
