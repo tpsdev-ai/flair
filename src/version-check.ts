@@ -244,3 +244,48 @@ export function formatVersionNudge(result: VersionCheckResult): VersionNudge | n
     `Upgrade: npm i -g ${FLAIR_PKG_NAME}@latest`;
   return { severity: gap.severity, message };
 }
+
+/**
+ * The version an INSTANCE reports, or null when it cannot be determined.
+ *
+ * flair#1072. Every other line `doctor` prints about a remote target is
+ * genuinely remote; the currency claim was about the local CLI. This asks the
+ * instance instead.
+ *
+ * Returns null — never a fallback — when the instance is unreachable, answers
+ * without a version, or times out. The whole defect being fixed is a fallback
+ * to the number already in hand, and an older instance that does not expose its
+ * version is exactly the case where that fallback is most tempting and most
+ * wrong. A caller that gets null must say "unknown", not substitute its own
+ * version.
+ *
+ * Deliberately short-timeout and failure-swallowing: doctor runs against
+ * possibly-down instances by design, and "cannot determine" is a legitimate,
+ * reportable answer rather than an error to propagate.
+ */
+export async function probeInstanceVersion(
+  baseUrl: string,
+  timeoutMs = 5000,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
+  const url = `${String(baseUrl).replace(/\/+$/, "")}/Health`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(url, { signal: ctrl.signal });
+    if (!res.ok) return null;
+    const body: unknown = await res.json();
+    if (!body || typeof body !== "object") return null;
+    const v = (body as Record<string, unknown>).version;
+    // "dev" and other non-semver markers are real answers from a real server,
+    // but they cannot be compared against a published version. Treat them as
+    // undeterminable rather than feeding them to a semver comparison — a
+    // Fabric peer mid-failed-deploy reports exactly this (harper#2061).
+    if (typeof v !== "string" || !/^\d+\.\d+\.\d+/.test(v)) return null;
+    return v;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
