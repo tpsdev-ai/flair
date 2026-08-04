@@ -10942,14 +10942,15 @@ program
     }
 
     // flair#1047: refuse to boot if the store was written by a newer engine.
-    const runningHarperVersion = readInstalledHarperVersion(flairPackageDir());
-    if (runningHarperVersion) {
-      const backwardsError = checkEngineVersionBackwards(dataDir, runningHarperVersion);
-      if (backwardsError) {
-        console.error(`❌ Cannot start Flair — the data directory was written by a newer Harper engine.\n`);
-        console.error(backwardsError);
-        process.exit(1);
-      }
+    // Same guard startFlairProcess runs, so restart/upgrade/snapshot cannot
+    // reach a boot this command would refuse (flair#1093).
+    try {
+      guardEngineNotBackwards(dataDir);
+    } catch (err: any) {
+      if (!err?.engineBackwards) throw err;
+      console.error(`❌ Cannot start Flair — the data directory was written by a newer Harper engine.\n`);
+      console.error(err.message);
+      process.exit(1);
     }
 
     const platform = process.platform;
@@ -11334,7 +11335,44 @@ async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
  * snapshot commands' restart leg brought the DEFAULT instance back up after
  * operating on a `--data-dir` elsewhere.
  */
+/**
+ * flair#1047's refusal, at the point every boot passes through (flair#1093).
+ *
+ * It used to live inline in the `start` command's action and nowhere else, so
+ * `flair restart`, `flair upgrade` (which restarts by spawning the new CLI with
+ * `restart`) and the snapshot paths all booted Harper without it. The guard
+ * covered one of the doors, and not the one an ENGINE SWAP comes through — so
+ * an upgrade across a storage-format boundary came back as a dead port and a
+ * bare exit 1 instead of a refusal naming actor, state and remedy.
+ *
+ * These same two functions had already drifted once, on the spawn environment:
+ * see the note above buildDirectSpawnEnv about `start` setting a host-qualified
+ * OPERATIONSAPI_NETWORK_PORT while startFlairProcess set none, silently
+ * re-widening the ops API on every restart. Same pair, same shape. This is why
+ * the check is a single function called from both rather than a second copy.
+ *
+ * Throws rather than exiting: `start` wants its own framing and an exit code,
+ * while restart/upgrade need the message to travel up as an error. Nothing here
+ * decides how it is presented.
+ */
+function guardEngineNotBackwards(dataDir: string): void {
+  const runningHarperVersion = readInstalledHarperVersion(flairPackageDir());
+  // No readable engine version means nothing to compare — the pre-stamp case
+  // checkEngineVersionBackwards already treats as "not backwards". Refusing here
+  // would brick every install written before the stamp existed.
+  if (!runningHarperVersion) return;
+  const backwardsError = checkEngineVersionBackwards(dataDir, runningHarperVersion);
+  if (!backwardsError) return;
+  const err: any = new Error(backwardsError);
+  err.engineBackwards = true;
+  throw err;
+}
+
 async function startFlairProcess(port: number, dataDir: string): Promise<void> {
+  // Before anything is spawned or launchd is touched: an older engine opening a
+  // newer store fails at the storage layer with an error about compression
+  // internals, minutes later and nowhere near the cause.
+  guardEngineNotBackwards(dataDir);
   if (process.platform === "darwin") {
     // resolveLaunchdLabel (flair#693) finds whichever label this data dir
     // is currently registered under before we attempt anything.
