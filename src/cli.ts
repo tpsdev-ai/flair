@@ -37,7 +37,7 @@ import {
   readEnvValue,
 } from "./component-env.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
-import { checkVersion, formatVersionNudge, primeVersionCheckCache, FLAIR_PKG_NAME } from "./version-check.js";
+import { checkVersion, formatVersionNudge, primeVersionCheckCache, probeInstanceVersion, FLAIR_PKG_NAME } from "./version-check.js";
 import {
   readInstalledHarperVersion,
   fetchDeclaredHarperVersion,
@@ -5444,7 +5444,7 @@ mcp
   .option("--secrets-path <path>", "Override the secrets staging file path")
   .option("--cimd-allowed-hosts <hosts>", "Comma-separated clientIdMetadataDocuments.allowedHosts override (else claude.ai,claude.com)")
   .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
-  .option("--admin-pass <pass>", "Admin password for the target instance (or FLAIR_ADMIN_PASS)")
+  .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
   .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
   .option("--dry-run", "Generate keys/tokens/config and validate inputs; skip every remote call")
   .option("--json", "Print machine-readable JSON instead of a human summary")
@@ -5472,8 +5472,11 @@ mcp
     const adminPass = dryRun ? (opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "") : resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
     if (!dryRun && !adminPass) {
       console.error(
-        "Error: --admin-pass or FLAIR_ADMIN_PASS required (the operations API on the target instance needs it " +
-          "for identity mapping + set_configuration + restart).",
+        "Error: --admin-pass <pass> or --admin-pass-file <path> is required for a REMOTE target " +
+          "(the operations API on the target instance needs it for identity mapping + set_configuration + restart).\n" +
+          "  FLAIR_ADMIN_PASS and ~/.flair/admin-pass are deliberately NOT used here: they are THIS machine's " +
+          "local admin credentials, and sending them to another instance is how a local secret ends up on someone " +
+          "else's Harper. Pass the target's own admin password explicitly.",
       );
       process.exit(1);
     }
@@ -10939,14 +10942,15 @@ program
     }
 
     // flair#1047: refuse to boot if the store was written by a newer engine.
-    const runningHarperVersion = readInstalledHarperVersion(flairPackageDir());
-    if (runningHarperVersion) {
-      const backwardsError = checkEngineVersionBackwards(dataDir, runningHarperVersion);
-      if (backwardsError) {
-        console.error(`❌ Cannot start Flair — the data directory was written by a newer Harper engine.\n`);
-        console.error(backwardsError);
-        process.exit(1);
-      }
+    // Same guard startFlairProcess runs, so restart/upgrade/snapshot cannot
+    // reach a boot this command would refuse (flair#1093).
+    try {
+      guardEngineNotBackwards(dataDir);
+    } catch (err: any) {
+      if (!err?.engineBackwards) throw err;
+      console.error(`❌ Cannot start Flair — the data directory was written by a newer Harper engine.\n`);
+      console.error(err.message);
+      process.exit(1);
     }
 
     const platform = process.platform;
@@ -11331,7 +11335,44 @@ async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
  * snapshot commands' restart leg brought the DEFAULT instance back up after
  * operating on a `--data-dir` elsewhere.
  */
+/**
+ * flair#1047's refusal, at the point every boot passes through (flair#1093).
+ *
+ * It used to live inline in the `start` command's action and nowhere else, so
+ * `flair restart`, `flair upgrade` (which restarts by spawning the new CLI with
+ * `restart`) and the snapshot paths all booted Harper without it. The guard
+ * covered one of the doors, and not the one an ENGINE SWAP comes through — so
+ * an upgrade across a storage-format boundary came back as a dead port and a
+ * bare exit 1 instead of a refusal naming actor, state and remedy.
+ *
+ * These same two functions had already drifted once, on the spawn environment:
+ * see the note above buildDirectSpawnEnv about `start` setting a host-qualified
+ * OPERATIONSAPI_NETWORK_PORT while startFlairProcess set none, silently
+ * re-widening the ops API on every restart. Same pair, same shape. This is why
+ * the check is a single function called from both rather than a second copy.
+ *
+ * Throws rather than exiting: `start` wants its own framing and an exit code,
+ * while restart/upgrade need the message to travel up as an error. Nothing here
+ * decides how it is presented.
+ */
+function guardEngineNotBackwards(dataDir: string): void {
+  const runningHarperVersion = readInstalledHarperVersion(flairPackageDir());
+  // No readable engine version means nothing to compare — the pre-stamp case
+  // checkEngineVersionBackwards already treats as "not backwards". Refusing here
+  // would brick every install written before the stamp existed.
+  if (!runningHarperVersion) return;
+  const backwardsError = checkEngineVersionBackwards(dataDir, runningHarperVersion);
+  if (!backwardsError) return;
+  const err: any = new Error(backwardsError);
+  err.engineBackwards = true;
+  throw err;
+}
+
 async function startFlairProcess(port: number, dataDir: string): Promise<void> {
+  // Before anything is spawned or launchd is touched: an older engine opening a
+  // newer store fails at the storage layer with an error about compression
+  // internals, minutes later and nowhere near the cause.
+  guardEngineNotBackwards(dataDir);
   if (process.platform === "darwin") {
     // resolveLaunchdLabel (flair#693) finds whichever label this data dir
     // is currently registered under before we attempt anything.
@@ -12378,15 +12419,48 @@ program
     // since we don't have advisory data, only the version gap. A red gap
     // counts as an issue (exit 1); a quieter yellow gap (one minor, or
     // patch-only) is printed but doesn't fail doctor.
-    const versionCheckResult = await checkVersion(__pkgVersion);
-    const versionNudge = formatVersionNudge(versionCheckResult);
-    if (versionNudge) {
-      const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
-      const icon = versionNudge.severity === "red" ? render.wrap(render.c.red, "✗") : render.icons.warn;
-      console.log(`  ${icon} ${render.wrap(color, versionNudge.message)}`);
-      if (versionNudge.severity === "red") issues++;
-    } else if (versionCheckResult.latest) {
-      console.log(`  ${render.icons.ok} flair ${__pkgVersion} is current`);
+    // ── flair#1072: the currency claim must be about the INSTANCE ─────────────
+    //
+    // This check used to run `checkVersion(__pkgVersion)` — the version of the
+    // CLI you happen to have installed — and print "flair <x> is current". When
+    // FLAIR_URL or --url points at a deployed instance, every other line doctor
+    // prints is genuinely remote, so that sentence reads as a statement about
+    // the thing you are talking to. It was a statement about your laptop.
+    //
+    // Reported against an instance five minors behind, where doctor said
+    // "current". Telling you that is doctor's entire job.
+    //
+    // UNKNOWN MUST NOT FALL BACK TO THE LOCAL NUMBER. An older instance may not
+    // expose its version at all, and the tempting fix is to use the one already
+    // in hand — which is precisely how this bug reads today. If the instance
+    // version cannot be determined, say so and count it as an issue rather than
+    // answering from the wrong machine.
+    const instanceVersion = await probeInstanceVersion(baseUrl);
+    const versionSubject = instanceVersion ?? null;
+
+    if (versionSubject === null) {
+      console.log(
+        `  ${render.icons.warn} ${render.wrap(render.c.yellow, `could not determine the version running at ${baseUrl} — not reporting currency. ` +
+          `(The local CLI is ${__pkgVersion}; that is NOT the instance.)`)}`,
+      );
+      issues++;
+    } else {
+      const versionCheckResult = await checkVersion(versionSubject);
+      const versionNudge = formatVersionNudge(versionCheckResult);
+      if (versionNudge) {
+        const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
+        const icon = versionNudge.severity === "red" ? render.wrap(render.c.red, "✗") : render.icons.warn;
+        console.log(`  ${icon} ${render.wrap(color, versionNudge.message)}`);
+        if (versionNudge.severity === "red") issues++;
+      } else if (versionCheckResult.latest) {
+        console.log(`  ${render.icons.ok} instance at ${baseUrl} runs flair ${versionSubject} — current`);
+      }
+      if (versionSubject !== __pkgVersion) {
+        console.log(
+          `  ${render.icons.warn} ${render.wrap(render.c.yellow, `local CLI is ${__pkgVersion}, instance is ${versionSubject} — they differ. ` +
+            `Commands run through the CLI; the instance serves the data.`)}`,
+        );
+      }
     }
 
     // Helper: try to reach Harper on a given port.
