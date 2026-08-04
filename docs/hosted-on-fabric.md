@@ -59,6 +59,26 @@ On Fabric, configuration goes through the component's environment, not a local `
 
 On Fabric / managed deploys, environment variables are provisioned through Harper's Fabric secrets mechanism (encrypted at rest with `enc:v1:` storage format).
 
+### How `flair mcp enable` delivers its secrets
+
+`flair mcp enable` needs five variables live in the target's process before it restarts — including `FLAIR_MCP_OAUTH` and the RS256 signing key, both read from `process.env` only and therefore impossible to deliver via `set_configuration`.
+
+It asks the target what it can do, rather than assuming from the hostname or the version:
+
+| The target… | What happens |
+|-------------|--------------|
+| supports Harper's env-secrets operations | the five vars are **sealed locally** and pushed over the ops API. No manual step, no re-run. |
+| does not have them (Harper older than 5.2) | the vars are staged to a `0600` file and you apply them yourself, then re-run with `--confirm-secrets-applied` |
+| is unreachable, refuses the probe, or answers unusably | same staged-file fallback, and the output says **which** of those happened |
+
+Values are encrypted **before leaving your machine** — AES-256-GCM on the value, RSA-OAEP(SHA-256) wrapping the key, addressed to a public key fetched from the target. Plaintext never appears in a request body, and the command's output carries variable *names* only.
+
+The staging file is written in every case, so a fallback never strands you mid-run. When the push succeeds it simply goes unused.
+
+> **What the probe does not promise.** It establishes that the target accepts secrets, not that it will *decrypt* them — no read-only call can, since a secret only proves it was decrypted by being present in the process. The **self-verify** step at the end is what proves that: the issuer's OAuth metadata is served only once `FLAIR_MCP_OAUTH` is live. A secret that is stored and never decrypted therefore fails at self-verify, naming the push as a candidate cause, rather than reporting success.
+
+`--secrets-mechanism <fabric-env-secrets|env-file>` remains an explicit override and skips the probe entirely.
+
 ---
 
 ## Agent authentication
