@@ -18,6 +18,254 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.37.0] - 2026-08-04
+
+### Fixed
+
+- **`--admin-pass`'s help text and error no longer promise something the code deliberately refuses.**
+  For a remote target, `flair mcp enable` requires the password explicitly — `FLAIR_ADMIN_PASS` and
+  `~/.flair/admin-pass` are skipped on purpose, because they are *this* machine's local admin
+  credentials and sending them to another instance is how a local secret ends up on someone else's
+  Harper. That guard is correct and unchanged.
+
+  What was wrong is that three places described it three different ways: `--help` and the error both
+  said `FLAIR_ADMIN_PASS` would work, one call-site comment described the goal as blocking only the
+  *file* fallback, and the resolver's own doc said both legs are skipped. Only the last matched the
+  code, and it was the one an operator never sees.
+
+  The error now says explicitly that the env var and the local file are not used for a remote target
+  **and why**, so the refusal is actionable instead of looking like a bug. Reported by an operator who
+  had exported `FLAIR_ADMIN_PASS`, watched it be ignored, and reasonably filed it as broken.
+
+- **The changelog gate now asks whether *your* change wrote an entry, not whether the directory is
+  non-empty.** The old rule fired only when `.changelog/unreleased/` was empty *and* feat/fix commits
+  had landed since the last tag — so the first PR after a release cut satisfied it for every PR that
+  followed, until the next cut emptied the directory again.
+
+  That is not hypothetical. On 2026-08-03 four PRs merged with no fragment while the directory held
+  three entries from earlier work; the gate passed on all four, and v0.36.0 was assembled with
+  release notes omitting three authz security fixes — the entire reason to upgrade. They were
+  backfilled by hand at the cut, which is the moment this check exists to make unnecessary.
+
+  The gate now also compares against the PR's merge base and requires a fragment to have been
+  **added** in that range. Editing an entry someone else staged is not writing your own. The
+  since-tag rule is kept, because it still catches the empty-directory-at-release case; where no
+  base ref is reachable (shallow clone, no `origin`) the per-change half is skipped and the
+  since-tag half still runs.
+
+- **`flair doctor` no longer reports the local CLI's version as the instance's.** Pointed at a
+  deployed instance, every line doctor printed was genuinely remote — uptime, PID, memory counts —
+  except the one that mattered: it ran the currency check against `__pkgVersion`, the CLI you happen
+  to have installed, and printed `flair <x> is current`. Reported against an instance five minors
+  behind, where doctor said "current". Telling you that is doctor's entire job.
+
+  It now probes the target's `/Health` and reports the version running **there**, and warns
+  separately when the local CLI and the instance differ.
+
+  **An undeterminable version is reported as unknown and counts as an issue — it never falls back to
+  the local number.** An older instance may not expose its version at all, and substituting the one
+  already in hand is exactly the bug being fixed. A Fabric node mid-failed-deploy reports a
+  non-semver marker (`dev`); that is a real answer from a real server and still cannot be compared
+  against a published version, so it is treated as undeterminable rather than fed to a semver check.
+
+- **The downgrade lane could only ever observe a hang, because the old binary was waiting for
+  someone to type "yes".** Starting an older Harper against a store written by a newer minor calls
+  `forceDowngradePrompt()`, which asks whether to proceed and **blocks on stdin**. The prompt and
+  its accompanying version warning are written to stdout only — never to the log — so in CI the
+  process simply stopped, with nothing in the output explaining why.
+
+  The lane classified that correctly as a hang (the outcome the invariant forbids), but it meant the
+  other two branches were untestable: the check could never distinguish "the old binary boots
+  cleanly" from "the old binary refuses loudly", because it never got past the prompt to find out.
+  An invariant naming three outcomes was being enforced against one.
+
+  Both enforcement points now set `CONFIRM_DOWNGRADE=yes`, which pre-answers the prompt. The
+  exit-124 hang check is deliberately kept — a hang that survives the override is a genuine hang and
+  still fails the lane, now with a message saying the known prompt cause has been ruled out.
+
+  The value must be lowercase `yes` or `y`: Harper tests membership in an allowlist behind a
+  case-sensitive pattern, and the prompt library **discards an override that fails validation and
+  falls through to reading stdin** — so `YES`, `true`, `1` or a trailing space reproduce the exact
+  hang this avoids. Measured against harper 5.1.22 with prompt 1.3.0.
+
+  Filed upstream as HarperFast/harper#2046; the migration itself is additive and reversible, which
+  is the opposite of what the silent hang suggested.
+
+- **The refusal to boot against a newer engine's data now runs on every boot path.** `flair start`
+  refuses when the data directory was written by a newer Harper — but that check had exactly one call
+  site, inline in `start`'s own action. `flair restart` goes straight to `restartFlair` →
+  `startFlairProcess` and never reached it, `flair upgrade` restarts by spawning the newly installed
+  CLI with `restart`, and the snapshot paths took the same unguarded route.
+
+  So the guard covered one of the doors a boot comes through, and not the one an **engine swap**
+  arrives by. Upgrading across a storage-format boundary left the instance down with a bare exit 1,
+  and the only explanation surfaced minutes later from the storage layer as an error about
+  compression internals — nowhere near the cause, and naming no remedy:
+
+  ```
+  the instance is REACHABLE after the upgrade   Expected: >= 200   Received: 0
+  the upgrade reported success                  Expected: 0        Received: 1
+  ```
+
+  The check is now a single function called from the top of `startFlairProcess`, before anything is
+  spawned or launchd is touched, which covers its callers — restart, upgrade and the snapshot paths
+  — in one place, plus `start`, which performs its own spawn and keeps its own framing and exit
+  code. Deliberately one function rather than a second copy: these two sites had already drifted once
+  on the spawn environment, where `start` set a host-qualified ops port and `startFlairProcess` set
+  none, silently re-widening the ops API on every restart.
+
+  **`flair restart` and `flair upgrade` now refuse rather than attempt the boot**, and the refusal
+  names the restore-from-backup path. An install whose engine version cannot be read is unaffected,
+  as before.
+
+  Tests assert the wiring rather than the logic, which was already covered: the decision has exactly
+  one implementation in the CLI, the guard precedes the first spawn, and a future boot path that
+  bypasses `startFlairProcess` fails the check rather than passing unnoticed.
+
+- **`models/*.gguf.downloading` is now ignored.** `.gitignore` covered `*.gguf` but not the
+  in-progress placeholder Harper writes beside it, and the integration harness points
+  `FLAIR_MODELS_DIR` at the repo's own `models/` directory — so a killed test run left an untracked
+  file in the working tree.
+
+- **The error no longer accuses the principal.** A failed lookup reported
+  `failed to look up principal '<x>' (HTTP 404)`, which sends the reader to inspect principals. But a
+  *missing* principal returns `200 []` and the very next branch creates it — reaching that error
+  means the ops **call** failed, not that the identity is absent. It now names the URL it tried, and
+  on a 404 says the address is probably the served origin and points at `--ops-url`. An error that
+  misdirects costs more than one that simply says no.
+
+- **`flair mcp enable` sent its ops-API calls to the served origin, and blamed the wrong thing when
+  they failed.** Against a hosted instance the ops target was the instance URL verbatim — so the
+  calls went to port 443, where the flair REST component owns `/` and answers `404 Not found`.
+  Measured against a live Fabric instance, same request:
+
+  ```
+  POST https://<host>/        -> HTTP 404  "Not found"
+  POST https://<host>:9925/   -> HTTP 200  []
+  ```
+
+  The ops API now gets the hosted ops port rather than the served one, and `--ops-url` overrides it
+  outright. **No arithmetic on the served port is trusted:** the codebase elsewhere documents
+  "ops port = HTTP port − 1", which derives 442 — also measured dead, along with 19925. An operator
+  can put the ops API anywhere, so an explicit target always wins.
+
+- **A failed `flair mcp enable` step is now reported against the step that failed.** The catch
+  attributed errors to `steps[steps.length - 1]` — the last step that *succeeded* — so a throw inside
+  identity mapping was filed against secrets provisioning, which had just completed:
+
+  ```
+  ✓ secrets-provisioning   ...apply these 5 vars via Fabric Studio, then re-run
+  ✗ secrets-provisioning   unexpected error: Identity mapping: ... (HTTP 404)
+  ```
+
+  Two results for one step name, and the `✓` instructs several minutes of manual work in a web UI
+  that the `✗` makes pointless. Read in reading order — which is how people read — you do the work
+  first and discover afterwards that the step failed anyway. It also makes a run un-skimmable:
+  scanning for the first `✗` finds a `✓` for that same step above it.
+
+  A test asserts the narrow fact (an identity-mapping failure reports `identity-mapping`) and a
+  broader invariant: no step name may carry both a pass and a failure in one run.
+
+- **Removed the redundant `postinstall` chmod.** npm already sets the executable bit on files
+  referenced by `bin` when it links them; the script changed nothing and cost a line in npm's
+  install-script approval prompt, on a package whose install output is already noisy.
+
+- **`docs/upgrade.md` no longer links to a CHANGELOG that isn't there.** The guide ships in the npm
+  package and pointed at `../CHANGELOG.md`, which the `files` allowlist excludes — so the first
+  instruction in the upgrade guide was a dead link for every reader who installed from the registry.
+  The three links now resolve to the published copy on GitHub, rather than adding a 1400-line file
+  to an install that is already too heavy.
+
+### Security
+
+- **A deploy no longer ships the whole working tree.** `harper deploy` packs its root wholesale, and
+  the code assumed that root was an npm-installed package — where the tree already *is* the published
+  file set. That assumption is true for the intended path and silently false for the one our own
+  deploy procedure prescribes: a git checkout.
+
+  Measured on a production Fabric component: **36 top-level entries**, including `.git`, `.env`,
+  `models/` (80 MB), `test/`, `packages/`, `src/`, and a scratch `pr-body.md` left in the clone that
+  afternoon. **96 MB against the published tarball's 1.3 MB.**
+
+  Two consequences. An operator deploying from a checkout shipped `.git` — every secret ever
+  committed and later removed — and any `.env` sitting in the tree, into a component that is then
+  persisted and replicated across the cluster. And a 96 MB payload is what puts a deploy inside
+  HarperFast/harper#2062's aborted-transaction window, where the pre-saved blob is destroyed at the
+  source. The bloat and the cluster failure were the same bug wearing two hats.
+
+  Staging is now unconditional and restricted to the entries `files` declares, read from the deploy
+  root's own `package.json`. The payload equals the published package **by construction** rather than
+  by an operator happening to run from the right directory. For an npm-installed root the result is
+  unchanged, because such a tree contains nothing else. Measured after: 10 entries, 3.8 MB — `.git`,
+  `models/`, `packages/`, `test/`, `src/` all gone.
+
+  `.env` is explicitly kept: it is not in `files` and never reaches npm, but `config.yaml`'s
+  `loadEnv` reads it and shipping it is the point of the staging mechanism. Filtering it out broke
+  `FLAIR_PUBLIC_URL` on every deploy — caught by an existing test rather than in production.
+
+  A root with no usable `files` array is now **refused** rather than deployed unfiltered. The
+  refusal names the remedy.
+
+- **`hono` pinned forward to `^4.12.34`** — GHSA-8j4g-w8fx-2239, a ReDoS in the CORS middleware via
+  `Access-Control-Request-Headers`. Reaches us transitively through
+  `@tpsdev-ai/flair-mcp › @modelcontextprotocol/sdk`, so it is not fixable by changing a direct
+  dependency.
+
+  This advisory was published **after** the previous override batch merged, which is worth recording:
+  the dependency gate now goes red on main whenever a new advisory lands against something in the
+  tree, and on 2026-08-03 that happened four times in one evening. The gate is telling the truth —
+  main really is exposed until the pin lands — but "main is red" stops carrying information if it is
+  the normal state. Worth a deliberate policy rather than a reflex.
+
+- **`REQUIRED_PACKAGE_FILES`'s "keep in sync" comment is no longer a promise nobody kept.** It
+  claimed to mirror `files`; nothing compared them, and they drifted invisibly for as long as the
+  comment existed. The payload is now derived from `files` directly, so there is one source of truth
+  and nothing to synchronise by hand. Four tests assert the deployed set — including that the filter
+  is not over-broad, since a filter that drops everything would also pass a "no `.git` shipped" check.
+
+- **Seven advisories resolved by pinning three transitive dependencies forward.** A wave of
+  advisories published on 2026-08-03 took the dependency gate from one blocking entry to seven, and
+  five of them were the same package:
+
+  | package | advisories | worst |
+  |---|---|---|
+  | `undici` → `^8.9.0` | 5 | **high** — cross-user information disclosure |
+  | `brace-expansion` → `^5.0.9` | 1 | **high** — DoS via unbounded intermediate arrays, bypassing the CVE-2026-14257 mitigation |
+  | `fast-uri` → `^4.1.2` | 1 | **high** — host confusion via backslash |
+
+  All three reach us transitively — through `pi-coding-agent`, `openclaw`, and
+  `harper › @fastify/static › glob › minimatch` — so none could be fixed by changing a direct
+  dependency. Total advisories drop from 21 to 14, and every remaining one is allowlisted with a
+  dated justification.
+
+  These are plain version overrides, deliberately **not** `npm:` aliases. flair#750 records an alias
+  override (`harper` → `npm:@harperfast/harper@…`) that collided with the already-installed scoped
+  copy, left npm's tree `invalid`, and made any second npm operation fail — which broke the clean-VM
+  install gate and was reverted. A version constraint introduces no second package name, so that
+  failure mode is absent by construction. Verified: build, a second `bun install` against the
+  reified tree, and the full unit suite (3859 tests) all pass.
+
+  Worth stating for whoever revisits these: an override is a **forward pin, not a fix**. Each one is
+  correct only until the upstream dependency resolves the advisory itself, at which point the
+  override becomes a pin holding a version we no longer need to hold. Re-check them at each
+  dependency bump rather than treating them as settled.
+
+- **A misspelled `visibility` no longer writes a memory everyone can read.** `PUT /Memory/<id>` with
+  `{"visibility":"prvate"}` was accepted, and the read scope resolves visibility by exact match on
+  `private` — so the typo, a wrong case, or a retired tier like `office` all read as non-private and
+  were visible to every agent on the instance. flair#1006 closed this at the CLI flag and the MCP
+  tool argument; REST and the in-process API reach `Memory.put()`/`post()` without passing either.
+
+  Both now refuse an unrecognised value with `400 invalid_visibility`, naming the two valid values
+  and how to opt out. Refusing rather than dropping the key is deliberate: dropping it falls through
+  to the durability-keyed default, which for a permanent or persistent write is `shared` — the same
+  widening, arrived at silently.
+
+  **The read predicate is deliberately left permissive.** A row written before the field existed has
+  no visibility and must keep reading exactly as it always did. So write-validation is strictly
+  stronger than read-resolution, and the two must not be collapsed into one predicate — there is a
+  test whose only job is to fail if someone tries.
+
 ## [0.36.0] - 2026-08-03
 
 ### Changed
