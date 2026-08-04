@@ -330,6 +330,17 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     // failure message does not show, this condition needs revisiting — stated
     // rather than enforced, because enforcing it means duplicating every
     // assertion's predicate here and that duplication is its own defect.
+    //
+    // ADDING A NEW STRUCTURAL ASSERTION BELOW? Add it here too. This condition is
+    // a hand-written copy of the state those assertions require, and nothing
+    // compares the two — so `expect(harperPid).toBeGreaterThan(0)` added below
+    // and not added here means the dump stays silent on exactly the failure it
+    // was written to explain. Sherlock raised this on review; the only thing
+    // holding it is that the copy sits directly above what it mirrors, where a
+    // reviewer can see both at once. Proximity is a weak mechanism. It is the
+    // one this has, and the reason the alternative was rejected is that a
+    // stronger-looking one — re-deriving each predicate at the dump site — is
+    // the keep-in-sync defect with more surface area, not less.
     const upgradeLooksHealthy =
       upgrade.code === 0 &&
       postUpgradeHealth >= 200 &&
