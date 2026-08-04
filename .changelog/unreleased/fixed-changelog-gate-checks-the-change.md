@@ -13,18 +13,3 @@
   since-tag rule is kept, because it still catches the empty-directory-at-release case; where no
   base ref is reachable (shallow clone, no `origin`) the per-change half is skipped and the
   since-tag half still runs.
-
-- **`models/*.gguf.downloading` is now ignored.** `.gitignore` covered `*.gguf` but not the
-  in-progress placeholder Harper writes beside it, and the integration harness points
-  `FLAIR_MODELS_DIR` at the repo's own `models/` directory — so a killed test run left an untracked
-  file in the working tree.
-
-- **Removed the redundant `postinstall` chmod.** npm already sets the executable bit on files
-  referenced by `bin` when it links them; the script changed nothing and cost a line in npm's
-  install-script approval prompt, on a package whose install output is already noisy.
-
-- **`docs/upgrade.md` no longer links to a CHANGELOG that isn't there.** The guide ships in the npm
-  package and pointed at `../CHANGELOG.md`, which the `files` allowlist excludes — so the first
-  instruction in the upgrade guide was a dead link for every reader who installed from the registry.
-  The three links now resolve to the published copy on GitHub, rather than adding a 1400-line file
-  to an install that is already too heavy.
