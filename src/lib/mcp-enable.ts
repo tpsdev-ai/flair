@@ -890,18 +890,28 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
   const steps: EnableStepResult[] = [];
   // The step currently executing, so a throw is attributed to IT rather than to
   // the last step that succeeded (flair#1087).
-  let currentStep: EnableStepName | undefined;
+  //
+  // `push` deliberately takes NO step name: it reads this variable. A name passed
+  // per-call would be the same string typed twice (once here, once at the push),
+  // and the two drifting apart is precisely the misattribution #1087 is about —
+  // a rule that only a comment or a source scan could enforce. Deriving it makes
+  // a wrong name unrepresentable instead of merely discouraged, so there is
+  // nothing left for a reviewer to check.
+  //
+  // Initialised to the first step rather than left undefined so a throw before
+  // any assignment cannot be attributed to an arbitrary fallback name.
+  let currentStep: EnableStepName = "local-origin-check";
   const dryRun = Boolean(params.dryRun);
-  const push = (step: EnableStepName, ok: boolean, detail: string) => steps.push({ step, ok, detail });
+  const push = (ok: boolean, detail: string) => steps.push({ step: currentStep, ok, detail });
 
   // ── Local-origin refusal (scenario addendum, binding) ─────────────────────
   currentStep = "local-origin-check";
   const localCheck = checkLocalOriginRefusal(params.instance);
   if (localCheck.refused) {
-    push("local-origin-check", false, localCheck.message);
+    push(false, localCheck.message);
     return { ok: false, dryRun, refused: { message: localCheck.message }, steps, failedStep: "local-origin-check" };
   }
-  push("local-origin-check", true, `${params.instance} is a public-shaped origin`);
+  push(true, `${params.instance} is a public-shaped origin`);
 
   const issuer = (params.issuer ?? params.instance).replace(/\/+$/, "");
   const idpProvider = params.idpProvider ?? "github";
@@ -912,15 +922,13 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // ── RS256 signing keypair ─────────────────────────────────────────────────
     currentStep = "signing-key";
     const keyResult = ensureSigningKeyFile(params.signingKeyFilePath, { generate: deps.generateRsaKeyPair });
-    push("signing-key", true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
+    push(true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
 
     // ── @harperfast/oauth config block (CIMD-only; DCR explicitly disabled) ──
     const cimdAllowedHosts = params.cimdAllowedHosts ?? DEFAULT_CIMD_ALLOWED_HOSTS;
     currentStep = "config-block";
     const configBlock = buildMcpOAuthConfigBlock({ idpProvider, cimdAllowedHosts });
-    push(
-      "config-block",
-      true,
+    push(true,
       `built the @harperfast/oauth mcp config block (accessTokenTtl=${REQUIRED_ACCESS_TOKEN_TTL}, ` +
         `dynamicClientRegistration.enabled=false, clientIdMetadataDocuments.allowedHosts=${JSON.stringify(cimdAllowedHosts)})`,
     );
@@ -934,14 +942,12 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         !params.idpClientSecret && "--idp-client-secret",
         !params.idpSubject && "--idp-subject",
       ].filter(Boolean).join(", ");
-      push(
-        "idp-credentials",
-        false,
+      push(false,
         `missing ${missing}. Create a ${idpProvider} OAuth app with callback URL ${callbackUrl}, then re-run with the credentials.`,
       );
       return { ok: false, dryRun, steps, failedStep: "idp-credentials", callbackUrl };
     }
-    push("idp-credentials", true, `${idpProvider} OAuth app credentials present; callback URL: ${callbackUrl}`);
+    push(true, `${idpProvider} OAuth app credentials present; callback URL: ${callbackUrl}`);
 
     if (dryRun) {
       // Dry-run stops here — everything above is pure/local generation; no
@@ -972,9 +978,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       mechanism: params.secretsMechanism,
       stagingPath: params.secretsStagingPath,
     });
-    push(
-      "secrets-provisioning",
-      true,
+    push(true,
       `mechanism: ${secretsResult.mechanism}; ${secretsResult.varNames.length} vars staged at ${secretsResult.path} (0600). ${secretsResult.instructions}`,
     );
 
@@ -992,9 +996,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       },
       { fetchImpl: deps.fetchImpl, now: deps.now },
     );
-    push(
-      "identity-mapping",
-      true,
+    push(true,
       `principal '${principal}' ${mapping.principalCreated ? "created" : "already existed"}; ` +
         `Credential(kind:idp) ${mapping.credentialReused ? "reused" : "created"} (${mapping.credentialId})`,
     );
@@ -1007,9 +1009,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       );
     }
     if (!confirmed) {
-      push(
-        "apply-config-and-restart",
-        false,
+      push(false,
         `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
       );
       return { ok: false, dryRun, steps, failedStep: "apply-config-and-restart", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
@@ -1021,13 +1021,13 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       { opsPortOrUrl: params.instance, adminUser: params.adminUser, adminPass: params.adminPass, configBlock },
       { fetchImpl: deps.fetchImpl },
     );
-    push("apply-config-and-restart", true, `set_configuration + restart succeeded against ${params.instance}`);
+    push(true, `set_configuration + restart succeeded against ${params.instance}`);
 
     // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
     currentStep = "self-verify";
     const verify = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
     if (!verify.ok) {
-      push("self-verify", false, `${verify.detail} — re-run \`flair mcp status\` to check current state, or \`flair mcp enable\` to retry the apply-config-and-restart step.`);
+      push(false, `${verify.detail} — re-run \`flair mcp status\` to check current state, or \`flair mcp enable\` to retry the apply-config-and-restart step.`);
       return {
         ok: false,
         dryRun,
@@ -1037,7 +1037,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         resource: `${issuer}/mcp`,
       };
     }
-    push("self-verify", true, verify.detail);
+    push(true, verify.detail);
 
     const resource = `${issuer}/mcp`;
     return {
@@ -1064,9 +1064,12 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // Two results for one step, and the ✓ instructs several minutes of manual
     // work in a web UI that the ✗ makes pointless. Read in order, you do the
     // work first.
-    const failed = currentStep ?? "signing-key";
-    push(failed, false, `unexpected error: ${err?.message ?? err}`);
-    return { ok: false, dryRun, steps, failedStep: failed };
+    // No `?? "signing-key"` fallback: currentStep is initialised to the first
+    // step, so there is no undefined case to invent a name for. A fallback here
+    // would attribute a throw to a step chosen for being a plausible default —
+    // the same misattribution this handler exists to prevent, one layer down.
+    push(false, `unexpected error: ${err?.message ?? err}`);
+    return { ok: false, dryRun, steps, failedStep: currentStep };
   }
 }
 

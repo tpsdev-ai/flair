@@ -94,31 +94,52 @@ describe("every step sets the tracker — no window attributes a throw elsewhere
     "utf8",
   );
 
-  test("each step name that can be pushed is also assigned to currentStep", () => {
-    // Deliberately permissive: [a-z-]+ silently DROPPED any step name with a
-    // digit or underscore from BOTH sets, so `push("verify-2", ...)` untracked
-    // would have passed this check. Sherlock caught it — a narrow pattern in a
-    // completeness check is itself a check that cannot fire.
-    const pushed = new Set(
-      [...src.matchAll(/push\(\s*"([^"]+)"/g)].map((m) => m[1]),
-    );
-    const tracked = new Set(
-      [...src.matchAll(/currentStep\s*=\s*"([^"]+)"/g)].map((m) => m[1]),
-    );
-    const untracked = [...pushed].filter((s) => !tracked.has(s));
-    // If a new step is added and pushed without setting currentStep, a throw
-    // inside it lands on whichever step was set last. This is the counting
-    // check that makes that fail rather than pass unnoticed.
+  // Extract the EnableStepName union members — the authoritative list of steps.
+  // Scanning the TYPE rather than the call sites is what makes this a
+  // completeness check: a step you added to the union but never tracked shows up
+  // here, whereas scanning calls could only ever find steps that already exist.
+  const unionBody = src.slice(
+    src.indexOf("export type EnableStepName ="),
+    src.indexOf(";", src.indexOf("export type EnableStepName =")),
+  );
+  const declared = [...unionBody.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  const tracked = new Set(
+    [...src.matchAll(/currentStep\s*=\s*"([^"]+)"/g)].map((m) => m[1]),
+  );
+
+  test("the union scan actually found the steps (guards the two above it)", () => {
+    // Without this, a changed type declaration silently yields `declared: []`,
+    // and BOTH tests below pass by having nothing to check — the vacuum this
+    // file exists to prevent, one level up.
+    expect(declared.length).toBeGreaterThanOrEqual(8);
+    expect(declared).toContain("identity-mapping");
+  });
+
+  test("every declared step assigns currentStep", () => {
+    // Add a step to the union, forget the tracker, and a throw inside it lands
+    // on whichever step was set last — the original bug, re-entering through
+    // the one door the type system does not watch.
+    const untracked = declared.filter((s) => !tracked.has(s));
     expect(untracked).toEqual([]);
   });
 
-  test("the scan's own pattern is not too narrow to see an unusual step name", () => {
-    // The regression Sherlock found: a narrow [a-z-]+ dropped names containing a
-    // digit or underscore from BOTH sets, so an untracked `verify-2` passed.
-    // A completeness check whose pattern cannot see the thing it counts is the
-    // exact defect class this file exists to guard.
+  test("push takes no step name — a wrong one must stay unrepresentable", () => {
+    // The fix for #1087 was not the counting check; it was deleting push's step
+    // parameter so the name is READ from currentStep. That removes wrong-name,
+    // and reviewers Kern and Sherlock split on whether a comment was enough to
+    // hold the line. It is not: this asserts the shape instead.
+    //
+    // Sherlock's runtime assertion (`if (currentStep !== step) throw`) was the
+    // other candidate. It validates a parameter that no longer needs to exist,
+    // and it adds a throw path to the reporting code inside the catch block that
+    // does the reporting. Removing the parameter beats checking it.
+    const named = [...src.matchAll(/(?<!steps\.)push\(\s*"([^"]+)"/g)].map((m) => m[1]);
+    expect(named).toEqual([]);
+  });
+
+  test("that shape check can see a reintroduced name (positive control)", () => {
     const sample = 'push("verify-2", true, "x"); push("odd_name", true, "y");';
-    const seen = [...sample.matchAll(/push\(\s*"([^"]+)"/g)].map((m) => m[1]);
+    const seen = [...sample.matchAll(/(?<!steps\.)push\(\s*"([^"]+)"/g)].map((m) => m[1]);
     expect(seen).toEqual(["verify-2", "odd_name"]);
   });
 });
