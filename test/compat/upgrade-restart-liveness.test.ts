@@ -292,6 +292,44 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     targetVersion = installedVersion(prefix) ?? "";
     postUpgradeHealth = await waitForHealth(baseUrl);
     harperPid = listeningPid(new URL(baseUrl).port);
+
+    // ── Emit what the upgrade actually said, but ONLY when it went wrong ──────
+    //
+    // Without this, a CI failure here reads:
+    //
+    //     Expected: >= 200        Expected: 0
+    //     Received: 0             Received: 1
+    //
+    // and nothing else. The output that explains WHY was captured and then
+    // dropped on the floor, so diagnosing meant reproducing the whole upgrade
+    // locally — on ops-lrf5 (harper 5.2.0 leaves the instance down) that is
+    // exactly where the investigation stalled: the lane proved the symptom and
+    // discarded the evidence.
+    //
+    // Safe to print: this sandbox has a throwaway HOME, a temp npm prefix, and
+    // ADMIN_PASS is a literal checked into this public repo — there is nothing
+    // confidential in this environment to leak into a public Actions log. That
+    // is a property of THIS suite, not a general licence to dump child output;
+    // a suite carrying a real credential must not copy this.
+    if (upgrade.code !== 0 || postUpgradeHealth < 200) {
+      const tail = (s: string, n = 4000) =>
+        s.length > n ? `…(${s.length - n} earlier chars omitted)\n${s.slice(-n)}` : s || "(empty)";
+      console.error(
+        [
+          "",
+          "── flair upgrade FAILED — captured output follows ──────────────────",
+          `exit code:          ${upgrade.code}`,
+          `health after:       ${postUpgradeHealth} (0 = nothing answered on ${baseUrl})`,
+          `listening pid:      ${harperPid ?? "(none — nothing holds the port)"}`,
+          `installed version:  ${targetVersion || "(could not read)"}`,
+          "── stdout ─────────────────────────────────────────────────────────",
+          tail(upgrade.stdout),
+          "── stderr ─────────────────────────────────────────────────────────",
+          tail(upgrade.stderr),
+          "───────────────────────────────────────────────────────────────────",
+        ].join("\n"),
+      );
+    }
   }, SETUP_TIMEOUT_MS + UPGRADE_TIMEOUT_MS);
 
   afterAll(async () => {
