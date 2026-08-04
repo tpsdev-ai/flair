@@ -95,16 +95,30 @@ describe("every step sets the tracker — no window attributes a throw elsewhere
   );
 
   test("each step name that can be pushed is also assigned to currentStep", () => {
+    // Deliberately permissive: [a-z-]+ silently DROPPED any step name with a
+    // digit or underscore from BOTH sets, so `push("verify-2", ...)` untracked
+    // would have passed this check. Sherlock caught it — a narrow pattern in a
+    // completeness check is itself a check that cannot fire.
     const pushed = new Set(
-      [...src.matchAll(/push\(\s*"([a-z-]+)"/g)].map((m) => m[1]),
+      [...src.matchAll(/push\(\s*"([^"]+)"/g)].map((m) => m[1]),
     );
     const tracked = new Set(
-      [...src.matchAll(/currentStep\s*=\s*"([a-z-]+)"/g)].map((m) => m[1]),
+      [...src.matchAll(/currentStep\s*=\s*"([^"]+)"/g)].map((m) => m[1]),
     );
     const untracked = [...pushed].filter((s) => !tracked.has(s));
     // If a new step is added and pushed without setting currentStep, a throw
     // inside it lands on whichever step was set last. This is the counting
     // check that makes that fail rather than pass unnoticed.
     expect(untracked).toEqual([]);
+  });
+
+  test("the scan's own pattern is not too narrow to see an unusual step name", () => {
+    // The regression Sherlock found: a narrow [a-z-]+ dropped names containing a
+    // digit or underscore from BOTH sets, so an untracked `verify-2` passed.
+    // A completeness check whose pattern cannot see the thing it counts is the
+    // exact defect class this file exists to guard.
+    const sample = 'push("verify-2", true, "x"); push("odd_name", true, "y");';
+    const seen = [...sample.matchAll(/push\(\s*"([^"]+)"/g)].map((m) => m[1]);
+    expect(seen).toEqual(["verify-2", "odd_name"]);
   });
 });
