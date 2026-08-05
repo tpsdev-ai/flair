@@ -22,9 +22,10 @@
   file is written either way, so a fallback never leaves an operator stranded mid-run.
 
   What the probe deliberately does not claim: that the secret will be *decrypted*. No read-only call
-  can establish that. The existing self-verify step already does — the issuer's OAuth metadata is
-  only served once `FLAIR_MCP_OAUTH` is live in the process — so a secret that is stored and never
-  decrypted fails there, with the push named as a candidate cause, rather than passing quietly.
+  can establish that. The existing self-verify step already does, by comparison rather than absence: the
+  well-known endpoint still answers when the flag is off, serving flair's own OAuth 2.1 document,
+  and self-verify recognises it by the advertised `token_endpoint`. So a secret that is stored and
+  never decrypted fails there with a message naming `FLAIR_MCP_OAUTH`, rather than passing quietly.
 
   `--secrets-mechanism` remains an explicit override and skips the probe entirely: an operator who
   has said what they want is not second-guessed.

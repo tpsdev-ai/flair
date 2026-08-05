@@ -75,7 +75,7 @@ Values are encrypted **before leaving your machine** — AES-256-GCM on the valu
 
 The staging file is written in every case, so a fallback never strands you mid-run. When the push succeeds it simply goes unused.
 
-> **What the probe does not promise.** It establishes that the target accepts secrets, not that it will *decrypt* them — no read-only call can, since a secret only proves it was decrypted by being present in the process. The **self-verify** step at the end is what proves that: the issuer's OAuth metadata is served only once `FLAIR_MCP_OAUTH` is live. A secret that is stored and never decrypted therefore fails at self-verify, naming the push as a candidate cause, rather than reporting success.
+> **What the probe does not promise.** It establishes that the target accepts secrets, not that it will *decrypt* them — no read-only call can, since a secret only proves it was decrypted by being present in the process. The **self-verify** step at the end is what proves that. Note the endpoint does *not* go quiet when the flag is off — flair serves its own OAuth 2.1 discovery document instead, and self-verify tells them apart by the advertised `token_endpoint` (`/OAuthToken` is flair's own; the MCP one is `/oauth/mcp/token`). So a secret that is stored and never decrypted fails at self-verify with a message naming `FLAIR_MCP_OAUTH`, rather than reporting success.
 
 `--secrets-mechanism <fabric-env-secrets|env-file>` remains an explicit override and skips the probe entirely.
 

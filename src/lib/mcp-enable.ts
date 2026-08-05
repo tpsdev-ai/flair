@@ -752,6 +752,31 @@ export async function selfVerifyMcpMetadata(
   } catch {
     return { ok: false, detail: `${url} did not return JSON` };
   }
+  // ── The flair's-own-server check runs BEFORE the shape check (flair#1094) ──
+  //
+  // It used to run after, and that made the DEFAULT flag-off case misreport.
+  // flair's own document omits `registration_endpoint` unless DCR is enabled,
+  // which it is not by default — so the shape check fired first and returned
+  // "the metadata shape is unexpected", which is true, useless, and points at
+  // shapes when the cause is an unset environment variable.
+  //
+  // `token_endpoint` is present in that document either way, so testing the
+  // discriminator first names the real cause in EVERY flag-off case rather than
+  // only when DCR happens to be on. Found by writing the test that pins this
+  // relationship, not by reading the code.
+  if (typeof body?.token_endpoint === "string" && body.token_endpoint === `${normalizedIssuer}/OAuthToken`) {
+    return {
+      ok: false,
+      issuer: body?.issuer,
+      registrationEndpoint: body?.registration_endpoint,
+      tokenEndpoint: body.token_endpoint,
+      detail:
+        `${url} answered with flair's OWN OAuth 2.1 authorization server, not the MCP one ` +
+        `(token_endpoint=${body.token_endpoint}) — the /mcp surface is NOT enabled on that instance. ` +
+        `Is FLAIR_MCP_OAUTH actually set on the restarted instance, and is the '@harperfast/oauth' ` +
+        `component declared in its config.yaml?`,
+    };
+  }
   if (
     body?.issuer !== normalizedIssuer ||
     typeof body?.registration_endpoint !== "string" ||

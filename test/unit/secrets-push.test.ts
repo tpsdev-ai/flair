@@ -137,3 +137,69 @@ describe("pushSecrets — plaintext never leaves this process", () => {
     expect(out.allOk).toBe(false);
   });
 });
+
+// ─── The guarantee the secrets push leans on ────────────────────────────────
+//
+// probeSecretsCapability establishes that a target ACCEPTS secrets. It cannot
+// establish that they are DECRYPTED — nothing read-only can, since a secret only
+// proves it was decrypted by being present in the process.
+//
+// So the push's safety argument is: a secret that lands in `hdb_secret` and is
+// never decrypted fails at SELF-VERIFY rather than passing quietly.
+//
+// I originally justified that with "the OAuth metadata is only served once
+// FLAIR_MCP_OAUTH is live." THAT IS FALSE, and checking it is how this test
+// exists. `makeWellKnownHandler` serves flair's OWN discovery document when the
+// flag is off — the endpoint answers either way. What actually catches it is a
+// DISCRIMINATOR: self-verify compares `token_endpoint` against
+// `<issuer>/OAuthToken`, which is exactly what flair's fallback advertises.
+//
+// That relationship spans two files and nothing compared them:
+//
+//   resources/oauth-discovery.ts   token_endpoint: `${baseUrl}/OAuthToken`
+//   src/lib/mcp-enable.ts          if (body.token_endpoint === `${issuer}/OAuthToken`)
+//
+// Change either and self-verify silently stops recognising a flag-off instance —
+// and the secrets push loses the only thing standing between "stored" and
+// "working". This pins them together behaviourally.
+import { selfVerifyMcpMetadata } from "../../src/lib/mcp-enable.js";
+import { buildAuthorizationServerMetadata } from "../../resources/oauth-discovery.js";
+
+describe("self-verify recognises a flag-OFF instance — the secrets push depends on it", () => {
+  const ISSUER = "https://flair.example.com";
+
+  function servingDoc(doc: unknown): typeof fetch {
+    return (async () => new Response(JSON.stringify(doc), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    })) as unknown as typeof fetch;
+  }
+
+  test("flair's OWN fallback document is detected, not accepted", async () => {
+    // The real builder, not a hand-written imitation — an imitation would keep
+    // passing after the real one drifted, which is the failure being prevented.
+    const fallback = buildAuthorizationServerMetadata(ISSUER);
+    const res = await selfVerifyMcpMetadata(ISSUER, { fetchImpl: servingDoc(fallback) });
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/FLAIR_MCP_OAUTH/);
+  });
+
+  test("the discriminator value is what the fallback actually advertises", () => {
+    // If this drifts, the test above starts passing for the wrong reason.
+    const fallback = buildAuthorizationServerMetadata(ISSUER) as any;
+    expect(fallback.token_endpoint).toBe(`${ISSUER}/OAuthToken`);
+  });
+
+  test("a genuine MCP document is accepted (positive control)", async () => {
+    // Without this, a self-verify that rejected EVERYTHING would satisfy the
+    // test above while breaking every successful enable.
+    const mcpDoc = {
+      issuer: ISSUER,
+      registration_endpoint: `${ISSUER}/oauth/mcp/register`,
+      token_endpoint: `${ISSUER}/oauth/mcp/token`,
+      token_endpoint_auth_methods_supported: ["none"],
+      client_id_metadata_document_supported: true,
+    };
+    const res = await selfVerifyMcpMetadata(ISSUER, { fetchImpl: servingDoc(mcpDoc) });
+    expect(res.detail ?? "").not.toMatch(/flair's OWN OAuth/);
+  });
+});

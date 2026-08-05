@@ -26,12 +26,18 @@
  * and no read-only call can — a secret only proves it was decrypted by being
  * present in the process.
  *
- * That check already exists downstream: `enable`'s self-verify step fetches the
- * issuer's OAuth metadata, which is only served when `FLAIR_MCP_OAUTH` reached
- * the process. So a push that lands in `hdb_secret` and is never decrypted shows
- * up as a self-verify failure rather than as silent success — provided the
- * failure names this as a candidate cause, which is why `pushed` is threaded
- * through to the result.
+ * That check already exists downstream, though NOT for the reason first claimed
+ * here. The well-known endpoint does not stop answering when the flag is off —
+ * flair serves its OWN OAuth 2.1 discovery document in that case
+ * (resources/oauth-discovery.ts). What distinguishes them is a DISCRIMINATOR:
+ * flair's document advertises `<issuer>/OAuthToken`, the plugin's advertises
+ * `<issuer>/oauth/mcp/token`, and self-verify tests for the former by name.
+ *
+ * So a push that lands in `hdb_secret` and is never decrypted shows up as a
+ * self-verify failure naming FLAIR_MCP_OAUTH — because of a comparison, not an
+ * absence. That relationship spans two files and is pinned by a test in
+ * test/unit/secrets-push.test.ts; without it, changing either side silently
+ * disables the only thing standing between "stored" and "working".
  *
  * ── Failure direction ───────────────────────────────────────────────────────
  * Every uncertain outcome falls back to the staged-file flow. That path works
