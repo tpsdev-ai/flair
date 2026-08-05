@@ -81,9 +81,22 @@ function installExitHook(): void {
   process.on("exit", reapLiveInstances);
   // A signalled run must not skip the reap. Re-raise after cleaning so the exit
   // code still reflects the signal rather than being swallowed.
+  //
+  // The listener MUST be removed before re-raising. Registering a handler for
+  // SIGINT/SIGTERM/SIGHUP replaces Node's default action (terminate), so
+  // re-raising while still registered re-enters this handler — forever. The
+  // process then survives the signal it was told to die on.
+  //
+  // That is not theoretical: the first version of this hung CI's Integration
+  // Tests for 35 minutes against a ~15 minute norm, until the runner hard-killed
+  // it. And it broke the case this hook exists for — Ctrl-C would no longer stop
+  // a test run. Verified both ways in isolation: re-raising while registered
+  // loops indefinitely; removing the listener first exits 143, terminated by the
+  // signal, which is what a caller expects to see.
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     process.on(sig, () => {
       reapLiveInstances();
+      process.removeAllListeners(sig);
       process.kill(process.pid, sig);
     });
   }

@@ -141,3 +141,55 @@ describe("the reaper kills only its own children", () => {
     expect(body.indexOf("LIVE_INSTANCES.delete")).toBeLessThan(body.indexOf("killProcess"));
   });
 });
+
+// ─── The signal handler must not survive its own signal ─────────────────────
+//
+// Registering a handler for SIGINT/SIGTERM/SIGHUP REPLACES Node's default
+// action (terminate). Re-raising while the listener is still registered
+// re-enters the handler forever, and the process survives the signal it was
+// told to die on.
+//
+// The first version of this hook did exactly that. It hung CI's Integration
+// Tests for 35 minutes against a ~15 minute norm until the runner hard-killed
+// the job — and it broke the very case the hook exists for, since Ctrl-C would
+// no longer stop a test run.
+//
+// Verified in isolation both ways: re-raising while registered loops
+// indefinitely; removing the listener first exits 143 (terminated by SIGTERM).
+describe("the signal handler removes its listener before re-raising", () => {
+  const CODE = readFileSync(join(import.meta.dir, "..", "helpers", "harper-lifecycle.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+  test("removeAllListeners precedes the re-raise", () => {
+    const hook = CODE.slice(CODE.indexOf("function installExitHook"), CODE.indexOf("export function countStaleHarperTrees"));
+    const remove = hook.indexOf("process.removeAllListeners(sig)");
+    const raise = hook.indexOf("process.kill(process.pid, sig)");
+    expect(remove).toBeGreaterThan(-1);
+    expect(raise).toBeGreaterThan(-1);
+    expect(remove).toBeLessThan(raise);
+  });
+
+  test("the reap still happens before either", () => {
+    // Order is reap -> deregister handler -> re-raise. Removing the listener
+    // first would be safe but would skip the cleanup this hook exists for.
+    const hook = CODE.slice(CODE.indexOf("function installExitHook"), CODE.indexOf("export function countStaleHarperTrees"));
+    expect(hook.indexOf("reapLiveInstances()")).toBeLessThan(hook.indexOf("process.removeAllListeners(sig)"));
+  });
+
+  test("a re-raise-while-registered pattern loops — the property being avoided", async () => {
+    // Behavioural proof rather than a claim about Node's semantics, run in a
+    // child so it cannot take this suite down.
+    const { spawnSync } = await import("node:child_process");
+    const script = [
+      "let n=0;",
+      "process.on('SIGTERM',()=>{n++;if(n>4){console.log('LOOP');process.exit(9);}process.kill(process.pid,'SIGTERM');});",
+      "setTimeout(()=>{console.log('NOLOOP');process.exit(0);},800);",
+      "process.kill(process.pid,'SIGTERM');",
+    ].join("");
+    // spawnSync, not execFileSync: the loop path exits 9, and execFileSync
+    // throws on a non-zero exit before the output can be read — which would
+    // fail this test for the wrong reason.
+    const r = spawnSync(process.execPath, ["-e", script], { encoding: "utf-8", timeout: 15000 });
+    expect(String(r.stdout)).toContain("LOOP");
+  });
+});
