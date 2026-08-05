@@ -13,6 +13,8 @@
 // 'set_secret' not found" — byte-identical to the answer for an operation that
 // was invented for the control.
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { generateKeyPairSync, privateDecrypt, createDecipheriv, constants } from "node:crypto";
 import { probeSecretsCapability, pushSecrets, PROCESS_ENV_TIER } from "../../src/lib/secrets-push.js";
 import { ENV_ENCRYPTED_PREFIX } from "../../src/lib/secret-envelope.js";
@@ -162,7 +164,7 @@ describe("pushSecrets — plaintext never leaves this process", () => {
 // Change either and self-verify silently stops recognising a flag-off instance —
 // and the secrets push loses the only thing standing between "stored" and
 // "working". This pins them together behaviourally.
-import { selfVerifyMcpMetadata } from "../../src/lib/mcp-enable.js";
+import { selfVerifyMcpMetadata, enableMcp } from "../../src/lib/mcp-enable.js";
 import { buildAuthorizationServerMetadata } from "../../resources/oauth-discovery.js";
 
 describe("self-verify recognises a flag-OFF instance — the secrets push depends on it", () => {
@@ -267,5 +269,54 @@ describe("self-verify accepts a valid MCP surface with DCR disabled", () => {
     const res = await selfVerifyMcpMetadata(ISSUER, { fetchImpl: serving(flairOwn) });
     expect(res.ok).toBe(false);
     expect(res.detail).toMatch(/FLAIR_MCP_OAUTH/);
+  });
+});
+
+// ─── enableMcp must actually USE the probe (Kern, #1101) ────────────────────
+//
+// Every test above exercises probeSecretsCapability and pushSecrets DIRECTLY.
+// None of them asserted that enableMcp calls either one — so when a bad file
+// copy removed the whole orchestration from enableMcp, leaving both modules as
+// dead code, the entire suite stayed green and the PR still claimed to push
+// secrets. Kern caught it by reading the diff; nothing mechanical did.
+//
+// A module that is tested but not wired is the same defect as a guard that is
+// correct but not called. This asserts the wiring.
+describe("enableMcp is wired to the probe, not merely shipping it", () => {
+  test("a run against a capable target ASKS for the public key", async () => {
+    const ops: string[] = [];
+    const fetchImpl = (async (_url: any, init: any) => {
+      const body = JSON.parse(init?.body ?? "{}");
+      if (body.operation) ops.push(body.operation);
+      // Answer the probe as an incapable target so the run takes the documented
+      // fallback — what matters here is that the probe was ATTEMPTED at all.
+      if (body.operation === "get_secrets_public_key") {
+        return new Response(JSON.stringify({ error: "Operation 'get_secrets_public_key' not found" }), { status: 400 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await enableMcp(
+      {
+        instance: "https://flair.example.harperfabric.com",
+        adminUser: "admin", adminPass: "pw",
+        idpProvider: "github", idpClientId: "id", idpClientSecret: "secret", idpSubject: "octocat",
+        principal: "self", principalKind: "human", confirmSecretsApplied: true,
+        signingKeyFilePath: `${process.env.TMPDIR ?? "/tmp"}/flair-wiring-probe-key.pem`,
+        secretsStagingPath: `${process.env.TMPDIR ?? "/tmp"}/flair-wiring-probe-secrets.env`,
+      } as any,
+      { fetchImpl } as any,
+    );
+
+    expect(ops).toContain("get_secrets_public_key");
+  });
+
+  test("the modules are imported by mcp-enable, not orphaned", () => {
+    // The cheap structural half: if the import goes, the orchestration went too.
+    const src = readFileSync(join(import.meta.dir, "..", "..", "src", "lib", "mcp-enable.ts"), "utf8");
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    expect(code).toMatch(/from "\.\/secrets-push\.js"/);
+    expect(code).toMatch(/probeSecretsCapability\(/);
+    expect(code).toMatch(/pushSecrets\(/);
   });
 });
