@@ -2,9 +2,71 @@ import { spawn, ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import type { AddressInfo, Server } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// ─── Leak backstop: clean up even when the test framework never gets to ──────
+//
+// `stopHarper` is correct when it is CALLED. The leak is that it often is not:
+// if a `beforeAll` throws or times out, `afterAll` does not run, and the spawned
+// Harper survives holding its ~3 GB install tree open.
+//
+// Measured on rockit 2026-08-05, after a night of integration runs: NINE orphaned
+// `flair-test-*` trees totalling 27 GB, held open by four abandoned `harper dev`
+// processes — two of them FOUR DAYS old. The disk hit 0 bytes and no command
+// could run at all, because every tool needs to write before it executes.
+//
+// Deleting the directories alone would not have helped: a file held open by a
+// live process does not return its blocks. The process has to die first, which
+// is why this tracks processes rather than just paths.
+//
+// So: every instance registers here on spawn and deregisters on clean stop, and
+// a process-exit hook kills whatever is left. Exit handlers must be SYNCHRONOUS,
+// hence `process.kill` + `rmSync` rather than the async paths `stopHarper` uses.
+const LIVE_INSTANCES = new Set<{ pid?: number; installDir?: string; owns: boolean }>();
+let exitHookInstalled = false;
+
+function reapLiveInstances(): void {
+  for (const inst of LIVE_INSTANCES) {
+    if (inst.pid) {
+      try { process.kill(inst.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    if (inst.installDir && inst.owns) {
+      try { rmSync(inst.installDir, { recursive: true, force: true, maxRetries: 2 }); } catch { /* best effort */ }
+    }
+  }
+  LIVE_INSTANCES.clear();
+}
+
+function installExitHook(): void {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.on("exit", reapLiveInstances);
+  // A signalled run must not skip the reap. Re-raise after cleaning so the exit
+  // code still reflects the signal rather than being swallowed.
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(sig, () => {
+      reapLiveInstances();
+      process.kill(process.pid, sig);
+    });
+  }
+}
+
+/**
+ * How many abandoned `flair-test-*` trees are sitting in the temp dir.
+ *
+ * Surfaced so a leak fails a TEST rather than a machine three hours later. The
+ * incident above was invisible until the disk was full: nothing counted, so
+ * nothing complained, and the only signal was every command failing at once.
+ */
+export function countStaleHarperTrees(): number {
+  try {
+    return readdirSync(tmpdir()).filter((n) => n.startsWith("flair-test-")).length;
+  } catch {
+    return 0;
+  }
+}
 
 const STARTUP_TIMEOUT_MS = 45_000;
 const MAX_SPAWN_ATTEMPTS = 3;
@@ -60,6 +122,9 @@ export interface HarperInstance {
    * test) is the caller's to clean up.
    */
   ownsInstallDir: boolean;
+  /** Internal: the leak-backstop registry entry, so stopHarper can deregister
+   *  by identity. Absent for external instances, which own nothing. */
+  __tracked?: { pid?: number; installDir?: string; owns: boolean };
 }
 
 interface HarperExit { code: number | null; signal: NodeJS.Signals | null }
@@ -345,7 +410,19 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
         waitForHealth(httpURL, 60_000, () => exited, () => log),
         waitForHealth(opsURL, 60_000, () => exited, () => log),
       ]);
-      return { httpURL, opsURL, installDir, process: proc, admin: { username: "admin", password: "test123" }, external: false, ownsInstallDir };
+      // Register BEFORE returning. If a caller's beforeAll times out between
+      // here and its afterAll, the exit hook is the only thing that reaps this.
+      installExitHook();
+      const tracked = { pid: proc.pid, installDir, owns: ownsInstallDir };
+      LIVE_INSTANCES.add(tracked);
+      return {
+        httpURL, opsURL, installDir, process: proc,
+        admin: { username: "admin", password: "test123" },
+        external: false, ownsInstallDir,
+        // Carried so stopHarper can deregister the exact entry rather than
+        // searching by pid — a pid can be reused, an object identity cannot.
+        __tracked: tracked,
+      } as HarperInstance;
     } catch (err) {
       await killProcess(proc);
       lastErr = err as Error;
@@ -371,6 +448,10 @@ export interface StopHarperOptions {
 
 export async function stopHarper(inst: HarperInstance, opts: StopHarperOptions = {}): Promise<void> {
   if (inst.external) return;
+
+  // Deregister first: a clean stop must not leave the exit hook holding a stale
+  // entry that would SIGKILL a reused pid later.
+  if (inst.__tracked) LIVE_INSTANCES.delete(inst.__tracked);
 
   if (inst.process) await killProcess(inst.process);
   // Never remove a directory this instance didn't create (ownsInstallDir
