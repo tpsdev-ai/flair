@@ -203,3 +203,69 @@ describe("self-verify recognises a flag-OFF instance — the secrets push depend
     expect(res.detail ?? "").not.toMatch(/flair's OWN OAuth/);
   });
 });
+
+// ─── Kern's finding: registration_endpoint must not be REQUIRED ─────────────
+//
+// Requiring it made self-verify fail on a CORRECTLY enabled instance — the very
+// configuration `enable` creates.
+//
+// RFC 8414 marks the field optional, and both authorization servers omit it when
+// DCR is off. `enable` writes `dynamicClientRegistration: { enabled: false }` by
+// design (#756), and the installed plugin conditions the field on exactly that:
+//
+//   @harperfast/oauth/dist/lib/mcp/wellKnown.js:142
+//   ...(dcrEnabled(mcpConfig) ? { registration_endpoint: … } : {})
+//
+// So every instance this command configures omits it, and self-verify reported
+// "metadata shape is unexpected" on a working MCP surface.
+//
+// This is the failure that matters most for the secrets push: self-verify is the
+// operator's ONLY signal that a pushed secret was never decrypted. A check that
+// fails on success teaches people to ignore it, and then it signals nothing.
+describe("self-verify accepts a valid MCP surface with DCR disabled", () => {
+  const ISSUER = "https://flair.example.com";
+  const serving = (doc: unknown): typeof fetch =>
+    (async () => new Response(JSON.stringify(doc), { status: 200, headers: { "Content-Type": "application/json" } })) as unknown as typeof fetch;
+
+  // The real default: DCR off, so no registration_endpoint at all.
+  const dcrOffDoc = {
+    issuer: ISSUER,
+    token_endpoint: `${ISSUER}/oauth/mcp/token`,
+    token_endpoint_auth_methods_supported: ["none"],
+    client_id_metadata_document_supported: true,
+  };
+
+  test("does not reject for a MISSING registration_endpoint", async () => {
+    const res = await selfVerifyMcpMetadata(ISSUER, { fetchImpl: serving(dcrOffDoc) });
+    expect(res.detail ?? "").not.toMatch(/shape is unexpected/);
+  });
+
+  test("still rejects a genuinely malformed document", async () => {
+    // The shape check must not have been loosened into uselessness.
+    const res = await selfVerifyMcpMetadata(ISSUER, { fetchImpl: serving({ issuer: ISSUER }) });
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/shape is unexpected/);
+  });
+
+  test("still rejects a wrong issuer", async () => {
+    const res = await selfVerifyMcpMetadata(ISSUER, { fetchImpl: serving({ ...dcrOffDoc, issuer: "https://evil.example" }) });
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/shape is unexpected/);
+  });
+
+  test("rejects a registration_endpoint of the wrong TYPE when present", async () => {
+    // Optional means "absent or valid", never "anything goes".
+    const res = await selfVerifyMcpMetadata(ISSUER, { fetchImpl: serving({ ...dcrOffDoc, registration_endpoint: 42 }) });
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/shape is unexpected/);
+  });
+
+  test("still names FLAIR_MCP_OAUTH for flair's own document with DCR off", async () => {
+    // The case the reorder fixed, now exercised at the real default rather than
+    // with DCR switched on — which is what made the earlier test miss it.
+    const flairOwn = { issuer: ISSUER, token_endpoint: `${ISSUER}/OAuthToken` };
+    const res = await selfVerifyMcpMetadata(ISSUER, { fetchImpl: serving(flairOwn) });
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/FLAIR_MCP_OAUTH/);
+  });
+});
