@@ -93,12 +93,20 @@ function installExitHook(): void {
   // a test run. Verified both ways in isolation: re-raising while registered
   // loops indefinitely; removing the listener first exits 143, terminated by the
   // signal, which is what a caller expects to see.
+  //
+  // Kern's review note: removeAllListeners(sig) would drop EVERY listener for
+  // that signal, not just this one — so anything else registering its own
+  // cleanup (bun, a future harness, a library) would silently lose it and the
+  // re-raise would terminate before it ran. He suggested documenting that.
+  // Removing only our own handler is strictly better than a comment about the
+  // hazard, and costs one named reference.
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-    process.on(sig, () => {
+    const onSignal = () => {
       reapLiveInstances();
-      process.removeAllListeners(sig);
+      process.off(sig, onSignal);
       process.kill(process.pid, sig);
-    });
+    };
+    process.on(sig, onSignal);
   }
 }
 

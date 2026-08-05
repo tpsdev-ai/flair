@@ -162,9 +162,11 @@ describe("the signal handler removes its listener before re-raising", () => {
 
   test("removeAllListeners precedes the re-raise", () => {
     const hook = CODE.slice(CODE.indexOf("function installExitHook"), CODE.indexOf("export function countStaleHarperTrees"));
-    const remove = hook.indexOf("process.removeAllListeners(sig)");
+    const remove = hook.indexOf("process.off(sig, onSignal)");
     const raise = hook.indexOf("process.kill(process.pid, sig)");
     expect(remove).toBeGreaterThan(-1);
+    // Targeted removal, not removeAllListeners — see the note at the handler.
+    expect(hook).not.toContain("removeAllListeners");
     expect(raise).toBeGreaterThan(-1);
     expect(remove).toBeLessThan(raise);
   });
@@ -173,7 +175,7 @@ describe("the signal handler removes its listener before re-raising", () => {
     // Order is reap -> deregister handler -> re-raise. Removing the listener
     // first would be safe but would skip the cleanup this hook exists for.
     const hook = CODE.slice(CODE.indexOf("function installExitHook"), CODE.indexOf("export function countStaleHarperTrees"));
-    expect(hook.indexOf("reapLiveInstances()")).toBeLessThan(hook.indexOf("process.removeAllListeners(sig)"));
+    expect(hook.indexOf("reapLiveInstances()")).toBeLessThan(hook.indexOf("process.off(sig, onSignal)"));
   });
 
   test("a re-raise-while-registered pattern loops — the property being avoided", async () => {
