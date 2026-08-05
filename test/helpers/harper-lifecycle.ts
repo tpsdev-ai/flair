@@ -79,35 +79,30 @@ function installExitHook(): void {
   if (exitHookInstalled) return;
   exitHookInstalled = true;
   process.on("exit", reapLiveInstances);
-  // A signalled run must not skip the reap. Re-raise after cleaning so the exit
-  // code still reflects the signal rather than being swallowed.
+  // ── NO SIGNAL HANDLERS HERE. This is deliberate. ──────────────────────────
   //
-  // The listener MUST be removed before re-raising. Registering a handler for
-  // SIGINT/SIGTERM/SIGHUP replaces Node's default action (terminate), so
-  // re-raising while still registered re-enters this handler — forever. The
-  // process then survives the signal it was told to die on.
+  // A signal handler looked obviously right: an interrupted run should still
+  // reap, and CI cancellation IS SIGTERM, so without one every cancelled run
+  // leaks the original 27 GB incident again. Kern reviewed that reasoning and
+  // agreed. We were both wrong, and the evidence is unambiguous.
   //
-  // That is not theoretical: the first version of this hung CI's Integration
-  // Tests for 35 minutes against a ~15 minute norm, until the runner hard-killed
-  // it. And it broke the case this hook exists for — Ctrl-C would no longer stop
-  // a test run. Verified both ways in isolation: re-raising while registered
-  // loops indefinitely; removing the listener first exits 143, terminated by the
-  // signal, which is what a caller expects to see.
+  // test/integration/federation-watch.test.ts SIGTERMs the TEST RUNNER ITSELF,
+  // three times, as its fixture — and says so at line 74: "This sends SIGTERM to
+  // the test-runner process itself." A global handler here intercepts that,
+  // re-raises, and kills the run. Measured: the suite died after 53 of 58 files
+  // with exit 143, in federation-watch, on a lane that is otherwise green and
+  // where `exit code 143` appears zero times.
   //
-  // Kern's review note: removeAllListeners(sig) would drop EVERY listener for
-  // that signal, not just this one — so anything else registering its own
-  // cleanup (bun, a future harness, a library) would silently lose it and the
-  // re-raise would terminate before it ran. He suggested documenting that.
-  // Removing only our own handler is strictly better than a comment about the
-  // hazard, and costs one named reference.
-  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-    const onSignal = () => {
-      reapLiveInstances();
-      process.off(sig, onSignal);
-      process.kill(process.pid, sig);
-    };
-    process.on(sig, onSignal);
-  }
+  // So this harness cannot own a process-wide signal handler: its own tests use
+  // signals as data. Any handler is either wrong for them or useless for us, and
+  // "wrong for them" is silent — it truncates a suite rather than failing a test.
+  //
+  // What is left: the exit hook, which covers clean exits including a suite that
+  // finishes with instances still tracked. An interrupted or cancelled run will
+  // leak, and that is the accepted cost. countStaleHarperTrees() makes the leak
+  // visible on the NEXT run instead of at 0 bytes free, which is the property
+  // that actually mattered — the incident was invisible for four days, not
+  // uncleaned for four days.
 }
 
 /**

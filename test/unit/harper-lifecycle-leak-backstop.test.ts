@@ -45,10 +45,10 @@ describe("the backstop is wired, not merely defined", () => {
     expect(CODE).toMatch(/LIVE_INSTANCES\.delete\(inst\.__tracked\)/);
   });
 
-  test("the exit hook covers signals, not just a clean exit", () => {
-    // `bun test` interrupted, or a CI runner cancelling the job, is exactly when
-    // a leak is most likely — an exit-only hook would miss all of it.
-    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) expect(CODE).toContain(sig);
+  test("the exit hook is installed for clean exits", () => {
+    // Signals are deliberately NOT handled — see the no-signal-handlers block
+    // below. federation-watch.test.ts SIGTERMs the runner as its fixture, so a
+    // handler here truncates the suite instead of protecting it.
     expect(CODE).toMatch(/process\.on\("exit", reapLiveInstances\)/);
   });
 
@@ -142,56 +142,29 @@ describe("the reaper kills only its own children", () => {
   });
 });
 
-// ─── The signal handler must not survive its own signal ─────────────────────
+// ─── No signal handlers: the harness must not intercept its own fixtures ────
 //
-// Registering a handler for SIGINT/SIGTERM/SIGHUP REPLACES Node's default
-// action (terminate). Re-raising while the listener is still registered
-// re-enters the handler forever, and the process survives the signal it was
-// told to die on.
+// An earlier version registered SIGINT/SIGTERM/SIGHUP so an interrupted run
+// would still reap. It broke the suite: federation-watch.test.ts SIGTERMs the
+// TEST RUNNER ITSELF as its fixture (its own comment says so), a global handler
+// intercepted that, and the run died after 53 of 58 files with exit 143.
 //
-// The first version of this hook did exactly that. It hung CI's Integration
-// Tests for 35 minutes against a ~15 minute norm until the runner hard-killed
-// the job — and it broke the very case the hook exists for, since Ctrl-C would
-// no longer stop a test run.
-//
-// Verified in isolation both ways: re-raising while registered loops
-// indefinitely; removing the listener first exits 143 (terminated by SIGTERM).
-describe("the signal handler removes its listener before re-raising", () => {
+// A handler here is either wrong for those tests or useless for us, and "wrong"
+// is silent — it truncates a suite rather than failing a test. So the exit hook
+// stands alone and interrupted runs are allowed to leak, with
+// countStaleHarperTrees making that visible on the next run.
+describe("the harness registers no process-wide signal handlers", () => {
   const CODE = readFileSync(join(import.meta.dir, "..", "helpers", "harper-lifecycle.ts"), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 
-  test("removeAllListeners precedes the re-raise", () => {
-    const hook = CODE.slice(CODE.indexOf("function installExitHook"), CODE.indexOf("export function countStaleHarperTrees"));
-    const remove = hook.indexOf("process.off(sig, onSignal)");
-    const raise = hook.indexOf("process.kill(process.pid, sig)");
-    expect(remove).toBeGreaterThan(-1);
-    // Targeted removal, not removeAllListeners — see the note at the handler.
-    expect(hook).not.toContain("removeAllListeners");
-    expect(raise).toBeGreaterThan(-1);
-    expect(remove).toBeLessThan(raise);
+  test("no process.on for SIGINT/SIGTERM/SIGHUP", () => {
+    // federation-watch.test.ts signals the runner deliberately. Anything we
+    // register here changes what that fixture does.
+    expect(CODE).not.toMatch(/process\.on\(\s*["']SIG/);
+    expect(CODE).not.toMatch(/for \(const sig of/);
   });
 
-  test("the reap still happens before either", () => {
-    // Order is reap -> deregister handler -> re-raise. Removing the listener
-    // first would be safe but would skip the cleanup this hook exists for.
-    const hook = CODE.slice(CODE.indexOf("function installExitHook"), CODE.indexOf("export function countStaleHarperTrees"));
-    expect(hook.indexOf("reapLiveInstances()")).toBeLessThan(hook.indexOf("process.off(sig, onSignal)"));
-  });
-
-  test("a re-raise-while-registered pattern loops — the property being avoided", async () => {
-    // Behavioural proof rather than a claim about Node's semantics, run in a
-    // child so it cannot take this suite down.
-    const { spawnSync } = await import("node:child_process");
-    const script = [
-      "let n=0;",
-      "process.on('SIGTERM',()=>{n++;if(n>4){console.log('LOOP');process.exit(9);}process.kill(process.pid,'SIGTERM');});",
-      "setTimeout(()=>{console.log('NOLOOP');process.exit(0);},800);",
-      "process.kill(process.pid,'SIGTERM');",
-    ].join("");
-    // spawnSync, not execFileSync: the loop path exits 9, and execFileSync
-    // throws on a non-zero exit before the output can be read — which would
-    // fail this test for the wrong reason.
-    const r = spawnSync(process.execPath, ["-e", script], { encoding: "utf-8", timeout: 15000 });
-    expect(String(r.stdout)).toContain("LOOP");
+  test("the exit hook is still installed — clean exits must still reap", () => {
+    expect(CODE).toMatch(/process\.on\("exit", reapLiveInstances\)/);
   });
 });
