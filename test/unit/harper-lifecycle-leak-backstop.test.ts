@@ -101,3 +101,43 @@ describe("countStaleHarperTrees — so a leak is visible before the disk is gone
     }
   });
 });
+
+// ─── The pid-reuse guard Sherlock's review surfaced ─────────────────────────
+//
+// He found the window and judged it acceptable because "the blast radius is a
+// test runner process on a dev machine." True in general, FALSE on rockit: this
+// machine also runs production Flair (~/flair-prod, :9926). A reused pid here
+// could be prod — which is the July 2026 `pkill -f harper` incident with better
+// manners.
+//
+// So the reaper now kills only processes that are still OUR CHILD. Production is
+// not our child; neither is anything that inherited a recycled pid.
+describe("the reaper kills only its own children", () => {
+  const CODE = readFileSync(join(import.meta.dir, "..", "helpers", "harper-lifecycle.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+  test("SIGKILL is gated on parentage, not on the pid alone", () => {
+    expect(CODE).toMatch(/if \(inst\.pid && isOwnChild\(inst\.pid\)\)/);
+  });
+
+  test("the parentage check fails CLOSED", () => {
+    // An unknowable pid must be left alone. A leaked directory is recoverable;
+    // a killed production instance is not.
+    const fn = CODE.slice(CODE.indexOf("function isOwnChild"), CODE.indexOf("function reapLiveInstances"));
+    expect(fn).toMatch(/catch\s*\{\s*return false/);
+  });
+
+  test("it compares against THIS process, not a hardcoded parent", () => {
+    const fn = CODE.slice(CODE.indexOf("function isOwnChild"), CODE.indexOf("function reapLiveInstances"));
+    expect(fn).toMatch(/=== process\.pid/);
+  });
+
+  test("stopHarper deregisters BEFORE it kills", () => {
+    // Sherlock noted the original tests asserted deregistration existed but not
+    // its ordering. If the kill came first, a pid could be reused in the gap
+    // while the entry was still tracked.
+    const fn = CODE.slice(CODE.indexOf("export async function stopHarper"));
+    const body = fn.slice(0, fn.indexOf("\n}"));
+    expect(body.indexOf("LIVE_INSTANCES.delete")).toBeLessThan(body.indexOf("killProcess"));
+  });
+});

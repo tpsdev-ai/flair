@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, execFileSync, ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import type { AddressInfo, Server } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -27,9 +27,45 @@ import { join } from "node:path";
 const LIVE_INSTANCES = new Set<{ pid?: number; installDir?: string; owns: boolean }>();
 let exitHookInstalled = false;
 
+/**
+ * Is `pid` still a direct child of this process?
+ *
+ * The reaper's one real hazard is pid REUSE: a tracked Harper dies on its own,
+ * the OS reuses its pid, and the exit hook SIGKILLs whatever now holds it.
+ * Sherlock found that window on review and judged it acceptable because "the
+ * blast radius is a test runner process on a dev machine."
+ *
+ * That is true in general and FALSE HERE. rockit runs production Flair
+ * (~/flair-prod, serving :9926) alongside these tests. A wrong kill on this
+ * machine can hit production — which is exactly the July 2026 incident, where a
+ * `pkill -f harper` took prod down. Rebuilding that with better manners is still
+ * rebuilding it.
+ *
+ * A spawned Harper is our CHILD. Production is not, and neither is any unrelated
+ * process that inherits a recycled pid. Checking parentage costs one `ps` at
+ * exit and turns "kill whatever holds this pid" into "kill it only if it is
+ * still the child we started".
+ *
+ * Not atomic — the pid could in principle be reused between this check and the
+ * kill — but it removes the entire class of victim that matters, since nothing
+ * we did not spawn is ever our child. Fails CLOSED: if parentage cannot be
+ * determined, the process is left alone and the tree is left behind. A leaked
+ * directory is recoverable; a killed production instance is not.
+ */
+function isOwnChild(pid: number): boolean {
+  try {
+    const out = execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
+      encoding: "utf-8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"],
+    });
+    return Number(out.trim()) === process.pid;
+  } catch {
+    return false; // gone, or unknowable — either way, do not kill it
+  }
+}
+
 function reapLiveInstances(): void {
   for (const inst of LIVE_INSTANCES) {
-    if (inst.pid) {
+    if (inst.pid && isOwnChild(inst.pid)) {
       try { process.kill(inst.pid, "SIGKILL"); } catch { /* already gone */ }
     }
     if (inst.installDir && inst.owns) {
