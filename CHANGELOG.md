@@ -18,6 +18,16 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.39.0] - 2026-08-06
+
+### Added
+
+- **adk-flair: Flair as the memory backend for Google ADK agents.** New `packages/adk-flair` Python package implementing `BaseMemoryService` with compound-tag user scoping, Ed25519-signed API calls, and semantic search. Published to PyPI as `adk-flair`.
+
+### Fixed
+
+- Fix `mcp enable` secrets push to send `processEnv: true` instead of `tier: processEnv` and verify the field on read-back so inert rows (core ignoring unknown params) are caught rather than silently failing at boot. Closes #1105
+
 ## [0.38.0] - 2026-08-05
 
 ### Added
