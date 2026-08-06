@@ -768,4 +768,90 @@ describe("OllamaLlm registry", () => {
       });
     }).not.toThrow();
   });
+
+  it("generateContentAsync terminates and yields exactly one final response", async () => {
+    registerOllamaLlm();
+
+    // Mock fetch to return a valid Ollama chat response
+    const originalFetch = globalThis.fetch;
+    const mockFetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            model: "llama3.2",
+            created_at: "2026-01-01T00:00:00Z",
+            message: { role: "assistant", content: "Hello from Ollama!" },
+            done: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    try {
+      const instance = LLMRegistry.newLlm("ollama_chat/llama3.2") as OllamaLlm;
+      const request: LlmRequest = {
+        contents: [{ role: "user", parts: [{ text: "Hi" }] }],
+      };
+
+      const responses: LlmResponse[] = [];
+      for await (const r of instance.generateContentAsync(request)) {
+        responses.push(r);
+      }
+
+      // Must yield exactly one response
+      expect(responses).toHaveLength(1);
+
+      const resp = responses[0];
+      // Must have content with the model's reply
+      expect(resp.content?.role).toBe("model");
+      expect(resp.content?.parts?.[0]?.text).toBe("Hello from Ollama!");
+      // Must have finishReason (mirrors Gemini non-streaming shape)
+      expect(resp.finishReason).toBe("STOP");
+      // Must NOT have partial flag (signals turn completion)
+      expect(resp.partial).toBeUndefined();
+      // Must NOT have error fields
+      expect(resp.errorCode).toBeUndefined();
+      expect(resp.errorMessage).toBeUndefined();
+
+      // Verify fetch was called with stream:false
+      const fetchCall = mockFetch.mock.calls[0] as [string, RequestInit];
+      const fetchBody = JSON.parse(fetchCall[1].body as string);
+      expect(fetchBody.stream).toBe(false);
+      expect(fetchBody.model).toBe("llama3.2");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("generateContentAsync yields error on non-ok response", async () => {
+    registerOllamaLlm();
+
+    const originalFetch = globalThis.fetch;
+    const mockFetch = mock(() =>
+      Promise.resolve(
+        new Response("model not found", { status: 404 }),
+      ),
+    );
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    try {
+      const instance = LLMRegistry.newLlm("ollama_chat/llama3.2") as OllamaLlm;
+      const request: LlmRequest = {
+        contents: [{ role: "user", parts: [{ text: "Hi" }] }],
+      };
+
+      const responses: LlmResponse[] = [];
+      for await (const r of instance.generateContentAsync(request)) {
+        responses.push(r);
+      }
+
+      expect(responses).toHaveLength(1);
+      expect(responses[0].errorCode).toBe("404");
+      expect(responses[0].errorMessage).toContain("Ollama API error 404");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

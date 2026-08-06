@@ -64,6 +64,9 @@ function extractSystemInstruction(
 
 const OLLAMA_PREFIX = "ollama_chat/";
 
+/** Hard timeout for Ollama API calls — prevents indefinite hangs. */
+const OLLAMA_TIMEOUT_MS = 30_000;
+
 export class OllamaLlm extends BaseLlm {
   /**
    * Regex matching the ollama_chat/ prefix for LLMRegistry resolution.
@@ -116,12 +119,25 @@ export class OllamaLlm extends BaseLlm {
       stream: false,
     });
 
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-      signal: abortSignal ?? null,
-    });
+    // Merge caller's abortSignal with our hard 30s timeout so any wedge
+    // is a loud failure, not a silent hang.
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), OLLAMA_TIMEOUT_MS);
+    const combinedSignal = abortSignal
+      ? AbortSignal.any([abortSignal, timeoutController.signal])
+      : timeoutController.signal;
+
+    let resp: Response;
+    try {
+      resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        signal: combinedSignal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
@@ -138,11 +154,16 @@ export class OllamaLlm extends BaseLlm {
 
     const replyText = data.message?.content ?? "";
 
+    // Mirror the Gemini non-streaming finish shape: a single yield with
+    // content + finishReason, no partial flag.  The generator returns
+    // immediately after — adk-js treats generator exhaustion as turn
+    // completion for non-streaming calls.
     yield {
       content: {
         role: "model",
         parts: [{ text: replyText }],
       },
+      finishReason: "STOP",
     };
   }
 
