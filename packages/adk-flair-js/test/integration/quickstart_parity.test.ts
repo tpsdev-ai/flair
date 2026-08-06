@@ -194,7 +194,7 @@ describe("QuickstartParity", () => {
     const { Agent } = await import("@google/adk");
     const { Runner } = await import("@google/adk");
     const { InMemorySessionService } = await import("@google/adk");
-    const { preloadMemory } = await import("@google/adk");
+    const { PRELOAD_MEMORY } = await import("@google/adk");
 
     const app = "quickstart-recall-agent-js";
     const user = "recall-agent-user";
@@ -212,7 +212,7 @@ describe("QuickstartParity", () => {
         "You are a helpful assistant with memory. " +
         "Use the preload_memory tool to recall what you know about the user, " +
         "and remember new facts they tell you.",
-      tools: [preloadMemory],
+      tools: [PRELOAD_MEMORY],
       afterAgentCallback,
     });
 

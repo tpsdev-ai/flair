@@ -752,4 +752,20 @@ describe("OllamaLlm registry", () => {
       "Model nonexistent-model-xyz not found."
     );
   });
+
+  it("LlmAgent construction with PRELOAD_MEMORY + OllamaLlm does not throw", async () => {
+    registerOllamaLlm();
+    const { Agent } = await import("@google/adk");
+    const { PRELOAD_MEMORY } = await import("@google/adk");
+    // This must not throw — validates the tools array shape and model
+    // resolution work together at agent construction time.
+    expect(() => {
+      new Agent({
+        model: "ollama_chat/llama3.2",
+        name: "test_agent",
+        instruction: "You are a test agent.",
+        tools: [PRELOAD_MEMORY],
+      });
+    }).not.toThrow();
+  });
 });
