@@ -121,36 +121,36 @@ export class FlairMemoryService implements BaseMemoryService {
     if (!events || events.length === 0) return;
 
     const tag = compoundTag(appName, userId);
-    const records: Array<Record<string, unknown>> = [];
+    let written = 0;
 
     for (const event of events) {
       const text = extractText(event.content);
       if (!text) continue; // filter no-text events (Vertex parity)
 
       const recordId = `${appName}:${userId}:${session.id}:${event.id}`;
-      records.push({
+      const body: Record<string, unknown> = {
         id: recordId,
         agentId: this._agentId,
         content: text,
         type: "session",
         durability: "standard",
         tags: [tag],
-        timestamp: epochMsToIso(event.timestamp),
-        author: event.author ?? "unknown",
-      });
+        createdAt: epochMsToIso(event.timestamp),
+      };
+
+      try {
+        await this._writeRecord(recordId, body);
+        written++;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[adk-flair] write failed for session ${session.id} event ${event.id} ` +
+          `(written=${written}/${events.length}): ${msg}`
+        );
+      }
     }
 
-    if (records.length === 0) return;
-
-    try {
-      await this._batchWrite(records);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(
-        `[adk-flair] addSessionToMemory failed: session=${session.id} ` +
-        `events=${records.length} error="${msg}"`
-      );
-    }
+    if (written === 0) return;
   }
 
   async searchMemory(
@@ -283,36 +283,36 @@ export class FlairMemoryService implements BaseMemoryService {
     }
 
     const tag = compoundTag(appName, userId);
-    const records: Array<Record<string, unknown>> = [];
+    let written = 0;
 
     for (const event of events) {
       const text = extractText(event.content);
       if (!text) continue;
 
       const recordId = `${appName}:${userId}:${sessionId}:${event.id}`;
-      records.push({
+      const body: Record<string, unknown> = {
         id: recordId,
         agentId: this._agentId,
         content: text,
         type: "session",
         durability: "standard",
         tags: [tag],
-        timestamp: epochMsToIso(event.timestamp),
-        author: event.author ?? "unknown",
-      });
+        createdAt: epochMsToIso(event.timestamp),
+      };
+
+      try {
+        await this._writeRecord(recordId, body);
+        written++;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[adk-flair] write failed for session ${sessionId} event ${event.id} ` +
+          `(written=${written}/${events.length}): ${msg}`
+        );
+      }
     }
 
-    if (records.length === 0) return;
-
-    try {
-      await this._batchWrite(records);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(
-        `[adk-flair] addEventsToMemory failed: session=${sessionId} ` +
-        `events=${records.length} error="${msg}"`
-      );
-    }
+    if (written === 0) return;
   }
 
   /**
@@ -343,48 +343,59 @@ export class FlairMemoryService implements BaseMemoryService {
     }
 
     const tag = compoundTag(appName, userId);
-    const records: Array<Record<string, unknown>> = [];
+    let written = 0;
 
     for (const mem of memories) {
       const text = extractText(mem.content);
       if (!text) continue;
 
       const recordId = `${appName}:${userId}:direct:${crypto.randomUUID()}`;
-
-      records.push({
+      const body: Record<string, unknown> = {
         id: recordId,
         agentId: this._agentId,
         content: text,
         type: "session",
         durability: "standard",
         tags: [tag],
-        timestamp: mem.timestamp ?? new Date().toISOString(),
-        author: mem.author ?? "unknown",
-      });
+        createdAt: mem.timestamp ?? new Date().toISOString(),
+      };
+      if (mem.author) {
+        body.author = mem.author;
+      }
+
+      try {
+        await this._writeRecord(recordId, body);
+        written++;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[adk-flair] direct memory write failed for id ${recordId} ` +
+          `(written=${written}/${memories.length}): ${msg}`
+        );
+      }
     }
 
-    if (records.length === 0) return;
-
-    try {
-      await this._batchWrite(records);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(
-        `[adk-flair] addMemory failed: count=${records.length} error="${msg}"`
-      );
-    }
+    if (written === 0) return;
   }
 
   // ─── Internal ─────────────────────────────────────────────────────────────
 
-  private async _batchWrite(
-    records: Array<Record<string, unknown>>,
+  /**
+   * Write a single record to Flair via PUT /Memory/{recordId}.
+   *
+   * The deterministic record ID is embedded in the URL path so the server
+   * can perform an idempotent upsert. The signing payload covers the full
+   * path (METHOD:pathname), so the path MUST include the record ID.
+   */
+  private async _writeRecord(
+    recordId: string,
+    body: Record<string, unknown>,
   ): Promise<void> {
-    const path = "/Memory";
+    const path = `/Memory/${recordId}`;
     const authHeader = signRequest(
       this._privateKey,
       this._agentId,
-      "POST",
+      "PUT",
       path,
     );
 
@@ -393,12 +404,12 @@ export class FlairMemoryService implements BaseMemoryService {
 
     try {
       const resp = await fetch(`${this._url}${path}`, {
-        method: "POST",
+        method: "PUT",
         headers: {
           "Authorization": authHeader,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(records),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 

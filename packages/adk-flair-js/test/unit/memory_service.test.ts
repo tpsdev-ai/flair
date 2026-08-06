@@ -454,9 +454,13 @@ describe("addSessionToMemory", () => {
   });
 
   it("writes session events with deterministic record IDs", async () => {
-    let capturedBody: string | null = null;
+    const calls: Array<{ method: string; url: string; body: unknown }> = [];
     globalThis.fetch = mock(async (url, init) => {
-      capturedBody = (init as RequestInit).body as string;
+      calls.push({
+        method: (init as RequestInit).method ?? "GET",
+        url: String(url),
+        body: JSON.parse((init as RequestInit).body as string),
+      });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
 
@@ -472,19 +476,20 @@ describe("addSessionToMemory", () => {
 
     await service.addSessionToMemory(session);
 
-    const records = JSON.parse(capturedBody!);
-    expect(records).toHaveLength(2);
-    expect(records[0].id).toBe("my-app:user-1:sess-1:evt-1");
-    expect(records[1].id).toBe("my-app:user-1:sess-1:evt-2");
-    expect(records[0].tags).toEqual(["adk:my-app:user-1"]);
-    expect(records[0].type).toBe("session");
-    expect(records[0].durability).toBe("standard");
+    expect(calls).toHaveLength(2);
+    // First call
+    expect(calls[0].method).toBe("PUT");
+    expect(calls[0].url).toContain("/Memory/my-app:user-1:sess-1:evt-1");
+    expect(calls[0].body).toMatchObject({ id: "my-app:user-1:sess-1:evt-1", tags: ["adk:my-app:user-1"], type: "session", durability: "standard" });
+    // Second call
+    expect(calls[1].method).toBe("PUT");
+    expect(calls[1].url).toContain("/Memory/my-app:user-1:sess-1:evt-2");
   });
 
   it("filters no-text events", async () => {
-    let capturedBody: string | null = null;
+    const calls: Array<{ body: unknown }> = [];
     globalThis.fetch = mock(async (url, init) => {
-      capturedBody = (init as RequestInit).body as string;
+      calls.push({ body: JSON.parse((init as RequestInit).body as string) });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
 
@@ -499,10 +504,9 @@ describe("addSessionToMemory", () => {
 
     await service.addSessionToMemory(session);
 
-    const records = JSON.parse(capturedBody!);
-    expect(records).toHaveLength(2);
-    expect(records[0].id).toContain("evt-1");
-    expect(records[1].id).toContain("evt-4");
+    expect(calls).toHaveLength(2);
+    expect((calls[0].body as Record<string, unknown>).id).toContain("evt-1");
+    expect((calls[1].body as Record<string, unknown>).id).toContain("evt-4");
   });
 
   it("no-ops on empty events", async () => {
@@ -518,9 +522,9 @@ describe("addSessionToMemory", () => {
   });
 
   it("maps epoch ms timestamps to ISO strings", async () => {
-    let capturedBody: string | null = null;
+    let capturedBody: unknown = null;
     globalThis.fetch = mock(async (url, init) => {
-      capturedBody = (init as RequestInit).body as string;
+      capturedBody = JSON.parse((init as RequestInit).body as string);
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
 
@@ -532,8 +536,7 @@ describe("addSessionToMemory", () => {
 
     await service.addSessionToMemory(session);
 
-    const records = JSON.parse(capturedBody!);
-    expect(records[0].timestamp).toBe(expectedIso);
+    expect((capturedBody as Record<string, unknown>).createdAt).toBe(expectedIso);
   });
 
   it("logs warning on write failure", async () => {
@@ -552,10 +555,34 @@ describe("addSessionToMemory", () => {
         events: [makeEvent({ id: "evt-1", text: "hello" })],
       });
       await service.addSessionToMemory(session);
-      expect(warnings.some((w) => w.includes("addSessionToMemory failed"))).toBe(true);
+      expect(warnings.some((w) => w.includes("write failed for session"))).toBe(true);
     } finally {
       console.warn = origWarn;
     }
+  });
+
+  it("sends PUT with id-bearing path (wire-shape guard)", async () => {
+    const calls: Array<{ method: string; url: string }> = [];
+    globalThis.fetch = mock(async (url, init) => {
+      calls.push({
+        method: (init as RequestInit).method ?? "GET",
+        url: String(url),
+      });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const session = makeSession({
+      id: "sess-ws",
+      appName: "ws-app",
+      userId: "ws-user",
+      events: [makeEvent({ id: "evt-ws", text: "wire shape test" })],
+    });
+
+    await service.addSessionToMemory(session);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("PUT");
+    expect(calls[0].url).toBe("http://localhost:19926/Memory/ws-app:ws-user:sess-ws:evt-ws");
   });
 });
 
@@ -583,9 +610,13 @@ describe("addMemory", () => {
   });
 
   it("writes memories with compound tag", async () => {
-    let capturedBody: string | null = null;
+    const calls: Array<{ method: string; url: string; body: unknown }> = [];
     globalThis.fetch = mock(async (url, init) => {
-      capturedBody = (init as RequestInit).body as string;
+      calls.push({
+        method: (init as RequestInit).method ?? "GET",
+        url: String(url),
+        body: JSON.parse((init as RequestInit).body as string),
+      });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
 
@@ -594,10 +625,11 @@ describe("addMemory", () => {
       makeMemoryEntry("fact two"),
     ]);
 
-    const records = JSON.parse(capturedBody!);
-    expect(records).toHaveLength(2);
-    expect(records[0].tags).toEqual(["adk:my-app:user-1"]);
-    expect(records[0].content).toBe("fact one");
+    expect(calls).toHaveLength(2);
+    expect(calls[0].method).toBe("PUT");
+    expect(calls[0].url).toContain("/Memory/my-app:user-1:direct:");
+    expect((calls[0].body as Record<string, unknown>).tags).toEqual(["adk:my-app:user-1"]);
+    expect((calls[0].body as Record<string, unknown>).content).toBe("fact one");
   });
 
   it("no-ops on empty memories", async () => {
@@ -636,9 +668,13 @@ describe("addEventsToMemory", () => {
   });
 
   it("writes events with session-scoped record IDs", async () => {
-    let capturedBody: string | null = null;
+    const calls: Array<{ method: string; url: string; body: unknown }> = [];
     globalThis.fetch = mock(async (url, init) => {
-      capturedBody = (init as RequestInit).body as string;
+      calls.push({
+        method: (init as RequestInit).method ?? "GET",
+        url: String(url),
+        body: JSON.parse((init as RequestInit).body as string),
+      });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
 
@@ -649,9 +685,10 @@ describe("addEventsToMemory", () => {
       "sess-2",
     );
 
-    const records = JSON.parse(capturedBody!);
-    expect(records).toHaveLength(1);
-    expect(records[0].id).toBe("my-app:user-1:sess-2:evt-1");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("PUT");
+    expect(calls[0].url).toContain("/Memory/my-app:user-1:sess-2:evt-1");
+    expect((calls[0].body as Record<string, unknown>).id).toBe("my-app:user-1:sess-2:evt-1");
   });
 });
 
