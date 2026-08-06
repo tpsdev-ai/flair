@@ -351,13 +351,12 @@ if you want to see it scripted end-to-end.
 - **Config:** `~/.flair/config.yaml` format is additive — new options fall back to
   defaults when absent, old options aren't removed out from under you.
 - **Harper 5.2:** Starting with the release that pins Harper 5.2.0 (see CHANGELOG). This upgrade is **forward-only** — Harper 5.2 writes LZ4-compressed storage
-  that Harper 5.1.x cannot read. If you need to roll back, you must restore from a
-  pre-upgrade snapshot; installing an older Harper version will not boot against a
+  that Harper 5.1.x cannot read. If you need to roll back, restore the pre-upgrade snapshot: `flair snapshot restore <path>` (use `flair snapshot list` to find available snapshots). Note this is the physical engine snapshot restore, distinct from `flair restore` which replays a logical JSON export and cannot recover a 5.1-incompatible data directory. Installing an older Harper version will not boot against a
   5.2-written data directory. Flair automatically takes a snapshot when the Harper engine
   minor version changes, so a valid snapshot will exist if you
   upgraded via `flair upgrade`. Real snapshots for production datasets run hundreds of
   megabytes — plan disk capacity accordingly. Cleanup of old engine snapshots is manual;
-  `flair snapshot list` shows your current pool, and you can delete entries you no longer
+  `flair snapshot list` shows available snapshots, and you can delete entries you no longer
   need.
 
 ## Rollback
