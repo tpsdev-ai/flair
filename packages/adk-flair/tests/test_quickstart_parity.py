@@ -199,8 +199,8 @@ class TestQuickstartParity:
     async def test_cross_session_recall(self, live_flair):
         """Cross-session recall through a real ADK agent loop.
 
-        Constructs a google.adk Agent with LiteLlm(model), PreloadMemoryTool,
-        and an after_agent_callback per the quickstart. Runs session 1 planting
+        Constructs a google.adk Agent with LiteLlm(model), the preload_memory
+        tool instance, and an after_agent_callback per the quickstart. Runs session 1 planting
         a fact via a real model turn, then session 2 asking for it, and asserts
         the fact surfaces in session 2's response.
 
@@ -212,7 +212,7 @@ class TestQuickstartParity:
         from adk_flair import FlairMemoryService
         from google.adk import Agent
         from google.adk.runners import Runner
-        from google.adk.tools import PreloadMemoryTool
+        from google.adk.tools import preload_memory
         from google.adk.sessions import InMemorySessionService
         from google.genai import types
 
@@ -244,7 +244,7 @@ class TestQuickstartParity:
                 "Use the preload_memory tool to recall what you know about the user, "
                 "and remember new facts they tell you."
             ),
-            tools=[PreloadMemoryTool()],
+            tools=[preload_memory],
             after_agent_callback=after_agent_callback,
         )
 
