@@ -200,9 +200,13 @@ describe("QuickstartParity", () => {
     const user = "recall-agent-user";
     const model = process.env["ADK_TEST_MODEL"]!;
 
-    const afterAgentCallback = async (callbackContext: Record<string, unknown>) => {
-      const ctxSession = callbackContext["session"] as Session;
-      await service!.addEventsToMemory(app, user, ctxSession.events, ctxSession.id);
+    // adk-js v1.6.0 callbacks receive a ReadonlyContext with
+    // invocationContext.session — there is no top-level session getter.
+    const afterAgentCallback = async (
+      ctx: { invocationContext: { session: Session } },
+    ) => {
+      const s = ctx.invocationContext.session;
+      await service!.addEventsToMemory(app, user, s.events, s.id);
     };
 
     const agent = new Agent({
