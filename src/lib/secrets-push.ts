@@ -8,11 +8,11 @@
  * otherwise. That is wrong in both directions and was wrong in both directions
  * on the day it was replaced:
  *
- *   - tps.dtrt.harperfabric.com runs Harper 5.1.26 and has NO secrets
+ *    - tps.dtrt.harperfabric.com runs Harper 5.1.26 and has NO secrets
  *     operations — measured, `set_secret` answers "Operation 'set_secret' not
  *     found", identical to an operation that does not exist at all — and was
  *     selected for the automated mechanism because of its name.
- *   - a self-hosted Harper 5.2 with the Pro env-secrets component is fully
+ *    - a self-hosted Harper 5.2 with the Pro env-secrets component is fully
  *     capable and was sent down the manual Fabric Studio path because its
  *     hostname did not match.
  *
@@ -48,9 +48,9 @@
 import { sealSecret } from "./secret-envelope.js";
 
 export interface SecretsCapability {
-  /** True only when the target answered with a usable public key. */
+   /** True only when the target answered with a usable public key. */
   available: boolean;
-  /** Why, in operator-facing words. Always set, including on success. */
+   /** Why, in operator-facing words. Always set, including on success. */
   reason: string;
   publicKeyPem?: string;
 }
@@ -70,7 +70,7 @@ async function opsCall(
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: authHeader },
     body: JSON.stringify(body),
-  });
+   });
   const text = await res.text().catch(() => "");
   let json: any = null;
   try { json = JSON.parse(text); } catch { /* non-JSON body — keep the text */ }
@@ -91,27 +91,27 @@ export async function probeSecretsCapability(
   let r;
   try {
     r = await opsCall(opsUrl, authHeader, { operation: "get_secrets_public_key" }, fetchImpl);
-  } catch (err: any) {
+   } catch (err: any) {
     return { available: false, reason: `could not reach the ops API to ask (${err?.message ?? err}) — using the staged-file flow` };
-  }
+   }
 
-  // "Operation '<name>' not found" is how Harper answers an operation it does
-  // not have, and it is byte-identical to the answer for an invented one. That
-  // is the signal for a target older than the env-secrets feature.
+   // "Operation '<name>' not found" is how Harper answers an operation it does
+   // not have, and it is byte-identical to the answer for an invented one. That
+   // is the signal for a target older than the env-secrets feature.
   const errText = String(r.json?.error ?? r.text ?? "");
   if (/not found/i.test(errText) && /get_secrets_public_key/.test(errText)) {
     return { available: false, reason: "the target's Harper has no env-secrets operations (needs 5.2 or newer) — using the staged-file flow" };
-  }
+   }
   if (!r.ok) {
     return { available: false, reason: `the target refused the capability probe (HTTP ${r.status}${errText ? `: ${errText.slice(0, 120)}` : ""}) — using the staged-file flow` };
-  }
+   }
 
   const pem = extractPublicKeyPem(r.json);
   if (!pem) {
-    // Answered, but not with something we can encrypt to. Undeterminable is
-    // treated exactly like unavailable — see the failure-direction note above.
+     // Answered, but not with something we can encrypt to. Undeterminable is
+     // treated exactly like unavailable — see the failure-direction note above.
     return { available: false, reason: "the target answered the probe without a usable public key — using the staged-file flow" };
-  }
+   }
   return { available: true, reason: "target supports env-secrets; pushing over the ops API", publicKeyPem: pem };
 }
 
@@ -121,7 +121,7 @@ function extractPublicKeyPem(json: any): string | undefined {
   const candidates = [json, json?.public_key, json?.publicKey, json?.key, json?.pem, json?.data?.public_key];
   for (const c of candidates) {
     if (typeof c === "string" && c.includes("BEGIN PUBLIC KEY")) return c;
-  }
+   }
   return undefined;
 }
 
@@ -150,14 +150,37 @@ export async function pushSecrets(
       const r = await opsCall(
         opsUrl,
         authHeader,
-        { operation: "set_secret", name, envelope: sealSecret(value, publicKeyPem), tier: PROCESS_ENV_TIER },
+         { operation: "set_secret", name, envelope: sealSecret(value, publicKeyPem), processEnv: true },
         fetchImpl,
-      );
+       );
       const err = String(r.json?.error ?? "").slice(0, 140);
-      results.push({ name, ok: r.ok, detail: r.ok ? undefined : `HTTP ${r.status}${err ? `: ${err}` : ""}` });
-    } catch (err: any) {
+      if (!r.ok) {
+        results.push({ name, ok: false, detail: `HTTP ${r.status}${err ? `: ${err}` : ""}` });
+        continue;
+       }
+
+      // Read back one pushed row to verify processEnv actually materialised.
+      // A 200 from set_secret is not proof — core silently ignores unknown
+      // params, so the row can be accepted and still land inert.
+      const verify = await opsCall(
+        opsUrl,
+        authHeader,
+          { operation: "search_by_value", table: "system.hdb_secret", name: name, get_attributes: ["name", "processEnv"] },
+        fetchImpl,
+        );
+      if (!verify.ok) {
+        results.push({ name, ok: false, detail: `push returned 200 but verify failed HTTP ${verify.status}` });
+        continue;
+        }
+      const row = Array.isArray(verify.json) ? verify.json[0] : verify.json?.[0];
+      if (!row || (row as Record<string, unknown>).processEnv !== true) {
+        results.push({ name, ok: false, detail: `push returned 200 but read-back shows processEnv is ${row?.processEnv ?? "missing"}, not true — secret is inert` });
+        continue;
+        }
+      results.push({ name, ok: true });
+     } catch (err: any) {
       results.push({ name, ok: false, detail: String(err?.message ?? err).slice(0, 140) });
+     }
     }
-  }
   return { allOk: results.every((x) => x.ok), results };
 }
