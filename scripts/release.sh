@@ -391,6 +391,7 @@ git -C "$ROOT" add \
   "$ROOT/packages/langgraph-flair/package.json" \
   "$ROOT/packages/flair-bench/package.json" \
   "$ROOT/packages/flair-bench/src/version.ts" \
+  "$ROOT/packages/adk-flair/pyproject.toml" \
   "$ROOT/bun.lock"
 
 # The fragment files consumed by step 1a are DELETED, so this needs -A to stage

@@ -88,6 +88,14 @@ const SOURCE_VERSION_FILES = [
     // Global so occurrences can be counted; see readDeclared.
     pattern: /(\bTOOL_VERSION\s*=\s*")([^"]*)(")/g,
   },
+  {
+    path: "packages/adk-flair/pyproject.toml",
+    label: "version",
+    // Matches: version = "X.Y.Z"  (TOML string)
+    // The adk-flair package tracks flair's minor while 0.x (compat-signal
+    // policy), so this must be bumped in lockstep with every release.
+    pattern: /(^version\s*=\s*")([^"]*)(")/gm,
+  },
 ];
 
 const INVENTORY = new Set([...PACKAGE_JSONS, ...SOURCE_VERSION_FILES.map((f) => f.path)]);
