@@ -153,8 +153,8 @@ export async function pushSecrets(
          { operation: "set_secret", name, envelope: sealSecret(value, publicKeyPem), processEnv: true },
         fetchImpl,
        );
-      const err = String(r.json?.error ?? "").slice(0, 140);
       if (!r.ok) {
+        const err = String(r.json?.error ?? "").slice(0, 140);
         results.push({ name, ok: false, detail: `HTTP ${r.status}${err ? `: ${err}` : ""}` });
         continue;
        }
