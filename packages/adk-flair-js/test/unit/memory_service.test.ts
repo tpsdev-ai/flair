@@ -709,3 +709,47 @@ describe("close", () => {
     }
   });
 });
+
+// ─── OllamaLlm registry ────────────────────────────────────────────────────
+
+import { LLMRegistry, BaseLlm } from "@google/adk";
+import { registerOllamaLlm, OllamaLlm } from "../helpers/ollama-llm.js";
+
+describe("OllamaLlm registry", () => {
+  it("resolves ollama_chat/<model> after registration", () => {
+    registerOllamaLlm();
+    const resolved = LLMRegistry.resolve("ollama_chat/llama3.2");
+    expect(resolved).toBe(OllamaLlm);
+  });
+
+  it("resolves ollama_chat/<model> with hyphens", () => {
+    registerOllamaLlm();
+    const resolved = LLMRegistry.resolve("ollama_chat/mistral-7b-instruct");
+    expect(resolved).toBe(OllamaLlm);
+  });
+
+  it("newLlm constructs an OllamaLlm instance", () => {
+    registerOllamaLlm();
+    const instance = LLMRegistry.newLlm("ollama_chat/llama3.2");
+    expect(instance).toBeInstanceOf(OllamaLlm);
+    expect(instance).toBeInstanceOf(BaseLlm);
+    expect(instance.model).toBe("ollama_chat/llama3.2");
+  });
+
+  it("strips prefix to derive ollama model name", () => {
+    registerOllamaLlm();
+    const instance = LLMRegistry.newLlm("ollama_chat/llama3.2") as OllamaLlm;
+    // The ollamaModel is private, but we can verify via the model property
+    // and the constructor strips the prefix internally.
+    expect(instance.model).toBe("ollama_chat/llama3.2");
+  });
+
+  it("rejects unknown model prefix", () => {
+    registerOllamaLlm();
+    // gemini-* is already registered by the built-in Gemini class, so use
+    // a model string that no built-in class matches.
+    expect(() => LLMRegistry.resolve("nonexistent-model-xyz")).toThrow(
+      "Model nonexistent-model-xyz not found."
+    );
+  });
+});

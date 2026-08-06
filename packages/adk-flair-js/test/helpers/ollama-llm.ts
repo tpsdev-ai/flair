@@ -65,8 +65,14 @@ function extractSystemInstruction(
 const OLLAMA_PREFIX = "ollama_chat/";
 
 export class OllamaLlm extends BaseLlm {
-  /** Regex matching the ollama_chat/ prefix for LLMRegistry resolution. */
-  static readonly supportedModels: Array<string | RegExp> = [/^ollama_chat\//];
+  /**
+   * Regex matching the ollama_chat/ prefix for LLMRegistry resolution.
+   *
+   * IMPORTANT: the registry wraps every regex with ^ and $, so this must
+   * NOT include its own ^ anchor.  The pattern ollama_chat\/.* becomes
+   * ^ollama_chat\/.*$ which correctly matches ollama_chat/<model>.
+   */
+  static readonly supportedModels: Array<string | RegExp> = [/ollama_chat\/.*/];
 
   private readonly ollamaModel: string;
 
