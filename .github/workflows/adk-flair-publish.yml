@@ -1,0 +1,117 @@
+name: adk-flair — PyPI publish (OIDC trusted publishing)
+
+# Tokenless PyPI publish for the adk-flair Python package. Triggered by pushing
+# an adk-flair-v* tag. Authenticates to PyPI via OIDC trusted publishing — no
+# PyPI token lives anywhere. The tag push triggers this workflow; a maintainer
+# cuts the tag after the release PR merges to main.
+#
+# Cut a release:
+#   git tag adk-flair-v0.1.0 && git push origin adk-flair-v0.1.0
+#
+# One-time PyPI setup (pypi.org): add a Trusted Publisher pointing at
+#   owner=tpsdev-ai, repo=flair, workflow=adk-flair-publish.yml
+#   environment=adk-flair-publish
+# The `adk-flair-publish` GitHub environment must permit `adk-flair-v*` tag
+# deploys.
+
+on:
+  push:
+    tags:
+      - "adk-flair-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Fallback only: version to publish (an adk-flair-v* tag must already exist on a merged commit)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adk-flair-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish adk-flair to PyPI
+    runs-on: ubuntu-latest
+    environment: adk-flair-publish
+    permissions:
+      id-token: write   # mint the short-lived OIDC token for PyPI trusted publishing
+      contents: read    # checkout
+    steps:
+      - name: Resolve version
+        id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="${REF_NAME#adk-flair-v}"
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.1.0 or 0.1.0-rc.1)."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tagged commit is on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Commit ${GITHUB_SHA} is not an ancestor of origin/main. Tag a merged release commit."
+            exit 1
+          fi
+          echo "  ok ${GITHUB_SHA} is on main"
+
+      - name: Verify pyproject.toml version matches the tag
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd packages/adk-flair
+          PV="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$PV" != "$VERSION" ]; then
+            echo "::error::pyproject.toml version is $PV, expected $VERSION (tag adk-flair-v$VERSION)."
+            exit 1
+          fi
+          echo "  ok adk-flair @ $PV"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: pip install build
+
+      - name: Build wheel and sdist
+        run: |
+          cd packages/adk-flair
+          python -m build
+
+      - name: Publish to PyPI via OIDC trusted publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: packages/adk-flair/dist
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          {
+            echo "### 🐍 adk-flair v$VERSION published to PyPI"
+            echo ""
+            echo "Package: [adk-flair](https://pypi.org/project/adk-flair/$VERSION/)"
+            echo "Install: \`pip install adk-flair==$VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
