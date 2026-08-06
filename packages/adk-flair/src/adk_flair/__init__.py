@@ -46,7 +46,8 @@ def register():
         parsed = urlparse(uri)
         host = parsed.hostname or "localhost"
         port = parsed.port or 19926
-        url = f"http://{host}:{port}"
+        scheme = "http" if host.lower() in ("localhost", "127.0.0.1", "::1", "[::1]") else "https"
+        url = f"{scheme}://{host}:{port}"
 
         # Allow agent_id override from kwargs (e.g. from adk web flags)
         agent_id = kwargs.pop("agent_id", None)

@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
 import time
@@ -231,7 +232,7 @@ class FlairMemoryService(BaseMemoryService):
 
         if resp.status_code >= 400:
             raise RuntimeError(
-                f"Flair {method} {path} → {resp.status_code}: {resp.text[:500]}"
+                f"Flair {method} {path} → {resp.status_code} {resp.reason_phrase}"
             )
 
         ctype = resp.headers.get("content-type", "")
@@ -368,7 +369,7 @@ class FlairMemoryService(BaseMemoryService):
             if not content_text:
                 continue
 
-            record_id = mem.id or f"{self._agent_id}-{int(time.time() * 1000)}"
+            record_id = mem.id or hashlib.sha256(content_text.encode()).hexdigest()[:32]
             body: Dict[str, Any] = {
                 "id": record_id,
                 "agentId": self._agent_id,

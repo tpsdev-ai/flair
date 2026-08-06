@@ -444,6 +444,41 @@ class TestAddMemory:
         assert body["tags"] == ["adk:app:user"]
         assert body["author"] == "test-agent"
 
+    @pytest.mark.asyncio
+    async def test_fallback_id_is_content_hash(self, service):
+        """When mem.id is None, the record id is a stable SHA-256 hash of content."""
+        import hashlib
+        content_text = "stable content for hashing"
+        memories = [
+            MemoryEntry(
+                id=None,
+                content=types.Content(
+                    role="user",
+                    parts=[types.Part(text=content_text)],
+                ),
+            ),
+        ]
+
+        service._client.request.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            text="{}",
+        )
+
+        await service.add_memory(
+            app_name="app", user_id="user", memories=memories,
+        )
+
+        body = service._client.request.call_args[1]["json"]
+        expected_id = hashlib.sha256(content_text.encode()).hexdigest()[:32]
+        assert body["id"] == expected_id
+        # Same content → same id (stable)
+        await service.add_memory(
+            app_name="app", user_id="user", memories=memories,
+        )
+        body2 = service._client.request.call_args_list[1][1]["json"]
+        assert body2["id"] == expected_id
+
 
 # ─── Event text extraction ──────────────────────────────────────────────────
 
@@ -495,3 +530,15 @@ class TestRegistration:
             assert svc is not None
             assert svc._url == "http://localhost:19926"
             assert svc._agent_id == "test"
+
+    def test_factory_uses_https_for_remote_host(self):
+        from adk_flair import register
+        from google.adk.cli.service_registry import get_service_registry
+
+        register()
+        registry = get_service_registry()
+
+        with patch("adk_flair.memory_service._load_ed25519_key", return_value=MagicMock()), \
+             patch.dict("os.environ", {"FLAIR_AGENT_ID": "test", "FLAIR_KEYFILE": "/f", "FLAIR_ALLOW_REMOTE_URL": "1"}, clear=True):
+            svc = registry.create_memory_service("flair://flair.example.com:9926")
+            assert svc._url == "https://flair.example.com:9926"
