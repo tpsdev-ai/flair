@@ -182,7 +182,7 @@ def live_flair():
 
         # Register agent
         import asyncio
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             register_agent(ops_url, admin_user, admin_pass, agent_id, public_b64)
         )
 
@@ -227,6 +227,37 @@ def live_flair():
             "set FLAIR_TEST_URL to a running Flair instance to run integration tests"
         )
 
+    # ── Build gate: the repo must be built before Harper can serve ─────────
+    _dist_dir = _REPO_ROOT / "dist"
+    if not _dist_dir.is_dir() or not any(_dist_dir.iterdir()):
+        # Try to build; if that fails, fail loudly naming the missing build
+        try:
+            subprocess.run(
+                [node_bin, "node_modules/.bin/tsc", "-p", "tsconfig.json", "--noCheck"],
+                cwd=str(_REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=True,
+            )
+        except subprocess.CalledProcessError as build_err:
+            pytest.skip(
+                f"FLAIR_TEST_URL not set and repo dist/ is missing — "
+                f"auto-build failed (exit {build_err.returncode}): "
+                f"{build_err.stderr[:1000]}"
+            )
+        except FileNotFoundError:
+            pytest.skip(
+                "FLAIR_TEST_URL not set and repo dist/ is missing — "
+                "tsc not found; run 'npm run build' first or set FLAIR_TEST_URL"
+            )
+        if not _dist_dir.is_dir() or not any(_dist_dir.iterdir()):
+            pytest.skip(
+                "FLAIR_TEST_URL not set and repo dist/ is missing — "
+                "build completed but dist/ is still empty; "
+                "run 'npm run build' manually or set FLAIR_TEST_URL"
+            )
+
     # Spawn the boot helper
     proc = subprocess.Popen(
         [node_bin, str(_BOOT_HELPER)],
@@ -244,14 +275,20 @@ def live_flair():
             stderr_output = proc.stderr.read()
             pytest.skip(
                 f"FLAIR_TEST_URL not set and ephemeral Harper failed to start: "
-                f"stderr={stderr_output[:500]}"
+                f"stderr={stderr_output}"
             )
         config = json.loads(stdout_line.strip())
     except (json.JSONDecodeError, Exception) as exc:
-        proc.kill()
-        proc.wait()
+        stderr_output = ""
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+            stderr_output = proc.stderr.read()
+        except Exception:
+            pass
         pytest.skip(
-            f"FLAIR_TEST_URL not set and ephemeral Harper config parse failed: {exc}"
+            f"FLAIR_TEST_URL not set and ephemeral Harper config parse failed: {exc}. "
+            f"stderr={stderr_output}"
         )
 
     http_url = config["httpURL"]
@@ -270,7 +307,7 @@ def live_flair():
     Path(keyfile_path).write_text(keyfile_content, encoding="utf-8")
 
     import asyncio
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         register_agent(ops_url, admin_user, admin_pass, agent_id, public_b64)
     )
 

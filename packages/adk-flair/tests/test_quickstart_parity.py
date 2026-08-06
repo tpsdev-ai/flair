@@ -139,21 +139,18 @@ class TestQuickstartParity:
         await service.close()
 
     @pytest.mark.asyncio
-    async def test_cross_session_recall(self, live_flair):
-        """Cross-session recall: write in session 1, read in session 2.
+    async def test_cross_session_direct(self, live_flair):
+        """Cross-session recall via direct service calls (always runs).
 
-        This is the model-dependent portion. When ADK_TEST_MODEL is not set,
-        this test SKIPs with a visible reason. The provisioning and write-path
-        tests above still validate everything up to the model-call boundary.
+        Writes a fact through the FlairMemoryService in one session context
+        and verifies it is searchable — the direct-service body that was
+        previously (and wrongly) named test_cross_session_recall. No model
+        required; this is the always-run path.
         """
-        if not _model_available():
-            pytest.skip(_skip_reason())
-
         from adk_flair import FlairMemoryService
 
         app = "quickstart-recall"
         user = "recall-user"
-        model = os.environ["ADK_TEST_MODEL"]
 
         service = FlairMemoryService(
             url=live_flair.http_url,
@@ -194,6 +191,126 @@ class TestQuickstartParity:
         assert found, (
             f"Cross-session recall failed: secret content not in results. "
             f"Results: {[m.content.parts[0].text[:80] if m.content and m.content.parts else '' for m in result.memories]}"
+        )
+
+        await service.close()
+
+    @pytest.mark.asyncio
+    async def test_cross_session_recall(self, live_flair):
+        """Cross-session recall through a real ADK agent loop.
+
+        Constructs a google.adk Agent with LiteLlm(model), PreloadMemoryTool,
+        and an after_agent_callback per the quickstart. Runs session 1 planting
+        a fact via a real model turn, then session 2 asking for it, and asserts
+        the fact surfaces in session 2's response.
+
+        Requires ADK_TEST_MODEL (LiteLLM syntax). Skips visibly otherwise.
+        """
+        if not _model_available():
+            pytest.skip(_skip_reason())
+
+        from adk_flair import FlairMemoryService
+        from google.adk import Agent
+        from google.adk.runners import Runner
+        from google.adk.tools import PreloadMemoryTool
+        from google.adk.sessions import InMemorySessionService
+        from google.genai import types
+
+        app = "quickstart-recall-agent"
+        user = "recall-agent-user"
+        model = os.environ["ADK_TEST_MODEL"]
+
+        service = FlairMemoryService(
+            url=live_flair.http_url,
+            agent_id=live_flair.agent_id,
+            keyfile=live_flair.keyfile_path,
+        )
+
+        # ── Build the agent per the quickstart pattern ───────────────────────
+        async def after_agent_callback(callback_context):
+            """Quickstart after_agent_callback: persist session events."""
+            await service.add_events_to_memory(
+                app_name=app,
+                user_id=user,
+                events=callback_context.session.events,
+                session_id=callback_context.session.id,
+            )
+
+        agent = Agent(
+            model=model,
+            name="recall_agent",
+            instruction=(
+                "You are a helpful assistant with memory. "
+                "Use the preload_memory tool to recall what you know about the user, "
+                "and remember new facts they tell you."
+            ),
+            tools=[PreloadMemoryTool()],
+            after_agent_callback=after_agent_callback,
+        )
+
+        session_service = InMemorySessionService()
+        runner = Runner(
+            agent=agent,
+            app_name=app,
+            session_service=session_service,
+            memory_service=service,
+        )
+
+        # ── Session 1: plant a fact via a real model turn ───────────────────
+        secret_word = f"zephyr-{uuid.uuid4().hex[:6]}"
+        plant_prompt = (
+            f"Remember this fact about me: my favorite code word is '{secret_word}'. "
+            f"Please acknowledge you've stored it."
+        )
+
+        session1 = await session_service.create_session(
+            app_name=app, user_id=user
+        )
+        events_s1 = []
+        async for event in runner.run_async(
+            user_id=user,
+            session_id=session1.id,
+            new_message=types.Content(
+                role="user",
+                parts=[types.Part(text=plant_prompt)],
+            ),
+        ):
+            events_s1.append(event)
+
+        # ── Session 2: ask for the fact ──────────────────────────────────────
+        session2 = await session_service.create_session(
+            app_name=app, user_id=user
+        )
+        recall_prompt = "What is my favorite code word?"
+
+        events_s2 = []
+        async for event in runner.run_async(
+            user_id=user,
+            session_id=session2.id,
+            new_message=types.Content(
+                role="user",
+                parts=[types.Part(text=recall_prompt)],
+            ),
+        ):
+            events_s2.append(event)
+
+        # ── Assert the fact surfaces in session 2's response ────────────────
+        # Collect all model-authored text from session 2
+        s2_texts = []
+        for evt in events_s2:
+            if getattr(evt, "author", "") == "recall_agent":
+                content = getattr(evt, "content", None)
+                if content:
+                    parts = getattr(content, "parts", []) or []
+                    for p in parts:
+                        t = getattr(p, "text", None)
+                        if t:
+                            s2_texts.append(str(t))
+
+        combined = " ".join(s2_texts).lower()
+        assert secret_word.lower() in combined, (
+            f"Cross-session agent recall failed: '{secret_word}' not found in "
+            f"session 2 agent response. Response texts: {s2_texts[:3]}"
         )
 
         await service.close()
