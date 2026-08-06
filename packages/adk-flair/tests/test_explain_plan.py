@@ -115,6 +115,65 @@ class TestExplainPlan:
                 f"ISOLATION VIOLATION in bob search: {text[:100]}"
             )
 
+        # ── 5. Explain plan: prove the tag is the DRIVING condition ─────────
+        # Issue the tagged search with explain enabled and assert the returned
+        # plan shows the tags condition as the first/index-seek position, not
+        # the vector sort. An engine-level post-filter would also satisfy the
+        # behavioral assertions above; the explain plan proves the pre-filter
+        # regime the spec mandates.
+        import httpx
+        from adk_flair.memory_service import _sign_request, _compound_tag
+
+        explain_body = {
+            "agentId": live_flair.agent_id,
+            "q": "technical work",
+            "tag": _compound_tag(app, "alice"),
+            "limit": 10,
+            "explain": True,
+        }
+        auth_header = _sign_request(
+            live_flair.private_key,
+            live_flair.agent_id,
+            "POST",
+            "/SemanticSearch",
+        )
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10)) as client:
+            explain_resp = await client.post(
+                f"{live_flair.http_url}/SemanticSearch",
+                headers={"Authorization": auth_header, "Content-Type": "application/json"},
+                json=explain_body,
+            )
+        assert explain_resp.status_code == 200, (
+            f"Explain request failed: HTTP {explain_resp.status_code} {explain_resp.text[:200]}"
+        )
+        plan = explain_resp.json()
+        assert plan.get("explain") is True, (
+            f"Expected explain=true in response, got: {plan}"
+        )
+
+        conditions = plan.get("conditions", [])
+        assert len(conditions) > 0, (
+            f"Expected non-empty conditions in explain plan, got: {plan}"
+        )
+
+        # The FIRST condition must be the tag filter (index-seek / pre-filter).
+        # If the first condition is NOT the tag, the engine is post-filtering
+        # after the vector sort, which the spec forbids.
+        first_condition = conditions[0]
+        assert first_condition.get("attribute") == "tags", (
+            f"Pre-filter proof FAILED: first condition is not the tags filter. "
+            f"First condition: {first_condition}. "
+            f"Full plan: {plan}"
+        )
+        assert first_condition.get("comparator") == "equals", (
+            f"Pre-filter proof FAILED: tag comparator is not 'equals'. "
+            f"First condition: {first_condition}"
+        )
+        assert first_condition.get("value") == _compound_tag(app, "alice"), (
+            f"Pre-filter proof FAILED: tag value mismatch. "
+            f"Expected: {_compound_tag(app, 'alice')}, got: {first_condition.get('value')}"
+        )
+
         await service.close()
 
     @pytest.mark.asyncio

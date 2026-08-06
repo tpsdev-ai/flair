@@ -66,7 +66,7 @@ export class SemanticSearch extends Resource {
     // recall-harness (test/bench/recall-harness/run.ts) and `recall-eval.mjs`
     // before reconsidering this default if the compositeScore formula or
     // corpus changes.
-    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, abstain = false } = data || {};
+    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, abstain = false, explain = false } = data || {};
 
     // Authenticated identity lives on the Harper Resource context (getContext().request).
     // `this.request` is NOT populated on Harper v5 Resources — prior reads here
@@ -185,6 +185,27 @@ export class SemanticSearch extends Resource {
           conditions: subjects.map(s => ({ attribute: "subject", comparator: "equals", value: s })),
         });
       }
+    }
+
+    // ─── Explain mode: return the query plan, not results ──────────────────
+    // When explain=true, return the conditions array and metadata that
+    // describe the query plan — the order of conditions reveals whether the
+    // tag filter is the DRIVING condition (first/index-seek position) or a
+    // post-filter applied after the vector sort. No search is executed.
+    if (explain) {
+      return {
+        explain: true,
+        conditions: conditions.map((c: any) => ({
+          attribute: c.attribute,
+          comparator: c.comparator,
+          value: c.value,
+          ...(c.operator ? { operator: c.operator, conditions: c.conditions } : {}),
+        })),
+        conditionCount: conditions.length,
+        hybrid: hybridEnabled(),
+        tag,
+        scoring,
+      };
     }
 
     const hybrid = hybridEnabled();

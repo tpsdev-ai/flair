@@ -91,9 +91,8 @@ async def register_agent(
             },
         )
         if resp.status_code >= 400:
-            body = resp.text[:500]
             raise RuntimeError(
-                f"Agent registration failed: HTTP {resp.status_code} — {body}"
+                f"Agent registration failed: HTTP {resp.status_code}"
             )
 
 
@@ -108,7 +107,12 @@ def _iso_now() -> str:
 
 
 class LiveFlair:
-    """Holds connection details for a live Flair instance."""
+    """Holds connection details for a live Flair instance.
+
+    admin_pass is stored privately and redacted from repr to prevent
+    credential leaks in pytest failure output when FLAIR_TEST_URL points
+    at a real (non-ephemeral) instance.
+    """
 
     def __init__(
         self,
@@ -124,11 +128,23 @@ class LiveFlair:
         self.http_url = http_url
         self.ops_url = ops_url
         self.admin_user = admin_user
-        self.admin_pass = admin_pass
+        self._admin_pass = admin_pass
         self.agent_id = agent_id
         self.private_key = private_key
         self.keyfile_path = keyfile_path
         self._harper_proc = harper_proc
+
+    @property
+    def admin_pass(self) -> str:
+        """Admin password — available to callers but redacted in repr."""
+        return self._admin_pass
+
+    def __repr__(self) -> str:
+        return (
+            f"LiveFlair(http_url={self.http_url!r}, ops_url={self.ops_url!r}, "
+            f"admin_user={self.admin_user!r}, admin_pass='***', "
+            f"agent_id={self.agent_id!r})"
+        )
 
     def cleanup(self):
         """Tear down ephemeral Harper if we spawned it."""

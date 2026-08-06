@@ -1,5 +1,11 @@
 # adk-flair Integration Tests
 
+> **⚠️  WARNING: These tests WRITE data and REGISTER agents.**
+> Never point `FLAIR_TEST_URL` at a production instance. The test harness
+> creates agents, writes synthetic memories, and may leave residual data.
+> Always use a dedicated test instance or let the harness boot an ephemeral
+> Harper (the default when `FLAIR_TEST_URL` is unset).
+
 Integration tests that require a live Flair instance. These tests validate
 the adapter against a real Flair server — they are **not** run in CI (no live
 Flair available) but are executed during verification on rockit.
