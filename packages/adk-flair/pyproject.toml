@@ -52,3 +52,6 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "live_flair: integration test that requires a live Flair instance (skips when FLAIR_TEST_URL is not set)",
+]

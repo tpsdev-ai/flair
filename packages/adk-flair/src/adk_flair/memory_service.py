@@ -274,10 +274,12 @@ class FlairMemoryService(BaseMemoryService):
             try:
                 await self._request("PUT", f"/Memory/{record_id}", json_body=body)
                 written += 1
-            except Exception:
+            except Exception as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
                 logger.warning(
-                    "adk-flair: write failed for session %s event %s",
-                    session_id, event.id,
+                    "adk-flair: write failed for session %s event %s "
+                    "(status=%s, written=%d/%d)",
+                    session_id, event.id, status, written, len(events),
                 )
 
         if written:
@@ -329,10 +331,12 @@ class FlairMemoryService(BaseMemoryService):
             try:
                 await self._request("PUT", f"/Memory/{record_id}", json_body=body)
                 written += 1
-            except Exception:
+            except Exception as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
                 logger.warning(
-                    "adk-flair: write failed for session %s event %s",
-                    sid, event_id,
+                    "adk-flair: write failed for session %s event %s "
+                    "(status=%s, written=%d/%d)",
+                    sid, event_id, status, written, len(events),
                 )
 
         if written:
@@ -383,9 +387,12 @@ class FlairMemoryService(BaseMemoryService):
             try:
                 await self._request("PUT", f"/Memory/{record_id}", json_body=body)
                 written += 1
-            except Exception:
+            except Exception as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
                 logger.warning(
-                    "adk-flair: direct memory write failed for id %s", record_id,
+                    "adk-flair: direct memory write failed for id %s "
+                    "(status=%s, written=%d/%d)",
+                    record_id, status, written, len(memories),
                 )
 
         if written:
