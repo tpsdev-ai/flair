@@ -64,8 +64,17 @@ function extractSystemInstruction(
 
 const OLLAMA_PREFIX = "ollama_chat/";
 
-/** Hard timeout for Ollama API calls — prevents indefinite hangs. */
-const OLLAMA_TIMEOUT_MS = 30_000;
+/** Hard timeout for Ollama API calls — prevents indefinite hangs.
+ * Must exceed cold-load time (observed ~72s on newton).
+ * Override via ADK_TEST_OLLAMA_TIMEOUT_MS. */
+const OLLAMA_TIMEOUT_MS = (() => {
+  const env = process.env["ADK_TEST_OLLAMA_TIMEOUT_MS"];
+  if (env) {
+    const parsed = parseInt(env, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return 120_000;
+})();
 
 export class OllamaLlm extends BaseLlm {
   /**
@@ -117,12 +126,16 @@ export class OllamaLlm extends BaseLlm {
       model: this.ollamaModel,
       messages,
       stream: false,
+      keep_alive: "10m",
     });
 
-    // Merge caller's abortSignal with our hard 30s timeout so any wedge
+    // Merge caller's abortSignal with our hard timeout so any wedge
     // is a loud failure, not a silent hang.
     const timeoutController = new AbortController();
-    const timeoutId = setTimeout(() => timeoutController.abort(), OLLAMA_TIMEOUT_MS);
+    const timeoutId = setTimeout(
+      () => timeoutController.abort(new Error("OllamaLlm timeout")),
+      OLLAMA_TIMEOUT_MS,
+    );
     const combinedSignal = abortSignal
       ? AbortSignal.any([abortSignal, timeoutController.signal])
       : timeoutController.signal;
@@ -135,9 +148,18 @@ export class OllamaLlm extends BaseLlm {
         body,
         signal: combinedSignal,
       });
-    } finally {
+    } catch (err: unknown) {
       clearTimeout(timeoutId);
+      // Re-throw abort/timeout errors loudly — the consumer must see them,
+      // not receive a contentless LlmResponse that passes for empty output.
+      if (err instanceof DOMException && err.name === "AbortError") {
+        throw new Error(
+          `OllamaLlm request aborted (timeout=${OLLAMA_TIMEOUT_MS}ms): ${err.message}`,
+        );
+      }
+      throw err;
     }
+    clearTimeout(timeoutId);
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");

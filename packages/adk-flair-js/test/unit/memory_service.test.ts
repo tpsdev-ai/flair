@@ -815,10 +815,11 @@ describe("OllamaLlm registry", () => {
       expect(resp.errorCode).toBeUndefined();
       expect(resp.errorMessage).toBeUndefined();
 
-      // Verify fetch was called with stream:false
+      // Verify fetch was called with stream:false and keep_alive
       const fetchCall = mockFetch.mock.calls[0] as [string, RequestInit];
       const fetchBody = JSON.parse(fetchCall[1].body as string);
       expect(fetchBody.stream).toBe(false);
+      expect(fetchBody.keep_alive).toBe("10m");
       expect(fetchBody.model).toBe("llama3.2");
     } finally {
       globalThis.fetch = originalFetch;
@@ -852,6 +853,68 @@ describe("OllamaLlm registry", () => {
       expect(responses[0].errorMessage).toContain("Ollama API error 404");
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("generateContentAsync throws on abort — never yields empty content", async () => {
+    registerOllamaLlm();
+
+    const originalFetch = globalThis.fetch;
+    // Simulate a fetch that never resolves (aborted by timeout)
+    const mockFetch = mock(
+      (_url: string, init?: RequestInit) =>
+        new Promise<never>((_, reject) => {
+          // Listen for abort on the signal and reject with AbortError
+          const signal = init?.signal;
+          if (signal) {
+            if (signal.aborted) {
+              const err = new DOMException("The operation was aborted", "AbortError");
+              reject(err);
+              return;
+            }
+            signal.addEventListener("abort", () => {
+              const err = new DOMException("The operation was aborted", "AbortError");
+              reject(err);
+            }, { once: true });
+          }
+        }),
+    );
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    // Override timeout to 100ms for fast test
+    process.env["ADK_TEST_OLLAMA_TIMEOUT_MS"] = "100";
+
+    try {
+      // Must re-register to pick up the new timeout (the class reads
+      // the env var at the module level, but the timeout is read inside
+      // generateContentAsync each call — actually it's a module-level
+      // const, so we need to re-import.  Instead, we just test that the
+      // abort path throws by passing our own AbortController.
+      const instance = LLMRegistry.newLlm("ollama_chat/llama3.2") as OllamaLlm;
+      const request: LlmRequest = {
+        contents: [{ role: "user", parts: [{ text: "Hi" }] }],
+      };
+
+      // Pass a pre-aborted signal to force the abort path
+      const abortedController = new AbortController();
+      abortedController.abort();
+
+      // The generator must throw, not yield empty content
+      await expect(
+        (async () => {
+          for await (const _r of instance.generateContentAsync(
+            request,
+            undefined,
+            abortedController.signal,
+          )) {
+            // If we get here, the test fails — abort should throw, not yield
+            throw new Error("generator yielded instead of throwing on abort");
+          }
+        })(),
+      ).rejects.toThrow(/aborted|timeout/i);
+    } finally {
+      globalThis.fetch = originalFetch;
+      delete process.env["ADK_TEST_OLLAMA_TIMEOUT_MS"];
     }
   });
 });

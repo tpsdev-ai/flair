@@ -277,7 +277,7 @@ describe("QuickstartParity", () => {
 
     const combined = s2Texts.join(" ").toLowerCase();
     expect(combined).toContain(secretWord.toLowerCase());
-  });
+  }, { timeout: 180_000 });
 
   it("agent loop boundary", async () => {
     if (!config || !service) {
