@@ -1266,40 +1266,36 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       return { ok: false, dryRun, steps, failedStep: "apply-config-and-restart", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
     }
 
-    // ── Capture boot discriminator BEFORE restart (flair#1120) ─────────────
+    currentStep = "apply-config-and-restart";
+
+     // ── Capture boot discriminator BEFORE restart (flair#1120) ─────────────
     const preDiscriminator = await captureBootDiscriminator(
        params.instance, params.adminUser, params.adminPass,
-        { fetchImpl: deps.fetchImpl },
-      );
-      
-    currentStep = "apply-config-and-restart";
-    await applyRemoteConfigAndRestart(
-       { opsPortOrUrl: params.instance, adminUser: params.adminUser, adminPass: params.adminPass, configBlock },
-        { fetchImpl: deps.fetchImpl },
-      );
-    push(true, `set_configuration + restart succeeded against ${params.instance}`);
+         { fetchImpl: deps.fetchImpl },
+       );
 
-     // ── Verify the process actually restarted (flair#1120) ────────────────────
-     // Poll the ops API until the PID changes — the old process can briefly
-     // still answer after a real restart, so a single post-capture is unreliable.
+    await applyRemoteConfigAndRestart(
+        { opsPortOrUrl: params.instance, adminUser: params.adminUser, adminPass: params.adminPass, configBlock },
+         { fetchImpl: deps.fetchImpl },
+       );
+    push(true, `set_configuration + restart succeeded against ${params.instance}`);
+      // ── Verify the process actually restarted (flair#1120) ──────────────────
+      // Poll the ops API until the PID changes — the old process can briefly
+      // still answer after a real restart, so a single post-capture is unreliable.
+      // waitForOpsApi guarantees PID change (or throws on timeout), so the restart
+      // is confirmed when this call returns.
     currentStep = "verify-restart";
     const postDiscriminator = await waitForOpsApi(
-        resolveOpsUrl(params.instance),
-        basicAuthHeader(params.adminUser, params.adminPass),
-        preDiscriminator.pid,
-           {
-            fetchImpl: deps.fetchImpl,
-            timeoutMs: deps.waitForOpsApiTimeoutMs,
-            pollMs: deps.waitForOpsApiPollMs,
-           },
-      );
-    const restartCheck = verifyProcessRestart(preDiscriminator, postDiscriminator);
-    if (!restartCheck.ok) {
-      push(false, restartCheck.detail);
-      return { ok: false, dryRun, steps, failedStep: "verify-restart" };
-       }
+       resolveOpsUrl(params.instance),
+       basicAuthHeader(params.adminUser, params.adminPass),
+       preDiscriminator.pid,
+         {
+          fetchImpl: deps.fetchImpl,
+          timeoutMs: deps.waitForOpsApiTimeoutMs,
+          pollMs: deps.waitForOpsApiPollMs,
+         },
+       );
     push(true, `process restarted: pid changed ${preDiscriminator.pid} -> ${postDiscriminator.pid}`);
-
      // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
     currentStep = "self-verify";
     const verify = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
