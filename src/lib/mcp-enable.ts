@@ -944,7 +944,8 @@ async function waitForOpsApi(
    }
   throw new Error(
      `ops API at ${opsUrl} did not confirm a new process within ${timeoutMs}ms (${attempt} attempts) ` +
-     `— the restart may have failed or the process bounced on the same thread (pid ${prePid} unchanged)`,
+     `— the restart may have failed or the process bounced on the same thread (pid ${prePid} unchanged). ` +
+     `Restart the instance manually, then re-run: flair mcp enable`,
    );
 }
 
@@ -977,26 +978,6 @@ export async function captureBootDiscriminator(
     throw new Error("system_information returned no harperdb_processes.core entry with a PID");
   }
   return { pid };
-}
-
-/**
- * Verify the Harper process actually restarted by comparing PIDs.
- * Returns `{ ok: true }` if the PID changed, or `{ ok: false, detail }` with
- * a loud operator-facing message if it did not (thread bounce / no-op restart).
- */
-export function verifyProcessRestart(
-  pre: BootDiscriminator,
-  post: BootDiscriminator,
-): { ok: true } | { ok: false; detail: string } {
-  if (pre.pid === post.pid) {
-    return {
-      ok: false,
-      detail:
-        "instance did not restart (thread bounce): configuration was applied but the running process still serves the old boot (pid " +
-        `${pre.pid} unchanged). Restart the instance manually, then re-run: flair mcp enable`,
-    };
-  }
-  return { ok: true };
 }
 
 // ─── Orchestration ────────────────────────────────────────────────────────────
@@ -1265,7 +1246,6 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       );
       return { ok: false, dryRun, steps, failedStep: "apply-config-and-restart", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
     }
-
     currentStep = "apply-config-and-restart";
 
      // ── Capture boot discriminator BEFORE restart (flair#1120) ─────────────

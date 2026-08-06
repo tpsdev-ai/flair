@@ -803,8 +803,6 @@ describe("mcpStatus", () => {
 
 import {
   captureBootDiscriminator,
-  verifyProcessRestart,
-  type BootDiscriminator,
 } from "../../src/lib/mcp-enable.js";
 
 const OPS_URL = "https://flair.example.com:9925/";
@@ -832,25 +830,49 @@ describe("captureBootDiscriminator", () => {
    });
 });
 
-describe("verifyProcessRestart", () => {
-  test("ok:true when PID changes (successful restart)", () => {
-    const before = { pid: 12345 };
-    const after = { pid: 67890 };
-    const result = verifyProcessRestart(before, after);
-    expect(result.ok).toBe(true);
-   });
-
-  test("ok:false with loud message when PID is unchanged (thread bounce)", () => {
-    const before: BootDiscriminator = { pid: 12345 };
-    const after: BootDiscriminator = { pid: 12345 };
-    const result = verifyProcessRestart(before, after);
-    expect(result.ok).toBe(false);
-    expect(result.detail).toContain("instance did not restart (thread bounce)");
-    expect(result.detail).toContain("pid 12345 unchanged");
-   });
-});
-
 describe("enableMcp — flair#1120 restart verification", () => {
+  test("sysinfo fails on first call: failedStep is apply-config-and-restart, never identity-mapping", async () => {
+    const calls: any[] = [];
+    let sysInfoCount = 0;
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const urlStr = String(url);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      calls.push({ url: urlStr, body });
+      if (body.operation === "system_information") {
+        sysInfoCount++;
+           // First call (pre-restart capture) always fails
+        if (sysInfoCount === 1) {
+          return new Response("sysinfo boom", { status: 500 });
+          }
+        return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid: 67890 }] } }), { status: 200 });
+           }
+      if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
+      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.table === "Credential") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (urlStr.includes(".well-known")) {
+        return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
+          }
+      return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
+         }) as typeof fetch;
+
+    const paths = tempPaths();
+    const result = await enableMcp(
+         {
+         ...BASE_PARAMS,
+         ...paths,
+        confirmSecretsApplied: true,
+        },
+        { fetchImpl },
+        );
+
+    expect(result.ok).toBe(false);
+       // captureBootDiscriminator is the first act of apply-config-and-restart,
+       // so its failure must be attributed there — never back to identity-mapping.
+    expect(result.failedStep).toBe("apply-config-and-restart");
+    expect(result.failedStep).not.toBe("identity-mapping");
+    });
+
   test("unchanged PID after restart fails at verify-restart with loud error, never prints checkmark", async () => {
     const calls: any[] = [];
     let sysInfoCallCount = 0;
@@ -1042,6 +1064,7 @@ describe("enableMcp — flair#1120 restart verification", () => {
     expect(verifyStep).toBeDefined();
     expect(verifyStep!.ok).toBe(false);
     expect(verifyStep!.detail).toContain("did not confirm a new process");
+    expect(verifyStep!.detail).toContain("Restart the instance manually, then re-run: flair mcp enable");
     const sysInfoCalls = calls.filter((c) => c.body.operation === "system_information");
     expect(sysInfoCalls.length).toBeGreaterThanOrEqual(5);
   });
