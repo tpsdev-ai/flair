@@ -917,4 +917,110 @@ describe("OllamaLlm registry", () => {
       delete process.env["ADK_TEST_OLLAMA_TIMEOUT_MS"];
     }
   });
+
+  it("string systemInstruction lands as a system-role message", async () => {
+    registerOllamaLlm();
+
+    const originalFetch = globalThis.fetch;
+    const mockFetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            model: "llama3.2",
+            message: { role: "assistant", content: "ok" },
+            done: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    try {
+      const instance = LLMRegistry.newLlm("ollama_chat/llama3.2") as OllamaLlm;
+      const request: LlmRequest = {
+        contents: [{ role: "user", parts: [{ text: "Hi" }] }],
+        config: {
+          systemInstruction: "You are a helpful assistant.",
+        },
+      };
+
+      const responses: LlmResponse[] = [];
+      for await (const r of instance.generateContentAsync(request)) {
+        responses.push(r);
+      }
+
+      expect(responses).toHaveLength(1);
+
+      // Verify the system message was included in the Ollama body
+      const fetchCall = mockFetch.mock.calls[0] as [string, RequestInit];
+      const fetchBody = JSON.parse(fetchCall[1].body as string);
+      const systemMsg = fetchBody.messages.find(
+        (m: { role: string }) => m.role === "system",
+      );
+      expect(systemMsg).toBeDefined();
+      expect(systemMsg.content).toBe("You are a helpful assistant.");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("appendInstructions string concat survives round-trip to system message", async () => {
+    registerOllamaLlm();
+
+    // adk-js appendInstructions writes config.systemInstruction as a
+    // plain string (+= concat).  Simulate what the agent loop produces
+    // after PreloadMemoryTool injects PAST_CONVERSATIONS.
+
+    const originalFetch = globalThis.fetch;
+    const mockFetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            model: "llama3.2",
+            message: { role: "assistant", content: "ok" },
+            done: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    try {
+      const instance = LLMRegistry.newLlm("ollama_chat/llama3.2") as OllamaLlm;
+
+      // Simulate what appendInstructions produces: a plain string with
+      // the original instruction + "\n\n" + appended instructions.
+      const request: LlmRequest = {
+        contents: [{ role: "user", parts: [{ text: "Hi" }] }],
+        config: {
+          systemInstruction:
+            "You are a helpful assistant.\n\n" +
+            "Remember: always be polite.\n\n" +
+            "PAST_CONVERSATIONS:\nUser previously said hello.",
+        },
+      };
+
+      const responses: LlmResponse[] = [];
+      for await (const r of instance.generateContentAsync(request)) {
+        responses.push(r);
+      }
+
+      expect(responses).toHaveLength(1);
+
+      const fetchCall = mockFetch.mock.calls[0] as [string, RequestInit];
+      const fetchBody = JSON.parse(fetchCall[1].body as string);
+      const systemMsg = fetchBody.messages.find(
+        (m: { role: string }) => m.role === "system",
+      );
+      expect(systemMsg).toBeDefined();
+      // Must contain the original instruction AND the appended text
+      expect(systemMsg.content).toContain("You are a helpful assistant.");
+      expect(systemMsg.content).toContain("Remember: always be polite.");
+      expect(systemMsg.content).toContain("PAST_CONVERSATIONS");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

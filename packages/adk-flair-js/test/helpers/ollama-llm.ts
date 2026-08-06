@@ -46,6 +46,9 @@ function extractSystemInstruction(
 ): string | null {
   if (!config?.systemInstruction) return null;
   const si = config.systemInstruction;
+  // adk-js appendInstructions writes config.systemInstruction as a
+  // plain string (+= concat) — handle that first.
+  if (typeof si === "string") return si.trim() || null;
   // ContentUnion: Content | PartUnion[] | PartUnion
   if (Array.isArray(si)) {
     return si.map(extractText).join("").trim() || null;
