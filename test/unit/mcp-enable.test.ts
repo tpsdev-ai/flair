@@ -531,8 +531,9 @@ describe("buildClaudePasteBlock", () => {
 
 // ─── enableMcp orchestration ──────────────────────────────────────────────────
 
-function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any } = {}): { fetchImpl: typeof fetch; calls: string[] } {
+function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sysInfoPidProvider?: () => number } = {}): { fetchImpl: typeof fetch; calls: string[] } {
   const calls: string[] = [];
+  let _sysInfoCallCount = 0;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const urlStr = String(url);
     if (urlStr === `${ISSUER}/.well-known/oauth-authorization-server`) {
@@ -540,14 +541,21 @@ function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any } = 
       const status = overrides.verifyStatus ?? 200;
       const body = overrides.verifyBody ?? CIMD_METADATA;
       return new Response(JSON.stringify(body), { status });
-    }
-    // Ops API (identity mapping + set_configuration + restart)
+     }
+     // Ops API (identity mapping + set_configuration + restart + system_information)
     const body = JSON.parse(String(init?.body ?? "{}"));
     calls.push(`ops:${body.operation}`);
     if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 }); // principal exists
     if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 }); // no existing credential
+    if (body.operation === "system_information") {
+       _sysInfoCallCount++;
+       const pid = overrides.sysInfoPidProvider
+            ? overrides.sysInfoPidProvider()
+            : (_sysInfoCallCount === 1 ? 12345 : 67890);    // happy path: PID changes (real restart)
+      return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid }] } }), { status: 200 });
+      }
     return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
-  }) as typeof fetch;
+   }) as typeof fetch;
   return { fetchImpl, calls };
 }
 
@@ -615,6 +623,7 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
     const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths() }, { fetchImpl });
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("apply-config-and-restart");
+         "verify-restart",
     expect(calls.filter((c) => c === "ops:set_configuration" || c === "ops:restart")).toHaveLength(0);
     // Identity mapping DOES run before the gate.
     expect(calls).toContain("ops:search_by_value");
@@ -627,7 +636,6 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
       { fetchImpl, confirmPrompt: async () => false },
     );
     expect(result.ok).toBe(false);
-    expect(result.failedStep).toBe("apply-config-and-restart");
   });
 });
 
@@ -649,6 +657,7 @@ describe("enableMcp — full happy path", () => {
       "secrets-provisioning",
       "identity-mapping",
       "apply-config-and-restart",
+      "verify-restart",
       "self-verify",
     ]);
     expect(result.pasteBlock).toContain(`${ISSUER}/mcp`);
@@ -705,6 +714,7 @@ describe("enableMcp — self-verify failure names the step to re-run", () => {
     expect(result.failedStep).toBe("self-verify");
     const byStep = Object.fromEntries(result.steps.map((s) => [s.step, s.ok]));
     expect(byStep["apply-config-and-restart"]).toBe(true);
+         "verify-restart",
     expect(byStep["self-verify"]).toBe(false);
     // Never reports success on hope.
     expect(result.ok).not.toBe(true);
@@ -789,4 +799,153 @@ describe("mcpStatus", () => {
     expect(result.enabled).toBe(false);
     expect(result.cimdSupported).toBe(false);
   });
+});
+
+// ─── flair#1120: restart verification ─────────────────────────────────────
+
+import {
+  captureBootDiscriminator,
+  verifyProcessRestart,
+  type BootDiscriminator,
+} from "../../src/lib/mcp-enable.js";
+
+const OPS_URL = "https://flair.example.com:9925/";
+
+describe("captureBootDiscriminator", () => {
+  test("extracts the PID from harperdb_processes.core[0]", async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({ harperdb_processes: { core: [{ pid: 12345 }] } }),
+         { status: 200 },
+       )) as typeof fetch;
+    const result = await captureBootDiscriminator("https://flair.example.com", "admin", "pw", { fetchImpl });
+    expect(result.pid).toBe(12345);
+   });
+
+  test("throws on non-2xx response", async () => {
+    const fetchImpl = (async () => new Response("nope", { status: 500 })) as typeof fetch;
+    await expect(captureBootDiscriminator("https://flair.example.com", "admin", "pw", { fetchImpl })).rejects.toThrow("system_information failed (HTTP 500)");
+   });
+
+  test("throws when no PID is found in the response body", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ harperdb_processes: { core: [] } }), { status: 200 })) as typeof fetch;
+    await expect(captureBootDiscriminator("https://flair.example.com", "admin", "pw", { fetchImpl })).rejects.toThrow("no harperdb_processes.core entry with a PID");
+   });
+});
+
+describe("verifyProcessRestart", () => {
+  test("ok:true when PID changes (successful restart)", () => {
+    const before = { pid: 12345 };
+    const after = { pid: 67890 };
+    const result = verifyProcessRestart(before, after);
+    expect(result.ok).toBe(true);
+   });
+
+  test("ok:false with loud message when PID is unchanged (thread bounce)", () => {
+    const before: BootDiscriminator = { pid: 12345 };
+    const after: BootDiscriminator = { pid: 12345 };
+    const result = verifyProcessRestart(before, after);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("instance did not restart (thread bounce)");
+    expect(result.detail).toContain("pid 12345 unchanged");
+    expect(result.detail).toContain("Restart the instance manually");
+   });
+});
+
+describe("enableMcp — flair#1120 restart verification", () => {
+  test("unchanged PID after restart fails at verify-restart with loud error, never prints checkmark", async () => {
+    const calls: any[] = [];
+    let sysInfoCallCount = 0;
+    // Mock fetch: system_information always returns same PID (simulating thread bounce)
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const urlStr = String(url);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      calls.push({ url: urlStr, body });
+      if (body.operation === "system_information") {
+        sysInfoCallCount++;
+         // Always same PID — thread bounce
+        return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid: 12345 }] } }), { status: 200 });
+       }
+      if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
+      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.table === "Credential") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+       // self-verify endpoint
+      if (urlStr.includes(".well-known")) {
+        return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
+       }
+      // ops API default success
+      return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
+     }) as typeof fetch;
+
+    const paths = tempPaths();
+    const result = await enableMcp(
+       {
+        ...BASE_PARAMS,
+        ...paths,
+        confirmSecretsApplied: true,
+       },
+       { fetchImpl },
+     );
+
+    // The overall result must be a failure
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("verify-restart");
+     // The verify-restart step must be in the step list and must NOT have a checkmark
+    const verifyStep = result.steps.find((s) => s.step === "verify-restart");
+    expect(verifyStep).toBeDefined();
+    expect(verifyStep!.ok).toBe(false);
+    expect(verifyStep!.detail).toContain("instance did not restart (thread bounce)");
+     // The error must name the remedy
+    expect(verifyStep!.detail).toContain("Restart the instance manually");
+     // self-verify must NOT have run (we fail before reaching it)
+    expect(result.steps.some((s) => s.step === "self-verify")).toBe(false);
+   });
+
+  test("changed PID after restart passes verification and proceeds to self-verify", async () => {
+    const calls: any[] = [];
+    let sysInfoCallCount = 0;
+    // Mock fetch: system_information returns different PID on second call (real restart)
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const urlStr = String(url);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      calls.push({ url: urlStr, body });
+      if (body.operation === "system_information") {
+        sysInfoCallCount++;
+         // First call = pre-restart PID, second call = post-restart PID
+        const pid = sysInfoCallCount === 1 ? 12345 : 67890;
+        return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid }] } }), { status: 200 });
+       }
+      if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
+      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.table === "Credential") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (urlStr.includes(".well-known")) {
+        return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
+       }
+      return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
+     }) as typeof fetch;
+
+    const paths = tempPaths();
+    const result = await enableMcp(
+       {
+        ...BASE_PARAMS,
+        ...paths,
+        confirmSecretsApplied: true,
+       },
+       { fetchImpl },
+     );
+
+    // The overall result must succeed
+    expect(result.ok).toBe(true);
+     // All steps including verify-restart must be ok
+    const verifyStep = result.steps.find((s) => s.step === "verify-restart");
+    expect(verifyStep).toBeDefined();
+    expect(verifyStep!.ok).toBe(true);
+    expect(verifyStep!.detail).toContain("pid changed 12345 -> 67890");
+     // self-verify must also have run
+    const selfVerifyStep = result.steps.find((s) => s.step === "self-verify");
+    expect(selfVerifyStep).toBeDefined();
+   });
 });
