@@ -1,1 +1,0 @@
-- Fix `mcp enable` secrets push to send `processEnv: true` instead of `tier: processEnv` and verify the field on read-back so inert rows (core ignoring unknown params) are caught rather than silently failing at boot. Closes #1105

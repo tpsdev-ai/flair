@@ -1,1 +1,0 @@
-- **adk-flair: Flair as the memory backend for Google ADK agents.** New `packages/adk-flair` Python package implementing `BaseMemoryService` with compound-tag user scoping, Ed25519-signed API calls, and semantic search. Published to PyPI as `adk-flair`.
