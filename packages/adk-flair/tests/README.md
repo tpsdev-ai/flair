@@ -26,6 +26,12 @@ FLAIR_TEST_URL=http://localhost:19926 pytest tests/ -m live_flair -v
 | `FLAIR_TEST_ADMIN_PASS` | no | `test123` | Admin password for agent registration |
 | `FLAIR_TEST_AGENT_ID` | no | auto-generated | Agent ID to register |
 | `ADK_TEST_MODEL` | no | — | LiteLLM model string for agent-loop tests (test 3) |
+
+> **Tool-capable model required:** `test_cross_session_recall` sends tools
+> (PreloadMemoryTool) to the model. Models that do not support tool-calling
+> will fail — e.g. `ollama_chat/qwen3.6:27b-coding-mxfp8` returns `{error: EOF}`
+> when ADK sends tools. Use a tool-capable model such as
+> `ollama_chat/qwen3-coder-next:latest` (~37s full loop).
 | `NODE_BIN` | no | `node` | Node.js binary (for ephemeral Harper boot) |
 
 \* `FLAIR_TEST_URL` is required unless you let the harness boot an ephemeral
