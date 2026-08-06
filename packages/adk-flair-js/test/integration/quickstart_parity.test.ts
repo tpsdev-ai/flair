@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { FlairMemoryService, compoundTag } from "../../src/index.js";
 import { getLiveFlair, type LiveFlairConfig } from "../helpers/live-flair.js";
+import { registerOllamaLlm } from "../helpers/ollama-llm.js";
 import type { MemoryEntry } from "@google/adk";
 import type { Session } from "@google/adk";
 import type { Event } from "@google/adk";
@@ -37,6 +38,13 @@ function makeMemoryEntry(text: string): MemoryEntry {
   return {
     content: { role: "user", parts: [{ text }] } as Content,
   };
+}
+
+// Register OllamaLlm if ADK_TEST_MODEL uses the ollama_chat/ prefix.
+// adk-js v1.6.0 has no built-in non-Google model class, so this helper
+// bridges the gap for self-hosted Ollama models.
+if (process.env["ADK_TEST_MODEL"]?.startsWith("ollama_chat/")) {
+  registerOllamaLlm();
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
