@@ -37,7 +37,14 @@ import {
   readEnvValue,
 } from "./component-env.js";
 import { fabricUpgrade } from "./fabric-upgrade.js";
-import { checkVersion, formatVersionNudge, primeVersionCheckCache, FLAIR_PKG_NAME } from "./version-check.js";
+import { checkVersion, formatVersionNudge, primeVersionCheckCache, probeInstanceVersion, FLAIR_PKG_NAME } from "./version-check.js";
+import {
+  readInstalledHarperVersion,
+  fetchDeclaredHarperVersion,
+  writeEngineVersionStamp,
+  checkEngineVersionBackwards,
+  UPGRADE_SNAPSHOT_ROOT,
+} from "./engine-version.js";
 import { checkServerHandshake, formatHandshakeNudge, invalidateHandshakeCache } from "./version-handshake.js";
 import { probeInstance, type ProbeResult } from "./probe.js";
 import {
@@ -5437,7 +5444,7 @@ mcp
   .option("--secrets-path <path>", "Override the secrets staging file path")
   .option("--cimd-allowed-hosts <hosts>", "Comma-separated clientIdMetadataDocuments.allowedHosts override (else claude.ai,claude.com)")
   .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
-  .option("--admin-pass <pass>", "Admin password for the target instance (or FLAIR_ADMIN_PASS)")
+  .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
   .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
   .option("--dry-run", "Generate keys/tokens/config and validate inputs; skip every remote call")
   .option("--json", "Print machine-readable JSON instead of a human summary")
@@ -5465,8 +5472,11 @@ mcp
     const adminPass = dryRun ? (opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "") : resolveLocalAdminPass(opts.adminPass, /* isRemoteTarget */ true);
     if (!dryRun && !adminPass) {
       console.error(
-        "Error: --admin-pass or FLAIR_ADMIN_PASS required (the operations API on the target instance needs it " +
-          "for identity mapping + set_configuration + restart).",
+        "Error: --admin-pass <pass> or --admin-pass-file <path> is required for a REMOTE target " +
+          "(the operations API on the target instance needs it for identity mapping + set_configuration + restart).\n" +
+          "  FLAIR_ADMIN_PASS and ~/.flair/admin-pass are deliberately NOT used here: they are THIS machine's " +
+          "local admin credentials, and sending them to another instance is how a local secret ends up on someone " +
+          "else's Harper. Pass the target's own admin password explicitly.",
       );
       process.exit(1);
     }
@@ -9710,7 +9720,8 @@ async function runFabricUpgrade(opts: any): Promise<void> {
 // standalone filesystem utility). Rejected in favor of the file-level
 // snapshot below. See docs/upgrade.md for the restore procedure this
 // produces.
-const UPGRADE_SNAPSHOT_ROOT = resolve(homedir(), ".flair", "upgrade-snapshots");
+// UPGRADE_SNAPSHOT_ROOT is defined in engine-version.ts (the module that owns the path)
+// and imported from there for all callers.
 const UPGRADE_SNAPSHOT_RETAIN = 3;
 
 function upgradeSnapshotFileName(): string {
@@ -9843,12 +9854,21 @@ export function pruneOldSnapshots(
 
 /**
  * Decide what `flair upgrade`'s pre-upgrade snapshot step should do (opt-in
- * rewrite, 2026-07-08). Pure — takes the three booleans the action already
+ * rewrite, 2026-07-08). Pure — takes the booleans the action already
  * computes and returns the branch to take, without performing any I/O. Pulled
  * out of the action itself so the gating logic (default = no snapshot, no
  * abort; --snapshot = same abort-on-failure mechanism as before) is directly
  * unit-testable instead of only reachable via a full `flair upgrade` run
  * (test/unit/upgrade-data-snapshot.test.ts).
+ *
+ * flair#1047 / flair#1050: the opt-in default is correct for same-engine
+ * upgrades — the downgrade-boot test (test/compat/downgrade-boot.test.ts)
+ * covers those, and the restated invariant ("no silent bad outcome") holds.
+ * When the engine (Harper) version is changing, the snapshot is unconditional
+ * — the tested-downgrade guarantee does not hold across engine version
+ * boundaries, and the backwards-boot refusal + snapshot recovery path is the
+ * invariant that applies. Opting out of the engine-change snapshot requires
+ * `--no-engine-snapshot` and prints what is being given up.
  *
  *   - "not-upgrading": @tpsdev-ai/flair isn't one of the packages being
  *     upgraded (or --snapshot wasn't requested and there's no data dir to
@@ -9859,15 +9879,22 @@ export function pruneOldSnapshots(
  *     to snapshot.
  *   - "snapshot": --snapshot was passed and there's data — run the real
  *     stop/snapshot/prune/restart flow, aborting the upgrade on failure.
+ *   - "engine-version-change": the engine version is changing and the operator
+ *     did not pass --no-engine-snapshot — same as "snapshot" but the message
+ *     names the reason (engine version change, not --snapshot flag).
  */
-export type UpgradeSnapshotDecision = "not-upgrading" | "nudge" | "no-data" | "snapshot";
+export type UpgradeSnapshotDecision = "not-upgrading" | "nudge" | "no-data" | "snapshot" | "engine-version-change";
 
 export function decideUpgradeSnapshotAction(
   flairIsUpgrading: boolean,
   snapshotRequested: boolean,
   hasDataDir: boolean,
+  engineVersionChanging?: boolean,
+  engineSnapshotOptOut?: boolean,
 ): UpgradeSnapshotDecision {
   if (!flairIsUpgrading) return "not-upgrading";
+  // Engine version change forces a snapshot unless explicitly opted out.
+  if (engineVersionChanging && hasDataDir && !engineSnapshotOptOut) return "engine-version-change";
   if (!snapshotRequested) return hasDataDir ? "nudge" : "not-upgrading";
   return hasDataDir ? "snapshot" : "no-data";
 }
@@ -9885,6 +9912,70 @@ export const UPGRADE_SNAPSHOT_NUDGE_LINES: readonly string[] = [
   "No pre-upgrade snapshot will be taken.",
   "To capture one first: `flair snapshot create` (physical) or `flair backup` (logical export), or re-run with --snapshot.",
 ];
+
+/**
+ * Run the stop → snapshot → prune → restart dance for a pre-upgrade snapshot.
+ * Extracted from the upgrade action so the --snapshot and engine-version-change
+ * branches share the same mechanism (flair#1047).
+ *
+ * On snapshot failure: aborts the upgrade (process.exit(1)), restarting Flair
+ * first if it was stopped. On restart-after-snapshot failure: also exits.
+ */
+async function runUpgradeSnapshot(port: number, dataDir: string): Promise<void> {
+  // Consistency: a running Harper's data dir can be mid-write, and a
+  // plain file copy of a live database directory isn't guaranteed
+  // point-in-time consistent (Harper 5.x = RocksDB: WAL/SST/MANIFEST
+  // can tear under a live copy). Stopping first — then immediately
+  // restarting the OLD version, before any package changes — gives a
+  // quiesced, safe-to-copy directory with only a brief blip, even for
+  // --no-restart (the snapshot's correctness doesn't depend on
+  // whether the caller wants a restart AFTER the upgrade — those are
+  // orthogonal). See docs/upgrade.md for the native-backup alternative
+  // considered and rejected (Harper's `get_backup` op backs up one
+  // table/schema at a time over the running HTTP API — not the whole
+  // data dir — and rejecting it here means this path never depends on
+  // the server being up).
+  let stoppedForSnapshot = false;
+  let snapshotPath: string | null = null;
+  try {
+    await stopFlairProcess(port, dataDir);
+    stoppedForSnapshot = true;
+    const snapshot = await createDataSnapshot(dataDir);
+    snapshotPath = snapshot.path;
+    const removed = pruneOldSnapshots();
+    console.log(`✅ Snapshot: ${snapshotPath} (${humanBytes(snapshot.bytes)})`);
+    console.log(`   Restore: flair snapshot restore "${snapshotPath}"`);
+    if (removed.length > 0) {
+      console.log(`   Pruned ${removed.length} older snapshot${removed.length > 1 ? "s" : ""} (keeping last ${UPGRADE_SNAPSHOT_RETAIN})`);
+    }
+  } catch (err: any) {
+    console.error(`❌ snapshot failed: ${err.message}`);
+    console.error("   Aborting upgrade — no packages were changed.");
+    if (stoppedForSnapshot) {
+      try { await startFlairProcess(port, dataDir); } catch { /* best effort — surface the original snapshot error, not this */ }
+    }
+    process.exit(1);
+  }
+  try {
+    await startFlairProcess(port, dataDir);
+  } catch (err: any) {
+    console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
+    console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Stamp the data directory with the currently-installed Harper engine version
+ * (flair#1047). Called after every successful boot — start, restart, upgrade.
+ * Best-effort: a failure to stamp is not a boot failure.
+ */
+function stampEngineVersionIfRunning(dataDir: string): void {
+  try {
+    const version = readInstalledHarperVersion(flairPackageDir());
+    if (version) writeEngineVersionStamp(dataDir, version);
+  } catch { /* best-effort — stamp failure must not prevent boot */ }
+}
 
 // ─── flair snapshot ─────────────────────────────────────────────────────────
 // Explicit, first-class surface for the physical data-dir snapshot mechanism
@@ -10124,6 +10215,7 @@ program
   .option("--no-restart", "Skip the restart after upgrade (stage new packages now, restart later)")
   .option("--no-verify", "Skip post-restart health/version/auth verification (default: verify — so a broken upgrade can't report success; see flair#635)")
   .option("--snapshot", "Take a pre-upgrade ~/.flair/data snapshot before the package swap, keep-last-3 retention (default: off — see `flair snapshot create` to take one by hand, or `flair backup` for a logical export; flair#637)")
+  .option("--no-engine-snapshot", "Skip the pre-upgrade snapshot even when the Harper engine version is changing (flair#1047). The snapshot is automatic on engine-version changes because the tested-downgrade guarantee does not hold across engine boundaries. Opting out prints what is being given up.")
   .option("--all", "Show transitive packages (e.g. flair-client) in the listing — verbose mode for debugging dep versions")
   // ── Fabric upgrade (--target) ────────────────────────────────────────────
   // When --target is passed, upgrade the Flair component DEPLOYED to that
@@ -10416,11 +10508,46 @@ program
     // moved from opt-out to opt-in. `flair snapshot create` (below) exposes
     // the exact same mechanism as a standalone command for anyone who wants
     // one without wrapping it around an upgrade.
+    //
+    // flair#1047: the tested-downgrade guarantee does not hold across engine
+    // version boundaries — a Harper bump is the only realistic source of a
+    // cross-version boot break. When the engine version is changing, the
+    // snapshot is unconditional. Opting out requires --no-engine-snapshot
+    // and prints what is being given up.
     const flairIsUpgrading = npmUpgrades.some((u) => u.pkg === "@tpsdev-ai/flair");
+    const hasDataDir = existsSync(upgradeDataDir);
+    const flairFinding = findings.find((f) => f.name === "@tpsdev-ai/flair");
+
+    // Determine whether the engine (Harper) version is changing.
+    let engineVersionChanging = false;
+    let currentEngineVersion: string | null = null;
+    let targetEngineVersion: string | null = null;
+    if (flairIsUpgrading && hasDataDir) {
+      currentEngineVersion = readInstalledHarperVersion(flairPackageDir());
+      const targetFlairVersion = flairFinding?.latest;
+      if (targetFlairVersion && currentEngineVersion) {
+        targetEngineVersion = await fetchDeclaredHarperVersion(targetFlairVersion);
+        if (targetEngineVersion === null) {
+          // Registry lookup failed — cannot determine the target Harper
+          // version. Assume it might change (safe default) and print why.
+          engineVersionChanging = true;
+          console.log(render.wrap(render.c.dim,
+            `Could not determine the target Harper version from the npm registry — forcing a pre-upgrade snapshot as a precaution.`));
+        } else {
+          engineVersionChanging = targetEngineVersion !== currentEngineVersion;
+        }
+      } else {
+        // Cannot determine — assume it might change (safe default).
+        engineVersionChanging = true;
+      }
+    }
+
     const snapshotDecision = decideUpgradeSnapshotAction(
       flairIsUpgrading,
       !!opts.snapshot,
-      existsSync(upgradeDataDir),
+      hasDataDir,
+      engineVersionChanging,
+      !!opts.noEngineSnapshot,
     );
     let snapshotPath: string | null = null;
     if (snapshotDecision === "nudge") {
@@ -10433,48 +10560,19 @@ program
       for (const line of UPGRADE_SNAPSHOT_NUDGE_LINES) console.log(render.wrap(render.c.dim, line));
     } else if (snapshotDecision === "no-data") {
       console.log(`\n(no data directory at ${upgradeDataDir} yet — nothing to snapshot)`);
+    } else if (snapshotDecision === "engine-version-change") {
+      // Engine version is changing — snapshot is unconditional (flair#1047).
+      // The operator can opt out with --no-engine-snapshot, which prints what
+      // is being given up (handled in the nudge branch above).
+      const fromLabel = currentEngineVersion ?? "unknown";
+      const toLabel = targetEngineVersion ?? "unknown";
+      console.log(`\nHarper engine version changing (${fromLabel} → ${toLabel}) — snapshotting data before upgrade...`);
+      console.log(render.wrap(render.c.dim, "The tested-downgrade guarantee does not hold across engine version boundaries."));
+      console.log(render.wrap(render.c.dim, "Pass --no-engine-snapshot to skip this (not recommended)."));
+      await runUpgradeSnapshot(upgradePort, upgradeDataDir);
     } else if (snapshotDecision === "snapshot") {
       console.log("\nSnapshotting data before upgrade...");
-      // Consistency: a running Harper's data dir can be mid-write, and a
-      // plain file copy of a live database directory isn't guaranteed
-      // point-in-time consistent (Harper 5.x = RocksDB: WAL/SST/MANIFEST
-      // can tear under a live copy). Stopping first — then immediately
-      // restarting the OLD version, before any package changes — gives a
-      // quiesced, safe-to-copy directory with only a brief blip, even for
-      // --no-restart (the snapshot's correctness doesn't depend on
-      // whether the caller wants a restart AFTER the upgrade — those are
-      // orthogonal). See docs/upgrade.md for the native-backup alternative
-      // considered and rejected (Harper's `get_backup` op backs up one
-      // table/schema at a time over the running HTTP API — not the whole
-      // data dir — and rejecting it here means this path never depends on
-      // the server being up).
-      let stoppedForSnapshot = false;
-      try {
-        await stopFlairProcess(upgradePort, upgradeDataDir);
-        stoppedForSnapshot = true;
-        const snapshot = await createDataSnapshot(upgradeDataDir);
-        snapshotPath = snapshot.path;
-        const removed = pruneOldSnapshots();
-        console.log(`✅ Snapshot: ${snapshotPath} (${humanBytes(snapshot.bytes)})`);
-        console.log(`   Restore: flair snapshot restore "${snapshotPath}"`);
-        if (removed.length > 0) {
-          console.log(`   Pruned ${removed.length} older snapshot${removed.length > 1 ? "s" : ""} (keeping last ${UPGRADE_SNAPSHOT_RETAIN})`);
-        }
-      } catch (err: any) {
-        console.error(`❌ snapshot failed: ${err.message}`);
-        console.error("   Aborting upgrade — no packages were changed. Omit --snapshot to proceed without one (not recommended).");
-        if (stoppedForSnapshot) {
-          try { await startFlairProcess(upgradePort, upgradeDataDir); } catch { /* best effort — surface the original snapshot error, not this */ }
-        }
-        process.exit(1);
-      }
-      try {
-        await startFlairProcess(upgradePort, upgradeDataDir);
-      } catch (err: any) {
-        console.error(`❌ failed to restart Flair after the pre-upgrade snapshot: ${err.message}`);
-        console.error(`   The snapshot itself succeeded (${snapshotPath}) — no packages were changed. Check: flair doctor`);
-        process.exit(1);
-      }
+      await runUpgradeSnapshot(upgradePort, upgradeDataDir);
     }
 
     // Perform upgrade. `latest` comes from the npm registry's HTTP
@@ -10524,7 +10622,6 @@ program
     // --restart is kept as a deprecated no-op for old muscle memory.
     // Upgrade = install → restart → verify → (rollback on failure), one
     // transaction — never report success on a broken restart.
-    const flairFinding = findings.find((f) => f.name === "@tpsdev-ai/flair");
     const previousFlairVersion = flairFinding?.installed ?? null;
     const expectedFlairVersion =
       flairFinding?.status === "outdated" && !flairInstallFailed
@@ -10844,6 +10941,18 @@ program
       process.exit(1);
     }
 
+    // flair#1047: refuse to boot if the store was written by a newer engine.
+    // Same guard startFlairProcess runs, so restart/upgrade/snapshot cannot
+    // reach a boot this command would refuse (flair#1093).
+    try {
+      guardEngineNotBackwards(dataDir);
+    } catch (err: any) {
+      if (!err?.engineBackwards) throw err;
+      console.error(`❌ Cannot start Flair — the data directory was written by a newer Harper engine.\n`);
+      console.error(err.message);
+      process.exit(1);
+    }
+
     const platform = process.platform;
     if (platform === "darwin") {
       // resolveLaunchdLabel (flair#693) finds whichever label this data
@@ -10865,6 +10974,7 @@ program
           if (migrated) console.log(`Migrated launchd service off the legacy label (${LEGACY_LAUNCHD_LABEL}) → ${label} ✓`);
           await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
           readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
+          stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
           console.log("✅ Flair started (launchd)");
           return;
         } catch (err: any) {
@@ -10908,6 +11018,7 @@ program
     try {
       await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
       readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture on the freshly-created socket
+      stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
       console.log(`✅ Flair started on port ${port}`);
     } catch {
       console.error("❌ Flair failed to start within timeout. Check logs in " + join(dataDir, "harper.log"));
@@ -11224,7 +11335,44 @@ async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
  * snapshot commands' restart leg brought the DEFAULT instance back up after
  * operating on a `--data-dir` elsewhere.
  */
+/**
+ * flair#1047's refusal, at the point every boot passes through (flair#1093).
+ *
+ * It used to live inline in the `start` command's action and nowhere else, so
+ * `flair restart`, `flair upgrade` (which restarts by spawning the new CLI with
+ * `restart`) and the snapshot paths all booted Harper without it. The guard
+ * covered one of the doors, and not the one an ENGINE SWAP comes through — so
+ * an upgrade across a storage-format boundary came back as a dead port and a
+ * bare exit 1 instead of a refusal naming actor, state and remedy.
+ *
+ * These same two functions had already drifted once, on the spawn environment:
+ * see the note above buildDirectSpawnEnv about `start` setting a host-qualified
+ * OPERATIONSAPI_NETWORK_PORT while startFlairProcess set none, silently
+ * re-widening the ops API on every restart. Same pair, same shape. This is why
+ * the check is a single function called from both rather than a second copy.
+ *
+ * Throws rather than exiting: `start` wants its own framing and an exit code,
+ * while restart/upgrade need the message to travel up as an error. Nothing here
+ * decides how it is presented.
+ */
+function guardEngineNotBackwards(dataDir: string): void {
+  const runningHarperVersion = readInstalledHarperVersion(flairPackageDir());
+  // No readable engine version means nothing to compare — the pre-stamp case
+  // checkEngineVersionBackwards already treats as "not backwards". Refusing here
+  // would brick every install written before the stamp existed.
+  if (!runningHarperVersion) return;
+  const backwardsError = checkEngineVersionBackwards(dataDir, runningHarperVersion);
+  if (!backwardsError) return;
+  const err: any = new Error(backwardsError);
+  err.engineBackwards = true;
+  throw err;
+}
+
 async function startFlairProcess(port: number, dataDir: string): Promise<void> {
+  // Before anything is spawned or launchd is touched: an older engine opening a
+  // newer store fails at the storage layer with an error about compression
+  // internals, minutes later and nowhere near the cause.
+  guardEngineNotBackwards(dataDir);
   if (process.platform === "darwin") {
     // resolveLaunchdLabel (flair#693) finds whichever label this data dir
     // is currently registered under before we attempt anything.
@@ -11255,6 +11403,7 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
         ensureLaunchdServiceLoaded(dataDir, (cmd) => execSync(cmd, { stdio: "pipe" }));
         await waitForHealth(port, DEFAULT_ADMIN_USER, process.env.HDB_ADMIN_PASSWORD ?? "", STARTUP_TIMEOUT_MS);
         readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture across restart/upgrade
+        stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
         return;
       } catch (err: any) {
         console.error(`launchd start failed, falling back to direct start: ${err.message}`);
@@ -11305,6 +11454,7 @@ async function startFlairProcess(port: number, dataDir: string): Promise<void> {
 
   await waitForHealth(port, DEFAULT_ADMIN_USER, adminPass, STARTUP_TIMEOUT_MS);
   readyOpsSocketPosture(dataDir); // flair#763: re-assert socket posture across restart/upgrade
+  stampEngineVersionIfRunning(dataDir); // flair#1047: stamp the store with the engine version
 }
 
 /**
@@ -12269,15 +12419,48 @@ program
     // since we don't have advisory data, only the version gap. A red gap
     // counts as an issue (exit 1); a quieter yellow gap (one minor, or
     // patch-only) is printed but doesn't fail doctor.
-    const versionCheckResult = await checkVersion(__pkgVersion);
-    const versionNudge = formatVersionNudge(versionCheckResult);
-    if (versionNudge) {
-      const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
-      const icon = versionNudge.severity === "red" ? render.wrap(render.c.red, "✗") : render.icons.warn;
-      console.log(`  ${icon} ${render.wrap(color, versionNudge.message)}`);
-      if (versionNudge.severity === "red") issues++;
-    } else if (versionCheckResult.latest) {
-      console.log(`  ${render.icons.ok} flair ${__pkgVersion} is current`);
+    // ── flair#1072: the currency claim must be about the INSTANCE ─────────────
+    //
+    // This check used to run `checkVersion(__pkgVersion)` — the version of the
+    // CLI you happen to have installed — and print "flair <x> is current". When
+    // FLAIR_URL or --url points at a deployed instance, every other line doctor
+    // prints is genuinely remote, so that sentence reads as a statement about
+    // the thing you are talking to. It was a statement about your laptop.
+    //
+    // Reported against an instance five minors behind, where doctor said
+    // "current". Telling you that is doctor's entire job.
+    //
+    // UNKNOWN MUST NOT FALL BACK TO THE LOCAL NUMBER. An older instance may not
+    // expose its version at all, and the tempting fix is to use the one already
+    // in hand — which is precisely how this bug reads today. If the instance
+    // version cannot be determined, say so and count it as an issue rather than
+    // answering from the wrong machine.
+    const instanceVersion = await probeInstanceVersion(baseUrl);
+    const versionSubject = instanceVersion ?? null;
+
+    if (versionSubject === null) {
+      console.log(
+        `  ${render.icons.warn} ${render.wrap(render.c.yellow, `could not determine the version running at ${baseUrl} — not reporting currency. ` +
+          `(The local CLI is ${__pkgVersion}; that is NOT the instance.)`)}`,
+      );
+      issues++;
+    } else {
+      const versionCheckResult = await checkVersion(versionSubject);
+      const versionNudge = formatVersionNudge(versionCheckResult);
+      if (versionNudge) {
+        const color = versionNudge.severity === "red" ? render.c.red : render.c.yellow;
+        const icon = versionNudge.severity === "red" ? render.wrap(render.c.red, "✗") : render.icons.warn;
+        console.log(`  ${icon} ${render.wrap(color, versionNudge.message)}`);
+        if (versionNudge.severity === "red") issues++;
+      } else if (versionCheckResult.latest) {
+        console.log(`  ${render.icons.ok} instance at ${baseUrl} runs flair ${versionSubject} — current`);
+      }
+      if (versionSubject !== __pkgVersion) {
+        console.log(
+          `  ${render.icons.warn} ${render.wrap(render.c.yellow, `local CLI is ${__pkgVersion}, instance is ${versionSubject} — they differ. ` +
+            `Commands run through the CLI; the instance serves the data.`)}`,
+        );
+      }
     }
 
     // Helper: try to reach Harper on a given port.

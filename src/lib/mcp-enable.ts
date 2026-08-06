@@ -101,10 +101,14 @@
  *     `dist/lib/mcp/wellKnown.js`'s `buildAuthorizationServerMetadata`
  *     (lines 129-166), which advertises `registration_endpoint`/
  *     `token_endpoint` unconditionally (NOTE: `registration_endpoint` is
- *     advertised even though DCR is disabled — the plugin doesn't condition
- *     that field on `dynamicClientRegistration.enabled`; a POST there still
- *     404s per dcr.js:165-167, this is just a metadata-completeness quirk of
- *     the installed package, not a gap in our config) and
+ *     advertised even though DCR is disabled — CORRECTED 2026-08-05: that was
+ *     true of the version this was written against and is FALSE of the
+ *     installed one. wellKnown.js:142 now reads
+ *     `...(dcrEnabled(mcpConfig) ? { registration_endpoint: … } : {})`, so the
+ *     field is OMITTED whenever DCR is off — which is every instance `enable`
+ *     configures. selfVerifyMcpMetadata required it and therefore failed on a
+ *     correctly enabled surface; see the note at that check. A verified fact
+ *     carries the date it was verified, and this one expired.) and
  *     `client_id_metadata_document_supported: true` whenever
  *     `clientIdMetadataDocuments.enabled !== false` (wellKnown.js:164 — true
  *     by default, which is what our config relies on), and
@@ -136,6 +140,7 @@
  *     expansion.
  */
 
+import { probeSecretsCapability, pushSecrets, PROCESS_ENV_TIER } from "./secrets-push.js";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
@@ -217,6 +222,30 @@ export type SecretsMechanism = "fabric-env-secrets" | "env-file";
  * an automated push: no confirmed ops-API operation for it exists in the
  * installed 5.1.17 SDK). Anything else defaults to `env-file` — the
  * documented, universally-supported fallback. Always overridable.
+ */
+/**
+ * ── The hostname no longer selects the mechanism (flair#1094) ───────────────
+ *
+ * This used to be `isFabricOrigin(url) ? "fabric-env-secrets" : "env-file"`, and
+ * that was wrong in BOTH directions on the day it was replaced:
+ *
+ *   - `tps.dtrt.harperfabric.com` runs Harper 5.1.26 and has no secrets
+ *     operations at all — measured; `set_secret` answers "Operation 'set_secret'
+ *     not found", identical to an invented operation — and was selected for the
+ *     automated mechanism purely because of its name.
+ *   - a self-hosted Harper 5.2 with the Pro env-secrets component is fully
+ *     capable and was sent down the manual Studio path for not matching.
+ *
+ * A hostname is not a capability, and neither is a version — the write
+ * operations and the Pro decryptor that makes a `processEnv` secret reach the
+ * process ship separately. `probeSecretsCapability` asks the target instead, and
+ * the answer decides at provisioning time.
+ *
+ * What remains here is the STAGING FILE's flavour of instructions, which is
+ * genuinely about where the operator will paste if we end up falling back.
+ * Fabric operators paste into Studio; everyone else edits a unit file. That is a
+ * UI fact about a human, not a claim about the server, so a hostname is a
+ * reasonable signal for it and a wrong guess costs only slightly-off prose.
  */
 export function selectSecretsMechanism(instanceUrl: string, override?: SecretsMechanism): SecretsMechanism {
   if (override) return override;
@@ -407,8 +436,49 @@ export function provisionSecrets(
 
 // ─── Identity mapping (Credential kind:idp) ─────────────────────────────────
 
+/**
+ * The ops API is NOT the served origin, and its port is NOT derivable.
+ *
+ * flair#1072-adjacent, found while enabling MCP against a hosted instance: this
+ * function used a string target verbatim, so `flair mcp enable --instance
+ * https://flair.example.harperfabric.com` posted its ops calls to **port 443**,
+ * where the flair REST component owns `/` and answers `404 Not found`. Measured
+ * against a live Fabric instance, same request both ways:
+ *
+ *     POST https://<host>/          -> HTTP 404  "Not found"
+ *     POST https://<host>:9925/     -> HTTP 200  []
+ *
+ * The codebase elsewhere documents "ops port = HTTP port - 1", which derives 442
+ * for a 443-served instance. Also measured: 442 and 19925 are both dead on
+ * Fabric. **That convention does not hold, and no arithmetic on the served port
+ * can be trusted — an operator can put the ops API anywhere.**
+ *
+ * So: never derive silently. An explicit target wins; otherwise the conventional
+ * hosted ops port is *tried*, and a caller that cannot reach it is told to pass
+ * one rather than being handed a 404 about something else.
+ */
+export const HOSTED_OPS_PORT = 9925;
+
+export function resolveOpsUrl(target: number | string, explicitOpsUrl?: string): string {
+  if (explicitOpsUrl) return `${explicitOpsUrl.replace(/\/+$/, "")}/`;
+  if (typeof target === "number") return `http://127.0.0.1:${target}/`;
+  // A string target is the SERVED origin. Its own port serves the REST surface,
+  // not the ops API, so reuse the host and apply the hosted ops port.
+  try {
+    const u = new URL(target.includes("://") ? target : `https://${target}`);
+    u.port = String(HOSTED_OPS_PORT);
+    u.pathname = "/";
+    u.search = "";
+    return u.toString();
+  } catch {
+    // Unparseable — preserve the old behaviour rather than inventing a URL, and
+    // let the caller's error path name the remedy.
+    return `${target.replace(/\/+$/, "")}/`;
+  }
+}
+
 function opsBaseUrl(opsPortOrUrl: number | string): string {
-  return typeof opsPortOrUrl === "number" ? `http://127.0.0.1:${opsPortOrUrl}/` : `${opsPortOrUrl.replace(/\/$/, "")}/`;
+  return resolveOpsUrl(opsPortOrUrl);
 }
 
 function basicAuthHeader(adminUser: string, adminPass: string): string {
@@ -463,7 +533,22 @@ export async function provisionIdpIdentityMapping(
   });
   if (!findRes.ok) {
     const text = await findRes.text().catch(() => "");
-    throw new Error(`Identity mapping: failed to look up principal '${params.principal}' (HTTP ${findRes.status}): ${text}`);
+    // A MISSING principal is not this branch. The ops API answers an empty
+    // search with 200 and [], and the code below creates the principal when the
+    // list is empty. Reaching here means the ops CALL failed, not that the
+    // identity is absent — and saying "failed to look up principal 'x'" sends
+    // the reader to look at principals, which is where an evening goes.
+    //
+    // 404 in particular almost always means the request reached the SERVED
+    // origin instead of the ops API: the flair REST component owns `/` there and
+    // answers 404. Say that, and name the flag that fixes it.
+    const hint =
+      findRes.status === 404
+        ? ` — a 404 here usually means ${opsUrl} is the served origin rather than the ops API (the REST component owns "/" and answers 404). The ops API is a DIFFERENT port (conventionally ${HOSTED_OPS_PORT} on hosted instances) and is not derivable from the served port. Pass --ops-url <url> to point at it explicitly.`
+        : "";
+    throw new Error(
+      `Identity mapping: the ops API call to ${opsUrl} failed (HTTP ${findRes.status})${hint}${text ? `: ${text}` : ""}`,
+    );
   }
   const foundAgents = await findRes.json().catch(() => []);
   let principalCreated = false;
@@ -671,14 +756,64 @@ export async function selfVerifyMcpMetadata(
   } catch {
     return { ok: false, detail: `${url} did not return JSON` };
   }
+  // ── The flair's-own-server check runs BEFORE the shape check (flair#1094) ──
+  //
+  // It used to run after, and that made the DEFAULT flag-off case misreport.
+  // flair's own document omits `registration_endpoint` unless DCR is enabled,
+  // which it is not by default — so the shape check fired first and returned
+  // "the metadata shape is unexpected", which is true, useless, and points at
+  // shapes when the cause is an unset environment variable.
+  //
+  // `token_endpoint` is present in that document either way, so testing the
+  // discriminator first names the real cause in EVERY flag-off case rather than
+  // only when DCR happens to be on. Found by writing the test that pins this
+  // relationship, not by reading the code.
+  if (typeof body?.token_endpoint === "string" && body.token_endpoint === `${normalizedIssuer}/OAuthToken`) {
+    return {
+      ok: false,
+      issuer: body?.issuer,
+      registrationEndpoint: body?.registration_endpoint,
+      tokenEndpoint: body.token_endpoint,
+      detail:
+        `${url} answered with flair's OWN OAuth 2.1 authorization server, not the MCP one ` +
+        `(token_endpoint=${body.token_endpoint}) — the /mcp surface is NOT enabled on that instance. ` +
+        `Is FLAIR_MCP_OAUTH actually set on the restarted instance, and is the '@harperfast/oauth' ` +
+        `component declared in its config.yaml?`,
+    };
+  }
+  // ── registration_endpoint is OPTIONAL and must not be required (Kern, #1101) ─
+  //
+  // Requiring it made self-verify fail on a CORRECTLY enabled instance — the
+  // exact configuration `enable` itself creates.
+  //
+  // RFC 8414 marks the field optional, and BOTH authorization servers in this
+  // system omit it when DCR is off:
+  //   - flair's own AS: resources/oauth-discovery.ts, conditional spread on
+  //     dcrEnabled(), default off.
+  //   - the MCP plugin: @harperfast/oauth/dist/lib/mcp/wellKnown.js:142,
+  //     `...(dcrEnabled(mcpConfig) ? { registration_endpoint: … } : {})`.
+  //
+  // And `enable` writes `dynamicClientRegistration: { enabled: false }` by
+  // design — DCR is unsupported on this surface (#756). So the plugin omits the
+  // field on every instance this command configures, and self-verify then
+  // reported "the metadata shape is unexpected" on a working MCP surface,
+  // sending the operator to debug metadata fields instead.
+  //
+  // The module header above still claims the plugin advertises it
+  // "unconditionally". That was true of the version it was written against and
+  // is false of the installed one — corrected there too. A verified fact carries
+  // the date it was verified, and this one expired.
+  //
+  // Required: issuer and token_endpoint, both always present in both servers.
+  // registration_endpoint is validated only when it appears.
   if (
     body?.issuer !== normalizedIssuer ||
-    typeof body?.registration_endpoint !== "string" ||
-    typeof body?.token_endpoint !== "string"
+    typeof body?.token_endpoint !== "string" ||
+    (body?.registration_endpoint !== undefined && typeof body.registration_endpoint !== "string")
   ) {
     return {
       ok: false,
-      detail: `${url} responded but the metadata shape is unexpected (issuer/registration_endpoint/token_endpoint) — got issuer=${JSON.stringify(body?.issuer)}`,
+      detail: `${url} responded but the metadata shape is unexpected (issuer/token_endpoint) — got issuer=${JSON.stringify(body?.issuer)}`,
     };
   }
 
@@ -832,16 +967,30 @@ export interface EnableMcpResult {
  */
 export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {}): Promise<EnableMcpResult> {
   const steps: EnableStepResult[] = [];
+  // The step currently executing, so a throw is attributed to IT rather than to
+  // the last step that succeeded (flair#1087).
+  //
+  // `push` deliberately takes NO step name: it reads this variable. A name passed
+  // per-call would be the same string typed twice (once here, once at the push),
+  // and the two drifting apart is precisely the misattribution #1087 is about —
+  // a rule that only a comment or a source scan could enforce. Deriving it makes
+  // a wrong name unrepresentable instead of merely discouraged, so there is
+  // nothing left for a reviewer to check.
+  //
+  // Initialised to the first step rather than left undefined so a throw before
+  // any assignment cannot be attributed to an arbitrary fallback name.
+  let currentStep: EnableStepName = "local-origin-check";
   const dryRun = Boolean(params.dryRun);
-  const push = (step: EnableStepName, ok: boolean, detail: string) => steps.push({ step, ok, detail });
+  const push = (ok: boolean, detail: string) => steps.push({ step: currentStep, ok, detail });
 
   // ── Local-origin refusal (scenario addendum, binding) ─────────────────────
+  currentStep = "local-origin-check";
   const localCheck = checkLocalOriginRefusal(params.instance);
   if (localCheck.refused) {
-    push("local-origin-check", false, localCheck.message);
+    push(false, localCheck.message);
     return { ok: false, dryRun, refused: { message: localCheck.message }, steps, failedStep: "local-origin-check" };
   }
-  push("local-origin-check", true, `${params.instance} is a public-shaped origin`);
+  push(true, `${params.instance} is a public-shaped origin`);
 
   const issuer = (params.issuer ?? params.instance).replace(/\/+$/, "");
   const idpProvider = params.idpProvider ?? "github";
@@ -850,20 +999,21 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
 
   try {
     // ── RS256 signing keypair ─────────────────────────────────────────────────
+    currentStep = "signing-key";
     const keyResult = ensureSigningKeyFile(params.signingKeyFilePath, { generate: deps.generateRsaKeyPair });
-    push("signing-key", true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
+    push(true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
 
     // ── @harperfast/oauth config block (CIMD-only; DCR explicitly disabled) ──
     const cimdAllowedHosts = params.cimdAllowedHosts ?? DEFAULT_CIMD_ALLOWED_HOSTS;
+    currentStep = "config-block";
     const configBlock = buildMcpOAuthConfigBlock({ idpProvider, cimdAllowedHosts });
-    push(
-      "config-block",
-      true,
+    push(true,
       `built the @harperfast/oauth mcp config block (accessTokenTtl=${REQUIRED_ACCESS_TOKEN_TTL}, ` +
         `dynamicClientRegistration.enabled=false, clientIdMetadataDocuments.allowedHosts=${JSON.stringify(cimdAllowedHosts)})`,
     );
 
     // ── IdP OAuth-app credential intake ───────────────────────────────────────
+    currentStep = "idp-credentials";
     const callbackUrl = idpCallbackUrl(issuer, idpProvider);
     if (!params.idpClientId || !params.idpClientSecret || !params.idpSubject) {
       const missing = [
@@ -871,14 +1021,12 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         !params.idpClientSecret && "--idp-client-secret",
         !params.idpSubject && "--idp-subject",
       ].filter(Boolean).join(", ");
-      push(
-        "idp-credentials",
-        false,
+      push(false,
         `missing ${missing}. Create a ${idpProvider} OAuth app with callback URL ${callbackUrl}, then re-run with the credentials.`,
       );
       return { ok: false, dryRun, steps, failedStep: "idp-credentials", callbackUrl };
     }
-    push("idp-credentials", true, `${idpProvider} OAuth app credentials present; callback URL: ${callbackUrl}`);
+    push(true, `${idpProvider} OAuth app credentials present; callback URL: ${callbackUrl}`);
 
     if (dryRun) {
       // Dry-run stops here — everything above is pure/local generation; no
@@ -904,17 +1052,65 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       idpClientId: params.idpClientId,
       idpClientSecret: params.idpClientSecret,
     });
+    currentStep = "secrets-provisioning";
+    // Stage first, unconditionally. If the push works the file is a no-op the
+    // operator never opens; if anything about the push is uncertain they still
+    // have the thing that always works, without a re-run. Staging costs a 0600
+    // write; not staging costs an operator stranded mid-enable.
     const secretsResult = provisionSecrets(params.instance, bundle, {
       mechanism: params.secretsMechanism,
       stagingPath: params.secretsStagingPath,
     });
-    push(
-      "secrets-provisioning",
-      true,
-      `mechanism: ${secretsResult.mechanism}; ${secretsResult.varNames.length} vars staged at ${secretsResult.path} (0600). ${secretsResult.instructions}`,
-    );
+
+    // Ask the TARGET whether it can take these, rather than inferring from its
+    // hostname or its version (flair#1094 — see selectSecretsMechanism's note).
+    // An explicit --secrets-mechanism is an operator override and is honoured
+    // without a probe: they have said what they want.
+    let secretsPushed = false;
+    if (!params.secretsMechanism) {
+      const cap = await probeSecretsCapability(
+        resolveOpsUrl(params.instance),
+        basicAuthHeader(params.adminUser, params.adminPass),
+        { fetchImpl: deps.fetchImpl },
+      );
+      if (cap.available && cap.publicKeyPem) {
+        const pushResult = await pushSecrets(
+          resolveOpsUrl(params.instance),
+          basicAuthHeader(params.adminUser, params.adminPass),
+          bundle,
+          cap.publicKeyPem,
+          { fetchImpl: deps.fetchImpl },
+        );
+        secretsPushed = pushResult.allOk;
+        if (secretsPushed) {
+          push(true,
+            `${secretsResult.varNames.length} vars pushed to the target as enc:v1 env-secrets (tier ${PROCESS_ENV_TIER}); ` +
+              `values were sealed locally and never sent in plaintext. Staged copy at ${secretsResult.path} (0600) is unused. ` +
+              `Self-verify below is what proves they were DECRYPTED into the process — a target that stores them without an ` +
+              `active env-secrets decryptor will fail there, not here.`,
+          );
+        } else {
+          const failed = pushResult.results.filter((r) => !r.ok).map((r) => `${r.name} (${r.detail})`).join("; ");
+          push(true,
+            `push attempted and did not complete for: ${failed}. Falling back to the staged file at ${secretsResult.path} (0600). ` +
+              `${secretsResult.instructions}`,
+          );
+        }
+      } else {
+        push(true,
+          `mechanism: ${secretsResult.mechanism}; ${secretsResult.varNames.length} vars staged at ${secretsResult.path} (0600). ` +
+            `${cap.reason}. ${secretsResult.instructions}`,
+        );
+      }
+    } else {
+      push(true,
+        `mechanism: ${secretsResult.mechanism} (explicit --secrets-mechanism, no capability probe); ` +
+          `${secretsResult.varNames.length} vars staged at ${secretsResult.path} (0600). ${secretsResult.instructions}`,
+      );
+    }
 
     // ── Identity mapping (Credential kind:idp) ────────────────────────────────
+    currentStep = "identity-mapping";
     const mapping = await provisionIdpIdentityMapping(
       {
         opsPortOrUrl: params.instance,
@@ -927,9 +1123,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       },
       { fetchImpl: deps.fetchImpl, now: deps.now },
     );
-    push(
-      "identity-mapping",
-      true,
+    push(true,
       `principal '${principal}' ${mapping.principalCreated ? "created" : "already existed"}; ` +
         `Credential(kind:idp) ${mapping.credentialReused ? "reused" : "created"} (${mapping.credentialId})`,
     );
@@ -942,25 +1136,25 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       );
     }
     if (!confirmed) {
-      push(
-        "apply-config-and-restart",
-        false,
+      push(false,
         `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
       );
       return { ok: false, dryRun, steps, failedStep: "apply-config-and-restart", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
     }
 
     // ── Apply config + restart ────────────────────────────────────────────────
+    currentStep = "apply-config-and-restart";
     await applyRemoteConfigAndRestart(
       { opsPortOrUrl: params.instance, adminUser: params.adminUser, adminPass: params.adminPass, configBlock },
       { fetchImpl: deps.fetchImpl },
     );
-    push("apply-config-and-restart", true, `set_configuration + restart succeeded against ${params.instance}`);
+    push(true, `set_configuration + restart succeeded against ${params.instance}`);
 
     // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
+    currentStep = "self-verify";
     const verify = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
     if (!verify.ok) {
-      push("self-verify", false, `${verify.detail} — re-run \`flair mcp status\` to check current state, or \`flair mcp enable\` to retry the apply-config-and-restart step.`);
+      push(false, `${verify.detail} — re-run \`flair mcp status\` to check current state, or \`flair mcp enable\` to retry the apply-config-and-restart step.`);
       return {
         ok: false,
         dryRun,
@@ -970,7 +1164,7 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
         resource: `${issuer}/mcp`,
       };
     }
-    push("self-verify", true, verify.detail);
+    push(true, verify.detail);
 
     const resource = `${issuer}/mcp`;
     return {
@@ -986,9 +1180,23 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       callbackUrl,
     };
   } catch (err: any) {
-    const lastStep = steps.length > 0 ? steps[steps.length - 1].step : "signing-key";
-    push(lastStep, false, `unexpected error: ${err?.message ?? err}`);
-    return { ok: false, dryRun, steps, failedStep: lastStep };
+    // flair#1087: blame the step that was RUNNING, never the last one that
+    // succeeded. This read steps[steps.length - 1] — the last COMPLETED step —
+    // so a throw inside identity-mapping was reported against
+    // secrets-provisioning, which had just succeeded. An operator saw:
+    //
+    //     ✓ secrets-provisioning   ...apply these 5 vars in Fabric Studio, then re-run
+    //     ✗ secrets-provisioning   unexpected error: Identity mapping: ...
+    //
+    // Two results for one step, and the ✓ instructs several minutes of manual
+    // work in a web UI that the ✗ makes pointless. Read in order, you do the
+    // work first.
+    // No `?? "signing-key"` fallback: currentStep is initialised to the first
+    // step, so there is no undefined case to invent a name for. A fallback here
+    // would attribute a throw to a step chosen for being a plausible default —
+    // the same misattribution this handler exists to prevent, one layer down.
+    push(false, `unexpected error: ${err?.message ?? err}`);
+    return { ok: false, dryRun, steps, failedStep: currentStep };
   }
 }
 

@@ -28,7 +28,7 @@ process.env.FLAIR_MCP_NO_AUTOSTART = "1";
 class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 const dbStub = new Proxy({}, { get: () => new Proxy({}, { get: () => NoopBase }) });
 mock.module("harper", () => ({
-  server: { http: () => {} },
+  server: { http: () => {}, getUser: async () => null },
   Resource: NoopBase,
   databases: { flair: dbStub },
 }));
@@ -66,6 +66,10 @@ function makeDeps() {
     // Inject the /mcp handler directly (replaces the old process-global
     // mock.module of ./mcp-handler.ts) — same shape the mock used to return.
     mcpHandler: () => ({ status: 200 }),
+    // Skip the boot guard in existing tests: they use a Harper mock that
+    // doesn't exercise the real config.yaml path. The guard is tested
+    // explicitly in the "flair#1021 boot guard" describe block below.
+    skipComponentGuard: true,
   };
 }
 
@@ -225,5 +229,87 @@ describe("mcpRouteState — the router's own record of the mount decision", () =
       expect(mcpRouteState().mounted).toBe(mounted);
     }
     clearEnv();
+  });
+});
+
+/**
+ * flair#1021 — boot guard: FLAIR_MCP_OAUTH=on with no @harperfast/oauth
+ * component in config.yaml must FAIL LOUDLY at boot, not silently degrade.
+ *
+ * These tests inject a mock harper namespace via deps.harper so they don't
+ * depend on process-global mock.module ordering (bun's mock.module is not
+ * isolated per test file — the first mock wins, and 26 other test files also
+ * mock harper).
+ */
+describe("flair#1021 — boot guard (loud failure when flag on but component absent)", () => {
+  /** Build a mock harper namespace with the given component config. */
+  function mockHarper(componentConfig: Record<string, any> | null) {
+    return {
+      app: {
+        config: {
+          get: (key: string) => key === "@harperfast/oauth" ? componentConfig : undefined,
+        },
+      },
+    };
+  }
+
+  it("flag ON + component absent → throws with actor/state/remedy in the message", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "1";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper(null); // component absent
+    await expect(registerMcpOAuthRoute(deps)).rejects.toThrow(
+      /FLAIR_MCP_OAUTH is enabled.*@harperfast\/oauth.*config\.yaml/i,
+    );
+  });
+
+  it("POSITIVE CONTROL: flag ON + component present + issuer → mounts without error", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "1";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ providers: { default: {} } }); // component present
+    const mounted = await registerMcpOAuthRoute(deps);
+    expect(mounted).toBe(true);
+  });
+
+  it("flag OFF → guard is bypassed (no throw even with component absent)", async () => {
+    clearEnv();
+    // Flag is off
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper(null); // component absent
+    const mounted = await registerMcpOAuthRoute(deps);
+    expect(mounted).toBe(false); // returns false, no error
+  });
+
+  it("error message does not contain a hardcoded hostname or example domain", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "1";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper(null);
+    await expect(registerMcpOAuthRoute(deps)).rejects.toThrow(
+      /FLAIR_MCP_OAUTH is enabled/,
+    );
+    // Catch the error to inspect the message.
+    try {
+      await registerMcpOAuthRoute(deps);
+    } catch (e: any) {
+      const msg: string = e.message;
+      // Must not contain a hardcoded issuer URL.
+      expect(msg).not.toMatch(/https:\/\/[^\s]+/);
+      // Must name the component and the config file.
+      expect(msg).toContain("@harperfast/oauth");
+      expect(msg).toContain("config.yaml");
+      // Must name the flag the operator set.
+      expect(msg).toContain("FLAIR_MCP_OAUTH");
+      // Must name the env var for the issuer.
+      expect(msg).toContain("FLAIR_MCP_ISSUER");
+    }
   });
 });

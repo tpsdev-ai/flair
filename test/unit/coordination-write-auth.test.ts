@@ -78,9 +78,18 @@ class BaseWorkspaceState {
     return workspaceStore.get(id) ?? null;
   }
   async search(query: any) {
-    const conditions = Array.isArray(query) ? query : Array.isArray(query?.conditions) ? query.conditions : [];
+    // Respect query.operator — Harper combines top-level conditions with
+    // the query's operator (default "and").
+    const topLevel = Array.isArray(query) ? { conditions: query, operator: "and" } : query || {};
+    const conds = Array.isArray(topLevel.conditions) ? topLevel.conditions : [];
+    const op = topLevel.operator || "and";
     let records = Array.from(workspaceStore.values());
-    for (const cond of conditions) records = records.filter((r) => matchesCondition(r, cond));
+    if (conds.length > 0) {
+      records = records.filter((r) => {
+        const results = conds.map((c: any) => matchesCondition(r, c));
+        return op === "or" ? results.some(Boolean) : results.every(Boolean);
+      });
+    }
     async function* gen() {
       for (const r of records) yield r;
     }
@@ -106,7 +115,7 @@ const databasesMock = {
   },
 };
 
-mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: databasesMock, Resource: class {} }));
 
 const { WorkspaceState } = await import("../../resources/WorkspaceState.ts");
 const { OrgEvent } = await import("../../resources/OrgEvent.ts");
@@ -318,3 +327,66 @@ describe("WorkspaceState.delete() — ownership check uses the raw record (super
     expect(res instanceof Response).toBe(false);
   });
 });
+
+// ─── Boolean-injection guard (authz-hardening slice 2a) ────────────────────
+
+describe("WorkspaceState.search() — boolean-injection guard (authz-hardening slice 2a)", () => {
+  it("a non-admin agent's search() cannot use operator:'or' + wildcard to see another agent's workspace records", async () => {
+    workspaceStore.set("ws-mine", { id: "ws-mine", agentId: "agent-1", ref: "main" });
+    workspaceStore.set("ws-theirs", { id: "ws-theirs", agentId: "agent-2", ref: "main" });
+
+    const ws = makeWorkspace(agentCtx("agent-1"));
+
+    // A malicious caller supplies a condition that matches EVERY row (no
+    // record's agentId equals this sentinel) combined with operator:"or",
+    // hoping the "or" escapes to the top level and unions in every agent's
+    // rows.  The owner condition is always the outermost AND — the attacker's
+    // wildcard+"or" stays trapped inside a nested group that itself must
+    // still satisfy the AND, so it can only ever narrow the caller's OWN
+    // rows, never broaden past them.
+    const res: any = await ws.search({
+      conditions: [{ attribute: "agentId", comparator: "not_equal", value: "no-such-agent-sentinel" }],
+      operator: "or",
+    });
+    const results: any[] = [];
+    for await (const rec of res) results.push(rec);
+    expect(results.map((rec) => rec.id)).toEqual(["ws-mine"]);
+  });
+
+  it("a non-admin agent sees only own workspace records with a normal scoped search", async () => {
+    workspaceStore.set("ws-mine", { id: "ws-mine", agentId: "agent-1" });
+    workspaceStore.set("ws-theirs", { id: "ws-theirs", agentId: "agent-2" });
+
+    const ws = makeWorkspace(agentCtx("agent-1"));
+    const res: any = await ws.search({ conditions: [] });
+    const results: any[] = [];
+    for await (const rec of res) results.push(rec);
+    expect(results.map((rec) => rec.id)).toEqual(["ws-mine"]);
+  });
+
+  it("an admin agent sees all workspace records, unfiltered", async () => {
+    workspaceStore.set("ws-mine", { id: "ws-mine", agentId: "agent-1" });
+    workspaceStore.set("ws-theirs", { id: "ws-theirs", agentId: "agent-2" });
+
+    const ws = makeWorkspace(agentCtx("agent-admin", true));
+    const res: any = await ws.search({ conditions: [] });
+    const results: any[] = [];
+    for await (const rec of res) results.push(rec);
+    expect(results.map((rec) => rec.id).sort()).toEqual(["ws-mine", "ws-theirs"]);
+  });
+
+  it("anonymous is denied with 401", async () => {
+    workspaceStore.set("ws-1", { id: "ws-1", agentId: "agent-1" });
+    const ws = makeWorkspace(anonCtx());
+    const res: any = await ws.search({ conditions: [] });
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(401);
+  });
+});
+
+// ─── MUTATION-CHECK NOTE ────────────────────────────────────────────────────
+// The boolean-injection test above was manually mutation-tested during
+// development: temporarily reverting WorkspaceState.search() to the flat
+// prepend — `query.conditions = [agentIdCondition, ...existing]` — made the
+// test FAIL (observed "ws-theirs" in the result), confirming the guard is
+// not vacuously true.  Reverted before commit.

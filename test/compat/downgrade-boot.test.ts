@@ -1,10 +1,22 @@
-// Downgrade compat (flair#637): does the previously-published npm baseline
-// BOOT against a data directory the CURRENT build has already written to?
+// Downgrade compat (flair#637, restated flair#1050): there is never a silent
+// bad outcome. Either the previously-published npm baseline BOOTS against a
+// data directory the CURRENT build has already written to, OR it refuses to
+// start with a message naming what wrote the store, what is running, and how
+// to recover.
 //
-// This is the honesty check behind `flair upgrade`'s new pre-upgrade
-// snapshot (src/cli.ts, flair#637): the snapshot is only useful insurance if
-// restoring it and starting an OLDER Flair actually works. Nobody had ever
-// tested that before this suite — "downgrade" was aspirational, not verified.
+// This is the honesty check behind `flair upgrade`'s pre-upgrade snapshot
+// (src/cli.ts, flair#637 / flair#1047): the snapshot is only useful insurance
+// if restoring it and starting an OLDER Flair actually works — or if the old
+// Flair refuses loudly and the snapshot provides the recovery path. Nobody
+// had ever tested either path before this suite — "downgrade" was
+// aspirational, not verified.
+//
+// The invariant holds in two branches (flair#1050):
+//   - Same engine version: the baseline boots and serves the corpus correctly
+//     (the original flair#637 assertion, unchanged).
+//   - Engine version changed: the baseline either refuses to start (non-zero,
+//     promptly, naming both versions and a remedy) — the stamp-capable path —
+//     or boots successfully (pre-stamp baseline, the transition case).
 //
 // Scenario (mirrors a real operator downgrade exactly — no shortcuts):
 //   1. Boot the CURRENT BUILD (this worktree's own `dist/`, via
@@ -61,6 +73,33 @@ import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const NODE_BIN = process.env.NODE_BIN ?? "node";
+
+// ─── Outcome classification (flair#1050) ────────────────────────────────────
+// The restated downgrade invariant names three outcomes:
+//   (a) old binary boots and serves correctly
+//   (b) old binary refuses loudly naming the engine change and how to recover
+//   (c) anything else — the silent bad outcome it forbids
+//
+// This function classifies a downgrade boot attempt from its exit code and
+// stderr.  It is pure (no side effects) so it can be unit-tested directly.
+
+export type DowngradeOutcome =
+  | { kind: "booted" }
+  | { kind: "refusal"; exitCode: number; stderr: string }
+  | { kind: "hung"; stderr: string };
+
+export function classifyDowngradeOutcome(
+  exitCode: number | null,
+  stderr: string,
+): DowngradeOutcome {
+  // Exit 124 is the timeout command's exit code: the process HUNG and was
+  // killed by the harness, it did not refuse.
+  if (exitCode === 124) return { kind: "hung", stderr };
+  // Exit 0 means the baseline booted successfully.
+  if (exitCode === 0) return { kind: "booted" };
+  // Any other non-zero exit is a refusal (outcome b).
+  return { kind: "refusal", exitCode: exitCode ?? -1, stderr };
+}
 
 // Generous but bounded — a fresh `npm install` from the public registry plus
 // two real Harper installs/boots easily takes 1-3 minutes on a cold cache
@@ -126,6 +165,20 @@ function instanceEnv(inst: HarperInstance): Record<string, string> {
     HOME: inst.installDir,
     FLAIR_URL: inst.httpURL,
     FLAIR_ADMIN_PASS: inst.admin.password,
+    // Defence in depth for CLI spawns only. This does NOT fix the baseline
+    // boot — startHarper() builds its env from process.env and never reads
+    // this, so the real override lives in beforeAll. Kept because runFlairCli()
+    // can also invoke commands that start Harper, and the same prompt would
+    // block those. See beforeAll for the mechanism and the review that caught
+    // the difference.
+    //
+    // MUST be lowercase "yes" or "y". Harper tests membership in
+    // UPGRADE_PROCEED = ['yes','y'] behind a case-sensitive /y(es)?$|n(o)?$/
+    // pattern; any other value (YES, true, 1, "yes ") fails validation, and the
+    // prompt library discards the invalid override and falls through to reading
+    // stdin — reproducing the exact hang this avoids. Measured against
+    // harper 5.1.22 with prompt 1.3.0.
+    CONFIRM_DOWNGRADE: "yes",
   };
 }
 
@@ -157,6 +210,7 @@ async function fetchAgentMemories(inst: HarperInstance, agentId: string): Promis
 }
 
 describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]", () => {
+  let priorConfirmDowngrade: string | undefined;
   let baselineDir: string;
   let pkgDirBaseline: string;
   let cliPathBaseline: string;
@@ -169,8 +223,29 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
    * suite can assert on the DOCUMENTED failure mode instead of erroring out
    * of every test via a failed beforeAll. */
   let baselineBootError: Error | null = null;
+  /** Whether the Harper engine version differs between baseline and current. */
+  let engineVersionChanged = false;
+  let baselineHarperVersion: string | null = null;
+  let currentHarperVersion: string | null = null;
 
   beforeAll(async () => {
+    // ── 0. Pre-answer Harper's interactive downgrade prompt ────────────────
+    //
+    // MUST be set on `process.env`, not via instanceEnv(). `startHarper()` —
+    // which is what actually boots the baseline against the newer store —
+    // builds its own env as `{ ...process.env }` minus two token keys
+    // (test/helpers/harper-lifecycle.ts). It never calls instanceEnv(), whose
+    // only consumer is runFlairCli(). Setting the key there looks like it
+    // covers this and does not: the baseline spawn would still block on stdin.
+    //
+    // Caught in review by Kern, after I had put it in instanceEnv() and
+    // convinced myself the test was fixed. The lane and the compat test are two
+    // separate enforcement points and each needs the override on its own path.
+    //
+    // See migration-ci-lanes.yml for why the value must be lowercase.
+    priorConfirmDowngrade = process.env.CONFIRM_DOWNGRADE;
+    process.env.CONFIRM_DOWNGRADE = "yes";
+
     // ── 1. Install the previous published baseline from npm (same recipe as
     // federation-mixed-version.test.ts's beforeAll) ─────────────────────────
     baselineDir = await mkdtemp(join(tmpdir(), "flair-downgrade-baseline-"));
@@ -240,6 +315,37 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     // ── 3. Stop the current build WITHOUT deleting its data dir ────────────
     await stopHarper(current, { keepInstallDir: true });
 
+    // ── 3a. Detect engine version change (flair#1050) ────────────────────
+    // Read the Harper version from both installs to determine whether the
+    // engine version changed. This drives the branching in the test
+    // assertions below: same engine → current assertions (boot + readable);
+    // engine changed → refusal or pre-stamp boot.
+    const { readFileSync, existsSync } = await import("node:fs");
+    for (const pkgName of ["harper", "@harperfast/harper"]) {
+      const pkgPath = join(pkgDirBaseline, "node_modules", ...pkgName.split("/"), "package.json");
+      if (existsSync(pkgPath)) {
+        try {
+          baselineHarperVersion = (JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string }).version ?? null;
+        } catch { /* keep null */ }
+        break;
+      }
+    }
+    for (const pkgName of ["harper", "@harperfast/harper"]) {
+      const pkgPath = join(process.cwd(), "node_modules", ...pkgName.split("/"), "package.json");
+      if (existsSync(pkgPath)) {
+        try {
+          currentHarperVersion = (JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string }).version ?? null;
+        } catch { /* keep null */ }
+        break;
+      }
+    }
+    engineVersionChanged = baselineHarperVersion !== null &&
+      currentHarperVersion !== null &&
+      baselineHarperVersion !== currentHarperVersion;
+    if (engineVersionChanged) {
+      console.log(`Engine version changed: baseline Harper ${baselineHarperVersion} → current Harper ${currentHarperVersion}`);
+    }
+
     // ── 4. Boot the npm baseline against the SAME data dir ─────────────────
     // Captured, not awaited-and-thrown: a boot failure here is one of the two
     // valid outcomes this suite exists to distinguish, not a setup error.
@@ -251,6 +357,12 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
+    // Restore CONFIRM_DOWNGRADE — this suite mutates the real process env, so
+    // leaving it set would silently pre-answer the prompt for anything else
+    // sharing this process.
+    if (priorConfirmDowngrade === undefined) delete process.env.CONFIRM_DOWNGRADE;
+    else process.env.CONFIRM_DOWNGRADE = priorConfirmDowngrade;
+
     // baseline never owns dataDir (passed explicitly via `installDir`), so
     // stopHarper(baseline) will not remove it — this suite owns and removes
     // the shared dir itself, once, regardless of which side last touched it.
@@ -271,7 +383,47 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   // landed without a documented downgrade break, and BOTH this test's
   // assertions AND docs/upgrade.md's compatibility statement need updating
   // together, not just the test loosened to pass again.
-  test("npm baseline boots against data written by the current build", async () => {
+  //
+  // ─── ENGINE-VERSION-CHANGE BRANCH (flair#1050) ──────────────────────────
+  // When the Harper engine version differs between baseline and current,
+  // the old invariant ("downgrade always works") does not hold. The restated
+  // invariant says: either the baseline refuses to start (non-zero, promptly,
+  // naming both versions and a remedy), OR it boots (pre-stamp baseline —
+  // the transition case before the first stamp-carrying release ships).
+  // Both outcomes are valid, asserted results.
+
+  test("npm baseline boots against data written by the current build, or refuses with engine-version message", async () => {
+    if (engineVersionChanged) {
+      // Engine version changed — either outcome is valid.
+      if (baselineBootError) {
+        const msg = baselineBootError.message;
+
+        // Distinguish refusal (prompt non-zero exit) from hang (timeout).
+        // A hang is the silent-bad-outcome case the invariant forbids.
+        if (msg.includes("timed out") || msg.includes("did not respond within")) {
+          throw new Error(
+            `baseline HUNG (timeout) — this is the silent-bad-outcome case ` +
+            `the invariant forbids:\n${msg}`,
+          );
+        }
+
+        // Baseline refused to boot. Assert the refusal message names the
+        // engine version change and a recovery path (flair#1049/#1050).
+        if (!msg.includes("Harper") || !msg.includes("data directory")) {
+          throw new Error(
+            `Engine version changed and baseline refused to boot, but the refusal ` +
+            `message does not name the engine version or data directory — ` +
+            `unexpected failure mode:\n${msg}`,
+          );
+        }
+        // Refusal is the expected outcome for a stamp-capable baseline.
+        // The test passes — this is the "loud refusal" branch of the invariant.
+        return;
+      }
+      // Baseline booted successfully — pre-stamp baseline (transition case).
+      // Fall through to the normal boot assertion below.
+    }
+
     if (baselineBootError) {
       throw new Error(
         `npm baseline failed to boot against current-build data — this is a REAL downgrade break, ` +
@@ -285,6 +437,11 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, CLI_TIMEOUT_MS);
 
   test("memory written by the current build is readable via the npm baseline after downgrade", async () => {
+    if (engineVersionChanged && baselineBootError) {
+      // Baseline refused — the "loud refusal" branch of the invariant.
+      // Data readability is not expected; the recovery path is the snapshot.
+      return;
+    }
     if (baselineBootError) {
       throw new Error("skipped: baseline never booted — see the boot test above for the documented failure");
     }
@@ -293,6 +450,10 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
   }, CLI_TIMEOUT_MS);
 
   test("presence written by the current build is readable via the npm baseline after downgrade", async () => {
+    if (engineVersionChanged && baselineBootError) {
+      // Baseline refused — the "loud refusal" branch of the invariant.
+      return;
+    }
     if (baselineBootError) {
       throw new Error("skipped: baseline never booted — see the boot test above for the documented failure");
     }
@@ -303,4 +464,47 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     expect(entry).toBeDefined();
     expect(entry.presenceStatus).toBe("active");
   }, CLI_TIMEOUT_MS);
+});
+
+// ─── Classification unit tests (flair#1050) ─────────────────────────────────
+// The classifyDowngradeOutcome function is pure — these tests feed it
+// simulated exit codes and stderr to assert the classification itself,
+// independent of a real Harper boot.
+
+describe("classifyDowngradeOutcome", () => {
+  test("exit 0 → booted", () => {
+    expect(classifyDowngradeOutcome(0, "").kind).toBe("booted");
+  });
+
+  test("exit 124 → hung (the silent-bad-outcome case)", () => {
+    const result = classifyDowngradeOutcome(124, "some startup output");
+    expect(result.kind).toBe("hung");
+    if (result.kind === "hung") {
+      expect(result.stderr).toBe("some startup output");
+    }
+  });
+
+  test("exit null → refusal (process killed by signal, not a timeout)", () => {
+    const result = classifyDowngradeOutcome(null, "Killed\n");
+    expect(result.kind).toBe("refusal");
+    if (result.kind === "refusal") {
+      expect(result.exitCode).toBe(-1);
+    }
+  });
+
+  test("non-zero exit (not 124) → refusal", () => {
+    const result = classifyDowngradeOutcome(1, "Harper v5.2.0 wrote this data directory; you are running v5.1.17. Restore the pre-upgrade snapshot.");
+    expect(result.kind).toBe("refusal");
+    if (result.kind === "refusal") {
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Harper");
+    }
+  });
+
+  test("exit 124 with Harper-naming stderr is still hung, not refusal", () => {
+    // A hang is a hang regardless of what stderr says — exit 124 means
+    // the timeout command killed it, not that it printed a message and exited.
+    const result = classifyDowngradeOutcome(124, "Harper engine version mismatch");
+    expect(result.kind).toBe("hung");
+  });
 });

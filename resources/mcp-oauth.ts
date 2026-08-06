@@ -21,6 +21,49 @@
 import * as harper from "harper";
 import { mcpOAuthEnabled, mcpAuthConfig } from "./mcp-oauth-flag.js";
 import { checkMcpRateLimit } from "./rate-limit.js";
+
+/**
+ * Boot guard (flair#1021): when FLAIR_MCP_OAUTH is on, the @harperfast/oauth
+ * component MUST be declared in config.yaml. Without it the authorization
+ * server's routes never mount — discovery, authorize, token, JWKS all 404.
+ * The /mcp route would still register, but every request fails closed against
+ * a non-existent auth server. This guard fails loudly so the operator sees the
+ * error at boot instead of a silently broken deployment.
+ *
+ * The error names the actor (the operator who set the flag), the state
+ * (component absent from config.yaml), and the remedy (add the declaration).
+ * It does NOT suggest a concrete issuer — the issuer is derived at runtime
+ * from FLAIR_MCP_ISSUER / FLAIR_PUBLIC_URL and must not be hardcoded.
+ */
+export function assertHarperOAuthComponentDeclared(harperNs?: any) {
+  // Harper exposes parsed config via its runtime namespace. We check for the
+  // @harperfast/oauth key; absence means the component's routes were never
+  // registered.
+  const h = harperNs ?? harper;
+  const hc = h.app?.config ?? h.config;
+  const component = hc?.get?.("@harperfast/oauth") ?? hc?.["@harperfast/oauth"];
+  if (!component) {
+    throw new Error(
+      "FLAIR_MCP_OAUTH is enabled but the @harperfast/oauth component is not declared in config.yaml. " +
+      "The authorization server cannot start without it — discovery, authorize, token, and JWKS endpoints will all 404, " +
+      "and /mcp will reject every request.\n" +
+      "Add this entry to your config.yaml:\n" +
+      "\n" +
+      '  "@harperfast/oauth":\n' +
+      "    providers:\n" +
+      '      default:\n' +
+      '        authorizationEndpoint: "/OAuthAuthorize"\n' +
+      '        tokenEndpoint: "/OAuthToken"\n' +
+      '        revocationEndpoint: "/OAuthRevoke"\n' +
+      '        registrationEndpoint: "/OAuthRegister"\n' +
+      '        jwksUri: "/.well-known/jwks.json"\n' +
+      '        discoveryEndpoint: "/.well-known/oauth-authorization-server"\n' +
+      "\n" +
+      "Then set FLAIR_MCP_ISSUER (or FLAIR_PUBLIC_URL) to your instance's public origin " +
+      "and add the corresponding mcp.* block to the component config.",
+    );
+  }
+}
 // NOTE: mcpHandler is intentionally NOT statically imported here — it's resolved
 // lazily (deps.mcpHandler ?? dynamic import) inside registerMcpOAuthRoute, same
 // as loadWithMCPAuth below. A static `import { mcpHandler } from "./mcp-handler.js"`
@@ -52,6 +95,13 @@ export interface RegisterDeps {
   /** The /mcp request handler (injectable for tests; defaults to a lazy import
    *  of ./mcp-handler.js — never statically imported, see the note at the top). */
   mcpHandler?: any;
+  /** Skip the boot guard that checks @harperfast/oauth is declared in config.yaml.
+   *  Tests that use a Harper mock without a real config.yaml set this to true. */
+  skipComponentGuard?: boolean;
+  /** Harper namespace for the boot guard (injectable for tests; defaults to the
+   *  real `harper` import). Tests inject a mock so they don't depend on
+   *  process-global mock.module ordering. */
+  harper?: any;
 }
 
 /**
@@ -152,6 +202,14 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
       status: "Not enabled",
       reason: "Set FLAIR_MCP_OAUTH=1 (and an issuer) to serve MCP over HTTP.",
     });
+  }
+
+  // Boot guard (flair#1021): fail loudly if the operator enabled the flag but
+  // the @harperfast/oauth component is absent from config.yaml. Without it the
+  // authorization server's routes never mount — discovery, authorize, token,
+  // JWKS all 404 — and the /mcp guard has nothing to validate against.
+  if (!deps.skipComponentGuard) {
+    assertHarperOAuthComponentDeclared(deps.harper);
   }
 
   const config = mcpAuthConfig();

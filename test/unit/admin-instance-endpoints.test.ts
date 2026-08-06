@@ -30,13 +30,14 @@ process.env.FLAIR_MCP_NO_AUTOSTART = "1";
 class NoopBase { constructor(_id?: any, _ctx?: any) {} }
 const dbStub = new Proxy({}, { get: () => new Proxy({}, { get: () => NoopBase }) });
 mock.module("harper", () => ({
-  server: { http: () => {} },
+  server: { http: () => {}, getUser: async () => null },
   Resource: NoopBase,
   databases: { flair: dbStub },
 }));
 
 const { AdminInstance } = await import("../../resources/AdminInstance.ts");
 const { registerMcpOAuthRoute } = await import("../../resources/mcp-oauth.ts");
+const { esc } = await import("../../resources/admin-layout.ts");
 
 const ENV = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_PUBLIC_URL"];
 function clearEnv() { for (const k of ENV) delete process.env[k]; }
@@ -47,6 +48,7 @@ function makeDeps() {
     server: { http: (_h: any, _o: any) => {} },
     loadWithMCPAuth: async () => (handler: any, _options: any) => handler,
     mcpHandler: () => ({ status: 200 }),
+    skipComponentGuard: true,
   };
 }
 
@@ -123,5 +125,66 @@ describe("AdminInstance Endpoints table — MCP row (flair#1001)", () => {
     await registerMcpOAuthRoute(makeDeps()); // flag ON
     const onHtml = await renderInstancePage();
     for (const url of siblings) expect(onHtml).toContain(`<code>${url}</code>`);
+  });
+});
+
+// ── flair#1029: publicUrl output escaping ───────────────────────────────
+
+describe("AdminInstance — publicUrl output escaping (flair#1029)", () => {
+  /**
+   * Render the Instance page with FLAIR_PUBLIC_URL set to `value`.
+   * No Host header is provided, so resolvePublicUrl returns the env var.
+   */
+  async function renderWithPublicUrl(value: string): Promise<string> {
+    process.env.FLAIR_PUBLIC_URL = value;
+    const inst: any = new (AdminInstance as any)();
+    inst.getContext = () => ({ request: {} });
+    const res = await inst.get();
+    return await res.text();
+  }
+
+  it("escapes HTML metacharacters in publicUrl at every interpolation site", async () => {
+    const hostile = `https://evil.com/<script>alert('xss')</script>`;
+    const html = await renderWithPublicUrl(hostile);
+
+    // The raw metacharacters must not appear in the output.
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("alert('xss')");
+
+    // The escaped equivalents must appear.
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).toContain("alert(&#39;xss&#39;)");
+
+    // Every row in the Endpoints table must be escaped.
+    // API row
+    expect(html).toContain(`<code>${esc("https://evil.com/<script>alert('xss')</script>")}/</code>`);
+    // OAuth Discovery row
+    expect(html).toContain(`<code>${esc("https://evil.com/<script>alert('xss')</script>")}/OAuthMetadata</code>`);
+    // OAuth Authorize row
+    expect(html).toContain(`<code>${esc("https://evil.com/<script>alert('xss')</script>")}/OAuthAuthorize</code>`);
+    // OAuth Token row
+    expect(html).toContain(`<code>${esc("https://evil.com/<script>alert('xss')</script>")}/OAuthToken</code>`);
+    // Admin row
+    expect(html).toContain(`<code>${esc("https://evil.com/<script>alert('xss')</script>")}/AdminDashboard</code>`);
+    // Public URL card
+    expect(html).toContain(esc("https://evil.com/<script>alert('xss')</script>"));
+  });
+
+  it("positive control: an ordinary URL renders unchanged and still works as a link", async () => {
+    const ordinary = "https://flair.example.com";
+    const html = await renderWithPublicUrl(ordinary);
+
+    // The URL must appear verbatim in every row.
+    expect(html).toContain(`<code>${ordinary}/</code>`);
+    expect(html).toContain(`<code>${ordinary}/OAuthMetadata</code>`);
+    expect(html).toContain(`<code>${ordinary}/OAuthAuthorize</code>`);
+    expect(html).toContain(`<code>${ordinary}/OAuthToken</code>`);
+    expect(html).toContain(`<code>${ordinary}/AdminDashboard</code>`);
+
+    // The Public URL card also shows it verbatim.
+    expect(html).toContain(`<div style="font-family:monospace;font-size:0.9em;word-break:break-all">${ordinary}</div>`);
+
+    // esc() is a no-op on ordinary URLs — verify that explicitly.
+    expect(esc(ordinary)).toBe(ordinary);
   });
 });

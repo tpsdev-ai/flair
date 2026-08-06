@@ -67,6 +67,12 @@ on:
       - "test/compat/**"
       - "test/helpers/**"
       - ".github/workflows/federation-compat.yml"
+      # An engine version change is the only realistic source of a
+      # cross-version boot break, and it reaches us through the lockfile,
+      # not through source — a Harper bump touches only these two files
+      # (flair#1047).
+      - "package.json"
+      - "bun.lock"
   workflow_dispatch:
 
 jobs:

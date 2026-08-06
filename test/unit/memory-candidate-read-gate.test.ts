@@ -70,7 +70,7 @@ const databasesMock = {
   },
 };
 
-mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: databasesMock, Resource: class {} }));
 
 const { MemoryCandidate } = await import("../../resources/MemoryCandidate.ts");
 

@@ -137,8 +137,11 @@ describe("classifyKeysDir — N unregistered + M registered", () => {
   });
 });
 
-describe("classifyKeysDir — invalid files classified distinctly from unregistered", () => {
-  it("an unparseable .key file → class 'invalid', and never triggers a network call", async () => {
+describe("classifyKeysDir — unidentifiable files classified distinctly from unregistered", () => {
+  // flair#1026: an unparseable file is "unidentified", NOT "invalid", and is not
+  // prunable. The keys dir is shared with AES-256-GCM keystore blobs, which do
+  // not parse as seeds while being live federation keys.
+  it("an unparseable .key file → class 'unidentified', and never triggers a network call", async () => {
     writeFileSync(join(keysDir, "garbage.key"), "not-a-real-ed25519-seed-at-all");
     let called = false;
     globalThis.fetch = (async () => { called = true; return new Response("{}", { status: 200 }); }) as typeof fetch;
@@ -146,19 +149,19 @@ describe("classifyKeysDir — invalid files classified distinctly from unregiste
     const res = await classifyKeysDir(keysDir, BASE_URL);
     expect(res.aborted).toBe(false);
     expect(res.entries).toHaveLength(1);
-    expect(res.entries[0].class).toBe("invalid");
+    expect(res.entries[0].class).toBe("unidentified");
     expect(res.entries[0].name).toBe("garbage.key");
     expect(called).toBe(false);
   });
 
-  it("invalid and stale are both prunable but reported as distinct classes side by side", async () => {
+  it("unidentified and stale are reported as distinct classes side by side, and only stale is prunable", async () => {
     writeFileSync(join(keysDir, "garbage.key"), "not-a-real-ed25519-seed-at-all");
     writeSeedKey(keysDir, "agent-stale");
     globalThis.fetch = mockRegistrationFetch(new Set());
 
     const res = await classifyKeysDir(keysDir, BASE_URL);
     const byClass = Object.fromEntries(res.entries.map((e) => [e.name, e.class]));
-    expect(byClass["garbage.key"]).toBe("invalid");
+    expect(byClass["garbage.key"]).toBe("unidentified");
     expect(byClass["agent-stale.key"]).toBe("stale");
   });
 });
@@ -185,7 +188,7 @@ describe("classifyKeysDir — unreachable instance aborts the whole run", () => 
 // ─── applyKeyPrune ──────────────────────────────────────────────────────────
 
 describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones untouched", () => {
-  it("moves exactly the stale + invalid entries into .pruned/<date>/, a registered agent's key is NEVER moved", async () => {
+  it("moves exactly the stale entries into .pruned/<date>/; a registered key and an UNIDENTIFIABLE file are NEVER moved", async () => {
     writeSeedKey(keysDir, "agent-stale-1");
     writeSeedKey(keysDir, "agent-stale-2");
     writeSeedKey(keysDir, "agent-registered");
@@ -196,18 +199,21 @@ describe("applyKeyPrune — --apply moves prunable keys, leaves registered ones 
     expect(classified.aborted).toBe(false);
 
     const moved = applyKeyPrune(keysDir, classified.entries, "2026-07-18");
-    expect(moved).toHaveLength(3);
-    expect(moved.map((m) => m.name).sort()).toEqual(["agent-stale-1.key", "agent-stale-2.key", "garbage.key"]);
+    expect(moved).toHaveLength(2);
+    expect(moved.map((m) => m.name).sort()).toEqual(["agent-stale-1.key", "agent-stale-2.key"]);
 
     // Prunable files are gone from the original location...
     expect(existsSync(join(keysDir, "agent-stale-1.key"))).toBe(false);
     expect(existsSync(join(keysDir, "agent-stale-2.key"))).toBe(false);
-    expect(existsSync(join(keysDir, "garbage.key"))).toBe(false);
     // ...and present in the archive.
     const archiveDir = join(keysDir, PRUNED_DIR_NAME, "2026-07-18");
     expect(existsSync(join(archiveDir, "agent-stale-1.key"))).toBe(true);
     expect(existsSync(join(archiveDir, "agent-stale-2.key"))).toBe(true);
-    expect(existsSync(join(archiveDir, "garbage.key"))).toBe(true);
+
+    // flair#1026 — THE POINT OF THIS CHANGE: the unparseable file stays exactly
+    // where it was. It may be a live keystore blob, and prune cannot tell.
+    expect(existsSync(join(keysDir, "garbage.key"))).toBe(true);
+    expect(existsSync(join(archiveDir, "garbage.key"))).toBe(false);
 
     // The registered agent's key is untouched, at its original path.
     expect(existsSync(join(keysDir, "agent-registered.key"))).toBe(true);

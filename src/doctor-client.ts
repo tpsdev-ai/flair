@@ -1067,7 +1067,7 @@ export function resolveCollisionSafeName(existingNames: Iterable<string>, filena
   return `${filename}.${n}`;
 }
 
-export type KeyPruneClass = "keep" | "stale" | "invalid" | "ignored";
+export type KeyPruneClass = "keep" | "stale" | "invalid" | "unidentified" | "ignored";
 
 export interface KeyPruneDecision {
   class: KeyPruneClass;
@@ -1099,7 +1099,20 @@ export function classifyKeyFile(
   baseUrl: string,
 ): KeyPruneDecision {
   if (!seedValid) {
-    return { class: "invalid", reason: "not a parseable Ed25519 private key seed" };
+    // NOT "invalid", and therefore NOT prunable. "I could not parse this" and
+    // "this is a stale agent key" are different findings, and only the second
+    // is safe to act on. `~/.flair/keys/<id>.key` is a namespace shared by two
+    // writers: plaintext Ed25519 seeds, and AES-256-GCM keystore blobs written
+    // by FileKeyStore (flair#1026). A keystore blob is unparseable AS A SEED
+    // while being a LIVE federation key — classifying it "invalid" moved a key
+    // that was in use. An unidentified file is reported for a human and left
+    // exactly where it is.
+    return {
+      class: "unidentified",
+      reason:
+        "not a parseable Ed25519 private key seed — may be a keystore blob or another format; " +
+        "left in place, inspect it before removing anything (flair#1026)",
+    };
   }
   if (registration?.state === "registered") {
     return { class: "keep", reason: `agent '${agentId}' is registered on ${baseUrl} — never pruned` };

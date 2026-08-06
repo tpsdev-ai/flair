@@ -87,6 +87,7 @@ const databasesMock = {
 };
 
 mock.module("harper", () => ({
+  server: { http: () => {}, getUser: async () => null },
   databases: databasesMock,
   Resource: MockResourceBase,
 }));

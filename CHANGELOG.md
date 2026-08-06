@@ -18,6 +18,635 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.38.0] - 2026-08-05
+
+### Added
+
+- **`flair mcp enable` now pushes its secrets to the target when the target can take them**, instead
+  of always ending in a manual paste. When the instance supports Harper's encrypted env-secrets, the
+  five vars are sealed locally and set over the ops API — no Fabric Studio step, no re-run with
+  `--confirm-secrets-applied`.
+
+  Values are encrypted **before** they leave the machine, using the same `enc:v1:` envelope Harper
+  reads: AES-256-GCM on the value, RSA-OAEP(SHA-256) wrapping the key, addressed to a public key
+  fetched from the target. Plaintext never appears in a request body, and never in the command's
+  output — results carry variable NAMES and outcomes only.
+
+  **The mechanism is chosen by asking the target, not by looking at its hostname.** The previous
+  selector was `hostname.endsWith(".harperfabric.com") ? automated : manual`, which was wrong in both
+  directions at the moment it was replaced: the Fabric instance it was written for runs Harper 5.1.26
+  and has no secrets operations at all, while a self-hosted Harper 5.2 with the env-secrets component
+  was sent down the manual path for having the wrong name. A hostname is not a capability, and
+  neither is a version — the write operations and the decryptor that makes the secret reach the
+  process ship separately.
+
+  So `enable` asks for the public key it would need anyway. If that answers, it pushes. If the target
+  says the operation does not exist, refuses the probe, is unreachable, or answers with something
+  unusable, it falls back to today's staged file and **says which of those happened**. The staging
+  file is written either way, so a fallback never leaves an operator stranded mid-run.
+
+  What the probe deliberately does not claim: that the secret will be *decrypted*. No read-only call
+  can establish that. The existing self-verify step already does, by comparison rather than absence: the
+  well-known endpoint still answers when the flag is off, serving flair's own OAuth 2.1 document,
+  and self-verify recognises it by the advertised `token_endpoint`. So a secret that is stored and
+  never decrypted fails there with a message naming `FLAIR_MCP_OAUTH`, rather than passing quietly.
+
+  `--secrets-mechanism` remains an explicit override and skips the probe entirely: an operator who
+  has said what they want is not second-guessed.
+
+## [0.37.0] - 2026-08-04
+
+### Fixed
+
+- **`--admin-pass`'s help text and error no longer promise something the code deliberately refuses.**
+  For a remote target, `flair mcp enable` requires the password explicitly — `FLAIR_ADMIN_PASS` and
+  `~/.flair/admin-pass` are skipped on purpose, because they are *this* machine's local admin
+  credentials and sending them to another instance is how a local secret ends up on someone else's
+  Harper. That guard is correct and unchanged.
+
+  What was wrong is that three places described it three different ways: `--help` and the error both
+  said `FLAIR_ADMIN_PASS` would work, one call-site comment described the goal as blocking only the
+  *file* fallback, and the resolver's own doc said both legs are skipped. Only the last matched the
+  code, and it was the one an operator never sees.
+
+  The error now says explicitly that the env var and the local file are not used for a remote target
+  **and why**, so the refusal is actionable instead of looking like a bug. Reported by an operator who
+  had exported `FLAIR_ADMIN_PASS`, watched it be ignored, and reasonably filed it as broken.
+
+- **The changelog gate now asks whether *your* change wrote an entry, not whether the directory is
+  non-empty.** The old rule fired only when `.changelog/unreleased/` was empty *and* feat/fix commits
+  had landed since the last tag — so the first PR after a release cut satisfied it for every PR that
+  followed, until the next cut emptied the directory again.
+
+  That is not hypothetical. On 2026-08-03 four PRs merged with no fragment while the directory held
+  three entries from earlier work; the gate passed on all four, and v0.36.0 was assembled with
+  release notes omitting three authz security fixes — the entire reason to upgrade. They were
+  backfilled by hand at the cut, which is the moment this check exists to make unnecessary.
+
+  The gate now also compares against the PR's merge base and requires a fragment to have been
+  **added** in that range. Editing an entry someone else staged is not writing your own. The
+  since-tag rule is kept, because it still catches the empty-directory-at-release case; where no
+  base ref is reachable (shallow clone, no `origin`) the per-change half is skipped and the
+  since-tag half still runs.
+
+- **`flair doctor` no longer reports the local CLI's version as the instance's.** Pointed at a
+  deployed instance, every line doctor printed was genuinely remote — uptime, PID, memory counts —
+  except the one that mattered: it ran the currency check against `__pkgVersion`, the CLI you happen
+  to have installed, and printed `flair <x> is current`. Reported against an instance five minors
+  behind, where doctor said "current". Telling you that is doctor's entire job.
+
+  It now probes the target's `/Health` and reports the version running **there**, and warns
+  separately when the local CLI and the instance differ.
+
+  **An undeterminable version is reported as unknown and counts as an issue — it never falls back to
+  the local number.** An older instance may not expose its version at all, and substituting the one
+  already in hand is exactly the bug being fixed. A Fabric node mid-failed-deploy reports a
+  non-semver marker (`dev`); that is a real answer from a real server and still cannot be compared
+  against a published version, so it is treated as undeterminable rather than fed to a semver check.
+
+- **The downgrade lane could only ever observe a hang, because the old binary was waiting for
+  someone to type "yes".** Starting an older Harper against a store written by a newer minor calls
+  `forceDowngradePrompt()`, which asks whether to proceed and **blocks on stdin**. The prompt and
+  its accompanying version warning are written to stdout only — never to the log — so in CI the
+  process simply stopped, with nothing in the output explaining why.
+
+  The lane classified that correctly as a hang (the outcome the invariant forbids), but it meant the
+  other two branches were untestable: the check could never distinguish "the old binary boots
+  cleanly" from "the old binary refuses loudly", because it never got past the prompt to find out.
+  An invariant naming three outcomes was being enforced against one.
+
+  Both enforcement points now set `CONFIRM_DOWNGRADE=yes`, which pre-answers the prompt. The
+  exit-124 hang check is deliberately kept — a hang that survives the override is a genuine hang and
+  still fails the lane, now with a message saying the known prompt cause has been ruled out.
+
+  The value must be lowercase `yes` or `y`: Harper tests membership in an allowlist behind a
+  case-sensitive pattern, and the prompt library **discards an override that fails validation and
+  falls through to reading stdin** — so `YES`, `true`, `1` or a trailing space reproduce the exact
+  hang this avoids. Measured against harper 5.1.22 with prompt 1.3.0.
+
+  Filed upstream as HarperFast/harper#2046; the migration itself is additive and reversible, which
+  is the opposite of what the silent hang suggested.
+
+- **The refusal to boot against a newer engine's data now runs on every boot path.** `flair start`
+  refuses when the data directory was written by a newer Harper — but that check had exactly one call
+  site, inline in `start`'s own action. `flair restart` goes straight to `restartFlair` →
+  `startFlairProcess` and never reached it, `flair upgrade` restarts by spawning the newly installed
+  CLI with `restart`, and the snapshot paths took the same unguarded route.
+
+  So the guard covered one of the doors a boot comes through, and not the one an **engine swap**
+  arrives by. Upgrading across a storage-format boundary left the instance down with a bare exit 1,
+  and the only explanation surfaced minutes later from the storage layer as an error about
+  compression internals — nowhere near the cause, and naming no remedy:
+
+  ```
+  the instance is REACHABLE after the upgrade   Expected: >= 200   Received: 0
+  the upgrade reported success                  Expected: 0        Received: 1
+  ```
+
+  The check is now a single function called from the top of `startFlairProcess`, before anything is
+  spawned or launchd is touched, which covers its callers — restart, upgrade and the snapshot paths
+  — in one place, plus `start`, which performs its own spawn and keeps its own framing and exit
+  code. Deliberately one function rather than a second copy: these two sites had already drifted once
+  on the spawn environment, where `start` set a host-qualified ops port and `startFlairProcess` set
+  none, silently re-widening the ops API on every restart.
+
+  **`flair restart` and `flair upgrade` now refuse rather than attempt the boot**, and the refusal
+  names the restore-from-backup path. An install whose engine version cannot be read is unaffected,
+  as before.
+
+  Tests assert the wiring rather than the logic, which was already covered: the decision has exactly
+  one implementation in the CLI, the guard precedes the first spawn, and a future boot path that
+  bypasses `startFlairProcess` fails the check rather than passing unnoticed.
+
+- **`models/*.gguf.downloading` is now ignored.** `.gitignore` covered `*.gguf` but not the
+  in-progress placeholder Harper writes beside it, and the integration harness points
+  `FLAIR_MODELS_DIR` at the repo's own `models/` directory — so a killed test run left an untracked
+  file in the working tree.
+
+- **The error no longer accuses the principal.** A failed lookup reported
+  `failed to look up principal '<x>' (HTTP 404)`, which sends the reader to inspect principals. But a
+  *missing* principal returns `200 []` and the very next branch creates it — reaching that error
+  means the ops **call** failed, not that the identity is absent. It now names the URL it tried, and
+  on a 404 says the address is probably the served origin and points at `--ops-url`. An error that
+  misdirects costs more than one that simply says no.
+
+- **`flair mcp enable` sent its ops-API calls to the served origin, and blamed the wrong thing when
+  they failed.** Against a hosted instance the ops target was the instance URL verbatim — so the
+  calls went to port 443, where the flair REST component owns `/` and answers `404 Not found`.
+  Measured against a live Fabric instance, same request:
+
+  ```
+  POST https://<host>/        -> HTTP 404  "Not found"
+  POST https://<host>:9925/   -> HTTP 200  []
+  ```
+
+  The ops API now gets the hosted ops port rather than the served one, and `--ops-url` overrides it
+  outright. **No arithmetic on the served port is trusted:** the codebase elsewhere documents
+  "ops port = HTTP port − 1", which derives 442 — also measured dead, along with 19925. An operator
+  can put the ops API anywhere, so an explicit target always wins.
+
+- **A failed `flair mcp enable` step is now reported against the step that failed.** The catch
+  attributed errors to `steps[steps.length - 1]` — the last step that *succeeded* — so a throw inside
+  identity mapping was filed against secrets provisioning, which had just completed:
+
+  ```
+  ✓ secrets-provisioning   ...apply these 5 vars via Fabric Studio, then re-run
+  ✗ secrets-provisioning   unexpected error: Identity mapping: ... (HTTP 404)
+  ```
+
+  Two results for one step name, and the `✓` instructs several minutes of manual work in a web UI
+  that the `✗` makes pointless. Read in reading order — which is how people read — you do the work
+  first and discover afterwards that the step failed anyway. It also makes a run un-skimmable:
+  scanning for the first `✗` finds a `✓` for that same step above it.
+
+  A test asserts the narrow fact (an identity-mapping failure reports `identity-mapping`) and a
+  broader invariant: no step name may carry both a pass and a failure in one run.
+
+- **Removed the redundant `postinstall` chmod.** npm already sets the executable bit on files
+  referenced by `bin` when it links them; the script changed nothing and cost a line in npm's
+  install-script approval prompt, on a package whose install output is already noisy.
+
+- **`docs/upgrade.md` no longer links to a CHANGELOG that isn't there.** The guide ships in the npm
+  package and pointed at `../CHANGELOG.md`, which the `files` allowlist excludes — so the first
+  instruction in the upgrade guide was a dead link for every reader who installed from the registry.
+  The three links now resolve to the published copy on GitHub, rather than adding a 1400-line file
+  to an install that is already too heavy.
+
+### Security
+
+- **A deploy no longer ships the whole working tree.** `harper deploy` packs its root wholesale, and
+  the code assumed that root was an npm-installed package — where the tree already *is* the published
+  file set. That assumption is true for the intended path and silently false for the one our own
+  deploy procedure prescribes: a git checkout.
+
+  Measured on a production Fabric component: **36 top-level entries**, including `.git`, `.env`,
+  `models/` (80 MB), `test/`, `packages/`, `src/`, and a scratch `pr-body.md` left in the clone that
+  afternoon. **96 MB against the published tarball's 1.3 MB.**
+
+  Two consequences. An operator deploying from a checkout shipped `.git` — every secret ever
+  committed and later removed — and any `.env` sitting in the tree, into a component that is then
+  persisted and replicated across the cluster. And a 96 MB payload is what puts a deploy inside
+  HarperFast/harper#2062's aborted-transaction window, where the pre-saved blob is destroyed at the
+  source. The bloat and the cluster failure were the same bug wearing two hats.
+
+  Staging is now unconditional and restricted to the entries `files` declares, read from the deploy
+  root's own `package.json`. The payload equals the published package **by construction** rather than
+  by an operator happening to run from the right directory. For an npm-installed root the result is
+  unchanged, because such a tree contains nothing else. Measured after: 10 entries, 3.8 MB — `.git`,
+  `models/`, `packages/`, `test/`, `src/` all gone.
+
+  `.env` is explicitly kept: it is not in `files` and never reaches npm, but `config.yaml`'s
+  `loadEnv` reads it and shipping it is the point of the staging mechanism. Filtering it out broke
+  `FLAIR_PUBLIC_URL` on every deploy — caught by an existing test rather than in production.
+
+  A root with no usable `files` array is now **refused** rather than deployed unfiltered. The
+  refusal names the remedy.
+
+- **`hono` pinned forward to `^4.12.34`** — GHSA-8j4g-w8fx-2239, a ReDoS in the CORS middleware via
+  `Access-Control-Request-Headers`. Reaches us transitively through
+  `@tpsdev-ai/flair-mcp › @modelcontextprotocol/sdk`, so it is not fixable by changing a direct
+  dependency.
+
+  This advisory was published **after** the previous override batch merged, which is worth recording:
+  the dependency gate now goes red on main whenever a new advisory lands against something in the
+  tree, and on 2026-08-03 that happened four times in one evening. The gate is telling the truth —
+  main really is exposed until the pin lands — but "main is red" stops carrying information if it is
+  the normal state. Worth a deliberate policy rather than a reflex.
+
+- **`REQUIRED_PACKAGE_FILES`'s "keep in sync" comment is no longer a promise nobody kept.** It
+  claimed to mirror `files`; nothing compared them, and they drifted invisibly for as long as the
+  comment existed. The payload is now derived from `files` directly, so there is one source of truth
+  and nothing to synchronise by hand. Four tests assert the deployed set — including that the filter
+  is not over-broad, since a filter that drops everything would also pass a "no `.git` shipped" check.
+
+- **Seven advisories resolved by pinning three transitive dependencies forward.** A wave of
+  advisories published on 2026-08-03 took the dependency gate from one blocking entry to seven, and
+  five of them were the same package:
+
+  | package | advisories | worst |
+  |---|---|---|
+  | `undici` → `^8.9.0` | 5 | **high** — cross-user information disclosure |
+  | `brace-expansion` → `^5.0.9` | 1 | **high** — DoS via unbounded intermediate arrays, bypassing the CVE-2026-14257 mitigation |
+  | `fast-uri` → `^4.1.2` | 1 | **high** — host confusion via backslash |
+
+  All three reach us transitively — through `pi-coding-agent`, `openclaw`, and
+  `harper › @fastify/static › glob › minimatch` — so none could be fixed by changing a direct
+  dependency. Total advisories drop from 21 to 14, and every remaining one is allowlisted with a
+  dated justification.
+
+  These are plain version overrides, deliberately **not** `npm:` aliases. flair#750 records an alias
+  override (`harper` → `npm:@harperfast/harper@…`) that collided with the already-installed scoped
+  copy, left npm's tree `invalid`, and made any second npm operation fail — which broke the clean-VM
+  install gate and was reverted. A version constraint introduces no second package name, so that
+  failure mode is absent by construction. Verified: build, a second `bun install` against the
+  reified tree, and the full unit suite (3859 tests) all pass.
+
+  Worth stating for whoever revisits these: an override is a **forward pin, not a fix**. Each one is
+  correct only until the upstream dependency resolves the advisory itself, at which point the
+  override becomes a pin holding a version we no longer need to hold. Re-check them at each
+  dependency bump rather than treating them as settled.
+
+- **A misspelled `visibility` no longer writes a memory everyone can read.** `PUT /Memory/<id>` with
+  `{"visibility":"prvate"}` was accepted, and the read scope resolves visibility by exact match on
+  `private` — so the typo, a wrong case, or a retired tier like `office` all read as non-private and
+  were visible to every agent on the instance. flair#1006 closed this at the CLI flag and the MCP
+  tool argument; REST and the in-process API reach `Memory.put()`/`post()` without passing either.
+
+  Both now refuse an unrecognised value with `400 invalid_visibility`, naming the two valid values
+  and how to opt out. Refusing rather than dropping the key is deliberate: dropping it falls through
+  to the durability-keyed default, which for a permanent or persistent write is `shared` — the same
+  widening, arrived at silently.
+
+  **The read predicate is deliberately left permissive.** A row written before the field existed has
+  no visibility and must keep reading exactly as it always did. So write-validation is strictly
+  stronger than read-resolution, and the two must not be collapsed into one predicate — there is a
+  test whose only job is to fail if someone tries.
+
+## [0.36.0] - 2026-08-03
+
+### Changed
+
+- Restated the downgrade invariant (flair#1050): there is never a silent bad
+  outcome — either the old binary boots and serves the corpus correctly, OR it
+  refuses to start with a message naming what wrote the store, what is running,
+  and how to recover, with a pre-upgrade snapshot that restores the store to a
+  working state. The migration CI lane and downgrade-boot compat test now assert
+  both branches, and the snapshot-opt-in rationale in docs and CLI docstrings
+  reflects the restated guarantee.
+
+### Fixed
+
+- **A crashed test run no longer leaves `config.yaml` permanently modified.**
+  `mcp-client-credentials-e2e` wrote the OAuth component block into the repository's real
+  `config.yaml` and restored it in `afterAll`. A kill or crash mid-run left the block in place,
+  and the next real instance start would silently 404 on `/.well-known/oauth-authorization-server`
+  — the OAuth surface was absent with no error, because `@harperfast/oauth` is not a declared
+  dependency in the shipped config. The test now stages the block into a temp copy and points
+  Harper at it; the real `config.yaml` is never touched.
+
+- Deactivated principals are now rejected on both authentication paths
+  (Ed25519 and Basic/agent-auth).  A deactivated agent can no longer
+  authenticate with a new Ed25519 signature or a Basic credential.
+
+  **Known limit, and its actual scope:** already-issued OAuth Bearer tokens are not
+  checked against principal status.  **On a default deployment this is not an
+  exposure** — `/mcp` is the only surface that accepts a Flair-issued Bearer token,
+  it is not registered unless `FLAIR_MCP_OAUTH` is set, and Harper's own auth layer
+  claims any other `Bearer` header before a Flair resource sees it.
+
+  **If you have enabled MCP OAuth**, a deactivated agent's existing token keeps
+  working against `/mcp` until that token expires or is revoked, because the MCP
+  guard validates the JWT cryptographically without consulting the Agent table.
+  Until revocation-on-deactivation lands as a follow-up slice, deactivating an agent
+  on such a deployment should be paired with explicitly revoking its tokens.
+
+  So this slice covers "deactivation stops new authentications" everywhere, and
+  "deactivation stops all access" everywhere except an MCP-OAuth-enabled deployment.
+
+- **A hung old binary during a downgrade check is now reported as a hang, not as a clean refusal.**
+  The downgrade invariant names three outcomes — the old binary boots, it refuses loudly, or
+  anything else — and both enforcement points folded the third into the second. A timeout therefore
+  printed a diagnosis stating the opposite of what had happened: an unbounded hang reported as a
+  correct, loud refusal.
+
+  Timeouts are now classified before the refusal check and fail with their own message. A pure
+  `classifyDowngradeOutcome()` covers the three outcomes explicitly, so an invariant naming three
+  states no longer has two branches.
+
+### Security
+
+- **Creating a `Credential` is now gated and attributed to the authenticated principal.** The
+  resource declared a read gate and a cross-principal check on update, but no gate on creation — so
+  a `POST` to the collection reached the base implementation with no cross-principal check, and
+  `principalId` was taken from the request body.
+
+  Creation now requires a verified principal, and `principalId` is stamped from the authenticated
+  identity rather than trusted from the body. A non-admin agent can only create credentials
+  attributed to itself.
+
+  **Upgrading is recommended.** The gap was in creation only; existing credentials were never
+  readable across principals.
+
+- **`FeedMemories.post()` now attributes writes to the authenticated principal and refuses
+  mismatched ones.** It previously read `agentId` from the request body and passed it into a
+  full-record write, so a verified agent could write memories attributed to another agent, or target
+  an existing record by supplying its `id`.
+
+  `agentId` is now stamped from the authenticated principal; a body-supplied `agentId` that
+  disagrees is rejected with `403` rather than silently overwritten. A body-supplied `id` is checked
+  against the existing record's ownership before the write proceeds.
+
+  **Upgrading is recommended for multi-agent deployments.** This path was previously documented
+  in-code as deferred debt; it is now closed.
+
+- **Read-scope enforcement in `Memory.search()` and `WorkspaceState.search()` no longer depends on
+  the caller's query operator.** Both resources composed their ownership condition in a way that a
+  caller-supplied top-level operator could weaken, so an authenticated agent could receive records
+  belonging to other agents. Ownership is now enforced as the outer `AND` around the caller's own
+  query block, matching the composition `MemoryCandidate` already used.
+
+  **Upgrading is recommended for any deployment that serves more than one agent.** Exploitation
+  requires an authenticated principal — it is not reachable anonymously — but it crosses the
+  per-agent read boundary, which is the boundary Flair exists to hold.
+
+  The composition now lives in one place, `makeScopedSearch()` in `record-type-kit.ts`, rather than
+  being hand-rolled per resource. It had been written three times and was correct once; a shared
+  implementation is what stops the next resource from getting it wrong. Boolean-injection guard
+  tests now cover every scoped resource, not just the one that happened to be correct.
+
+## [0.35.0] - 2026-08-02
+
+### Added
+
+- **Flair now stamps the data directory with the Harper engine version and refuses to boot when the store was written by a newer engine.** If an older Harper boots against a store written by a newer one, the error names both versions, the data directory, and the remedy — reinstall the newer version or restore from a pre-upgrade snapshot.
+
+  This only helps from the release that ships it onward: the check lives in the version being downgraded *to*, so it cannot rescue a downgrade to a build that predates the stamp.
+
+### Changed
+
+- **Pre-upgrade snapshots are now automatic when the Harper engine version changes.** The tested-downgrade guarantee that justified making snapshots opt-in does not hold across engine version boundaries — a Harper bump is the only realistic source of a cross-version boot break. Opting out requires `--no-engine-snapshot` and prints what is being given up.
+
+  Ordinary flair-version upgrades (same Harper) remain opt-in via `--snapshot`.
+
+### Fixed
+
+- **Turning on MCP OAuth without the authorization-server component now logs a visible error at boot.**
+  Enabling MCP OAuth is two steps, and the guard tells you the second one. `FLAIR_MCP_OAUTH=on`
+  requires the `@harperfast/oauth` component, which ships commented out in `config.yaml` so it loads
+  only on instances that use it. Turn the flag on without uncommenting and flair logs an error at
+  boot naming the flag, the missing component, and the exact YAML to uncomment, and records the
+  surface as not mounted (visible on the admin Instance page). The guard does not stop the boot — an
+  optional feature must not deny service to the core one. Previously the flag could be on with the
+  component absent and flair booted without error while `/mcp` silently rejected every request
+  (#1021).
+
+- **`flair keys prune` no longer archives a key file it cannot identify.** `~/.flair/keys/<id>.key`
+  is a namespace shared by two writers: plaintext Ed25519 seeds, and AES-256-GCM keystore blobs
+  written by `FileKeyStore`. A keystore blob does not parse as a seed, and prune classified any
+  unparseable file as `invalid` — which is prunable — so it would move a **live federation key**
+  into `.pruned/`. Recoverable, since prune archives rather than deletes, but wrong in the
+  direction of touching a key that is in use. Unparseable files are now classified
+  `unidentified`, reported for a human, and left where they are. "I could not parse this" and
+  "this is a stale agent key" are different findings, and only the second is safe to act on.
+
+- **Backwards-boot recovery message now names an actual snapshot file instead of a literal placeholder.** When a downgrade prevents Flair from starting, the error message inspects the pre-upgrade snapshot directory and prints a runnable `flair snapshot restore` command with the newest snapshot. If multiple snapshots exist it also mentions `flair snapshot list`. If no snapshot exists it says so plainly and omits the restore line entirely — suggesting a restore that cannot work is worse than being honest about having nothing to restore from.
+
+- **The test suite is now type-checked in CI.** Both project tsconfigs excluded `test/`, so
+  `tsc --noEmit` — what CI runs as its Type Check lane — never read a test file, and bun's
+  transpiler strips types rather than checking them. A guard test could call a function that
+  no longer exists, pass a wrong-shaped argument, or assert against a renamed property, and
+  the only signal was whether it happened to fail at runtime. That matters most for guard
+  tests, which are how we know a control still works. A new `tsconfig.test.check.json` covers
+  the suite under `strict`, with an explicit exclude list for the files carrying a known
+  backlog — a visible, shrinkable list rather than a blanket relaxation, since relaxing the
+  compiler options until everything passed would have bought coverage of ~30 files by
+  weakening the check on ~260.
+
+### Security
+
+- **The admin Instance page now HTML-escapes `publicUrl` in the Endpoints table and Public URL card.**
+  `FLAIR_PUBLIC_URL` is operator-set and not validated, and as of 0.34.0 the deploy step writes it
+  into the component's `.env` — so a value that used to be typed at a prompt now arrives through a
+  payload. The fix escapes on output at every interpolation site rather than sanitising the input,
+  which is the wrong layer. An operator setting a hostile value on their own instance is attacking
+  themselves; this is fixed because the shape is wrong and the input path widened, not because it
+  represents a meaningful external threat (#1029).
+
+## [0.34.0] - 2026-08-01
+
+### Added
+
+- **OAuth discovery is now served at the two well-known paths clients actually
+  probe.** `GET /.well-known/oauth-authorization-server` (RFC 8414) and
+  `GET /.well-known/oauth-protected-resource` (RFC 9728, which the MCP
+  authorization specification makes a MUST) both answer, unauthenticated, over
+  CORS. Flair published a correct document only at `/OAuthMetadata` — a path
+  nothing in the ecosystem asks for — and 404'd at both standard paths, so a
+  spec-compliant remote MCP client could not discover an instance at all.
+
+  The protected-resource document is also served at the RFC 9728 §3.1
+  path-appended URL `/.well-known/oauth-protected-resource/mcp`, which is the
+  form real MCP clients construct and the form the `/mcp` surface's own 401
+  challenge points at.
+
+  `/OAuthMetadata` is unchanged for existing callers and is now an **alias**:
+  both paths return the same document from the same builder, so they cannot
+  drift apart. Nothing about issuer derivation changed — set `FLAIR_PUBLIC_URL`
+  on any non-loopback deployment or every advertised URL still points at the
+  client's own localhost.
+
+  No authentication behaviour changed. Basic and Ed25519 callers, and the
+  response an uncredentialed request gets, are exactly as before; `/mcp` remains
+  behind `FLAIR_MCP_OAUTH`, still off by default.
+
+### Fixed
+
+- **The admin Instance page no longer advertises an MCP endpoint that isn't there.** The
+  Endpoints table printed `<public-url>/mcp` on every install, but that route is off by
+  default — so a default install's own dashboard pointed operators at a URL that returns
+  404, which reads as a broken install rather than a disabled feature. The row now shows
+  "Not enabled" plus the environment variable that turns the surface on, and shows the URL
+  only when the route is genuinely mounted. Nothing to do — the other rows are unchanged
+  and were already accurate.
+
+  The row renders from the state the route registration records about its own decision,
+  not from a second read of the feature flag, so the page cannot drift from what is
+  actually served. That matters because the flag alone was never sufficient: with the flag
+  on but no issuer configured, the route still does not mount.
+
+- **A deploy now supplies `FLAIR_PUBLIC_URL`, and proves it took effect.** A publicly-reachable
+  instance served an OAuth discovery document whose issuer and every endpoint were
+  `http://127.0.0.1:9980`, so remote clients followed discovery to their own loopback and no
+  authorization flow could complete (#1000). `flair deploy` and `flair init --remote` now ship a
+  `.env` in the component payload carrying `FLAIR_PUBLIC_URL`, taken from the target the deploy
+  already resolves and verifies against; after deploying, `flair deploy` reads
+  `GET <target>/OAuthMetadata` and fails if the advertised issuer is still loopback — an
+  unreadable document is reported as a check that did not run, never as a pass. `flair doctor`
+  reports the same misconfiguration locally, naming the file, the key and the `loadEnv`
+  requirement. An existing `.env` is merged and a value you set is never overwritten; the deploy
+  prints the disagreement and keeps yours, and your file on disk is never written to. The
+  `flair init --remote` tarball builder had written a `.env` since April and packed an entries
+  list that never contained it, so its output was discarded on every call — `.env` is now in that
+  list, and the tests assert against the packed payload rather than against a file on disk. That
+  builder's admin-password parameter is **removed** rather than validated: the deploy payload is
+  ingested into Harper's replicated deployment record, so it must carry no credential, and
+  `HDB_ADMIN_PASSWORD` could not configure Harper from a component `.env` in any case — Harper
+  composes its own configuration before component env files load (#1005, #1011).
+
+- **`flair doctor` no longer explains one unreadable key as two different wrong causes.** A key
+  file that OpenSSL could not decode surfaced twice in the same report — once as `Embeddings: not
+  verified` advising `Pass --agent <id>`, and once as `could not verify agent registration
+  (instance unreachable: ...)` printed six lines beneath doctor's own `✓ Harper responding` tick
+  (#1023). Neither was the cause: an agent had been selected, and the instance had demonstrably
+  answered. The operator was sent to check firewalls and ports for a file on their own disk. The
+  fix is structural rather than better wording — signing strictly precedes the request, so
+  `authFetch` now raises a distinct `KeyLoadError` for the signing half only, and no caller has to
+  infer from an error string whether the network was ever reached. Doctor names the file that
+  failed and that it could not be parsed as an Ed25519 private key; an unrecognised failure
+  reports the operation and the raw error and asserts **no** cause at all. `--agent` is suggested
+  only where it can actually resolve an identity — a remedy that cannot change the outcome is now
+  omitted rather than printed. Registration findings also carry the reachability the run already
+  established, so `unreachable` can no longer be claimed after this run watched the instance
+  respond. Key-decode failures are recognised by the crypto backend's structured error code
+  across both OpenSSL and BoringSSL, whose wording for the identical failure differs.
+
+- **`/mcp` reports its real version.** The `initialize` response hardcoded
+  `serverInfo.version` as `0.1.0`, which is the string a connecting client
+  displays and the one someone reads while diagnosing an incident. It now comes
+  from the package version.
+
+- **The SessionStart hook now fails quietly, and `flair doctor` notices when it stops working.** The
+  hook Flair registers resolves a package binary through your Node runtime, and under a Node version
+  manager globally installed packages are per-runtime-version — so a routine, unrelated runtime
+  upgrade could orphan it. The hook then failed on *every* session, indefinitely, with a message that
+  named neither Flair nor a remedy, and it kept doing so after Flair itself was gone (#1007). The
+  registered command is now wrapped so any failure to resolve or execute produces no output and exits
+  0, on every shell tested (sh, bash, zsh, dash, ksh, fish, tcsh — the previous form was broken
+  outright in the last two). The adapter's own no-op-on-failure guarantee could not cover this: it
+  lives inside the binary that never ran. `flair doctor` now *runs* the registered command — bounded,
+  and side-effect-free via a new `FLAIR_HOOK_PROBE` mode that makes the hook answer and exit without
+  touching the network — so a hook that no longer resolves is reported with a remedy instead of
+  staying invisible. `flair doctor --fix` rewrites an older, loud hook in place, keeping its agent and
+  instance; it never rewrites a hand-edited one and never removes a hook. `flair hook status` gained an
+  **On failure** line. Agent ids and URLs are now refused rather than escaped if they contain
+  characters that are not safe in a shell command.
+
+- **An upgrade that drops the instance out of launchd now says so, instead of reporting success.**
+  On macOS, `flair upgrade` and `flair restart` fall back to a plain detached start when a launchd
+  operation fails. The fallback is right — a running instance beats a down one — but it leaves the
+  process outside the manager that owns it, so it will not come back after a reboot, and the run
+  still finished with `✅ verified: healthy, authenticated, running <version>`. Every one of those
+  facts was true; none of them was the one that mattered (#1022). After a restart, both commands now
+  ask launchd what it is actually running and compare it against the process serving the instance.
+  A run that ends detached reports the verified facts **without** a success marker, names the job,
+  says the instance will not survive a reboot, and gives the commands that restore it. A clean run
+  prints exactly the line it always did.
+
+  The launchd start also no longer waits out its full startup budget to discover a plist it could
+  never have run. `launchctl load` and `launchctl start` both exit 0 for a job whose program does not
+  exist, so the only symptom was a 60-second timeout naming a port — twice, once for the stop and
+  once for the start. A plist records absolute paths, and switching Node runtimes moves all of them,
+  so those paths are now checked before launchd is asked to do anything: a stale one fails
+  immediately, naming the path that moved and the `flair init && flair restart` that re-points it.
+  Likewise, the stop leg asks whether launchd is running this instance before waiting a minute for a
+  process it does not control to exit. The fallbacks are unchanged; only the waiting and the
+  reporting are.
+
+### Security
+
+- **Dynamic client registration is now off unless an operator turns it on.**
+  `POST /OAuthRegister` used to accept anonymous registrations from anyone who
+  could reach the instance, gated only by a redirect-URI host match — so on a
+  publicly-reachable Flair, anyone could create rows in the durable, replicated
+  `OAuthClient` table, each one a `client_id` that `/OAuthAuthorize` would
+  subsequently honour. It now answers `403 access_denied` by default, and the
+  RFC 8414 / `/OAuthMetadata` discovery documents stop advertising a
+  `registration_endpoint`, because advertising one that refuses every request is
+  a discovery document that misdirects.
+
+  **This changes behaviour for anyone relying on anonymous registration.** To
+  keep it, set `FLAIR_OAUTH_DCR_TOKEN` to an initial access token of 32 to 508
+  characters (RFC 7591 §3.1) and have clients present it in an
+  `X-Flair-Initial-Access-Token` header. Registering clients ahead of time and
+  leaving registration off is the better shape where it is workable.
+
+  That one variable is the whole interface: there is no separate enable switch,
+  so enabling registration and supplying the credential that guards it are the
+  same act, and "on, and open to the internet" is not a state reachable by
+  forgetting a setting. A token outside the accepted length leaves registration
+  **off** rather than enabling it weakly, and says so by variable name.
+
+  Note that registration rate limiting runs in front of this gate, so refused
+  attempts spend budget and a flood against a closed endpoint is answered `429`
+  rather than `403`.
+
+  The token belongs in the process environment. `flair deploy` will not generate
+  a component `.env` containing it — a deploy payload is stored in Harper's
+  deployment record and replicated to every node.
+
+  RFC 7591 presents this token as `Authorization: Bearer`, which cannot work
+  here: Harper's own auth layer claims that header and answers `401` before any
+  Flair code runs. Hence the dedicated header. See
+  [docs/auth.md](docs/auth.md#dynamic-client-registration).
+
+- **`/mcp` now caps the request body at 256 KB.** The handler read the entire
+  request into memory with no limit, and Harper imposes none on this path —
+  `srv.http()` bypasses both Fastify's 1 GB `bodyLimit` and the contentTypes
+  handler's configurable default. Enforcement is two-phase: an oversized
+  `Content-Length` is rejected before a byte is read, and the streaming read
+  aborts mid-body, so a chunked request that omits or understates the header
+  cannot bypass it. This matters more here than the same pattern elsewhere
+  because `/mcp` is the first surface reachable by an open population of OAuth
+  clients rather than by agents we issued credentials to.
+
+- **The OAuth endpoints and `/mcp` are now rate limited.** `/OAuthToken`,
+  `/OAuthAuthorize` and `/OAuthRevoke` share a budget of 30 requests per minute
+  per caller; `/OAuthRegister` gets 5 per five minutes; `/mcp` gets 120 per
+  minute per verified token subject. A rejected request answers `429` with a
+  `Retry-After`. On by default — nothing to configure — and no other path is
+  affected.
+
+  The counter is consumed before any credential is examined, so a `429` reveals
+  nothing about what the request was carrying: a valid authorization code and a
+  garbage one get byte-identical responses once a bucket is spent. No
+  `RateLimit-*` headers are published on allowed requests.
+
+  Tunable via `FLAIR_OAUTH_RATE_LIMIT`, `FLAIR_OAUTH_REGISTER_RATE_LIMIT` and
+  `FLAIR_MCP_RATE_LIMIT`; `FLAIR_RATE_LIMIT=off` disables it entirely. A limit
+  of zero, a negative number or a non-numeric value is refused in favour of the
+  default, with a warning naming the variable — a shell that expanded an unset
+  variable cannot quietly switch the control off.
+
+  Keying is on the socket peer address. `X-Forwarded-For` is ignored unless
+  `FLAIR_TRUSTED_PROXY` names how many proxy hops genuinely sit in front, since
+  an instance that trusts that header without a proxy can be bypassed by varying
+  it. **The limiter is per node**: on a multi-node deployment the effective
+  ceiling is the limit times the node count, and counters reset on component
+  reload. A cluster-shared counter would turn every counted request into a
+  durable replicated write on an authentication hot path, which is a worse
+  denial-of-service shape than the one being defended against. See
+  [docs/auth.md](docs/auth.md) for what this does and does not protect against.
+
 ## [0.33.0] - 2026-07-31
 
 ### Added

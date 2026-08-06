@@ -114,8 +114,19 @@ export interface DeployResult {
   convergedAfterReplicationError?: boolean;
 }
 
-// Files that must be present in a Flair package for deployment.
-// Mirrors the `files` array in package.json — keep in sync.
+// Files that must be PRESENT for a deploy root to be usable at all — a
+// preflight sanity check, not the payload definition.
+//
+// This used to say "Mirrors the `files` array in package.json — keep in sync."
+// It did not, and nothing compared them. The payload was whatever sat in the
+// deploy root, which for a git checkout meant .git, models/, test/, packages/
+// and any stray file: 96 MB against a 1.3 MB published tarball, verified on a
+// production Fabric component. A rule asserted in a comment with no mechanism
+// behind it will drift, and this one drifted invisibly for as long as it existed.
+//
+// The payload is now derived from `files` directly, at pack time, by
+// publishedEntryNames() — so there is one source of truth and nothing left to
+// keep in sync by hand.
 export const REQUIRED_PACKAGE_FILES = [
   "dist",
   "schemas",
@@ -836,6 +847,71 @@ function isNodeModulesPath(root: string, path: string): boolean {
 }
 
 /**
+ * The top-level entries the payload may contain: whatever `files` declares, plus
+ * the three npm always-includes. Read from the deploy root's own package.json so
+ * there is ONE source of truth — a hardcoded copy here is how `files` and the
+ * payload drifted apart in the first place.
+ */
+export function publishedEntryNames(packageRoot: string): Set<string> {
+  // `.env` is not in `files` and never ships to npm, but it MUST reach the
+  // component: config.yaml's `loadEnv` reads it, and shipping it is the whole
+  // point of flair#1005 and of stageDeployRoot itself. Filtering it out breaks
+  // FLAIR_PUBLIC_URL on every deploy — caught by the operator-value test rather
+  // than in production, which is the only reason this comment exists.
+  //
+  // What goes INSIDE that file is a separate concern with its own issue
+  // (flair#1011, HDB_ADMIN_PASSWORD must not be written into a deployed .env).
+  // This function decides what may ship, not what the file may contain.
+  const always = ["package.json", "README.md", "LICENSE", "LICENCE", COMPONENT_ENV_FILENAME];
+  let declared: string[] = [];
+  try {
+    const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+    if (Array.isArray(pkg.files)) declared = pkg.files;
+  } catch {
+    /* handled by the caller's emptiness check below */
+  }
+  // `files` entries are npm patterns; the ones flair uses are plain top-level
+  // names, optionally trailing-slashed ("dist/"). Normalise to the entry name.
+  const names = declared
+    .map((f) => String(f).replace(/^\.\//, "").replace(/\/+$/, ""))
+    .filter((f) => f !== "" && !f.includes("*") && !f.startsWith("!"));
+  return new Set([...names, ...always]);
+}
+
+/**
+ * Whether `packageRoot` declares a usable `files` array.
+ *
+ * Separate from `publishedEntryNames` deliberately. The refusal below used to
+ * ask whether the resulting set was larger than the always-includes, i.e. it
+ * compared against a hardcoded count — so adding one always-include silently
+ * stopped it firing. A check keyed to the length of a list that grows is a check
+ * that disables itself the next time someone edits that list.
+ */
+export function hasDeclaredFiles(packageRoot: string): boolean {
+  try {
+    const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+    return Array.isArray(pkg.files) && pkg.files.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when `src` is a top-level entry the published package would not contain.
+ *
+ * Only TOP-LEVEL entries are filtered. Once a directory is admitted its whole
+ * subtree ships, which is what npm does and what makes the staged copy equal the
+ * published tarball rather than merely similar.
+ */
+function isUnpublishedEntry(root: string, src: string, allowed: Set<string>): boolean {
+  const rel = relative(root, src);
+  if (rel === "") return false;
+  const parts = rel.split(sep);
+  if (parts.length > 1) return false;
+  return !allowed.has(parts[0]);
+}
+
+/**
  * Resolve the value `FLAIR_PUBLIC_URL` should carry for this deploy, or null.
  *
  * The deploy already knows this: `url` is the target it hands to harper AND the
@@ -872,8 +948,42 @@ export function stageDeployRoot(packageRoot: string, publicUrl: string | null): 
   const existing = existsSync(envPath) ? readFileSync(envPath, "utf8") : null;
   const plan = planComponentEnv(existing, publicUrl);
 
-  if (plan.text === null) {
-    return { dir: packageRoot, plan, cleanup: () => {} };
+  // ── Why this ALWAYS stages now ─────────────────────────────────────────────
+  //
+  // harper packs its CWD wholesale, so the payload is whatever sits in the
+  // deploy root. The comment above assumes that root is an npm-installed
+  // package, where the tree already IS the published file set. That assumption
+  // is true for the intended path and silently false for the one our own
+  // deploy procedure prescribes: a git checkout.
+  //
+  // Measured on the production Fabric origin 2026-08-03, deploying from a
+  // checkout at v0.36.0: the deployed component held 36 top-level entries —
+  // `.git`, `.env`, `models/`, `test/`, `packages/`, `src/`, and a scratch
+  // `pr-body.md` left in the clone that afternoon. Payload 96 MB against the
+  // published tarball's 1.3 MB, a factor of 74. `models/` alone was 80 MB.
+  //
+  // Two consequences, both bad. An operator deploying from a checkout ships
+  // `.git` (every secret ever committed and later removed) and any `.env`
+  // sitting in the tree, into a component that is then PERSISTED and REPLICATED
+  // across the cluster. And a 96 MB payload is what puts the deploy inside
+  // HarperFast/harper#2062's aborted-transaction window, where the pre-saved
+  // blob is destroyed at the source.
+  //
+  // So the filter is not an optimisation. Staging unconditionally, restricted to
+  // the entries `files` declares, makes the payload equal the published package
+  // BY CONSTRUCTION rather than by an operator happening to run from the right
+  // directory. For an npm-installed root the result is byte-identical to before,
+  // because such a tree contains nothing else.
+  const allowed = publishedEntryNames(packageRoot);
+  // An empty/unreadable `files` would filter the payload down to the
+  // always-includes and deploy a component with no dist/. Refuse instead: a
+  // deploy that silently ships almost nothing is worse than one that does not run.
+  if (!hasDeclaredFiles(packageRoot)) {
+    throw new Error(
+      `Cannot determine the published file set for ${packageRoot}: package.json has no usable "files" array. ` +
+        `Refusing to deploy rather than shipping an unfiltered payload (which would include .git and any .env) ` +
+        `or an empty one. Deploy from an npm-installed @tpsdev-ai/flair, or pass --package-root at one.`,
+    );
   }
 
   const dir = mkdtempSync(join(tmpdir(), STAGING_PREFIX));
@@ -882,12 +992,20 @@ export function stageDeployRoot(packageRoot: string, publicUrl: string | null): 
       recursive: true,
       dereference: false,
       verbatimSymlinks: true,
-      filter: (src) => !isNodeModulesPath(packageRoot, src),
+      filter: (src) =>
+        !isNodeModulesPath(packageRoot, src) && !isUnpublishedEntry(packageRoot, src, allowed),
     });
     // 0600 even though the generated content is a public URL: an operator's own
     // keys may have been merged through, and the file's permissions should not
     // depend on what happens to be in it.
-    writeFileSync(join(dir, COMPONENT_ENV_FILENAME), plan.text, { mode: 0o600 });
+    //
+    // `plan.text === null` means there is nothing to add — a loopback target, or
+    // an operator who already set the key. Staging still happened (the filter is
+    // the point now, not the `.env`), so any `.env` the root carried has been
+    // copied through unchanged and must be left alone.
+    if (plan.text !== null) {
+      writeFileSync(join(dir, COMPONENT_ENV_FILENAME), plan.text, { mode: 0o600 });
+    }
   } catch (err) {
     rmSync(dir, { recursive: true, force: true });
     throw err;

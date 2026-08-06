@@ -292,6 +292,80 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     targetVersion = installedVersion(prefix) ?? "";
     postUpgradeHealth = await waitForHealth(baseUrl);
     harperPid = listeningPid(new URL(baseUrl).port);
+
+    // ── Emit what the upgrade actually said, but ONLY when it went wrong ──────
+    //
+    // Without this, a CI failure here reads:
+    //
+    //     Expected: >= 200        Expected: 0
+    //     Received: 0             Received: 1
+    //
+    // and nothing else. The output that explains WHY was captured and then
+    // dropped on the floor, so diagnosing meant reproducing the whole upgrade
+    // locally — on ops-lrf5 (harper 5.2.0 leaves the instance down) that is
+    // exactly where the investigation stalled: the lane proved the symptom and
+    // discarded the evidence.
+    //
+    // Safe to print: this sandbox has a throwaway HOME, a temp npm prefix, and
+    // ADMIN_PASS is a literal checked into this public repo — there is nothing
+    // confidential in this environment to leak into a public Actions log. That
+    // is a property of THIS suite, not a general licence to dump child output;
+    // a suite carrying a real credential must not copy this.
+    // The condition mirrors the STATE the assertions below require, not just the
+    // two loudest ones. Sherlock caught that `code !== 0 || health < 200` stays
+    // silent when the upgrade appears to succeed but never swapped the package
+    // (targetVersion unchanged) — the dump would be missing exactly when the
+    // failure is most confusing. A 5xx health also failed `toBeLessThan(500)`
+    // while reading as "fine" to the original condition.
+    //
+    // Kern reviewed the same question and called the original "exactly the
+    // complement (De Morgan)" of the assertions. It was the complement of TWO of
+    // them; the suite asserts on the version swap and the health RANGE as well.
+    // Recorded because the disagreement is the useful part: two reviewers, one
+    // saw a gap and one proved its absence, and the assertions settle it.
+    //
+    // Not covered here, deliberately: the `toContain` assertions on stdout. A
+    // failing toContain already prints the received string, so a dump would only
+    // repeat it. If a stdout assertion is ever changed to compare something the
+    // failure message does not show, this condition needs revisiting — stated
+    // rather than enforced, because enforcing it means duplicating every
+    // assertion's predicate here and that duplication is its own defect.
+    //
+    // ADDING A NEW STRUCTURAL ASSERTION BELOW? Add it here too. This condition is
+    // a hand-written copy of the state those assertions require, and nothing
+    // compares the two — so `expect(harperPid).toBeGreaterThan(0)` added below
+    // and not added here means the dump stays silent on exactly the failure it
+    // was written to explain. Sherlock raised this on review; the only thing
+    // holding it is that the copy sits directly above what it mirrors, where a
+    // reviewer can see both at once. Proximity is a weak mechanism. It is the
+    // one this has, and the reason the alternative was rejected is that a
+    // stronger-looking one — re-deriving each predicate at the dump site — is
+    // the keep-in-sync defect with more surface area, not less.
+    const upgradeLooksHealthy =
+      upgrade.code === 0 &&
+      postUpgradeHealth >= 200 &&
+      postUpgradeHealth < 500 &&
+      targetVersion !== "" &&
+      targetVersion !== driverVersion;
+    if (!upgradeLooksHealthy) {
+      const tail = (s: string, n = 4000) =>
+        s.length > n ? `…(${s.length - n} earlier chars omitted)\n${s.slice(-n)}` : s || "(empty)";
+      console.error(
+        [
+          "",
+          "── flair upgrade FAILED — captured output follows ──────────────────",
+          `exit code:          ${upgrade.code}`,
+          `health after:       ${postUpgradeHealth} (0 = nothing answered on ${baseUrl})`,
+          `listening pid:      ${harperPid ?? "(none — nothing holds the port)"}`,
+          `installed version:  ${targetVersion || "(could not read)"}`,
+          "── stdout ─────────────────────────────────────────────────────────",
+          tail(upgrade.stdout),
+          "── stderr ─────────────────────────────────────────────────────────",
+          tail(upgrade.stderr),
+          "───────────────────────────────────────────────────────────────────",
+        ].join("\n"),
+      );
+    }
   }, SETUP_TIMEOUT_MS + UPGRADE_TIMEOUT_MS);
 
   afterAll(async () => {

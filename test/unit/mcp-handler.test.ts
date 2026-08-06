@@ -113,7 +113,7 @@ const databasesMock = {
 // AttentionQuery.ts `extends Resource` (not a table subclass), so it needs no
 // databasesMock.flair entry of its own — only __setHandlers below, same as
 // SemanticSearch/BootstrapMemories.
-mock.module("harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {} } }));
+mock.module("harper", () => ({ databases: databasesMock, Resource: NoopBase, server: { http: () => {}, getUser: async () => null } }));
 
 const { mcpHandler, resolveAgentFromSub } = await import("../../resources/mcp-handler.ts");
 const { __setHandlers } = await import("../../resources/mcp-tools.ts");
@@ -187,11 +187,13 @@ describe("tools/list — exactly the 12 curated tools", () => {
 
 // ─── initialize / ping ───────────────────────────────────────────────────────
 describe("protocol handshake", () => {
-  it("initialize advertises tools capability", async () => {
+  it("initialize returns the real package version, not a hardcoded string", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "initialize" }, { sub: "s" }));
     const body = await parse(res);
-    expect(body.result.capabilities.tools).toBeDefined();
     expect(body.result.serverInfo.name).toBe("flair");
+    // Must be a semver-like string (e.g. "0.33.0"), not the old hardcoded "0.1.0".
+    expect(body.result.serverInfo.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(body.result.serverInfo.version).not.toBe("0.1.0");
   });
   it("ping → empty result", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 2, method: "ping" }, { sub: "s" }));
@@ -624,5 +626,152 @@ describe("protocol errors", () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 9, method: "resources/list" }, { sub: "s" }));
     const body = await parse(res);
     expect(body.error.code).toBe(-32601);
+  });
+});
+
+// ─── Body size cap (flair#1033) ──────────────────────────────────────────────
+
+/** Build a request double with optional headers. */
+function requestWithHeaders(body: any, mcp: any, headers: Record<string, string> = {}) {
+  return {
+    method: "POST",
+    mcp,
+    headers: {
+      get: (name: string) => headers[name.toLowerCase()] ?? null,
+    },
+    text: async () => JSON.stringify(body),
+  };
+}
+
+/** Build a request double whose body is a string (simulates a pre-read body). */
+function requestWithStringBody(bodyStr: string, mcp: any, headers: Record<string, string> = {}) {
+  return {
+    method: "POST",
+    mcp,
+    headers: {
+      get: (name: string) => headers[name.toLowerCase()] ?? null,
+    },
+    body: bodyStr,
+  };
+}
+
+/** Build a request double whose body is an async iterable (simulates Harper's RequestBody). */
+function requestWithStreamBody(chunks: string[], mcp: any, headers: Record<string, string> = {}) {
+  return {
+    method: "POST",
+    mcp,
+    headers: {
+      get: (name: string) => headers[name.toLowerCase()] ?? null,
+    },
+    body: {
+      [Symbol.asyncIterator]() {
+        let i = 0;
+        return {
+          next: async () => {
+            if (i >= chunks.length) return { done: true, value: undefined };
+            return { done: false, value: chunks[i++] };
+          },
+        };
+      },
+    },
+  };
+}
+
+describe("body size cap", () => {
+  it("rejects when Content-Length exceeds the cap (413, JSON-RPC error)", async () => {
+    const bigBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
+    const res = await mcpHandler(requestWithHeaders(
+      { jsonrpc: "2.0", id: 1, method: "ping" },
+      { sub: "s" },
+      { "content-length": String(300 * 1024) }, // 300 KB > 256 KB cap
+    ));
+    expect(res.status).toBe(413);
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe(-32000);
+    expect(body.error.message).toContain("too large");
+  });
+
+  it("POSITIVE CONTROL: a request under the cap succeeds", async () => {
+    const res = await mcpHandler(requestWithHeaders(
+      { jsonrpc: "2.0", id: 1, method: "ping" },
+      { sub: "s" },
+      { "content-length": "128" },
+    ));
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.result).toEqual({});
+  });
+
+  it("rejects an invalid (non-numeric) Content-Length", async () => {
+    const res = await mcpHandler(requestWithHeaders(
+      { jsonrpc: "2.0", id: 1, method: "ping" },
+      { sub: "s" },
+      { "content-length": "eleventy" },
+    ));
+    expect(res.status).toBe(413);
+    const body = JSON.parse(res.body);
+    expect(body.error.message).toContain("invalid Content-Length");
+  });
+
+  it("rejects a negative Content-Length", async () => {
+    const res = await mcpHandler(requestWithHeaders(
+      { jsonrpc: "2.0", id: 1, method: "ping" },
+      { sub: "s" },
+      { "content-length": "-1" },
+    ));
+    expect(res.status).toBe(413);
+    const body = JSON.parse(res.body);
+    expect(body.error.message).toContain("invalid Content-Length");
+  });
+
+  it("rejects a body that exceeds the cap during streaming read (no Content-Length header — chunked encoding path)", async () => {
+    // Build a body that's 300 KB — over the 256 KB cap.
+    const padding = "x".repeat(300 * 1024);
+    const bigPayload = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", padding });
+    const res = await mcpHandler(requestWithStreamBody(
+      [bigPayload],
+      { sub: "s" },
+      // No content-length header — simulates chunked transfer encoding.
+    ));
+    expect(res.status).toBe(413);
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe(-32000);
+    expect(body.error.message).toContain("too large");
+  });
+
+  it("POSITIVE CONTROL: streaming read under the cap succeeds (no Content-Length)", async () => {
+    const res = await mcpHandler(requestWithStreamBody(
+      [JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" })],
+      { sub: "s" },
+    ));
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.result).toEqual({});
+  });
+
+  it("rejects a string body that exceeds the cap", async () => {
+    const padding = "x".repeat(300 * 1024);
+    const bigPayload = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", padding });
+    const res = await mcpHandler(requestWithStringBody(bigPayload, { sub: "s" }));
+    expect(res.status).toBe(413);
+    const body = JSON.parse(res.body);
+    expect(body.error.message).toContain("too large");
+  });
+
+  it("POSITIVE CONTROL: string body under the cap succeeds", async () => {
+    const res = await mcpHandler(requestWithStringBody(
+      JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+      { sub: "s" },
+    ));
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.result).toEqual({});
+  });
+
+  it("accepts an empty body (no Content-Length, no body bytes)", async () => {
+    const res = await mcpHandler(requestWithStreamBody([], { sub: "s" }));
+    // Empty body → not valid JSON-RPC → parse error, not a size rejection.
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe(-32700);
   });
 });
