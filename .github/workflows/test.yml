@@ -157,7 +157,7 @@ jobs:
         # model load or network I/O) and it doesn't need its own dedicated step.
         run: |
           FAIL=0
-          for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
+          for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench adk-flair-js; do
             echo "::group::test $pkg"
             (cd "packages/$pkg" && bun test) || FAIL=1
             echo "::endgroup::"
