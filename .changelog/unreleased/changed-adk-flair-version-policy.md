@@ -1,0 +1,1 @@
+- adk-flair versions now track flair's minor while 0.x (compat-signal policy).

@@ -1,7 +1,7 @@
 import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
-import { patchRecord } from "./table-helpers.js";
+import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 
@@ -66,7 +66,7 @@ export class SemanticSearch extends Resource {
     // recall-harness (test/bench/recall-harness/run.ts) and `recall-eval.mjs`
     // before reconsidering this default if the compositeScore formula or
     // corpus changes.
-    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, abstain = false } = data || {};
+    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, abstain = false, explain = false } = data || {};
 
     // Authenticated identity lives on the Harper Resource context (getContext().request).
     // `this.request` is NOT populated on Harper v5 Resources — prior reads here
@@ -185,6 +185,35 @@ export class SemanticSearch extends Resource {
           conditions: subjects.map(s => ({ attribute: "subject", comparator: "equals", value: s })),
         });
       }
+    }
+
+    // ─── Explain mode: return Harper's ENGINE-LEVEL query plan ────────────
+    // When explain=true, construct the same search query that the HNSW leg
+    // would use and pass explain:true through to Harper's Table.search().
+    // Harper's cost-based planner re-sorts conditions by estimated count at
+    // execution (the scope OR-group estimates Infinity and can never drive;
+    // a selective tags-equals wins the seek). The returned plan shows the
+    // ENGINE's chosen order — the proof the spec requires.
+    //
+    // No search is executed; no side effects (rate-limit, hit-tracking).
+    if (explain) {
+      const ctx = (this as any).getContext?.();
+      const explainQuery: any = {
+        sort: qEmb ? { attribute: "embedding", target: qEmb, distance: "cosine" } : undefined,
+        select: DEFAULT_SELECT,
+        limit,
+        explain: true,
+      };
+      if (conditions.length > 0) explainQuery.conditions = conditions;
+      const plan = withDetachedTxn(ctx, () =>
+        (databases as any).flair.Memory.search(explainQuery)
+      );
+      return {
+        explain: true,
+        plan,
+        tag,
+        scoring,
+      };
     }
 
     const hybrid = hybridEnabled();

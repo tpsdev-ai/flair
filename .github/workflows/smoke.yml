@@ -4,6 +4,17 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+  # Also gate PULL REQUESTS. Without this the lane ran only after merge, so it
+  # could never block anything — every merge to main was its first execution,
+  # and a red main was a matter of when rather than if.
+  #
+  # It happened: b659682 turned main red on a lane that had never run against
+  # either of the two PRs that produced it. Diagnosing that cost real time and
+  # the failure turned out to be unrelated to both changes — which is exactly
+  # the tax a post-merge-only gate charges. You pay it after the fact, on main,
+  # under pressure, instead of on a branch where it is cheap.
+  pull_request:
+    branches: [main]
 
 jobs:
   smoke:

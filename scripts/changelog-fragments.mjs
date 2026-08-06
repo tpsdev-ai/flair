@@ -123,6 +123,35 @@ export function validateFragmentBody(relPath, body) {
         `### heading verbatim. Indent continuation lines by 2 spaces.`,
     );
   }
+  // One entry per file, checked HERE rather than only at assembly.
+  //
+  // `promote` already refused a multi-entry fragment, but promote runs once, at
+  // the release cut. So the rule was invisible for the entire life of a PR and
+  // fired for the first time under time pressure, against a batch of fragments
+  // written weeks apart by whoever was around — which is exactly what happened
+  // cutting 0.37.0: three fragments held 8 entries between them and the release
+  // stopped dead at assembly.
+  //
+  // validateFragmentBody is called by readFragments, which docs-freshness-check
+  // already runs on every PR, so putting it here means the author hears it while
+  // the change is still theirs to fix.
+  //
+  // Fenced code blocks are stripped before counting: fragments routinely quote
+  // terminal output, and a line like `- foo` inside a fence is content, not a
+  // second entry.
+  // Fence markers are INDENTED in practice: a fenced block inside a fragment is
+  // continuation content under the entry's '- ', so it carries the two-space
+  // indent. An unanchored `^```` matched nothing and the strip silently did
+  // nothing — caught by the fenced-block test below failing, not by review.
+  const withoutFences = body.replace(/^[ \t]*```[\s\S]*?^[ \t]*```/gm, "");
+  const entries = (withoutFences.match(/^- /gm) ?? []).length;
+  if (entries > 1) {
+    throw new FragmentError(
+      `${relPath}: holds ${entries} top-level '- ' entries; a fragment is ONE changelog entry. ` +
+        `Split it into one file per entry (<category>-<slug>.md) so each can be categorised, ordered ` +
+        `and reviewed on its own. Indent continuation lines by 2 spaces so they stay part of their entry.`,
+    );
+  }
 }
 
 // Read every fragment in `dir`. Dotfiles are ignored (.DS_Store, .gitkeep);

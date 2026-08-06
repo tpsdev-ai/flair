@@ -1,10 +1,124 @@
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, execFileSync, ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import type { AddressInfo, Server } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// ─── Leak backstop: clean up even when the test framework never gets to ──────
+//
+// `stopHarper` is correct when it is CALLED. The leak is that it often is not:
+// if a `beforeAll` throws or times out, `afterAll` does not run, and the spawned
+// Harper survives holding its ~3 GB install tree open.
+//
+// Measured on rockit 2026-08-05, after a night of integration runs: NINE orphaned
+// `flair-test-*` trees totalling 27 GB, held open by four abandoned `harper dev`
+// processes — two of them FOUR DAYS old. The disk hit 0 bytes and no command
+// could run at all, because every tool needs to write before it executes.
+//
+// Deleting the directories alone would not have helped: a file held open by a
+// live process does not return its blocks. The process has to die first, which
+// is why this tracks processes rather than just paths.
+//
+// So: every instance registers here on spawn and deregisters on clean stop, and
+// a process-exit hook kills whatever is left. Exit handlers must be SYNCHRONOUS,
+// hence `process.kill` + `rmSync` rather than the async paths `stopHarper` uses.
+const LIVE_INSTANCES = new Set<{ pid?: number; installDir?: string; owns: boolean }>();
+let exitHookInstalled = false;
+
+/**
+ * Is `pid` still a direct child of this process?
+ *
+ * The reaper's one real hazard is pid REUSE: a tracked Harper dies on its own,
+ * the OS reuses its pid, and the exit hook SIGKILLs whatever now holds it.
+ * Sherlock found that window on review and judged it acceptable because "the
+ * blast radius is a test runner process on a dev machine."
+ *
+ * That is true in general and FALSE HERE. rockit runs production Flair
+ * (~/flair-prod, serving :9926) alongside these tests. A wrong kill on this
+ * machine can hit production — which is exactly the July 2026 incident, where a
+ * `pkill -f harper` took prod down. Rebuilding that with better manners is still
+ * rebuilding it.
+ *
+ * A spawned Harper is our CHILD. Production is not, and neither is any unrelated
+ * process that inherits a recycled pid. Checking parentage costs one `ps` at
+ * exit and turns "kill whatever holds this pid" into "kill it only if it is
+ * still the child we started".
+ *
+ * Not atomic — the pid could in principle be reused between this check and the
+ * kill — but it removes the entire class of victim that matters, since nothing
+ * we did not spawn is ever our child. Fails CLOSED: if parentage cannot be
+ * determined, the process is left alone and the tree is left behind. A leaked
+ * directory is recoverable; a killed production instance is not.
+ */
+function isOwnChild(pid: number): boolean {
+  try {
+    const out = execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
+      encoding: "utf-8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"],
+    });
+    return Number(out.trim()) === process.pid;
+  } catch {
+    return false; // gone, or unknowable — either way, do not kill it
+  }
+}
+
+function reapLiveInstances(): void {
+  for (const inst of LIVE_INSTANCES) {
+    if (inst.pid && isOwnChild(inst.pid)) {
+      try { process.kill(inst.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    if (inst.installDir && inst.owns) {
+      try { rmSync(inst.installDir, { recursive: true, force: true, maxRetries: 2 }); } catch { /* best effort */ }
+    }
+  }
+  LIVE_INSTANCES.clear();
+}
+
+function installExitHook(): void {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.on("exit", reapLiveInstances);
+  // ── NO SIGNAL HANDLERS HERE. This is deliberate. ──────────────────────────
+  //
+  // A signal handler looked obviously right: an interrupted run should still
+  // reap, and CI cancellation IS SIGTERM, so without one every cancelled run
+  // leaks the original 27 GB incident again. Kern reviewed that reasoning and
+  // agreed. We were both wrong, and the evidence is unambiguous.
+  //
+  // test/integration/federation-watch.test.ts SIGTERMs the TEST RUNNER ITSELF,
+  // three times, as its fixture — and says so at line 74: "This sends SIGTERM to
+  // the test-runner process itself." A global handler here intercepts that,
+  // re-raises, and kills the run. Measured: the suite died after 53 of 58 files
+  // with exit 143, in federation-watch, on a lane that is otherwise green and
+  // where `exit code 143` appears zero times.
+  //
+  // So this harness cannot own a process-wide signal handler: its own tests use
+  // signals as data. Any handler is either wrong for them or useless for us, and
+  // "wrong for them" is silent — it truncates a suite rather than failing a test.
+  //
+  // What is left: the exit hook, which covers clean exits including a suite that
+  // finishes with instances still tracked. An interrupted or cancelled run will
+  // leak, and that is the accepted cost. countStaleHarperTrees() makes the leak
+  // visible on the NEXT run instead of at 0 bytes free, which is the property
+  // that actually mattered — the incident was invisible for four days, not
+  // uncleaned for four days.
+}
+
+/**
+ * How many abandoned `flair-test-*` trees are sitting in the temp dir.
+ *
+ * Surfaced so a leak fails a TEST rather than a machine three hours later. The
+ * incident above was invisible until the disk was full: nothing counted, so
+ * nothing complained, and the only signal was every command failing at once.
+ */
+export function countStaleHarperTrees(): number {
+  try {
+    return readdirSync(tmpdir()).filter((n) => n.startsWith("flair-test-")).length;
+  } catch {
+    return 0;
+  }
+}
 
 const STARTUP_TIMEOUT_MS = 45_000;
 const MAX_SPAWN_ATTEMPTS = 3;
@@ -60,6 +174,9 @@ export interface HarperInstance {
    * test) is the caller's to clean up.
    */
   ownsInstallDir: boolean;
+  /** Internal: the leak-backstop registry entry, so stopHarper can deregister
+   *  by identity. Absent for external instances, which own nothing. */
+  __tracked?: { pid?: number; installDir?: string; owns: boolean };
 }
 
 interface HarperExit { code: number | null; signal: NodeJS.Signals | null }
@@ -345,7 +462,19 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
         waitForHealth(httpURL, 60_000, () => exited, () => log),
         waitForHealth(opsURL, 60_000, () => exited, () => log),
       ]);
-      return { httpURL, opsURL, installDir, process: proc, admin: { username: "admin", password: "test123" }, external: false, ownsInstallDir };
+      // Register BEFORE returning. If a caller's beforeAll times out between
+      // here and its afterAll, the exit hook is the only thing that reaps this.
+      installExitHook();
+      const tracked = { pid: proc.pid, installDir, owns: ownsInstallDir };
+      LIVE_INSTANCES.add(tracked);
+      return {
+        httpURL, opsURL, installDir, process: proc,
+        admin: { username: "admin", password: "test123" },
+        external: false, ownsInstallDir,
+        // Carried so stopHarper can deregister the exact entry rather than
+        // searching by pid — a pid can be reused, an object identity cannot.
+        __tracked: tracked,
+      } as HarperInstance;
     } catch (err) {
       await killProcess(proc);
       lastErr = err as Error;
@@ -371,6 +500,10 @@ export interface StopHarperOptions {
 
 export async function stopHarper(inst: HarperInstance, opts: StopHarperOptions = {}): Promise<void> {
   if (inst.external) return;
+
+  // Deregister first: a clean stop must not leave the exit hook holding a stale
+  // entry that would SIGKILL a reused pid later.
+  if (inst.__tracked) LIVE_INSTANCES.delete(inst.__tracked);
 
   if (inst.process) await killProcess(inst.process);
   // Never remove a directory this instance didn't create (ownsInstallDir

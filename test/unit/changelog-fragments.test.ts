@@ -24,6 +24,7 @@ import {
   readFragments,
   strayUnreleasedEntries,
   UNRELEASED_NOTE,
+  validateFragmentBody,
 } from "../../scripts/changelog-fragments.mjs";
 
 function tmp(): string {
@@ -279,7 +280,11 @@ describe("promote", () => {
   test("refuses a fragment carrying more than one top-level entry", () => {
     const { dir, changelog } = scaffold();
     write(dir, "fixed-two-in-one.md", "- **First.** Body.\n\n- **Second.** Body.\n");
-    expect(() => promote("0.31.0", { changelogPath: changelog, dir })).toThrow(/more than\s+one top-level/);
+    // The refusal now comes from validateFragmentBody (via readFragments), which
+    // runs BEFORE assembly — so the message is the validator's, not promote's.
+    // Same guarantee, raised to PR time. promote's own count check still stands
+    // behind it and now guards assemble() rather than the fragments.
+    expect(() => promote("0.31.0", { changelogPath: changelog, dir })).toThrow(/holds 2 top-level/);
     expect(existsSync(join(dir, "fixed-two-in-one.md"))).toBe(true);
   });
 
@@ -303,5 +308,55 @@ describe("locateUnreleased", () => {
 
   test("returns null when there is no [Unreleased] section", () => {
     expect(locateUnreleased(["# Changelog", "", "## [0.30.0]"])).toBeNull();
+  });
+});
+
+// ─── One entry per fragment, enforced at PR time (0.37.0 cut) ────────────────
+//
+// `promote` already refused a multi-entry fragment, but promote runs once — at
+// the release cut. So the rule was invisible for a PR's entire life and fired
+// for the first time under time pressure: cutting 0.37.0 stopped dead at
+// assembly with "assembled 16 entries from 11 fragments", against fragments
+// written weeks apart by whoever was around.
+//
+// validateFragmentBody is called by readFragments, which docs-freshness-check
+// runs on every PR, so moving the rule here is what makes the author hear it
+// while the change is still theirs.
+describe("validateFragmentBody — one entry per fragment", () => {
+  test("accepts a single entry with indented continuation lines", () => {
+    expect(() => validateFragmentBody("f.md", "- **A thing changed.** Why it did:\n  more detail here\n  and more")).not.toThrow();
+  });
+
+  test("rejects two top-level entries, naming the count", () => {
+    expect(() => validateFragmentBody("f.md", "- first entry\n- second entry"))
+      .toThrow(/holds 2 top-level/);
+  });
+
+  test("rejects the real shape that broke the 0.37.0 cut", () => {
+    // fixed-changelog-gate-and-small-batch.md: four entries, each with its own
+    // indented body — every one individually well-formed.
+    const body = ["- **One.** body", "  cont", "- **Two.** body", "- **Three.** body", "- **Four.** body"].join("\n");
+    expect(() => validateFragmentBody("f.md", body)).toThrow(/holds 4 top-level/);
+  });
+
+  test("a '- ' inside a fenced code block is CONTENT, not a second entry", () => {
+    // Fragments quote terminal output constantly. Counting naively would reject
+    // a correct fragment and push authors toward not quoting output at all.
+    const body = [
+      "- **A thing changed.** The old output read:",
+      "",
+      "  ```",
+      "- some listing line",
+      "- another listing line",
+      "  ```",
+      "",
+      "  and that was wrong.",
+    ].join("\n");
+    expect(() => validateFragmentBody("f.md", body)).not.toThrow();
+  });
+
+  test("still rejects empty and non-'- ' bodies", () => {
+    expect(() => validateFragmentBody("f.md", "   ")).toThrow(/empty/);
+    expect(() => validateFragmentBody("f.md", "no marker")).toThrow(/must start with/);
   });
 });

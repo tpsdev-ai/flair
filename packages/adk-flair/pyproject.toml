@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adk-flair"
+version = "0.39.0"
+description = "Flair memory backend for Google ADK — self-hosted, federated, portable agent memory"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "google-adk>=2.6",
+    "httpx>=0.27",
+    "cryptography>=42",
+]
+keywords = [
+    "flair",
+    "adk",
+    "google-adk",
+    "agent",
+    "memory",
+    "ed25519",
+    "self-hosted",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/tpsdev-ai/flair"
+Repository = "https://github.com/tpsdev-ai/flair"
+Issues = "https://github.com/tpsdev-ai/flair/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adk_flair"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/adk_flair/**/*.py",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "live_flair: integration test that requires a live Flair instance (skips when FLAIR_TEST_URL is not set)",
+]
