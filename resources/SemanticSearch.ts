@@ -1,7 +1,7 @@
 import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
-import { patchRecord } from "./table-helpers.js";
+import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 
@@ -187,22 +187,30 @@ export class SemanticSearch extends Resource {
       }
     }
 
-    // ─── Explain mode: return the query plan, not results ──────────────────
-    // When explain=true, return the conditions array and metadata that
-    // describe the query plan — the order of conditions reveals whether the
-    // tag filter is the DRIVING condition (first/index-seek position) or a
-    // post-filter applied after the vector sort. No search is executed.
+    // ─── Explain mode: return Harper's ENGINE-LEVEL query plan ────────────
+    // When explain=true, construct the same search query that the HNSW leg
+    // would use and pass explain:true through to Harper's Table.search().
+    // Harper's cost-based planner re-sorts conditions by estimated count at
+    // execution (the scope OR-group estimates Infinity and can never drive;
+    // a selective tags-equals wins the seek). The returned plan shows the
+    // ENGINE's chosen order — the proof the spec requires.
+    //
+    // No search is executed; no side effects (rate-limit, hit-tracking).
     if (explain) {
+      const ctx = (this as any).getContext?.();
+      const explainQuery: any = {
+        sort: qEmb ? { attribute: "embedding", target: qEmb, distance: "cosine" } : undefined,
+        select: DEFAULT_SELECT,
+        limit,
+        explain: true,
+      };
+      if (conditions.length > 0) explainQuery.conditions = conditions;
+      const plan = withDetachedTxn(ctx, () =>
+        (databases as any).flair.Memory.search(explainQuery)
+      );
       return {
         explain: true,
-        conditions: conditions.map((c: any) => ({
-          attribute: c.attribute,
-          comparator: c.comparator,
-          value: c.value,
-          ...(c.operator ? { operator: c.operator, conditions: c.conditions } : {}),
-        })),
-        conditionCount: conditions.length,
-        hybrid: hybridEnabled(),
+        plan,
         tag,
         scoring,
       };

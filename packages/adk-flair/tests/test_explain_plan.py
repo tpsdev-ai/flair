@@ -151,15 +151,20 @@ class TestExplainPlan:
             f"Expected explain=true in response, got: {plan}"
         )
 
-        conditions = plan.get("conditions", [])
-        assert len(conditions) > 0, (
-            f"Expected non-empty conditions in explain plan, got: {plan}"
+        # The plan comes from Harper's Table.search() with explain:true —
+        # Harper's cost-based planner re-sorts conditions by estimated count
+        # at execution. The scope OR-group estimates Infinity and can never
+        # drive; a selective tags-equals wins the seek position.
+        engine_plan = plan.get("plan", {})
+        engine_conditions = engine_plan.get("conditions", [])
+        assert len(engine_conditions) > 0, (
+            f"Expected non-empty conditions in engine plan, got: {plan}"
         )
 
         # The FIRST condition must be the tag filter (index-seek / pre-filter).
         # If the first condition is NOT the tag, the engine is post-filtering
         # after the vector sort, which the spec forbids.
-        first_condition = conditions[0]
+        first_condition = engine_conditions[0]
         assert first_condition.get("attribute") == "tags", (
             f"Pre-filter proof FAILED: first condition is not the tags filter. "
             f"First condition: {first_condition}. "
