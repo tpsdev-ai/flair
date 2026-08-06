@@ -74,12 +74,12 @@ describe("ExplainPlan", () => {
       agentId: config.agentId,
       keyfile: config.keyfilePath,
     });
-  });
+  }, { timeout: 30_000 });
 
   afterAll(async () => {
     if (service) await service.close();
     if (config?.cleanup) await config.cleanup();
-  });
+  }, { timeout: 10_000 });
 
   it("tag drives pre-filter isolation", async () => {
     if (!config || !service) {

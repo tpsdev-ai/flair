@@ -65,7 +65,8 @@ export class FlairMemoryService implements BaseMemoryService {
   private readonly _agentId: string;
   private readonly _privateKey: crypto.KeyObject;
   private readonly _timeoutMs: number;
-  private _warnedCustomMetadata = false;
+  /** Per-session state for custom_metadata warn-once (Python parity). */
+  private _warnedSessions: Set<string> = new Set();
 
   /**
    * @param url - Flair HTTP URL (default: FLAIR_URL env or http://localhost:19926)
@@ -196,7 +197,6 @@ export class FlairMemoryService implements BaseMemoryService {
           body,
           signal: controller.signal,
         });
-        clearTimeout(timeoutId);
 
         phase = "read";
         if (!resp.ok) {
@@ -257,14 +257,30 @@ export class FlairMemoryService implements BaseMemoryService {
   /**
    * Add events to memory incrementally (the quickstart's after_agent_callback path).
    * Not called by ADK — use in after_agent_callback or directly.
+   *
+   * @param customMetadata - If provided, logs a once-per-session warning that
+   *   custom_metadata is not supported by adk-flair (Python parity).
    */
   async addEventsToMemory(
     appName: string,
     userId: string,
     events: Event[],
     sessionId: string,
+    customMetadata?: Record<string, unknown>,
   ): Promise<void> {
     if (!events || events.length === 0) return;
+
+    // custom_metadata warn-once per session (Python parity)
+    if (customMetadata) {
+      const sessionKey = `${appName}:${userId}:${sessionId}`;
+      if (!this._warnedSessions.has(sessionKey)) {
+        this._warnedSessions.add(sessionKey);
+        console.warn(
+          "adk-flair: custom_metadata ignored — adk-flair does not " +
+          `support custom_metadata keys (session=${sessionKey})`
+        );
+      }
+    }
 
     const tag = compoundTag(appName, userId);
     const records: Array<Record<string, unknown>> = [];
@@ -302,13 +318,29 @@ export class FlairMemoryService implements BaseMemoryService {
   /**
    * Add memory entries directly.
    * Not called by ADK — use for direct memory writes.
+   *
+   * @param customMetadata - If provided, logs a once-per-session warning that
+   *   custom_metadata is not supported by adk-flair (Python parity).
    */
   async addMemory(
     appName: string,
     userId: string,
     memories: MemoryEntry[],
+    customMetadata?: Record<string, unknown>,
   ): Promise<void> {
     if (!memories || memories.length === 0) return;
+
+    // custom_metadata warn-once (Python parity)
+    if (customMetadata) {
+      const sessionKey = `${appName}:${userId}:direct`;
+      if (!this._warnedSessions.has(sessionKey)) {
+        this._warnedSessions.add(sessionKey);
+        console.warn(
+          "adk-flair: custom_metadata ignored — adk-flair does not " +
+          "support custom_metadata keys"
+        );
+      }
+    }
 
     const tag = compoundTag(appName, userId);
     const records: Array<Record<string, unknown>> = [];
@@ -317,9 +349,7 @@ export class FlairMemoryService implements BaseMemoryService {
       const text = extractText(mem.content);
       if (!text) continue;
 
-      const recordId = mem.content
-        ? `${appName}:${userId}:direct:${crypto.randomUUID()}`
-        : `${appName}:${userId}:direct:${crypto.randomUUID()}`;
+      const recordId = `${appName}:${userId}:direct:${crypto.randomUUID()}`;
 
       records.push({
         id: recordId,

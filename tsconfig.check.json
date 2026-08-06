@@ -13,6 +13,6 @@
       "harper": ["./types/harper.d.ts"]
     }
   },
-  "include": ["resources/**/*.ts"],
+  "include": ["resources/**/*.ts", "packages/adk-flair-js/src/**/*.ts"],
   "exclude": ["node_modules", "dist", "test"]
 }
