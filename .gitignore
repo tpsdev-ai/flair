@@ -25,3 +25,4 @@ ui/office-space*.html
 .env
 .env.*
 !.env.example
+.venv/
