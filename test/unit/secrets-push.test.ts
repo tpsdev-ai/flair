@@ -94,11 +94,11 @@ describe("probeSecretsCapability — asks the target, never its hostname", () =>
 });
 
 describe("pushSecrets — plaintext never leaves this process", () => {
-  test("each var is sent sealed with processEnv:true (not tier), and decrypts to its value", async () => {
-     // #1105 fix: core reads processEnv:boolean, not tier:string. Wire body
-     // must carry the correct field name or the row lands inert (processEnv:false).
+  test("each var is sent sealed at the processEnv tier, and decrypts to its value", async () => {
+     // #1105 fix: deliver at PROCESS_ENV_TIER tier so core decrypts the secret
+     // must carry the correct tier or the row lands inert (processEnv:false).
     const { impl, sent } = opsStub((op, body) => op === "search_by_value"
-        ? { json: [{ name: body.name, processEnv: true }] }
+        ? { json: [{ name: body.search_value, processEnv: true }] }
         : { json: { ok: true } });
     const vars = { FLAIR_MCP_OAUTH: "1", FLAIR_MCP_SIGNING_KEY: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----" };
     const out = await pushSecrets("https://x/", "Basic y", vars, PUB, { fetchImpl: impl });
@@ -109,9 +109,8 @@ describe("pushSecrets — plaintext never leaves this process", () => {
     for (let i = 0; i < sent.length; i += 2) {
       const req = sent[i];
       expect(req.operation).toBe("set_secret");
-       // Wire body MUST have processEnv:true and MUST NOT have tier.
-      expect(req.processEnv).toBe(true);
-      expect(req.tier).toBeUndefined();
+       // Wire body MUST carry tier to set the delivery tier — core reads tier, not processEnv.
+      expect(req.tier).toBe(PROCESS_ENV_TIER);
        // The value must NOT be present in plaintext anywhere in the request.
       expect(JSON.stringify(req)).not.toContain("BEGIN PRIVATE KEY");
       expect(req.value).toBeUndefined();
@@ -129,7 +128,10 @@ describe("pushSecrets — plaintext never leaves this process", () => {
        // The verify call (odd-indexed) must be a search_by_value.
       const verifyReq = sent[i + 1];
       expect(verifyReq.operation).toBe("search_by_value");
-      expect(verifyReq.table).toBe("system.hdb_secret");
+      expect(verifyReq.database).toBe("system");
+      expect(verifyReq.table).toBe("hdb_secret");
+      expect(verifyReq.search_attribute).toBe("name");
+      expect(verifyReq.search_value).toBeDefined();
       expect(verifyReq.get_attributes).toContain("processEnv");
      }
     });
@@ -145,7 +147,7 @@ describe("pushSecrets — plaintext never leaves this process", () => {
         return { json: { ok: true } }; // set_secret returns 200
        }
        // search_by_value returns the row with processEnv:false (simulating inert row)
-      return { json: [{ name: body.name, processEnv: false }] };
+      return { json: [{ name: body.search_value, processEnv: false }] };
      });
     const out = await pushSecrets("https://x/", "Basic y", { TEST_VAR: "val" }, PUB, { fetchImpl: impl });
     expect(out.allOk).toBe(false);
@@ -160,12 +162,35 @@ describe("pushSecrets — plaintext never leaves this process", () => {
       if (callCount === 1) {
         return { json: { ok: true } }; // set_secret returns 200
        }
-      return { json: [{ name: body.name, processEnv: true }] };
+      return { json: [{ name: body.search_value, processEnv: true }] };
      });
     const out = await pushSecrets("https://x/", "Basic y", { TEST_VAR: "val" }, PUB, { fetchImpl: impl });
     expect(out.allOk).toBe(true);
     expect(out.results[0].ok).toBe(true);
     });
+
+  // ── Kern blocker: verify request body shape must match Harper's search_by_value contract ──
+  // The old body used table:"system.hdb_secret" (dotted) and name:name — Harper rejects it.
+  // Separate database+table, plus search_attribute+search_value, is the convention (see src/cli.ts).
+  test("verify request body carries database, table, search_attribute and search_value", async () => {
+    const captured: any[] = [];
+    const { impl } = opsStub((_op, body) => {
+      captured.push(body);
+      if (_op === "search_by_value") {
+        return { json: [{ name: body.search_value, processEnv: true }] };
+         }
+      return { json: { ok: true } };
+       });
+    await pushSecrets("https://x/", "Basic y", { VERIFY_TEST: "v" }, PUB, { fetchImpl: impl });
+    const verifyReq = captured.find((r) => r.operation === "search_by_value")!;
+    expect(verifyReq.database).toBe("system");
+    expect(verifyReq.table).toBe("hdb_secret");
+    expect(verifyReq.search_attribute).toBe("name");
+    expect(verifyReq.search_value).toBe("VERIFY_TEST");
+    expect(verifyReq.get_attributes).toEqual(["name", "processEnv"]);
+    // Mutation check: if search_attribute is dropped, this fails and the regression is caught.
+    expect(Object.keys(verifyReq)).toContain("search_attribute");
+      });
 
   test("verify path FAILS when read-back returns no rows at all", async () => {
     let callCount = 0;

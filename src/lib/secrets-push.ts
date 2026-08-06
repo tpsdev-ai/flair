@@ -150,7 +150,7 @@ export async function pushSecrets(
       const r = await opsCall(
         opsUrl,
         authHeader,
-         { operation: "set_secret", name, envelope: sealSecret(value, publicKeyPem), processEnv: true },
+         { operation: "set_secret", name, envelope: sealSecret(value, publicKeyPem), tier: PROCESS_ENV_TIER },
         fetchImpl,
        );
       const err = String(r.json?.error ?? "").slice(0, 140);
@@ -165,7 +165,7 @@ export async function pushSecrets(
       const verify = await opsCall(
         opsUrl,
         authHeader,
-          { operation: "search_by_value", table: "system.hdb_secret", name: name, get_attributes: ["name", "processEnv"] },
+          { operation: "search_by_value", database: "system", table: "hdb_secret", search_attribute: "name", search_value: name, get_attributes: ["name", "processEnv"] },
         fetchImpl,
         );
       if (!verify.ok) {
