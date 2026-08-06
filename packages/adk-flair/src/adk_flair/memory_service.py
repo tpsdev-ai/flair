@@ -71,9 +71,8 @@ def _deterministic_record_id(
 
 def _iso_now() -> str:
     """ISO 8601 timestamp with millisecond precision in UTC."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + (
-        f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
-    )
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
 def _load_ed25519_key(keyfile: str) -> ed25519.Ed25519PrivateKey:
