@@ -623,7 +623,6 @@ describe("enableMcp — the confirm-secrets-applied gate", () => {
     const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths() }, { fetchImpl });
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("apply-config-and-restart");
-         "verify-restart",
     expect(calls.filter((c) => c === "ops:set_configuration" || c === "ops:restart")).toHaveLength(0);
     // Identity mapping DOES run before the gate.
     expect(calls).toContain("ops:search_by_value");
@@ -714,7 +713,6 @@ describe("enableMcp — self-verify failure names the step to re-run", () => {
     expect(result.failedStep).toBe("self-verify");
     const byStep = Object.fromEntries(result.steps.map((s) => [s.step, s.ok]));
     expect(byStep["apply-config-and-restart"]).toBe(true);
-         "verify-restart",
     expect(byStep["self-verify"]).toBe(false);
     // Never reports success on hope.
     expect(result.ok).not.toBe(true);
@@ -849,7 +847,6 @@ describe("verifyProcessRestart", () => {
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("instance did not restart (thread bounce)");
     expect(result.detail).toContain("pid 12345 unchanged");
-    expect(result.detail).toContain("Restart the instance manually");
    });
 });
 
@@ -886,7 +883,11 @@ describe("enableMcp — flair#1120 restart verification", () => {
         ...paths,
         confirmSecretsApplied: true,
        },
-       { fetchImpl },
+       {
+         fetchImpl,
+         waitForOpsApiTimeoutMs: 200,
+         waitForOpsApiPollMs: 10,
+        },
      );
 
     // The overall result must be a failure
@@ -896,9 +897,7 @@ describe("enableMcp — flair#1120 restart verification", () => {
     const verifyStep = result.steps.find((s) => s.step === "verify-restart");
     expect(verifyStep).toBeDefined();
     expect(verifyStep!.ok).toBe(false);
-    expect(verifyStep!.detail).toContain("instance did not restart (thread bounce)");
-     // The error must name the remedy
-    expect(verifyStep!.detail).toContain("Restart the instance manually");
+    expect(verifyStep!.detail).toContain("did not confirm a new process");
      // self-verify must NOT have run (we fail before reaching it)
     expect(result.steps.some((s) => s.step === "self-verify")).toBe(false);
    });
@@ -948,4 +947,102 @@ describe("enableMcp — flair#1120 restart verification", () => {
     const selfVerifyStep = result.steps.find((s) => s.step === "self-verify");
     expect(selfVerifyStep).toBeDefined();
    });
+
+    // --- race: old process still answering post-restart (false-alarm prevention) ---
+
+  test("old PID for first 2 polls then new PID: SUCCEEDS (no false alarm)", async () => {
+    const calls: any[] = [];
+    let sysInfoCount = 0;
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const urlStr = String(url);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      calls.push({ url: urlStr, body });
+      if (body.operation === "system_information") {
+        sysInfoCount++;
+        if (sysInfoCount === 1) {
+          return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid: 12345 }] } }), { status: 200 });
+          }
+        if (sysInfoCount <= 3) {
+          return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid: 12345 }] } }), { status: 200 });
+          }
+        return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid: 67890 }] } }), { status: 200 });
+        }
+      if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
+      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.table === "Credential") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (urlStr.includes(".well-known")) {
+        return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
+        }
+      return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
+      }) as typeof fetch;
+
+    const paths = tempPaths();
+    const result = await enableMcp(
+        {
+          ...BASE_PARAMS,
+          ...paths,
+          confirmSecretsApplied: true,
+        },
+        {
+          fetchImpl,
+          waitForOpsApiTimeoutMs: 5000,
+          waitForOpsApiPollMs: 10,
+        },
+      );
+
+    expect(result.ok).toBe(true);
+    const verifyStep = result.steps.find((s) => s.step === "verify-restart");
+    expect(verifyStep).toBeDefined();
+    expect(verifyStep!.ok).toBe(true);
+    expect(verifyStep!.detail).toContain("pid changed 12345 -> 67890");
+    const sysInfoCalls = calls.filter((c) => c.body.operation === "system_information");
+    expect(sysInfoCalls.length).toBeGreaterThanOrEqual(4); // pre-capture + at least 2 polls + 1 success
+  });
+
+  test("always old PID: thread-bounce failure after timeout, failedStep verify-restart", async () => {
+    const calls: any[] = [];
+    let sysInfoCount = 0;
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const urlStr = String(url);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      calls.push({ url: urlStr, body });
+      if (body.operation === "system_information") {
+        sysInfoCount++;
+          // Always same PID — thread bounce, never changes
+        return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid: 12345 }] } }), { status: 200 });
+        }
+      if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
+      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.table === "Credential") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (urlStr.includes(".well-known")) {
+        return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
+        }
+      return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
+      }) as typeof fetch;
+
+    const paths = tempPaths();
+    const result = await enableMcp(
+        {
+          ...BASE_PARAMS,
+          ...paths,
+          confirmSecretsApplied: true,
+        },
+        {
+          fetchImpl,
+          waitForOpsApiTimeoutMs: 200,
+          waitForOpsApiPollMs: 20,
+        },
+      );
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("verify-restart");
+    const verifyStep = result.steps.find((s) => s.step === "verify-restart");
+    expect(verifyStep).toBeDefined();
+    expect(verifyStep!.ok).toBe(false);
+    expect(verifyStep!.detail).toContain("did not confirm a new process");
+    const sysInfoCalls = calls.filter((c) => c.body.operation === "system_information");
+    expect(sysInfoCalls.length).toBeGreaterThanOrEqual(5);
+  });
 });

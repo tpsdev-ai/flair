@@ -889,23 +889,32 @@ export interface BootDiscriminator {
   pid: number;
 }
 
-/** How long to wait for the ops API to come back after a restart. */
+/** How long to wait for the ops API / PID change after a restart. */
 const RESTART_WAIT_TIMEOUT_MS = 30_000;
 /** Poll interval while waiting for the ops API after restart. */
 const RESTART_WAIT_POLL_MS = 1000;
 
 /**
- * Wait for the ops API to respond again after a restart.
- * The restart call closes the connection as Harper shuts down; we must poll
- * until the new process accepts requests before we can verify the discriminator.
+ * Wait for the ops API to respond after a restart, then poll until the PID
+ * changes (proving a genuine restart, not the old process still answering).
+ *
+ * After a real restart, the old process can briefly still respond to the first
+ * ops request. We capture the PID on every poll until it changes — if the
+ * window expires with the PID still the same we report thread-bounce failure
+ * so the operator knows the restart was a no-op rather than a timing quirk.
+ *
+ * `timeoutMs` and `pollMs` are injectable via `deps` so tests can run fast.
  */
 async function waitForOpsApi(
   opsUrl: string,
   authHeader: string,
-  deps: { fetchImpl?: typeof fetch } = {},
-): Promise<void> {
+  prePid: number,
+  deps: { fetchImpl?: typeof fetch; timeoutMs?: number; pollMs?: number } = {},
+): Promise<BootDiscriminator> {
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const deadline = Date.now() + RESTART_WAIT_TIMEOUT_MS;
+  const timeoutMs = deps.timeoutMs ?? RESTART_WAIT_TIMEOUT_MS;
+  const pollMs = deps.pollMs ?? RESTART_WAIT_POLL_MS;
+  const deadline = Date.now() + timeoutMs;
   let attempt = 0;
   while (Date.now() < deadline) {
     attempt++;
@@ -915,12 +924,28 @@ async function waitForOpsApi(
         headers: { "Content-Type": "application/json", Authorization: authHeader },
         body: JSON.stringify({ operation: "system_information", attributes: ["harperdb_processes"] }),
         signal: AbortSignal.timeout(3000),
-      });
-      if (res.ok) return;
-    } catch { /* not ready yet */ }
-    await new Promise((r) => setTimeout(r, RESTART_WAIT_POLL_MS));
-  }
-  throw new Error(`ops API at ${opsUrl} did not respond within ${RESTART_WAIT_TIMEOUT_MS}ms (${attempt} attempts) — the restart may have failed`);
+        });
+      if (!res.ok) {
+        await new Promise((r) => setTimeout(r, pollMs));
+        continue;
+       }
+       // Ops API answered — extract the PID from this response
+      const data: { harperdb_processes?: { core?: { pid?: number }[] } } = await res.json();
+      const pid = data?.harperdb_processes?.core?.[0]?.pid;
+      if (!pid || typeof pid !== "number") {
+        await new Promise((r) => setTimeout(r, pollMs));
+        continue;
+       }
+       // If PID changed from pre-restart value, the restart is confirmed
+      if (pid !== prePid) return { pid };
+       // PID still the same (old process may still be answering), keep polling
+     } catch { /* not ready yet — connection refused, timeout, etc. */ }
+    await new Promise((r) => setTimeout(r, pollMs));
+   }
+  throw new Error(
+     `ops API at ${opsUrl} did not confirm a new process within ${timeoutMs}ms (${attempt} attempts) ` +
+     `— the restart may have failed or the process bounced on the same thread (pid ${prePid} unchanged)`,
+   );
 }
 
 /**
@@ -1031,6 +1056,10 @@ export interface EnableMcpDeps {
    *  Only consulted when `confirmSecretsApplied` is not already true and
    *  this is not a dry run. */
   confirmPrompt?: (message: string) => Promise<boolean>;
+    /** Timeout (ms) for waitForOpsApi — injectable so tests run fast. */
+  waitForOpsApiTimeoutMs?: number;
+    /** Poll interval (ms) for waitForOpsApi — injectable so tests run fast. */
+  waitForOpsApiPollMs?: number;
 }
 
 export interface EnableMcpResult {
@@ -1250,22 +1279,25 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       );
     push(true, `set_configuration + restart succeeded against ${params.instance}`);
 
-    // ── Verify the process actually restarted (flair#1120) ────────────────────
+     // ── Verify the process actually restarted (flair#1120) ────────────────────
+     // Poll the ops API until the PID changes — the old process can briefly
+     // still answer after a real restart, so a single post-capture is unreliable.
     currentStep = "verify-restart";
-    await waitForOpsApi(
-       resolveOpsUrl(params.instance),
-       basicAuthHeader(params.adminUser, params.adminPass),
-        { fetchImpl: deps.fetchImpl },
-      );
-    const postDiscriminator = await captureBootDiscriminator(
-       params.instance, params.adminUser, params.adminPass,
-        { fetchImpl: deps.fetchImpl },
+    const postDiscriminator = await waitForOpsApi(
+        resolveOpsUrl(params.instance),
+        basicAuthHeader(params.adminUser, params.adminPass),
+        preDiscriminator.pid,
+           {
+            fetchImpl: deps.fetchImpl,
+            timeoutMs: deps.waitForOpsApiTimeoutMs,
+            pollMs: deps.waitForOpsApiPollMs,
+           },
       );
     const restartCheck = verifyProcessRestart(preDiscriminator, postDiscriminator);
     if (!restartCheck.ok) {
       push(false, restartCheck.detail);
       return { ok: false, dryRun, steps, failedStep: "verify-restart" };
-      }
+       }
     push(true, `process restarted: pid changed ${preDiscriminator.pid} -> ${postDiscriminator.pid}`);
 
      // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
