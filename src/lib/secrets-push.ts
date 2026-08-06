@@ -150,7 +150,7 @@ export async function pushSecrets(
       const r = await opsCall(
         opsUrl,
         authHeader,
-         { operation: "set_secret", name, envelope: sealSecret(value, publicKeyPem), tier: PROCESS_ENV_TIER },
+         { operation: "set_secret", name, envelope: sealSecret(value, publicKeyPem), processEnv: true },
         fetchImpl,
        );
       const err = String(r.json?.error ?? "").slice(0, 140);

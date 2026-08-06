@@ -95,8 +95,8 @@ describe("probeSecretsCapability — asks the target, never its hostname", () =>
 
 describe("pushSecrets — plaintext never leaves this process", () => {
   test("each var is sent sealed at the processEnv tier, and decrypts to its value", async () => {
-     // #1105 fix: deliver at PROCESS_ENV_TIER tier so core decrypts the secret
-     // must carry the correct tier or the row lands inert (processEnv:false).
+     // #1105 fix: deliver with processEnv:true so core sets the flag on the row.
+     // must carry processEnv (not tier) or the row lands inert (processEnv:false).
     const { impl, sent } = opsStub((op, body) => op === "search_by_value"
         ? { json: [{ name: body.search_value, processEnv: true }] }
         : { json: { ok: true } });
@@ -109,8 +109,9 @@ describe("pushSecrets — plaintext never leaves this process", () => {
     for (let i = 0; i < sent.length; i += 2) {
       const req = sent[i];
       expect(req.operation).toBe("set_secret");
-       // Wire body MUST carry tier to set the delivery tier — core reads tier, not processEnv.
-      expect(req.tier).toBe(PROCESS_ENV_TIER);
+       // Wire body MUST carry processEnv — core reads processEnv, not tier.
+      expect(req.processEnv).toBe(true);
+      expect(req.tier).toBeUndefined();
        // The value must NOT be present in plaintext anywhere in the request.
       expect(JSON.stringify(req)).not.toContain("BEGIN PRIVATE KEY");
       expect(req.value).toBeUndefined();
