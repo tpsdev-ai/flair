@@ -404,7 +404,7 @@ Shipped: Ed25519 identity and auth · memory CRUD with durability enforcement an
 
 Next: git-backed memory sync · opt-in encryption at rest (AES-256-GCM per memory).
 
-> **Note:** Flair runs on [Harper v5](https://harper.fast), currently in beta. We run it in production daily and track upstream closely. Pin your Harper version.
+> **Note:** Flair runs on [Harper v5](https://harper.fast). We run it in production daily and track upstream closely. Pin your Harper version.
 
 ## License
 
