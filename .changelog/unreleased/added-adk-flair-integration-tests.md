@@ -1,1 +1,0 @@
-- **adk-flair: integration tests for explain-plan, portability, and quickstart parity.** New `tests/test_explain_plan.py`, `tests/test_portability.py`, and `tests/test_quickstart_parity.py` with a `live_flair` pytest marker that skips visibly when no live Flair is configured. Includes ephemeral Harper boot helper and test README.
