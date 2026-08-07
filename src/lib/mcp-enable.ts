@@ -880,6 +880,106 @@ export function buildClaudePasteBlock(resource: string): string {
   ].join("\n");
 }
 
+// ─── Restart verification (flair#1120) ───────────────────────────────────
+
+/** A boot discriminator: the Harper core process PID from
+ *  `system_information` (`harperdb_processes` attribute).
+ *  Used to verify the process actually restarted after a restart call. */
+export interface BootDiscriminator {
+  pid: number;
+}
+
+/** How long to wait for the ops API / PID change after a restart. */
+const RESTART_WAIT_TIMEOUT_MS = 30_000;
+/** Poll interval while waiting for the ops API after restart. */
+const RESTART_WAIT_POLL_MS = 1000;
+
+/**
+ * Wait for the ops API to respond after a restart, then poll until the PID
+ * changes (proving a genuine restart, not the old process still answering).
+ *
+ * After a real restart, the old process can briefly still respond to the first
+ * ops request. We capture the PID on every poll until it changes — if the
+ * window expires with the PID still the same we report thread-bounce failure
+ * so the operator knows the restart was a no-op rather than a timing quirk.
+ *
+ * `timeoutMs` and `pollMs` are injectable via `deps` so tests can run fast.
+ */
+async function waitForOpsApi(
+  opsUrl: string,
+  authHeader: string,
+  prePid: number,
+  deps: { fetchImpl?: typeof fetch; timeoutMs?: number; pollMs?: number } = {},
+): Promise<BootDiscriminator> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const timeoutMs = deps.timeoutMs ?? RESTART_WAIT_TIMEOUT_MS;
+  const pollMs = deps.pollMs ?? RESTART_WAIT_POLL_MS;
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt++;
+    try {
+      const res = await fetchImpl(opsUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({ operation: "system_information", attributes: ["harperdb_processes"] }),
+        signal: AbortSignal.timeout(3000),
+        });
+      if (!res.ok) {
+        await new Promise((r) => setTimeout(r, pollMs));
+        continue;
+       }
+       // Ops API answered — extract the PID from this response
+      const data: { harperdb_processes?: { core?: { pid?: number }[] } } = await res.json();
+      const pid = data?.harperdb_processes?.core?.[0]?.pid;
+      if (!pid || typeof pid !== "number") {
+        await new Promise((r) => setTimeout(r, pollMs));
+        continue;
+       }
+       // If PID changed from pre-restart value, the restart is confirmed
+      if (pid !== prePid) return { pid };
+       // PID still the same (old process may still be answering), keep polling
+     } catch { /* not ready yet — connection refused, timeout, etc. */ }
+    await new Promise((r) => setTimeout(r, pollMs));
+   }
+  throw new Error(
+     `ops API at ${opsUrl} did not confirm a new process within ${timeoutMs}ms (${attempt} attempts) ` +
+     `— the restart may have failed or the process bounced on the same thread (pid ${prePid} unchanged). ` +
+     `Restart the instance manually, then re-run: flair mcp enable`,
+   );
+}
+
+/**
+ * Capture the Harper core process PID from the ops API via `system_information`.
+ * This PID is the boot discriminator: it changes on every real restart.
+ */
+export async function captureBootDiscriminator(
+  opsPortOrUrl: number | string,
+  adminUser: string,
+  adminPass: string,
+  deps: { fetchImpl?: typeof fetch } = {},
+): Promise<BootDiscriminator> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const opsUrl = resolveOpsUrl(opsPortOrUrl);
+  const authHeader = basicAuthHeader(adminUser, adminPass);
+
+  const res = await fetchImpl(opsUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: authHeader },
+    body: JSON.stringify({ operation: "system_information", attributes: ["harperdb_processes"] }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`system_information failed (HTTP ${res.status}): ${text}`);
+  }
+  const data: { harperdb_processes?: { core?: { pid?: number }[] } } = await res.json();
+  const pid = data?.harperdb_processes?.core?.[0]?.pid;
+  if (!pid || typeof pid !== "number") {
+    throw new Error("system_information returned no harperdb_processes.core entry with a PID");
+  }
+  return { pid };
+}
+
 // ─── Orchestration ────────────────────────────────────────────────────────────
 
 export type EnableStepName =
@@ -890,6 +990,7 @@ export type EnableStepName =
   | "secrets-provisioning"
   | "identity-mapping"
   | "apply-config-and-restart"
+  | "verify-restart"
   | "self-verify";
 
 export interface EnableStepResult {
@@ -936,6 +1037,10 @@ export interface EnableMcpDeps {
    *  Only consulted when `confirmSecretsApplied` is not already true and
    *  this is not a dry run. */
   confirmPrompt?: (message: string) => Promise<boolean>;
+    /** Timeout (ms) for waitForOpsApi — injectable so tests run fast. */
+  waitForOpsApiTimeoutMs?: number;
+    /** Poll interval (ms) for waitForOpsApi — injectable so tests run fast. */
+  waitForOpsApiPollMs?: number;
 }
 
 export interface EnableMcpResult {
@@ -1141,16 +1246,37 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       );
       return { ok: false, dryRun, steps, failedStep: "apply-config-and-restart", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
     }
-
-    // ── Apply config + restart ────────────────────────────────────────────────
     currentStep = "apply-config-and-restart";
-    await applyRemoteConfigAndRestart(
-      { opsPortOrUrl: params.instance, adminUser: params.adminUser, adminPass: params.adminPass, configBlock },
-      { fetchImpl: deps.fetchImpl },
-    );
-    push(true, `set_configuration + restart succeeded against ${params.instance}`);
 
-    // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
+     // ── Capture boot discriminator BEFORE restart (flair#1120) ─────────────
+    const preDiscriminator = await captureBootDiscriminator(
+       params.instance, params.adminUser, params.adminPass,
+         { fetchImpl: deps.fetchImpl },
+       );
+
+    await applyRemoteConfigAndRestart(
+        { opsPortOrUrl: params.instance, adminUser: params.adminUser, adminPass: params.adminPass, configBlock },
+         { fetchImpl: deps.fetchImpl },
+       );
+    push(true, `set_configuration + restart succeeded against ${params.instance}`);
+      // ── Verify the process actually restarted (flair#1120) ──────────────────
+      // Poll the ops API until the PID changes — the old process can briefly
+      // still answer after a real restart, so a single post-capture is unreliable.
+      // waitForOpsApi guarantees PID change (or throws on timeout), so the restart
+      // is confirmed when this call returns.
+    currentStep = "verify-restart";
+    const postDiscriminator = await waitForOpsApi(
+       resolveOpsUrl(params.instance),
+       basicAuthHeader(params.adminUser, params.adminPass),
+       preDiscriminator.pid,
+         {
+          fetchImpl: deps.fetchImpl,
+          timeoutMs: deps.waitForOpsApiTimeoutMs,
+          pollMs: deps.waitForOpsApiPollMs,
+         },
+       );
+    push(true, `process restarted: pid changed ${preDiscriminator.pid} -> ${postDiscriminator.pid}`);
+     // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
     currentStep = "self-verify";
     const verify = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
     if (!verify.ok) {

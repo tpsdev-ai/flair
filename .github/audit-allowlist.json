@@ -58,17 +58,6 @@
       "removeWhen": "The dependency PR raising the resolved form-data to >=4.0.6 merges — the same bump that retires GHSA-fjxv-7rqg-78g4."
     },
     {
-      "ghsa": "GHSA-r292-9mhp-454m",
-      "package": "tar",
-      "severity": "moderate",
-      "class": "remediation-available",
-      "introducedBy": "direct dependency, plus @types/tar, workspace @tpsdev-ai/openclaw-flair -> openclaw, and workspace @tpsdev-ai/flair-bench -> node-llama-cpp",
-      "reason": "tar is a DIRECT dependency of this repo pinned at a version inside the vulnerable range; tar 7.5.22 is published and fixes it. Deferred to the dependency PR only because the pin is shared with three other consumers and moving it wants its own test run.",
-      "added": "2026-07-27",
-      "expires": "2026-08-26",
-      "removeWhen": "The dependency PR raising tar to >=7.5.21 across the direct pin and the three transitive consumers merges."
-    },
-    {
       "ghsa": "GHSA-frvp-7c67-39w9",
       "package": "@hono/node-server",
       "severity": "moderate",

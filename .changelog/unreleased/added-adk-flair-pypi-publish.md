@@ -1,1 +1,0 @@
-- adk-flair publishes to PyPI via OIDC trusted publishing on `adk-flair-v*` tags.

@@ -39,6 +39,7 @@ PACKAGES=(
   "$ROOT/packages/pi-flair"
   "$ROOT/packages/n8n-nodes-flair"
   "$ROOT/packages/langgraph-flair"
+  "$ROOT/packages/adk-flair-js"
   "$ROOT/packages/flair-bench"
   "$ROOT"
 )
@@ -50,6 +51,7 @@ PACKAGE_JSONS=(
   "$ROOT/packages/pi-flair/package.json"
   "$ROOT/packages/n8n-nodes-flair/package.json"
   "$ROOT/packages/langgraph-flair/package.json"
+  "$ROOT/packages/adk-flair-js/package.json"
   "$ROOT/packages/flair-bench/package.json"
   "$ROOT/package.json"
 )
@@ -161,6 +163,7 @@ if [[ "$MODE" == "--publish" ]]; then
   soft_publish "packages/pi-flair"        "@tpsdev-ai/pi-flair"        "may need build step"
   soft_publish "packages/n8n-nodes-flair" "@tpsdev-ai/n8n-nodes-flair"
   soft_publish "packages/langgraph-flair" "@tpsdev-ai/langgraph-flair" "may need build step"
+  soft_publish "packages/adk-flair-js"     "@tpsdev-ai/adk-flair"     "may need build step"
   # Until the one-time bootstrap in docs/releasing.md is done (first manual
   # publish + npm Trusted Publisher registration), this is expected to fail on a
   # brand-new install of the package.
@@ -389,6 +392,7 @@ git -C "$ROOT" add \
   "$ROOT/packages/pi-flair/package.json" \
   "$ROOT/packages/n8n-nodes-flair/package.json" \
   "$ROOT/packages/langgraph-flair/package.json" \
+  "$ROOT/packages/adk-flair-js/package.json" \
   "$ROOT/packages/flair-bench/package.json" \
   "$ROOT/packages/flair-bench/src/version.ts" \
   "$ROOT/packages/adk-flair/pyproject.toml" \
