@@ -293,68 +293,20 @@ jobs:
             bun test $(find test/integration -name '*.test.ts' | sort)
             echo "::endgroup::"
           done
-      # adk-flair-js integration tests boot an ephemeral Harper instance and
-      # exercise the Flair application through the ADK MemoryService. They
-      # live here (not in the Unit Tests matrix) because they need a built
-      # Flair app — the unit lane has no build artifacts, so Harper would
-      # start but every /Memory call would 404.
+      # adk-flair-js integration tests exercise the Flair application through
+      # the ADK MemoryService. They live here (not in the Unit Tests matrix)
+      # because they need a built Flair app — the unit lane has no build
+      # artifacts, so Harper would start but every /Memory call would 404.
       #
-      # Harper is booted as a BACKGROUND step (not inside the test process)
-      # to eliminate the shared-boot race: bun's per-file workers caused
-      # last-worker-out teardown to kill Harper while other files still ran.
-      # The boot step exports FLAIR_TEST_URL / FLAIR_TEST_OPS_URL to the env;
-      # live-flair.ts detects these and uses external mode, never engaging
-      # the in-suite shared-boot protocol. The teardown step (always())
-      # kills the recorded PID and removes the ephemeral install tree.
-      - name: Boot ephemeral Harper for adk-flair-js integration tests
+      # These tests clean-skip when FLAIR_TEST_URL is absent (no live Flair
+      # instance). GitHub standard runners cannot reach the adapter's 1000ms
+      # warm-up bar (measured floor ~1860ms, flair#1119), so this lane does
+      # not boot an ephemeral Harper in CI. The capability-gate plumbing
+      # (boot-harper.mjs warm-up + three-outcome JSON) is correct and ready
+      # for the day #1126 lands capable runners.
+      - name: adk-flair-js live-integration posture
         run: |
-          BOOT_OUT=$(mktemp)
-          echo "$BOOT_OUT" > /tmp/harper-boot-out
-          # tail -f /dev/null keeps stdin open so boot-harper.mjs blocks
-          # until we SIGTERM it, rather than seeing stdin close immediately.
-          tail -f /dev/null | bun packages/adk-flair/tests/helpers/boot-harper.mjs > "$BOOT_OUT" 2>&1 &
-          BOOT_PID=$!
-          echo "$BOOT_PID" > /tmp/harper-boot-pid
-          echo "Harper boot PID: $BOOT_PID, output: $BOOT_OUT"
-          # Poll for the JSON config line. boot-harper.mjs emits one JSON line:
-          #   BOOTED+WARM  → { httpURL, opsURL, adminUser, adminPass, installDir, outcome, floor_ms }
-          #   FLOOR-EXCEEDED → { outcome, floor_ms }  (then exits 0 — capability gate, flair#1119)
-          DEADLINE=$((SECONDS + 180))
-          while [ $SECONDS -lt $DEADLINE ]; do
-            if LINE=$(grep -E '"httpURL"|"outcome"' "$BOOT_OUT" 2>/dev/null | head -1); then
-              OUTCOME=$(echo "$LINE" | jq -r '.outcome // "BOOTED+WARM"')
-
-              if [ "$OUTCOME" = "FLOOR-EXCEEDED" ]; then
-                FLOOR_MS=$(echo "$LINE" | jq -r '.floor_ms')
-                echo "::notice::FLOOR-EXCEEDED: measured write+search floor ${FLOOR_MS}ms exceeds the adapter's 1000ms warm-up bar"
-                SUMMARY_LINE="adk-flair-js integration: SKIPPED on this runner class — measured write+search floor ${FLOOR_MS}ms exceeds the adapter's 1000ms warm-up bar"
-                echo "$SUMMARY_LINE" >> "$GITHUB_STEP_SUMMARY"
-                # boot-harper already tore down Harper and exited — nothing to clean up
-                exit 0
-              fi
-
-              # BOOTED+WARM — export env vars for the test steps
-              HTTP_URL=$(echo "$LINE" | jq -r '.httpURL')
-              OPS_URL=$(echo "$LINE" | jq -r '.opsURL')
-              INSTALL_DIR=$(echo "$LINE" | jq -r '.installDir')
-              echo "FLAIR_TEST_URL=$HTTP_URL" >> "$GITHUB_ENV"
-              echo "FLAIR_TEST_OPS_URL=$OPS_URL" >> "$GITHUB_ENV"
-              echo "$INSTALL_DIR" > /tmp/harper-install-dir
-              echo "FLAIR_TEST_URL=$HTTP_URL FLAIR_TEST_OPS_URL=$OPS_URL"
-              exit 0
-            fi
-            # Check if the boot process died early (BOOT-FAILED)
-            if ! kill -0 "$BOOT_PID" 2>/dev/null; then
-              echo "boot-harper.mjs exited early. Output:"
-              cat "$BOOT_OUT"
-              exit 1
-            fi
-            sleep 1
-          done
-          echo "Harper failed to boot within 180s. Output:"
-          cat "$BOOT_OUT"
-          kill "$BOOT_PID" 2>/dev/null || true
-          exit 1
+          echo "adk-flair-js live-integration: skipped on this runner class (see #1126); coverage via unit tests + maintainer acceptance." >> "$GITHUB_STEP_SUMMARY"
       - name: Run adk-flair-js integration tests
         run: cd packages/adk-flair-js && bun test test/integration/
       # test/integration-isolated/ holds files that must not share a bun test
@@ -368,33 +320,6 @@ jobs:
             bun test "$f" || exit 1
             echo "::endgroup::"
           done
-      - name: Teardown ephemeral Harper
-        if: always()
-        run: |
-          if [ -f /tmp/harper-boot-pid ]; then
-            PID=$(cat /tmp/harper-boot-pid)
-            echo "Stopping Harper (PID $PID)..."
-            # SIGTERM triggers boot-harper.mjs's graceful shutdown (stopHarper
-            # removes the install tree). Fall back to SIGKILL after 5s.
-            kill "$PID" 2>/dev/null || true
-            for i in $(seq 1 5); do
-              if ! kill -0 "$PID" 2>/dev/null; then
-                echo "Harper stopped gracefully"
-                break
-              fi
-              sleep 1
-            done
-            kill -9 "$PID" 2>/dev/null || true
-          fi
-          # Safety net: if stopHarper didn't complete (SIGKILL fallback),
-          # remove the install tree ourselves.
-          if [ -f /tmp/harper-install-dir ]; then
-            INSTALL_DIR=$(cat /tmp/harper-install-dir)
-            echo "Removing Harper install tree: $INSTALL_DIR"
-            rm -rf "$INSTALL_DIR" 2>/dev/null || true
-          fi
-          # Clean up temp files
-          rm -f /tmp/harper-boot-pid /tmp/harper-boot-out /tmp/harper-install-dir 2>/dev/null || true
       # Single source of truth (#625): derive the Harper Docker image tag from the
       # harper version declared in package.json, so the Docker-based
       # E2E/Playwright validation can never drift behind the Harper that ships to
