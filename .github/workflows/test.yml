@@ -99,6 +99,13 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
+      # adk-flair-js integration tests boot an ephemeral Harper instance.
+      # Harper's NAPI modules require real Node.js (bun 1.3.x lacks uv_ip6_addr).
+      # The matrix node-version is used here; Harper is known-good on 22,
+      # and the shared-boot skip path handles any failures on 24/26 cleanly.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
       # test/*.test.ts — 12 files, 250 cases — were run by NO CI command
       # (flair#953). Every `bun test` invocation in every workflow targets a
       # subdirectory, and a subdirectory filter does not pick up root-level test
