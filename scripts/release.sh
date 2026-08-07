@@ -39,6 +39,7 @@ PACKAGES=(
   "$ROOT/packages/pi-flair"
   "$ROOT/packages/n8n-nodes-flair"
   "$ROOT/packages/langgraph-flair"
+  "$ROOT/packages/adk-flair-js"
   "$ROOT/packages/flair-bench"
   "$ROOT"
 )
@@ -50,6 +51,7 @@ PACKAGE_JSONS=(
   "$ROOT/packages/pi-flair/package.json"
   "$ROOT/packages/n8n-nodes-flair/package.json"
   "$ROOT/packages/langgraph-flair/package.json"
+  "$ROOT/packages/adk-flair-js/package.json"
   "$ROOT/packages/flair-bench/package.json"
   "$ROOT/package.json"
 )

@@ -151,6 +151,7 @@ jobs:
             packages/pi-flair/package.json
             packages/n8n-nodes-flair/package.json
             packages/langgraph-flair/package.json
+            packages/adk-flair-js/package.json
             packages/flair-bench/package.json
           )
           for pj in "${PKG_JSONS[@]}"; do
@@ -205,6 +206,7 @@ jobs:
             packages/pi-flair
             packages/n8n-nodes-flair
             packages/langgraph-flair
+            packages/adk-flair-js
           )
           for dir in "${DIRS[@]}"; do
             name="$(node -p "require('./$dir/package.json').name")"
@@ -247,7 +249,7 @@ jobs:
           {
             echo "### 🚀 v$VERSION staged for release"
             echo ""
-            echo "All 8 lockstep-versioned workspace packages submitted to npm **staging**"
+            echo "All 9 lockstep-versioned workspace packages submitted to npm **staging**"
             echo "with provenance. They are **not live yet**."
             echo ""
             echo "**To release:** open [npmjs.com → Staged Packages](https://www.npmjs.com/settings/tpsdev-ai/staging),"
