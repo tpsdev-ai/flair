@@ -1,0 +1,1 @@
+Release tooling: adk-flair-js added to the version-bump and stage-publish lists — the 0.40.0 cut failed its post-bump guard because the new package was not a bump site.
