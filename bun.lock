@@ -11,7 +11,7 @@
         "harper": "5.1.22",
         "harper-fabric-embeddings": "^0.5.0",
         "jose": "6.2.2",
-        "js-yaml": "4.3.0",
+        "js-yaml": "^4.3.1",
         "tar": "7.5.20",
         "tweetnacl": "1.0.3",
       },
@@ -133,6 +133,7 @@
     "brace-expansion": "^5.0.9",
     "fast-uri": "^4.1.2",
     "hono": "^4.12.34",
+    "js-yaml": "^4.3.1",
     "react-native-fs": "npm:empty-npm-package@1.0.0",
     "undici": "^8.9.0",
   },
@@ -1145,7 +1146,7 @@
 
     "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 
-    "js-yaml": ["js-yaml@4.3.0", "", { "dependencies": { "argparse": "^2.0.1" }, "bin": { "js-yaml": "bin/js-yaml.js" } }, "sha512-1td788aAnnZ5qs7V2QIRl1owjtYpbKt749Y3xauqQgwIIGF/xXWz1wMTEBx5O3LK3lXLVuqXPdPxj2BoFHaW9Q=="],
+    "js-yaml": ["js-yaml@4.3.1", "", { "dependencies": { "argparse": "^2.0.1" }, "bin": { "js-yaml": "bin/js-yaml.js" } }, "sha512-CY6crGq313MX8GkwvB7tzgp99vjQxY1++5y10/BKN/GUfHqWaOGQMNZkBvqSzsZKWk/ijwHlWzzkLulsGHhjWQ=="],
 
     "jsesc": ["jsesc@2.5.2", "", { "bin": { "jsesc": "bin/jsesc" } }, "sha512-OYu7XEzjkCQ3C5Ps3QIZsQfNpqoJyZZA99wd9aWd05NCtC5pWOkShK2mkL6HXQR6/Cy2lbNdPlZBpuQHXE63gA=="],
 
