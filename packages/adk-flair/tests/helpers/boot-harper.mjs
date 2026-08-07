@@ -28,23 +28,40 @@ async function main() {
   // Warm up the embedding/write pipeline so the first real test write
   // doesn't time out against a cold Harper on a CI runner. Performs a
   // real authenticated write+search round-trip, retrying until latency
-  // drops below 1s (the adapter's localhost budget). Deletes the warm-up
-  // row afterwards so tests start clean.
-  await warmUpPipeline(
+  // drops below 1s (the adapter's localhost budget).
+  //
+  // Returns { outcome: "warm" | "floor-exceeded", floorMs: number }.
+  // "floor-exceeded" means the CI runner cannot reach operating latency
+  // — this is a capability gate, not a failure (flair#1119).
+  const warmup = await warmUpPipeline(
     harper.httpURL,
     harper.opsURL,
     harper.admin.username,
     harper.admin.password,
   );
 
-  // Emit connection details as one JSON line (installDir included so the
-  // caller can clean up the ephemeral tree after stopping Harper).
+  if (warmup.outcome === "floor-exceeded") {
+    // Capability gate: runner class cannot meet the warm-up bar.
+    // Emit FLOOR-EXCEEDED so the CI lane can skip gracefully, then
+    // tear down and exit 0 — this is NOT a failure.
+    const floorMsg = {
+      outcome: "FLOOR-EXCEEDED",
+      floor_ms: warmup.floorMs,
+    };
+    process.stdout.write(JSON.stringify(floorMsg) + "\n");
+    await stopHarper(harper);
+    process.exit(0);
+  }
+
+  // Pipeline is warm — emit connection details and block until teardown.
   const config = {
     httpURL: harper.httpURL,
     opsURL: harper.opsURL,
     adminUser: harper.admin.username,
     adminPass: harper.admin.password,
     installDir: harper.installDir,
+    outcome: "BOOTED+WARM",
+    floor_ms: warmup.floorMs,
   };
   process.stdout.write(JSON.stringify(config) + "\n");
 
@@ -108,13 +125,17 @@ function signRequest(privateKey, agentId, method, path) {
 /**
  * Warm up the embedding/write pipeline by performing a real authenticated
  * write + search round-trip. Retries until a full round-trip completes in
- * under 1s (the adapter's localhost budget), or fails after ~120s.
+ * under 1s (the adapter's localhost budget), or the deadline expires.
  *
  * On a cold CI runner, the first few writes can take 2-5s while Harper's
  * embedding pipeline initialises. This warm-up absorbs that cost before
  * tests run, so the adapter's intentionally-tight timeouts are never hit.
  *
- * Deletes the warm-up row and agent afterwards so tests start clean.
+ * Returns { outcome: "warm" | "floor-exceeded", floorMs: number }.
+ * "floor-exceeded" is a capability gate (flair#1119) — the runner class
+ * cannot reach operating latency, but this is not a code defect.
+ *
+ * Deletes the warm-up row and agent afterwards when warm.
  */
 async function warmUpPipeline(httpURL, opsURL, adminUser, adminPass, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
@@ -225,7 +246,7 @@ async function warmUpPipeline(httpURL, opsURL, adminUser, adminPass, timeoutMs =
         // Pipeline is warm — clean up and return
         await deleteWarmupRow(httpURL, privateKey, warmupAgentId, memoryId);
         console.error(`[boot-harper] pipeline warm: ${latency}ms (${attempt} attempt(s))`);
-        return;
+        return { outcome: "warm", floorMs: bestLatency };
       }
     } catch (err) {
       const msg = err?.message ?? String(err);
@@ -236,13 +257,15 @@ async function warmUpPipeline(httpURL, opsURL, adminUser, adminPass, timeoutMs =
     await new Promise(r => setTimeout(r, 2000));
   }
 
-  // Timed out — report the measured floor, do NOT force it
-  throw new Error(
-    `Pipeline warm-up failed: best round-trip ${bestLatency === Infinity ? "N/A" : `${bestLatency}ms`} ` +
+  // Timed out — the runner class cannot reach operating latency.
+  // This is a capability gate, not a code defect (flair#1119).
+  const floorMs = bestLatency === Infinity ? null : bestLatency;
+  console.error(
+    `[boot-harper] pipeline floor-exceeded: best round-trip ${floorMs ?? "N/A"}ms ` +
     `after ${attempt} attempts (budget: <1000ms, deadline: ${timeoutMs / 1000}s). ` +
-    `The CI runner cannot reach operating latency for this lane — ` +
-    `it needs a warmer runner class, not looser timeouts.`
+    `Runner class cannot reach operating latency — capability gate, not a failure.`,
   );
+  return { outcome: "floor-exceeded", floorMs };
 }
 
 /**

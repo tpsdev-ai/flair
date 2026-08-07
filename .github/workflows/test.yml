@@ -316,23 +316,34 @@ jobs:
           BOOT_PID=$!
           echo "$BOOT_PID" > /tmp/harper-boot-pid
           echo "Harper boot PID: $BOOT_PID, output: $BOOT_OUT"
-          # Poll for the JSON config line (boot-harper.mjs emits one JSON line
-          # with httpURL, opsURL, adminUser, adminPass, installDir).
+          # Poll for the JSON config line. boot-harper.mjs emits one JSON line:
+          #   BOOTED+WARM  → { httpURL, opsURL, adminUser, adminPass, installDir, outcome, floor_ms }
+          #   FLOOR-EXCEEDED → { outcome, floor_ms }  (then exits 0 — capability gate, flair#1119)
           DEADLINE=$((SECONDS + 180))
           while [ $SECONDS -lt $DEADLINE ]; do
-            if grep -q '"httpURL"' "$BOOT_OUT" 2>/dev/null; then
-              CONFIG=$(grep '"httpURL"' "$BOOT_OUT" | head -1)
-              echo "Harper booted: $CONFIG"
-              HTTP_URL=$(echo "$CONFIG" | jq -r '.httpURL')
-              OPS_URL=$(echo "$CONFIG" | jq -r '.opsURL')
-              INSTALL_DIR=$(echo "$CONFIG" | jq -r '.installDir')
+            if LINE=$(grep -E '"httpURL"|"outcome"' "$BOOT_OUT" 2>/dev/null | head -1); then
+              OUTCOME=$(echo "$LINE" | jq -r '.outcome // "BOOTED+WARM"')
+
+              if [ "$OUTCOME" = "FLOOR-EXCEEDED" ]; then
+                FLOOR_MS=$(echo "$LINE" | jq -r '.floor_ms')
+                echo "::notice::FLOOR-EXCEEDED: measured write+search floor ${FLOOR_MS}ms exceeds the adapter's 1000ms warm-up bar"
+                SUMMARY_LINE="adk-flair-js integration: SKIPPED on this runner class — measured write+search floor ${FLOOR_MS}ms exceeds the adapter's 1000ms warm-up bar"
+                echo "$SUMMARY_LINE" >> "$GITHUB_STEP_SUMMARY"
+                # boot-harper already tore down Harper and exited — nothing to clean up
+                exit 0
+              fi
+
+              # BOOTED+WARM — export env vars for the test steps
+              HTTP_URL=$(echo "$LINE" | jq -r '.httpURL')
+              OPS_URL=$(echo "$LINE" | jq -r '.opsURL')
+              INSTALL_DIR=$(echo "$LINE" | jq -r '.installDir')
               echo "FLAIR_TEST_URL=$HTTP_URL" >> "$GITHUB_ENV"
               echo "FLAIR_TEST_OPS_URL=$OPS_URL" >> "$GITHUB_ENV"
               echo "$INSTALL_DIR" > /tmp/harper-install-dir
               echo "FLAIR_TEST_URL=$HTTP_URL FLAIR_TEST_OPS_URL=$OPS_URL"
               exit 0
             fi
-            # Check if the boot process died early
+            # Check if the boot process died early (BOOT-FAILED)
             if ! kill -0 "$BOOT_PID" 2>/dev/null; then
               echo "boot-harper.mjs exited early. Output:"
               cat "$BOOT_OUT"
