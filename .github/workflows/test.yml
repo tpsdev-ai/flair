@@ -162,13 +162,21 @@ jobs:
         # (pure-logic scorer/prefix/recommend-heuristic/share-schema assertions +
         # two source-text sync-checks against test/bench/recall-harness/, no live
         # model load or network I/O) and it doesn't need its own dedicated step.
+        #
+        # adk-flair-js runs only its unit tests here. Its integration tests
+        # (explain_plan, portability, quickstart_parity) boot an ephemeral Harper
+        # instance and require a built Flair application — they run in the
+        # Integration Tests lane instead (see test-integration below).
         run: |
           FAIL=0
-          for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench adk-flair-js; do
+          for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
             echo "::group::test $pkg"
             (cd "packages/$pkg" && bun test) || FAIL=1
             echo "::endgroup::"
           done
+          echo "::group::test adk-flair-js (unit only)"
+          (cd packages/adk-flair-js && bun test test/unit/) || FAIL=1
+          echo "::endgroup::"
           if [ "$FAIL" -ne 0 ]; then
             echo "::error::One or more workspace packages have failing tests"
             exit 1
@@ -285,6 +293,13 @@ jobs:
             bun test $(find test/integration -name '*.test.ts' | sort)
             echo "::endgroup::"
           done
+      # adk-flair-js integration tests boot an ephemeral Harper instance and
+      # exercise the Flair application through the ADK MemoryService. They
+      # live here (not in the Unit Tests matrix) because they need a built
+      # Flair app — the unit lane has no build artifacts, so Harper would
+      # start but every /Memory call would 404.
+      - name: Run adk-flair-js integration tests
+        run: cd packages/adk-flair-js && bun test test/integration/
       # test/integration-isolated/ holds files that must not share a bun test
       # process with other integration files (env cross-contamination from
       # mcp-client-credentials-e2e, see flair#691). Structurally excluded
