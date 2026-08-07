@@ -972,6 +972,14 @@ export function buildDirectSpawnEnv(opts: {
     HTTP_PORT: String(opts.httpPort),
     OPERATIONSAPI_NETWORK_PORT: opsNetworkPortValue(opts.opsBindHost, opts.opsPort),
     LOCAL_STUDIO: "false",
+    // flair#905 / lrf5: Harper's forceDowngradePrompt reads CONFIRM_DOWNGRADE
+    // from the environment (via the `prompt` npm package's assignCmdEnvVariables
+    // override). Under launchd/systemd stdin is not a TTY, so the prompt gets
+    // EOF and Harper exits 0 without starting — leaving the instance DOWN with
+    // no error. Setting this to "yes" makes the prompt non-interactive: Harper
+    // proceeds without blocking, which is the correct default for a managed
+    // restart where the operator already chose to proceed.
+    CONFIRM_DOWNGRADE: "yes",
   };
   if (opts.adminPass) env.HDB_ADMIN_PASSWORD = opts.adminPass;
   return env;
@@ -10666,6 +10674,49 @@ program
         console.error(`   Recover by hand: npm install -g @tpsdev-ai/flair@${toVersion} && flair start`);
         process.exit(1);
       }
+
+      // flair#1053: when the engine (Harper) version changed, the pre-upgrade
+      // snapshot is the ONLY way back — the old Harper cannot read data written
+      // by the new one (e.g. 5.2 LZ4-compressed storage is unreadable by 5.1).
+      // Restore it before restarting, or refuse loudly when none exists.
+      if (engineVersionChanging) {
+        if (snapshotPath) {
+          console.log(`\nEngine version changed — restoring pre-upgrade snapshot before rollback...`);
+          console.log(`  snapshot: ${snapshotPath}`);
+          console.log(`  target:   ${upgradeDataDir}`);
+          try {
+            await validateSnapshotArchive({ file: snapshotPath, targetDir: upgradeDataDir });
+            rmSync(upgradeDataDir, { recursive: true, force: true });
+            mkdirSync(upgradeDataDir, { recursive: true, mode: 0o700 });
+            await extractSnapshotSafely({ file: snapshotPath, targetDir: upgradeDataDir });
+            console.log(`  ✅ snapshot restored`);
+          } catch (err: any) {
+            console.error(`❌ snapshot restore failed: ${err.message}`);
+            console.error(`   @tpsdev-ai/flair@${toVersion} is installed but the data directory could not be restored.`);
+            console.error(`   The snapshot itself is intact at ${snapshotPath} — restore it by hand:`);
+            console.error(`   flair snapshot restore "${snapshotPath}"`);
+            console.error(`   Then: flair start`);
+            process.exit(1);
+          }
+        } else {
+          // No snapshot exists — the old Harper WILL NOT BOOT against the new
+          // data. Refuse loudly rather than attempting a guaranteed failure.
+          console.error(`\n❌ Cannot roll back: the Harper engine version changed (${currentEngineVersion ?? "?"} → ${targetEngineVersion ?? "?"}) and no pre-upgrade snapshot exists.`);
+          console.error(`   The old Harper cannot read data written by the new engine — restarting without a snapshot restore would fail.`);
+          console.error(`   @tpsdev-ai/flair@${toVersion} is installed but NOT running.`);
+          if (snapshotDecision === "nudge") {
+            console.error(`   A snapshot was skipped because --no-engine-snapshot was passed.`);
+            console.error(`   Recovery options:`);
+            console.error(`   1. Re-upgrade to the version that wrote this data: npm install -g @tpsdev-ai/flair@${expectedFlairVersion ?? "latest"} && flair start`);
+            console.error(`   2. Restore from a ` + "`flair backup`" + ` JSON export on a fresh data directory.`);
+          } else {
+            console.error(`   No snapshot was taken (data directory may not have existed, or the snapshot step was skipped).`);
+            console.error(`   Recovery: re-upgrade to the version that wrote this data, or restore from a ` + "`flair backup`" + ` JSON export.`);
+          }
+          process.exit(1);
+        }
+      }
+
       // Same post-swap rule as the upgrade restart above: the rolled-back
       // version's own CLI is the thing that knows how to start it.
       const rolledBackCli = resolveInstalledFlairCli(flairPackageDir(), toVersion);
@@ -11320,8 +11371,15 @@ async function stopFlairProcess(port: number, dataDir: string): Promise<void> {
   for (const target of targets) {
     try { process.kill(target, "SIGTERM"); } catch {}
   }
-  // Wait briefly for shutdown
-  await new Promise((r) => setTimeout(r, 2000));
+  // flair#905 / lrf5: wait for every signalled process to actually exit.
+  // A blind 2-second sleep is not a guarantee — Harper may be flushing
+  // RocksDB WAL/MANIFEST, and the next start will fail with a locked data
+  // directory if the old process hasn't released it yet. The launchd path
+  // above already does this via waitForProcessExit; the port-based path
+  // must match that guarantee.
+  for (const target of targets) {
+    try { await waitForProcessExit(target, STARTUP_TIMEOUT_MS); } catch { /* best-effort — the next start will surface the real problem */ }
+  }
 }
 
 /**

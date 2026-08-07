@@ -357,7 +357,7 @@ if you want to see it scripted end-to-end.
   upgraded via `flair upgrade`. Real snapshots for production datasets run hundreds of
   megabytes — plan disk capacity accordingly. Cleanup of old engine snapshots is manual;
   `flair snapshot list` shows available snapshots, and you can delete entries you no longer
-  need.
+  need (e.g. `rm ~/.flair/upgrade-snapshots/flair-data-<old>.tar.gz`).
 
 ## Rollback
 
