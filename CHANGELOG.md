@@ -18,6 +18,37 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.40.0] - 2026-08-07
+
+### Added
+
+- **adk-flair: integration tests for explain-plan, portability, and quickstart parity.** New `tests/test_explain_plan.py`, `tests/test_portability.py`, and `tests/test_quickstart_parity.py` with a `live_flair` pytest marker that skips visibly when no live Flair is configured. Includes ephemeral Harper boot helper and test README.
+
+- **New `@tpsdev-ai/adk-flair` package — Flair memory backend for Google ADK (JS/TS).**
+  Implements `BaseMemoryService` from `@google/adk` with Ed25519 request signing,
+  compound-tag scoping (`adk:<app>:<user>`), and silent-degrade health warnings.
+  Ports the Python `adk-flair` design to TypeScript with the same conformance
+  suite (explain-plan, portability, quickstart-parity).
+
+- adk-flair publishes to PyPI via OIDC trusted publishing on `adk-flair-v*` tags.
+
+### Changed
+
+- adk-flair versions now track flair's minor while 0.x (compat-signal policy).
+
+### Fixed
+
+- **`flair mcp enable` verifies the process actually restarted.** Before
+  calling `restart`, the command captures the running process PID via the
+  ops API and re-checks it after the restart completes. If the PID is
+  unchanged (thread bounce / no-op restart) the step fails with a
+  loud error naming the actor, state, and remedy, and `enable` exits
+  non-zero without printing a success checkmark. Fixes #1120 (sub-issue A).
+
+- **MCP enable: capture-boot failure now attributed to `apply-config-and-restart`, not `identity-mapping`, and the restart-timeout message names the manual-recovery remedy.** `captureBootDiscriminator` is the first act of the apply-config-and-restart step so its errors belong there; the dead `verifyProcessRestart` comparison function is deleted (the gate was never reached because `waitForOpsApi` throws on timeout).
+
+- Release tooling: adk-flair-js added to the version-bump and stage-publish lists — the 0.40.0 cut failed its post-bump guard because the new package was not a bump site.
+
 ## [0.39.0] - 2026-08-06
 
 ### Added
