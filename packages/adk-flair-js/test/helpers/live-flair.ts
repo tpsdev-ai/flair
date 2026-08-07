@@ -296,13 +296,20 @@ function releaseLock(): void {
 // ─── Ephemeral Harper boot ───────────────────────────────────────────────────
 
 /**
- * Harper's full cold-start budget (install + startup banner + dual health poll)
- * is up to ~125s in harper-lifecycle.ts. We budget 180s here to cover that plus
- * process-spawn overhead and a margin for CI runner variance.
+ * The booter's bounded budget. On a runner class that can't reach operating
+ * latency, the full cold-start timeout would burn the per-test timeout
+ * (200s). 60s is enough for a capable runner to complete the full cold-start
+ * path (install + startup banner + dual health poll, ~125s in
+ * harper-lifecycle.ts, minus the install step which is pre-cached in CI).
+ * On a standard runner the booter skips clean like the waiters instead of
+ * failing dirty after burning the full test timeout (flair#1119).
  */
-const BOOT_TIMEOUT_MS = 180_000;
+const BOOT_TIMEOUT_MS = 60_000;
 
-async function bootEphemeralHarper(): Promise<{
+export async function bootEphemeralHarper(
+  helperPath?: string,
+  timeoutMs?: number,
+): Promise<{
   config: HarperConfig;
   proc: ChildProcess;
 }> {
@@ -310,6 +317,9 @@ async function bootEphemeralHarper(): Promise<{
   if (!nodeBin) {
     throw new Error("No Node.js/bun runtime available");
   }
+
+  const bootScript = helperPath ?? BOOT_HELPER;
+  const budget = timeoutMs ?? BOOT_TIMEOUT_MS;
 
   // Harper's NAPI modules require real Node.js (bun 1.3.x lacks uv_ip6_addr).
   // If the found binary is bun, we still use it to SPAWN boot-harper.mjs
@@ -330,7 +340,7 @@ async function bootEphemeralHarper(): Promise<{
   }
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(nodeBin, [BOOT_HELPER], {
+    const proc = spawn(nodeBin, [bootScript], {
       cwd: REPO_ROOT,
       stdio: ["pipe", "pipe", "pipe"],
       env,
@@ -350,8 +360,8 @@ async function bootEphemeralHarper(): Promise<{
       } catch {
         proc.kill("SIGKILL");
       }
-      reject(new Error(`boot-harper timed out after ${BOOT_TIMEOUT_MS / 1000}s`));
-    }, BOOT_TIMEOUT_MS);
+      reject(new Error(`boot-harper timed out after ${budget / 1000}s`));
+    }, budget);
 
     proc.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();

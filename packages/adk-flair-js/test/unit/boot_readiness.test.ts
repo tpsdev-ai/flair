@@ -8,6 +8,10 @@
 import { test, expect } from "bun:test";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { bootEphemeralHarper } from "../helpers/live-flair";
 
 /**
  * Replicated from boot-harper.mjs — kept in sync manually.
@@ -133,5 +137,53 @@ test("waitForAppLoaded eventually resolves when app loads after delay", async ()
     expect(callCount).toBeGreaterThanOrEqual(4);
   } finally {
     server.close();
+  }
+});
+
+// ─── Booter timeout (flair#1119) ────────────────────────────────────────────
+// The booter must never burn the per-test timeout. When the helper script
+// never emits the JSON config line, bootEphemeralHarper must reject within
+// its budget, kill the process, and leave no zombie.
+
+test("bootEphemeralHarper rejects within budget when helper never emits config", async () => {
+  // Create a temporary script that sleeps — never emits the JSON config line.
+  const sleeperPath = join(tmpdir(), `adk-flair-test-sleeper-${process.pid}.mjs`);
+  writeFileSync(sleeperPath, [
+    "#!/usr/bin/env node",
+    "// Sleeper: never emits JSON config — used to test boot timeout",
+    "setTimeout(() => {}, 120_000); // sleep 120s, well past the test budget",
+  ].join("\n"), "utf-8");
+
+  const cleanup = () => {
+    try { unlinkSync(sleeperPath); } catch {}
+  };
+
+  try {
+    const start = Date.now();
+    let err: Error | null = null;
+
+    try {
+      await bootEphemeralHarper(sleeperPath, 3_000);
+    } catch (e) {
+      err = e as Error;
+    }
+
+    const elapsed = Date.now() - start;
+
+    // Must have rejected
+    expect(err).not.toBeNull();
+    expect(err!.message).toMatch(/timed out/);
+
+    // Must reject within budget + reasonable margin (process-spawn overhead)
+    expect(elapsed).toBeLessThan(10_000);
+
+    // Verify no zombie: the process group should be killed.
+    // We can't easily check for zombies in a cross-platform way, but the
+    // timeout handler does `process.kill(-proc.pid, "SIGKILL")` which
+    // kills the entire process group. The fact that the promise rejected
+    // (rather than hanging) confirms the timeout fired and killed the
+    // process — otherwise the promise would still be pending.
+  } finally {
+    cleanup();
   }
 });
