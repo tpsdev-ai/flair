@@ -73,6 +73,7 @@ const PACKAGE_JSONS = [
   "packages/pi-flair/package.json",
   "packages/n8n-nodes-flair/package.json",
   "packages/langgraph-flair/package.json",
+  "packages/adk-flair-js/package.json",
   "packages/flair-bench/package.json",
 ];
 

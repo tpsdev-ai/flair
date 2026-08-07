@@ -1,0 +1,43 @@
+{
+  "name": "@tpsdev-ai/adk-flair",
+  "version": "0.39.0",
+  "description": "Flair memory backend for Google ADK — self-hosted, federated, portable agent memory",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc --noCheck",
+    "prepublishOnly": "npm run build",
+    "test": "bun test"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "adk",
+    "google-adk",
+    "flair",
+    "memory",
+    "agent",
+    "semantic-search"
+  ],
+  "homepage": "https://github.com/tpsdev-ai/flair/tree/main/packages/adk-flair-js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tpsdev-ai/flair.git",
+    "directory": "packages/adk-flair-js"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@google/adk": "^1.6.0",
+    "@google/genai": "^1.52.0"
+  }
+}

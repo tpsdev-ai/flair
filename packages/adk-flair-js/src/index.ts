@@ -1,0 +1,9 @@
+/**
+ * adk-flair — Flair as the memory backend for Google ADK (JS/TS).
+ *
+ * @packageDocumentation
+ */
+
+export { FlairMemoryService } from "./memory_service.js";
+export { compoundTag, sanitizeTagSegment } from "./tag.js";
+export { loadEd25519Key, signRequest } from "./signing.js";

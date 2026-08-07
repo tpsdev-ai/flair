@@ -99,6 +99,13 @@ jobs:
           restore-keys: |
             bun-cache-${{ runner.os }}-
       - run: sfw bun install --frozen-lockfile
+      # adk-flair-js integration tests boot an ephemeral Harper instance.
+      # Harper's NAPI modules require real Node.js (bun 1.3.x lacks uv_ip6_addr).
+      # The matrix node-version is used here; Harper is known-good on 22,
+      # and the shared-boot skip path handles any failures on 24/26 cleanly.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
       # test/*.test.ts — 12 files, 250 cases — were run by NO CI command
       # (flair#953). Every `bun test` invocation in every workflow targets a
       # subdirectory, and a subdirectory filter does not pick up root-level test
@@ -155,6 +162,11 @@ jobs:
         # (pure-logic scorer/prefix/recommend-heuristic/share-schema assertions +
         # two source-text sync-checks against test/bench/recall-harness/, no live
         # model load or network I/O) and it doesn't need its own dedicated step.
+        #
+        # adk-flair-js runs only its unit tests here. Its integration tests
+        # (explain_plan, portability, quickstart_parity) boot an ephemeral Harper
+        # instance and require a built Flair application — they run in the
+        # Integration Tests lane instead (see test-integration below).
         run: |
           FAIL=0
           for pkg in langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
@@ -162,6 +174,9 @@ jobs:
             (cd "packages/$pkg" && bun test) || FAIL=1
             echo "::endgroup::"
           done
+          echo "::group::test adk-flair-js (unit only)"
+          (cd packages/adk-flair-js && bun test test/unit/) || FAIL=1
+          echo "::endgroup::"
           if [ "$FAIL" -ne 0 ]; then
             echo "::error::One or more workspace packages have failing tests"
             exit 1
@@ -278,6 +293,22 @@ jobs:
             bun test $(find test/integration -name '*.test.ts' | sort)
             echo "::endgroup::"
           done
+      # adk-flair-js integration tests exercise the Flair application through
+      # the ADK MemoryService. They live here (not in the Unit Tests matrix)
+      # because they need a built Flair app — the unit lane has no build
+      # artifacts, so Harper would start but every /Memory call would 404.
+      #
+      # These tests clean-skip when FLAIR_TEST_URL is absent (no live Flair
+      # instance). GitHub standard runners cannot reach the adapter's 1000ms
+      # warm-up bar (measured floor ~1860ms, flair#1119), so this lane does
+      # not boot an ephemeral Harper in CI. The capability-gate plumbing
+      # (boot-harper.mjs warm-up + three-outcome JSON) is correct and ready
+      # for the day #1126 lands capable runners.
+      - name: adk-flair-js live-integration posture
+        run: |
+          echo "adk-flair-js live-integration: skipped on this runner class (see #1126); coverage via unit tests + maintainer acceptance." >> "$GITHUB_STEP_SUMMARY"
+      - name: Run adk-flair-js integration tests
+        run: cd packages/adk-flair-js && bun test test/integration/
       # test/integration-isolated/ holds files that must not share a bun test
       # process with other integration files (env cross-contamination from
       # mcp-client-credentials-e2e, see flair#691). Structurally excluded
