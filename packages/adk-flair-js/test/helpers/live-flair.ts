@@ -78,6 +78,8 @@ interface HarperConfig {
   opsURL: string;
   adminUser: string;
   adminPass: string;
+  /** Ephemeral install tree — removed by the last worker during teardown. */
+  installDir?: string;
 }
 
 // ─── Ed25519 key generation ──────────────────────────────────────────────────
@@ -626,6 +628,17 @@ export async function getLiveFlair(): Promise<LiveFlairConfig | null> {
       });
     } catch {
       // best effort
+    }
+    // Remove the ephemeral install tree. stopHarper (called by the
+    // boot-harper.mjs SIGTERM handler above) also removes it, but if
+    // stopHarper didn't complete before the SIGKILL fallback, the tree
+    // survives. This is the last-worker-out safety net.
+    if (harperConfig.installDir) {
+      try {
+        fs.rmSync(harperConfig.installDir, { recursive: true, force: true, maxRetries: 4 });
+      } catch {
+        // best effort
+      }
     }
     // Remove shared config so the next run starts fresh
     try { fs.unlinkSync(SHARED_CONFIG_FILE); } catch {}

@@ -17,12 +17,14 @@ import { startHarper, stopHarper } from "../../../../test/helpers/harper-lifecyc
 async function main() {
   const harper = await startHarper();
 
-  // Emit connection details as one JSON line
+  // Emit connection details as one JSON line (installDir included so the
+  // caller can clean up the ephemeral tree after stopping Harper).
   const config = {
     httpURL: harper.httpURL,
     opsURL: harper.opsURL,
     adminUser: harper.admin.username,
     adminPass: harper.admin.password,
+    installDir: harper.installDir,
   };
   process.stdout.write(JSON.stringify(config) + "\n");
 
