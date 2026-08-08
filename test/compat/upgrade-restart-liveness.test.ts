@@ -207,6 +207,7 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   let sandbox: string;
   let prefix: string;
   let home: string;
+  let localPkgDir: string;
   let publishedPkgDir: string;
   let publishedCli: string;
   let localCli: string;
@@ -360,7 +361,7 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
       "npm install -g (local upgrade over published baseline)",
     );
 
-    const localPkgDir = join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair");
+    localPkgDir = join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair");
     localCli = join(localPkgDir, "dist", "cli.js");
 
     // Linux: the local build may need its own native embedding binary.
@@ -524,11 +525,13 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   });
 
   test("the running instance reports the local build version", () => {
-    // The /Health endpoint returns the harper engine version, which is the
-    // same across both builds when the harper dep hasn't changed. Assert
-    // the INSTALLED package version instead — that's what `npm install -g`
-    // actually swapped.
-    expect(installedVersion(prefix)).toBe(localVersion);
+    // Read the installed package version directly from the package.json
+    // that npm install -g wrote. This is the ground truth for what version
+    // was actually installed, independent of what the running harper process
+    // reports via /Health (which returns the harper engine version).
+    const pkgJson = join(localPkgDir, "package.json");
+    const installedVer = (JSON.parse(readFileSync(pkgJson, "utf-8")) as { version?: string }).version;
+    expect(installedVer).toBe(localVersion);
   });
 
   test("data written before the upgrade is readable after", async () => {
