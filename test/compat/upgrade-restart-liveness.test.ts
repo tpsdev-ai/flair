@@ -73,6 +73,42 @@ import { join } from "node:path";
 
 const NODE_BIN = process.env.NODE_BIN ?? "node";
 
+// ─── Engine-difference guard: is the reverse-direction test exercisable? ───
+// The backwards-engine guard only fires when the local build's harper engine
+// version is actually NEWER than the published baseline's.  When the harper
+// dep hasn't changed (same engine version in both builds), the guard
+// correctly does NOT fire — there is no downgrade to refuse, and the
+// reverse-direction test must report SKIP rather than a decorative PASS.
+//
+// Compute this ONCE at module-load time so the describe block can use
+// conditional test registration (test vs test.skip).  A network failure
+// during the lookup is treated as "cannot determine" → skip the lane.
+const _repoRoot = process.cwd();
+const _rootPkg = JSON.parse(readFileSync(join(_repoRoot, "package.json"), "utf-8")) as {
+  version?: string;
+  dependencies?: Record<string, string>;
+};
+const _localHarperDep = _rootPkg.dependencies?.harper ?? _rootPkg.dependencies?.["@harperfast/harper"];
+
+let _publishedHarperDep: string | null = null;
+try {
+  const res = await fetch(`https://registry.npmjs.org/@tpsdev-ai/flair/latest`, {
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (res.ok) {
+    const data = await res.json() as { dependencies?: Record<string, string> };
+    _publishedHarperDep = data.dependencies?.harper ?? data.dependencies?.["@harperfast/harper"] ?? null;
+  }
+} catch {
+  // network unavailable — leave _publishedHarperDep as null
+}
+
+/** True when the local build's harper engine version differs from the
+ * published baseline's.  Only then is the reverse-direction downgrade guard
+ * actually exercisable. */
+const ENGINES_DIFFER: boolean =
+  !!(_localHarperDep && _publishedHarperDep && _localHarperDep !== _publishedHarperDep);
+
 // A global install of flair resolves the full Harper + embeddings tree twice
 // over (once for the baseline, once for the upgrade target). Cold-cache CI runs
 // of comparable installs in test/compat/downgrade-boot.test.ts sit in the 1-3
@@ -176,31 +212,6 @@ function listeningPid(port: string): number | null {
   } catch {
     return null;
   }
-}
-
-function installedVersion(prefix: string): string | null {
-  try {
-    const pkgJson = join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair", "package.json");
-    return (JSON.parse(readFileSync(pkgJson, "utf-8")) as { version?: string }).version ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** Read the installed Harper engine version from a flair package root
- * (same logic as src/engine-version.ts:readInstalledHarperVersion). */
-function readHarperVersion(packageRoot: string): string | null {
-  for (const name of ["harper", "@harperfast/harper"]) {
-    const pkgPath = join(packageRoot, "node_modules", ...name.split("/"), "package.json");
-    if (!existsSync(pkgPath)) continue;
-    try {
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string };
-      if (pkg.version) return pkg.version;
-    } catch {
-      continue;
-    }
-  }
-  return null;
 }
 
 describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
@@ -564,31 +575,21 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   // refusal IS the feature — assert it explicitly rather than letting it
   // masquerade as a test failure.
   //
-  // This assertion is only meaningful when the local build's harper engine
-  // version is actually NEWER than the published baseline's. When the harper
-  // dep hasn't changed (same engine version in both builds), the guard
-  // correctly does NOT fire — there is no downgrade to refuse. The test
-  // detects which case applies and asserts accordingly.
+  // This lane is only exercisable when the local build's harper engine
+  // version actually differs from the published baseline's.  When they match
+  // (same harper dep), the guard correctly does NOT fire and the test is
+  // registered as skip — it must never show PASS unless the guard fired.
 
-  test("reverse direction (LOCAL → PUBLISHED) is refused by the backwards-engine guard", () => {
-    // Read the harper versions from both installs to determine whether an
-    // engine downgrade actually occurred.
-    const publishedHarperVersion = readHarperVersion(publishedPkgDir);
-    const localHarperVersion = readHarperVersion(join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair"));
-
-    if (localHarperVersion && publishedHarperVersion && localHarperVersion !== publishedHarperVersion) {
-      // Engine versions differ — the guard MUST fire.
-      expect(downgradeStart.code).not.toBe(0);
-      const output = `${downgradeStart.stdout}${downgradeStart.stderr}`;
-      expect(output).toContain("Harper");
-      expect(output).toContain("data directory");
-      expect(output).toMatch(/newer/);
-    } else {
-      // Same engine version — no downgrade occurred, start should succeed
-      // (or fail for an unrelated reason, but NOT because of the guard).
-      // The guard message must NOT appear.
-      const output = `${downgradeStart.stdout}${downgradeStart.stderr}`;
-      expect(output).not.toContain("newer engine version");
+  const _reverseGuard = ENGINES_DIFFER ? test : test.skip;
+  _reverseGuard("reverse direction (LOCAL → PUBLISHED) is refused by the backwards-engine guard", () => {
+    if (!ENGINES_DIFFER) {
+      // test.skip still invokes the body in some runners; guard anyway.
+      return;
     }
+    expect(downgradeStart.code).not.toBe(0);
+    const output = `${downgradeStart.stdout}${downgradeStart.stderr}`;
+    expect(output).toContain("Harper");
+    expect(output).toContain("data directory");
+    expect(output).toMatch(/newer/);
   });
 });
