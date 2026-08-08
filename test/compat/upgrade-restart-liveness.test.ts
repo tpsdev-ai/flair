@@ -530,7 +530,19 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     // was actually installed, independent of what the running harper process
     // reports via /Health (which returns the harper engine version).
     const pkgJson = join(localPkgDir, "package.json");
-    const installedVer = (JSON.parse(readFileSync(pkgJson, "utf-8")) as { version?: string }).version;
+    const raw = readFileSync(pkgJson, "utf-8");
+    const installedVer = (JSON.parse(raw) as { version?: string }).version;
+    // Debug: dump the installed package.json if the version doesn't match,
+    // so CI failures are diagnosable without reproducing the full upgrade.
+    if (installedVer !== localVersion) {
+      console.error(`\n── installed package.json version mismatch ─────────────────`);
+      console.error(`  expected: ${localVersion}`);
+      console.error(`  received: ${installedVer}`);
+      console.error(`  path:     ${pkgJson}`);
+      console.error(`  exists:   ${existsSync(pkgJson)}`);
+      console.error(`  raw (first 500 chars): ${raw.slice(0, 500)}`);
+      console.error(`──────────────────────────────────────────────────────────\n`);
+    }
     expect(installedVer).toBe(localVersion);
   });
 
