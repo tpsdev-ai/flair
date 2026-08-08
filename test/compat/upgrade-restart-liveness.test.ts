@@ -356,11 +356,12 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     // This is the real upgrade: published → local, the direction every actual
     // user takes. `npm install -g` replaces the package tree in-place, exactly
     // as `flair upgrade` does internally.
-    // Install the local tarball OVER the published baseline.  Use --force
-    // so npm always replaces the existing installation even when the tarball
-    // version sorts lower in semver (e.g. a pre-release suffix).
+    // Uninstall the published baseline first, then install the local tarball
+    // clean.  npm install -g of a tarball may silently skip replacement when
+    // the package is already present, even with --force.
+    await run("npm", ["uninstall", "-g", "@tpsdev-ai/flair"], { cwd: sandbox, env: childEnv, timeoutMs: CLI_TIMEOUT_MS });
     expectOk(
-      await run("npm", ["install", "-g", "--force", tarball], { cwd: sandbox, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
+      await run("npm", ["install", "-g", tarball], { cwd: sandbox, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
       "npm install -g (local upgrade over published baseline)",
     );
 
