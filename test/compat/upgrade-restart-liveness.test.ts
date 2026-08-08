@@ -557,7 +557,13 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
       env: childEnv,
       timeoutMs: CLI_TIMEOUT_MS,
     });
-    expect(res.code).toBe(0);
+    if (res.code !== 0) {
+      // Surface the actual failure — a bare exit-code assertion swallows the
+      // diagnostic and forces a full local repro to learn anything (2026-08-08).
+      throw new Error(
+        `memory list exited ${res.code}\n--- stderr ---\n${res.stderr}\n--- stdout ---\n${res.stdout}`,
+      );
+    }
     expect(res.stdout).toContain(memoryMarker);
   }, CLI_TIMEOUT_MS);
 
