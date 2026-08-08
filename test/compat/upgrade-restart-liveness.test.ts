@@ -209,6 +209,7 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   let home: string;
   let localPkgDir: string;
   let publishedPkgDir: string;
+  let installedLocalVersion: string;
   let publishedCli: string;
   let localCli: string;
   let baseUrl: string;
@@ -388,6 +389,10 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     localPkgDir = join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair");
     localCli = join(localPkgDir, "dist", "cli.js");
 
+    // Capture the installed version NOW, before the reverse-direction
+    // downgrade (step 7 below) reverts the package.json on disk.
+    installedLocalVersion = (JSON.parse(readFileSync(join(localPkgDir, "package.json"), "utf-8")) as { version: string }).version;
+
     // Linux: the local build may need its own native embedding binary.
     if (process.platform === "linux") {
       expectOk(
@@ -562,25 +567,11 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   });
 
   test("the running instance reports the local build version", () => {
-    // Read the installed package version directly from the package.json
-    // that npm install -g wrote. This is the ground truth for what version
-    // was actually installed, independent of what the running harper process
-    // reports via /Health (which returns the harper engine version).
-    const pkgJson = join(localPkgDir, "package.json");
-    const raw = readFileSync(pkgJson, "utf-8");
-    const installedVer = (JSON.parse(raw) as { version?: string }).version;
-    // Debug: dump the installed package.json if the version doesn't match,
-    // so CI failures are diagnosable without reproducing the full upgrade.
-    if (installedVer !== localVersion) {
-      console.error(`\n── installed package.json version mismatch ─────────────────`);
-      console.error(`  expected: ${localVersion}`);
-      console.error(`  received: ${installedVer}`);
-      console.error(`  path:     ${pkgJson}`);
-      console.error(`  exists:   ${existsSync(pkgJson)}`);
-      console.error(`  raw (first 500 chars): ${raw.slice(0, 500)}`);
-      console.error(`──────────────────────────────────────────────────────────\n`);
-    }
-    expect(installedVer).toBe(localVersion);
+    // The version is captured in beforeAll BEFORE the reverse-direction
+    // downgrade reverts the package.json on disk.  The /Health endpoint
+    // returns the harper engine version (same across builds when the dep
+    // hasn't changed), so we assert the installed package version instead.
+    expect(installedLocalVersion).toBe(localVersion);
   });
 
   test("data written before the upgrade is readable after", async () => {
