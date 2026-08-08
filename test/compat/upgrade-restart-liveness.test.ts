@@ -359,11 +359,31 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     // Uninstall the published baseline first, then install the local tarball
     // clean.  npm install -g of a tarball may silently skip replacement when
     // the package is already present, even with --force.
-    await run("npm", ["uninstall", "-g", "@tpsdev-ai/flair"], { cwd: sandbox, env: childEnv, timeoutMs: CLI_TIMEOUT_MS });
-    expectOk(
-      await run("npm", ["install", "-g", tarball], { cwd: sandbox, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
-      "npm install -g (local upgrade over published baseline)",
-    );
+    const uninstallResult = await run("npm", ["uninstall", "-g", "@tpsdev-ai/flair"], { cwd: sandbox, env: childEnv, timeoutMs: CLI_TIMEOUT_MS });
+    const installResult = await run("npm", ["install", "-g", tarball], { cwd: sandbox, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS });
+    // Debug: dump npm output when the version doesn't match, so we can
+    // diagnose silent install skips.
+    {
+      const pkgJson = join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair", "package.json");
+      const installedVer = existsSync(pkgJson)
+        ? (JSON.parse(readFileSync(pkgJson, "utf-8")) as { version?: string }).version
+        : null;
+      if (installedVer !== localVersion) {
+        console.error(`\n── npm install -g diagnostics ──────────────────────────`);
+        console.error(`  tarball:        ${tarball}`);
+        console.error(`  tarball exists: ${existsSync(tarball)}`);
+        console.error(`  uninstall code: ${uninstallResult.code}`);
+        console.error(`  uninstall stdout: ${uninstallResult.stdout.slice(0, 200)}`);
+        console.error(`  uninstall stderr: ${uninstallResult.stderr.slice(0, 200)}`);
+        console.error(`  install code:   ${installResult.code}`);
+        console.error(`  install stdout: ${installResult.stdout.slice(0, 500)}`);
+        console.error(`  install stderr: ${installResult.stderr.slice(0, 500)}`);
+        console.error(`  installed ver:  ${installedVer}`);
+        console.error(`  expected ver:   ${localVersion}`);
+        console.error(`────────────────────────────────────────────────────────\n`);
+      }
+    }
+    expectOk(installResult, "npm install -g (local upgrade over published baseline)");
 
     localPkgDir = join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair");
     localCli = join(localPkgDir, "dist", "cli.js");
