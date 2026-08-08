@@ -1,0 +1,1 @@
+- Upgrade-liveness compat test now runs the real consumer direction (published → local build) and asserts the backwards-engine refusal explicitly, skipping loudly when engines match — engine-forward PRs no longer red circularly.
