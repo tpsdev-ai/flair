@@ -233,6 +233,7 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   let memoryMarker: string;
   let upgradeRestart: RunResult;
   let downgradeStart: RunResult;
+  let postUpgradeReadBack: RunResult;
 
   beforeAll(async () => {
     const repoRoot = process.cwd();
@@ -411,6 +412,17 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     postUpgradeHealth = await waitForHealth(baseUrl);
     harperPid = listeningPid(new URL(baseUrl).port);
 
+    // ── 6b. Verify data survived the upgrade (BEFORE the downgrade) ────────
+    // The reverse-direction guard test below stops the instance and reinstalls
+    // the published baseline, which replaces the local CLI on disk and kills
+    // the live connection.  Capture the read-back NOW while the upgraded
+    // instance is still running and the local CLI is still on disk.
+    postUpgradeReadBack = await run(NODE_BIN, [localCli, "memory", "list", "--agent", AGENT_ID, "--json"], {
+      cwd: sandbox,
+      env: childEnv,
+      timeoutMs: CLI_TIMEOUT_MS,
+    });
+
     // ── 7. Reverse-direction guard: downgrade and assert refusal ────────────
     // After the forward upgrade succeeds, the data directory was written by the
     // LOCAL build's engine. Installing PUBLISHED latest again and trying to
@@ -548,18 +560,13 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     expect(installedLocalVersion).toBe(localVersion);
   });
 
-  test("data written before the upgrade is readable after", async () => {
-    // Read memories back through the upgraded instance. Use `flair memory
-    // list --json` — the same CLI surface a real operator would use to
-    // verify their data survived an upgrade.
-    const res = await run(NODE_BIN, [localCli, "memory", "list", "--agent", AGENT_ID, "--json"], {
-      cwd: sandbox,
-      env: childEnv,
-      timeoutMs: CLI_TIMEOUT_MS,
-    });
-    expect(res.code).toBe(0);
-    expect(res.stdout).toContain(memoryMarker);
-  }, CLI_TIMEOUT_MS);
+  test("data written before the upgrade is readable after", () => {
+    // The read-back was captured in beforeAll while the upgraded instance was
+    // still running and the local CLI was still on disk (before the
+    // reverse-direction downgrade replaced both).
+    expect(postUpgradeReadBack.code).toBe(0);
+    expect(postUpgradeReadBack.stdout).toContain(memoryMarker);
+  });
 
   // The false remedy is half the reported defect: an error naming `flair init`
   // on an initialised instance costs the operator's trust before it costs them
