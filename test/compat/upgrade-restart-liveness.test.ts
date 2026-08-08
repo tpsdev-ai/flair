@@ -394,6 +394,19 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
         await run("npm", ["install", "--no-save", "@node-llama-cpp/linux-x64@3"], { cwd: localPkgDir, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
         "npm install @node-llama-cpp/linux-x64 (local upgrade)",
       );
+      // Check if the native dep install reverted the package.json.
+      {
+        const pkgJson = join(localPkgDir, "package.json");
+        const verAfterNative = existsSync(pkgJson)
+          ? (JSON.parse(readFileSync(pkgJson, "utf-8")) as { version?: string }).version
+          : null;
+        if (verAfterNative !== localVersion) {
+          console.error(`\n── package.json reverted after native dep install ──────`);
+          console.error(`  before native: ${localVersion}`);
+          console.error(`  after native:  ${verAfterNative}`);
+          console.error(`────────────────────────────────────────────────────────\n`);
+        }
+      }
     }
 
     // ── 6. Restart via the newly installed CLI ──────────────────────────────
