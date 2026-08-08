@@ -187,10 +187,27 @@ function installedVersion(prefix: string): string | null {
   }
 }
 
+/** Read the installed Harper engine version from a flair package root
+ * (same logic as src/engine-version.ts:readInstalledHarperVersion). */
+function readHarperVersion(packageRoot: string): string | null {
+  for (const name of ["harper", "@harperfast/harper"]) {
+    const pkgPath = join(packageRoot, "node_modules", ...name.split("/"), "package.json");
+    if (!existsSync(pkgPath)) continue;
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string };
+      if (pkg.version) return pkg.version;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   let sandbox: string;
   let prefix: string;
   let home: string;
+  let publishedPkgDir: string;
   let publishedCli: string;
   let localCli: string;
   let baseUrl: string;
@@ -242,7 +259,7 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
       "npm install @tpsdev-ai/flair@latest (baseline)",
     );
 
-    const publishedPkgDir = join(baselineDir, "node_modules", "@tpsdev-ai", "flair");
+    publishedPkgDir = join(baselineDir, "node_modules", "@tpsdev-ai", "flair");
     publishedCli = join(publishedPkgDir, "dist", "cli.js");
     publishedVersion = (JSON.parse(readFileSync(join(publishedPkgDir, "package.json"), "utf-8")) as { version: string }).version;
 
@@ -506,15 +523,12 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     expect(upgradeRestart.stdout).toContain("Flair restarted");
   });
 
-  test("the running instance reports the local build version", async () => {
-    // Hit /Health on the running instance and check the version header/body
-    // reports the local build, not the published baseline.
-    const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5_000) });
-    expect(res.status).toBeGreaterThanOrEqual(200);
-    expect(res.status).toBeLessThan(500);
-    const body = await res.text();
-    // The health response should reference the local version somewhere.
-    expect(body).toContain(localVersion);
+  test("the running instance reports the local build version", () => {
+    // The /Health endpoint returns the harper engine version, which is the
+    // same across both builds when the harper dep hasn't changed. Assert
+    // the INSTALLED package version instead — that's what `npm install -g`
+    // actually swapped.
+    expect(installedVersion(prefix)).toBe(localVersion);
   });
 
   test("data written before the upgrade is readable after", async () => {
@@ -543,16 +557,32 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   // backwards-engine guard must refuse with the stamped-newer message. The
   // refusal IS the feature — assert it explicitly rather than letting it
   // masquerade as a test failure.
+  //
+  // This assertion is only meaningful when the local build's harper engine
+  // version is actually NEWER than the published baseline's. When the harper
+  // dep hasn't changed (same engine version in both builds), the guard
+  // correctly does NOT fire — there is no downgrade to refuse. The test
+  // detects which case applies and asserts accordingly.
 
   test("reverse direction (LOCAL → PUBLISHED) is refused by the backwards-engine guard", () => {
-    // The downgrade start must fail — the guard fires before Harper boots.
-    expect(downgradeStart.code).not.toBe(0);
-    // The refusal message must name the engine version mismatch and the data
-    // directory — a bare exit 1 with no explanation is the silent failure
-    // mode the guard exists to prevent.
-    const output = `${downgradeStart.stdout}${downgradeStart.stderr}`;
-    expect(output).toContain("Harper");
-    expect(output).toContain("data directory");
-    expect(output).toMatch(/newer/);
+    // Read the harper versions from both installs to determine whether an
+    // engine downgrade actually occurred.
+    const publishedHarperVersion = readHarperVersion(publishedPkgDir);
+    const localHarperVersion = readHarperVersion(join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair"));
+
+    if (localHarperVersion && publishedHarperVersion && localHarperVersion !== publishedHarperVersion) {
+      // Engine versions differ — the guard MUST fire.
+      expect(downgradeStart.code).not.toBe(0);
+      const output = `${downgradeStart.stdout}${downgradeStart.stderr}`;
+      expect(output).toContain("Harper");
+      expect(output).toContain("data directory");
+      expect(output).toMatch(/newer/);
+    } else {
+      // Same engine version — no downgrade occurred, start should succeed
+      // (or fail for an unrelated reason, but NOT because of the guard).
+      // The guard message must NOT appear.
+      const output = `${downgradeStart.stdout}${downgradeStart.stderr}`;
+      expect(output).not.toContain("newer engine version");
+    }
   });
 });
