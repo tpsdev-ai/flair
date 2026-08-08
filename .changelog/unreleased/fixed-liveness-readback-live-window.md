@@ -1,0 +1,1 @@
+- **Upgrade-liveness compat test reads data back during the live window.** The reverse-guard leg's reinstall replaces the local CLI and stops the upgraded instance; the data-survival read-back is now captured while the upgraded instance is live, making it a genuine cross-engine proof instead of a dead-world read.
