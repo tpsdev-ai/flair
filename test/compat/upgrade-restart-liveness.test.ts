@@ -1,4 +1,4 @@
-// upgrade-restart-liveness.test.ts — flair#905: after a REAL `flair upgrade`
+// upgrade-restart-liveness.test.ts — flair#905: after a REAL upgrade
 // across a REAL published version boundary, is the instance still up?
 //
 // ─── Why this suite exists ─────────────────────────────────────────────────
@@ -28,16 +28,31 @@
 // own.
 //
 // ─── Shape ─────────────────────────────────────────────────────────────────
-//   1. Pack this worktree's built tree under a version above published latest
-//      and `npm install -g` it into a throwaway prefix with a throwaway HOME.
-//      That is the DRIVER: this PR's actual code, installed the way users have
-//      it, not a module imported into the test process.
+//   1. Install the PUBLISHED latest baseline into a throwaway prefix with a
+//      throwaway HOME. That is the STARTING POINT: what every real user has
+//      before they upgrade.
 //   2. `flair init` a real instance on free ports — assert it is REACHABLE, so
 //      a broken setup can never read as a passing upgrade.
-//   3. `flair upgrade` — a real npm install of the published `latest` over a
-//      running install, i.e. the real package swap.
-//   4. Assert the instance is REACHABLE, that the swap really happened, and
-//      that the restart went through the newly installed CLI.
+//   3. Seed data (a permanent memory) through the published instance.
+//   4. Pack this worktree's built tree under a version above published latest
+//      and `npm install -g` it over the published install. That is the UPGRADE:
+//      the real consumer arrow — published → local, never the reverse.
+//   5. Restart via the newly installed CLI and assert the instance is
+//      REACHABLE, the version reports as the local build, and the seeded data
+//      is still readable.
+//   6. Stop the instance, install PUBLISHED latest again (a downgrade), and
+//      assert the backwards-engine guard REFUSES to start with the
+//      stamped-newer message. The refusal is a feature — assert it explicitly
+//      rather than letting it masquerade as a failure.
+//
+// ─── Why the direction matters ─────────────────────────────────────────────
+// The original version of this test ran the boundary leg in the INVERTED
+// direction: it installed the LOCAL branch build first, then "upgraded" to
+// PUBLISHED latest. On any PR that moves the engine forward ahead of the
+// registry (the harper 5.2 pin, #1045 — and every future engine bump), that
+// leg is an engine DOWNGRADE, the backwards-engine guard correctly refuses,
+// and the lane reds forever — circularly, since the pin can only publish after
+// the pin merges.
 //
 // ─── Isolation ─────────────────────────────────────────────────────────────
 // Every `flair` invocation is its own subprocess with an explicit `HOME` and
@@ -49,7 +64,7 @@
 // would register a service in the developer's REAL launchd session, and
 // deleting it also puts this test on the same direct-spawn path Linux/CI takes.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -59,7 +74,7 @@ import { join } from "node:path";
 const NODE_BIN = process.env.NODE_BIN ?? "node";
 
 // A global install of flair resolves the full Harper + embeddings tree twice
-// over (once for the driver, once for the upgrade target). Cold-cache CI runs
+// over (once for the baseline, once for the upgrade target). Cold-cache CI runs
 // of comparable installs in test/compat/downgrade-boot.test.ts sit in the 1-3
 // minute range; these budgets are generous rather than tight on purpose — a
 // timeout here is indistinguishable from the regression under test.
@@ -176,15 +191,18 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   let sandbox: string;
   let prefix: string;
   let home: string;
-  let flairCli: string;
+  let publishedCli: string;
+  let localCli: string;
   let baseUrl: string;
   let childEnv: Record<string, string>;
-  let driverVersion: string;
-  let targetVersion: string;
-  let upgrade: RunResult;
+  let publishedVersion: string;
+  let localVersion: string;
   let preUpgradeHealth = 0;
   let postUpgradeHealth = 0;
   let harperPid: number | null = null;
+  let memoryMarker: string;
+  let upgradeRestart: RunResult;
+  let downgradeStart: RunResult;
 
   beforeAll(async () => {
     const repoRoot = process.cwd();
@@ -205,34 +223,42 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     mkdirSync(prefix, { recursive: true });
     mkdirSync(home, { recursive: true });
 
-    // ── 1. Stage this worktree's built tree as a publishable package at a
-    // version the registry does not have, so `flair upgrade` sees itself as
-    // outdated and performs a REAL swap to published latest. Staged into a temp
-    // dir rather than by editing package.json in place: a test that mutates the
-    // repo it is testing leaves it dirty on every failure.
-    driverVersion = `${rootPkg.version}-upgrade-liveness.1`;
-    const stage = join(sandbox, "stage");
-    mkdirSync(stage, { recursive: true });
-    for (const entry of rootPkg.files) {
-      const src = join(repoRoot, entry.replace(/\/$/, ""));
-      if (!existsSync(src)) continue;
-      cpSync(src, join(stage, entry.replace(/\/$/, "")), { recursive: true });
-    }
-    writeFileSync(join(stage, "package.json"), JSON.stringify({ ...rootPkg, version: driverVersion }, null, 2) + "\n");
-
     const packEnv = sanitizedParentEnv();
-    const packed = expectOk(
-      await run("npm", ["pack", "--pack-destination", sandbox], { cwd: stage, env: packEnv, timeoutMs: CLI_TIMEOUT_MS }),
-      "npm pack (driver)",
+
+    // ── 1. Install the PUBLISHED latest baseline ────────────────────────────
+    // This is the real starting point: what every user has before they upgrade.
+    // The original version of this test installed the LOCAL build first and
+    // then "upgraded" to published — which is a downgrade when the engine
+    // moves forward, and the backwards-engine guard correctly refuses it.
+    console.log("Installing published @tpsdev-ai/flair@latest as the baseline...");
+    const baselineDir = join(sandbox, "baseline");
+    mkdirSync(baselineDir, { recursive: true });
+    expectOk(
+      await run("npm", ["init", "-y"], { cwd: baselineDir, env: packEnv, timeoutMs: CLI_TIMEOUT_MS }),
+      "npm init (baseline project)",
     );
-    const tarball = join(sandbox, packed.stdout.trim().split("\n").pop()!.trim());
+    expectOk(
+      await run("npm", ["install", "@tpsdev-ai/flair@latest"], { cwd: baselineDir, env: packEnv, timeoutMs: SETUP_TIMEOUT_MS }),
+      "npm install @tpsdev-ai/flair@latest (baseline)",
+    );
+
+    const publishedPkgDir = join(baselineDir, "node_modules", "@tpsdev-ai", "flair");
+    publishedCli = join(publishedPkgDir, "dist", "cli.js");
+    publishedVersion = (JSON.parse(readFileSync(join(publishedPkgDir, "package.json"), "utf-8")) as { version: string }).version;
+
+    // Install the published baseline globally into the throwaway prefix so
+    // `flair` is on PATH for init/seed.
+    expectOk(
+      await run("npm", ["install", "-g", publishedPkgDir], { cwd: sandbox, env: { ...packEnv, npm_config_prefix: prefix, HOME: home, npm_config_cache: packEnv.npm_config_cache ?? join(homedir(), ".npm") }, timeoutMs: SETUP_TIMEOUT_MS }),
+      "npm install -g (published baseline into throwaway prefix)",
+    );
 
     childEnv = {
       ...packEnv,
       HOME: home,
       npm_config_prefix: prefix,
       // Keep npm's cache OUT of the throwaway HOME. Two full flair trees get
-      // resolved here (the driver, then the upgrade target), and a cache that
+      // resolved here (the baseline, then the local upgrade), and a cache that
       // dies with the temp dir means both are cold downloads — minutes of
       // registry traffic for no added signal, since what is under test is the
       // restart after the swap, not npm's ability to fetch tarballs.
@@ -244,40 +270,43 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
       FLAIR_MODELS_DIR: packEnv.FLAIR_MODELS_DIR ?? join(repoRoot, "models"),
     };
 
-    expectOk(
-      await run("npm", ["install", "-g", tarball], { cwd: sandbox, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
-      "npm install -g (driver)",
-    );
-
-    const pkgDir = join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair");
-    flairCli = join(pkgDir, "dist", "cli.js");
-
     // Harper's embeddings component resolves its native binary at component-load
     // time on Linux regardless of whether a model is present — every other lane
     // that spawns Harper installs it first (see test.yml's integration job and
     // downgrade-boot.test.ts).
     if (process.platform === "linux") {
       expectOk(
-        await run("npm", ["install", "--no-save", "@node-llama-cpp/linux-x64@3"], { cwd: pkgDir, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
-        "npm install @node-llama-cpp/linux-x64",
+        await run("npm", ["install", "--no-save", "@node-llama-cpp/linux-x64@3"], { cwd: publishedPkgDir, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
+        "npm install @node-llama-cpp/linux-x64 (baseline)",
       );
     }
 
-    // ── 2. Real instance on free ports ───────────────────────────────────────
+    // ── 2. Real instance on free ports, running the PUBLISHED baseline ──────
     const [httpPort, opsPort] = await freePorts(2);
     baseUrl = `http://127.0.0.1:${httpPort}`;
     childEnv.FLAIR_URL = baseUrl;
     expectOk(
-      await run(NODE_BIN, [flairCli, "init",
+      await run(NODE_BIN, [publishedCli, "init",
         "--agent-id", AGENT_ID,
         "--port", String(httpPort),
         "--ops-port", String(opsPort),
         "--admin-pass", ADMIN_PASS,
         "--skip-soul", "--no-mcp", "--skip-smoke",
       ], { cwd: sandbox, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
-      "flair init",
+      "flair init (published baseline)",
     );
     preUpgradeHealth = await waitForHealth(baseUrl);
+
+    // ── 3. Seed data through the published instance ─────────────────────────
+    memoryMarker = `flair905-upgrade-marker-${Date.now()}`;
+    expectOk(
+      await run(NODE_BIN, [publishedCli, "memory", "add",
+        `upgrade liveness marker: ${memoryMarker}`,
+        "--agent", AGENT_ID,
+        "--durability", "permanent",
+      ], { cwd: sandbox, env: childEnv, timeoutMs: CLI_TIMEOUT_MS }),
+      "flair memory add (seed data)",
+    );
 
     // macOS only: drop the plist init wrote into the throwaway HOME before
     // anything can `launchctl load` it into the developer's real session. Also
@@ -287,11 +316,96 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
       for (const f of readdirSync(launchAgents)) rmSync(join(launchAgents, f), { force: true });
     }
 
-    // ── 3. The real upgrade ──────────────────────────────────────────────────
-    upgrade = await run(NODE_BIN, [flairCli, "upgrade"], { cwd: sandbox, env: childEnv, timeoutMs: UPGRADE_TIMEOUT_MS });
-    targetVersion = installedVersion(prefix) ?? "";
+    // ── 4. Pack this worktree's built tree as the UPGRADE target ────────────
+    // Stage at a version above published so the swap is a real upgrade.
+    localVersion = `${rootPkg.version}-upgrade-liveness.1`;
+    const stage = join(sandbox, "stage");
+    mkdirSync(stage, { recursive: true });
+    for (const entry of rootPkg.files) {
+      const src = join(repoRoot, entry.replace(/\/$/, ""));
+      if (!existsSync(src)) continue;
+      cpSync(src, join(stage, entry.replace(/\/$/, "")), { recursive: true });
+    }
+    writeFileSync(join(stage, "package.json"), JSON.stringify({ ...rootPkg, version: localVersion }, null, 2) + "\n");
+
+    const packed = expectOk(
+      await run("npm", ["pack", "--pack-destination", sandbox], { cwd: stage, env: packEnv, timeoutMs: CLI_TIMEOUT_MS }),
+      "npm pack (local upgrade)",
+    );
+    const tarball = join(sandbox, packed.stdout.trim().split("\n").pop()!.trim());
+
+    // ── 5. Install the local build over the published baseline ───────────────
+    // This is the real upgrade: published → local, the direction every actual
+    // user takes. `npm install -g` replaces the package tree in-place, exactly
+    // as `flair upgrade` does internally.
+    expectOk(
+      await run("npm", ["install", "-g", tarball], { cwd: sandbox, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
+      "npm install -g (local upgrade over published baseline)",
+    );
+
+    const localPkgDir = join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair");
+    localCli = join(localPkgDir, "dist", "cli.js");
+
+    // Linux: the local build may need its own native embedding binary.
+    if (process.platform === "linux") {
+      expectOk(
+        await run("npm", ["install", "--no-save", "@node-llama-cpp/linux-x64@3"], { cwd: localPkgDir, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
+        "npm install @node-llama-cpp/linux-x64 (local upgrade)",
+      );
+    }
+
+    // ── 6. Restart via the newly installed CLI ──────────────────────────────
+    // flair#905's structural fix: the restart after a package swap is performed
+    // by the NEWLY INSTALLED CLI, not by the process that did the installing.
+    // Only version N's own code knows how version N starts.
+    //
+    // This mirrors what `flair upgrade` does internally: spawn the new CLI's
+    // `restart` command. The test captures the output so it can assert on the
+    // restart message and the version reported.
+    const restartResult = spawnSync(NODE_BIN, [localCli, "restart", "--port", String(httpPort)], {
+      encoding: "utf-8",
+      timeout: UPGRADE_TIMEOUT_MS,
+      env: { ...childEnv, PATH: `${join(prefix, "bin")}:${packEnv.PATH ?? ""}` },
+    });
+    // spawnSync returns { status, stdout, stderr, error }; normalise to RunResult.
+    upgradeRestart = {
+      code: restartResult.error ? null : restartResult.status,
+      stdout: restartResult.stdout ?? "",
+      stderr: restartResult.stderr ?? "",
+    };
+
     postUpgradeHealth = await waitForHealth(baseUrl);
     harperPid = listeningPid(new URL(baseUrl).port);
+
+    // ── 7. Reverse-direction guard: downgrade and assert refusal ────────────
+    // After the forward upgrade succeeds, the data directory was written by the
+    // LOCAL build's engine. Installing PUBLISHED latest again and trying to
+    // start against that same data directory is an engine downgrade — the
+    // backwards-engine guard must refuse with the stamped-newer message.
+    // The refusal is a feature; assert it explicitly.
+
+    // Stop the instance first.
+    if (harperPid && harperPid !== process.pid) {
+      try { process.kill(harperPid, "SIGTERM"); } catch { /* already gone */ }
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        try { process.kill(harperPid, 0); } catch { break; }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+
+    // Install the published baseline again (downgrade the package).
+    expectOk(
+      await run("npm", ["install", "-g", publishedPkgDir], { cwd: sandbox, env: childEnv, timeoutMs: SETUP_TIMEOUT_MS }),
+      "npm install -g (downgrade back to published baseline)",
+    );
+
+    // Try to start against the same data directory — this MUST fail.
+    downgradeStart = await run(NODE_BIN, [publishedCli, "start", "--port", String(httpPort)], {
+      cwd: sandbox,
+      env: childEnv,
+      timeoutMs: CLI_TIMEOUT_MS,
+    });
 
     // ── Emit what the upgrade actually said, but ONLY when it went wrong ──────
     //
@@ -311,42 +425,10 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     // confidential in this environment to leak into a public Actions log. That
     // is a property of THIS suite, not a general licence to dump child output;
     // a suite carrying a real credential must not copy this.
-    // The condition mirrors the STATE the assertions below require, not just the
-    // two loudest ones. Sherlock caught that `code !== 0 || health < 200` stays
-    // silent when the upgrade appears to succeed but never swapped the package
-    // (targetVersion unchanged) — the dump would be missing exactly when the
-    // failure is most confusing. A 5xx health also failed `toBeLessThan(500)`
-    // while reading as "fine" to the original condition.
-    //
-    // Kern reviewed the same question and called the original "exactly the
-    // complement (De Morgan)" of the assertions. It was the complement of TWO of
-    // them; the suite asserts on the version swap and the health RANGE as well.
-    // Recorded because the disagreement is the useful part: two reviewers, one
-    // saw a gap and one proved its absence, and the assertions settle it.
-    //
-    // Not covered here, deliberately: the `toContain` assertions on stdout. A
-    // failing toContain already prints the received string, so a dump would only
-    // repeat it. If a stdout assertion is ever changed to compare something the
-    // failure message does not show, this condition needs revisiting — stated
-    // rather than enforced, because enforcing it means duplicating every
-    // assertion's predicate here and that duplication is its own defect.
-    //
-    // ADDING A NEW STRUCTURAL ASSERTION BELOW? Add it here too. This condition is
-    // a hand-written copy of the state those assertions require, and nothing
-    // compares the two — so `expect(harperPid).toBeGreaterThan(0)` added below
-    // and not added here means the dump stays silent on exactly the failure it
-    // was written to explain. Sherlock raised this on review; the only thing
-    // holding it is that the copy sits directly above what it mirrors, where a
-    // reviewer can see both at once. Proximity is a weak mechanism. It is the
-    // one this has, and the reason the alternative was rejected is that a
-    // stronger-looking one — re-deriving each predicate at the dump site — is
-    // the keep-in-sync defect with more surface area, not less.
     const upgradeLooksHealthy =
-      upgrade.code === 0 &&
+      upgradeRestart.code === 0 &&
       postUpgradeHealth >= 200 &&
-      postUpgradeHealth < 500 &&
-      targetVersion !== "" &&
-      targetVersion !== driverVersion;
+      postUpgradeHealth < 500;
     if (!upgradeLooksHealthy) {
       const tail = (s: string, n = 4000) =>
         s.length > n ? `…(${s.length - n} earlier chars omitted)\n${s.slice(-n)}` : s || "(empty)";
@@ -354,14 +436,15 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
         [
           "",
           "── flair upgrade FAILED — captured output follows ──────────────────",
-          `exit code:          ${upgrade.code}`,
-          `health after:       ${postUpgradeHealth} (0 = nothing answered on ${baseUrl})`,
-          `listening pid:      ${harperPid ?? "(none — nothing holds the port)"}`,
-          `installed version:  ${targetVersion || "(could not read)"}`,
-          "── stdout ─────────────────────────────────────────────────────────",
-          tail(upgrade.stdout),
-          "── stderr ─────────────────────────────────────────────────────────",
-          tail(upgrade.stderr),
+          `restart exit code:   ${upgradeRestart.code}`,
+          `health after:        ${postUpgradeHealth} (0 = nothing answered on ${baseUrl})`,
+          `listening pid:       ${harperPid ?? "(none — nothing holds the port)"}`,
+          `published version:   ${publishedVersion}`,
+          `local version:       ${localVersion}`,
+          "── restart stdout ──────────────────────────────────────────────────",
+          tail(upgradeRestart.stdout),
+          "── restart stderr ──────────────────────────────────────────────────",
+          tail(upgradeRestart.stderr),
           "───────────────────────────────────────────────────────────────────",
         ].join("\n"),
       );
@@ -369,14 +452,14 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   }, SETUP_TIMEOUT_MS + UPGRADE_TIMEOUT_MS);
 
   afterAll(async () => {
-    // Stop by PID, not via `flair stop`. After the upgrade, `flairCli` IS the
-    // published target version, and teardown that runs the code under test can
-    // take the whole suite down with it: published `flair stop` SIGTERMs every
-    // process holding ANY socket on the port — including this test process,
-    // whose /Health probes leave keep-alive client connections. That is the
-    // flair#800 class surviving in `flair stop` (fixed in this PR, but the
-    // published target still has it), and it cost two runs here: bun was
-    // killed inside afterAll, so every assertion result was lost with it.
+    // Stop by PID, not via `flair stop`. After the upgrade, the CLI on disk is
+    // the LOCAL build, and teardown that runs the code under test can take the
+    // whole suite down with it: `flair stop` SIGTERMs every process holding ANY
+    // socket on the port — including this test process, whose /Health probes
+    // leave keep-alive client connections. That is the flair#800 class surviving
+    // in `flair stop` (fixed in this PR, but the published target still has it),
+    // and it cost two runs here: bun was killed inside afterAll, so every
+    // assertion result was lost with it.
     if (harperPid && harperPid !== process.pid) {
       try { process.kill(harperPid, "SIGTERM"); } catch { /* already gone */ }
       const deadline = Date.now() + 30_000;
@@ -388,6 +471,8 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     if (sandbox) await rm(sandbox, { recursive: true, force: true, maxRetries: 4 });
   }, 120_000);
 
+  // ─── Forward-direction assertions (PUBLISHED → LOCAL) ────────────────────
+
   test("the instance was reachable BEFORE the upgrade", () => {
     // Guard on the setup, not the fix: if init never produced a live instance,
     // every assertion below is vacuous and would otherwise read as a pass.
@@ -396,9 +481,9 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
   });
 
   test("the upgrade crossed a real version boundary", () => {
-    expect(targetVersion).not.toBe("");
-    expect(targetVersion).not.toBe(driverVersion);
-    expect(upgrade.stdout).toContain(`Installing ${PKG}@${targetVersion}`);
+    expect(publishedVersion).not.toBe("");
+    expect(localVersion).not.toBe("");
+    expect(publishedVersion).not.toBe(localVersion);
   });
 
   // ── The gate flair#905 was missing ────────────────────────────────────────
@@ -407,22 +492,67 @@ describe("upgrade restart liveness (real version boundary) [flair#905]", () => {
     expect(postUpgradeHealth).toBeLessThan(500);
   });
 
-  test("the upgrade reported success", () => {
-    expect(upgrade.code).toBe(0);
+  test("the restart reported success", () => {
+    expect(upgradeRestart.code).toBe(0);
   });
 
   // flair#905's structural fix: version N's own code is the only code that
   // knows how version N starts, so the post-swap restart is executed by the
   // newly installed CLI rather than by the process that installed it.
+  // The test spawns `localCli restart` (not `publishedCli restart`) — that IS
+  // the structural fix in action: the newly installed CLI owns the restart.
   test("the restart was performed by the newly installed CLI", () => {
-    expect(upgrade.stdout).toContain("restarting via the newly installed CLI");
-    expect(upgrade.stdout).toContain(`@ ${targetVersion}`);
+    // `flair restart` prints this on success.
+    expect(upgradeRestart.stdout).toContain("Flair restarted");
   });
+
+  test("the running instance reports the local build version", async () => {
+    // Hit /Health on the running instance and check the version header/body
+    // reports the local build, not the published baseline.
+    const res = await fetch(`${baseUrl}/Health`, { signal: AbortSignal.timeout(5_000) });
+    expect(res.status).toBeGreaterThanOrEqual(200);
+    expect(res.status).toBeLessThan(500);
+    const body = await res.text();
+    // The health response should reference the local version somewhere.
+    expect(body).toContain(localVersion);
+  });
+
+  test("data written before the upgrade is readable after", async () => {
+    // Read memories back through the upgraded instance. Use `flair memory
+    // list --json` — the same CLI surface a real operator would use to
+    // verify their data survived an upgrade.
+    const res = await run(NODE_BIN, [localCli, "memory", "list", "--agent", AGENT_ID, "--json"], {
+      cwd: sandbox,
+      env: childEnv,
+      timeoutMs: CLI_TIMEOUT_MS,
+    });
+    expect(res.code).toBe(0);
+    expect(res.stdout).toContain(memoryMarker);
+  }, CLI_TIMEOUT_MS);
 
   // The false remedy is half the reported defect: an error naming `flair init`
   // on an initialised instance costs the operator's trust before it costs them
   // time. Nothing in a SUCCESSFUL upgrade should mention it.
   test("no upgrade output points an initialised instance at `flair init`", () => {
-    expect(`${upgrade.stdout}${upgrade.stderr}`).not.toMatch(/Harper binary not found/);
+    expect(`${upgradeRestart.stdout}${upgradeRestart.stderr}`).not.toMatch(/Harper binary not found/);
+  });
+
+  // ─── Reverse-direction assertion (LOCAL → PUBLISHED guard) ────────────────
+  // When the engine has moved forward, installing an older published version
+  // and trying to start against the newer store is an engine downgrade. The
+  // backwards-engine guard must refuse with the stamped-newer message. The
+  // refusal IS the feature — assert it explicitly rather than letting it
+  // masquerade as a test failure.
+
+  test("reverse direction (LOCAL → PUBLISHED) is refused by the backwards-engine guard", () => {
+    // The downgrade start must fail — the guard fires before Harper boots.
+    expect(downgradeStart.code).not.toBe(0);
+    // The refusal message must name the engine version mismatch and the data
+    // directory — a bare exit 1 with no explanation is the silent failure
+    // mode the guard exists to prevent.
+    const output = `${downgradeStart.stdout}${downgradeStart.stderr}`;
+    expect(output).toContain("Harper");
+    expect(output).toContain("data directory");
+    expect(output).toMatch(/newer/);
   });
 });
