@@ -18,6 +18,33 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.41.0] - 2026-08-10
+
+### Changed
+
+- **Harper is now 5.2.0, and its SQL engine default changed.** Flair pinned Harper 5.1.22;
+  5.2.0 is the first stable release of the 5.2 line. Two consequences worth knowing. First,
+  **`sql.engine` now defaults to `auto`** rather than `legacy`: queries are planned by
+  Harper's Resource-API engine and fall back to the legacy AlaSQL path only for shapes it
+  does not support. Set `sql.engine: legacy` to restore the previous behaviour, or `new` to
+  disable the fallback and surface unsupported shapes as errors. Second, this carries a
+  storage read fix that 5.1.22 did not have: in the `@harperfast/rocksdb-js` version that
+  range permitted, a column-family override was honoured on the synchronous block-cache
+  attempt but dropped in the async worker, so every table after the first in a request was
+  read through a foreign column family — cache hits correct, **cache misses silently
+  returning not-found**, worst immediately after a restart and healing as traffic warmed
+  the cache.
+
+### Fixed
+
+- **Upgrade-liveness compat test reads data back during the live window.** The reverse-guard leg's reinstall replaces the local CLI and stops the upgraded instance; the data-survival read-back is now captured while the upgraded instance is live, making it a genuine cross-engine proof instead of a dead-world read.
+
+- The MCP client-credentials e2e test's `afterAll` teardown now carries an explicit 180s timeout (mirroring its `beforeAll`); its `rm -rf` of the hard-linked temp component tree had outgrown the default 5s hook budget as the dependency tree grew, surfacing only in the macOS release lane.
+
+- Upgrade-liveness compat test now runs the real consumer direction (published → local build) and asserts the backwards-engine refusal explicitly, skipping loudly when engines match — engine-forward PRs no longer red circularly.
+
+- **`flair upgrade` restart handles Harper engine changes end-to-end.** The restart path now sets `CONFIRM_DOWNGRADE=yes` so Harper's non-interactive confirm prompt doesn't silently exit 0 under launchd/systemd, waits for the old process to release its data-directory lock before starting the new one, and the rollback path restores the pre-upgrade engine snapshot when the Harper version changed (refusing loudly when no snapshot exists — the old Harper cannot read data written by the new engine).
+
 ## [0.40.0] - 2026-08-07
 
 ### Added

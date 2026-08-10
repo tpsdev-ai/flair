@@ -1,1 +1,0 @@
-- The MCP client-credentials e2e test's `afterAll` teardown now carries an explicit 180s timeout (mirroring its `beforeAll`); its `rm -rf` of the hard-linked temp component tree had outgrown the default 5s hook budget as the dependency tree grew, surfacing only in the macOS release lane.
