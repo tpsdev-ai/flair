@@ -191,11 +191,14 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (tempDir) {
+      // rm -rf of the hard-linked temp tree (repo + node_modules, tens of
+      // thousands of inodes) is syscall-heavy and outgrows the default 5s hook
+      // timeout as the dependency tree grows — mirror beforeAll's 180s budget.
       await rm(tempDir, { recursive: true, force: true, maxRetries: 4 });
     }
     delete process.env.FLAIR_MCP_OAUTH;
     delete process.env.FLAIR_MCP_ISSUER;
-  });
+  }, 180_000);
 
   test("the repository's config.yaml is never mutated during this test run", () => {
     const after = sha256(CONFIG_PATH);
