@@ -494,7 +494,7 @@ describe("structural: adopted commands consolidate onto authedRequest, not their
   test("api() delegates to authedRequest — no inline admin-pass/token chain of its own", () => {
     const body = extractBody(
       "async function api(method: string, path: string, body?: any, options?",
-      "const savedPort = readPortFromConfig();",
+      "resolveHttpPort({})",
     );
     expect(body).toContain("authedRequest(");
     // The OLD inline chain read these env vars directly inside api(); now

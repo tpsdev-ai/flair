@@ -1609,11 +1609,9 @@ function b64url(bytes: Uint8Array): string {
  * out of scope for this HTTP/REST auth path.
  */
 async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string }): Promise<any> {
-  // Resolve port: FLAIR_URL env > ~/.flair/config.yaml > default 9926
-  // When baseUrl is provided (--target), use it directly.
-  const savedPort = readPortFromConfig();
-  const defaultUrl = savedPort ? `http://127.0.0.1:${savedPort}` : `http://127.0.0.1:${DEFAULT_PORT}`;
-  const base = options?.baseUrl ?? (process.env.FLAIR_URL || defaultUrl);
+  // Resolve port via the canonical path (flair#1129): options.baseUrl > FLAIR_URL > resolveHttpPort.
+  // api() callers mean the default install, so resolveHttpPort({}) with no --data-dir is correct.
+  const base = options?.baseUrl ?? (process.env.FLAIR_URL || `http://127.0.0.1:${resolveHttpPort({})}`);
 
   // Extract agentId from FLAIR_AGENT_ID env, or the body (POST/PUT) / URL
   // query params (GET) — Harper-CLI-request-shape knowledge, not a generic
@@ -16854,8 +16852,7 @@ program
       if (!dryRun) {
         console.log(`    Writing to Flair...`);
         try {
-          const DEFAULT_PORT = 19926;
-          const httpUrl = `http://127.0.0.1:${DEFAULT_PORT}`;
+          const httpUrl = `http://127.0.0.1:${resolveHttpPort({})}`;
           const agentKeyId = `${agentId}.key`;
           const keysDir = join(homedir(), ".flair", "keys");
           const keyPath = join(keysDir, agentKeyId);
