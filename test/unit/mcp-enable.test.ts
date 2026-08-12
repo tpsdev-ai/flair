@@ -27,7 +27,7 @@
  *   - structural: buildMcpOAuthConfigBlock always disables DCR explicitly
  *     and never writes initialAccessToken/allowedRedirectUriHosts
  */
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,8 +62,22 @@ import {
 let dir: string;
 const ISSUER = "https://flair.example.com";
 
+// Minimal local component config the standalone enableMcp path writes to.
+// tempPaths() points localConfigPath here so the local-config-update step
+// never falls back to its default search (["config.yaml", ~/.flair/config.yaml])
+// and mutates the repo's own ./config.yaml — which poisoned the mcp-oauth
+// boot-safety integration test during the flair#1136 0.42.0 release cut.
+const LOCAL_CONFIG_YAML = `name: flair
+rest: true
+"@harperfast/oauth":
+  package: "@harperfast/oauth"
+  mcp:
+    enabled: false
+`;
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "flair-mcp-enable-"));
+  writeFileSync(join(dir, "config.yaml"), LOCAL_CONFIG_YAML, "utf-8");
 });
 
 afterEach(() => {
@@ -574,6 +588,7 @@ function tempPaths() {
   return {
     signingKeyFilePath: join(dir, "signing-key.pem"),
     secretsStagingPath: join(dir, "secrets.env"),
+    localConfigPath: join(dir, "config.yaml"),
   };
 }
 
@@ -1090,6 +1105,18 @@ describe("updateLocalConfigMcpEnabled (flair#1136)", () => {
     try { rmSync(configDir, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
+  // Regression guard (flair#1136): no test in this suite may mutate the repo's
+  // own config.yaml. The no-explicit-path variant of updateLocalConfigMcpEnabled
+  // once did — poisoning the mcp-oauth boot-safety integration test during the
+  // 0.42.0 release cut (release.sh runs unit + integration in one process, so a
+  // unit-test mutation reaches the integration lane; CI's separate lanes hid it).
+  const REPO_CONFIG = join(import.meta.dir, "..", "..", "config.yaml");
+  let repoConfigBefore = "";
+  beforeAll(() => { repoConfigBefore = readFileSync(REPO_CONFIG, "utf-8"); });
+  afterAll(() => {
+    expect(readFileSync(REPO_CONFIG, "utf-8")).toBe(repoConfigBefore);
+  });
+
   const CONFIG_WITH_MCP_DISABLED = `name: flair
 rest: true
 "@harperfast/oauth":
@@ -1150,12 +1177,16 @@ rest: true
     expect(result.detail).toContain("not found");
   });
 
-  test("file not found: tries common locations", () => {
-    // The test runs from the repo root where ./config.yaml exists, so
-    // this may succeed if the repo config has an mcp.enabled key.
-    // We only assert the detail mentions the search locations.
-    const result = updateLocalConfigMcpEnabled(true);
-    expect(result.detail).toMatch(/config\.yaml|not found|already|set to/);
+  test("file not found: reports the searched path (no ambient mutation)", () => {
+    // Do NOT call updateLocalConfigMcpEnabled(true) with no path: its default
+    // search is ["config.yaml", ~/.flair/config.yaml], so from the repo root it
+    // finds and MUTATES the repo's own config.yaml, and from elsewhere would
+    // mutate a real ~/.flair config. That poisoned the boot-safety integration
+    // test during the flair#1136 release cut. Use an explicit missing path.
+    const missing = join(configDir, "does-not-exist", "config.yaml");
+    const result = updateLocalConfigMcpEnabled(true, missing);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("not found");
   });
 
   test("no @harperfast/oauth block in config", () => {
