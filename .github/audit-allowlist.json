@@ -58,17 +58,6 @@
       "removeWhen": "The dependency PR raising the resolved form-data to >=4.0.6 merges \u2014 the same bump that retires GHSA-fjxv-7rqg-78g4."
     },
     {
-      "ghsa": "GHSA-frvp-7c67-39w9",
-      "package": "@hono/node-server",
-      "severity": "moderate",
-      "class": "remediation-available",
-      "introducedBy": "workspace @tpsdev-ai/flair-mcp -> @modelcontextprotocol/sdk -> @hono/node-server",
-      "reason": "Pulled in through a first-party workspace package, not harper. @hono/node-server 2.0.5 and later fix it; the fix arrives by bumping @modelcontextprotocol/sdk in packages/flair-mcp. Also note the advisory is Windows-specific and flair's supported deployment targets are macOS and Linux, which lowers urgency but does not make the entry unnecessary.",
-      "added": "2026-07-27",
-      "expires": "2026-08-26",
-      "removeWhen": "packages/flair-mcp bumps @modelcontextprotocol/sdk to a release that resolves @hono/node-server >=2.0.5."
-    },
-    {
       "ghsa": "GHSA-86vw-mfpg-wwv9",
       "package": "jsonata",
       "severity": "high",
