@@ -191,6 +191,40 @@ export function appendCodexFlairBlock(raw: string, env: WireEnv): string {
 }
 
 /**
+ * flair#1135: does the existing `[mcp_servers.flair]` TOML section carry the
+ * CURRENT pinned mcpServerSpec()? Pure string scan — no TOML parser needed
+ * (same rationale as codexConfigHasFlairSection).
+ */
+function codexFlairSectionHasCurrentPin(raw: string): boolean {
+  const idx = raw.indexOf("[mcp_servers.flair]");
+  if (idx === -1) return false;
+  const after = raw.slice(idx);
+  // Find the end of the section: the next top-level [header] that is NOT a
+  // sub-table of mcp_servers.flair (e.g. [mcp_servers.flair.env] is part of
+  // the same logical section and must not terminate the scan).
+  const nextHeader = after.slice("[mcp_servers.flair]".length).search(/\n\[(?!mcp_servers\.flair\.)/);
+  const section = nextHeader === -1 ? after : after.slice(0, "[mcp_servers.flair]".length + nextHeader);
+  return section.includes(mcpServerSpec());
+}
+
+/**
+ * flair#1135: replace the existing `[mcp_servers.flair]` TOML section with a
+ * fresh one carrying the current pin. Preserves everything else in the file.
+ */
+function replaceCodexFlairBlock(raw: string, env: WireEnv): string {
+  const idx = raw.indexOf("[mcp_servers.flair]");
+  if (idx === -1) return appendCodexFlairBlock(raw, env);
+  const before = raw.slice(0, idx);
+  const after = raw.slice(idx);
+  const nextHeader = after.slice("[mcp_servers.flair]".length).search(/\n\[(?!mcp_servers\.flair\.)/);
+  const rest = nextHeader === -1 ? "" : after.slice("[mcp_servers.flair]".length + nextHeader);
+  const newBlock = tomlSnippet(env) + "\n";
+  // Preserve the separator between the new block and whatever follows.
+  const sep = rest.length === 0 ? "" : rest.startsWith("\n") ? "" : "\n";
+  return before + newBlock + sep + rest;
+}
+
+/**
  * Merge the Flair MCP server into a JSON config file with an `mcpServers` map.
  * Creates the file (and parent dir) if absent; preserves existing servers and
  * any other top-level keys. Returns ok:true only when the file was written.
@@ -210,13 +244,20 @@ function wireJsonMcp(
     }
     config.mcpServers = config.mcpServers || {};
     const existing = config.mcpServers.flair;
-    if (existing && existing.env?.FLAIR_URL === env.FLAIR_URL && existing.env?.FLAIR_AGENT_ID === env.FLAIR_AGENT_ID) {
+    const currentSpec = mcpServerSpec();
+    const existingArgs = existing?.args;
+    const argsMatch = Array.isArray(existingArgs) && existingArgs.includes(currentSpec);
+    const urlAgentMatch = existing && existing.env?.FLAIR_URL === env.FLAIR_URL && existing.env?.FLAIR_AGENT_ID === env.FLAIR_AGENT_ID;
+    // flair#1135: the pin in `args` must match the current mcpServerSpec().
+    // A matching pin stays a no-op (idempotent); only a stale pin triggers a re-write.
+    if (urlAgentMatch && argsMatch) {
       return { ok: true, message: `${label}: already wired in ${display}` };
     }
     config.mcpServers.flair = flairMcpEntry(env);
     mkdirSync(dirname(configPath), { recursive: true });
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
-    return { ok: true, message: `${label}: wired ${display} (restart ${label} to pick it up)` };
+    const action = urlAgentMatch ? "refreshed pin in" : "wired";
+    return { ok: true, message: `${label}: ${action} ${display} (restart ${label} to pick it up)` };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return {
@@ -286,16 +327,22 @@ function _wireCodex(env: WireEnv): { ok: boolean; message: string } {
   // parser, but appending a new top-level table at EOF is safe TOML when the
   // exact header isn't already present (flair#727) — so an existing file only
   // forces the manual-print fallback when it's genuinely unreadable/
-  // unwritable (permissions, I/O error), never merely "exists". A file that
-  // already has the section is reported already-wired, matching the JSON
-  // clients' idempotency (wireJsonMcp above).
+  // unwritable (permissions, I/O error), never merely "exists".
+  //
+  // flair#1135: the "already wired" check is now version-aware — a section
+  // with a stale pin triggers a re-write instead of a no-op.
   const path = codexConfigPath();
   const display = "~/.codex/config.toml";
   try {
     if (existsSync(path)) {
       const raw = readFileSync(path, "utf-8");
-      if (codexConfigHasFlairSection(raw)) {
+      if (codexFlairSectionHasCurrentPin(raw)) {
         return { ok: true, message: `Codex: already wired in ${display}` };
+      }
+      if (codexConfigHasFlairSection(raw)) {
+        // Section exists but pin is stale — replace it.
+        writeFileSync(path, replaceCodexFlairBlock(raw, env));
+        return { ok: true, message: `Codex: refreshed pin in ${display} (restart Codex to pick it up)` };
       }
       writeFileSync(path, appendCodexFlairBlock(raw, env));
       return { ok: true, message: `Codex: wired ${display} (restart Codex to pick it up)` };
