@@ -5479,7 +5479,7 @@ mcp
     if (!dryRun && !adminPass) {
       console.error(
         "Error: --admin-pass <pass> or --admin-pass-file <path> is required for a REMOTE target " +
-          "(the operations API on the target instance needs it for identity mapping + set_configuration + restart).\n" +
+          "(the operations API on the target instance needs it for identity mapping + restart).\n" +
           "  FLAIR_ADMIN_PASS and ~/.flair/admin-pass are deliberately NOT used here: they are THIS machine's " +
           "local admin credentials, and sending them to another instance is how a local secret ends up on someone " +
           "else's Harper. Pass the target's own admin password explicitly.",
@@ -5539,7 +5539,29 @@ mcp
       process.exit(1);
     }
     if (!result.ok) {
-      console.error(`${render.icons.error} enable failed at step "${result.failedStep}" — see detail above for the exact fix, then re-run \`flair mcp enable\` (earlier steps are idempotent and will be reused).`);
+      if (result.failedStep === "fabric-operator-deploy") {
+        // flair#1136: Fabric deployments require the operator to deploy the
+        // config change — we can't write to harperdb-config.yaml (Fabric
+        // regenerates it on every container restart).
+        console.error(
+          `\n${render.icons.info} ${render.wrap(render.c.bold, "Fabric deployment detected.")}`,
+        );
+        console.error(
+          `   The @harperfast/oauth block ships in your component config.yaml with mcp.enabled: false.`,
+        );
+        console.error(
+          `   To activate: set mcp.enabled: true (literal boolean) in your deployed component`,
+        );
+        console.error(
+          `   config.yaml, ensure the staged secrets are live in the instance's process`,
+        );
+        console.error(
+          `   environment, and redeploy. Then re-run \`flair mcp enable\` — earlier steps`,
+        );
+        console.error(`   are idempotent and will be reused.\n`);
+      } else {
+        console.error(`${render.icons.error} enable failed at step "${result.failedStep}" — see detail above for the exact fix, then re-run \`flair mcp enable\` (earlier steps are idempotent and will be reused).`);
+      }
       process.exit(1);
     }
     if (result.dryRun) {

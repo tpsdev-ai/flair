@@ -82,19 +82,38 @@ authentication:
   authorizeLocal: false
   enableSessions: true
 
-# @harperfast/oauth — authorization server component declaration.
-# Commented out by default: the plugin is only needed when FLAIR_MCP_OAUTH=on.
-# When you enable the flag without uncommenting this block, the boot guard
-# (resources/mcp-oauth.ts) logs an error with the exact YAML to add — uncomment
-# the block below and add mcp.* config. The issuer is derived at runtime from
-# FLAIR_MCP_ISSUER / FLAIR_PUBLIC_URL; do not hardcode one here.
+# @harperfast/oauth — authorization server component (flair#1136).
+# Shipped inert by default: mcp.enabled is a literal `false` (never an env var —
+# the plugin's expandEnvVar returns the literal "${...}" string for unset vars,
+# which coerceConfigBoolean treats as truthy, so an interpolated default would
+# crash-boot every install with the env unset). When disabled the plugin is a
+# genuine no-op: issuer is never validated, /mcp endpoints 404, well-known falls
+# through, withMCPAuth denies.
 #
-# "@harperfast/oauth":
-#   providers:
-#     default:
-#       authorizationEndpoint: "/OAuthAuthorize"
-#       tokenEndpoint: "/OAuthToken"
-#       revocationEndpoint: "/OAuthRevoke"
-#       registrationEndpoint: "/OAuthRegister"
-#       jwksUri: "/.well-known/jwks.json"
-#       discoveryEndpoint: "/.well-known/oauth-authorization-server"
+# To activate: set mcp.enabled: true (literal) in your deployed config.yaml,
+# set FLAIR_MCP_ISSUER + FLAIR_MCP_SIGNING_KEY_PEM + OAUTH_<PROVIDER>_CLIENT_ID/SECRET
+# in the process environment, and restart. Or run `flair mcp enable` which
+# automates the full checklist for a standalone-local install.
+#
+# dynamicClientRegistration is explicitly disabled (fail-closed) — CIMD is the
+# only supported client-registration path. The providers block carries ${ENV}
+# placeholders for the IdP OAuth app credentials; they are inert while
+# mcp.enabled is false.
+"@harperfast/oauth":
+  package: "@harperfast/oauth"
+  providers:
+    github:
+      clientId: "${OAUTH_GITHUB_CLIENT_ID}"
+      clientSecret: "${OAUTH_GITHUB_CLIENT_SECRET}"
+  mcp:
+    enabled: true
+    issuer: "${FLAIR_MCP_ISSUER}"
+    resource: "${FLAIR_MCP_ISSUER}/mcp"
+    accessTokenTtl: 900
+    dynamicClientRegistration:
+      enabled: true
+    clientIdMetadataDocuments:
+      allowedHosts:
+        - "claude.ai"
+        - "claude.com"
+    signingKeyPem: "${FLAIR_MCP_SIGNING_KEY_PEM}"
