@@ -18,6 +18,16 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.42.0] - 2026-08-12
+
+### Fixed
+
+- The CLI now reaches Flair instances on non-standalone shapes without FLAIR_URL. api() (used by ~30 commands incl. memory add/search and the rem family) carried a stale duplicate port-resolution ladder that skipped Harper's own config and fell through to the 19926 default, so every fleet/Fabric install serving 9926 got ECONNREFUSED; api() now delegates to the single canonical resolver.
+
+- **`flair upgrade` (and re-running `flair init`) now refreshes stale MCP client-config pins to the running version.** The three client-wiring guards — JSON clients, the inline Claude Code wiring, and the Codex TOML section — treated any existing wiring as up-to-date, so once a client was wired to `@tpsdev-ai/flair-mcp@<version>` it stayed on that pin even after the CLI was upgraded. The guards are now version-aware: a wiring whose URL and agent still match but whose pin is stale is re-written to the current version, and `flair upgrade` runs this refresh across detected clients as a best-effort step (a refresh failure warns but never fails the upgrade). The flair#907 pin still holds a wired client to a known version between upgrades — this just makes an upgrade actually advance it. (#1135)
+
+- MCP-OAuth config now ships in the component config.yaml (mcp.enabled: false default, inert), replacing the set_configuration delivery that Fabric regenerated away; flair mcp enable drops the config leg and reports the operator-deploy path on Fabric.
+
 ## [0.41.0] - 2026-08-10
 
 ### Changed
