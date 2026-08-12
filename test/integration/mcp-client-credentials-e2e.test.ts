@@ -64,20 +64,18 @@
 // always fails first).
 //
 // ── The oauth plugin as a live component (validated mechanism) ────────────
-// `@harperfast/oauth` is a real `dependencies` entry (package.json) but is
-// NEVER loaded as a Harper component by this repo's shipped `config.yaml` —
-// `resources/mcp-oauth.ts` only ever does a bare `import("@harperfast/oauth")`
+// `@harperfast/oauth` is a real `dependencies` entry (package.json) and is
+// now declared as a Harper component in this repo's shipped `config.yaml`
+// (flair#1136) — but with `mcp.enabled: false` so the plugin is inert by
+// default. `resources/mcp-oauth.ts` does a bare `import("@harperfast/oauth")`
 // for its `withMCPAuth` named export, wrapping flair's OWN `/mcp` handler.
 // The full plugin (its `/oauth/mcp/token` route, `.well-known/*` discovery,
-// `harper_oauth_mcp_*` tables) only mounts when declared as a Harper
-// component — `'<name>': { package: '<npm-pkg>', ...options }` inside
-// `config.yaml`, exactly the pattern this file used to use for
-// `harper-fabric-embeddings` before flair#504/694 moved that to in-process
-// boot (see config.yaml's own history/comments). This test stages that
-// block into a TEMPORARY copy of config.yaml for its own lifetime only —
-// the repository's real config.yaml is never touched. Harper is pointed at
-// the temp copy via `startHarper({ cwd: tempDir })`; the temp directory is
-// discarded in `afterAll`. A crash therefore leaves nothing behind.
+// `harper_oauth_mcp_*` tables) only activates when `mcp.enabled: true`.
+// This test REPLACES the shipped block (not appends — that would create a
+// duplicate key) with its own version that enables mcp and adds test-specific
+// issuer/keys config. Harper is pointed at the temp copy via
+// `startHarper({ cwd: tempDir })`; the temp directory is discarded in
+// `afterAll`. A crash therefore leaves nothing behind.
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import { createHash } from "node:crypto";
@@ -164,7 +162,16 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
     execSync(`cp -al "${REPO_ROOT}"/. "${tempDir}"/`, { stdio: "pipe" });
     // Remove the hard-linked config.yaml and write our augmented copy.
     execSync(`rm -f "${tempDir}/config.yaml"`);
-    writeFileSync(join(tempDir, "config.yaml"), readFileSync(CONFIG_PATH, "utf8") + OAUTH_COMPONENT_BLOCK);
+    // Replace the shipped @harperfast/oauth block (mcp.enabled: false) with
+    // the test's version (mcp.enabled: true + test issuer/keys).  Appending
+    // would create a duplicate key now that config.yaml ships the block
+    // (flair#1136).
+    const configContent = readFileSync(CONFIG_PATH, "utf8");
+    const replaced = configContent.replace(
+      /["']@harperfast\/oauth["']:[\s\S]*?(?=\n\S|\n*$)/,
+      OAUTH_COMPONENT_BLOCK.trimEnd(),
+    );
+    writeFileSync(join(tempDir, "config.yaml"), replaced);
 
     process.env.FLAIR_MCP_OAUTH = "1";
     process.env.FLAIR_MCP_ISSUER = ISSUER;
