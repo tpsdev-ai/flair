@@ -13120,22 +13120,33 @@ program
         const hook = inspectSessionStartHook(homedir());
         if (hook.present) {
           if (hook.execution === "broken") {
-            // Reported in full, with the remedy — but NOT counted as an issue,
-            // so it never flips doctor's exit code on its own. This is a
-            // verification of the environment at the moment doctor runs (a
-            // cold `npx` cache, an offline machine, a slow registry), exactly
-            // like the FLAIR_URL reachability and agent-registration
-            // verifications above, which are warnings for the same reason. A
-            // fresh, correct install on a machine that simply has not fetched
-            // the adapter yet must not be told it is broken in the exit code.
-            // The unsilenced finding below IS counted: that one is a fact
-            // about the file, true regardless of the environment.
-            console.log(`  ${render.icons.warn} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)}, but its command did not run just now`);
-            console.log(`     ${render.wrap(render.c.dim, hook.detail ?? "")}`);
-            console.log(`     ${render.wrap(render.c.dim, "If this persists, the Node runtime probably changed and the globally")}`);
-            console.log(`     ${render.wrap(render.c.dim, "installed @tpsdev-ai/flair-mcp no longer resolves for it.")}`);
-            console.log(`     ${render.wrap(render.c.dim, "Fix:")} npm install -g @tpsdev-ai/flair-mcp ${render.wrap(render.c.dim, "(reinstall for the runtime you use now)")}`);
-            console.log(`     ${render.wrap(render.c.dim, "Or, if you no longer want ambient memory:")} flair hook uninstall`);
+            // Two very different states that share one probe outcome:
+            //
+            // 1. Silenced (current) command that didn't run — the npx cache
+            //    is cold, the machine is offline, or the adapter hasn't been
+            //    fetched yet.  On a fresh install this is NORMAL: the hook is
+            //    wired but no Claude Code session has exercised it yet.
+            //    Report as informational, not a warning, and never suggest
+            //    reinstall — the setup is correct, the environment just
+            //    hasn't warmed yet.
+            //
+            // 2. Unsilenced (legacy) command that didn't run — the hook has
+            //    been in place long enough that a cold cache is not the
+            //    explanation.  This IS a genuine failure: warn and name the
+            //    actual state with a fitting remedy.
+            if (hook.silenced) {
+              console.log(`  ${render.icons.ok} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)} — not yet exercised`);
+              console.log(`     ${render.wrap(render.c.dim, hook.detail ?? "")}`);
+              console.log(`     ${render.wrap(render.c.dim, "The hook is correctly wired but the adapter has not been fetched yet.")}`);
+              console.log(`     ${render.wrap(render.c.dim, "This is normal on a fresh install — the first Claude Code session will warm the npx cache.")}`);
+            } else {
+              console.log(`  ${render.icons.warn} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)}, but its command did not run just now`);
+              console.log(`     ${render.wrap(render.c.dim, hook.detail ?? "")}`);
+              console.log(`     ${render.wrap(render.c.dim, "The hook command could not be executed. Check that npx can resolve")}`);
+              console.log(`     ${render.wrap(render.c.dim, "@tpsdev-ai/flair-mcp — a cold cache, missing global install, or network")}`);
+              console.log(`     ${render.wrap(render.c.dim, "issue can prevent the adapter from running on its first invocation.")}`);
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites the hook to the current silent-failure form)")}`);
+            }
           } else if (hook.execution === "unknown") {
             console.log(`  ${render.icons.warn} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)}, but could not be verified ${render.wrap(render.c.dim, `(${hook.detail ?? "no detail"})`)}`);
           } else if (!hook.ours) {

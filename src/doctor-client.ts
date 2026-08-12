@@ -646,6 +646,37 @@ export function inspectSessionStartHook(
 }
 
 /**
+ * Classify what a broken probe means for the operator, now that the shipped
+ * config.yaml declares the @harperfast/oauth block (flair#1136).
+ *
+ * Two states share the same "broken" probe outcome:
+ *
+ *   not-yet-exercised — the hook is wired in its current (silenced) form
+ *     but the adapter hasn't been fetched yet.  On a fresh install this is
+ *     NORMAL: the npx cache is cold and no Claude Code session has run.
+ *     Report as informational, never a warning, and never suggest reinstall.
+ *
+ *   genuinely-broken — the hook is in its legacy (unsilenced) form AND the
+ *     probe failed.  The hook has been in place long enough that a cold cache
+ *     is not the explanation.  This IS a failure: warn and name the actual
+ *     state with a fitting remedy.
+ *
+ * Pure — no fs, no network, no spawn.  The caller (cli.ts) decides how to
+ * render each readiness level.
+ */
+export type HookReadiness = "runs" | "not-yet-exercised" | "genuinely-broken" | "unverified" | "absent" | "custom";
+
+export function classifyHookReadiness(report: SessionStartHookCommandReport): HookReadiness {
+  if (!report.present) return "absent";
+  if (!report.ours) return "custom";
+  if (report.execution === "runs") return "runs";
+  if (report.execution === "broken") {
+    return report.silenced ? "not-yet-exercised" : "genuinely-broken";
+  }
+  return "unverified";
+}
+
+/**
  * Rewrite an existing Flair-authored hook command to the current canonical
  * form, in place, preserving the agent id and URL the entry already carries —
  * so this never needs --agent and never re-points a hook at a different agent.
