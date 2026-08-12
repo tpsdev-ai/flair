@@ -16,7 +16,7 @@ authentication:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
       clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
   mcp:
-    enabled: true
+    enabled: false
     issuer: ${FLAIR_MCP_ISSUER}
     resource: ${FLAIR_MCP_ISSUER}/mcp
     accessTokenTtl: 900

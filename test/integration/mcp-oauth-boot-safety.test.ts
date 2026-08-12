@@ -34,24 +34,37 @@ afterAll(async () => {
 
 describe("flair#1136 boot-safety: shipped config with mcp.enabled: false", () => {
   test(
-    "Harper boots cleanly with the shipped config.yaml and no FLAIR_MCP_* env",
+    "Harper boots cleanly with the ACTUAL shipped config.yaml and no FLAIR_MCP_* env",
     async () => {
-      // If the shipped config caused a boot crash, startHarper throws.
+      // Boot against the REAL shipped config.yaml in the repo root — NOT a
+      // hand-crafted copy. This is the only way to prove the artifact we ship
+      // is safe. If the shipped file has mcp.enabled: true, this test MUST
+      // fail (health returns 500 because the plugin degrades on the unset
+      // issuer).
       const harper = await startHarper({
         cwd: REPO_ROOT,
         harperBinDir: REPO_ROOT,
       });
       instances.push(harper);
 
-      // Harper came up — the process is running and the ops API answers.
+      // Harper came up — the process is running.
       expect(harper.httpURL).toBeTruthy();
       expect(harper.opsURL).toBeTruthy();
 
-      // Verify the ops API is healthy (basic health check).
-      const healthRes = await fetch(harper.opsURL, {
+      // Ops API is healthy (Harper is running).
+      const opsRes = await fetch(harper.opsURL, {
         signal: AbortSignal.timeout(10_000),
       });
-      expect(healthRes.status).toBe(200);
+      expect(opsRes.status).toBe(200);
+
+      // /mcp returns 404 — MCP is OFF (not degraded). When the plugin
+      // degrades (mcp.enabled: true + issuer unset), /mcp returns 500.
+      // A 404 here proves the shipped default is inert. If someone
+      // accidentally ships enabled: true, this assertion fires.
+      const mcpRes = await fetch(`${harper.httpURL}/mcp`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(mcpRes.status).toBe(404);
     },
     120_000,
   );
