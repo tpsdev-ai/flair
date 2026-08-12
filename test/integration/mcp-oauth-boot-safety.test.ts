@@ -14,19 +14,24 @@
  *      metadata advertises.
  */
 
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { describe, test, expect, afterAll } from "bun:test";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
+const SHIPPED_CONFIG = join(REPO_ROOT, "config.yaml");
 
 let instances: HarperInstance[] = [];
+let tempDirs: string[] = [];
 
 afterAll(async () => {
   for (const h of instances) {
     try { await stopHarper(h); } catch { /* best effort */ }
+  }
+  for (const d of tempDirs) {
+    try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 });
 
@@ -36,13 +41,24 @@ describe("flair#1136 boot-safety: shipped config with mcp.enabled: false", () =>
   test(
     "Harper boots cleanly with the ACTUAL shipped config.yaml and no FLAIR_MCP_* env",
     async () => {
-      // Boot against the REAL shipped config.yaml in the repo root — NOT a
-      // hand-crafted copy. This is the only way to prove the artifact we ship
-      // is safe. If the shipped file has mcp.enabled: true, this test MUST
-      // fail (health returns 500 because the plugin degrades on the unset
-      // issuer).
+      // NEVER boot in-place (cwd: REPO_ROOT) — Harper WRITES to config.yaml
+      // in its cwd at boot (adds ports, etc.), which would corrupt the
+      // committed file. Instead, copy the shipped config VERBATIM into a
+      // temp component tree and boot from there. This still tests the REAL
+      // shipped content without mutating the repo.
+      const workDir = mkdtempSync(join(tmpdir(), "flair-boot-safety-"));
+      tempDirs.push(workDir);
+
+      // Copy the ACTUAL shipped config.yaml verbatim.
+      copyFileSync(SHIPPED_CONFIG, join(workDir, "config.yaml"));
+
+      // Symlink node_modules and dist so Harper can find the plugin and JS
+      // resources.
+      symlinkSync(join(REPO_ROOT, "node_modules"), join(workDir, "node_modules"));
+      symlinkSync(join(REPO_ROOT, "dist"), join(workDir, "dist"));
+
       const harper = await startHarper({
-        cwd: REPO_ROOT,
+        cwd: workDir,
         harperBinDir: REPO_ROOT,
       });
       instances.push(harper);
