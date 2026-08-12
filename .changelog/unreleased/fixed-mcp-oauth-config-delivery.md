@@ -1,0 +1,1 @@
+- MCP-OAuth config now ships in the component config.yaml (mcp.enabled: false default, inert), replacing the set_configuration delivery that Fabric regenerated away; flair mcp enable drops the config leg and reports the operator-deploy path on Fabric.

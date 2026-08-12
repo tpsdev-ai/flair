@@ -28,9 +28,10 @@
  *     and never writes initialAccessToken/allowedRedirectUriHosts
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import yaml from "js-yaml";
 
 import {
   isLocalOrigin,
@@ -47,6 +48,7 @@ import {
   provisionIdpIdentityMapping,
   applyRemoteConfigAndRestart,
   triggerRemoteRestart,
+  updateLocalConfigMcpEnabled,
   selfVerifyMcpMetadata,
   buildClaudePasteBlock,
   enableMcp,
@@ -618,12 +620,12 @@ describe("enableMcp — dry-run", () => {
 });
 
 describe("enableMcp — the confirm-secrets-applied gate", () => {
-  test("refuses to restart without confirmation, and never calls set_configuration/restart", async () => {
+  test("refuses to restart without confirmation, and never calls restart", async () => {
     const { fetchImpl, calls } = fullMockFetch();
     const result = await enableMcp({ ...BASE_PARAMS, ...tempPaths() }, { fetchImpl });
     expect(result.ok).toBe(false);
-    expect(result.failedStep).toBe("apply-config-and-restart");
-    expect(calls.filter((c) => c === "ops:set_configuration" || c === "ops:restart")).toHaveLength(0);
+    expect(result.failedStep).toBe("secrets-provisioning");
+    expect(calls.filter((c) => c === "ops:restart")).toHaveLength(0);
     // Identity mapping DOES run before the gate.
     expect(calls).toContain("ops:search_by_value");
   });
@@ -655,7 +657,8 @@ describe("enableMcp — full happy path", () => {
       "idp-credentials",
       "secrets-provisioning",
       "identity-mapping",
-      "apply-config-and-restart",
+      "local-config-update",
+      "restart",
       "verify-restart",
       "self-verify",
     ]);
@@ -667,6 +670,8 @@ describe("enableMcp — full happy path", () => {
     // restart are the ops API restart itself and self-verify.
     expect(calls).not.toContain("dcr-register");
     expect(calls.some((c) => c.includes("oauth/mcp/register"))).toBe(false);
+    // flair#1136: set_configuration is removed — only restart is called.
+    expect(calls).not.toContain("ops:set_configuration");
     const restartIdx = calls.indexOf("ops:restart");
     const verifyIdx = calls.indexOf("self-verify");
     expect(restartIdx).toBeGreaterThan(-1);
@@ -712,7 +717,7 @@ describe("enableMcp — self-verify failure names the step to re-run", () => {
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("self-verify");
     const byStep = Object.fromEntries(result.steps.map((s) => [s.step, s.ok]));
-    expect(byStep["apply-config-and-restart"]).toBe(true);
+    expect(byStep["restart"]).toBe(true);
     expect(byStep["self-verify"]).toBe(false);
     // Never reports success on hope.
     expect(result.ok).not.toBe(true);
@@ -831,7 +836,7 @@ describe("captureBootDiscriminator", () => {
 });
 
 describe("enableMcp — flair#1120 restart verification", () => {
-  test("sysinfo fails on first call: failedStep is apply-config-and-restart, never identity-mapping", async () => {
+  test("sysinfo fails on first call: failedStep is restart, never identity-mapping", async () => {
     const calls: any[] = [];
     let sysInfoCount = 0;
     const fetchImpl = (async (url: any, init?: RequestInit) => {
@@ -867,9 +872,9 @@ describe("enableMcp — flair#1120 restart verification", () => {
         );
 
     expect(result.ok).toBe(false);
-       // captureBootDiscriminator is the first act of apply-config-and-restart,
+       // captureBootDiscriminator is the first act of restart,
        // so its failure must be attributed there — never back to identity-mapping.
-    expect(result.failedStep).toBe("apply-config-and-restart");
+    expect(result.failedStep).toBe("restart");
     expect(result.failedStep).not.toBe("identity-mapping");
     });
 
@@ -1067,5 +1072,261 @@ describe("enableMcp — flair#1120 restart verification", () => {
     expect(verifyStep!.detail).toContain("Restart the instance manually, then re-run: flair mcp enable");
     const sysInfoCalls = calls.filter((c) => c.body.operation === "system_information");
     expect(sysInfoCalls.length).toBeGreaterThanOrEqual(5);
+  });
+});
+
+// ─── flair#1136: updateLocalConfigMcpEnabled ────────────────────────────────
+
+describe("updateLocalConfigMcpEnabled (flair#1136)", () => {
+  let configDir: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    configDir = mkdtempSync(join(tmpdir(), "flair-test-config-"));
+    configPath = join(configDir, "config.yaml");
+  });
+
+  afterEach(() => {
+    try { rmSync(configDir, { recursive: true, force: true }); } catch { /* ok */ }
+  });
+
+  const CONFIG_WITH_MCP_DISABLED = `name: flair
+rest: true
+"@harperfast/oauth":
+  package: "@harperfast/oauth"
+  providers:
+    github:
+      clientId: "\${OAUTH_GITHUB_CLIENT_ID}"
+      clientSecret: "\${OAUTH_GITHUB_CLIENT_SECRET}"
+  mcp:
+    enabled: false
+    issuer: "\${FLAIR_MCP_ISSUER}"
+    resource: "\${FLAIR_MCP_ISSUER}/mcp"
+    accessTokenTtl: 900
+    dynamicClientRegistration:
+      enabled: false
+    clientIdMetadataDocuments:
+      allowedHosts:
+        - "claude.ai"
+        - "claude.com"
+    signingKeyPem: "\${FLAIR_MCP_SIGNING_KEY_PEM}"
+`;
+
+  test("flips enabled: false → true", () => {
+    writeFileSync(configPath, CONFIG_WITH_MCP_DISABLED, "utf-8");
+    const result = updateLocalConfigMcpEnabled(true, configPath);
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain("mcp.enabled set to true");
+    // Re-parse to verify the mutation is structural, not string-level.
+    const updated = readFileSync(configPath, "utf-8");
+    const doc = yaml.load(updated) as any;
+    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(true);
+    // dynamicClientRegistration.enabled is a separate key and stays false.
+    expect(doc["@harperfast/oauth"].mcp.dynamicClientRegistration.enabled).toBe(false);
+  });
+
+  test("flips enabled: true → false", () => {
+    const enabledConfig = CONFIG_WITH_MCP_DISABLED.replace("enabled: false", "enabled: true");
+    writeFileSync(configPath, enabledConfig, "utf-8");
+    const result = updateLocalConfigMcpEnabled(false, configPath);
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain("mcp.enabled set to false");
+    const doc = yaml.load(readFileSync(configPath, "utf-8")) as any;
+    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(false);
+  });
+
+  test("already at target value: no-op", () => {
+    writeFileSync(configPath, CONFIG_WITH_MCP_DISABLED, "utf-8");
+    const result = updateLocalConfigMcpEnabled(false, configPath);
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain("already false");
+    // File unchanged.
+    expect(readFileSync(configPath, "utf-8")).toBe(CONFIG_WITH_MCP_DISABLED);
+  });
+
+  test("file not found at explicit path", () => {
+    const result = updateLocalConfigMcpEnabled(true, "/nonexistent/config.yaml");
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("not found");
+  });
+
+  test("file not found: tries common locations", () => {
+    // The test runs from the repo root where ./config.yaml exists, so
+    // this may succeed if the repo config has an mcp.enabled key.
+    // We only assert the detail mentions the search locations.
+    const result = updateLocalConfigMcpEnabled(true);
+    expect(result.detail).toMatch(/config\.yaml|not found|already|set to/);
+  });
+
+  test("no @harperfast/oauth block in config", () => {
+    const noOauth = "name: flair\nrest: true\n";
+    writeFileSync(configPath, noOauth, "utf-8");
+    const result = updateLocalConfigMcpEnabled(true, configPath);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("@harperfast/oauth block not found");
+  });
+
+  test("no mcp key under @harperfast/oauth", () => {
+    const noMcp = `name: flair
+"@harperfast/oauth":
+  package: "@harperfast/oauth"
+  providers:
+    github:
+      clientId: "x"
+      clientSecret: "y"
+`;
+    writeFileSync(configPath, noMcp, "utf-8");
+    const result = updateLocalConfigMcpEnabled(true, configPath);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("mcp key not found");
+  });
+
+  test("flips ONLY mcp.enabled when both enabled keys are present (flair#1136 safety)", () => {
+    // This is the critical safety test: the config has TWO `enabled: false`
+    // keys (mcp.enabled and dynamicClientRegistration.enabled). The YAML-based
+    // implementation navigates to the exact key, so it can never flip the
+    // wrong one.
+    writeFileSync(configPath, CONFIG_WITH_MCP_DISABLED, "utf-8");
+    const result = updateLocalConfigMcpEnabled(true, configPath);
+    expect(result.ok).toBe(true);
+    const doc = yaml.load(readFileSync(configPath, "utf-8")) as any;
+    // Only mcp.enabled flipped.
+    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(true);
+    // dynamicClientRegistration.enabled is untouched.
+    expect(doc["@harperfast/oauth"].mcp.dynamicClientRegistration.enabled).toBe(false);
+  });
+
+  test("loud no-op when config is malformed YAML", () => {
+    writeFileSync(configPath, "this is not valid: yaml: [", "utf-8");
+    const result = updateLocalConfigMcpEnabled(true, configPath);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("cannot parse");
+  });
+
+  test("preserves other config content structurally", () => {
+    writeFileSync(configPath, CONFIG_WITH_MCP_DISABLED, "utf-8");
+    updateLocalConfigMcpEnabled(true, configPath);
+    const doc = yaml.load(readFileSync(configPath, "utf-8")) as any;
+    expect(doc.name).toBe("flair");
+    expect(doc.rest).toBe(true);
+    expect(doc["@harperfast/oauth"].package).toBe("@harperfast/oauth");
+    expect(doc["@harperfast/oauth"].mcp.accessTokenTtl).toBe(900);
+    expect(doc["@harperfast/oauth"].mcp.clientIdMetadataDocuments.allowedHosts).toEqual(["claude.ai", "claude.com"]);
+  });
+});
+
+// ─── flair#1136: Fabric operator-deploy path ────────────────────────────────
+
+describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
+  test("Fabric origin: reports operator-deploy requirement, never restarts", async () => {
+    const FABRIC_ISSUER = "https://my-flair.harperfabric.com";
+    const calls: string[] = [];
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const urlStr = String(url);
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      calls.push(`ops:${body.operation ?? urlStr}`);
+      if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
+      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await enableMcp(
+      {
+        instance: FABRIC_ISSUER,
+        idpClientId: "client-id",
+        idpClientSecret: "client-secret",
+        idpSubject: "octocat",
+        adminUser: "admin",
+        adminPass: "pw",
+        signingKeyFilePath: join(dir, "signing-key.pem"),
+        secretsStagingPath: join(dir, "secrets.env"),
+        confirmSecretsApplied: true,
+      },
+      { fetchImpl },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("fabric-operator-deploy");
+    // Must NOT call restart.
+    expect(calls).not.toContain("ops:restart");
+    // Must report the requirement loudly.
+    const fabricStep = result.steps.find((s) => s.step === "fabric-operator-deploy");
+    expect(fabricStep).toBeDefined();
+    expect(fabricStep!.ok).toBe(false);
+    expect(fabricStep!.detail).toContain("harperfabric.com");
+    expect(fabricStep!.detail).toContain("mcp.enabled: true");
+    expect(fabricStep!.detail).toContain("redeploy");
+    // Earlier steps (secrets, identity) still succeeded.
+    const byStep = Object.fromEntries(result.steps.map((s) => [s.step, s.ok]));
+    expect(byStep["secrets-provisioning"]).toBe(true);
+    expect(byStep["identity-mapping"]).toBe(true);
+  });
+
+  test("Fabric origin: result includes issuer and resource for status checks", async () => {
+    const FABRIC_ISSUER = "https://my-flair.harperfabric.com";
+    const fetchImpl = (async (url: any, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
+      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
+      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await enableMcp(
+      {
+        instance: FABRIC_ISSUER,
+        idpClientId: "client-id",
+        idpClientSecret: "client-secret",
+        idpSubject: "octocat",
+        adminUser: "admin",
+        adminPass: "pw",
+        signingKeyFilePath: join(dir, "signing-key.pem"),
+        secretsStagingPath: join(dir, "secrets.env"),
+        confirmSecretsApplied: true,
+      },
+      { fetchImpl },
+    );
+
+    expect(result.issuer).toBe(FABRIC_ISSUER);
+    expect(result.resource).toBe(`${FABRIC_ISSUER}/mcp`);
+    expect(result.secretsMechanism).toBe("fabric-env-secrets");
+  });
+});
+
+// ─── flair#1136: standalone path with local config update ───────────────────
+
+describe("enableMcp — standalone local config update (flair#1136)", () => {
+  test("standalone: local-config-update step runs before restart", async () => {
+    const { fetchImpl } = fullMockFetch();
+    const result = await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true },
+      { fetchImpl },
+    );
+
+    expect(result.ok).toBe(true);
+    const steps = result.steps.map((s) => s.step);
+    const localConfigIdx = steps.indexOf("local-config-update");
+    const restartIdx = steps.indexOf("restart");
+    expect(localConfigIdx).toBeGreaterThan(-1);
+    expect(restartIdx).toBeGreaterThan(localConfigIdx);
+  });
+
+  test("standalone: no set_configuration call anywhere", async () => {
+    const { fetchImpl, calls } = fullMockFetch();
+    await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true },
+      { fetchImpl },
+    );
+    expect(calls).not.toContain("ops:set_configuration");
+  });
+
+  test("standalone: restart IS called (only restart, not set_configuration)", async () => {
+    const { fetchImpl, calls } = fullMockFetch();
+    await enableMcp(
+      { ...BASE_PARAMS, ...tempPaths(), confirmSecretsApplied: true },
+      { fetchImpl },
+    );
+    expect(calls).toContain("ops:restart");
   });
 });

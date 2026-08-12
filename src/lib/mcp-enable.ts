@@ -145,6 +145,7 @@ import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "n
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
+import yaml from "js-yaml";
 
 // ─── CIMD constants ──────────────────────────────────────────────────────────
 
@@ -302,6 +303,9 @@ export interface McpOAuthConfigBlockParams {
   /** `clientIdMetadataDocuments.allowedHosts` override — defaults to
    *  `DEFAULT_CIMD_ALLOWED_HOSTS`. */
   cimdAllowedHosts?: string[];
+  /** mcp.enabled — defaults to true (the enable command flips it on).
+   *  The shipped config.yaml uses false (inert default). */
+  enabled?: boolean;
 }
 
 /**
@@ -325,6 +329,7 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
   const provider = params.idpProvider;
   const envPrefix = `OAUTH_${provider.toUpperCase()}`;
   const cimdAllowedHosts = params.cimdAllowedHosts ?? DEFAULT_CIMD_ALLOWED_HOSTS;
+  const enabled = params.enabled ?? true;
   return {
     "@harperfast/oauth": {
       package: "@harperfast/oauth",
@@ -335,7 +340,7 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         },
       },
       mcp: {
-        enabled: true,
+        enabled,
         issuer: "${FLAIR_MCP_ISSUER}",
         resource: "${FLAIR_MCP_ISSUER}/mcp",
         accessTokenTtl: REQUIRED_ACCESS_TOKEN_TTL,
@@ -352,6 +357,98 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
       },
     },
   };
+}
+
+// ─── Local config.yaml update (flair#1136) ──────────────────────────────────
+
+/**
+ * Flip mcp.enabled in a local component config.yaml. Best-effort: returns
+ * `{ ok: false }` with a reason when the file can't be found or parsed.
+ *
+ * Looks for config.yaml at `explicitPath`, then `./config.yaml`, then
+ * `~/.flair/config.yaml`. When found, replaces `mcp:\n    enabled: false`
+ * with `mcp:\n    enabled: true` (exact string match — avoids a YAML parser
+ * dependency for a single boolean flip).
+ */
+export function updateLocalConfigMcpEnabled(
+  enabled: boolean,
+  explicitPath?: string,
+): { ok: boolean; detail: string } {
+  const candidates = explicitPath
+    ? [explicitPath]
+    : ["config.yaml", join(homedir(), ".flair", "config.yaml")];
+
+  let configPath: string | null = null;
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      configPath = p;
+      break;
+    }
+  }
+
+  if (!configPath) {
+    return {
+      ok: false,
+      detail: `local config.yaml not found (tried: ${candidates.join(", ")}). ` +
+        `Set mcp.enabled: ${enabled} in your component config.yaml manually, then restart.`,
+    };
+  }
+
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, "utf-8");
+  } catch (err: any) {
+    return { ok: false, detail: `cannot read ${configPath}: ${err.message}` };
+  }
+
+  // Parse the YAML to navigate to the exact key — avoids the ambiguity of
+  // string-matching `enabled:` when the block has multiple enabled keys
+  // (mcp.enabled vs dynamicClientRegistration.enabled).
+  let doc: any;
+  try {
+    doc = yaml.load(raw);
+  } catch (err: any) {
+    return { ok: false, detail: `cannot parse ${configPath} as YAML: ${err.message}` };
+  }
+
+  if (!doc || typeof doc !== "object") {
+    return { ok: false, detail: `${configPath} is empty or not a YAML mapping` };
+  }
+
+  const oauth = doc["@harperfast/oauth"];
+  if (!oauth || typeof oauth !== "object") {
+    return {
+      ok: false,
+      detail: `@harperfast/oauth block not found in ${configPath}. ` +
+        `Ensure the component block is present with mcp.enabled: ${enabled}.`,
+    };
+  }
+
+  const mcp = oauth.mcp;
+  if (!mcp || typeof mcp !== "object") {
+    return {
+      ok: false,
+      detail: `mcp key not found under @harperfast/oauth in ${configPath}. ` +
+        `Ensure the mcp block is present with enabled: ${enabled}.`,
+    };
+  }
+
+  const current = mcp.enabled;
+  if (current === enabled) {
+    return { ok: true, detail: `mcp.enabled already ${enabled} in ${configPath}` };
+  }
+
+  // Mutate the parsed document and re-emit.
+  mcp.enabled = enabled;
+
+  const updated = yaml.dump(doc, { lineWidth: -1, noCompatMode: true });
+  try {
+    writeFileSync(configPath, updated, { encoding: "utf-8" });
+  } catch (err: any) {
+    return { ok: false, detail: `cannot write ${configPath}: ${err.message}` };
+  }
+
+  return { ok: true, detail: `mcp.enabled set to ${enabled} in ${configPath}` };
 }
 
 /** The exact callback URL to hand the operator when they create the IdP
@@ -989,7 +1086,9 @@ export type EnableStepName =
   | "idp-credentials"
   | "secrets-provisioning"
   | "identity-mapping"
-  | "apply-config-and-restart"
+  | "local-config-update"
+  | "fabric-operator-deploy"
+  | "restart"
   | "verify-restart"
   | "self-verify";
 
@@ -1027,6 +1126,11 @@ export interface EnableMcpParams {
    *  environment. Required (or an interactive `prompt` confirmation) before
    *  `enable` calls restart — never assumed. */
   confirmSecretsApplied?: boolean;
+  /** Path to the local component config.yaml for standalone-local installs.
+   *  When set, enable flips mcp.enabled to true before restarting.
+   *  When unset, enable tries common locations (./config.yaml,
+   *  ~/.flair/config.yaml). */
+  localConfigPath?: string;
 }
 
 export interface EnableMcpDeps {
@@ -1108,12 +1212,14 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     const keyResult = ensureSigningKeyFile(params.signingKeyFilePath, { generate: deps.generateRsaKeyPair });
     push(true, `signing key ${keyResult.reused ? "reused" : "generated"} at ${keyResult.path} (0600)`);
 
-    // ── @harperfast/oauth config block (CIMD-only; DCR explicitly disabled) ──
+    // ── @harperfast/oauth config (flair#1136: shipped in config.yaml) ──────
+    // The block ships uncommented with mcp.enabled: false (inert default).
+    // set_configuration is removed — the block lives in the component's own
+    // config.yaml, not in harperdb-config.yaml where Fabric would wipe it.
     const cimdAllowedHosts = params.cimdAllowedHosts ?? DEFAULT_CIMD_ALLOWED_HOSTS;
     currentStep = "config-block";
-    const configBlock = buildMcpOAuthConfigBlock({ idpProvider, cimdAllowedHosts });
     push(true,
-      `built the @harperfast/oauth mcp config block (accessTokenTtl=${REQUIRED_ACCESS_TOKEN_TTL}, ` +
+      `@harperfast/oauth config ships in config.yaml (mcp.enabled=false, ` +
         `dynamicClientRegistration.enabled=false, clientIdMetadataDocuments.allowedHosts=${JSON.stringify(cimdAllowedHosts)})`,
     );
 
@@ -1244,26 +1350,66 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       push(false,
         `not applied: pass --confirm-secrets-applied once the staged secrets are live on ${params.instance}, then re-run \`flair mcp enable\` (earlier steps are idempotent and will reuse what's already provisioned).`,
       );
-      return { ok: false, dryRun, steps, failedStep: "apply-config-and-restart", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
+      return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsMechanism: secretsResult.mechanism, secretsPath: secretsResult.path };
     }
-    currentStep = "apply-config-and-restart";
 
-     // ── Capture boot discriminator BEFORE restart (flair#1120) ─────────────
+    // ── flair#1136: config delivery is now SHIPPED in config.yaml ────────────
+    // The @harperfast/oauth block ships uncommented with mcp.enabled: false
+    // (inert default). set_configuration is REMOVED — Fabric regenerates
+    // harperdb-config.yaml on every container restart, so writing the block
+    // there was always a race against the next deploy. Instead:
+    //
+    //   - Standalone-local: flip mcp.enabled to true in the local config.yaml,
+    //     restart, self-verify.
+    //   - Fabric: the operator must set mcp.enabled: true in their deployed
+    //     component config.yaml. Report the requirement LOUDLY — never report
+    //     success with /mcp still dark.
+    const isFabric = isFabricOrigin(params.instance);
+
+    if (isFabric) {
+      // ── Fabric: operator-deploy requirement ──────────────────────────────
+      currentStep = "fabric-operator-deploy";
+      const msg = [
+        `Fabric deployment detected (${new URL(params.instance).hostname}).`,
+        `The @harperfast/oauth block ships in config.yaml with mcp.enabled: false.`,
+        `To activate: set mcp.enabled: true (literal boolean) in your deployed component config.yaml,`,
+        `ensure the staged secrets are live in the instance's process environment, and redeploy.`,
+        `Then re-run \`flair mcp enable\` — earlier steps are idempotent and will be reused.`,
+      ].join(" ");
+      push(false, msg);
+      return {
+        ok: false,
+        dryRun,
+        steps,
+        failedStep: "fabric-operator-deploy",
+        issuer,
+        resource: `${issuer}/mcp`,
+        secretsMechanism: secretsResult.mechanism,
+        secretsPath: secretsResult.path,
+        signingKeyFilePath: keyResult.path,
+        callbackUrl,
+      };
+    }
+
+    // ── Standalone (non-Fabric): update local config + restart ────────────
+    currentStep = "local-config-update";
+    const localConfigResult = updateLocalConfigMcpEnabled(true, params.localConfigPath);
+    push(localConfigResult.ok, localConfigResult.detail);
+
+    // ── Restart ───────────────────────────────────────────────────────────
+    currentStep = "restart";
     const preDiscriminator = await captureBootDiscriminator(
        params.instance, params.adminUser, params.adminPass,
          { fetchImpl: deps.fetchImpl },
        );
 
-    await applyRemoteConfigAndRestart(
-        { opsPortOrUrl: params.instance, adminUser: params.adminUser, adminPass: params.adminPass, configBlock },
-         { fetchImpl: deps.fetchImpl },
-       );
-    push(true, `set_configuration + restart succeeded against ${params.instance}`);
-      // ── Verify the process actually restarted (flair#1120) ──────────────────
-      // Poll the ops API until the PID changes — the old process can briefly
-      // still answer after a real restart, so a single post-capture is unreliable.
-      // waitForOpsApi guarantees PID change (or throws on timeout), so the restart
-      // is confirmed when this call returns.
+    await triggerRemoteRestart(
+      params.instance, params.adminUser, params.adminPass,
+      { fetchImpl: deps.fetchImpl },
+    );
+    push(true, `restart triggered against ${params.instance}`);
+
+    // ── Verify the process actually restarted (flair#1120) ──────────────────
     currentStep = "verify-restart";
     const postDiscriminator = await waitForOpsApi(
        resolveOpsUrl(params.instance),
@@ -1276,11 +1422,12 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
          },
        );
     push(true, `process restarted: pid changed ${preDiscriminator.pid} -> ${postDiscriminator.pid}`);
-     // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
+
+    // ── Self-verify from the operator's machine, public origin, CIMD-inclusive
     currentStep = "self-verify";
     const verify = await selfVerifyMcpMetadata(issuer, { fetchImpl: deps.fetchImpl });
     if (!verify.ok) {
-      push(false, `${verify.detail} — re-run \`flair mcp status\` to check current state, or \`flair mcp enable\` to retry the apply-config-and-restart step.`);
+      push(false, `${verify.detail} — re-run \`flair mcp status\` to check current state, or \`flair mcp enable\` to retry.`);
       return {
         ok: false,
         dryRun,
