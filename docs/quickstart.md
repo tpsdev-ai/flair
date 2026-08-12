@@ -154,6 +154,8 @@ flair search --agent local "native addon loading in sandboxed runtimes"
 
 You searched for a concept, not the keywords. The line under each hit is its creation date, durability tier, and rank score.
 
+> **When stdout is not a terminal** — piped to another command, captured in a script, or run in CI — the same `flair search` command emits a JSON array instead of the formatted prose above. Each hit is an object with `id`, `text`, `createdAt`, `durability`, and `_score` fields. Add `--explain` to include an `_explain` ranking breakdown on each hit. Use `flair search --json` to force JSON output even in a terminal, or `flair memory search` for the raw JSON form in all contexts.
+
 > The percentage is a **rank-fusion score, not a similarity**. It is normalized so the top result is always near 100%. Read it as ordering within these results, never as confidence that the match is good.
 
 Add `--explain` to see the ranking inputs per hit — the raw score, the composite score under `--scoring composite`, and the record's durability, age and usage count. When output is JSON (`--json`, or any time stdout is not a terminal) the same breakdown arrives as an `_explain` object on each hit, so scripts get it too. Use `--limit`, `--tag`, `--since 7d` to narrow the search. `flair memory search` runs the same query but always prints raw JSON — use it when piping to a script.
