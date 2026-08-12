@@ -1,119 +1,29 @@
 name: flair
 rest: true
-
-## Port is configured via CLI (flair init --port) or HTTP_PORT env var.
-## Omitted here to avoid conflicts with different deployment scenarios.
-# http:
-#   port: 19926
-
-# Harper does not read a component's `.env` implicitly — it only loads env
-# files a component ASKS for, via this plugin. Without this block a `.env`
-# sitting next to config.yaml is inert: the file is present and its values
-# never reach `process.env`. That is exactly what a deployed instance hit —
-# `FLAIR_PUBLIC_URL` was set in the deployed component's `.env` and OAuth
-# discovery kept advertising a loopback issuer (flair#1005, #1000).
-#
-# MUST STAY FIRST. Config keys are iterated in file order by Harper's
-# component loader, and each plugin's initial entry load is awaited before
-# the next key is processed — so declaring this above `jsResource` is what
-# guarantees `process.env` is populated before `dist/resources/*.js` are
-# imported. Most consumers read `process.env` per request and would not care
-# (resources/OAuth.ts, resources/AdminInstance.ts, resources/XAA.ts,
-# resources/a2a-url.ts), but `resources/mcp-oauth.ts` decides at MODULE LOAD
-# whether to mount `/mcp`; move this below `jsResource` and that decision is
-# made against an env that has not been loaded yet.
-#
-# No `.env` is required, which is the case for essentially every local
-# install: when the glob matches nothing the plugin never fires and emits
-# nothing. Measured — a boot log with this block and no `.env` differs from
-# one without the block only in the PID and in non-deterministic table-init
-# ordering. (A MALFORMED declaration is loud, not silent: a pattern
-# containing '..' produced both an `Ignoring invalid loadEnv files pattern`
-# warning and a `Could not load component 'loadEnv'` error, which is the
-# positive control for that silence.)
-#
-# Application variables only. Harper composes its OWN configuration before
-# component `.env` files load, so Harper-level settings cannot be set this
-# way; `HARPER_CONFIG` / `HARPER_DEFAULT_CONFIG` / `HARPER_SET_CONFIG` are
-# refused at the injection point and warned about (harper#1513). Those
-# belong in the process environment or harper-config.yaml.
 loadEnv:
-  files: '.env'
-
+  files: .env
 graphqlSchema:
   files: schemas/*.graphql
-
 jsResource:
   files: dist/resources/*.js
-
-# Phase 1 (flair#504): embeddings now run through Harper's native
-# models.embed() facade, backed by harper-fabric-embeddings registered as the
-# `embedding` backend. That registration is NOT configured here, and (as of
-# flair#694) is no longer config-driven anywhere: a `models:` block in THIS
-# file would silently never be read (this application always loads with
-# `isRoot: false` — components/componentLoader.ts gates `bootstrapModels()`
-# on `isRoot`), and the earlier fix for that — reasserting the block into the
-# Harper INSTANCE-ROOT config via the HARPER_CONFIG env var on every spawn —
-# turned out to PERSIST that block into harper-config.yaml, which an
-# older/downgraded build's boot (never having set the env var) would tear
-# down to an invalid empty shell and refuse to boot against (flair#694; see
-# flair#695 for the invariant this violated). The registration now happens
-# in-process instead: `dist/resources/embeddings-boot.js` (built from
-# resources/embeddings-boot.ts, loaded by the `jsResource` glob below like
-# every other file under resources/) calls harper-fabric-embeddings'
-# `register()` factory directly on every boot — nothing is ever written to
-# the config file, so there is nothing for a downgrade to trip over. This
-# also means a `package:`-style sub-component entry
-# (`'harper-fabric-embeddings': { package: ... }`, which used to sit here and
-# drove `handleApplication`) still must not be reintroduced alongside it —
-# that hook populates a SEPARATE raw-API engine, not `models.embed()`, and
-# running both would double-init (two separate EmbeddingEngine instances:
-# one unused, one backing models.embed).
-
 authentication:
-  # Default secure (flair#654): a credential-less loopback request to the
-  # Harper ops API (:9925) is no longer auto-authorized as super_user. Local
-  # admin operations now require a real credential — ~/.flair/admin-pass
-  # (written by `flair init`), --admin-pass, or FLAIR_ADMIN_PASS. flair's own
-  # application-layer resources were already immune to this forgery (#655's
-  # credential-evidence gate); this closes the remaining gap below it, in the
-  # raw Harper ops API itself. Set true only for local development, at your
-  # own risk.
   authorizeLocal: false
   enableSessions: true
-
-# @harperfast/oauth — authorization server component (flair#1136).
-# Shipped inert by default: mcp.enabled is a literal `false` (never an env var —
-# the plugin's expandEnvVar returns the literal "${...}" string for unset vars,
-# which coerceConfigBoolean treats as truthy, so an interpolated default would
-# crash-boot every install with the env unset). When disabled the plugin is a
-# genuine no-op: issuer is never validated, /mcp endpoints 404, well-known falls
-# through, withMCPAuth denies.
-#
-# To activate: set mcp.enabled: true (literal) in your deployed config.yaml,
-# set FLAIR_MCP_ISSUER + FLAIR_MCP_SIGNING_KEY_PEM + OAUTH_<PROVIDER>_CLIENT_ID/SECRET
-# in the process environment, and restart. Or run `flair mcp enable` which
-# automates the full checklist for a standalone-local install.
-#
-# dynamicClientRegistration is explicitly disabled (fail-closed) — CIMD is the
-# only supported client-registration path. The providers block carries ${ENV}
-# placeholders for the IdP OAuth app credentials; they are inert while
-# mcp.enabled is false.
-"@harperfast/oauth":
-  package: "@harperfast/oauth"
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
   providers:
     github:
-      clientId: "${OAUTH_GITHUB_CLIENT_ID}"
-      clientSecret: "${OAUTH_GITHUB_CLIENT_SECRET}"
+      clientId: ${OAUTH_GITHUB_CLIENT_ID}
+      clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
   mcp:
     enabled: true
-    issuer: "${FLAIR_MCP_ISSUER}"
-    resource: "${FLAIR_MCP_ISSUER}/mcp"
+    issuer: ${FLAIR_MCP_ISSUER}
+    resource: ${FLAIR_MCP_ISSUER}/mcp
     accessTokenTtl: 900
     dynamicClientRegistration:
-      enabled: true
+      enabled: false
     clientIdMetadataDocuments:
       allowedHosts:
-        - "claude.ai"
-        - "claude.com"
-    signingKeyPem: "${FLAIR_MCP_SIGNING_KEY_PEM}"
+        - claude.ai
+        - claude.com
+    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}

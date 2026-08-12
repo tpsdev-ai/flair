@@ -1,23 +1,21 @@
 /**
- * flair#1136: Boot-safety integration tests for the shipped @harperfast/oauth
- * config block.
+ * flair#1136: Boot-safety and mutation-proof integration tests for the shipped
+ * @harperfast/oauth config block.
  *
- * These tests boot an ephemeral Harper instance against the shipped
- * config.yaml and verify:
- *   1. BOOT-SAFETY: Harper comes up clean with mcp.enabled: false and no
- *      FLAIR_MCP_* env vars set — no crash, no /mcp surface, no /oauth surface.
- *   2. MUTATION-PROVE: (requires @harperfast/oauth installed) flipping
- *      mcp.enabled to true with env unset must crash/throw.
- *   3. ENABLED: (requires @harperfast/oauth installed) mcp.enabled: true +
- *      issuer/keys env → /mcp mounts, CIMD metadata advertises.
- *
- * Tests 2-3 are gated behind a `describe.skip` — they need the
- * @harperfast/oauth npm package installed in node_modules, which is not
- * part of the flair dev dependency tree.
+ * These tests boot ephemeral Harper instances against mutated configs and
+ * verify:
+ *   1. BOOT-SAFETY: shipped config (mcp.enabled: false, no env) boots clean.
+ *   2. MUTATION-PROVE (literal true): mcp.enabled: true + env unset → CRASH.
+ *      This proves the boot-safety test CAN fire — it catches the crash.
+ *   3. MUTATION-PROVE (${ENV} trap): mcp.enabled: ${FLAIR_MCP_OAUTH} + env
+ *      unset → CRASH. Proves that ${ENV} interpolation of unset vars produces
+ *      a truthy string, which is why the shipped default MUST be literal false.
+ *   4. ENABLED: mcp.enabled: true + env vars set → /mcp mounts, CIMD
+ *      metadata advertises.
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
@@ -59,43 +57,121 @@ describe("flair#1136 boot-safety: shipped config with mcp.enabled: false", () =>
   );
 });
 
-// ─── MUTATION-PROVE: enabled:true + no env → crash ──────────────────────────
-//
-// These tests require @harperfast/oauth to be installed. They are skipped by
-// default and intended to be run in an environment where the plugin is present
-// (e.g. a full integration test suite with all dependencies).
+// ─── MUTATION-PROVE: enabled:true + no env → CRASH ─────────────────────────
 
-describe.skip("flair#1136 mutation-prove: enabled:true with env unset", () => {
+describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
   test(
-    "mcp.enabled: true with FLAIR_MCP_* env unset must crash Harper boot",
+    "literal true: Harper boots DEGRADED when mcp.enabled is true but FLAIR_MCP_* env is unset",
     async () => {
-      // Create a temp copy of the repo with a mutated config.yaml.
-      const workDir = mkdtempSync(join(tmpdir(), "flair-mutation-prove-"));
+      const workDir = mkdtempSync(join(tmpdir(), "flair-mutation-prove-literal-"));
       const configPath = join(workDir, "config.yaml");
 
-      // Read the shipped config and flip mcp.enabled to true.
+      // Symlink node_modules and dist so Harper can find @harperfast/oauth
+      // and the JS resources (mcp-oauth.ts, etc.).
+      symlinkSync(join(REPO_ROOT, "node_modules"), join(workDir, "node_modules"));
+      symlinkSync(join(REPO_ROOT, "dist"), join(workDir, "dist"));
+
+      // Read the shipped config and flip mcp.enabled to literal true.
       const shipped = readFileSync(join(REPO_ROOT, "config.yaml"), "utf-8");
       const mutated = shipped.replace("enabled: false", "enabled: true");
       writeFileSync(configPath, mutated, "utf-8");
 
-      // Harper should fail to boot because @harperfast/oauth will try to
-      // initialize with ${FLAIR_MCP_ISSUER} as a literal string (env unset).
-      await expect(
-        startHarper({ cwd: workDir, harperBinDir: REPO_ROOT }),
-      ).rejects.toThrow();
+      // Harper boots but the plugin fails to load because the issuer
+      // ("${FLAIR_MCP_ISSUER}" literal, env unset) is not a valid URL.
+      // Harper catches the error and continues in a degraded state.
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+      });
+      instances.push(harper);
+
+      // PROOF: the health endpoint is degraded (500, not 200).
+      // The boot-safety test checks for 200 — this proves it CAN fire.
+      const healthRes = await fetch(`${harper.httpURL}/health`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(healthRes.status).toBe(500);
+
+      // /mcp surfaces the plugin load error.
+      const mcpRes = await fetch(`${harper.httpURL}/mcp`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(mcpRes.status).toBe(500);
+      const mcpBody = await mcpRes.text();
+      expect(mcpBody).toContain("mcp.issuer must be an absolute http(s) origin");
+      expect(mcpBody).toContain("${FLAIR_MCP_ISSUER}");
+
+      // Clean up the temp dir.
+      try { rmSync(workDir, { recursive: true, force: true }); } catch { /* ok */ }
+    },
+    120_000,
+  );
+
+  test(
+    "${ENV} trap: Harper boots DEGRADED when mcp.enabled is ${FLAIR_MCP_OAUTH} and env is unset",
+    async () => {
+      const workDir = mkdtempSync(join(tmpdir(), "flair-mutation-prove-env-"));
+      const configPath = join(workDir, "config.yaml");
+
+      // Symlink node_modules and dist so Harper can find @harperfast/oauth
+      // and the JS resources (mcp-oauth.ts, etc.).
+      symlinkSync(join(REPO_ROOT, "node_modules"), join(workDir, "node_modules"));
+      symlinkSync(join(REPO_ROOT, "dist"), join(workDir, "dist"));
+
+      // Read the shipped config and replace literal `false` with
+      // `${FLAIR_MCP_OAUTH}` — simulating what would happen if we shipped
+      // with env-var interpolation on the enabled flag.
+      const shipped = readFileSync(join(REPO_ROOT, "config.yaml"), "utf-8");
+      const mutated = shipped.replace("enabled: false", 'enabled: "${FLAIR_MCP_OAUTH}"');
+      writeFileSync(configPath, mutated, "utf-8");
+
+      // With FLAIR_MCP_OAUTH unset, expandEnvVar returns the literal
+      // "${FLAIR_MCP_OAUTH}" string. coerceConfigBoolean returns undefined
+      // for it, so the original truthy string is preserved. The plugin then
+      // enters issuer validation and fails on the unset issuer URL.
+      // This is WHY the shipped default MUST be literal false — ${ENV}
+      // interpolation of unset vars produces a truthy string that enables
+      // the crash path.
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+      });
+      instances.push(harper);
+
+      // PROOF: degraded — health is 500, not 200.
+      const healthRes = await fetch(`${harper.httpURL}/health`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(healthRes.status).toBe(500);
+
+      // /mcp surfaces the same issuer validation error.
+      const mcpRes = await fetch(`${harper.httpURL}/mcp`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      expect(mcpRes.status).toBe(500);
+      const mcpBody = await mcpRes.text();
+      expect(mcpBody).toContain("mcp.issuer must be an absolute http(s) origin");
+
+      // Clean up the temp dir.
+      try { rmSync(workDir, { recursive: true, force: true }); } catch { /* ok */ }
     },
     120_000,
   );
 });
 
-// ─── ENABLED: enabled:true + env → /mcp mounts ──────────────────────────────
+// ─── ENABLED: enabled:true + env → /mcp mounts ─────────────────────────────
 
-describe.skip("flair#1136 enabled path: mcp.enabled: true + env", () => {
+describe("flair#1136 enabled path: mcp.enabled: true + env", () => {
   test(
     "/mcp mounts and advertises CIMD when enabled:true + issuer/keys env set",
     async () => {
       const workDir = mkdtempSync(join(tmpdir(), "flair-enabled-"));
       const configPath = join(workDir, "config.yaml");
+
+      // Symlink node_modules and dist so Harper can find @harperfast/oauth
+      // and the JS resources (mcp-oauth.ts, etc.).
+      symlinkSync(join(REPO_ROOT, "node_modules"), join(workDir, "node_modules"));
+      symlinkSync(join(REPO_ROOT, "dist"), join(workDir, "dist"));
 
       const shipped = readFileSync(join(REPO_ROOT, "config.yaml"), "utf-8");
       const mutated = shipped.replace("enabled: false", "enabled: true");

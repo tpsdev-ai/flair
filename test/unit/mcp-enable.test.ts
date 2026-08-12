@@ -31,6 +31,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import yaml from "js-yaml";
 
 import {
   isLocalOrigin,
@@ -1116,11 +1117,12 @@ rest: true
     const result = updateLocalConfigMcpEnabled(true, configPath);
     expect(result.ok).toBe(true);
     expect(result.detail).toContain("mcp.enabled set to true");
+    // Re-parse to verify the mutation is structural, not string-level.
     const updated = readFileSync(configPath, "utf-8");
-    // The mcp.enabled line is flipped, but dynamicClientRegistration.enabled
-    // is a separate key and stays false.
-    expect(updated).toContain("\n    enabled: true");
-    expect(updated).toContain("dynamicClientRegistration:\n      enabled: false");
+    const doc = yaml.load(updated) as any;
+    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(true);
+    // dynamicClientRegistration.enabled is a separate key and stays false.
+    expect(doc["@harperfast/oauth"].mcp.dynamicClientRegistration.enabled).toBe(false);
   });
 
   test("flips enabled: true → false", () => {
@@ -1129,9 +1131,8 @@ rest: true
     const result = updateLocalConfigMcpEnabled(false, configPath);
     expect(result.ok).toBe(true);
     expect(result.detail).toContain("mcp.enabled set to false");
-    const updated = readFileSync(configPath, "utf-8");
-    expect(updated).toContain("\n    enabled: false");
-    expect(updated).not.toContain("\n    enabled: true");
+    const doc = yaml.load(readFileSync(configPath, "utf-8")) as any;
+    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(false);
   });
 
   test("already at target value: no-op", () => {
@@ -1157,24 +1158,60 @@ rest: true
     expect(result.detail).toMatch(/config\.yaml|not found|already|set to/);
   });
 
-  test("no mcp.enabled key in config", () => {
-    const noMcp = "name: flair\nrest: true\n";
+  test("no @harperfast/oauth block in config", () => {
+    const noOauth = "name: flair\nrest: true\n";
+    writeFileSync(configPath, noOauth, "utf-8");
+    const result = updateLocalConfigMcpEnabled(true, configPath);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("@harperfast/oauth block not found");
+  });
+
+  test("no mcp key under @harperfast/oauth", () => {
+    const noMcp = `name: flair
+"@harperfast/oauth":
+  package: "@harperfast/oauth"
+  providers:
+    github:
+      clientId: "x"
+      clientSecret: "y"
+`;
     writeFileSync(configPath, noMcp, "utf-8");
     const result = updateLocalConfigMcpEnabled(true, configPath);
     expect(result.ok).toBe(false);
-    expect(result.detail).toContain("mcp.enabled key not found");
+    expect(result.detail).toContain("mcp key not found");
   });
 
-  test("preserves other config content", () => {
+  test("flips ONLY mcp.enabled when both enabled keys are present (flair#1136 safety)", () => {
+    // This is the critical safety test: the config has TWO `enabled: false`
+    // keys (mcp.enabled and dynamicClientRegistration.enabled). The YAML-based
+    // implementation navigates to the exact key, so it can never flip the
+    // wrong one.
+    writeFileSync(configPath, CONFIG_WITH_MCP_DISABLED, "utf-8");
+    const result = updateLocalConfigMcpEnabled(true, configPath);
+    expect(result.ok).toBe(true);
+    const doc = yaml.load(readFileSync(configPath, "utf-8")) as any;
+    // Only mcp.enabled flipped.
+    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(true);
+    // dynamicClientRegistration.enabled is untouched.
+    expect(doc["@harperfast/oauth"].mcp.dynamicClientRegistration.enabled).toBe(false);
+  });
+
+  test("loud no-op when config is malformed YAML", () => {
+    writeFileSync(configPath, "this is not valid: yaml: [", "utf-8");
+    const result = updateLocalConfigMcpEnabled(true, configPath);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("cannot parse");
+  });
+
+  test("preserves other config content structurally", () => {
     writeFileSync(configPath, CONFIG_WITH_MCP_DISABLED, "utf-8");
     updateLocalConfigMcpEnabled(true, configPath);
-    const updated = readFileSync(configPath, "utf-8");
-    expect(updated).toContain("name: flair");
-    expect(updated).toContain("rest: true");
-    expect(updated).toContain('"@harperfast/oauth"');
-    expect(updated).toContain("accessTokenTtl: 900");
-    expect(updated).toContain('"claude.ai"');
-    expect(updated).toContain('"claude.com"');
+    const doc = yaml.load(readFileSync(configPath, "utf-8")) as any;
+    expect(doc.name).toBe("flair");
+    expect(doc.rest).toBe(true);
+    expect(doc["@harperfast/oauth"].package).toBe("@harperfast/oauth");
+    expect(doc["@harperfast/oauth"].mcp.accessTokenTtl).toBe(900);
+    expect(doc["@harperfast/oauth"].mcp.clientIdMetadataDocuments.allowedHosts).toEqual(["claude.ai", "claude.com"]);
   });
 });
 

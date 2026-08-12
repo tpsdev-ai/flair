@@ -145,6 +145,7 @@ import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "n
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
+import yaml from "js-yaml";
 
 // ─── CIMD constants ──────────────────────────────────────────────────────────
 
@@ -400,31 +401,54 @@ export function updateLocalConfigMcpEnabled(
     return { ok: false, detail: `cannot read ${configPath}: ${err.message}` };
   }
 
-  const fromValue = enabled ? "false" : "true";
-  const toValue = enabled ? "true" : "false";
-  // Match `enabled: false` or `enabled: true` under the mcp: key.
-  // The pattern is: newline + whitespace + "enabled:" + whitespace + value.
-  const pattern = new RegExp(`(\n(\\s*)enabled:\\s*)${fromValue}`, "m");
-  if (!pattern.test(raw)) {
-    // Already at the target value, or the key doesn't exist.
-    if (raw.includes(`enabled: ${toValue}`)) {
-      return { ok: true, detail: `mcp.enabled already ${toValue} in ${configPath}` };
-    }
+  // Parse the YAML to navigate to the exact key — avoids the ambiguity of
+  // string-matching `enabled:` when the block has multiple enabled keys
+  // (mcp.enabled vs dynamicClientRegistration.enabled).
+  let doc: any;
+  try {
+    doc = yaml.load(raw);
+  } catch (err: any) {
+    return { ok: false, detail: `cannot parse ${configPath} as YAML: ${err.message}` };
+  }
+
+  if (!doc || typeof doc !== "object") {
+    return { ok: false, detail: `${configPath} is empty or not a YAML mapping` };
+  }
+
+  const oauth = doc["@harperfast/oauth"];
+  if (!oauth || typeof oauth !== "object") {
     return {
       ok: false,
-      detail: `mcp.enabled key not found in ${configPath}. ` +
-        `Ensure the @harperfast/oauth block is present with mcp.enabled: ${toValue}.`,
+      detail: `@harperfast/oauth block not found in ${configPath}. ` +
+        `Ensure the component block is present with mcp.enabled: ${enabled}.`,
     };
   }
 
-  const updated = raw.replace(pattern, `$1${toValue}`);
+  const mcp = oauth.mcp;
+  if (!mcp || typeof mcp !== "object") {
+    return {
+      ok: false,
+      detail: `mcp key not found under @harperfast/oauth in ${configPath}. ` +
+        `Ensure the mcp block is present with enabled: ${enabled}.`,
+    };
+  }
+
+  const current = mcp.enabled;
+  if (current === enabled) {
+    return { ok: true, detail: `mcp.enabled already ${enabled} in ${configPath}` };
+  }
+
+  // Mutate the parsed document and re-emit.
+  mcp.enabled = enabled;
+
+  const updated = yaml.dump(doc, { lineWidth: -1, noCompatMode: true });
   try {
     writeFileSync(configPath, updated, { encoding: "utf-8" });
   } catch (err: any) {
     return { ok: false, detail: `cannot write ${configPath}: ${err.message}` };
   }
 
-  return { ok: true, detail: `mcp.enabled set to ${toValue} in ${configPath}` };
+  return { ok: true, detail: `mcp.enabled set to ${enabled} in ${configPath}` };
 }
 
 /** The exact callback URL to hand the operator when they create the IdP
