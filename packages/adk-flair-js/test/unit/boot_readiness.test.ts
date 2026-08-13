@@ -207,7 +207,7 @@ async function spawnMockBootHelper(jsonFields: Record<string, unknown>): Promise
   const jsonLine = JSON.stringify(jsonFields);
   writeFileSync(scriptPath, [
     "#!/usr/bin/env node",
-    `process.stdout.write('${jsonLine.replace(/'/g, "\\'")}\\n');`,
+    `process.stdout.write(${JSON.stringify(jsonLine)} + "\\n");`,
     "// block until stdin closes",
     "process.stdin.on('end', () => process.exit(0));",
   ].join("\n"), "utf-8");
@@ -337,12 +337,11 @@ test("SIGKILL mid-teardown: recovery via harperPid + rootPath works (mock)", asy
   // 2. Spawns a child process (simulating Harper)
   // 3. Blocks until stdin closes, then "tears down" (kills child, removes tree)
   const mockScript = join(tmpdir(), `adk-flair-test-recovery-mock-${process.pid}.mjs`);
-  const escapedRootPath = rootPath.replace(/'/g, "\\'");
   writeFileSync(mockScript, [
     "import { spawn } from 'node:child_process';",
     "import { rm } from 'node:fs/promises';",
     "",
-    `const ROOT = '${escapedRootPath}';`,
+    `const ROOT = ${JSON.stringify(rootPath)};`,
     "",
     "// Spawn a mock Harper child (just sleeps)",
     "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300_000)'], {",
