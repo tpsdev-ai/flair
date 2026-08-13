@@ -2699,6 +2699,24 @@ export function shouldPrintUpgradeLine(status: UpgradeStatus, showAll: boolean):
 }
 
 /**
+ * Returns the human-readable suffix for a package status line in
+ * `flair upgrade` / `flair upgrade --check` output.
+ *
+ * flair-mcp is zero-install via npx — its suffix must never suggest a
+ * global install (flair#1168).
+ */
+export function upgradeStatusSuffix(name: string, status: UpgradeStatus): string {
+  if (status === "current") return " (current)";
+  if (status === "missing") {
+    return name === "@tpsdev-ai/flair-mcp"
+      ? " (zero-install via npx — run: flair doctor --fix)"
+      : " (run: npm install -g)";
+  }
+  if (status === "optional") return " (install via: openclaw plugins install @tpsdev-ai/openclaw-flair)";
+  return "";
+}
+
+/**
  * Pure flag resolution for `flair upgrade`'s restart/verify defaults
  * (flair#635 decision: restart is now the default; `--no-restart` opts
  * out). `--restart` is a deprecated no-op accepted for backward compat —
@@ -10429,10 +10447,7 @@ program
           : status === "optional" ? "○"
           : "❔";
         const installedLabel = installed ?? (status === "optional" ? "not installed (openclaw not detected)" : "not detected");
-        const suffix = status === "current" ? " (current)"
-          : status === "missing" ? " (run: npm install -g)"
-          : status === "optional" ? " (install via: openclaw plugins install @tpsdev-ai/openclaw-flair)"
-          : "";
+        const suffix = upgradeStatusSuffix(name, status);
         console.log(`  ${icon} ${name}: ${installedLabel} → ${latest}${suffix}`);
       } catch { /* skip unavailable packages */ }
     }
@@ -10461,8 +10476,15 @@ program
     }
 
     if (missing.length > 0 && outdated.length === 0) {
+      const npmMissing = missing.filter((f) => f.name !== "@tpsdev-ai/flair-mcp");
+      const mcpMissing = missing.filter((f) => f.name === "@tpsdev-ai/flair-mcp");
       console.log(`\n❔ ${missing.length} package${missing.length > 1 ? "s" : ""} not detected — all detected packages are up to date.`);
-      console.log(`   Install missing: npm install -g ${missing.map((f) => f.name).join(" ")}`);
+      if (npmMissing.length > 0) {
+        console.log(`   Install missing: npm install -g ${npmMissing.map((f) => f.name).join(" ")}`);
+      }
+      if (mcpMissing.length > 0) {
+        console.log(`   flair-mcp is zero-install via npx — run: flair doctor --fix to re-wire the hook`);
+      }
       return;
     }
 
@@ -13168,7 +13190,7 @@ program
               console.log(`  ${render.icons.warn} SessionStart hook: wired in ${render.wrap(render.c.dim, hook.path)}, but its command did not run just now`);
               console.log(`     ${render.wrap(render.c.dim, hook.detail ?? "")}`);
               console.log(`     ${render.wrap(render.c.dim, "The hook command could not be executed. Check that npx can resolve")}`);
-              console.log(`     ${render.wrap(render.c.dim, "@tpsdev-ai/flair-mcp — a cold cache, missing global install, or network")}`);
+              console.log(`     ${render.wrap(render.c.dim, "@tpsdev-ai/flair-mcp — a cold npx cache or network issue")}`);
               console.log(`     ${render.wrap(render.c.dim, "issue can prevent the adapter from running on its first invocation.")}`);
               console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites the hook to the current silent-failure form)")}`);
             }

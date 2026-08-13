@@ -1,0 +1,1 @@
+- `flair upgrade --check` and the doctor hook-warning path no longer suggest globally installing `@tpsdev-ai/flair-mcp`. flair-mcp is zero-install via npx; the advice now points to `flair doctor --fix` instead.

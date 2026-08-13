@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { probeBinVersion, probeLibVersion, probeOpenclawPluginVersion, shouldPrintUpgradeLine } from "../../src/cli";
+import { probeBinVersion, probeLibVersion, probeOpenclawPluginVersion, shouldPrintUpgradeLine, upgradeStatusSuffix } from "../../src/cli";
 
 // execFileSync takes (file, args, opts) and returns Buffer|string. Tests
 // inject a fake that ignores input and returns a fixed string (or throws).
@@ -175,5 +175,38 @@ describe("shouldPrintUpgradeLine", () => {
       expect(shouldPrintUpgradeLine("outdated", showAll)).toBe(true);
       expect(shouldPrintUpgradeLine("missing", showAll)).toBe(true);
     }
+  });
+});
+
+// flair#1168: the upgrade/check advice must never recommend a global install
+// of flair-mcp — it is zero-install via npx.
+describe("upgradeStatusSuffix", () => {
+  test("missing flair-mcp does NOT suggest npm install -g", () => {
+    const suffix = upgradeStatusSuffix("@tpsdev-ai/flair-mcp", "missing");
+    expect(suffix).not.toContain("npm install -g");
+    expect(suffix).not.toContain("npm i -g");
+    expect(suffix).toContain("zero-install via npx");
+    expect(suffix).toContain("flair doctor --fix");
+  });
+
+  test("missing flair (the main package) still suggests npm install -g", () => {
+    const suffix = upgradeStatusSuffix("@tpsdev-ai/flair", "missing");
+    expect(suffix).toContain("npm install -g");
+  });
+
+  test("outdated packages have no suffix", () => {
+    expect(upgradeStatusSuffix("@tpsdev-ai/flair-mcp", "outdated")).toBe("");
+    expect(upgradeStatusSuffix("@tpsdev-ai/flair", "outdated")).toBe("");
+  });
+
+  test("current packages show (current)", () => {
+    expect(upgradeStatusSuffix("@tpsdev-ai/flair-mcp", "current")).toBe(" (current)");
+    expect(upgradeStatusSuffix("@tpsdev-ai/flair", "current")).toBe(" (current)");
+  });
+
+  test("optional packages show the openclaw install path", () => {
+    const suffix = upgradeStatusSuffix("@tpsdev-ai/openclaw-flair", "optional");
+    expect(suffix).toContain("openclaw plugins install");
+    expect(suffix).not.toContain("npm install -g");
   });
 });
