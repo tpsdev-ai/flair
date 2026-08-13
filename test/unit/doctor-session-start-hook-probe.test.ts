@@ -8,6 +8,7 @@ import {
   buildSessionStartHookCommand,
   checkSessionStartHook,
   classifyHookProbe,
+  classifyHookReadiness,
   fixSessionStartHook,
   hookCommandIsSilenced,
   inspectSessionStartHook,
@@ -329,5 +330,55 @@ describe("upgradeSessionStartHookCommand — repair, never removal", () => {
     const res = upgradeSessionStartHookCommand(isoHome);
     expect(res.ok).toBe(false);
     expect(res.changed).toBe(false);
+  });
+});
+
+describe("classifyHookReadiness — flair#1131 fresh-install vs genuinely-broken", () => {
+  const brokenProbe = () => outcome({ exitCode: 127, stderr: "sh: npx: command not found" });
+  const workingProbe = () => outcome({ exitCode: 0, stdout: "{}" });
+
+  it("silenced (current) hook that probe says is broken → not-yet-exercised (informational, not warning)", () => {
+    writeHook(buildSessionStartHookCommand("me"));
+    const report = inspectSessionStartHook(isoHome, { probe: brokenProbe });
+    expect(report.silenced).toBe(true);
+    expect(report.execution).toBe("broken");
+    expect(classifyHookReadiness(report)).toBe("not-yet-exercised");
+  });
+
+  it("unsilenced (legacy) hook that probe says is broken → genuinely-broken (warning)", () => {
+    writeHook(LEGACY_COMMAND);
+    const report = inspectSessionStartHook(isoHome, { probe: brokenProbe });
+    expect(report.silenced).toBe(false);
+    expect(report.execution).toBe("broken");
+    expect(classifyHookReadiness(report)).toBe("genuinely-broken");
+  });
+
+  it("silenced hook that probe says runs → runs", () => {
+    writeHook(buildSessionStartHookCommand("me"));
+    const report = inspectSessionStartHook(isoHome, { probe: workingProbe });
+    expect(report.execution).toBe("runs");
+    expect(classifyHookReadiness(report)).toBe("runs");
+  });
+
+  it("absent hook → absent", () => {
+    const report = inspectSessionStartHook(isoHome, { probe: false });
+    expect(report.present).toBe(false);
+    expect(classifyHookReadiness(report)).toBe("absent");
+  });
+
+  it("custom (not ours) hook → custom", () => {
+    writeHook(`my-own-${SESSION_START_HOOK_MARKER}-script.sh`);
+    const report = inspectSessionStartHook(isoHome, { probe: false });
+    expect(report.ours).toBe(false);
+    expect(classifyHookReadiness(report)).toBe("custom");
+  });
+
+  it("silenced hook with unknown execution → unverified", () => {
+    writeHook(buildSessionStartHookCommand("me"));
+    const report = inspectSessionStartHook(isoHome, {
+      probe: () => outcome({ exitCode: null, stdout: "", stderr: "", timedOut: true, spawnError: null }),
+    });
+    expect(report.execution).toBe("unknown");
+    expect(classifyHookReadiness(report)).toBe("unverified");
   });
 });
