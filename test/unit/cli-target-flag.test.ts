@@ -17,6 +17,7 @@ import {
   resolveOpsTarget,
   resolveEffectiveOpsUrl,
   resolveOpsUrlFromTarget,
+  FABRIC_OPS_PORT,
   resolveHttpPort,
   program,
   seedFederationInstanceViaOpsApi,
@@ -162,42 +163,57 @@ describe("resolveEffectiveOpsUrl", () => {
 // ─── resolveOpsUrlFromTarget ───────────────────────────────────────────────────
 
 describe("resolveOpsUrlFromTarget", () => {
-  test("derives ops URL by subtracting 1 from explicit port", () => {
+  // ── https effective-443 (Fabric managed): FABRIC_OPS_PORT (9925) ──
+
+  test("https with no explicit port → FABRIC_OPS_PORT", () => {
+    expect(resolveOpsUrlFromTarget("https://flair.example.com"))
+      .toBe("https://flair.example.com:9925");
+  });
+
+  test("https with explicit port 443 → FABRIC_OPS_PORT", () => {
+    expect(resolveOpsUrlFromTarget("https://flair.example.com:443"))
+      .toBe("https://flair.example.com:9925");
+  });
+
+  // ── https non-443 explicit port (self-hosted TLS): port-1 (unchanged) ──
+
+  test("https with explicit port 8443 → port-1 (8442)", () => {
+    expect(resolveOpsUrlFromTarget("https://flair.example.com:8443"))
+      .toBe("https://flair.example.com:8442");
+  });
+
+  test("https with explicit port 9926 → port-1 (9925)", () => {
     expect(resolveOpsUrlFromTarget("https://flair.example.com:9926"))
       .toBe("https://flair.example.com:9925");
   });
 
-  test("derives ops URL from http URL with explicit port", () => {
+  test("bare host normalised to https → FABRIC_OPS_PORT", () => {
+    expect(resolveOpsUrlFromTarget("flair.example.com"))
+      .toBe("https://flair.example.com:9925");
+  });
+
+  // ── http (local/dev): unchanged — explicit port → port-1, no port → DEFAULT_OPS_PORT ──
+
+  test("http with explicit port → port-1", () => {
     expect(resolveOpsUrlFromTarget("http://10.0.0.5:19926"))
       .toBe("http://10.0.0.5:19925");
   });
 
-  test("uses 442 for https with no explicit port (443-1)", () => {
-    expect(resolveOpsUrlFromTarget("https://flair.example.com"))
-      .toBe("https://flair.example.com:442");
-  });
-
-  test("uses DEFAULT_OPS_PORT for http with no explicit port", () => {
+  test("http with no explicit port → DEFAULT_OPS_PORT", () => {
     expect(resolveOpsUrlFromTarget("http://flair.example.com"))
       .toBe("http://flair.example.com:19925");
   });
 
-  test("bare host is normalised to https:// with default ops port (442)", () => {
-    // Bare hosts without a scheme are normalised to https://
-    // https default port = 443, so ops = 442
-    expect(resolveOpsUrlFromTarget("flair.example.com"))
-      .toBe("https://flair.example.com:442");
-  });
+  // ── error cases ──
 
   test("throws on port 1 (ops port would be 0, out of range)", () => {
-    expect(() => resolveOpsUrlFromTarget("https://example.com:1"))
+    expect(() => resolveOpsUrlFromTarget("http://example.com:1"))
       .toThrow(/out of range/i);
   });
 
   test("throws on out-of-range port (65536)", () => {
-    // URL parser itself rejects ports > 65535
     expect(() => resolveOpsUrlFromTarget("https://example.com:65536"))
-      .toThrow(); // throws regardless of error message
+      .toThrow();
   });
 
   test("strips trailing slash from target URL", () => {
@@ -206,9 +222,14 @@ describe("resolveOpsUrlFromTarget", () => {
   });
 
   test("throws on completely unparseable URL fragments", () => {
-    // Spaces are invalid in URLs
     expect(() => resolveOpsUrlFromTarget("not a url :// ???"))
       .toThrow();
+  });
+
+  // ── invariant: FABRIC_OPS_PORT is the well-known constant ──
+
+  test("FABRIC_OPS_PORT is 9925", () => {
+    expect(FABRIC_OPS_PORT).toBe(9925);
   });
 });
 
@@ -407,21 +428,23 @@ describe("--ops-target overrides ops URL derivation", () => {
     expect(baseUrl).toBe("https://flair.example.harperfabric.com");
     expect(opsUrl).toBe("https://flair.example.harperfabric.com:9925");
 
-    // Verify no derivation contamination: opsUrl is explicit, not port-1
+    // Verify no derivation contamination: opsUrl is explicit, not port-1.
+    // With the https→9925 fix, the derived URL is also :9925 — correct, and
+    // the explicit --ops-target still wins via resolveEffectiveOpsUrl precedence.
     const derivedFromBase = resolveOpsUrlFromTarget(baseUrl);
-    expect(derivedFromBase).toBe("https://flair.example.harperfabric.com:442");
-    expect(opsUrl).not.toBe(derivedFromBase);
+    expect(derivedFromBase).toBe("https://flair.example.harperfabric.com:9925");
   });
 
   test("only --target (local-style) still derives ops URL correctly", () => {
-    // Back-compat: no --ops-target, only --target
+    // Back-compat: no --ops-target, only --target on http (local/dev).
+    // http targets still use port-1 derivation.
     const baseUrl = resolveTarget({
-      target: "https://localhost:19926",
+      target: "http://localhost:19926",
     })!.replace(/\/$/, "");
     const opsUrl = resolveEffectiveOpsUrl({ target: baseUrl });
 
-    expect(baseUrl).toBe("https://localhost:19926");
-    expect(opsUrl).toBe("https://localhost:19925"); // port-1 derivation
+    expect(baseUrl).toBe("http://localhost:19926");
+    expect(opsUrl).toBe("http://localhost:19925"); // port-1 derivation
   });
 });
 

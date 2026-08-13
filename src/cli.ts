@@ -250,6 +250,7 @@ function shouldShowInlineSecretWarning(
 
 const DEFAULT_PORT = 19926;
 const DEFAULT_OPS_PORT = 19925;
+const FABRIC_OPS_PORT = 9925;
 const DEFAULT_ADMIN_USER = "admin";
 const STARTUP_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
@@ -1334,10 +1335,15 @@ function resolveOpsTarget(opts: { opsTarget?: string }): string | undefined {
 }
 
 /** Derive the ops API URL from a Flair base URL.
- *  Convention: ops port = HTTP port - 1.
- *  If target has an explicit port, use port-1 (validated: must be 1-65535).
- *  If no explicit port: https → 442 (443-1), http → 19925 (19926-1), bare host → https://<host>:19925.
- *  Throws on unparseable URLs.
+ *  https with effective port 443 (no explicit port, or explicit :443): returns
+ *    <host>:9925 (FABRIC_OPS_PORT) — the Fabric managed case where port-1/:442
+ *    is a dead-end.
+ *  All other cases unchanged:
+ *    https with non-443 explicit port → port-1 (self-hosted TLS: 19926→19925, 8443→8442)
+ *    http with explicit port → port-1 (19926→19925)
+ *    http with no port → DEFAULT_OPS_PORT (19925)
+ *  Bare hosts are normalised to https:// (effective-443 → Fabric path).
+ *  Throws on unparseable URLs or out-of-range ports.
  */
 /** Compute the effective ops API URL for remote commands.
  *  - If --ops-target is set, use it directly (no derivation).
@@ -1356,6 +1362,19 @@ function resolveOpsUrlFromTarget(targetUrl: string): string {
   // Normalise bare hosts: add https:// prefix so URL parser can handle them.
   const normalised = targetUrl.includes("://") ? targetUrl : `https://${targetUrl}`;
   const url = new URL(normalised);
+
+  // https target with effective port 443 (no explicit port, or explicit :443):
+  // this is the Fabric managed case — the ops API is on the well-known Fabric
+  // ops port, never REST-adjacent. The port-1 / :442 logic is a dead-end here.
+  if (url.protocol === "https:" && (url.port === "" || url.port === "443")) {
+    url.port = String(FABRIC_OPS_PORT);
+    return url.toString().replace(/\/$/, "");
+  }
+
+  // All other cases: unchanged port-1 convention.
+  //   https with non-443 explicit port → port-1 (self-hosted TLS: 19926→19925, 8443→8442)
+  //   http with explicit port → port-1 (19926→19925)
+  //   http with no port → DEFAULT_OPS_PORT (19925)
   const port = parseInt(url.port, 10);
   if (!isNaN(port) && port > 0 && port <= 65535) {
     const opsPort = port - 1;
@@ -1367,12 +1386,8 @@ function resolveOpsUrlFromTarget(targetUrl: string): string {
   if (url.port !== "" && url.port !== undefined) {
     throw new Error(`Invalid target port: ${url.port} (must be 1-65535)`);
   }
-  // No explicit port — infer from scheme
-  if (url.protocol === "https:") {
-    url.port = "442";
-  } else {
-    url.port = String(DEFAULT_OPS_PORT);
-  }
+  // No explicit port on http — use the default ops port.
+  url.port = String(DEFAULT_OPS_PORT);
   return url.toString().replace(/\/$/, "");
 }
 
@@ -2089,12 +2104,22 @@ export async function callOpsApi(
 ): Promise<any> {
   const url = `${opsUrl.replace(/\/$/, "")}/`;
   const auth = Buffer.from(`${user}:${pass}`).toString("base64");
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Basic ${auth}` } : {}) },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Basic ${auth}` } : {}) },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `ops API unreachable at ${opsUrl} (derived from --target). ` +
+      `Set --ops-target or FLAIR_OPS_TARGET to override. ` +
+      `(${message})`,
+    );
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Ops API call failed (${res.status}): ${text}`);
@@ -17494,6 +17519,7 @@ export {
   resolveOpsTarget,
   resolveEffectiveOpsUrl,
   resolveOpsUrlFromTarget,
+  FABRIC_OPS_PORT,
   signRequestBody,
   b64,
   b64url,
