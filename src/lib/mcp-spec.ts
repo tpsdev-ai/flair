@@ -60,14 +60,29 @@ let cachedVersion: string | undefined;
 
 /**
  * This CLI's own version — the single source for `--version`, the CLI↔server
- * handshake, `upgrade --check`, and the MCP pin. Cached: the answer cannot
- * change within a process, and several commands ask repeatedly.
+ * handshake, `upgrade --check`, and the MCP pin. Cached: the answer normally
+ * cannot change within a process, and several commands ask repeatedly.
+ *
+ * The one exception is `flair upgrade`: `npm install -g` replaces package.json
+ * in-place while the process is still running, so the cached version becomes
+ * stale. Callers that run after an in-process upgrade must call
+ * {@link clearFlairCliVersionCache} first so the next read resolves the new
+ * version from disk (flair#1167).
  */
 export function flairCliVersion(): string {
   if (cachedVersion === undefined) {
     cachedVersion = resolveFlairCliVersion(import.meta.dirname ?? __dirname);
   }
   return cachedVersion;
+}
+
+/**
+ * Clear the cached CLI version so the next call to {@link flairCliVersion}
+ * re-resolves from the package.json on disk. Needed after an in-process
+ * `npm install -g` replaces the package (flair#1167).
+ */
+export function clearFlairCliVersionCache(): void {
+  cachedVersion = undefined;
 }
 
 /** True when `version` is usable as a pin. */

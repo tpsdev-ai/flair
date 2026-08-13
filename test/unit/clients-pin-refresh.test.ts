@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   mcpServerSpec,
   flairCliVersion,
+  clearFlairCliVersionCache,
   FLAIR_MCP_PACKAGE,
 } from "../../src/lib/mcp-spec.ts";
 import {
@@ -268,5 +269,88 @@ describe("flair#1135 — tomlSnippet still pins (regression guard)", () => {
     const snippet = tomlSnippet(ENV);
     expect(snippet).toContain(CURRENT_SPEC);
     expect(snippet).not.toContain(`"${FLAIR_MCP_PACKAGE}"`);
+  });
+});
+
+// ── flair#1167 — clearFlairCliVersionCache prevents stale-cache no-op ─────
+
+describe("flair#1167 — clearFlairCliVersionCache prevents stale-cache no-op", () => {
+  const PKG_PATH = join(import.meta.dirname, "..", "..", "package.json");
+  let originalPkg: string;
+  let realVersion: string;
+
+  beforeAll(() => {
+    originalPkg = readFileSync(PKG_PATH, "utf-8");
+    realVersion = JSON.parse(originalPkg).version;
+  });
+
+  afterEach(() => {
+    // Restore the real package.json after every test that might mutate it.
+    if (originalPkg) writeFileSync(PKG_PATH, originalPkg);
+    clearFlairCliVersionCache();
+  });
+
+  it("stale cache → no-op without clear; refresh with clear", () => {
+    const FAKE_VERSION = "99.99.99";
+
+    // Prime the cache with the real version (simulating module-load before upgrade).
+    expect(flairCliVersion()).toBe(realVersion);
+
+    // Simulate an in-process upgrade: bump package.json to a fake newer version.
+    const fakePkg = JSON.parse(originalPkg);
+    fakePkg.version = FAKE_VERSION;
+    writeFileSync(PKG_PATH, JSON.stringify(fakePkg, null, 2) + "\n");
+
+    // Write a config with the OLD (real) version as the pin — this is what a
+    // pre-upgrade wired config looks like.
+    const oldSpec = `${FLAIR_MCP_PACKAGE}@${realVersion}`;
+    writeJsonConfig("claude-code", oldSpec);
+
+    const client = ALL_CLIENTS.find(c => c.id === "claude-code")!;
+
+    // WITHOUT clearing the cache: mcpServerSpec() still returns the OLD cached
+    // version. The pin matches → wire should no-op. This IS the bug — the
+    // upgrade installed new packages but the stale cache hides the new version.
+    const resStale = client.wire({ ...ENV, FLAIR_CLIENT: "claude-code" });
+    expect(resStale.ok).toBe(true);
+    expect(resStale.message).toContain("already wired");
+    expect(readJsonPin("claude-code")).toBe(oldSpec); // Pin unchanged — BUG.
+
+    // NOW clear the cache (simulating the fix: clearFlairCliVersionCache()
+    // called after npm install -g).
+    clearFlairCliVersionCache();
+
+    // After clearing: mcpServerSpec() re-resolves from the (now bumped)
+    // package.json and returns the NEW version. The pin is stale → wire
+    // should refresh.
+    const resFresh = client.wire({ ...ENV, FLAIR_CLIENT: "claude-code" });
+    expect(resFresh.ok).toBe(true);
+    expect(resFresh.message).toContain("refreshed pin");
+    expect(readJsonPin("claude-code")).toBe(`${FLAIR_MCP_PACKAGE}@${FAKE_VERSION}`);
+  });
+
+  it("clearFlairCliVersionCache re-resolves from disk", () => {
+    // Prime the cache.
+    const v1 = flairCliVersion();
+    expect(v1).toBe(realVersion);
+
+    // Clear it.
+    clearFlairCliVersionCache();
+
+    // Re-resolve — package.json hasn't changed, so same version.
+    const v2 = flairCliVersion();
+    expect(v2).toBe(realVersion);
+  });
+
+  it("mcpServerSpec uses re-resolved version after cache clear", () => {
+    // Prime the cache.
+    flairCliVersion();
+
+    // Clear it.
+    clearFlairCliVersionCache();
+
+    // mcpServerSpec should use the re-resolved version.
+    const spec = mcpServerSpec();
+    expect(spec).toBe(`${FLAIR_MCP_PACKAGE}@${realVersion}`);
   });
 });

@@ -55,7 +55,7 @@ import {
 } from "./fleet-verify.js";
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
 import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
-import { flairCliVersion, mcpServerSpec, unpinnedSpecWarning } from "./lib/mcp-spec.js";
+import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning } from "./lib/mcp-spec.js";
 import {
   resolveAgentKeyPath,
   loadEd25519PrivateKeyFromFile,
@@ -10699,6 +10699,55 @@ program
       }
     }
 
+    // flair#1167: `npm install -g` replaced package.json in-place, so the
+    // module-load-cached CLI version is stale. Clear it so mcpServerSpec()
+    // resolves the NEW version for the pin refresh below.
+    clearFlairCliVersionCache();
+
+    // ── Refresh wired MCP client configs (flair#1135, flair#1167) ──────────
+    // After a successful package install, the flair-mcp package on disk is
+    // newer than the pinned version in wired client configs. Re-run wiring for
+    // already-wired clients so the pin stays in lockstep with the installed
+    // version. Runs BEFORE the restart so --no-restart and --no-verify paths
+    // also get the refresh (flair#1167). Best-effort: failures warn but never
+    // fail the upgrade.
+    await (async () => {
+      const agentId = resolveAgentIdOrEnv({}) ?? (() => {
+        try {
+          const keyFiles = readdirSync(defaultKeysDir()).filter((f) => f.endsWith(".key"));
+          return keyFiles.length > 0 ? keyFiles[0].replace(/\.key$/, "") : null;
+        } catch { return null; }
+      })();
+      if (!agentId) {
+        console.log("\n   (no agent id known — skip MCP client pin refresh; run `flair init` to refresh manually)");
+        return;
+      }
+      const httpUrl = `http://127.0.0.1:${upgradePort}`;
+      const mcpEnv = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
+      const detected = detectClients().filter(c => c.detected);
+      if (detected.length === 0) return;
+      console.log("\n   Refreshing MCP client pins...");
+      for (const client of detected) {
+        const configPath = clientConfigPath(client.id);
+        if (!existsSync(configPath)) continue;
+        // Only refresh clients that are already wired — don't wire new ones.
+        let hasFlair = false;
+        try {
+          const raw = readFileSync(configPath, "utf-8");
+          if (client.id === "codex") {
+            hasFlair = codexConfigHasFlairSection(raw);
+          } else {
+            const cfg = JSON.parse(raw);
+            hasFlair = !!cfg.mcpServers?.flair;
+          }
+        } catch { /* unreadable/malformed — skip */ }
+        if (!hasFlair) continue;
+        const env = { ...mcpEnv, FLAIR_CLIENT: client.id } as { FLAIR_AGENT_ID: string; FLAIR_URL: string; FLAIR_CLIENT?: string };
+        const result = client.wire(env);
+        console.log(`   ${result.ok ? "✓" : "•"} ${result.message}`);
+      }
+    })();
+
     // ── Restart + verify + rollback (flair#635) ─────────────────────────────
     // Decision (2026-07-08): restart is now the default post-upgrade step —
     // installing new code without restarting leaves the OLD process serving
@@ -10923,48 +10972,6 @@ program
 
     const verdict = decideAfterVerify(verify, previousFlairVersion);
 
-    // ── Refresh wired MCP client configs (flair#1135) ──────────────────────
-    // After a successful upgrade, the flair-mcp package on disk is newer than
-    // the pinned version in wired client configs. Re-run wiring for
-    // already-wired clients so the pin stays in lockstep with the installed
-    // version. Best-effort: failures warn but never fail the upgrade.
-    const refreshWiredClients = async () => {
-      const agentId = resolveAgentIdOrEnv({}) ?? (() => {
-        try {
-          const keyFiles = readdirSync(defaultKeysDir()).filter((f) => f.endsWith(".key"));
-          return keyFiles.length > 0 ? keyFiles[0].replace(/\.key$/, "") : null;
-        } catch { return null; }
-      })();
-      if (!agentId) {
-        console.log("\n   (no agent id known — skip MCP client pin refresh; run `flair init` to refresh manually)");
-        return;
-      }
-      const httpUrl = `http://127.0.0.1:${upgradePort}`;
-      const mcpEnv = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
-      const detected = detectClients().filter(c => c.detected);
-      if (detected.length === 0) return;
-      console.log("\n   Refreshing MCP client pins...");
-      for (const client of detected) {
-        const configPath = clientConfigPath(client.id);
-        if (!existsSync(configPath)) continue;
-        // Only refresh clients that are already wired — don't wire new ones.
-        let hasFlair = false;
-        try {
-          const raw = readFileSync(configPath, "utf-8");
-          if (client.id === "codex") {
-            hasFlair = codexConfigHasFlairSection(raw);
-          } else {
-            const cfg = JSON.parse(raw);
-            hasFlair = !!cfg.mcpServers?.flair;
-          }
-        } catch { /* unreadable/malformed — skip */ }
-        if (!hasFlair) continue;
-        const env = { ...mcpEnv, FLAIR_CLIENT: client.id } as { FLAIR_AGENT_ID: string; FLAIR_URL: string; FLAIR_CLIENT?: string };
-        const result = client.wire(env);
-        console.log(`   ${result.ok ? "✓" : "•"} ${result.message}`);
-      }
-    };
-
     if (verdict.kind === "ok") {
       // flair#1022: the verified facts are unchanged and still stated — the
       // upgrade did land. What changes is the MARKER and the claim around it.
@@ -10977,7 +10984,6 @@ program
       for (const line of summary.lines) {
         if (summary.degraded) console.error(line); else console.log(line);
       }
-      await refreshWiredClients();
       return;
     }
 
@@ -11005,7 +11011,6 @@ program
           console.error(line);
         }
       }
-      await refreshWiredClients();
       return;
     }
 
