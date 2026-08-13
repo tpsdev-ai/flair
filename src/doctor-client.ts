@@ -45,7 +45,7 @@ export const SESSION_START_HOOK_MARKER = "flair-session-start";
 //
 // WHY THE INVOCATION IS WRAPPED
 // -----------------------------
-// The hook runs `npx -y @tpsdev-ai/flair-mcp flair-session-start`: it resolves
+// The hook runs `npx -y -p @tpsdev-ai/flair-mcp flair-session-start`: it resolves
 // a package binary through whatever Node runtime the user's shell happens to
 // expose. Under a Node version manager, globally installed packages are
 // per-runtime-version, so a routine and entirely unrelated runtime upgrade
@@ -128,7 +128,7 @@ export function buildSessionStartHookCommand(agentId: string, flairUrl?: string)
     );
   }
   const env = flairUrl ? `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl}` : `FLAIR_AGENT_ID=${agentId}`;
-  const invocation = `${env} npx -y @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`;
+  const invocation = `${env} npx -y -p @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`;
   return `sh -c 'out=$(${invocation} 2>/dev/null) && printf %s "$out" || true'`;
 }
 

@@ -66,7 +66,7 @@ describe("buildHookCommand / parseHookCommandEnv", () => {
   it("round-trips agentId and flairUrl through the command string", () => {
     const command = buildHookCommand(AGENT, URL);
     expect(command).toContain(SESSION_START_HOOK_MARKER);
-    expect(command).toContain("npx -y @tpsdev-ai/flair-mcp");
+    expect(command).toContain("npx -y -p @tpsdev-ai/flair-mcp");
     const parsed = parseHookCommandEnv(command);
     expect(parsed.agentId).toBe(AGENT);
     expect(parsed.flairUrl).toBe(URL);

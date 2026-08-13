@@ -134,7 +134,7 @@ describe("buildSessionStartHookCommand — shape", () => {
   it("carries the marker, the package and the agent id verbatim", () => {
     const cmd = buildSessionStartHookCommand(AGENT);
     expect(cmd).toContain(SESSION_START_HOOK_MARKER);
-    expect(cmd).toContain("npx -y @tpsdev-ai/flair-mcp");
+    expect(cmd).toContain("npx -y -p @tpsdev-ai/flair-mcp");
     expect(cmd).toContain(`FLAIR_AGENT_ID=${AGENT}`);
   });
 
@@ -226,5 +226,69 @@ describe("the command is silent when it cannot resolve (flair#1007 — the defec
     expect(shells).toContain("/bin/sh");
     expect(shells).toContain("/bin/bash");
     expect(shells.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ── flair#1166: the command runs the flair-session-start binary, not the shim ──
+//
+// The defect: `npx -y @tpsdev-ai/flair-mcp flair-session-start` runs the
+// package's DEFAULT bin (the MCP-server shim) and passes flair-session-start
+// as an argument, which the shim ignores — it reads stdin EOF and exits with
+// empty stdout. The fix: `npx -y -p @tpsdev-ai/flair-mcp flair-session-start`
+// — `-p` selects the package so the NAMED bin runs.
+//
+// A string-only assertion ("the command contains the marker") cannot catch this
+// because both forms contain the same tokens. The test below EXECUTES the
+// built command through a mock npx that distinguishes the two forms.
+
+describe("the command runs the binary, not the shim (flair#1166)", () => {
+  let shimVsBinDir: string;
+  let PATH_SHIM_VS_BIN: string;
+
+  beforeAll(() => {
+    // A mock npx that behaves differently based on whether -p is passed:
+    //   without -p → shim: prints "stdin EOF" and exits 0 (empty stdout)
+    //   with -p    → binary: prints the adapter output
+    shimVsBinDir = join(fixtureDir, "shim-vs-bin");
+    mkdirSync(shimVsBinDir, { recursive: true });
+    symlinkSync("/bin/sh", join(shimVsBinDir, "sh"));
+    writeFileSync(
+      join(shimVsBinDir, "npx"),
+      `#!/bin/sh
+# flair#1166: -p selects the package so the named bin runs;
+# without -p, npx runs the default bin (the shim) and passes
+# the name as an argument, which the shim ignores.
+case " $* " in
+  *\\ -p\\ *|*\\ --package\\ *)
+    printf '%s' '${ADAPTER_OUTPUT}'
+    ;;
+  *)
+    echo 'flair-mcp: stdin EOF; exiting cleanly.' >&2
+    ;;
+esac
+`,
+    );
+    chmodSync(join(shimVsBinDir, "npx"), 0o755);
+    PATH_SHIM_VS_BIN = shimVsBinDir;
+  });
+
+  it("produces adapter output, not the shim's stdin-EOF message", () => {
+    const cmd = buildSessionStartHookCommand(AGENT);
+    const run = runCommand(cmd, "/bin/sh", PATH_SHIM_VS_BIN);
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(ADAPTER_OUTPUT);
+    expect(run.stderr).toBe("");
+  });
+
+  it("MUTATION CHECK: the old form (without -p) runs the shim, not the binary", () => {
+    // Revert to the pre-#1166 form and confirm the mock npx runs the shim path.
+    const legacyCmd = buildSessionStartHookCommand(AGENT).replace("npx -y -p", "npx -y");
+    const run = runCommand(legacyCmd, "/bin/sh", PATH_SHIM_VS_BIN);
+    // The wrapper absorbs the failure → exit 0, empty stdout.
+    // But the mock npx's shim path writes to stderr, which the wrapper
+    // discards (2>/dev/null). So we get exit 0, empty stdout — exactly
+    // the signature of a command that never ran the binary.
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe("");
   });
 });

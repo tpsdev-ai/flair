@@ -462,7 +462,7 @@ export function hookStatus(homeDir: string, harness: Harness): HookStatusResult 
 
   const hookEntry = config.hooks.SessionStart[existing.groupIndex].hooks[existing.hookIndex];
   const command: string = typeof hookEntry?.command === "string" ? hookEntry.command : "";
-  const correctShape = hookEntry?.type === "command" && command.includes(`npx -y @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`);
+  const correctShape = hookEntry?.type === "command" && (command.includes(`npx -y -p @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`) || command.includes(`npx -y @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`));
   const env = parseHookCommandEnv(command);
   return {
     harness, path, wired: true, correctShape,
