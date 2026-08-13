@@ -1,0 +1,1 @@
+- **test**: HOME-isolate `resolveOpsPort` unit tests so they exercise the `httpPort-1` default path regardless of the host's `~/.flair/config.yaml`. A `mock.module("node:os")` shim makes `homedir()` delegate to `process.env.HOME`, and a `beforeEach` points HOME at a fresh empty temp dir so the config rung is correctly skipped.
