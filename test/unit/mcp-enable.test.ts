@@ -46,7 +46,6 @@ import {
   writeSecretsStagingFile,
   provisionSecrets,
   provisionIdpIdentityMapping,
-  applyRemoteConfigAndRestart,
   triggerRemoteRestart,
   updateLocalConfigMcpEnabled,
   selfVerifyMcpMetadata,
@@ -383,37 +382,7 @@ describe("provisionIdpIdentityMapping", () => {
     });
 });
 
-// ─── apply config + restart ──────────────────────────────────────────────────
-
-describe("applyRemoteConfigAndRestart", () => {
-  test("calls set_configuration then restart, in that order", async () => {
-    const { fetchImpl, calls } = mockOpsFetch();
-    await applyRemoteConfigAndRestart(
-      { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", configBlock: { "@harperfast/oauth": { mcp: { enabled: true } } } },
-      { fetchImpl },
-    );
-    expect(calls.map((c) => c.body.operation)).toEqual(["set_configuration", "restart"]);
-    // set_configuration's body spreads the config block at the top level
-    // alongside `operation` (matches harper's setConfiguration
-    // destructuring: `{ operation, hdb_user, hdbAuthHeader, ...configFields }`).
-    expect(calls[0].body["@harperfast/oauth"]).toEqual({ mcp: { enabled: true } });
-  });
-
-  test("a failed set_configuration never calls restart", async () => {
-    const calls: any[] = [];
-    const fetchImpl = (async (url: any, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body ?? "{}"));
-      calls.push(body);
-      if (body.operation === "set_configuration") return new Response("nope", { status: 500 });
-      return new Response("{}", { status: 200 });
-    }) as typeof fetch;
-
-    await expect(
-      applyRemoteConfigAndRestart({ opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", configBlock: {} }, { fetchImpl }),
-    ).rejects.toThrow(/set_configuration failed/);
-    expect(calls).toHaveLength(1);
-  });
-});
+// ─── restart only ────────────────────────────────────────────────────────────
 
 describe("triggerRemoteRestart", () => {
   test("calls restart only", async () => {

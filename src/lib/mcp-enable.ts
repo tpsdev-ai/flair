@@ -311,10 +311,12 @@ export interface McpOAuthConfigBlockParams {
 /**
  * The `@harperfast/oauth` config block, matching the installed 2.2.0
  * package's field names (node_modules/@harperfast/oauth/dist/types.d.ts).
- * Secrets are `${ENV_VAR}` placeholders — never literal values — so this
- * block is safe to write to harperdb-config.yaml via `set_configuration`
- * (the config file itself carries no secret material; see the
- * secrets-provisioning step for how the referenced env vars land).
+ * Secrets are `${ENV_VAR}` placeholders — never literal values.
+ *
+ * flair#1136: set_configuration delivery was removed. Fabric regenerates
+ * the root harperdb-config.yaml; the component's own config.yaml is the
+ * source of truth for the oauth block. This function builds the block that
+ * ships in config.yaml — it is never written to harperdb-config.yaml.
  *
  * flair#756: `dynamicClientRegistration: { enabled: false }` is written
  * EXPLICITLY — never omitted. See the module header's "Leaving
@@ -731,46 +733,7 @@ export async function provisionIdpIdentityMapping(
   return { principalCreated, credentialId, credentialReused: Boolean(existing) };
 }
 
-// ─── Apply config + restart ──────────────────────────────────────────────────
-
-export interface ApplyConfigAndRestartParams {
-  opsPortOrUrl: number | string;
-  adminUser: string;
-  adminPass: string;
-  configBlock: Record<string, unknown>;
-}
-
-/** `set_configuration` (writes harperdb-config.yaml) then `restart`
- *  (whole-process restart) — the genuine Harper Operations API operations
- *  this module's header documents. Throws on either non-2xx response. */
-export async function applyRemoteConfigAndRestart(
-  params: ApplyConfigAndRestartParams,
-  deps: { fetchImpl?: typeof fetch } = {},
-): Promise<void> {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const opsUrl = opsBaseUrl(params.opsPortOrUrl);
-  const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
-
-  const setRes = await fetchImpl(opsUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify({ operation: "set_configuration", ...params.configBlock }),
-  });
-  if (!setRes.ok) {
-    const text = await setRes.text().catch(() => "");
-    throw new Error(`set_configuration failed (HTTP ${setRes.status}): ${text}`);
-  }
-
-  const restartRes = await fetchImpl(opsUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify({ operation: "restart" }),
-  });
-  if (!restartRes.ok) {
-    const text = await restartRes.text().catch(() => "");
-    throw new Error(`restart failed (HTTP ${restartRes.status}): ${text}`);
-  }
-}
+// ─── Restart only ────────────────────────────────────────────────────────────
 
 /** `restart` only — used by `disableMcp` (flag off + restart, no config
  *  rewrite: the `@harperfast/oauth` config block is left in place; it is
