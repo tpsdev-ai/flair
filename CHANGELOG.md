@@ -43,6 +43,8 @@ so a hand-written entry here is lost.
 
 - **test**: HOME-isolate `resolveOpsPort` unit tests so they exercise the `httpPort-1` default path regardless of the host's `~/.flair/config.yaml`. A `mock.module("node:os")` shim makes `homedir()` delegate to `process.env.HOME`, and a `beforeEach` points HOME at a fresh empty temp dir so the config rung is correctly skipped.
 
+- Fixed the SessionStart hook command so it runs the `flair-session-start` binary instead of the MCP-server shim. The old form `npx -y @tpsdev-ai/flair-mcp flair-session-start` ran the package's default bin (the shim) and passed `flair-session-start` as an ignored argument. The corrected form `npx -y -p @tpsdev-ai/flair-mcp flair-session-start` uses `-p` to select the package so the named bin runs. Closes #1166.
+
 ## [0.42.0] - 2026-08-12
 
 ### Fixed
