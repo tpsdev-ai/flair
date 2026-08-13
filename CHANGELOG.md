@@ -18,6 +18,12 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.0] - 2026-08-13
+
+### Fixed
+
+- Fixed the SessionStart hook command so it runs the `flair-session-start` binary instead of the MCP-server shim. The old form `npx -y @tpsdev-ai/flair-mcp flair-session-start` ran the package's default bin (the shim) and passed `flair-session-start` as an ignored argument. The corrected form `npx -y -p @tpsdev-ai/flair-mcp flair-session-start` uses `-p` to select the package so the named bin runs.
+
 ## [0.43.0] - 2026-08-13
 
 ### Added
