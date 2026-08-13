@@ -18,6 +18,14 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.1] - 2026-08-13
+
+### Fixed
+
+- `flair upgrade` now re-pins MCP client configs to the newly installed version. Previously, the CLI version was cached at module load and never invalidated after `npm install -g` replaced `package.json` in-process, so the pin refresh wrote the OLD version back into client configs — a no-op. The upgrade path now clears the version cache after package install and refreshes pins before restart, covering `--no-restart` and `--no-verify` paths as well.
+
+- `flair upgrade --check` and the doctor hook-warning path no longer suggest globally installing `@tpsdev-ai/flair-mcp`. flair-mcp is zero-install via npx; the advice now points to `flair doctor --fix` instead.
+
 ## [0.44.0] - 2026-08-13
 
 ### Fixed
