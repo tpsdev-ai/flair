@@ -1,0 +1,1 @@
+- The quickstart now notes that `flair search` outputs JSON for non-TTY callers (scripts, pipes, CI) and documents the JSON fields and `--json` flag (#1139)
