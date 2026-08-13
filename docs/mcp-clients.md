@@ -109,7 +109,7 @@ Or wire it by hand — add a `SessionStart` hook to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'out=$(FLAIR_AGENT_ID=me npx -y @tpsdev-ai/flair-mcp flair-session-start 2>/dev/null) && printf %s \"$out\" || true'"
+            "command": "sh -c 'out=$(FLAIR_AGENT_ID=me npx -y -p @tpsdev-ai/flair-mcp flair-session-start 2>/dev/null) && printf %s \"$out\" || true'"
           }
         ]
       }

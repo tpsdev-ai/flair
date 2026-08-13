@@ -66,7 +66,7 @@ describe("buildHookCommand / parseHookCommandEnv", () => {
   it("round-trips agentId and flairUrl through the command string", () => {
     const command = buildHookCommand(AGENT, URL);
     expect(command).toContain(SESSION_START_HOOK_MARKER);
-    expect(command).toContain("npx -y @tpsdev-ai/flair-mcp");
+    expect(command).toContain("npx -y -p @tpsdev-ai/flair-mcp");
     const parsed = parseHookCommandEnv(command);
     expect(parsed.agentId).toBe(AGENT);
     expect(parsed.flairUrl).toBe(URL);
@@ -339,6 +339,21 @@ describe("hookStatus", () => {
     writeFileSync(
       path,
       JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: `echo ${SESSION_START_HOOK_MARKER}-decoy` }] }] } }),
+    );
+    const status = hookStatus(isoHome, "claude-code");
+    expect(status.wired).toBe(true);
+    expect(status.correctShape).toBe(false);
+  });
+
+  it("wired but NOT correctShape for the pre-#1166 form (missing -p) — doctor must still flag it", () => {
+    // flair#1166: the old form `npx -y @tpsdev-ai/flair-mcp flair-session-start`
+    // runs the shim, not the binary. correctShape must reject it so doctor
+    // flags it and --fix re-wires to the -p form.
+    const path = hookSettingsPath(isoHome, "claude-code");
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: `FLAIR_AGENT_ID=${AGENT} npx -y @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}` }] }] } }),
     );
     const status = hookStatus(isoHome, "claude-code");
     expect(status.wired).toBe(true);
