@@ -177,7 +177,8 @@ If you'd rather upgrade by hand instead of `flair upgrade`:
 
 ```bash
 npm install -g @tpsdev-ai/flair@latest
-npm install -g @tpsdev-ai/flair-mcp@latest   # if installed
+# flair-mcp is zero-install via npx — no global install needed.
+# flair doctor --fix rewires the hook to the current npx form.
 flair restart
 ```
 
