@@ -12,7 +12,7 @@
  *   - Commander program command registration
  */
 
-import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll, mock } from "bun:test";
 import {
   mkdirSync,
   rmSync,
@@ -21,9 +21,22 @@ import {
   chmodSync,
 } from "node:fs";
 import { join } from "node:path";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir } from "node:os";
 import nacl from "tweetnacl";
 import { createPrivateKey, sign as nodeCryptoSign } from "node:crypto";
+
+// Mock homedir() so tests can override it via process.env.HOME.
+// homedir() caches at first call (module load time), so setting
+// process.env.HOME in beforeEach comes too late. This mock delegates
+// to process.env.HOME when set, falling back to the real homedir().
+mock.module("node:os", () => {
+  const actual = { ...require("node:os") };
+  return {
+    ...actual,
+    homedir: () => process.env.HOME || actual.homedir(),
+  };
+});
+
 import {
   resolveKeyPath,
   buildEd25519Auth,
@@ -154,10 +167,10 @@ describe("resolveKeyPath", () => {
 });
 
 // ─── readPortFromConfig ───────────────────────────────────────────────────────
-// Note: readPortFromConfig() reads from homedir() (from node:os), which is
-// baked in at module load time and cannot be overridden via process.env.HOME.
-// We therefore test it against the live environment: if ~/.flair/config.yaml
-// exists, the function returns whatever port is configured there; otherwise null.
+// Note: readPortFromConfig() reads from homedir() (from node:os). The mock at
+// the top of this file makes homedir() delegate to process.env.HOME, so tests
+// can override HOME to isolate. These tests run against the live environment
+// (no HOME override) and verify the function doesn't throw.
 
 describe("readPortFromConfig", () => {
   test("returns a number or null (never throws)", () => {
@@ -360,10 +373,25 @@ describe("resolveHttpPort", () => {
 describe("resolveOpsPort", () => {
   let origFlairOpsPort: string | undefined;
   let origFlairUrl: string | undefined;
+  let origHome: string | undefined;
+  let origUserProfile: string | undefined;
+  let tmpHome: string;
 
   beforeAll(() => {
     origFlairOpsPort = process.env.FLAIR_OPS_PORT;
     origFlairUrl = process.env.FLAIR_URL;
+    origHome = process.env.HOME;
+    origUserProfile = process.env.USERPROFILE;
+  });
+
+  beforeEach(() => {
+    // HOME-isolate: resolveOpsPort reads configPath() = homedir()/.flair/config.yaml.
+    // A real install with a persisted opsPort would shadow the httpPort-1 default
+    // path that these tests exercise. Point HOME at a fresh empty temp dir so the
+    // config rung is correctly skipped.
+    tmpHome = makeTmpDir();
+    process.env.HOME = tmpHome;
+    if (process.env.USERPROFILE !== undefined) process.env.USERPROFILE = tmpHome;
   });
 
   afterEach(() => {
@@ -371,6 +399,11 @@ describe("resolveOpsPort", () => {
     else process.env.FLAIR_OPS_PORT = origFlairOpsPort;
     if (origFlairUrl === undefined) delete process.env.FLAIR_URL;
     else process.env.FLAIR_URL = origFlairUrl;
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = origUserProfile;
+    try { rmSync(tmpHome, { recursive: true, force: true }); } catch {}
   });
 
   test("uses explicit --ops-port flag over all others", () => {
