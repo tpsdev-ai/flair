@@ -1,1 +1,0 @@
-- `flair doctor` now distinguishes a cold npx cache on a fresh install from a genuinely-broken SessionStart hook, and no longer suggests an unrelated Node-runtime-mismatch remedy (#1131)

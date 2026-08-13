@@ -18,6 +18,31 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.43.0] - 2026-08-13
+
+### Added
+
+- **Fabric deployment docs corrected for 5.2+.** Fixed ops-API port (9925, same hostname),
+  clarified cluster_status availability on Fabric, documented the mcp.enabled manual flip
+  and its upgrade-reverts trap, and versioned log paths (hdb.log froze at 5.2, system.log
+  is the live log 5.2+). Closes #1153, #1156, #1157.
+
+### Changed
+
+- **boot-harper.mjs** now emits `rootPath` and `harperPid` in the JSON config line, enabling callers to recover from an interrupted teardown (kill by explicit PID, remove the install tree). The teardown contract is documented in the header comment, and `hdb.pid` is removed only after teardown fully completes, making a surviving `hdb.pid` a reliable orphan indicator.
+
+- Removed dead `applyRemoteConfigAndRestart` function and its `ApplyConfigAndRestartParams` interface from `src/lib/mcp-enable.ts`. The function was test-only since #1136 removed `set_configuration` delivery; Fabric regenerates the root `harperdb-config.yaml` and the component's own `config.yaml` is the source of truth for the oauth block. Updated the stale JSDoc on `buildMcpOAuthConfigBlock` to reflect this.
+
+- The quickstart now notes that `flair search` outputs JSON for non-TTY callers (scripts, pipes, CI) and documents the JSON fields and `--json` flag (#1139)
+
+### Fixed
+
+- `flair doctor` now distinguishes a cold npx cache on a fresh install from a genuinely-broken SessionStart hook, and no longer suggests an unrelated Node-runtime-mismatch remedy (#1131)
+
+- Fixed ops URL derivation for Fabric https targets: the ops API port is now the well-known Fabric ops port (9925) for https targets with effective port 443, instead of the dead-end port-1 derivation that produced :442. Self-hosted TLS installs with non-443 explicit ports are unchanged (port-1 convention preserved). The unreachable-ops error now names both `--ops-target` and `FLAIR_OPS_TARGET` with the exact host:port tried.
+
+- **test**: HOME-isolate `resolveOpsPort` unit tests so they exercise the `httpPort-1` default path regardless of the host's `~/.flair/config.yaml`. A `mock.module("node:os")` shim makes `homedir()` delegate to `process.env.HOME`, and a `beforeEach` points HOME at a fresh empty temp dir so the config rung is correctly skipped.
+
 ## [0.42.0] - 2026-08-12
 
 ### Fixed
