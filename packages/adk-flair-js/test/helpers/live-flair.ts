@@ -80,6 +80,10 @@ interface HarperConfig {
   adminPass: string;
   /** Ephemeral install tree — removed by the last worker during teardown. */
   installDir?: string;
+  /** Same as installDir — the ephemeral tree path for recovery. */
+  rootPath?: string;
+  /** Harper child process PID — for recovery after interrupted teardown. */
+  harperPid?: number | null;
 }
 
 // ─── Ed25519 key generation ──────────────────────────────────────────────────

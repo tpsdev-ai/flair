@@ -5,12 +5,29 @@
  * Usage:
  *   node boot-harper.mjs
  *
- * Outputs one JSON line to stdout with { httpURL, opsURL, adminUser, adminPass },
- * then blocks until stdin closes or SIGTERM arrives, at which point it tears
- * down Harper and exits.
+ * Outputs one JSON line to stdout with { httpURL, opsURL, adminUser, adminPass,
+ * rootPath, harperPid }, then blocks until stdin closes or SIGTERM arrives, at
+ * which point it tears down Harper and exits.
  *
  * The Python conftest spawns this as a subprocess, reads the JSON line, and
  * kills the process to trigger teardown.
+ *
+ * ─── Teardown contract ───────────────────────────────────────────────────
+ *
+ * On SIGTERM (or stdin-close), this helper calls stopHarper() which sends
+ * SIGTERM to the Harper child and WAITS for it to exit. A wrapper that follows
+ * SIGTERM with a kill -9 before exit KILLS TEARDOWN MID-FLIGHT and orphans the
+ * Harper child process + its install tree.
+ *
+ * Recovery: the JSON line now includes `harperPid` (the Harper child PID) and
+ * `rootPath` (the ephemeral install tree). If teardown is interrupted, the
+ * caller owns cleanup:
+ *   1. kill <harperPid>          — kill the orphaned Harper by explicit PID
+ *   2. rm -rf <rootPath>         — remove the leaked install tree
+ *
+ * A surviving `hdb.pid` file inside rootPath is a reliable orphan indicator:
+ * teardown removes it ONLY after stopHarper() completes fully. If hdb.pid
+ * still exists, teardown was interrupted and the tree is leaked.
  */
 import { startHarper, stopHarper } from "../../../../test/helpers/harper-lifecycle";
 import * as crypto from "node:crypto";
@@ -60,6 +77,8 @@ async function main() {
     adminUser: harper.admin.username,
     adminPass: harper.admin.password,
     installDir: harper.installDir,
+    rootPath: harper.installDir,
+    harperPid: harper.process?.pid ?? null,
     outcome: "BOOTED+WARM",
     floor_ms: warmup.floorMs,
   };
@@ -73,6 +92,17 @@ async function main() {
   });
 
   await stopHarper(harper);
+
+  // Remove hdb.pid as a completion sentinel — ONLY after teardown fully
+  // completes. If teardown is interrupted (kill -9), hdb.pid survives in
+  // the tree and is a reliable orphan indicator for the caller.
+  try {
+    const { unlink } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    await unlink(join(harper.installDir, "hdb.pid"));
+  } catch {
+    // best-effort — file may not exist or tree may already be gone
+  }
 }
 
 /**

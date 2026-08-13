@@ -1,0 +1,1 @@
+- **boot-harper.mjs** now emits `rootPath` and `harperPid` in the JSON config line, enabling callers to recover from an interrupted teardown (kill by explicit PID, remove the install tree). The teardown contract is documented in the header comment, and `hdb.pid` is removed only after teardown fully completes, making a surviving `hdb.pid` a reliable orphan indicator.
