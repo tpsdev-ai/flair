@@ -79,6 +79,35 @@ The staging file is written in every case, so a fallback never strands you mid-r
 
 `--secrets-mechanism <fabric-env-secrets|env-file>` remains an explicit override and skips the probe entirely.
 
+### The `mcp.enabled` operator step (Fabric)
+
+MCP is **off by default**. The shipped component `config.yaml` contains
+`@harperfast/oauth` → `mcp` → `enabled: false`. Until [flair#1152](https://github.com/tpsdev-ai/flair/issues/1152)
+lands (interpolate from env — *ON HOLD*), you must flip this manually:
+
+1. In your deployed component's `config.yaml`, change:
+   ```yaml
+   '@harperfast/oauth':
+     mcp:
+       enabled: true     # was: false
+   ```
+2. Re-deploy the component so Harper picks up the new value.
+3. **Verify the `/mcp` surface is actually serving** (the flag alone does not
+   guarantee it — a secret that is stored but never decrypted fails at self-verify):
+   ```bash
+   # Check /mcp is reachable and returning MCP protocol (not a loopback proxy or 404)
+   curl -sf https://<cluster>.<org>.harperfabric.com/mcp
+   # Should return MCP JSON-RPC content; if you get HTML redirect or 404 the flag
+   # is not effective
+   ```
+
+**⚠ SECURITY CAVEAT — the upgrade-reverts trap.** Any package update or fleet component
+update re-ships the literal `enabled: false` and silently darkens a live `/mcp` surface.
+You must **re-flip to `true` after every upgrade** and re-deploy. An updated component
+without this re-flip will appear healthy (`/Health` green) while its MCP tools are
+dark to every connected client. If you rely on MCP, add the re-flip to your upgrade
+runbook.
+
 ---
 
 ## Agent authentication
@@ -140,7 +169,7 @@ flair fleet verify --target https://<cluster>.<org>.harperfabric.com
 
 **`flair doctor`** takes no `--target` — it hardcodes localhost, reads a local PID file, and shells out to `lsof`. Unavailable too: `start`, `stop`, `restart`, `snapshot`, `reembed`, `rem`, `bridge`.
 
-**Fabric's own cluster topology is invisible.** `fleet verify` sweeps *Flair's* federation peer table, not Harper's cluster nodes. `cluster_status` is harper-pro-only. `0 peers known` means "0 on file", never "0 exist."
+**Fabric's own cluster topology is invisible.** `fleet verify` sweeps *Flair's* federation peer table, not Harper's cluster nodes. **`cluster_status` works on Fabric** — Fabric always runs harper-pro (not the OSS harper build), so cluster_status is available over the ops API. `0 peers known` means "0 on file", never "0 exist."
 
 ---
 

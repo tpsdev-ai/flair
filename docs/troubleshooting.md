@@ -23,7 +23,8 @@ If it fails to start:
 lsof -i :19926
 
 # Check logs (macOS)
-cat ~/.flair/data/log/hdb.log | tail -50
+cat ~/.flair/data/log/hdb.log | tail -50     # Harper ≤ 5.1 only (see below)
+cat ~/.flair/data/log/system.log | tail -50   # Harper 5.2+ (live log)
 
 # Check logs (Linux)
 journalctl --user -u flair --since "10 minutes ago"
@@ -242,6 +243,14 @@ flair --help          # all commands
 flair <command> -h    # command-specific help
 ```
 
-Logs: `~/.flair/data/log/hdb.log`
+**Log paths depend on Harper version:**
+
+- **Harper ≤ 5.1:** `~/.flair/data/log/hdb.log`
+- **Harper 5.2+:** `~/.flair/data/log/system.log`
+
+> ⚠ **On Harper 5.2+, `hdb.log` freezes at the upgrade boundary.** The live log is
+> `system.log`. The Harper ops `read_log` endpoint keeps serving the frozen `hdb.log`,
+> so remote diagnosis reads days-stale entries that look current. Always check
+> `system.log` after upgrading to 5.2+.
 
 File issues: [github.com/tpsdev-ai/flair/issues](https://github.com/tpsdev-ai/flair/issues)

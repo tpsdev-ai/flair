@@ -129,13 +129,16 @@ where nothing answers:
 # --target https://<fabric-node>:19926/<instance>     → ops derived as :19925 ✓
 ```
 
+**Fabric's ops API runs on the same hostname at port 9925** <!-- docs-freshness-allow: Fabric ops API port, not legacy data port --> (the deploy/upgrade path already targets this port). For a managed `*.harperfabric.com` instance:
+
+```bash
+# Same hostname, port 9925 — not port 442 <!-- docs-freshness-allow: Fabric ops API -->
+flair init --target https://<cluster>.<org>.harperfabric.com \
+    --ops-target https://<cluster>.<org>.harperfabric.com:9925 <!-- docs-freshness-allow: Fabric ops API -->
+```
+
 **Pass `--ops-target <url>` explicitly** (or set `FLAIR_OPS_TARGET`) on any command that
 touches the ops API: `init --target`, `agent add --target`, `federation token --target`.
-
-> **Gap — needs a Fabric account to verify.** This guide does not state the correct
-> ops-API URL for a managed `*.harperfabric.com` instance, or whether the ops API is
-> reachable remotely there at all. The derivation above is certain (read from source);
-> the right value to pass is not.
 
 Precedence: `--target` > `--url` > `FLAIR_TARGET` > `FLAIR_URL` > localhost. For ops:
 `--ops-target` > `FLAIR_OPS_TARGET` > derived > localhost.
@@ -250,8 +253,9 @@ and shells out to `lsof`. The command you'd reach for when something breaks is u
 here. Unavailable too: `start`, `stop`, `restart`, `snapshot`, `reembed`, `rem`, `bridge`.
 
 **Fabric's own cluster topology is invisible.** `fleet verify` sweeps *Flair's* federation
-peer table, not Harper's cluster nodes — `cluster_status` is harper-pro-only and absent
-from the OSS `harper` build. **`0 peers known` means "0 on file", never "0 exist."**
+peer table, not Harper's cluster nodes. **`cluster_status` works on Fabric** — Fabric
+always runs harper-pro (not the OSS harper build), so cluster_status is available over
+the ops API. `0 peers known` means "0 on file", never "0 exist."
 
 **There is no disk or quota telemetry.** `flair status` reports usage for two directories:
 no free space, no total, no quota, no warning threshold, walk capped at six levels, no
@@ -262,6 +266,35 @@ with nothing saying so. The one indirect signal is a migration halting for space
 > server-side. That is uncited and unverified, so this guide doesn't rely on it — and it
 > wouldn't matter: Flair calls it only as a post-failure convergence oracle and discards
 > the `size` field. Component disk usage is invisible structurally.
+
+### The `mcp.enabled` operator step
+
+MCP is **off by default**. The shipped component `config.yaml` contains
+`@harperfast/oauth` → `mcp` → `enabled: false`. Until [flair#1152](https://github.com/tpsdev-ai/flair/issues/1152)
+lands (interpolate from env — *ON HOLD*), you must flip this manually:
+
+1. In your deployed component's `config.yaml`, change:
+    ```yaml
+    '@harperfast/oauth':
+     mcp:
+       enabled: true      # was: false
+    ```
+2. Re-deploy the component so Harper picks up the new value.
+3. **Verify the `/mcp` surface is actually serving** (the flag alone does not
+   guarantee it — a secret that is stored but never decrypted fails at self-verify):
+    ```bash
+    # Check /mcp is reachable and returning MCP protocol (not a loopback proxy or 404)
+    curl -sf https://\<cluster\>.\<org\>.harperfabric.com/mcp
+    # Should return MCP JSON-RPC content; if you get HTML redirect or 404 the flag
+    # is not effective
+    ```
+
+**⚠ SECURITY CAVEAT — the upgrade-reverts trap.** Any package update or fleet component
+update re-ships the literal `enabled: false` and silently darkens a live `/mcp` surface.
+You must **re-flip to `true` after every upgrade** and re-deploy. An updated component
+without this re-flip will appear healthy (`/Health` green) while its MCP tools are
+dark to every connected client. If you rely on MCP, add the re-flip to your upgrade
+runbook.
 
 ### Known hazard: unbounded npm cache
 
