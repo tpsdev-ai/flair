@@ -259,12 +259,16 @@ async function memoryStore(agent: ResolvedAgent, args: any) {
  */
 async function memoryUpdate(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Memory");
-  const h = new Cls(undefined, delegationContext(agent));
   const id = args?.id;
   const content = args?.content;
   const preserveHistory = args?.preserveHistory === true;
 
-  const existing = await h.get(id);
+  // flair#1181 — the existing-record fetch is a by-id READ and must use the
+  // STATIC `Cls.get(id, context)` form (see memoryGet). The instance
+  // `new Cls(undefined, ctx).get(id)` returned `undefined` for the caller's own
+  // record (getProperty on an unloaded instance), so memory_update 404'd
+  // ("memory not found") on the connector path before it ever reached a write.
+  const existing = await Cls.get(id, delegationContext(agent));
   if (!existing) {
     return { error: "memory not found", status: 404 };
   }
@@ -288,8 +292,7 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
     // the resolved OAuth client_id (never forgeable via args) so the NEW
     // version's provenance records which client authored this update.
     if (agent.clientId) record.claimedClient = agent.clientId;
-    // A create needs a COLLECTION-bound instance (see resources/in-process.ts);
-    // `h` above is the by-id handle the get()/put() branches use.
+    // A create needs a COLLECTION-bound instance (see resources/in-process.ts).
     const coll: any = await collectionResource(Cls, delegationContext(agent));
     return unwrap(await coll.post(record));
   }
@@ -299,25 +302,53 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
   delete merged.embeddingModel;
   // flair#718 authorship-provenance — see memoryStore's comment above.
   if (agent.clientId) merged.claimedClient = agent.clientId;
-  return unwrap(await h.put(merged));
+  // flair#1181 — the default merge write must ALSO use the STATIC transactional
+  // path, `Cls.put(merged, context)`, NOT an instance `new Cls(undefined, ctx).put(merged)`.
+  // An unloaded instance has no primary key, so its put()/save() throws
+  // "Invalid primary key type: undefined" (proven by the memory_update
+  // round-trip integration test). The pre-#1181 code never hit this because the
+  // broken by-id read above 404'd first — migrating the read to static exposed
+  // the same unloaded-instance defect on the write. The static form loads the
+  // row by `merged.id` and threads the context, then dispatches through
+  // Memory.put()'s own ownership gate — no scope change, same as the read.
+  return unwrap(await Cls.put(merged, delegationContext(agent)));
 }
 
 async function memoryGet(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Memory");
-  const h = new Cls(undefined, delegationContext(agent));
-  // flair#744 slice 1 — opt-in inline trust block on the returned record.
-  // Pass the opts arg ONLY when requested so a plain get() call is unchanged.
-  return unwrap(
-    args?.includeTrust === true
-      ? await h.get(args?.id, { includeTrust: true })
-      : await h.get(args?.id),
-  );
+  // flair#1181 — by-id reads MUST use the STATIC `Cls.get(id, context)` form,
+  // never an instance `new Cls(undefined, ctx).get(id)`. Harper routes an
+  // instance `.get(<string>)` on an UNLOADED record (tables leave
+  // `loadAsInstance` at its `undefined` default) to `getProperty()` — a field
+  // accessor that returns `undefined` — so the read never loads the row and
+  // `makeByIdReadGate`'s `!record` branch 404s the caller's OWN record (one
+  // call after a successful store). The static form is the same transactional
+  // path the Ed25519 REST route takes: it loads the row, hands the override a
+  // `RequestTarget` (never a bare string), and still dispatches through
+  // Memory.get() → makeByIdReadGate → resolveReadScope, so the scope model is
+  // unchanged (own + org-non-private only). See resources/in-process.ts:223.
+  //
+  // flair#744 slice 1 — opt-in inline trust block. The instance call passed
+  // `includeTrust` as a 2nd positional opts arg to get(); the static form has
+  // no opts slot (arg 2 is the context), so fold it into the RequestTarget as
+  // a plain `{ id, includeTrust }` property — Memory.get()'s wantsTrust() reads
+  // it there (the in-process shape alongside the HTTP query-param shape).
+  const target = args?.includeTrust === true ? { id: args?.id, includeTrust: true } : args?.id;
+  return unwrap(await Cls.get(target, delegationContext(agent)));
 }
 
 async function memoryDelete(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Memory");
-  const h = new Cls(undefined, delegationContext(agent));
-  return unwrap(await h.delete(args?.id));
+  // flair#1181 — STATIC `Cls.delete(id, context)`, not an instance
+  // `new Cls(undefined, ctx).delete(id)`. Memory.delete()'s override loads the
+  // row via `super.get(id)` to enforce the permanent-memory admin guard; on an
+  // unloaded instance that `super.get(<string>)` hit the same `getProperty()`
+  // dead end (`undefined`), so the guard's `record.durability === "permanent"`
+  // check was SILENTLY SKIPPED and the delete fell through to an unguarded
+  // `super.delete(id)`. The static form loads the row first (RequestTarget,
+  // not a bare string), so the override sees the real record and the
+  // ownership/durability guard runs as intended.
+  return unwrap(await Cls.delete(args?.id, delegationContext(agent)));
 }
 
 async function bootstrap(agent: ResolvedAgent, args: any) {
@@ -367,8 +398,14 @@ async function soulSet(agent: ResolvedAgent, args: any) {
 
 async function soulGet(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Soul");
-  const h = new Cls(undefined, delegationContext(agent));
-  return unwrap(await h.get(`${agent.agentId}:${args?.key}`));
+  // flair#1181 — STATIC by-id read (see memoryGet). Soul has no get() override
+  // and no read-scope gate; its ids are `${agentId}:${key}`, built here from
+  // the RESOLVED agent, so a caller can only ever address its OWN soul — the
+  // static migration does not change that. The instance `h.get(<string>)`
+  // returned `undefined` (getProperty on an unloaded record), which is why
+  // soul_get came back empty on the connector path even though the entries
+  // exist and load fine via the Ed25519 static route.
+  return unwrap(await Cls.get(`${agent.agentId}:${args?.key}`, delegationContext(agent)));
 }
 
 async function workspaceSet(agent: ResolvedAgent, args: any) {

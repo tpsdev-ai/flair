@@ -67,19 +67,58 @@ function makeHandlerMock(resource: string, method: string) {
 }
 
 // Memory has post/get/delete on the same class.
+//
+// flair#1181 — the by-id read/delete doubles are shaped like Harper's REAL
+// static-vs-instance split, because the divergence between them IS the bug:
+//   - STATIC `Cls.get(target, ctx)` / `Cls.delete(target, ctx)` is the
+//     transactional wrapper the fixed tools call. It loads the row and hands
+//     the override a RequestTarget (never a bare string), then returns the
+//     loaded record. This is also the Ed25519 REST path.
+//   - INSTANCE `.get(<string>)` on an UNLOADED record (tables leave
+//     `loadAsInstance` at its `undefined` default) routes to `getProperty()` —
+//     a field accessor — and returns `undefined`. That is the #1181 404: the
+//     read never loads the row, so makeByIdReadGate's `!record` branch fires
+//     on the caller's OWN record. The fixed tools no longer call the instance
+//     form; this faithful shape makes any regression back to
+//     `new Cls(undefined, ctx).get(id)` fail loudly (undefined → 404).
+// A double whose instance-get returns canned data (as this one used to) is
+// easier to satisfy than the real class and cannot catch this class of bug.
 class MemoryMock extends HarperShapedBase {
   async post(args: any) { lastCall = { resource: "Memory.post", ctx: this._ctx, args, isCollection: this.isCollection } as any; return { ok: true, resource: "Memory.post", agentId: this._ctx?.request?.tpsAgent }; }
-  async put(args: any) { lastCall = { resource: "Memory.put", ctx: this._ctx, args }; return { ok: true, resource: "Memory.put", agentId: this._ctx?.request?.tpsAgent }; }
-  async get(id: any) {
-    lastCall = { resource: "Memory.get", ctx: this._ctx, args: id };
+  // flair#1181 — the default memory_update merge now writes via the STATIC
+  // `Cls.put(merged, ctx)` transactional path (the instance put on an unloaded
+  // `new Cls(undefined, ctx)` throws "Invalid primary key type: undefined").
+  // The instance put below is left for faithfulness but is no longer reached.
+  static async put(record: any, ctx: any) { lastCall = { resource: "Memory.put", ctx, args: record }; return { ok: true, resource: "Memory.put", agentId: ctx?.request?.tpsAgent }; }
+  async put(args: any) { lastCall = { resource: "Memory.put#instance", ctx: this._ctx, args }; return { ok: true, resource: "Memory.put#instance", agentId: this._ctx?.request?.tpsAgent }; }
+  static async get(target: any, ctx: any) {
+    const id = typeof target === "string" ? target : target?.id;
+    lastCall = { resource: "Memory.get", ctx, args: id };
     if (id === "missing-id") return null;
-    return { id, agentId: this._ctx?.request?.tpsAgent, content: "existing content", ok: true, resource: "Memory.get" };
+    const rec: any = { id, agentId: ctx?.request?.tpsAgent, content: "existing content", ok: true, resource: "Memory.get" };
+    // includeTrust is folded into the RequestTarget as a plain property by the
+    // fixed memory_get (static Cls.get has no opts slot); Memory.get()'s
+    // wantsTrust() reads it there and attachTrust() stamps a `trust` block.
+    if (target && typeof target === "object" && target.includeTrust === true) rec.trust = { tier: "unverified" };
+    return rec;
   }
-  async delete(id: any) { lastCall = { resource: "Memory.delete", ctx: this._ctx, args: id }; return { ok: true, resource: "Memory.delete", agentId: this._ctx?.request?.tpsAgent }; }
+  static async delete(target: any, ctx: any) {
+    const id = typeof target === "string" ? target : target?.id;
+    lastCall = { resource: "Memory.delete", ctx, args: id };
+    return { ok: true, resource: "Memory.delete", agentId: ctx?.request?.tpsAgent };
+  }
+  // The #1181 bug, modeled: instance get(<string>) → getProperty → undefined.
+  async get(target: any) { lastCall = { resource: "Memory.get#instance-getProperty", ctx: this._ctx, args: target }; return undefined; }
 }
 class SoulMock extends HarperShapedBase {
   async put(args: any) { lastCall = { resource: "Soul.put", ctx: this._ctx, args }; return { ok: true, resource: "Soul.put", agentId: this._ctx?.request?.tpsAgent }; }
-  async get(id: any) { lastCall = { resource: "Soul.get", ctx: this._ctx, args: id }; return { ok: true, resource: "Soul.get", agentId: this._ctx?.request?.tpsAgent }; }
+  static async get(target: any, ctx: any) {
+    const id = typeof target === "string" ? target : target?.id;
+    lastCall = { resource: "Soul.get", ctx, args: id };
+    return { ok: true, resource: "Soul.get", id, agentId: ctx?.request?.tpsAgent };
+  }
+  // The #1181 bug, modeled: instance get(<string>) → getProperty → undefined.
+  async get(target: any) { lastCall = { resource: "Soul.get#instance-getProperty", ctx: this._ctx, args: target }; return undefined; }
 }
 
 // ─── Mock harper: Credential + Agent tables ──────────────────────
@@ -507,6 +546,84 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
     expect(lastCall?.resource).toBe("Memory.get");
     expect(body.result.isError).toBe(true);
     expect(body.result.structuredContent.status).toBe(404);
+  });
+
+  // ─── flair#1181 — by-id reads use the STATIC Cls.get/delete, not an
+  // instance new Cls(undefined, ctx).get(id) that getProperty's to undefined ──
+  //
+  // These are the tool surfaces the connector 404'd on (memory_get, soul_get)
+  // or that silently mis-behaved (memory_delete's permanent-guard skipped)
+  // because the read never loaded the row. The doubles above are shaped like
+  // real Harper (static loads the row; instance-get(<string>) → undefined), so
+  // a regression back to the instance pattern fails here. The cross-agent
+  // scope proof (own-only, no widening) is in the real-gate integration test
+  // test/integration/mcp-byid-read-static-pattern — the double replaces the
+  // gate, so scope can only be pinned against a real Memory + makeByIdReadGate.
+  it("memory_get (flair#1181) returns the caller's OWN record via the STATIC by-id read, not a 404", async () => {
+    const res = await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_get", arguments: { id: "mem-own-1" } } },
+      { sub: "sub-bob" },
+    ));
+    const body = await parse(res);
+    // Dispatched to the STATIC load (resource marker set only by the static get).
+    expect(lastCall?.resource).toBe("Memory.get");
+    expect(lastCall?.args).toBe("mem-own-1");
+    expect(body.result.isError).toBeFalsy();
+    expect(body.result.structuredContent.id).toBe("mem-own-1");
+    // Scoped to the caller — identity comes from the resolved agent, never args.
+    expect(body.result.structuredContent.agentId).toBe("agt_bob");
+    expect(body.result.structuredContent.content).toBe("existing content");
+  });
+
+  it("memory_get with includeTrust folds the flag into the RequestTarget so the trust block survives (flair#1181/#744)", async () => {
+    const res = await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_get", arguments: { id: "mem-own-1", includeTrust: true } } },
+      { sub: "sub-bob" },
+    ));
+    const body = await parse(res);
+    // The static Cls.get has no opts slot; includeTrust must arrive as a plain
+    // property on the target object, which Memory.get()'s wantsTrust() reads.
+    expect(body.result.structuredContent.trust).toBeDefined();
+    expect(body.result.structuredContent.trust.tier).toBe("unverified");
+  });
+
+  it("MUTATION GUARD (flair#1181): the pre-fix INSTANCE pattern returns undefined for the caller's own id; the STATIC pattern returns the record", async () => {
+    // Proves the double faithfully models Harper's static-vs-instance divergence
+    // (so the tests above can catch a regression). Revert memory_get in
+    // resources/mcp-tools.ts to `new Cls(undefined, ctx).get(id)` and the
+    // positive control above fails with the 404 this asserts the instance path
+    // produces.
+    const Cls: any = MemoryMock;
+    const ctx = { request: { tpsAgent: "agt_bob" } };
+    const viaInstance = await new Cls(undefined, ctx).get("mem-own-1");
+    expect(viaInstance).toBeUndefined(); // getProperty on an unloaded record
+    const viaStatic = await Cls.get("mem-own-1", ctx);
+    expect(viaStatic?.id).toBe("mem-own-1");
+    expect(viaStatic?.agentId).toBe("agt_bob");
+  });
+
+  it("memory_delete (flair#1181) dispatches to the STATIC Cls.delete so Memory.delete()'s permanent-guard load can run", async () => {
+    const res = await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_delete", arguments: { id: "mem-own-1" } } },
+      { sub: "sub-bob" },
+    ));
+    const body = await parse(res);
+    expect(lastCall?.resource).toBe("Memory.delete");
+    expect(lastCall?.args).toBe("mem-own-1");
+    expect(body.result.isError).toBeFalsy();
+  });
+
+  it("soul_get (flair#1181) reads the caller's own soul via the STATIC by-id read", async () => {
+    const res = await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "soul_get", arguments: { key: "role" } } },
+      { sub: "sub-bob" },
+    ));
+    const body = await parse(res);
+    expect(lastCall?.resource).toBe("Soul.get");
+    // id is derived from the RESOLVED agent (`${agentId}:${key}`), never args.
+    expect(lastCall?.args).toBe("agt_bob:role");
+    expect(body.result.isError).toBeFalsy();
+    expect(body.result.structuredContent.agentId).toBe("agt_bob");
   });
 
   it("soul_set PUTs with id = agentId:key (so soul_get can find it)", async () => {

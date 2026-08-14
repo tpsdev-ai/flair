@@ -42,6 +42,14 @@ import { recordCitations } from "./usage-recording.js";
  */
 function wantsTrust(target: any, opts: { includeTrust?: boolean } | undefined): boolean {
   if (opts?.includeTrust === true) return true;
+  // flair#1181 — the in-process STATIC by-id read (resources/mcp-tools.ts
+  // memory_get) folds includeTrust into the RequestTarget as a plain property,
+  // because Harper's static `Cls.get(target, context)` has no opts slot (arg 2
+  // is the context, not opts). This is the in-process analog of the two shapes
+  // below; a real RequestTarget from the HTTP path never carries a plain
+  // `includeTrust` property (it lives in the query string, read via `.get`),
+  // so this is purely additive and does not affect the HTTP path.
+  if (target?.includeTrust === true) return true;
   const raw =
     target?.get?.("includeTrust") ??
     target?.searchParams?.get?.("includeTrust") ??
