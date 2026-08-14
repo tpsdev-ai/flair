@@ -243,6 +243,10 @@ export function makeReadScope(
 export function makeByIdReadGate(
   readScope: (authAgentId: string) => Promise<RecordTypeReadScope>,
 ): (this: any, target: any, superGet: (t: any) => Promise<any>) => Promise<any> {
+  // flair#1181 — the owner field this gate's read-scope keys on, used ONLY to
+  // annotate the diagnostic logs below. Tagged onto the resolver by
+  // makeReadScope(); "agentId" for every table wired through this kit today.
+  const ownerField: string = (readScope as any)?.ownerField ?? "agentId";
   return async function byIdReadGate(this: any, target: any, superGet: (t: any) => Promise<any>): Promise<any> {
     // Collection / query reads arrive as a RequestTarget with
     // `isCollection === true`, and are governed by search() (same owner
@@ -251,12 +255,26 @@ export function makeByIdReadGate(
       return this.search(target);
     }
 
+    // flair#1181 — a single debug breadcrumb per DENY/ABSENT outcome so the
+    // next 404-on-your-own-record is a one-log diagnosis instead of a re-derive
+    // from Anthropic request ids. The three outcomes below are otherwise
+    // indistinguishable to the caller BY DESIGN — the client ALWAYS receives
+    // NOT_FOUND (404-never-403, so a denied caller can't enumerate other
+    // agents' ids). This logging is server-side only and changes no response.
+    const table: string | undefined = (this as any)?.constructor?.name;
+    const targetId = typeof target === "string" ? target : (target as any)?.id;
+
     const ctx = this.getContext?.();
     const auth = await resolveAgentAuth(ctx);
 
     // Anonymous by-id read is already blocked at the allowRead() gate (403);
     // this is defense-in-depth if get() is ever reached directly.
-    if (auth.kind === "anonymous") return NOT_FOUND();
+    if (auth.kind === "anonymous") {
+      console.debug("makeByIdReadGate by-id read → NOT_FOUND", {
+        table, targetId, resolvedAgentId: undefined, recordLoaded: false, recordOwner: undefined, branch: "anonymous",
+      });
+      return NOT_FOUND();
+    }
 
     // Trusted internal call or admin agent — unfiltered, unchanged behavior.
     if (auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin)) {
@@ -265,10 +283,25 @@ export function makeByIdReadGate(
 
     // Non-admin agent: scoped per the table's own read-scope model.
     const record = await superGet(target);
-    if (!record) return NOT_FOUND();
+    if (!record) {
+      // Row did not load: either it genuinely does not exist, OR — the #1181
+      // failure — a by-id read reached here on an unloaded instance and
+      // getProperty()'d to undefined. `recordLoaded: false` is the tell.
+      console.debug("makeByIdReadGate by-id read → NOT_FOUND", {
+        table, targetId, resolvedAgentId: auth.agentId, recordLoaded: false, recordOwner: undefined, branch: "absent-or-failed-load",
+      });
+      return NOT_FOUND();
+    }
 
     const scope = await readScope(auth.agentId);
-    if (!scope.isAllowed(record)) return NOT_FOUND();
+    if (!scope.isAllowed(record)) {
+      // Row loaded and is owned by someone this caller may not read — a genuine
+      // ownership denial, distinct from the absent/failed-load branch above.
+      console.debug("makeByIdReadGate by-id read → NOT_FOUND", {
+        table, targetId, resolvedAgentId: auth.agentId, recordLoaded: true, recordOwner: (record as any)?.[ownerField], branch: "denied",
+      });
+      return NOT_FOUND();
+    }
 
     return record;
   };

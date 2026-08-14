@@ -148,6 +148,69 @@ async function recallById(agentId, id) {
   return record && typeof record === "object" && !(record instanceof Response) ? summarise(record) : null;
 }
 
+// ─── flair#1181 — the by-id read access-pattern bug, reproduced on real Harper ─
+//
+// `recallById` above is the CORRECT static form — `Cls.get(id, context)` — the
+// one resources/mcp-tools.ts's fixed by-id reads use, the same transactional
+// path the Ed25519 REST route takes. The three ops below drive the exact
+// divergence #1181 was about, against a real Memory resource + makeByIdReadGate:
+
+/**
+ * The PRE-FIX mcp-tools pattern: an INSTANCE by-id read,
+ * `new Cls(undefined, ctx).get(id)`. Harper routes `.get(<string>)` on an
+ * unloaded instance (loadAsInstance at its default) to `getProperty()` — a
+ * field accessor — so the row never loads and makeByIdReadGate 404s the
+ * caller's OWN record. This op exists ONLY to reproduce the bug; do not copy it.
+ */
+async function recallByIdInstance(agentId, id) {
+  const Cls = flair("Memory");
+  const record = await new Cls(undefined, agentContext(agentId)).get(id);
+  return record && typeof record === "object" && !(record instanceof Response) ? summarise(record) : null;
+}
+
+/**
+ * The FIXED static by-id read WITH includeTrust folded into the RequestTarget
+ * as a plain property (mcp-tools memory_get; static `Cls.get` has no opts slot).
+ * Proves the trust block still attaches end-to-end through the real Memory.get()
+ * → wantsTrust() path after the migration.
+ */
+async function recallByIdTrust(agentId, id) {
+  const record = await flair("Memory").get({ id, includeTrust: true }, agentContext(agentId));
+  if (!record || record instanceof Response) return null;
+  return { ...summarise(record), hasTrust: record.trust !== undefined, trust: record.trust ?? null };
+}
+
+/**
+ * The FIXED memory_delete path: static `Cls.delete(id, context)`. Memory.delete()
+ * loads the row via `super.get(id)` to run the permanent-memory admin guard; the
+ * static form makes that load see the real record (the instance form getProperty'd
+ * to undefined and skipped the guard). Returns whether the row is gone afterward.
+ */
+async function deleteById(agentId, id) {
+  await flair("Memory").delete(id, agentContext(agentId));
+  const after = await flair("Memory").get(id, agentContext(agentId));
+  return { deleted: !after || after instanceof Response };
+}
+
+/**
+ * The FIXED memory_update DEFAULT path, mirrored exactly (mcp-tools memoryUpdate):
+ * static existing-read, then a STATIC `Cls.put(merged, ctx)` write leg. The
+ * instance write leg `new Cls(undefined, ctx).put(merged)` throws
+ * "Invalid primary key type: undefined" on an unloaded instance — this op
+ * proves the static write round-trips end-to-end.
+ */
+async function updateById(agentId, id, content) {
+  const Cls = flair("Memory");
+  const existing = await Cls.get(id, agentContext(agentId));      // static by-id read (the #1181 fix)
+  if (!existing || existing instanceof Response) return { updated: false, reason: "not-found" };
+  const merged = { ...existing, content, updatedAt: new Date().toISOString() };
+  delete merged.embedding;
+  delete merged.embeddingModel;
+  await Cls.put(merged, agentContext(agentId));                  // static write leg (the #1181 fix)
+  const after = await Cls.get(id, agentContext(agentId));
+  return { updated: after && after.content === content, content: after?.content ?? null };
+}
+
 /**
  * The DELIBERATELY unfiltered read — every agent's private records, by name.
  * `internalContext()` is what an infrastructure sweep asks for on purpose; an
@@ -230,6 +293,14 @@ export class AgentFleet extends Resource {
         return run(() => recall(body.agentId, body));
       case "recallById":
         return run(() => recallById(body.agentId, body.id));
+      case "recallByIdInstance":
+        return run(() => recallByIdInstance(body.agentId, body.id));
+      case "recallByIdTrust":
+        return run(() => recallByIdTrust(body.agentId, body.id));
+      case "deleteById":
+        return run(() => deleteById(body.agentId, body.id));
+      case "updateById":
+        return run(() => updateById(body.agentId, body.id, body.content));
       case "semanticRecall":
         return run(() => semanticRecall(body.agentId, body.q, body.limit));
       case "semanticRecallUnscoped":
