@@ -18,6 +18,12 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.2] - 2026-08-14
+
+### Changed
+
+- Bumped `@harperfast/oauth` to 2.5.0 (upstream oauth#200 — CIMD auth on Fabric for claude.ai remote MCP).
+
 ## [0.44.1] - 2026-08-13
 
 ### Fixed

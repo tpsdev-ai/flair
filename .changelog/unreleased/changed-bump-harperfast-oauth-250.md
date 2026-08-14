@@ -1,1 +1,0 @@
-- Bumped `@harperfast/oauth` to 2.5.0 (upstream oauth#200 — CIMD auth on Fabric for claude.ai remote MCP).
