@@ -75,7 +75,13 @@ import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
  *   row's `entities`.
  *
  * Response:
- *   { context, sections, tokenEstimate, memoriesIncluded, memoriesAvailable }
+ *   { context, sections, tokenEstimate, memoriesIncluded, memoriesAvailable,
+ *     agentId, scope, soul, memories, predicted[, currentTaskHint] }
+ *   The self-describing keys (flair#1182 part 1) — `agentId` (resolved caller),
+ *   `scope` (read model applied to the caller), `soul`/`memories`/`predicted`
+ *   (the caller's OWN records as structured containers), and `currentTaskHint`
+ *   (present only when currentTask is absent/blank) — are ALWAYS emitted so a
+ *   client can tell an empty instance from one that doesn't support them.
  */
 
 // Collision surfacing (flair#681) tunables.
@@ -215,6 +221,28 @@ export class BootstrapMemories extends Resource {
     let memoriesAvailable = 0;
     let memoriesTruncated = 0;
 
+    // flair#1182 (part 1) — self-describing bootstrap. These structured
+    // container keys are ALWAYS emitted on the response (empty `{}`/`[]` when
+    // the caller has nothing), so a client can tell an *empty* instance from
+    // one that doesn't support these keys at all — and can read the caller's
+    // own soul/memories as structured data instead of parsing the `context`
+    // markdown string. Scoped to the CALLER'S OWN records only
+    // (permanent/recent/relevant/predicted are all agentId==self reads);
+    // teammate findings stay in `context`/`sections.teammate` and are never
+    // duplicated here, so these containers carry no other agent's data.
+    const soulMap: Record<string, unknown> = {};
+    const includedOwnMemories: any[] = [];
+    const includedPredicted: any[] = [];
+    const leanMemory = (m: any, section: string) => ({
+      id: m.id,
+      content: m.content,
+      durability: m.durability ?? null,
+      createdAt: m.createdAt ?? null,
+      agentId: m.agentId ?? agentId,
+      subject: m.subject ?? null,
+      section,
+    });
+
     // --- 1. Soul records (budgeted — prioritized by key importance) ---
     // Soul is who you are, but we still need to respect token budgets.
     // Workspace files (SOUL.md, AGENTS.md) can be massive — they're already
@@ -239,6 +267,9 @@ export class BootstrapMemories extends Resource {
           skillAssignments.push(record);
           continue;
         }
+        // flair#1182 — the raw soul container (key→value), independent of the
+        // token-budgeted/priority-truncated `sections.soul` lines built below.
+        soulMap[record.key] = record.value;
         const line = `**${record.key}:** ${record.value}`;
         const tokens = estimateTokens(line);
         const priority = SOUL_KEY_PRIORITY[record.key] ?? 50;
@@ -449,6 +480,7 @@ export class BootstrapMemories extends Resource {
       const cost = estimateTokens(line);
       if (cost <= tokenBudget) {
         sections.permanent.push(line);
+        includedOwnMemories.push(leanMemory(m, "permanent"));
         if (includeTrust) includedTrustMemories.push(m);
         tokenBudget -= cost;
         memoriesIncluded++;
@@ -519,6 +551,7 @@ export class BootstrapMemories extends Resource {
         continue;
       }
       sections.recent.push(line);
+      includedOwnMemories.push(leanMemory(m, "recent"));
       if (includeTrust) includedTrustMemories.push(m);
       recentSpent += cost;
       tokenBudget -= cost;
@@ -565,6 +598,7 @@ export class BootstrapMemories extends Resource {
           continue;
         }
         sections.predicted.push(line);
+        includedPredicted.push(leanMemory(m, "predicted"));
         if (includeTrust) includedTrustMemories.push(m);
         predictedSpent += cost;
         tokenBudget -= cost;
@@ -745,6 +779,9 @@ export class BootstrapMemories extends Resource {
             sections.teammate.push(line);
           } else {
             sections.relevant.push(line);
+            // flair#1182 — own task-relevant records join the `memories`
+            // container; teammate (`_source`) records stay in `context` only.
+            includedOwnMemories.push(leanMemory(m, "relevant"));
           }
           if (includeTrust) includedTrustMemories.push(m);
           tokenBudget -= cost;
@@ -976,8 +1013,40 @@ export class BootstrapMemories extends Resource {
     // the single GLOBAL threshold.
     const abstention = abstain ? evaluateAbstention(taskBestSimilarity) : undefined;
 
+    // flair#1182 (part 1) — resolved identity + read-scope descriptor. Reveals
+    // ONLY the caller's own resolved identity/scope (who the server decided the
+    // caller is, and the read model applied to them) — never another agent's
+    // data. Would have made the #1181 read-gate bug a one-call diagnosis.
+    const scopeInfo = {
+      agentId,
+      isAdmin: callerIsAdmin,
+      // The read model resolveReadScope(agentId) enforces for this caller: the
+      // caller's own records (any visibility) plus every other in-org agent's
+      // non-private record. Keep in sync with resources/memory-read-scope.ts.
+      reads: "own-and-org-non-private",
+    };
+
+    // flair#1182 (part 1) — currentTask is what turns on task-relevant
+    // retrieval, teammate findings and collision surfacing. When it's absent or
+    // blank, say so in the response so a caller learns the knob exists (present
+    // ONLY when absent/blank — a provided task needs no hint).
+    const taskProvided = typeof currentTask === "string" && currentTask.trim().length > 0;
+    const currentTaskHint = taskProvided
+      ? undefined
+      : "No currentTask was provided. Pass currentTask (a short description of what you're working on) to enable task-relevant memory retrieval, teammate findings, and collision surfacing.";
+
     return {
       context,
+      // flair#1182 (part 1) — always-present self-describing keys: who the
+      // server resolved the caller as, the read model applied, and the caller's
+      // own soul/memories/predicted as structured containers (empty `{}`/`[]`,
+      // never absent, so "empty" is distinguishable from "unsupported").
+      agentId,
+      scope: scopeInfo,
+      soul: soulMap,
+      memories: includedOwnMemories,
+      predicted: includedPredicted,
+      ...(currentTaskHint ? { currentTaskHint } : {}),
       ...(trust ? { trust } : {}),
       ...(abstention ? { abstention } : {}),
       sections: {
