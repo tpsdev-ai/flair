@@ -33,15 +33,16 @@ flair init
 
 # 2. Provision an Ed25519 identity for your ADK app
 flair agent add my-adk-app
-# → writes ~/.flair/keys/my-adk-app.key (PKCS8 base64)
+# → writes ~/.flair/keys/my-adk-app.key
 
-# 3. Install adk-flair
-pip install adk-flair
+# 3. Install adk-flair (litellm powers the Gemini model in the example)
+pip install adk-flair litellm
 
 # 4. Set environment variables
 export FLAIR_URL=http://localhost:19926
 export FLAIR_AGENT_ID=my-adk-app
 export FLAIR_KEYFILE=$HOME/.flair/keys/my-adk-app.key
+export GOOGLE_API_KEY=...   # or GEMINI_API_KEY, to run the agent
 
 # 5. Use in your agent
 #    from adk_flair import FlairMemoryService
@@ -52,13 +53,25 @@ export FLAIR_KEYFILE=$HOME/.flair/keys/my-adk-app.key
 adk web --memory_service_uri="flair://localhost:19926"
 ```
 
+### Run it end to end
+
+A complete, copy-paste-runnable demo lives at
+[`examples/quickstart.py`](./examples/quickstart.py). After the steps above:
+
+```bash
+python examples/quickstart.py
+```
+
+It plants a fact in session 1, waits for Flair to make it searchable, then
+asks for it back in a fresh session 2 and prints whether the fact was recalled.
+
 ## Configuration
 
 | Setting          | Env var            | Default                       | Notes                                    |
 |------------------|--------------------|-------------------------------|------------------------------------------|
 | Server URL       | `FLAIR_URL`        | `http://localhost:19926`      | Must be localhost unless opt-in (below)  |
 | Agent ID         | `FLAIR_AGENT_ID`   | (required)                    | Must match `flair agent add <id>`        |
-| Private key path | `FLAIR_KEYFILE`    | (required)                    | PKCS8 base64 Ed25519 key                 |
+| Private key path | `FLAIR_KEYFILE`    | (required)                    | Keyfile from `flair agent add` (raw seed; base64/PEM also accepted). A leading `~` is expanded. |
 | Allow remote URL | `FLAIR_ALLOW_REMOTE_URL` | (unset)                 | Set to `1` to allow non-localhost URLs   |
 
 All settings can also be passed as constructor arguments:

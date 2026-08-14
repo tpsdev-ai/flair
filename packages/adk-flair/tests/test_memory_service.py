@@ -164,6 +164,70 @@ class TestConstructorValidation:
             with pytest.raises(ValueError, match="FLAIR_KEYFILE"):
                 _load_ed25519_key("/nonexistent/path")
 
+    def test_loads_raw_seed_keyfile(self, tmp_path):
+        """`flair agent add` writes a raw 32-byte Ed25519 seed, not PKCS8 base64.
+
+        A cold user points FLAIR_KEYFILE straight at ~/.flair/keys/<id>.key, so
+        the adapter must read that format or the documented quickstart is broken.
+        """
+        from adk_flair.memory_service import _load_ed25519_key
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives import serialization
+
+        key = ed25519.Ed25519PrivateKey.generate()
+        seed = key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        assert len(seed) == 32
+        keyfile = tmp_path / "agent.key"
+        keyfile.write_bytes(seed)  # binary, exactly like the CLI
+
+        loaded = _load_ed25519_key(str(keyfile))
+        assert isinstance(loaded, ed25519.Ed25519PrivateKey)
+
+    def test_loads_pkcs8_base64_keyfile(self, tmp_path):
+        """The historical adk-flair format (base64 PKCS8 DER) still loads."""
+        from adk_flair.memory_service import _load_ed25519_key
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives import serialization
+        import base64
+
+        key = ed25519.Ed25519PrivateKey.generate()
+        der = key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        keyfile = tmp_path / "agent.key"
+        keyfile.write_text(base64.b64encode(der).decode("ascii"))
+
+        loaded = _load_ed25519_key(str(keyfile))
+        assert isinstance(loaded, ed25519.Ed25519PrivateKey)
+
+    def test_expands_home_in_keyfile_path(self, tmp_path, monkeypatch):
+        """A leading ~ in FLAIR_KEYFILE is expanded to the home directory."""
+        from adk_flair.memory_service import _load_ed25519_key
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives import serialization
+
+        fake_home = tmp_path / "home"
+        keys_dir = fake_home / ".flair" / "keys"
+        keys_dir.mkdir(parents=True)
+        key = ed25519.Ed25519PrivateKey.generate()
+        seed = key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        (keys_dir / "agent.key").write_bytes(seed)
+
+        monkeypatch.setenv("HOME", str(fake_home))  # POSIX expanduser source
+        monkeypatch.setenv("USERPROFILE", str(fake_home))  # Windows parity
+        loaded = _load_ed25519_key("~/.flair/keys/agent.key")
+        assert isinstance(loaded, ed25519.Ed25519PrivateKey)
+
 
 # ─── search_memory ──────────────────────────────────────────────────────────
 

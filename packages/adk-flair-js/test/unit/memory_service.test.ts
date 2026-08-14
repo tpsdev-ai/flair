@@ -5,10 +5,10 @@
  * Uses mock fetch to avoid requiring a live Flair instance.
  */
 
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
 import { FlairMemoryService } from "../../src/memory_service.js";
 import { compoundTag, sanitizeTagSegment } from "../../src/tag.js";
-import { loadEd25519Key, signRequest } from "../../src/signing.js";
+import { loadEd25519Key, signRequest, expandHome } from "../../src/signing.js";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -147,6 +147,58 @@ describe("signing", () => {
     const key = loadEd25519Key(keyfilePath);
     const header = signRequest(key, "test-agent", "POST", "/SemanticSearch");
     expect(header).toMatch(/^TPS-Ed25519 test-agent:\d+:[0-9a-f-]+:[A-Za-z0-9+/=]+$/);
+  });
+
+  it("loads a raw 32-byte seed keyfile (the `flair agent add` format)", () => {
+    // `flair agent add <id>` writes the private key as a raw 32-byte Ed25519
+    // seed (src/cli.ts), NOT PKCS8 base64. A cold user following the README
+    // points FLAIR_KEYFILE straight at ~/.flair/keys/<id>.key, so the adapter
+    // must read that format — otherwise the documented quickstart never works.
+    const { privateKey } = crypto.generateKeyPairSync("ed25519");
+    const pkcs8 = privateKey.export({ format: "der", type: "pkcs8" }); // 48 bytes
+    const seed = pkcs8.subarray(16); // raw 32-byte seed
+    expect(seed.length).toBe(32);
+    const seedPath = path.join(os.tmpdir(), `adk-flair-seed-${crypto.randomUUID()}.key`);
+    fs.writeFileSync(seedPath, seed); // binary, exactly like the CLI
+    try {
+      const key = loadEd25519Key(seedPath);
+      expect(key.asymmetricKeyType).toBe("ed25519");
+    } finally {
+      fs.unlinkSync(seedPath);
+    }
+  });
+
+  it("expands a leading ~/ to the home directory", () => {
+    // Point os.homedir() at a temp dir and drop a keyfile under ~/.flair/keys/.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "adk-flair-home-"));
+    const keysDir = path.join(fakeHome, ".flair", "keys");
+    fs.mkdirSync(keysDir, { recursive: true });
+    fs.copyFileSync(keyfilePath, path.join(keysDir, "agent.key"));
+    const homedirSpy = spyOn(os, "homedir").mockReturnValue(fakeHome);
+    try {
+      expect(expandHome("~/.flair/keys/agent.key")).toBe(
+        path.join(fakeHome, ".flair", "keys", "agent.key"),
+      );
+      const key = loadEd25519Key("~/.flair/keys/agent.key");
+      expect(key.asymmetricKeyType).toBe("ed25519");
+    } finally {
+      homedirSpy.mockRestore();
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("throws a clear error naming the expanded path when a ~ keyfile is missing", () => {
+    const homedirSpy = spyOn(os, "homedir").mockReturnValue("/fake/home");
+    try {
+      // Never a bare ENOENT — the message must name the resolved path and stay
+      // FLAIR_KEYFILE-tagged so the constructor's error contract holds.
+      expect(() => loadEd25519Key("~/.flair/keys/missing.key")).toThrow("FLAIR_KEYFILE");
+      expect(() => loadEd25519Key("~/.flair/keys/missing.key")).toThrow(
+        "/fake/home/.flair/keys/missing.key",
+      );
+    } finally {
+      homedirSpy.mockRestore();
+    }
   });
 });
 

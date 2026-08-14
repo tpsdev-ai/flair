@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]  # flair repo root
+_REPO_ROOT = Path(__file__).resolve().parents[3]  # flair repo root (tests → adk-flair → packages → repo)
 _BOOT_HELPER = Path(__file__).resolve().parent / "helpers" / "boot-harper.mjs"
 
 
@@ -284,17 +284,46 @@ def live_flair():
         text=True,
     )
 
-    # Read the JSON config line
+    # Scan stdout for the JSON config line.
+    #
+    # boot-harper.mjs emits the Harper connection config as a single JSON line on
+    # stdout, but harper-lifecycle prints progress lines ("[harper-lifecycle] …")
+    # to stdout BEFORE it. Reading only the first line and json-parsing it fails
+    # on those logs ("Expecting value: line 1 column 2"), so every ephemeral test
+    # skipped even after the repo root was resolved correctly. Scan each line and
+    # take the first that parses as the expected config dict — mirrors the JS
+    # live-flair helper. boot-harper self-bounds (startup/health/warm-up timeouts)
+    # and exits on failure, closing stdout (EOF) so this loop terminates.
+    config = None
     try:
-        stdout_line = proc.stdout.readline()
-        if not stdout_line:
-            stderr_output = proc.stderr.read()
-            pytest.skip(
-                f"FLAIR_TEST_URL not set and ephemeral Harper failed to start: "
-                f"stderr={stderr_output}"
-            )
-        config = json.loads(stdout_line.strip())
-    except (json.JSONDecodeError, Exception) as exc:
+        while True:
+            line = proc.stdout.readline()
+            if not line:  # EOF — boot-harper exited without emitting config
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # a harper-lifecycle progress log — keep scanning
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("httpURL") and candidate.get("opsURL"):
+                config = candidate
+                break
+            if candidate.get("outcome") == "FLOOR-EXCEEDED":
+                # Capability gate (flair#1119): runner can't reach operating
+                # latency. Not a code defect — skip cleanly.
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+                pytest.skip(
+                    f"ephemeral Harper floor-exceeded (runner too slow): {candidate}"
+                )
+    except Exception as exc:
         stderr_output = ""
         try:
             proc.kill()
@@ -303,7 +332,20 @@ def live_flair():
         except Exception:
             pass
         pytest.skip(
-            f"FLAIR_TEST_URL not set and ephemeral Harper config parse failed: {exc}. "
+            f"FLAIR_TEST_URL not set and ephemeral Harper config read failed: {exc}. "
+            f"stderr={stderr_output}"
+        )
+
+    if config is None:
+        stderr_output = ""
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+            stderr_output = proc.stderr.read()
+        except Exception:
+            pass
+        pytest.skip(
+            "FLAIR_TEST_URL not set and ephemeral Harper produced no config line. "
             f"stderr={stderr_output}"
         )
 
