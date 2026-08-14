@@ -75,30 +75,77 @@ def _iso_now() -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
-def _load_ed25519_key(keyfile: str) -> ed25519.Ed25519PrivateKey:
-    """Load a PKCS8 base64-encoded Ed25519 private key from a Flair-managed keyfile.
+def _parse_ed25519_key(raw: bytes) -> ed25519.Ed25519PrivateKey:
+    """Parse Ed25519 key bytes in any encoding Flair produces or consumes.
 
-    Raises ValueError with the env-var name (never the filesystem path) on failure.
+    Mirrors src/lib/auth-resolve.ts:buildEd25519Auth so the adapter reads
+    exactly the keyfiles Flair itself writes and signs with:
+
+      - raw 32-byte Ed25519 seed (binary) — what ``flair agent add`` writes
+      - base64-encoded raw 32-byte seed
+      - base64-encoded PKCS8 DER (the historical adk-flair format)
+      - PEM (``-----BEGIN PRIVATE KEY-----``)
     """
-    try:
-        raw = Path(keyfile).read_text(encoding="utf-8").strip()
-        der = base64.b64decode(raw)
-        key = serialization.load_der_private_key(der, password=None)
+    # 1) Raw 32-byte seed on disk (binary) — `flair agent add` format.
+    if len(raw) == 32:
+        return ed25519.Ed25519PrivateKey.from_private_bytes(raw)
+
+    text = raw.decode("utf-8").strip()  # raises UnicodeDecodeError on binary junk
+
+    # 2) PEM.
+    if "-----BEGIN" in text:
+        key = serialization.load_pem_private_key(text.encode("ascii"), password=None)
         if not isinstance(key, ed25519.Ed25519PrivateKey):
-            raise ValueError(
-                f"FLAIR_KEYFILE does not contain an Ed25519 key "
-                f"(got {type(key).__name__})"
-            )
+            raise ValueError(f"not an Ed25519 key (got {type(key).__name__})")
         return key
+
+    # 3/4) base64 — either a raw 32-byte seed or a full PKCS8 DER.
+    decoded = base64.b64decode(text)
+    if len(decoded) == 32:
+        return ed25519.Ed25519PrivateKey.from_private_bytes(decoded)
+    key = serialization.load_der_private_key(decoded, password=None)
+    if not isinstance(key, ed25519.Ed25519PrivateKey):
+        raise ValueError(f"not an Ed25519 key (got {type(key).__name__})")
+    return key
+
+
+def _load_ed25519_key(keyfile: str) -> ed25519.Ed25519PrivateKey:
+    """Load and validate an Ed25519 private key from a Flair keyfile.
+
+    Accepts every on-disk encoding Flair produces (see ``_parse_ed25519_key``),
+    so the keyfile written by ``flair agent add`` (a raw 32-byte seed) loads
+    without a conversion step. A leading ``~`` in the path is expanded.
+
+    Raises ValueError naming FLAIR_KEYFILE on any failure — the failure lands
+    in the constructor, never deferred to first use (where ADK's
+    exception-swallowing search path would turn it into silent empty recall).
+    """
+    path = Path(keyfile).expanduser()
+    try:
+        raw = path.read_bytes()
     except FileNotFoundError:
         raise ValueError(
-            "FLAIR_KEYFILE points to a file that does not exist"
+            "FLAIR_KEYFILE points to a file that does not exist. Provision one "
+            "with `flair agent add <agent-id>` (writes ~/.flair/keys/<agent-id>.key), "
+            "then set FLAIR_KEYFILE to it."
         ) from None
-    except (base64.binascii.Error, ValueError) as exc:
-        if isinstance(exc, ValueError) and "FLAIR_KEYFILE" in str(exc):
+
+    if not raw.strip():
+        raise ValueError("FLAIR_KEYFILE points to an empty file")
+
+    try:
+        return _parse_ed25519_key(raw)
+    except ValueError as exc:
+        if "FLAIR_KEYFILE" in str(exc):
             raise
         raise ValueError(
-            "FLAIR_KEYFILE does not contain a valid PKCS8 base64-encoded Ed25519 key"
+            "FLAIR_KEYFILE does not contain a valid Ed25519 key (accepted: raw "
+            "32-byte seed, base64 seed, base64 PKCS8 DER, or PEM)"
+        ) from exc
+    except Exception as exc:  # UnicodeDecodeError, binascii.Error, InvalidKey, …
+        raise ValueError(
+            "FLAIR_KEYFILE does not contain a valid Ed25519 key (accepted: raw "
+            "32-byte seed, base64 seed, base64 PKCS8 DER, or PEM)"
         ) from exc
 
 
