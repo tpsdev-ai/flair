@@ -288,6 +288,20 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
     delete record.validFrom;
     delete record.validTo;
     delete record.archivedAt;
+    // flair#1189 — retrievalCount and lastRetrieved are RECORD-scoped, not
+    // lineage-scoped: a brand-new successor record has no retrieval history of
+    // its OWN, so it must start with none. Inheriting them from the superseded
+    // record via the `...existing` spread produced a successor whose
+    // lastRetrieved PREDATED its own createdAt ("retrieved 8h before it
+    // existed"), silently corrupting any recency/usage-based ranking that reads
+    // these fields. Reset both here, at succession construction — NOT server-
+    // side, because `supersedes` is a PERMANENT property of every successor and
+    // legitimate later retrievalCount bumps route through put() on a record that
+    // still carries it. Usage/citation-ledger counters (usageCount, the #1147
+    // citation ledger) are a SEPARATE, arguably lineage-scoped question and are
+    // deliberately left untouched here (#1147's usage loop is currently inert).
+    record.retrievalCount = 0;
+    delete record.lastRetrieved;
     // flair#718 authorship-provenance — see memoryStore's comment: forward
     // the resolved OAuth client_id (never forgeable via args) so the NEW
     // version's provenance records which client authored this update.

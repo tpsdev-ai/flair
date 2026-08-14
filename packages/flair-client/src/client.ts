@@ -246,6 +246,17 @@ class MemoryApi {
       delete record.validTo;
       delete record.archivedAt;
       delete record.deduped;
+      // flair#1189 — retrievalCount and lastRetrieved are RECORD-scoped, not
+      // lineage-scoped: a brand-new successor record has no retrieval history of
+      // its OWN, so it must start with none. Inheriting them from the superseded
+      // record via the `...existing` spread produced a successor whose
+      // lastRetrieved PREDATED its own createdAt ("retrieved before it existed"),
+      // silently corrupting any recency/usage-based ranking that reads these
+      // fields. Reset both here, at succession construction. Usage/citation-
+      // ledger counters (usageCount, the #1147 citation ledger) are a SEPARATE,
+      // arguably lineage-scoped question and are deliberately left untouched.
+      record.retrievalCount = 0;
+      delete record.lastRetrieved;
       // flair#718 authorship-provenance — see write()'s identical comment above.
       if (this.client.claimedClient) record.claimedClient = this.client.claimedClient;
       // The Memory schema does not expose a working HTTP POST route (see
