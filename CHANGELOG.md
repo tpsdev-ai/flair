@@ -18,6 +18,22 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.4] - 2026-08-14
+
+### Added
+
+- **Bootstrap responses are now self-describing (flair#1182, part 1).** `POST /BootstrapMemories` (and the `bootstrap` MCP tool that wraps it) always emit the structured container keys `soul` (`{}`), `memories` (`[]`) and `predicted` (`[]`) even for an empty instance, so a caller can tell an *empty* instance from one that doesn't support them. The response also always carries the resolved `agentId` and a `scope` descriptor (`{ agentId, isAdmin, reads }`) so a caller can tell who the server thinks they are — a one-call diagnosis for read-gate bugs like #1181 — plus a `currentTaskHint` when `currentTask` (which is what turns on task-relevant retrieval, teammate findings and collision surfacing) is absent or blank. The new keys reveal only the CALLER'S OWN resolved identity and records; teammate findings stay in `context`/`sections.teammate` and are never duplicated into `memories`. Purely additive — every pre-existing response key (`context`, `sections`, token counts, `trust`, `abstention`) is unchanged. Parts 2 (MCP `initialize` instructions) and 3 (soul-as-onboarding docs) are tracked separately under the same issue.
+
+### Fixed
+
+- **`memory_get` / `memory_update` / `soul_get` / `memory_delete` no longer 404 on the caller's own record over the `/mcp` connector (flair#1181).** These tools reached the datastore with an instance by-id read (`new Cls(undefined, ctx).get(id)`); Harper routes `.get(<string>)` on an unloaded instance to a field accessor that returns `undefined`, so the by-id read gate saw no record and returned NOT_FOUND before the ownership check — one call after a successful `memory_store`. They now use the static `Cls.get(id, context)` form (the same transactional path the Ed25519 REST route takes), which loads the row and still dispatches through the per-agent read-scope gate. Own-records-only scope is unchanged. Nothing to do; connector reads that were vanishing now return.
+
+  The `memory_update` write leg and `memory_delete`'s permanent-memory guard shared the same unloaded-instance defect (an instance `put`/`super.get` on `new Cls(undefined, ctx)`) and were migrated to the static path too. Server-side debug logging was added to the by-id read gate to distinguish an absent/failed-load from an ownership denial; the client-facing response stays `404` either way.
+
+- **The CLI now resolves the signing identity ONE way for every command, with a documented precedence: `--agent` flag > `FLAIR_AGENT_ID` env > config profile (flair#1183).** Command families had drifted apart on this: `search`/`bootstrap`/`status`/`presence`/`workspace` honored `--agent` over `FLAIR_AGENT_ID`, but everything routed through the internal `api()` helper (memory search/list, the `soul` family, and the writes) re-derived the signer as `FLAIR_AGENT_ID`-first — so `--agent X` run with `FLAIR_AGENT_ID=Y` exported in the shell SIGNED as Y while the record it wrote and the query it filtered both named X. Against a remote target where Y wasn't registered, the server answered `unknown_agent`. The `soul` family was the worst case: it had no flag/env resolution of its own and leaned entirely on that env-first extraction, so even the `FLAIR_KEY_DIR` workaround couldn't steer it. All families now resolve the signer once, at the command boundary, and thread it down as an authoritative value; `api()` no longer overrides it from the environment. A config-profile-only user with no flag and no env is unaffected — the machine's ambient credential (admin-pass / agent-key floor) still applies below the flag/env tiers, exactly as before.
+
+  Set `FLAIR_DEBUG=1` to print, on stderr, the identity each command resolved and which source won (e.g. `[flair] signing identity for 'soul set': X (source: --agent flag)`) — so operator, CLI, and server can't silently disagree about who's calling.
+
 ## [0.44.3] - 2026-08-14
 
 ### Fixed
