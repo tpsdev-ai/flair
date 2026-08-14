@@ -437,6 +437,113 @@ jobs:
           FLAIR_URL: http://localhost:9926
           FLAIR_ADMIN_PASS: admin123
 
+  adk-flair-python:
+    # The Python adk-flair package (packages/adk-flair) had NO pytest step
+    # anywhere in CI — test.yml ran only the JS twin (adk-flair-js) — so its
+    # suite never ran on push/PR. flair#1177 (the conftest JSON-line-scan fix)
+    # made the ephemeral tests stop silently-skipping, which surfaced that they
+    # had zero CI coverage. This job wires them in.
+    #
+    # Two tiers of coverage, split into two pytest steps on purpose:
+    #
+    #   1. HERMETIC UNIT TESTS (test_memory_service.py, 33 cases) — pure-logic
+    #      assertions with mocked httpx: keyfile parsing (raw seed / PKCS8),
+    #      URL-scope protection, compound-tag scoping, search hit-mapping + tag
+    #      reverification, session/event/direct write paths, registration. They
+    #      need NO live server, NO model, and NO repo build. This is the real,
+    #      guaranteed coverage the zero-coverage bug was hiding, so it runs
+    #      FIRST — before the ~build+model setup below — as a fast, blocking
+    #      gate that fails in ~1 min if broken rather than after a 10-min build.
+    #
+    #   2. LIVE (@pytest.mark.live_flair) TESTS (explain_plan, portability,
+    #      quickstart_parity — 9 cases) — exercise the adapter against a real
+    #      Flair. With FLAIR_TEST_URL unset, conftest's `live_flair` fixture
+    #      boots an ephemeral Harper from the built dist/ via
+    #      tests/helpers/boot-harper.mjs (bun runs it; it imports the repo's
+    #      .ts harper-lifecycle, which spawns Harper under real node — hence
+    #      both bun AND node 22 below, matching test-integration). That path
+    #      needs the same build+native-binary+model the integration lane sets
+    #      up, so those steps are mirrored here.
+    #
+    #      On GitHub standard runners these SKIP VISIBLY: boot-harper's warm-up
+    #      gate can't reach the adapter's 1000ms round-trip floor (measured
+    #      ~1860ms, flair#1119) and emits FLOOR-EXCEEDED, which the fixture
+    #      turns into a clean skip — the identical posture the adk-flair-js
+    #      live lane already documents (see test-integration above, #1126). The
+    #      plumbing is correct and runs the full suite the moment a capable
+    #      runner class lands (#1126); it is verified green on rockit today
+    #      (41 passed, 1 skipped — only the model-gated recall test).
+    #
+    #   test_cross_session_recall additionally needs a tool-capable model via
+    #   ADK_TEST_MODEL (LiteLLM syntax). It is deliberately left UNSET here — no
+    #   Gemini/Google or any other model key belongs in CI — so that one test
+    #   skips visibly regardless of runner class. All other quickstart cases run.
+    name: adk-flair Python tests
+    runs-on: ubuntu-latest
+    # Generous headroom: the unit gate is ~1 min, but the live step below builds
+    # the repo + fetches the embedding model + attempts an ephemeral Harper boot
+    # whose warm-up carries a 120s floor-detection deadline before it skips.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      # ── Tier 1: hermetic unit tests (fast, blocking, no build) ─────────────
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          # >=3.10 per pyproject requires-python; 3.12 is the newest version in
+          # its classifiers list and what google-adk targets.
+          python-version: "3.12"
+      - name: Install adk-flair + test extra
+        # The [test] extra (pytest + pytest-asyncio) is declared in
+        # packages/adk-flair/pyproject.toml — pytest-asyncio is required because
+        # asyncio_mode = "auto" and the suite/conftest use async. -e so the
+        # editable install resolves the in-repo sources.
+        run: python -m pip install -e "packages/adk-flair[test]"
+      - name: adk-flair Python unit tests (hermetic — the real CI coverage)
+        # No FLAIR_TEST_URL, no build, no model: none of these 33 cases touch
+        # the live_flair fixture, so this is a pure-Python gate. Deselecting the
+        # live tests here (not skipping) keeps this step's signal about the unit
+        # suite alone; the live tests get their own step below.
+        run: pytest packages/adk-flair/tests -m "not live_flair" -v
+      # ── Tier 2: live tests via ephemeral Harper boot (see job comment) ─────
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Harper's NAPI modules need real Node (bun 1.3.x lacks uv_ip6_addr);
+          # 22 matches the native-spawn pin the integration lane relies on.
+          node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      - run: sfw bun install --frozen-lockfile
+      - name: Install linux-x64 native binary for embeddings
+        run: bun add --no-save @node-llama-cpp/linux-x64@3
+      - name: Build Flair resources and CLI
+        run: bun run build && bun run build:cli
+      - name: Pre-download embedding model
+        # Same resilient fetch the integration lane uses (cache → GitHub mirror
+        # → HuggingFace, sha256-verified — flair#715). Downloaded here so the
+        # ephemeral boot's warm-up reuses it via FLAIR_MODELS_DIR below instead
+        # of pulling from HuggingFace mid-test.
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      - name: adk-flair Python live tests (ephemeral Harper; skips if runner too slow)
+        # FLAIR_TEST_URL unset → conftest boots an ephemeral, port-isolated
+        # Harper (never touches a fixed port). ADK_TEST_MODEL unset → the
+        # model-gated recall test skips. FLAIR_MODELS_DIR points the ephemeral
+        # Harper at the model fetched above. On a standard runner the warm-up
+        # floor-exceeds and every live case skips visibly (flair#1119/#1126).
+        env:
+          FLAIR_MODELS_DIR: ${{ github.workspace }}/models
+        run: pytest packages/adk-flair/tests -m "live_flair" -v
+
   pack-smoke:
     # Matrixed (#672), not just pinned to the primary version: this
     # job is the closest thing in this pipeline to "a real user runs the

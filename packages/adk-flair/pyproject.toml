@@ -34,6 +34,18 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
+[project.optional-dependencies]
+# Test/dev extras. Kept out of the runtime `dependencies` above so a plain
+# `pip install adk-flair` never pulls a test runner. CI installs the package
+# with this group (`pip install -e packages/adk-flair[test]`) to run the suite
+# in tests/. pytest-asyncio is required because pyproject sets
+# asyncio_mode = "auto" (below) and the suite has async tests + an async agent
+# registration helper in conftest.py.
+test = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.24",
+]
+
 [project.urls]
 Homepage = "https://github.com/tpsdev-ai/flair"
 Repository = "https://github.com/tpsdev-ai/flair"
