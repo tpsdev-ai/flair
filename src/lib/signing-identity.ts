@@ -67,7 +67,7 @@ export interface ResolvedSigningIdentity {
 export function resolveSigningIdentity(
   opts: { agent?: string | null | undefined },
   configProfileAgentId?: string | null | undefined,
-  env: { FLAIR_AGENT_ID?: string | undefined } = process.env,
+  env: Record<string, string | undefined> = process.env,
 ): ResolvedSigningIdentity {
   if (opts.agent) return { agentId: opts.agent, source: "flag" };
   const envId = env.FLAIR_AGENT_ID;
@@ -110,7 +110,7 @@ export function formatSigningIdentityDebug(
 export function emitSigningIdentityDebug(
   resolved: ResolvedSigningIdentity,
   command?: string,
-  env: { FLAIR_DEBUG?: string | undefined } = process.env,
+  env: Record<string, string | undefined> = process.env,
   write: (s: string) => void = (s) => { process.stderr.write(s); },
 ): void {
   if (!env.FLAIR_DEBUG) return;
