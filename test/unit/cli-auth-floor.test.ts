@@ -530,7 +530,9 @@ describe("structural: adopted commands consolidate onto authedRequest, not their
   test("`flair bootstrap`'s action delegates to authedRequest — no inline header-building / raw fetch of its own", () => {
     const body = extractBody(
       '.command("bootstrap")',
-      "const agentId = resolveAgentIdOrEnv(opts);",
+      // flair#1183: bootstrap now resolves its signer through the canonical
+      // seam (resolveSigningAgentId) instead of the low-level resolveAgentIdOrEnv.
+      'const agentId = resolveSigningAgentId(opts, "bootstrap");',
     );
     expect(body).toContain("authedRequest(");
     expect(body).not.toContain("buildEd25519Auth(");
