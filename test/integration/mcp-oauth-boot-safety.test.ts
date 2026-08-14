@@ -137,7 +137,7 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
   );
 
   test(
-    "${ENV} trap: Harper boots DEGRADED when mcp.enabled is ${FLAIR_MCP_OAUTH} and env is unset",
+    "${ENV} backstop: an unresolved mcp.enabled placeholder fail-safes to DISABLED (oauth 2.5.0+)",
     async () => {
       const workDir = mkdtempSync(join(tmpdir(), "flair-mutation-prove-env-"));
       const configPath = join(workDir, "config.yaml");
@@ -154,32 +154,31 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
       const mutated = shipped.replace("enabled: false", 'enabled: "${FLAIR_MCP_OAUTH}"');
       writeFileSync(configPath, mutated, "utf-8");
 
-      // With FLAIR_MCP_OAUTH unset, expandEnvVar returns the literal
-      // "${FLAIR_MCP_OAUTH}" string. coerceConfigBoolean returns undefined
-      // for it, so the original truthy string is preserved. The plugin then
-      // enters issuer validation and fails on the unset issuer URL.
-      // This is WHY the shipped default MUST be literal false — ${ENV}
-      // interpolation of unset vars produces a truthy string that enables
-      // the crash path.
+      // oauth 2.5.0+ backstop: normalizeBooleanField detects the unresolved
+      // ${FLAIR_MCP_OAUTH} placeholder on mcp.enabled, warns, and DELETES the
+      // field — so the documented default (disabled) applies and Harper boots
+      // CLEAN with mcp OFF, instead of the pre-2.5.0 behavior where the truthy
+      // placeholder string enabled the crash path. We STILL ship literal false
+      // (proven by the sibling shipped-config test) — this proves the plugin
+      // fail-safes the ${ENV} form rather than failing degraded.
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
       });
       instances.push(harper);
 
-      // PROOF: degraded — health is 500, not 200.
-      const healthRes = await fetch(`${harper.httpURL}/health`, {
+      // PROOF: clean boot — Harper is healthy (ops API 200), NOT degraded.
+      const opsRes = await fetch(harper.opsURL, {
         signal: AbortSignal.timeout(10_000),
       });
-      expect(healthRes.status).toBe(500);
+      expect(opsRes.status).toBe(200);
 
-      // /mcp surfaces the same issuer validation error.
+      // /mcp is 404 — MCP is OFF (the placeholder was dropped to the default),
+      // not 500 (which is what a degraded plugin load returns).
       const mcpRes = await fetch(`${harper.httpURL}/mcp`, {
         signal: AbortSignal.timeout(10_000),
       });
-      expect(mcpRes.status).toBe(500);
-      const mcpBody = await mcpRes.text();
-      expect(mcpBody).toContain("mcp.issuer must be an absolute http(s) origin");
+      expect(mcpRes.status).toBe(404);
 
       // Clean up the temp dir.
       try { rmSync(workDir, { recursive: true, force: true }); } catch { /* ok */ }
