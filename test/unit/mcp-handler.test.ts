@@ -95,7 +95,11 @@ class MemoryMock extends HarperShapedBase {
     const id = typeof target === "string" ? target : target?.id;
     lastCall = { resource: "Memory.get", ctx, args: id };
     if (id === "missing-id") return null;
-    const rec: any = { id, agentId: ctx?.request?.tpsAgent, content: "existing content", ok: true, resource: "Memory.get" };
+    // flair#1188 — a real by-id load returns the FULL stored row, INCLUDING the
+    // raw `embedding` vector. Modeled here so memory_get's default-strip (and
+    // its includeEmbedding opt-in) is exercised against a record that actually
+    // carries the vector, not a double that quietly lacks it.
+    const rec: any = { id, agentId: ctx?.request?.tpsAgent, content: "existing content", ok: true, resource: "Memory.get", embedding: [0.11, 0.22, 0.33] };
     // includeTrust is folded into the RequestTarget as a plain property by the
     // fixed memory_get (static Cls.get has no opts slot); Memory.get()'s
     // wantsTrust() reads it there and attachTrust() stamps a `trust` block.
@@ -573,6 +577,23 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
     // Scoped to the caller — identity comes from the resolved agent, never args.
     expect(body.result.structuredContent.agentId).toBe("agt_bob");
     expect(body.result.structuredContent.content).toBe("existing content");
+    // flair#1188 — the raw embedding vector is stripped from the default
+    // response (it is thousands of noise tokens on a chat surface).
+    expect(body.result.structuredContent).not.toHaveProperty("embedding");
+  });
+
+  it("memory_get omits the embedding by default but returns it when includeEmbedding=true (flair#1188)", async () => {
+    // Default: stripped (asserted in the test above). Opt-in: present.
+    const res = await mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_get", arguments: { id: "mem-own-1", includeEmbedding: true } } },
+      { sub: "sub-bob" },
+    ));
+    const body = await parse(res);
+    expect(body.result.isError).toBeFalsy();
+    expect(body.result.structuredContent.id).toBe("mem-own-1");
+    // The vector is included only because the caller explicitly asked for it.
+    expect(Array.isArray(body.result.structuredContent.embedding)).toBe(true);
+    expect(body.result.structuredContent.embedding).toEqual([0.11, 0.22, 0.33]);
   });
 
   it("memory_get with includeTrust folds the flag into the RequestTarget so the trust block survives (flair#1181/#744)", async () => {
