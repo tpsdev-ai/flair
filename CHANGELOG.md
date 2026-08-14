@@ -18,6 +18,26 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.5] - 2026-08-14
+
+### Fixed
+
+- **`memory_get` no longer inlines the raw embedding vector.** Retrieving a memory
+  by ID over the `/mcp` connector returned the record's full 768-float `embedding`
+  array inline — thousands of noise tokens per record on chat surfaces with a fixed
+  context budget. The vector is now omitted by default; pass `includeEmbedding=true`
+  to include it. The `memory_store` and `memory_update` responses are stripped the
+  same way; `memory_search` and `bootstrap` already excluded it.
+
+- **`memory_update` with `preserveHistory: true` no longer copies the superseded
+  record's retrieval stats onto its successor.** The new supersedes-linked record
+  now starts with `retrievalCount` at 0 and no `lastRetrieved`, instead of
+  inheriting them from the record it replaces — which previously produced a
+  successor whose `lastRetrieved` predated its own `createdAt` ("retrieved before
+  it existed") and silently skewed recency- and usage-based ranking.
+  `retrievalCount` and `lastRetrieved` are record-scoped and reset on succession;
+  usage- and citation-ledger counters are unaffected.
+
 ## [0.44.4] - 2026-08-14
 
 ### Added
