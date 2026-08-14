@@ -162,6 +162,29 @@ async function unwrap(value: any): Promise<any> {
   return value;
 }
 
+/**
+ * flair#1188 — remove the raw `embedding` vector from a record before it is
+ * returned over the MCP surface. A stored memory carries a 768-float
+ * `embedding` (the HNSW vector); inlined into a tool result that is thousands
+ * of noise tokens per record on chat connectors that have a fixed context
+ * budget, and the caller can never do anything useful with it. Returns a
+ * shallow copy WITHOUT `embedding` (never mutates the source record), and
+ * passes through anything that is not a plain record — null, primitives,
+ * arrays, and the `{ error, status }` shapes `unwrap` produces — untouched.
+ *
+ * `memory_search` already projects with an explicit select that omits
+ * `embedding` (resources/semantic-retrieval-core.ts's DEFAULT_SELECT), and
+ * `bootstrap` uses the same select-without-embedding pushdown, so this is only
+ * needed on the FULL-record read/write paths (memory_get, and the write
+ * responses that echo the stored row).
+ */
+function stripEmbedding(value: any): any {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  if (!("embedding" in value)) return value;
+  const { embedding, ...rest } = value;
+  return rest;
+}
+
 // ── Tool implementations (thin wrappers over existing handlers) ──────────────
 //
 // Each takes the resolved agent + the parsed tool arguments and returns a plain
@@ -235,7 +258,10 @@ async function memoryStore(agent: ResolvedAgent, args: any) {
     }
     body.visibility = args.visibility;
   }
-  return unwrap(await h.post(body));
+  // flair#1188 — memory_store's response goes through the same buildWriteResponse
+  // echo as memory_update; strip the server-regenerated embedding so no write
+  // tool ever inlines the vector. No-op when the response carries none.
+  return stripEmbedding(await unwrap(await h.post(body)));
 }
 
 /**
@@ -308,7 +334,10 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
     if (agent.clientId) record.claimedClient = agent.clientId;
     // A create needs a COLLECTION-bound instance (see resources/in-process.ts).
     const coll: any = await collectionResource(Cls, delegationContext(agent));
-    return unwrap(await coll.post(record));
+    // flair#1188 — the write response echoes the stored row (Memory.post
+    // regenerates the embedding server-side), so strip the vector before it
+    // returns over the MCP surface. No-op when the response carries none.
+    return stripEmbedding(await unwrap(await coll.post(record)));
   }
 
   const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
@@ -325,7 +354,9 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
   // the same unloaded-instance defect on the write. The static form loads the
   // row by `merged.id` and threads the context, then dispatches through
   // Memory.put()'s own ownership gate — no scope change, same as the read.
-  return unwrap(await Cls.put(merged, delegationContext(agent)));
+  // flair#1188 — strip the embedding from the echoed write response (Memory.put
+  // regenerates the vector server-side); no-op when the response carries none.
+  return stripEmbedding(await unwrap(await Cls.put(merged, delegationContext(agent))));
 }
 
 async function memoryGet(agent: ResolvedAgent, args: any) {
@@ -348,7 +379,13 @@ async function memoryGet(agent: ResolvedAgent, args: any) {
   // a plain `{ id, includeTrust }` property — Memory.get()'s wantsTrust() reads
   // it there (the in-process shape alongside the HTTP query-param shape).
   const target = args?.includeTrust === true ? { id: args?.id, includeTrust: true } : args?.id;
-  return unwrap(await Cls.get(target, delegationContext(agent)));
+  const result = await unwrap(await Cls.get(target, delegationContext(agent)));
+  // flair#1188 — a by-id get loads the FULL record, including the 768-float
+  // `embedding` vector (search/bootstrap project it out; a raw get does not).
+  // Strip it by default so a chat connector isn't flooded with thousands of
+  // useless tokens per record; return it only when the caller explicitly opts
+  // in via includeEmbedding.
+  return args?.includeEmbedding === true ? result : stripEmbedding(result);
 }
 
 async function memoryDelete(agent: ResolvedAgent, args: any) {
@@ -597,13 +634,15 @@ export const TOOLS: Record<string, ToolEntry> = {
   memory_get: {
     def: {
       name: "memory_get",
-      description: "Retrieve a specific memory by ID.",
+      description:
+        "Retrieve a specific memory by ID. The record's raw embedding vector is omitted by default (it is large and not useful to a caller); pass includeEmbedding=true to include it.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         type: "object",
         properties: {
           id: { type: "string", description: "Memory ID" },
           includeTrust: { type: "boolean", description: "Attach a trust-evidence block (provenance, author, usage, freshness, supersession) to the record. Default false." },
+          includeEmbedding: { type: "boolean", description: "Include the raw embedding vector (hundreds of floats) in the returned record. Omitted by default because it is large and rarely useful to a caller. Default false." },
         },
         required: ["id"],
       },
