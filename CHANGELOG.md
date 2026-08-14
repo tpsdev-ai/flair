@@ -18,6 +18,23 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.3] - 2026-08-14
+
+### Fixed
+
+- **`adk-flair` ships a runnable cross-session-recall quickstart.** New
+  `examples/quickstart.ts` (JS) and `examples/quickstart.py` (Python) plant a
+  fact in one session, wait for a freshly-booted Flair to make it searchable,
+  then recall it in a brand-new session and print the result — reliable on a
+  cold instance without weakening the adapter's production 2s search budget.
+
+- **`adk-flair` reads the keyfile `flair agent add` actually writes.** The ADK
+  memory adapter (Python and JS) now accepts the raw 32-byte Ed25519 seed that
+  `flair agent add` writes to `~/.flair/keys/<id>.key` — alongside base64-encoded
+  seeds, base64 PKCS8 DER, and PEM — and expands a leading `~` in `FLAIR_KEYFILE`.
+  Following the documented quickstart no longer fails with a cryptic ASN.1 decode
+  error, and a missing keyfile now raises a clear message naming the resolved path.
+
 ## [0.44.2] - 2026-08-14
 
 ### Changed
