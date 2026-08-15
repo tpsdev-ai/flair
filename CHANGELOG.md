@@ -18,6 +18,40 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.9] - 2026-08-15
+
+### Added
+
+- **Added the Antigravity CLI (`agy`) as a wire-able MCP client.** `flair init`,
+  `flair doctor` and the client registry now detect Antigravity and can write
+  the pinned `flair-mcp` server into its MCP config at
+  `~/.gemini/config/mcp_config.json` (a sibling of, and distinct from, Gemini
+  CLI's `~/.gemini/settings.json`). Note: the end-to-end wiring has not yet been
+  verified against a live `agy` — after wiring, restart Antigravity and confirm
+  the flair tools appear.
+
+### Changed
+
+- **`maxTokens` is documented and enforced as a content-selection budget (#1199).** The bootstrap `maxTokens` was described as bounding the output size but only ever bounded content selection; the serialized response could exceed it, and that gap was neither documented nor consistently enforced. It is now a hard cap on how much soul/memory/finding content is selected (every admitted line is gated against the shared budget), while `tokenEstimate` honestly reports the real serialized size — which may exceed `maxTokens` by the structured-container scaffolding. If a payload needs to be larger, raise `maxTokens`; the cap is no longer "fixed" by dropping content (that was the #1207 regression).
+
+### Fixed
+
+- **Bootstrap no longer drops relevant findings at the same `maxTokens` (#1207).** A per-item structured overhead and a scaffolding reserve introduced with the payload-honesty work were being charged against the *content-selection* budget, silently shrinking how much on-task memory shipped for a given `maxTokens` (relevant findings could roughly halve), and a large high-relevance record could be skipped while smaller, less-relevant ones still fit. Measurement is now decoupled from budgeting: `tokenEstimate` still honestly reports the real serialized payload, but the structural overhead no longer reduces the selection budget, restoring the prior finding count. A size-skip in the task-relevant pass is now reported (`memoriesTruncated` / `teammateFindingsTruncated`) instead of being silent, so a client can tell "no relevant finding" from "a relevant finding did not fit".
+
+- **Bootstrap now delivers org events in a structured `events` container (#1206).** Since the prose `context` became opt-in, org events lived only in that prose, so on the default `/mcp` bootstrap path (prose off) they were counted and measured but never delivered in any field a connector could read. Bootstrap now always returns an `events` array (`[]` when there are none), parallel to `memories`/`teammateFindings`, with each entry carrying `id`, `kind`, `summary`, `createdAt`, and — when present — `detail`, `targetIds`, and `scope`. The events are deduped by content signature and target-scoped exactly as the prose section already was; the prose path (`includeContext: true`) is unchanged.
+
+- **`flair upgrade` no longer reports a correctly-wired `flair-mcp` as "not
+  detected".** It used to probe `flair-mcp` as a global npm install, but
+  `flair-mcp` is zero-install via `npx` and is never installed globally — so a
+  correctly-wired machine was told it was missing, with an `npm install -g`
+  remedy that does nothing. Upgrade now detects `flair-mcp` by its actual wiring
+  (the pinned version in a wired MCP client config, or the presence of the Flair
+  SessionStart hook) and shows that version against the latest. "Missing" now
+  means not wired anywhere; the remedy for a wired-but-behind or unwired
+  `flair-mcp` is `flair doctor --fix`, never a global install.
+
+- **Trust block carries both true age and freshness (#1201).** `ageDays` had been keyed off the record's last-write time, which overcorrected: a record created weeks ago but edited today read as brand new, losing its true age. `ageDays` now reflects true age (days since `createdAt`), and a new `staleDays` field carries freshness (days since `updatedAt`) — both are exposed rather than collapsed into one. `matchQuality` section-tagging is unchanged.
+
 ## [0.44.8] - 2026-08-15
 
 ### Fixed
