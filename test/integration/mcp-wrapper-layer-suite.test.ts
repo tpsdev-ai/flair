@@ -367,6 +367,60 @@ describe("/mcp TOOLS wrapper layer — every tool driven through its real .impl"
     expect(rows[0].authorId, "orgevent is attributed to the caller").toBe(AGENT);
   }, 120_000);
 
+  // ── bootstrap events container (flair#1206) — the wrapper-seam proof ──
+  // #1199 made prose `context` opt-in; org events lived ONLY in that prose, so
+  // at the /mcp DEFAULT (includeContext=false) they were counted+charged but
+  // never delivered in any structured field a connector could read — orphaned.
+  // The bug lived in the wrapper path (the connector's vantage), uncaught because
+  // the handler unit tests drove the resource, not the wrapper. This drives the
+  // REAL bootstrap wrapper (TOOLS.bootstrap.impl) and asserts the structured
+  // `events` array is delivered at the default, with the targetIds relevance
+  // filter preserved (Sherlock: a pure prose→structured move, no scope widening).
+  test("bootstrap: delivers the structured `events` array at the /mcp default; targetIds relevance filter preserved (#1206)", async () => {
+    const evSfx = randomUUID();
+    const ORG_SUMMARY = `mcp-1206 org-scoped ${evSfx}`;
+    const MINE_SUMMARY = `mcp-1206 targeted-to-me ${evSfx}`;
+    const OTHER_SUMMARY = `mcp-1206 targeted-elsewhere ${evSfx}`;
+    // Org-scoped (no targets) → relevant to everyone incl. AGENT.
+    await seedInsert("OrgEvent", {
+      id: `1206-org-${evSfx}`, authorId: `mcp-1206-author-${evSfx}`, kind: "status",
+      summary: ORG_SUMMARY, scope: "org", createdAt: new Date().toISOString(),
+    });
+    // Targeted AT AGENT → relevant.
+    await seedInsert("OrgEvent", {
+      id: `1206-mine-${evSfx}`, authorId: `mcp-1206-author-${evSfx}`, kind: "handoff",
+      summary: MINE_SUMMARY, scope: "direct", targetIds: [AGENT],
+      detail: "please pick this up", createdAt: new Date().toISOString(),
+    });
+    // Targeted at a DIFFERENT agent → the relevance filter must exclude it.
+    await seedInsert("OrgEvent", {
+      id: `1206-other-${evSfx}`, authorId: `mcp-1206-author-${evSfx}`, kind: "handoff",
+      summary: OTHER_SUMMARY, scope: "direct", targetIds: [`someone-else-${evSfx}`],
+      createdAt: new Date().toISOString(),
+    });
+
+    // Wrapper default: includeContext is NOT passed → false (the connector path).
+    const body = await tool("bootstrap", { currentTask: "events wrapper check", maxTokens: 8000 });
+
+    // Always present + self-describing — an array even when the caller has none.
+    expect(Array.isArray(body.events), `events must be a structured array on the wrapper path, got: ${JSON.stringify(body.events)}`).toBe(true);
+    const summaries = body.events.map((e: any) => e.summary);
+    // The two relevant events are delivered structurally, at the default.
+    expect(summaries, "org-scoped event delivered").toContain(ORG_SUMMARY);
+    expect(summaries, "event targeted at the caller delivered").toContain(MINE_SUMMARY);
+    // The event targeted at someone else is filtered out — no scope widening.
+    expect(summaries, "event targeted at a DIFFERENT agent must be filtered out").not.toContain(OTHER_SUMMARY);
+    // Shape: the targeted entry carries the fields a connector reads.
+    const mine = body.events.find((e: any) => e.summary === MINE_SUMMARY);
+    expect(mine.kind, "structured entry carries kind").toBe("handoff");
+    expect(mine.detail, "optional detail is carried when present").toBe("please pick this up");
+    expect(Array.isArray(mine.targetIds) && mine.targetIds.includes(AGENT), "targetIds carried when present").toBe(true);
+    // Delivery is independent of prose: at the default, context carries no bodies.
+    expect(body.context, "default prose context does not carry the event body").not.toContain(ORG_SUMMARY);
+    // Count coherence: the self-describing count equals the shipped array length.
+    expect(body.sections.events, "sections.events equals the shipped array length").toBe(body.events.length);
+  }, 120_000);
+
   // ── attention (read/payload) ──
   test("attention: returns the grouped-by-source view with all five groups and a counts total", async () => {
     const res = await tool("attention", { entity: "repo:tpsdev-ai/flair", days: 30 });

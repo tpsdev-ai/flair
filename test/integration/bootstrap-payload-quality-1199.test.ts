@@ -170,10 +170,19 @@ describe("flair#1199/#1200/#1201 — bootstrap payload quality", () => {
     expect(body.context, "opt-in prose carries the soul body").toContain(SOUL_ROLE);
   }, 120_000);
 
-  // (b) #1199 — tokenEstimate reflects the ACTUAL payload, and maxTokens bounds it.
-  test("#1199 (b): tokenEstimate matches the real serialized payload, and maxTokens bounds it", async () => {
-    // Seed enough permanent content to overflow a modest cap.
-    for (let i = 0; i < 30; i++) {
+  // (b) #1199/#1207 CAP CONTRACT — tokenEstimate HONESTLY reports the real
+  // serialized payload; maxTokens is the hard cap on CONTENT SELECTION (NOT on
+  // the serialized output size). #1199 originally asserted tokenEstimate ≤
+  // maxTokens by shrinking the selection budget (a reserve + per-item overhead) —
+  // that silently cut recall below 0.44.6 (#1207). The corrected contract:
+  // selection ≤ maxTokens (enforced), tokenEstimate may exceed maxTokens by the
+  // structured-container JSON scaffolding (honestly measured, not "fixed" by
+  // dropping content).
+  test("#1199/#1207 (b): tokenEstimate is an HONEST report; maxTokens bounds CONTENT SELECTION, not the serialized size", async () => {
+    // Seed enough permanent content to overflow the cap even at the RESTORED
+    // (0.44.6) selection capacity — so the cap demonstrably engages after the
+    // #1207 budget restore (60 records × ~90 prose tokens ≫ the 3000 budget).
+    for (let i = 0; i < 60; i++) {
       await seedInsert("Memory", {
         id: `${AGENT}-bulk-${i}-${randomUUID()}`, agentId: AGENT,
         content: `bulk permanent memory ${i} ${sfx} ` + "lorem ipsum dolor sit amet ".repeat(12),
@@ -187,15 +196,21 @@ describe("flair#1199/#1200/#1201 — bootstrap payload quality", () => {
 
     // Honesty: tokenEstimate equals estimateTokens over the exact serialized body
     // the caller received (minus the wrapper-appended flairVersion + the
-    // tokenEstimate field itself).
+    // tokenEstimate field itself). This is the #1199 improvement — KEEP.
     const { tokenEstimate, flairVersion, ...rest } = body;
     const measured = est(JSON.stringify(rest));
     expect(Math.abs(tokenEstimate - measured), `tokenEstimate ${tokenEstimate} vs measured ${measured}`).toBeLessThanOrEqual(5);
 
-    // The bound: the ACTUAL payload stays within maxTokens (the old estimate only
-    // covered `context` and let the structured fields blow past the cap).
-    expect(tokenEstimate, `tokenEstimate ${tokenEstimate} must be ≤ maxTokens ${maxTokens}`).toBeLessThanOrEqual(maxTokens);
-    // The cap actually engaged (proves it's bounding, not just fitting).
+    // The ENFORCED cap: selected CONTENT (soul + rendered memory lines) never
+    // exceeds maxTokens — the shared tokenBudget started at maxTokens and every
+    // admitted line was gated against it. This is the real, recall-preserving
+    // cap (#1207), replacing the false "serialized payload ≤ maxTokens" claim.
+    expect(
+      body.soulTokens + body.memoryTokens,
+      `selected content (soul ${body.soulTokens} + memory ${body.memoryTokens}) must be ≤ maxTokens ${maxTokens}`,
+    ).toBeLessThanOrEqual(maxTokens);
+    // The cap actually engaged (proves it's bounding, not just fitting) — and the
+    // selection engaged at the RESTORED capacity, not the #1199-shrunk one.
     expect(body.memoriesTruncated, "bulk seed must have forced truncation").toBeGreaterThan(0);
   }, 180_000);
 
@@ -212,6 +227,29 @@ describe("flair#1199/#1200/#1201 — bootstrap payload quality", () => {
     expect(typeof body.teammateFindingsIncluded, "teammateFindingsIncluded is its own counter").toBe("number");
   }, 120_000);
 
+  // (d') #1206 — org events ship in the STRUCTURED `events` container at the /mcp
+  // DEFAULT (includeContext=false), where prose `context` carries no bodies.
+  // Before #1206 events lived ONLY in the prose string, so a connector at the
+  // default saw sections.events count but had no way to read the events. The
+  // #1200 dedup is preserved (the byte-identical pair → ONE entry), and the
+  // structured count agrees with the shipped array.
+  test("#1206 (d'): the structured `events` array is delivered at the default (prose off), deduped, count-coherent", async () => {
+    const body = await bootstrap({ maxTokens: 8000 }); // wrapper default: includeContext=false
+    // Always present, self-describing (never absent → distinguishable from unsupported).
+    expect(Array.isArray(body.events), "events is a structured array (always present)").toBe(true);
+    const mine = body.events.filter((e: any) => e.summary === EVENT_SUMMARY);
+    // Deduped to a single entry (the #1200 signature dedup, shared with the array).
+    expect(mine.length, `the byte-identical event pair must ship as ONE structured entry, got ${JSON.stringify(body.events).slice(0, 400)}`).toBe(1);
+    // Entry shape: the fields a connector needs to read the event.
+    expect(mine[0].kind, "structured entry carries kind").toBe("status");
+    expect(typeof mine[0].id, "structured entry carries an id").toBe("string");
+    expect(typeof mine[0].createdAt, "structured entry carries createdAt").toBe("string");
+    // The count reflects the SHIPPED (deduped) array, not the pre-dedup pair.
+    expect(body.sections.events, "sections.events reflects the shipped deduped count").toBe(body.events.length);
+    // Delivery is independent of prose: at the default, context carries no event body.
+    expect(body.context, "default prose context does not carry the event summary").not.toContain(EVENT_SUMMARY);
+  }, 120_000);
+
   // (d) #1200 — org events deduped (scarce slots not wasted on exact dupes).
   test("#1200 (d): byte-identical org events are deduped to a single slot", async () => {
     const body = await bootstrap({ maxTokens: 8000, includeContext: true });
@@ -223,8 +261,11 @@ describe("flair#1199/#1200/#1201 — bootstrap payload quality", () => {
     ).toBe(1);
   }, 120_000);
 
-  // (e) #1201 — freshness keys off updatedAt: a record edited today reads fresh.
-  test("#1201 (e): a record updated today shows small ageDays (not its 12-day-old createdAt)", async () => {
+  // (e) #1201 (refined) — carry BOTH signals: ageDays is TRUE AGE (off
+  // createdAt), staleDays is FRESHNESS (off updatedAt). A record created 12 days
+  // ago but edited today has ageDays ~12 AND staleDays ~0 — the first #1201 pass
+  // keyed ageDays off updatedAt and collapsed true age into freshness (ageDays 0).
+  test("#1201 (e): a record created 12d ago but updated today shows ageDays ~12 (true age) AND staleDays ~0 (fresh)", async () => {
     const body = await bootstrap({ maxTokens: 8000, includeTrust: true });
     expect(Array.isArray(body.trust), "includeTrust returns a trust array").toBe(true);
     const updatedEntry = body.trust.find((t: any) => {
@@ -232,9 +273,16 @@ describe("flair#1199/#1200/#1201 — bootstrap payload quality", () => {
       return m && m.content === UPDATED_MARKER;
     });
     expect(updatedEntry, "the updated-today record must have a trust block").toBeDefined();
+    // TRUE AGE off createdAt (12 days ago) — the mutation-check anchor: reverting
+    // ageDays to key off updatedAt makes this ~0 and fails.
     expect(
       updatedEntry.ageDays,
-      `updated-today record must read as FRESH (ageDays off updatedAt), got ${updatedEntry.ageDays}`,
+      `true age off createdAt (~12d), got ${updatedEntry.ageDays}`,
+    ).toBeGreaterThanOrEqual(11);
+    // FRESHNESS off updatedAt (edited today) — the new separate signal.
+    expect(
+      updatedEntry.staleDays,
+      `freshness off updatedAt (~0d), got ${updatedEntry.staleDays}`,
     ).toBeLessThanOrEqual(1);
   }, 120_000);
 

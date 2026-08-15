@@ -161,17 +161,28 @@ export interface TrustBlock {
   /**
    * Raw `updatedAt` (server-clock last-write time), or null. This is the
    * record's OWN update time — never a superseded predecessor's (#1189
-   * field-scoping) — and is what `ageDays` keys off (see below).
+   * field-scoping) — and is what `staleDays` keys off (see below).
    */
   updatedAt: string | null;
   /**
-   * Freshness: whole days since the record was last touched — keyed off
-   * `updatedAt` when present, falling back to `createdAt` (#1201). A record
-   * edited today must read as fresh even if it was first created weeks ago;
-   * keying age off the original `createdAt` made the freshest record present as
-   * the stalest. `null` when neither timestamp is parseable.
+   * TRUE AGE: whole days since the record was first created — keyed off
+   * `createdAt`, falling back to `updatedAt` (flair#1201, refined). `null` when
+   * neither timestamp is parseable. Distinct from `staleDays`: a record created
+   * weeks ago but edited today has a LARGE `ageDays` and a SMALL `staleDays`.
+   * The first #1201 pass keyed ageDays off `updatedAt`, which overcorrected —
+   * it collapsed true age into freshness and made an old-but-recently-edited
+   * record read as brand new. Both signals are now carried, not collapsed.
    */
   ageDays: number | null;
+  /**
+   * FRESHNESS / RECENCY: whole days since the record was last touched — keyed
+   * off `updatedAt`, falling back to `createdAt` (flair#1201). The "how stale is
+   * this" signal: a record edited today reads fresh (`staleDays` 0) even when
+   * `ageDays` is large. `null` when neither timestamp is parseable. The record's
+   * OWN `updatedAt` only — never a superseded predecessor's (#1189). For a
+   * never-updated record `updatedAt == createdAt`, so `staleDays == ageDays`.
+   */
+  staleDays: number | null;
 
   /**
    * Supersession — the forward pointer `supersedes` (the id of the memory this
@@ -268,13 +279,21 @@ export function buildTrustBlock(record: TrustableRecord, now: number = Date.now(
     validityStatus = "future";
   }
 
-  // #1201 — freshness keys off the record's OWN last-write time (updatedAt),
-  // falling back to createdAt. A record updated today must not read as stale
-  // off its original createdAt. updatedAt is the record's own field, so this
-  // reintroduces no lineage-inheritance (#1189).
-  const freshnessMs = parseTime(updatedAt ?? createdAt);
-  const ageDays = Number.isFinite(freshnessMs)
-    ? Math.max(0, Math.floor((now - freshnessMs) / MS_PER_DAY))
+  // flair#1201 (refined) — carry BOTH temporal signals rather than collapsing
+  // to one. `ageDays` is TRUE AGE (days since `createdAt`, fallback updatedAt);
+  // `staleDays` is FRESHNESS (days since `updatedAt`, fallback createdAt). The
+  // first #1201 pass keyed ageDays off updatedAt only, which overcorrected — a
+  // record created weeks ago but edited today then read as "0 days old", losing
+  // its true age. Both are the record's OWN fields (never a superseded
+  // predecessor's — #1189), so neither reintroduces lineage-inheritance. For a
+  // never-updated record updatedAt == createdAt, so ageDays == staleDays.
+  const createdMs = parseTime(createdAt ?? updatedAt);
+  const ageDays = Number.isFinite(createdMs)
+    ? Math.max(0, Math.floor((now - createdMs) / MS_PER_DAY))
+    : null;
+  const updatedMs = parseTime(updatedAt ?? createdAt);
+  const staleDays = Number.isFinite(updatedMs)
+    ? Math.max(0, Math.floor((now - updatedMs) / MS_PER_DAY))
     : null;
 
   return {
@@ -290,6 +309,7 @@ export function buildTrustBlock(record: TrustableRecord, now: number = Date.now(
     createdAt,
     updatedAt,
     ageDays,
+    staleDays,
     supersedes: typeof record.supersedes === "string" ? record.supersedes : null,
     // flair#744 refinement — confidence band from the result's absolute
     // similarity (null when there is no signal to judge). Pure, global,

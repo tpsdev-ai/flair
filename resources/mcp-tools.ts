@@ -701,7 +701,7 @@ export const TOOLS: Record<string, ToolEntry> = {
       inputSchema: {
         type: "object",
         properties: {
-          maxTokens: { type: "number", description: "Max tokens in output (default 4000)" },
+          maxTokens: { type: "number", description: "Content-selection budget in tokens (default 4000): the hard cap on how much soul/memory/finding CONTENT is selected. The actual serialized response (reported by tokenEstimate) may exceed this by the structured-container JSON scaffolding — maxTokens bounds what is selected, not the raw output size. Raise it to include more content." },
           currentTask: { type: "string", description: "Current task — enables semantic search for relevant memories" },
           channel: { type: "string", description: "Channel name (discord, tps-mail, claude-code)" },
           surface: { type: "string", description: "Surface name (tps-build, tps-review, cli-session)" },

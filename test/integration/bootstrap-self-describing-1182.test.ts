@@ -117,6 +117,12 @@ describe("flair#1182 part 1 — self-describing bootstrap empty-state (+ resolve
     expect(body.memories).toEqual([]);
     expect(Array.isArray(body.predicted)).toBe(true);
     expect(body.predicted).toEqual([]);
+    // flair#1206 — the `events` container follows the SAME self-describing
+    // empty-state pattern: ALWAYS present, `[]` when the caller has no org
+    // events, so a client distinguishes "no events" from "events not supported".
+    expect(Object.prototype.hasOwnProperty.call(body, "events"), "response must always carry `events`").toBe(true);
+    expect(Array.isArray(body.events)).toBe(true);
+    expect(body.events).toEqual([]);
 
     // --- resolved identity + scope reflect the CALLER ---
     expect(body.agentId, "resolved agentId must be the caller's").toBe(agent.id);
