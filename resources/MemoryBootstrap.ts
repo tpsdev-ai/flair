@@ -66,7 +66,11 @@ import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
  *
  * Request:
  *   { agentId, currentTask?, maxTokens?, includeSoul?, since?,
- *     channel?, surface?, subjects?, entities? }
+ *     channel?, surface?, subjects?, entities?, includeContext? }
+ *   `includeContext` (flair#1199): whether to assemble the prose `context`
+ *   mirror. Default true here (the resource/REST/CLI path); the /mcp bootstrap
+ *   wrapper passes false so a token-budgeted connector — which reads the
+ *   structured containers — never receives the same bodies twice.
  *   `entities` (flair#681): the caller's own declared attention-plane
  *   vocabulary strings (see resources/entity-vocab.ts) for collision
  *   surfacing's entity-overlap join. Invalid entries are silently dropped
@@ -76,12 +80,21 @@ import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
  *
  * Response:
  *   { context, sections, tokenEstimate, memoriesIncluded, memoriesAvailable,
- *     agentId, scope, soul, memories, predicted[, currentTaskHint] }
+ *     teammateFindingsIncluded, agentId, scope, soul, memories, predicted,
+ *     teammateFindings[, currentTaskHint][, predictedHint] }
  *   The self-describing keys (flair#1182 part 1) — `agentId` (resolved caller),
  *   `scope` (read model applied to the caller), `soul`/`memories`/`predicted`
  *   (the caller's OWN records as structured containers), and `currentTaskHint`
  *   (present only when currentTask is absent/blank) — are ALWAYS emitted so a
  *   client can tell an empty instance from one that doesn't support them.
+ *   flair#1199 — the structured containers are CANONICAL; `context` is a prose
+ *   mirror (opt-in via includeContext). Cross-agent teammate findings ship in
+ *   the `teammateFindings` container (own memories in `memories`), counted by
+ *   `teammateFindingsIncluded` (a separate denominator from `memoriesIncluded`,
+ *   which is own-scoped so it never exceeds `memoriesAvailable`). `tokenEstimate`
+ *   reflects the ACTUAL serialized payload, and `maxTokens` bounds it.
+ *   `predictedHint` is present only when subjects were provided but `predicted`
+ *   came back empty.
  */
 
 // Collision surfacing (flair#681) tunables.
@@ -120,6 +133,18 @@ const MAX_CANDIDATE_POOL = 100;
 // `minScore` request param) — preserved verbatim from the original raw
 // JS dot-product scan's `.filter((s) => s.score > 0.3)`.
 const TASK_RELEVANCE_FLOOR = 0.3;
+
+// flair#1199 — per-memory structured-payload overhead charged against the token
+// budget IN ADDITION to the rendered prose line. Each included memory ships as a
+// structured object ({id, content, durability, createdAt, updatedAt, agentId,
+// subject, section, ...}) which is the CANONICAL payload; its JSON keys cost
+// ~30-40 tokens beyond the prose line the fill loop measures. Charging it here
+// keeps the ACTUAL serialized payload (measured by tokenEstimate) within
+// maxTokens — the prose line alone under-charged, so the structured containers
+// crossed the cap. Sized to the non-content JSON a lean memory carries (id +
+// createdAt + updatedAt + agentId + durability + subject + section + key names,
+// ~55-70 tokens); conservative (errs slightly high, never low).
+const STRUCT_ITEM_OVERHEAD_TOKENS = 70;
 
 // Rough token estimate: ~4 chars per token for English text
 function estimateTokens(text: string): number {
@@ -172,6 +197,16 @@ export class BootstrapMemories extends Resource {
       subjects,    // e.g., ["flair", "auth"] — entities to preload context for
       includeTrust = false,  // flair#744 slice 1 — opt-in per-memory trust block
       abstain = false,       // flair#744 slice 2 — opt-in task-relevance abstention
+      // flair#1199 — whether to assemble the prose `context` string. The
+      // structured containers (soul/memories/predicted/teammateFindings) are the
+      // CANONICAL payload; `context` is a human/agent-readable MIRROR of the same
+      // bytes. Default TRUE here (the resource/REST/CLI path has always emitted
+      // prose, and every direct caller reads it) — but the /mcp bootstrap wrapper
+      // (resources/mcp-tools.ts) passes `false` by default, so a token-budgeted
+      // connector, which consumes the structured fields, never receives the same
+      // bodies twice. When false, `context` is a compact structural pointer (no
+      // bodies), so nothing crosses the wire twice on that path.
+      includeContext = true,
     } = data || {};
 
     // Authenticated identity lives on getContext().request — `this.request` is
@@ -216,28 +251,60 @@ export class BootstrapMemories extends Resource {
       collision: [],
       events: [],
     };
-    let tokenBudget = maxTokens;
+    // flair#1199 — the structured containers (soul/memories/predicted/
+    // teammateFindings) are the CANONICAL payload, and `tokenEstimate` now
+    // reports the ACTUAL serialized bytes. Reserve headroom for the JSON
+    // scaffolding those containers and the self-describing keys (scope/sections/
+    // counters) add on top of the raw content, so `maxTokens` bounds the real
+    // payload — not just the prose. Without this the containers ship on top of
+    // the memory-line budget and blow the cap (the reported 4000→4275+ overrun).
+    const structOverheadReserve = Math.min(600, Math.floor(maxTokens * 0.15));
+    // Single shared budget across soul + every memory section (soul used to be
+    // budgeted SEPARATELY and added ON TOP, so context alone could reach
+    // 1.4×maxTokens; #1199). Content selected therefore stays within
+    // maxTokens − reserve, and the serialized payload within maxTokens.
+    let tokenBudget = Math.max(0, maxTokens - structOverheadReserve);
+    // Own memories included in the payload (permanent + recent + predicted +
+    // own task-relevant). Denominator is `memoriesAvailable` (own-scoped), so
+    // memoriesIncluded ≤ memoriesAvailable always holds (#1199 coherent
+    // counters). Cross-agent teammate findings are counted separately below.
     let memoriesIncluded = 0;
     let memoriesAvailable = 0;
     let memoriesTruncated = 0;
+    // flair#1199 — cross-agent teammate findings included (a DIFFERENT
+    // denominator than own memories): counting these into `memoriesIncluded`
+    // is what let one client see included(9) > available(3).
+    let teammateFindingsIncluded = 0;
 
     // flair#1182 (part 1) — self-describing bootstrap. These structured
     // container keys are ALWAYS emitted on the response (empty `{}`/`[]` when
     // the caller has nothing), so a client can tell an *empty* instance from
     // one that doesn't support these keys at all — and can read the caller's
     // own soul/memories as structured data instead of parsing the `context`
-    // markdown string. Scoped to the CALLER'S OWN records only
-    // (permanent/recent/relevant/predicted are all agentId==self reads);
-    // teammate findings stay in `context`/`sections.teammate` and are never
-    // duplicated here, so these containers carry no other agent's data.
+    // markdown string. `soul`/`memories`/`predicted` are scoped to the CALLER'S
+    // OWN records only (permanent/recent/relevant/predicted are all agentId==self
+    // reads). flair#1199 — cross-agent teammate findings now have their OWN
+    // structured container (`teammateFindings`, below), attributed via `source`,
+    // rather than living only in the prose `context` (which is opt-in as of
+    // #1199); the own-only containers still carry no other agent's data.
     const soulMap: Record<string, unknown> = {};
     const includedOwnMemories: any[] = [];
     const includedPredicted: any[] = [];
+    // flair#1199 — teammate (cross-agent) findings get their OWN structured
+    // container. Before #1199 they lived ONLY in the prose `context`; now that
+    // `context` is an opt-in mirror (default off on the /mcp path), they need a
+    // structured home so a connector that consumes the containers still sees
+    // them. Kept SEPARATE from `memories`/`predicted` (which stay own-only per
+    // the #1182 boundary) and clearly attributed via `source`.
+    const includedTeammateFindings: any[] = [];
     const leanMemory = (m: any, section: string) => ({
       id: m.id,
       content: m.content,
       durability: m.durability ?? null,
       createdAt: m.createdAt ?? null,
+      // #1201 — the record's own last-write time, so a structured consumer can
+      // compute freshness off the same anchor the trust block's ageDays uses.
+      updatedAt: m.updatedAt ?? null,
       agentId: m.agentId ?? agentId,
       subject: m.subject ?? null,
       section,
@@ -288,12 +355,15 @@ export class BootstrapMemories extends Resource {
           if (maxChars > 100) {
             const truncated = `**${entry.key}:** ${entry.line.slice(entry.key.length + 6, entry.key.length + 6 + maxChars)}…(truncated)`;
             sections.soul.push(truncated);
-            soulTokens += estimateTokens(truncated);
+            const cost = estimateTokens(truncated);
+            soulTokens += cost;
+            tokenBudget -= cost; // #1199 — soul draws from the shared budget
           }
           continue;
         }
         sections.soul.push(entry.line);
         soulTokens += entry.tokens;
+        tokenBudget -= entry.tokens; // #1199 — soul draws from the shared budget
       }
     }
 
@@ -416,16 +486,25 @@ export class BootstrapMemories extends Resource {
     // requested, so a non-trust bootstrap fetches (and returns) exactly what it
     // did before. These records are never returned raw when the block is off,
     // so widening the select cannot change the off-path response bytes.
+    // #1201 — `updatedAt` is projected on BOTH paths (not just the trust path):
+    // the structured `memories`/`predicted` containers carry it so a consumer
+    // can compute freshness, and the trust block's ageDays keys off it.
     const OWN_SELECT = includeTrust
-      ? ["id", "agentId", "content", "durability", "createdAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags", "provenance", "usageCount", "validFrom"]
-      : ["id", "agentId", "content", "durability", "createdAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags"];
+      ? ["id", "agentId", "content", "durability", "createdAt", "updatedAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags", "provenance", "usageCount", "validFrom"]
+      : ["id", "agentId", "content", "durability", "createdAt", "updatedAt", "supersedes", "subject", "validTo", "expiresAt", "_safetyFlags"];
 
     // flair#744 slice 1 — the Memory records that became visible lines in the
     // memory-bearing sections (permanent/recent/predicted/relevant/teammate),
     // collected as they're added so the opt-in `trust` array below can carry a
     // self-contained block per included memory. Stays empty (and unused) when
-    // includeTrust is off.
-    const includedTrustMemories: any[] = [];
+    // includeTrust is off. flair#1201 — each entry carries the SECTION it landed
+    // in, so a trust entry's `matchQuality` is legible: null on a lifecycle
+    // section (permanent/recent/predicted — not a retrieval surface) reads as
+    // "not scored", not as a scoring failure, and a band on a retrieval section
+    // (relevant/teammate) is applied by the SAME rule to own and teammate
+    // records. Fixes the "own recent → null while teammate → strong looks like
+    // my own records scored worse" misread.
+    const includedTrustMemories: { m: any; section: string }[] = [];
 
     // flair#744 slice 2 — the best absolute semantic similarity seen while
     // scoring the task-relevant candidate pool (section 4). Drives the opt-in
@@ -477,11 +556,11 @@ export class BootstrapMemories extends Resource {
     const permanent = permanentRows.filter((m) => !permanentSupersededIds.has(m.id));
     for (const m of permanent) {
       const line = formatMemory(m, agentId);
-      const cost = estimateTokens(line);
+      const cost = estimateTokens(line) + STRUCT_ITEM_OVERHEAD_TOKENS; // #1199 structured cost
       if (cost <= tokenBudget) {
         sections.permanent.push(line);
         includedOwnMemories.push(leanMemory(m, "permanent"));
-        if (includeTrust) includedTrustMemories.push(m);
+        if (includeTrust) includedTrustMemories.push({ m, section: "permanent" });
         tokenBudget -= cost;
         memoriesIncluded++;
       } else {
@@ -545,14 +624,14 @@ export class BootstrapMemories extends Resource {
     let recentSpent = 0;
     for (const m of recent) {
       const line = formatMemory(m, agentId);
-      const cost = estimateTokens(line);
+      const cost = estimateTokens(line) + STRUCT_ITEM_OVERHEAD_TOKENS; // #1199 structured cost
       if (recentSpent + cost > recentBudget) {
         memoriesTruncated++;
         continue;
       }
       sections.recent.push(line);
       includedOwnMemories.push(leanMemory(m, "recent"));
-      if (includeTrust) includedTrustMemories.push(m);
+      if (includeTrust) includedTrustMemories.push({ m, section: "recent" });
       recentSpent += cost;
       tokenBudget -= cost;
       memoriesIncluded++;
@@ -592,14 +671,14 @@ export class BootstrapMemories extends Resource {
       let predictedSpent = 0;
       for (const m of subjectMemories) {
         const line = formatMemory(m, agentId);
-        const cost = estimateTokens(line);
+        const cost = estimateTokens(line) + STRUCT_ITEM_OVERHEAD_TOKENS; // #1199 structured cost
         if (predictedSpent + cost > predictedBudget) {
           memoriesTruncated++;
           continue;
         }
         sections.predicted.push(line);
         includedPredicted.push(leanMemory(m, "predicted"));
-        if (includeTrust) includedTrustMemories.push(m);
+        if (includeTrust) includedTrustMemories.push({ m, section: "predicted" });
         predictedSpent += cost;
         tokenBudget -= cost;
         memoriesIncluded++;
@@ -773,19 +852,38 @@ export class BootstrapMemories extends Resource {
         // section double-spends.
         for (const { memory: m } of scored) {
           const line = formatMemory(m, agentId);
-          const cost = estimateTokens(line);
+          const cost = estimateTokens(line) + STRUCT_ITEM_OVERHEAD_TOKENS; // #1199 structured cost
           if (cost > tokenBudget) continue;
           if (m._source) {
             sections.teammate.push(line);
+            // flair#1199 — cross-agent teammate findings join their OWN
+            // structured container (attributed via `source`), so a connector
+            // consuming the containers still sees them when prose `context` is
+            // off. Counted separately (teammateFindingsIncluded), NOT into
+            // memoriesIncluded — that different-denominator mix is what let
+            // included exceed available.
+            includedTeammateFindings.push({
+              id: m.id,
+              content: m.content,
+              durability: m.durability ?? null,
+              createdAt: m.createdAt ?? null,
+              updatedAt: m.updatedAt ?? null,
+              subject: m.subject ?? null,
+              source: m._source,
+              section: "teammate",
+            });
+            if (includeTrust) includedTrustMemories.push({ m, section: "teammate" });
+            tokenBudget -= cost;
+            teammateFindingsIncluded++;
           } else {
             sections.relevant.push(line);
             // flair#1182 — own task-relevant records join the `memories`
-            // container; teammate (`_source`) records stay in `context` only.
+            // container.
             includedOwnMemories.push(leanMemory(m, "relevant"));
+            if (includeTrust) includedTrustMemories.push({ m, section: "relevant" });
+            tokenBudget -= cost;
+            memoriesIncluded++;
           }
-          if (includeTrust) includedTrustMemories.push(m);
-          tokenBudget -= cost;
-          memoriesIncluded++;
         }
       }
     }
@@ -933,8 +1031,29 @@ export class BootstrapMemories extends Resource {
         eventResults.push(event);
       }
 
-      eventResults.sort((a: any, b: any) => (a.createdAt || "").localeCompare(b.createdAt || ""));
-      for (const evt of eventResults.slice(0, 10)) {
+      // flair#1200 — collapse byte-identical duplicate events before rendering.
+      // The same logical event can land in the table more than once (a producer
+      // that double-fires, or the same broadcast emitted from two paths); each
+      // physical row has a distinct id/createdAt (OrgEvent.post keys the id off
+      // a millisecond timestamp), so they aren't caught by primary-key upsert
+      // and render as exact dupes. Org-event slots are scarce (10), so dedup
+      // BEFORE the slice — otherwise ~half the slots are wasted on duplicates.
+      // Keyed on the CONTENT (kind + summary + detail + targets), keeping the
+      // most-recent occurrence per signature.
+      const eventBySignature = new Map<string, any>();
+      for (const evt of eventResults) {
+        const sig = JSON.stringify([
+          evt.kind ?? "",
+          evt.summary ?? "",
+          evt.detail ?? "",
+          Array.isArray(evt.targetIds) ? [...evt.targetIds].sort() : (evt.targetIds ?? null),
+        ]);
+        const prev = eventBySignature.get(sig);
+        if (!prev || (evt.createdAt || "") > (prev.createdAt || "")) eventBySignature.set(sig, evt);
+      }
+      const dedupedEvents = [...eventBySignature.values()]
+        .sort((a: any, b: any) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+      for (const evt of dedupedEvents.slice(0, 10)) {
         const elapsed = Date.now() - new Date(evt.createdAt).getTime();
         const mins = Math.floor(elapsed / 60_000);
         const relTime = mins < 60 ? `${mins}min ago` : `${Math.floor(mins / 60)}h ago`;
@@ -989,9 +1108,27 @@ export class BootstrapMemories extends Resource {
       parts.push("## Recent Org Events\n" + sections.events.join("\n"));
     }
 
-    const context = parts.join("\n\n");
+    const fullContext = parts.join("\n\n");
+    // flair#1199 — the structured containers are canonical; `context` is a prose
+    // MIRROR of the same bytes. When includeContext is off (the /mcp default),
+    // ship a compact structural pointer instead of re-embedding every body — so
+    // no field's bytes cross the wire twice. Always a string, so a client can
+    // still tell an empty instance from an unsupported one. When on, the prose
+    // is the full assembled context (the resource/REST/CLI behaviour, unchanged).
+    const context = includeContext
+      ? fullContext
+      : (fullContext.length === 0
+          ? ""
+          : `Structured payload in soul/memories/predicted/teammateFindings `
+            + `(${memoriesIncluded} own + ${teammateFindingsIncluded} teammate memories, `
+            + `${sections.soul.length} soul entries). Pass includeContext:true for the assembled prose context.`);
     const soulTokens = sections.soul.reduce((sum, line) => sum + estimateTokens(line), 0);
-    const memoryTokens = maxTokens - tokenBudget;
+    // #1199 — memory-line token spend (informational breakdown), independent of
+    // the reserve/soul now sharing the budget. Sum of the rendered memory lines.
+    const memoryTokens = [
+      ...sections.permanent, ...sections.recent, ...sections.predicted,
+      ...sections.relevant, ...sections.teammate,
+    ].reduce((sum, line) => sum + estimateTokens(line), 0);
 
     // flair#744 slice 1 — opt-in per-memory trust block. Bootstrap renders
     // memories as text lines rather than result objects, so the block is
@@ -1000,9 +1137,12 @@ export class BootstrapMemories extends Resource {
     // HERE, in the response tail, strictly after all read-scope resolution and
     // purely for the response — never consulted for any authority decision
     // (#735-spirit zero-authority invariant). Default OFF ⇒ the `trust` key is
-    // absent ⇒ the response is byte-identical to pre-slice-1.
+    // absent ⇒ the response is byte-identical to pre-slice-1. flair#1201 — each
+    // entry carries its `section` so `matchQuality: null` on a lifecycle section
+    // reads as "not a retrieval surface", not as a scoring failure on the
+    // caller's own records.
     const trust = includeTrust
-      ? includedTrustMemories.map((m) => ({ id: m.id, ...buildTrustBlock(m) }))
+      ? includedTrustMemories.map(({ m, section }) => ({ id: m.id, section, ...buildTrustBlock(m) }))
       : undefined;
 
     // flair#744 slice 2 — opt-in abstention verdict for the task-relevance
@@ -1035,7 +1175,18 @@ export class BootstrapMemories extends Resource {
       ? undefined
       : "No currentTask was provided. Pass currentTask (a short description of what you're working on) to enable task-relevant memory retrieval, teammate findings, and collision surfacing.";
 
-    return {
+    // flair#1199 — when `subjects` were provided but nothing surfaced in
+    // `predicted`, say WHY (like currentTaskHint), so an empty `predicted: []`
+    // next to a non-empty `subjects` doesn't read as broken. Predicted fills
+    // from your OWN non-permanent memories whose `subject` matches one of the
+    // provided subjects; it stays empty until you've tagged memories that way.
+    const predictedHint = (predictedSubjects.length > 0 && includedPredicted.length === 0)
+      ? `No memories tagged with the requested subjects (${predictedSubjects.join(", ")}) were found. `
+        + `predicted surfaces your own non-permanent memories whose subject matches one of the provided `
+        + `subjects — it fills as you store memories tagged with these subjects.`
+      : undefined;
+
+    const responseBody: Record<string, unknown> = {
       context,
       // flair#1182 (part 1) — always-present self-describing keys: who the
       // server resolved the caller as, the read model applied, and the caller's
@@ -1046,7 +1197,12 @@ export class BootstrapMemories extends Resource {
       soul: soulMap,
       memories: includedOwnMemories,
       predicted: includedPredicted,
+      // flair#1199 — cross-agent teammate findings as a structured container
+      // (always present, `[]` when none), so a connector that consumes the
+      // containers still gets them when prose `context` is off.
+      teammateFindings: includedTeammateFindings,
       ...(currentTaskHint ? { currentTaskHint } : {}),
+      ...(predictedHint ? { predictedHint } : {}),
       ...(trust ? { trust } : {}),
       ...(abstention ? { abstention } : {}),
       sections: {
@@ -1062,12 +1218,26 @@ export class BootstrapMemories extends Resource {
         collision: sections.collision.length,
         events: sections.events.length,
       },
-      tokenEstimate: soulTokens + memoryTokens,
       soulTokens,
       memoryTokens,
+      // flair#1199 — own memories included (denominator: memoriesAvailable, also
+      // own-scoped), so memoriesIncluded ≤ memoriesAvailable always holds.
       memoriesIncluded,
       memoriesAvailable,
+      // Cross-agent teammate findings included — a SEPARATE denominator, labelled
+      // so it's never confused with the own-memory counters.
+      teammateFindingsIncluded,
       memoriesTruncated,
     };
+
+    // flair#1199 — tokenEstimate must reflect the ACTUAL serialized payload the
+    // caller receives (the structured containers included), not just the prose
+    // `context`. The old `soulTokens + memoryTokens` counted only the context
+    // string, so it under-reported by ~2× once the structured fields shipped
+    // alongside — the reported "maxTokens 4000 → tokenEstimate 4275 while the
+    // real payload was well over the cap". Measured over the assembled body
+    // (the ~1-line tokenEstimate field it omits is negligible).
+    const tokenEstimate = estimateTokens(JSON.stringify(responseBody));
+    return { ...responseBody, tokenEstimate };
   }
 }

@@ -158,7 +158,19 @@ export interface TrustBlock {
   validTo: string | null;
   /** Raw `createdAt` (server-clock write time), or null. */
   createdAt: string | null;
-  /** Whole days since `createdAt` (freshness), or null when unavailable. */
+  /**
+   * Raw `updatedAt` (server-clock last-write time), or null. This is the
+   * record's OWN update time — never a superseded predecessor's (#1189
+   * field-scoping) — and is what `ageDays` keys off (see below).
+   */
+  updatedAt: string | null;
+  /**
+   * Freshness: whole days since the record was last touched — keyed off
+   * `updatedAt` when present, falling back to `createdAt` (#1201). A record
+   * edited today must read as fresh even if it was first created weeks ago;
+   * keying age off the original `createdAt` made the freshest record present as
+   * the stalest. `null` when neither timestamp is parseable.
+   */
   ageDays: number | null;
 
   /**
@@ -191,6 +203,14 @@ export interface TrustableRecord {
   validFrom?: string | null;
   validTo?: string | null;
   createdAt?: string | null;
+  /**
+   * The record's own last-write time (#1201 freshness anchor). Falls back to
+   * `createdAt` when absent — a never-updated record has updatedAt == createdAt
+   * anyway (Memory.post stamps them equal on create), so age is unchanged for
+   * those. The record's OWN field only — never inherited from a superseded
+   * predecessor (#1189 field-scoping).
+   */
+  updatedAt?: string | null;
   supersedes?: string | null;
   /**
    * Absolute semantic similarity (cosine in [0,1]) the retrieval core attaches
@@ -237,6 +257,7 @@ export function buildTrustBlock(record: TrustableRecord, now: number = Date.now(
   const validFrom = typeof record.validFrom === "string" ? record.validFrom : null;
   const validTo = typeof record.validTo === "string" ? record.validTo : null;
   const createdAt = typeof record.createdAt === "string" ? record.createdAt : null;
+  const updatedAt = typeof record.updatedAt === "string" ? record.updatedAt : null;
 
   const validToMs = parseTime(validTo);
   const validFromMs = parseTime(validFrom);
@@ -247,9 +268,13 @@ export function buildTrustBlock(record: TrustableRecord, now: number = Date.now(
     validityStatus = "future";
   }
 
-  const createdMs = parseTime(createdAt);
-  const ageDays = Number.isFinite(createdMs)
-    ? Math.max(0, Math.floor((now - createdMs) / MS_PER_DAY))
+  // #1201 — freshness keys off the record's OWN last-write time (updatedAt),
+  // falling back to createdAt. A record updated today must not read as stale
+  // off its original createdAt. updatedAt is the record's own field, so this
+  // reintroduces no lineage-inheritance (#1189).
+  const freshnessMs = parseTime(updatedAt ?? createdAt);
+  const ageDays = Number.isFinite(freshnessMs)
+    ? Math.max(0, Math.floor((now - freshnessMs) / MS_PER_DAY))
     : null;
 
   return {
@@ -263,6 +288,7 @@ export function buildTrustBlock(record: TrustableRecord, now: number = Date.now(
     validFrom,
     validTo,
     createdAt,
+    updatedAt,
     ageDays,
     supersedes: typeof record.supersedes === "string" ? record.supersedes : null,
     // flair#744 refinement — confidence band from the result's absolute
