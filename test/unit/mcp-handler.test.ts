@@ -115,7 +115,15 @@ class MemoryMock extends HarperShapedBase {
   async get(target: any) { lastCall = { resource: "Memory.get#instance-getProperty", ctx: this._ctx, args: target }; return undefined; }
 }
 class SoulMock extends HarperShapedBase {
-  async put(args: any) { lastCall = { resource: "Soul.put", ctx: this._ctx, args }; return { ok: true, resource: "Soul.put", agentId: this._ctx?.request?.tpsAgent }; }
+  // flair#1181 — soul_set now writes through a COLLECTION-bound `post()`
+  // (collectionResource(Cls, ctx).post(...)), the same create path as
+  // memory_store / workspace_set / orgevent. `isCollection` is recorded so a
+  // regression to a bare `new Cls(undefined, ctx).post()` (isCollection false →
+  // 405 against real Harper) or back to the unloaded-instance `put()` (throws
+  // "Invalid primary key type: undefined") fails this test loudly.
+  async post(args: any) { lastCall = { resource: "Soul.post", ctx: this._ctx, args, isCollection: this.isCollection } as any; return { ok: true, resource: "Soul.post", agentId: this._ctx?.request?.tpsAgent }; }
+  // The pre-#1181 instance put — left for faithfulness, no longer reached.
+  async put(args: any) { lastCall = { resource: "Soul.put#instance", ctx: this._ctx, args }; return { ok: true, resource: "Soul.put#instance", agentId: this._ctx?.request?.tpsAgent }; }
   static async get(target: any, ctx: any) {
     const id = typeof target === "string" ? target : target?.id;
     lastCall = { resource: "Soul.get", ctx, args: id };
@@ -647,15 +655,22 @@ describe("tools/call — scopes to the resolved agent (no forging)", () => {
     expect(body.result.structuredContent.agentId).toBe("agt_bob");
   });
 
-  it("soul_set PUTs with id = agentId:key (so soul_get can find it)", async () => {
+  it("soul_set POSTs (collection-bound) with id = agentId:key (so soul_get can find it)", async () => {
     await mcpHandler(post(
       { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "soul_set", arguments: { key: "role", value: "cofounder" } } },
       { sub: "sub-bob" },
     ));
-    expect(lastCall?.resource).toBe("Soul.put");
+    // flair#1181 — the write goes through the collection-bound create path
+    // (Soul.post via collectionResource), NOT the old unloaded-instance put()
+    // that threw "Invalid primary key type: undefined" against a real store.
+    expect(lastCall?.resource).toBe("Soul.post");
+    expect((lastCall as any)?.isCollection).toBe(true);
+    // id is still derived from the RESOLVED agent (`${agentId}:${key}`), never
+    // args, so soul_get's `${agentId}:${key}` lookup finds the entry.
     expect(lastCall?.args.id).toBe("agt_bob:role");
     expect(lastCall?.args.agentId).toBe("agt_bob");
     expect(lastCall?.args.key).toBe("role");
+    expect(lastCall?.args.value).toBe("cofounder");
   });
 
   it("flair_orgevent carries NO authorId in the body (attributed from identity)", async () => {
