@@ -311,34 +311,26 @@ describe("/mcp TOOLS wrapper layer — every tool driven through its real .impl"
     expect(res.value, "soul entry value round-trips").toBe(SOUL_ROLE);
   }, 120_000);
 
-  // ── soul_set (write) — DEFECT FOUND BY THIS SUITE, pinned with test.failing ──
+  // ── soul_set (write) — DEFECT FOUND BY THIS SUITE, FIXED IN THIS PR ──────────
   //
-  // The soul_set wrapper (resources/mcp-tools.ts `soulSet`) does
-  // `new Cls(undefined, ctx).put({ id, ... })` — a PUT on an UNLOADED instance.
-  // Driven through its real `.impl` against a real Soul + real store, that
-  // throws `Invalid primary key type: undefined` — the EXACT #1181 class the
-  // sibling write tools were already fixed away from: `memoryStore` /
-  // `workspaceSet` / `orgEvent` create via `collectionResource(Cls, ctx).post()`,
-  // and `memoryUpdate` writes via the static `Cls.put(record, ctx)` (see its
-  // comment at mcp-tools.ts's memoryUpdate: "NOT an instance
-  // `new Cls(undefined, ctx).put(merged)` … throws 'Invalid primary key type:
-  // undefined'"). resources/in-process.ts's header names this outright: "flair
-  // itself got [collection binding] wrong in four MCP tool paths." soul_set's
-  // ONLY existing test (test/unit/mcp-handler.test.ts) drives a MOCKED handler,
-  // so the real instance-put never ran and the defect shipped green.
-  //
-  // This is a PRODUCTION wrapper bug, not a test bug — reported, never forced
-  // green. The body below asserts the INTENDED behavior (soul_set must persist
-  // an entry readable via soul_get). It is marked `test.failing` so it is GREEN
-  // while the wrapper is broken and turns RED the instant soul_set is fixed —
-  // at which point remove `.failing` (the fix is a one-liner mirroring its
-  // siblings: collection-bound or static put). A `.failing` line is a VISIBLE,
-  // self-clearing tripwire, not a hidden skip that reads as a pass.
-  test.failing("soul_set: writes an entry the wrapper can read back", async () => {
+  // The soul_set wrapper used to do `new Cls(undefined, ctx).put({ id, ... })` —
+  // a PUT on an UNLOADED instance — which threw `Invalid primary key type:
+  // undefined` against a real Soul + real store: the EXACT #1181 class the
+  // sibling read wrappers (memoryGet/update/delete/soulGet) and write wrappers
+  // (memoryStore/workspaceSet/orgEvent) were already migrated off of. soul_set's
+  // only prior test (test/unit/mcp-handler.test.ts) drove a MOCKED handler, so
+  // the real instance-put never ran and the defect shipped on the connector path.
+  // This suite caught it; the fix (mcp-tools.ts's soulSet, now a collection-bound
+  // `collectionResource(Cls, ctx).post()` so Soul.post stamps the required
+  // createdAt) lands in the same PR. This test asserts the intended behavior —
+  // a green here proves the write both lands and reads back through the wrapper.
+  test("soul_set: writes an entry the wrapper can read back", async () => {
     const key = `project-${sfx}`;
     const value = `mcp wrapper-layer soul_set value ${randomUUID()}`;
-    const res = await tool("soul_set", { key, value }); // currently THROWS (bug)
-    expect(res?.error, "soul_set must not return an error").toBeUndefined();
+    // unloaded-instance (#1181): pre-fix this THREW "Invalid primary key type:
+    // undefined"; the collection-bound post persists and echoes without error.
+    const res = await tool("soul_set", { key, value });
+    expect(res?.error, `soul_set must not return an error, got: ${JSON.stringify(res).slice(0, 200)}`).toBeUndefined();
     const back = await tool("soul_get", { key });
     expect(back?.value, "soul_set must persist the value readable via soul_get").toBe(value);
   }, 120_000);

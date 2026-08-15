@@ -440,14 +440,29 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
 
 async function soulSet(agent: ResolvedAgent, args: any) {
   const Cls = await handler("Soul");
-  const h = new Cls(undefined, delegationContext(agent));
-  // Soul records are keyed `id = agentId:key` (see flair-client SoulApi.set and
-  // schemas/memory.graphql). Use PUT with the explicit id so soul_get's
-  // `${agentId}:${key}` lookup finds it — a plain post() would mint a random id
-  // and orphan the entry from get(). Soul.put enforces write ownership via
-  // resolveAgentAuth (non-admin can only write agentId === self).
+  // flair#1181 — this write MUST go through a COLLECTION-bound instance
+  // (`collectionResource(Cls, ctx).post(...)`), the same create path the sibling
+  // write tools use (memoryStore / workspaceSet / orgEvent). The previous
+  // `new Cls(undefined, ctx).put({ id, ... })` was a PUT on an UNLOADED instance:
+  // an unloaded instance has no primary key, so Harper's instance put()/save()
+  // threw `Invalid primary key type: undefined` (the same defect class the
+  // memoryGet/update/delete/soulGet by-id READS were migrated off of — see those
+  // wrappers, and resources/in-process.ts's header: "flair itself got [collection
+  // binding] wrong in four MCP tool paths"). soul_set's only prior test drove a
+  // MOCKED handler, so the real instance-put never ran and it shipped broken on
+  // the connector path.
+  //
+  // A COLLECTION post (not a static `Cls.put(record, ctx)`) is the right form:
+  // it routes through Soul.post(), which stamps createdAt (a schema-required,
+  // non-null field). Static `Cls.put` reaches Soul.put(), which does NOT stamp
+  // createdAt on a create, so it fails a "Property createdAt is required"
+  // validation. Soul.post honors the explicit body `id`, so the record is still
+  // keyed `id = agentId:key` and soul_get's `${agentId}:${key}` lookup finds it —
+  // a random-id create would orphan the entry from get(). Soul.post enforces
+  // write ownership via resolveAgentAuth (non-admin can only write agentId === self).
   const id = `${agent.agentId}:${args?.key}`;
-  return unwrap(await h.put({
+  const h: any = await collectionResource(Cls, delegationContext(agent));
+  return unwrap(await h.post({
     id,
     agentId: agent.agentId,
     key: args?.key,
