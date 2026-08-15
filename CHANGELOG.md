@@ -18,6 +18,30 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.7] - 2026-08-15
+
+### Added
+
+- **/mcp tools wrapper-layer test coverage.** Added an integration suite that
+  drives every tool in the `TOOLS` registry through its real `.impl` wrapper
+  in-process against an ephemeral Harper seeded with realistic data, asserting
+  each returns the expected payload shape. Closes the coverage gap behind three
+  connector regressions (#1181 unloaded-instance by-id reads, #1188 inlined raw
+  embedding vectors, #1182 an un-awaited async spread) that shipped green
+  because only the underlying handlers and the signed-REST path were tested,
+  never the thin wrapper seam a real /mcp connector drives.
+
+### Fixed
+
+- **`/mcp` `soul_set` now persists instead of erroring.** The tool wrapper did a
+  PUT on an unloaded resource instance (`new Cls(undefined, ctx).put(...)`),
+  which threw `Invalid primary key type: undefined` against a real store — the
+  same #1181 unloaded-instance class already fixed in the other tool wrappers.
+  It now writes through a collection-bound `post()` (stamping the required
+  `createdAt`), so setting a soul entry over a `/mcp` connector works and is
+  readable via `soul_get`. Found by the new wrapper-layer test suite, whose only
+  prior `soul_set` coverage exercised a mocked handler.
+
 ## [0.44.6] - 2026-08-15
 
 ### Fixed
