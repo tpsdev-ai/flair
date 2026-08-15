@@ -423,7 +423,15 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
   // flair#831 — attach the running Flair version to the RESPONSE (not the
   // delegated request body) so the calling agent learns the server version
   // on its very first call.
-  const result = unwrap(await h.post(body));
+  //
+  // flair#1182 — `unwrap` is async: it must be AWAITED before the result is
+  // spread, exactly as every sibling tool does (`await unwrap(...)` in
+  // memory_store / memory_update / memory_get). Without the await, `result` is
+  // the still-pending PROMISE, and `{ ...aPromise }` copies no own-enumerable
+  // keys — so the entire computed payload (resolved agentId, scope, soul,
+  // memories, predicted, the #1182.1 containers, the abstention verdict) was
+  // silently discarded and the caller saw ONLY the injected `flairVersion`.
+  const result = await unwrap(await h.post(body));
   if (result && typeof result === "object" && !Array.isArray(result)) {
     return { ...result, flairVersion: resolveVersion() };
   }

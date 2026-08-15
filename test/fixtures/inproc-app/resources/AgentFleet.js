@@ -211,6 +211,26 @@ async function updateById(agentId, id, content) {
   return { updated: after && after.content === content, content: after?.content ?? null };
 }
 
+// ─── flair#1182 (part 2) — the /mcp `bootstrap` wrapper drops the payload ──────
+//
+// resources/mcp-tools.ts's `bootstrap` tool wrapper builds its response as
+// `{ ...unwrap(await h.post(body)), flairVersion }`. `unwrap` is an ASYNC
+// function, so the sibling write/read tools spell it `await unwrap(...)`;
+// `bootstrap` omitted the await, so `result` was the unresolved PROMISE. Object-
+// spreading a Promise copies no own-enumerable keys (`{...aPromise}` === `{}`),
+// so the entire rich payload BootstrapMemories.post computed — agentId, scope,
+// soul, memories, predicted, the #1182.1 containers, the abstention verdict —
+// was discarded and only the injected `flairVersion` survived. This op drives
+// the REAL `resources/mcp-tools.ts` bootstrap wrapper (not a mirror) against the
+// real BootstrapMemories resource + real store, so the fix — and its mutation
+// proof — land on the shipped line. Imported dynamically (a relative path that
+// bypasses the package `exports` gate) so nothing else that loads this fixture
+// pays for the import.
+async function bootstrapViaMcp(agentId, args) {
+  const { TOOLS } = await import("../node_modules/@tpsdev-ai/flair/dist/resources/mcp-tools.js");
+  return TOOLS.bootstrap.impl({ agentId, isAdmin: false }, args ?? {});
+}
+
 /**
  * The DELIBERATELY unfiltered read — every agent's private records, by name.
  * `internalContext()` is what an infrastructure sweep asks for on purpose; an
@@ -307,6 +327,8 @@ export class AgentFleet extends Resource {
         return run(() => semanticRecallUnscoped(body.q, body.limit));
       case "recallUnscoped":
         return run(() => recallUnscoped());
+      case "bootstrapViaMcp":
+        return run(() => bootstrapViaMcp(body.agentId, body.args));
       case "buildContextWith":
         return run(() => buildContextWith(body.agentId));
       case "createWithNoContext":
