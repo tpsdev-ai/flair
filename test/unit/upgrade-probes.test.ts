@@ -194,8 +194,18 @@ describe("upgradeStatusSuffix", () => {
     expect(suffix).toContain("npm install -g");
   });
 
-  test("outdated packages have no suffix", () => {
-    expect(upgradeStatusSuffix("@tpsdev-ai/flair-mcp", "outdated")).toBe("");
+  // flair#1208: an outdated flair-mcp is re-pinned by re-wiring (`flair doctor
+  // --fix`), never `npm install -g` — a global bin does nothing for an
+  // `npx -y -p @tpsdev-ai/flair-mcp` invocation. So its outdated line carries
+  // the doctor remedy, while every other package still has no outdated suffix.
+  test("outdated flair-mcp shows the doctor re-pin remedy, never npm install -g", () => {
+    const suffix = upgradeStatusSuffix("@tpsdev-ai/flair-mcp", "outdated");
+    expect(suffix).toContain("flair doctor --fix");
+    expect(suffix).not.toContain("npm install -g");
+    expect(suffix).not.toContain("npm i -g");
+  });
+
+  test("outdated non-mcp packages have no suffix", () => {
     expect(upgradeStatusSuffix("@tpsdev-ai/flair", "outdated")).toBe("");
   });
 

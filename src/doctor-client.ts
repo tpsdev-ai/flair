@@ -23,7 +23,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { clientConfigPath, type ClientId } from "./install/clients.js";
+import { ALL_CLIENTS, clientConfigPath, type ClientId } from "./install/clients.js";
+import { FLAIR_MCP_PACKAGE } from "./lib/mcp-spec.js";
 
 // The exact substring `flair init` writes into CLAUDE.md (src/cli.ts, the
 // `init` action) and that the doctor check + fix both key off of.
@@ -402,6 +403,80 @@ export function checkSessionStartHook(homeDir: string): SessionStartHookCheckRes
   } catch {
     return { present: false, path };
   }
+}
+
+// ── flair-mcp presence by WIRING, not global install (flair#1208) ───────────
+//
+// flair-mcp is zero-install via npx by design (#1168): a correctly-wired
+// machine invokes it as `npx -y -p @tpsdev-ai/flair-mcp` and NEVER installs it
+// globally, so `flair upgrade`'s global bin/lib probe finds nothing and
+// mis-reports it "not detected." Its real "installed version" is the pin its
+// wiring carries — the mcpServerSpec() written into a client's MCP config
+// (pinned since #1135). Detect it there instead.
+
+/**
+ * Extract a pinned `@tpsdev-ai/flair-mcp` version from any wiring string — a
+ * client MCP `args` array, a Codex TOML args line, or a SessionStart hook
+ * command. Returns the version when the spec is written
+ * `@tpsdev-ai/flair-mcp@<ver>`; null for a bare/unpinned spec.
+ *
+ * The SessionStart hook is deliberately unpinned (`npx -y -p
+ * @tpsdev-ai/flair-mcp`, buildSessionStartHookCommand above), so a hook
+ * establishes that flair-mcp is wired but never carries a version — the pin
+ * comes from the client MCP config.
+ */
+export function extractFlairMcpPin(text: string): string | null {
+  if (typeof text !== "string") return null;
+  // `@tpsdev-ai/flair-mcp@<version>`; the version token runs until the first
+  // character that can't appear in a spec embedded in JSON args / TOML.
+  const m = text.match(/@tpsdev-ai\/flair-mcp@([0-9A-Za-z][^\s"'\],]*)/);
+  return m ? m[1]! : null;
+}
+
+/**
+ * flair-mcp's presence resolved from its actual wiring rather than a global
+ * install probe (flair#1208).
+ *
+ * `wired` is true when a Flair SessionStart hook OR any known client's MCP
+ * config references the flair-mcp package. `pinnedVersion` is the concrete
+ * version pinned in that wiring, or null when the only wiring found is unpinned
+ * (a bare npx spec / the SessionStart hook).
+ *
+ * Iterates the SAME client registry (ALL_CLIENTS) and per-client config paths
+ * (clientConfigPath) that wiring uses, so a client added to the registry is
+ * scanned here automatically — no second list to keep in step.
+ */
+export interface FlairMcpWiring {
+  wired: boolean;
+  pinnedVersion: string | null;
+}
+
+export function detectWiredFlairMcp(homeDir: string): FlairMcpWiring {
+  let wired = false;
+  let pinnedVersion: string | null = null;
+
+  // The package name only ever appears in a Flair MCP wiring block, so its
+  // presence in a config's text is a reliable "flair-mcp is wired here" signal.
+  const note = (text: string | null | undefined): void => {
+    if (!text || !text.includes(FLAIR_MCP_PACKAGE)) return;
+    wired = true;
+    if (!pinnedVersion) {
+      const pin = extractFlairMcpPin(text);
+      if (pin) pinnedVersion = pin;
+    }
+  };
+
+  // 1. The SessionStart hook (claude-code). Establishes wiring; unpinned by design.
+  const hook = checkSessionStartHook(homeDir);
+  if (hook.present && isFlairHookCommand(hook.command ?? "")) note(hook.command);
+
+  // 2. Every known client's MCP config — a wired flair block carries the spec.
+  for (const client of ALL_CLIENTS) {
+    const configPath = withHome(homeDir, () => clientConfigPath(client.id));
+    note(readTextFile(configPath));
+  }
+
+  return { wired, pinnedVersion };
 }
 
 /**
