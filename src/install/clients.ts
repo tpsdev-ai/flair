@@ -14,7 +14,7 @@
 //   All paths are resolved cross-platform (Linux included) via standard
 //   per-client locations under $HOME / $XDG_CONFIG_HOME.
 
-export type ClientId = "claude-code" | "codex" | "gemini" | "cursor";
+export type ClientId = "claude-code" | "codex" | "gemini" | "cursor" | "antigravity";
 
 /**
  * The env block every wire function writes into a client's MCP server config.
@@ -233,9 +233,16 @@ function wireJsonMcp(
   configPath: string,
   label: string,
   env: WireEnv,
+  // The parenthetical appended to a successful wire/refresh message. Defaults to
+  // the confident "restart <label> to pick it up". A client whose end-to-end
+  // pickup Flair has NOT verified (Antigravity — flair#1209) passes an honest
+  // note instead, so the message claims only what it did (wrote the config), not
+  // that the client will read it.
+  pickupNote?: string,
 ): { ok: boolean; message: string } {
   const home = resolveHome();
   const display = configPath.startsWith(home) ? "~" + configPath.slice(home.length) : configPath;
+  const note = pickupNote ?? `restart ${label} to pick it up`;
   try {
     let config: any = {};
     if (existsSync(configPath)) {
@@ -257,7 +264,7 @@ function wireJsonMcp(
     mkdirSync(dirname(configPath), { recursive: true });
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
     const action = urlAgentMatch ? "refreshed pin in" : "wired";
-    return { ok: true, message: `${label}: ${action} ${display} (restart ${label} to pick it up)` };
+    return { ok: true, message: `${label}: ${action} ${display} (${note})` };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return {
@@ -290,6 +297,24 @@ function codexConfigPath(): string {
 }
 
 /**
+ * Antigravity CLI (`agy`) + Antigravity 2.0 IDE + SDK: they share ONE central
+ * MCP config at ~/.gemini/config/mcp_config.json on every OS (flair#1209).
+ *
+ * This is a SIBLING of, and distinct from, Gemini CLI's ~/.gemini/settings.json
+ * (geminiConfigPath above) — both tools live under ~/.gemini but read different
+ * files, so wiring one never touches the other. Same standard `mcpServers`
+ * stdio schema (command/args/env) the JSON clients above use.
+ *
+ * Path per Antigravity's own docs (antigravity.google/docs/mcp) and a Google
+ * Developer Advocate write-up (atamel.dev "Where does Antigravity look for MCP
+ * Servers?"). NOTE: the end-to-end wiring has NOT been verified against a real
+ * `agy` install — see the PR body.
+ */
+function antigravityConfigPath(): string {
+  return join(resolveHome(), ".gemini", "config", "mcp_config.json");
+}
+
+/**
  * Single dispatcher for "where does this client's MCP config live" — used by
  * `flair doctor`'s client-integration checks (flair#588) to read the config
  * without duplicating the per-client path logic that already lives here.
@@ -305,6 +330,8 @@ export function clientConfigPath(id: ClientId): string {
       return geminiConfigPath();
     case "cursor":
       return cursorConfigPath();
+    case "antigravity":
+      return antigravityConfigPath();
   }
 }
 
@@ -368,6 +395,24 @@ function _wireCursor(env: WireEnv): { ok: boolean; message: string } {
   return wireJsonMcp(cursorConfigPath(), "Cursor", env);
 }
 
+// Antigravity uses the same standard JSON `mcpServers` stdio schema as Gemini/
+// Cursor (command/args/env), so wireJsonMcp merges into it byte-identically —
+// only the config PATH differs (flair#1209).
+//
+// The success message deliberately does NOT claim "restart Antigravity to pick
+// it up": Flair writes the config to the documented path, but has not verified
+// end-to-end that a live `agy` reads it. So the message claims only the write,
+// and asks the user to confirm pickup (flair#1209 review — honesty on an
+// unverified integration).
+function _wireAntigravity(env: WireEnv): { ok: boolean; message: string } {
+  return wireJsonMcp(
+    antigravityConfigPath(),
+    "Antigravity",
+    env,
+    "wiring unverified against a real agy — restart Antigravity and confirm the flair tools appear",
+  );
+}
+
 // ---- Exported detection & wiring array ------------------------------------------
 
 export const ALL_CLIENTS: Omit<Client, "detected">[] = [
@@ -394,6 +439,13 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
     label: "Cursor",
     bin: "cursor",
     wire: _wireCursor,
+  },
+  {
+    id: "antigravity",
+    label: "Antigravity",
+    // Google's Antigravity CLI — the executable is `agy` (flair#1209).
+    bin: "agy",
+    wire: _wireAntigravity,
   },
 ];
 
@@ -512,4 +564,10 @@ export function wireCursor(
   env: WireEnv
 ): { ok: boolean; message: string } {
   return _wireCursor(env);
+}
+
+export function wireAntigravity(
+  env: WireEnv
+): { ok: boolean; message: string } {
+  return _wireAntigravity(env);
 }

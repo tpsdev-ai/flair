@@ -15,6 +15,7 @@ Where Flair already runs. Each integration shown here is a working surface — t
 | **Continue.dev** | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | Standard MCP server |
 | **OpenAI Codex CLI** | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | Standard MCP server |
 | **Gemini CLI** | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | Standard MCP server |
+| **Antigravity CLI** (`agy`) | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | `~/.gemini/config/mcp_config.json`; pickup by a live `agy` pending verification |
 | **Goose** (block/goose) | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | Goose ships native MCP support |
 | **LangGraph (TS)** | [`langgraph-flair`](#langgraph-typescript) | FlairClient | Drop-in `BaseStore` |
 | **OpenClaw** | [`openclaw-flair`](#openclaw) | Ed25519 | Native plugin + context engine |
@@ -68,6 +69,8 @@ FLAIR_AGENT_ID = "codex"
 ```
 
 **Gemini CLI** (`~/.gemini/settings.json`): same shape as Cursor.
+
+**Antigravity CLI** (`agy`) (`~/.gemini/config/mcp_config.json` — Antigravity's own MCP config, separate from Gemini CLI's `settings.json`): same shape as Cursor. Newly added; the config path follows Antigravity's documentation, but Flair has not yet verified end-to-end pickup by a live `agy` — after wiring, restart Antigravity and confirm the flair tools appear.
 
 **Continue.dev** (`~/.continue/config.json`):
 ```json

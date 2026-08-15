@@ -54,8 +54,8 @@ import {
   type FleetSweepResult,
 } from "./fleet-verify.js";
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
-import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
-import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning } from "./lib/mcp-spec.js";
+import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, wireAntigravity, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
+import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning, FLAIR_MCP_PACKAGE } from "./lib/mcp-spec.js";
 import {
   resolveAgentKeyPath,
   loadEd25519PrivateKeyFromFile,
@@ -81,6 +81,7 @@ import {
 import {
   readClientMcpBlock,
   checkClaudeMdBootstrap,
+  detectWiredFlairMcp,
   inspectSessionStartHook,
   upgradeSessionStartHookCommand,
   fixClaudeMdBootstrap,
@@ -2783,12 +2784,61 @@ export function shouldPrintUpgradeLine(status: UpgradeStatus, showAll: boolean):
 export function upgradeStatusSuffix(name: string, status: UpgradeStatus): string {
   if (status === "current") return " (current)";
   if (status === "missing") {
-    return name === "@tpsdev-ai/flair-mcp"
+    return name === FLAIR_MCP_PACKAGE
       ? " (zero-install via npx — run: flair doctor --fix)"
       : " (run: npm install -g)";
   }
   if (status === "optional") return " (install via: openclaw plugins install @tpsdev-ai/openclaw-flair)";
+  // flair-mcp is refreshed by re-pinning its wiring (`flair doctor --fix` /
+  // the post-upgrade pin refresh), never `npm install -g` — a global bin does
+  // nothing for an `npx -y -p @tpsdev-ai/flair-mcp` invocation (flair#1208).
+  if (status === "outdated" && name === FLAIR_MCP_PACKAGE) {
+    return " (npx-wired — run: flair doctor --fix to re-pin)";
+  }
   return "";
+}
+
+/**
+ * Resolve the `flair upgrade` finding for flair-mcp from its ACTUAL wiring,
+ * not a global-install probe (flair#1208).
+ *
+ * flair-mcp is zero-install via npx (#1168): a correctly-wired machine never
+ * installs it globally, so the global bin/lib probe returning null is the
+ * NORMAL state, not "missing". Its real installed version is the pin its wiring
+ * carries (a client MCP config's args, refreshed by `flair doctor --fix`).
+ *
+ * Resolution order:
+ *   1. Legacy global install — the bin/lib probe found a version. Honor it.
+ *   2. Not wired anywhere — genuinely missing; the remedy (upgradeStatusSuffix)
+ *      is `flair doctor --fix`, never `npm install -g`.
+ *   3. Wired with a concrete pin — that pin IS the installed version
+ *      (current when it equals latest, else outdated → re-pin via doctor).
+ *   4. Wired but unpinned (a bare npx spec / the SessionStart hook) — `npx -y`
+ *      re-resolves latest every session, so the effective version IS latest →
+ *      current.
+ */
+export function resolveFlairMcpFinding(
+  globalProbe: string | null,
+  latest: string,
+  wiring: { wired: boolean; pinnedVersion: string | null },
+): { installed: string | null; status: UpgradeStatus } {
+  // 1. Legacy global install.
+  if (globalProbe !== null) {
+    return { installed: globalProbe, status: globalProbe === latest ? "current" : "outdated" };
+  }
+  // 2. Not wired anywhere.
+  if (!wiring.wired) {
+    return { installed: null, status: "missing" };
+  }
+  // 3. Wired with a pin.
+  if (wiring.pinnedVersion) {
+    return {
+      installed: wiring.pinnedVersion,
+      status: wiring.pinnedVersion === latest ? "current" : "outdated",
+    };
+  }
+  // 4. Wired but unpinned — npx resolves latest on every session.
+  return { installed: latest, status: "current" };
 }
 
 /**
@@ -3132,7 +3182,7 @@ program
   .option("--data-dir <dir>", "Harper data directory")
   .option("--skip-start", "Skip Harper startup (assume already running)")
   .option("--skip-soul", "Skip interactive personality setup")
-  .option("--client <client>", "MCP client(s) to wire: claude-code, codex, gemini, cursor, all, or none")
+  .option("--client <client>", "MCP client(s) to wire: claude-code, codex, gemini, cursor, antigravity, all, or none")
   .option("--no-mcp", "Skip MCP client wiring (instance + agent only)")
   .option("--skip-smoke", "Skip the MCP smoke test")
   .option("--skip-claude-md", "Skip appending the Flair bootstrap line to CLAUDE.md (claude-code only)")
@@ -3360,9 +3410,9 @@ program
     const noMcp = opts.mcp === false;
     const selectedClients: ClientId[] = [];
     if (clientOpt && clientOpt !== "all" && clientOpt !== "none" && !noMcp) {
-      const valid: ClientId[] = ["claude-code", "codex", "gemini", "cursor"];
+      const valid: ClientId[] = ["claude-code", "codex", "gemini", "cursor", "antigravity"];
       if (!valid.includes(clientOpt as ClientId)) {
-        console.error(`Unknown client: ${clientOpt}. Valid: claude-code, codex, gemini, cursor, all, none`);
+        console.error(`Unknown client: ${clientOpt}. Valid: claude-code, codex, gemini, cursor, antigravity, all, none`);
         process.exit(1);
       }
       selectedClients.push(clientOpt as ClientId);
@@ -3959,6 +4009,7 @@ program
               case "codex": result = wireCodex({ ...mcpEnv, FLAIR_CLIENT: "codex" }); break;
               case "gemini": result = wireGemini({ ...mcpEnv, FLAIR_CLIENT: "gemini" }); break;
               case "cursor": result = wireCursor({ ...mcpEnv, FLAIR_CLIENT: "cursor" }); break;
+              case "antigravity": result = wireAntigravity({ ...mcpEnv, FLAIR_CLIENT: "antigravity" }); break;
               default: result = { ok: false, message: `Unknown client: ${clientId}` };
             }
             wiringResults.push({ client: clientId, message: result.message, wired: result.ok });
@@ -10505,16 +10556,27 @@ program
           try { primeVersionCheckCache(latest); } catch { /* best-effort */ }
         }
 
-        const installed = probe();
+        const globalProbe = probe();
+        let installed: string | null;
         let status: Status;
-        if (installed === null) {
-          // openclaw-plugin packages are optional — if openclaw isn't
-          // installed, don't surface a misleading "install with npm" advice.
-          status = kind === "openclaw-plugin" ? "optional" : "missing";
-        } else if (installed === latest) {
-          status = "current";
+        if (name === FLAIR_MCP_PACKAGE) {
+          // flair-mcp is zero-install via npx (#1168) — a null global probe is
+          // the NORMAL state, not "missing". Resolve it from its actual wiring
+          // (the pin in a client MCP config / the SessionStart hook) so the
+          // listing is truthful and the remedy actually works (flair#1208).
+          const home = process.env.HOME ?? homedir();
+          ({ installed, status } = resolveFlairMcpFinding(globalProbe, latest, detectWiredFlairMcp(home)));
         } else {
-          status = "outdated";
+          installed = globalProbe;
+          if (installed === null) {
+            // openclaw-plugin packages are optional — if openclaw isn't
+            // installed, don't surface a misleading "install with npm" advice.
+            status = kind === "openclaw-plugin" ? "optional" : "missing";
+          } else if (installed === latest) {
+            status = "current";
+          } else {
+            status = "outdated";
+          }
         }
         findings.push({ name, installed, latest, status, kind });
 
@@ -10541,12 +10603,19 @@ program
 
     const outdated = findings.filter((f) => f.status === "outdated");
     const missing = findings.filter((f) => f.status === "missing");
+    // flair-mcp is refreshed by re-pinning its wiring (`flair doctor --fix` /
+    // the post-upgrade pin refresh below), NEVER `npm install -g` — a global
+    // bin does nothing for an `npx -y -p @tpsdev-ai/flair-mcp` invocation
+    // (#1168/#1208). So a stale-pinned flair-mcp drives a remedy line, not the
+    // npm-install + restart transaction. It is kept out of npmUpgrades here and
+    // surfaced separately below.
+    const flairMcpOutdated = outdated.find((f) => f.name === FLAIR_MCP_PACKAGE) ?? null;
     // openclaw plugins upgrade through `openclaw plugins install`, not `npm
     // install -g` (npm-installed wouldn't connect to OpenClaw's gateway slot).
     // Split outdated into npm-upgradeable vs openclaw-plugin so we can use
     // the right command for each.
     const npmUpgrades = outdated
-      .filter((f) => f.kind !== "openclaw-plugin")
+      .filter((f) => f.kind !== "openclaw-plugin" && f.name !== FLAIR_MCP_PACKAGE)
       .map(({ name, installed, latest }) => ({ pkg: name, installed: installed ?? "unknown", latest }));
     const openclawUpgrades = outdated
       .filter((f) => f.kind === "openclaw-plugin")
@@ -10558,15 +10627,26 @@ program
       return;
     }
 
-    if (missing.length > 0 && outdated.length === 0) {
-      const npmMissing = missing.filter((f) => f.name !== "@tpsdev-ai/flair-mcp");
-      const mcpMissing = missing.filter((f) => f.name === "@tpsdev-ai/flair-mcp");
-      console.log(`\n❔ ${missing.length} package${missing.length > 1 ? "s" : ""} not detected — all detected packages are up to date.`);
-      if (npmMissing.length > 0) {
-        console.log(`   Install missing: npm install -g ${npmMissing.map((f) => f.name).join(" ")}`);
+    // Nothing to install via npm/openclaw. What is left is advisory: packages
+    // not detected (missing) and/or a flair-mcp whose wired pin is behind latest
+    // — both fixed by re-wiring (`flair doctor --fix`), never by the
+    // npm-install + restart transaction below (#1168/#1208). Print the remedies
+    // and stop.
+    if (totalUpgrades === 0) {
+      if (missing.length > 0) {
+        const npmMissing = missing.filter((f) => f.name !== FLAIR_MCP_PACKAGE);
+        const mcpMissing = missing.some((f) => f.name === FLAIR_MCP_PACKAGE);
+        console.log(`\n❔ ${missing.length} package${missing.length > 1 ? "s" : ""} not detected — all detected packages are up to date.`);
+        if (npmMissing.length > 0) {
+          console.log(`   Install missing: npm install -g ${npmMissing.map((f) => f.name).join(" ")}`);
+        }
+        if (mcpMissing) {
+          console.log(`   flair-mcp is zero-install via npx — run: flair doctor --fix to wire the hook`);
+        }
       }
-      if (mcpMissing.length > 0) {
-        console.log(`   flair-mcp is zero-install via npx — run: flair doctor --fix to re-wire the hook`);
+      if (flairMcpOutdated) {
+        console.log(`\n⬆️  flair-mcp is wired via npx (pinned ${flairMcpOutdated.installed} → latest ${flairMcpOutdated.latest}).`);
+        console.log(`   Re-pin it: flair doctor --fix`);
       }
       return;
     }
@@ -13209,6 +13289,7 @@ program
                     client.id === "claude-code" ? wireClaudeCode(wireEnv) :
                     client.id === "codex" ? wireCodex(wireEnv) :
                     client.id === "gemini" ? wireGemini(wireEnv) :
+                    client.id === "antigravity" ? wireAntigravity(wireEnv) :
                     wireCursor(wireEnv);
                   console.log(`     ${wireResult.ok ? render.icons.ok : render.icons.warn} ${wireResult.message}`);
                   if (wireResult.ok) fixed++;
