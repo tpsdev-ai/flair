@@ -233,9 +233,16 @@ function wireJsonMcp(
   configPath: string,
   label: string,
   env: WireEnv,
+  // The parenthetical appended to a successful wire/refresh message. Defaults to
+  // the confident "restart <label> to pick it up". A client whose end-to-end
+  // pickup Flair has NOT verified (Antigravity — flair#1209) passes an honest
+  // note instead, so the message claims only what it did (wrote the config), not
+  // that the client will read it.
+  pickupNote?: string,
 ): { ok: boolean; message: string } {
   const home = resolveHome();
   const display = configPath.startsWith(home) ? "~" + configPath.slice(home.length) : configPath;
+  const note = pickupNote ?? `restart ${label} to pick it up`;
   try {
     let config: any = {};
     if (existsSync(configPath)) {
@@ -257,7 +264,7 @@ function wireJsonMcp(
     mkdirSync(dirname(configPath), { recursive: true });
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
     const action = urlAgentMatch ? "refreshed pin in" : "wired";
-    return { ok: true, message: `${label}: ${action} ${display} (restart ${label} to pick it up)` };
+    return { ok: true, message: `${label}: ${action} ${display} (${note})` };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : String(err);
     return {
@@ -391,8 +398,19 @@ function _wireCursor(env: WireEnv): { ok: boolean; message: string } {
 // Antigravity uses the same standard JSON `mcpServers` stdio schema as Gemini/
 // Cursor (command/args/env), so wireJsonMcp merges into it byte-identically —
 // only the config PATH differs (flair#1209).
+//
+// The success message deliberately does NOT claim "restart Antigravity to pick
+// it up": Flair writes the config to the documented path, but has not verified
+// end-to-end that a live `agy` reads it. So the message claims only the write,
+// and asks the user to confirm pickup (flair#1209 review — honesty on an
+// unverified integration).
 function _wireAntigravity(env: WireEnv): { ok: boolean; message: string } {
-  return wireJsonMcp(antigravityConfigPath(), "Antigravity", env);
+  return wireJsonMcp(
+    antigravityConfigPath(),
+    "Antigravity",
+    env,
+    "wiring unverified against a real agy — restart Antigravity and confirm the flair tools appear",
+  );
 }
 
 // ---- Exported detection & wiring array ------------------------------------------

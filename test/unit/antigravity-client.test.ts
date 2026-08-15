@@ -103,6 +103,16 @@ describe("Antigravity client registration (flair#1209)", () => {
     expect(readFileSync(cfgPath, "utf-8")).toBe(JSON.stringify(cfg1, null, 2) + "\n");
   });
 
+  it("wire success message is HONEST — no confident pickup claim, carries the unverified caveat (flair#1209 review)", () => {
+    const res = wireAntigravity(ENV);
+    expect(res.ok).toBe(true);
+    // Flair wrote the config, but has NOT verified a live agy reads it — so the
+    // message must not claim the confident "restart Antigravity to pick it up"
+    // the other JSON clients get, and must name the unverified state.
+    expect(res.message).toContain("unverified against a real agy");
+    expect(res.message).not.toContain("restart Antigravity to pick it up");
+  });
+
   it("stamps FLAIR_CLIENT provenance when the caller sets it", () => {
     wireAntigravity({ ...ENV, FLAIR_CLIENT: "antigravity" });
     const cfgPath = join(isoHome, ".gemini", "config", "mcp_config.json");
