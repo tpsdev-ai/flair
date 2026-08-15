@@ -89,8 +89,10 @@ import {
   applyOrReportSessionStartHook,
   resolveWireFlairUrl,
   planAgentIterations,
-  inferSoleAgentId,
   fixCommandAgentHint,
+  isNodeKeyId,
+  partitionKeyIds,
+  resolveFixAgentId,
   describeAgentGateFinding,
   embeddingsSkipRemedy,
   classifyKeyFile,
@@ -1806,7 +1808,11 @@ export async function verifySemanticSearch(
   if (!agentId) {
     try {
       const keyFiles = readdirSync(keysDir).filter((f) => f.endsWith(".key"));
-      if (keyFiles.length > 0) agentId = keyFiles[0].replace(/\.key$/, "");
+      // Skip node-scoped federation keys (flair#1193): they can't sign, so
+      // picking one here would fail the probe with a decode error that reads
+      // like a semantic-search regression rather than "no agent to sign as".
+      const agentKeyFile = keyFiles.find((f) => !isNodeKeyId(f.replace(/\.key$/, ""), keysDir));
+      if (agentKeyFile) agentId = agentKeyFile.replace(/\.key$/, "");
     } catch { /* keysDir missing */ }
   }
   if (!agentId) {
@@ -10791,8 +10797,12 @@ program
     await (async () => {
       const agentId = resolveAgentIdOrEnv({}) ?? (() => {
         try {
-          const keyFiles = readdirSync(defaultKeysDir()).filter((f) => f.endsWith(".key"));
-          return keyFiles.length > 0 ? keyFiles[0].replace(/\.key$/, "") : null;
+          const kd = defaultKeysDir();
+          const keyFiles = readdirSync(kd).filter((f) => f.endsWith(".key"));
+          // Node-scoped federation keys aren't agents (flair#1193) — never
+          // pin-refresh a connector as one.
+          const agentKeyFile = keyFiles.find((f) => !isNodeKeyId(f.replace(/\.key$/, ""), kd));
+          return agentKeyFile ? agentKeyFile.replace(/\.key$/, "") : null;
         } catch { return null; }
       })();
       if (!agentId) {
@@ -12900,9 +12910,29 @@ program
     const keysDir = defaultKeysDir();
     if (existsSync(keysDir)) {
       const keyFiles = (await import("node:fs")).readdirSync(keysDir).filter((f: string) => f.endsWith(".key"));
-      if (keyFiles.length > 0) {
-        keyAgentIds = keyFiles.map((f: string) => f.replace(/\.key$/, ""));
-        console.log(`  ${render.icons.ok} Keys found: ${render.wrap(render.c.bold, String(keyFiles.length))} agent(s) in ${render.wrap(render.c.dim, keysDir)}`);
+      // ~/.flair/keys is shared by agent Ed25519 signing keys and node-scoped
+      // federation keys (flair#1193). Only agent keys are signing identities;
+      // node keys are AES-GCM keystore blobs that must never be parsed as, or
+      // inferred as, an agent. Partition them out here so every downstream
+      // consumer of keyAgentIds (registration checks, --fix inference,
+      // fixCommandAgentHint) is node-free by construction.
+      const { agentKeyIds, nodeKeyIds } = partitionKeyIds(
+        keyFiles.map((f: string) => f.replace(/\.key$/, "")),
+        keysDir,
+      );
+      keyAgentIds = agentKeyIds;
+      if (agentKeyIds.length > 0) {
+        console.log(`  ${render.icons.ok} Keys found: ${render.wrap(render.c.bold, String(agentKeyIds.length))} agent(s) in ${render.wrap(render.c.dim, keysDir)}`);
+        if (nodeKeyIds.length > 0) {
+          console.log(`     ${render.icons.info} ${render.wrap(render.c.dim, `${nodeKeyIds.length} node-scoped federation key(s) present — not agent signing keys; skipping`)}`);
+        }
+      } else if (nodeKeyIds.length > 0) {
+        // Node keys but no agent key: functionally there is no agent identity
+        // here. Report it plainly (not the old DECODER false alarm) and point
+        // at the real remedy. Kept a warn — not an issues++ — so a genuine
+        // federation-only host doesn't newly fail doctor's exit code.
+        console.log(`  ${render.icons.warn} No agent signing key found — only ${render.wrap(render.c.bold, String(nodeKeyIds.length))} node-scoped federation key(s) in ${render.wrap(render.c.dim, keysDir)}`);
+        console.log(`     ${render.wrap(render.c.dim, "These are Fabric node keys, not agent identities. Fix:")} flair init --agent-id <your-agent>`);
       } else {
         console.log(`  ${render.icons.error} Keys directory exists but no .key files found`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair init --agent-id <your-agent>`);
@@ -13155,12 +13185,23 @@ program
                 // nothing else identifies one — the only case doctor can
                 // infer without being told (see inferSoleAgentId's doc
                 // comment in doctor-client.ts for why 0/2+ keys don't guess).
-                const fixAgentId = opts.agent || process.env.FLAIR_AGENT_ID || anyKnownAgentId || inferSoleAgentId(keyAgentIds);
+                // flair#1193: resolveFixAgentId additionally refuses a
+                // node-scoped federation id from ANY source (inference, env,
+                // or a wired block a prior buggy run may have poisoned) — a
+                // node id can't sign, so wiring it would authenticate the
+                // connector as a phantom unregistered node.
+                const fixAgentId = resolveFixAgentId({
+                  optsAgent: opts.agent,
+                  envAgentId: process.env.FLAIR_AGENT_ID,
+                  anyKnownAgentId,
+                  keyAgentIds,
+                  keysDir: defaultKeysDir(),
+                });
                 if (!fixAgentId) {
                   if (keyAgentIds.length > 1) {
                     console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: multiple agents found (${[...keyAgentIds].sort().join(", ")}) — pass --agent <id> to choose which one`);
                   } else {
-                    console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: no agent registered — run \`flair agent add <id>\` first, then re-run \`flair doctor --fix\``);
+                    console.log(`     ${render.icons.warn} Cannot auto-wire ${client.label}: no agent identity found in keys/ — run \`flair init --agent <name>\` or \`flair agent add <name>\` before wiring a connector`);
                   }
                 } else {
                   const wireEnv = { FLAIR_AGENT_ID: fixAgentId, FLAIR_URL: resolveWireFlairUrl(block.flairUrl, baseUrl) };

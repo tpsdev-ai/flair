@@ -1159,3 +1159,90 @@ export function classifyKeyFile(
     reason: `agent '${agentId}' is not registered on ${baseUrl}${registration?.detail ? ` (${registration.detail})` : ""}`,
   };
 }
+
+// ── Node-scoped federation keys vs agent signing keys (flair#1193) ─────────
+//
+// `~/.flair/keys/` is a namespace shared by two writers with two file shapes:
+//
+//   • agent Ed25519 signing keys — a 32-byte raw seed at `<name>.key`, ALWAYS
+//     written together with a sibling `<name>.pub` (see the keypair write in
+//     src/cli.ts: the seed and the public key are emitted in the same block).
+//   • node-scoped federation keys — `flair_<hex8>.key`, an AES-256-GCM
+//     keystore blob written by FileKeyStore during Fabric provisioning
+//     (flair#1026). The id is minted as `flair_${randomBytes(4).toString("hex")}`
+//     in resources/Federation.ts, and NO `.pub` is ever written for it.
+//
+// Nothing used to tell them apart, so doctor tried to Ed25519-parse the node
+// blob — a "DECODER routines::unsupported" warning that reads as agent-auth
+// breakage when agent auth is fine — and `doctor --fix` could infer the node
+// id as the sole "agent" and wire it as a connector identity, authenticating
+// as a phantom, unregistered node whose key cannot sign (flair#1193).
+//
+// The guard is STRUCTURAL, not a parse attempt: a node id matches
+// `flair_<hex8>` AND has no sibling `.pub`. We deliberately do NOT classify by
+// parsing the file and treating a decode failure as "must be a node key" —
+// that is the exact fails-open move flair#1026 warns against (a genuinely
+// corrupt agent key would be misread as a node key and silently skipped).
+// A real agent always has a `.pub`; a node key never does, so `.pub` presence
+// is the primary, falsifiable signal and classification never depends on the
+// parse-failure of the thing being classified.
+
+/** The shape a Fabric node id always has: `flair_` + 8 lowercase hex chars. */
+const NODE_KEY_ID_RE = /^flair_[0-9a-f]{8}$/;
+
+/**
+ * True iff `id` names a node-scoped federation key rather than an agent
+ * signing key: it is shaped like a node id AND has no sibling `<id>.pub` in
+ * `keysDir`. Both conditions are required — an agent that happened to be named
+ * `flair_deadbeef` would still have a `.pub`, so it is never misclassified.
+ */
+export function isNodeKeyId(id: string, keysDir: string): boolean {
+  if (!NODE_KEY_ID_RE.test(id)) return false;
+  return !existsSync(join(keysDir, `${id}.pub`));
+}
+
+/**
+ * Partition `.key`-derived ids into agent signing keys and node-scoped
+ * federation keys (see isNodeKeyId). Node keys must never feed agent handling —
+ * Ed25519 parsing, registration checks, or connector-identity inference
+ * (flair#1193) — so callers keep only `agentKeyIds` for those paths and report
+ * `nodeKeyIds` informatively.
+ */
+export function partitionKeyIds(
+  ids: string[],
+  keysDir: string,
+): { agentKeyIds: string[]; nodeKeyIds: string[] } {
+  const agentKeyIds: string[] = [];
+  const nodeKeyIds: string[] = [];
+  for (const id of ids) {
+    (isNodeKeyId(id, keysDir) ? nodeKeyIds : agentKeyIds).push(id);
+  }
+  return { agentKeyIds, nodeKeyIds };
+}
+
+/**
+ * Resolve the agent id `doctor --fix` should wire a connector as, or undefined
+ * when none can be safely determined. A node-scoped federation id is NEVER
+ * returned regardless of source (flair#1193): it cannot sign, so wiring it
+ * yields a connector that authenticates as a phantom unregistered node and
+ * fails every read/write. When this returns undefined the caller MUST refuse
+ * and tell the user to create/register an agent — never fall back to a node id.
+ *
+ * `keyAgentIds` is expected to already be node-free (its producer partitions
+ * node keys out at enumeration), so `inferSoleAgentId` never sees one; the
+ * explicit `isNodeKeyId` guard additionally covers `optsAgent` / `envAgentId` /
+ * `anyKnownAgentId`, since a prior buggy run may have poisoned a wired block
+ * with a node id that would otherwise be read back and re-propagated.
+ */
+export function resolveFixAgentId(args: {
+  optsAgent?: string;
+  envAgentId?: string;
+  anyKnownAgentId?: string;
+  keyAgentIds: string[];
+  keysDir: string;
+}): string | undefined {
+  const { optsAgent, envAgentId, anyKnownAgentId, keyAgentIds, keysDir } = args;
+  const candidate = optsAgent || envAgentId || anyKnownAgentId || inferSoleAgentId(keyAgentIds);
+  if (candidate && isNodeKeyId(candidate, keysDir)) return undefined;
+  return candidate;
+}
