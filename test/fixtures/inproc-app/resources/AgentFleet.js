@@ -231,6 +231,29 @@ async function bootstrapViaMcp(agentId, args) {
   return TOOLS.bootstrap.impl({ agentId, isAdmin: false }, args ?? {});
 }
 
+// ─── /mcp wrapper-layer coverage (the class behind #1181/#1188/#1182) ─────────
+//
+// GENERIC driver over the shipped `TOOLS` registry — imports the SAME
+// `resources/mcp-tools.ts` wrappers the /mcp handler dispatches through and
+// invokes `TOOLS[tool].impl(resolvedAgent, args)` in-process, exactly as
+// resources/mcp-handler.ts's handleToolCall does after resolving an OAuth
+// token's `sub` → a flair Agent id. This is the THIN WRAPPER SEAM between the
+// MCP transport and the delegated handlers — the layer where all three shipped
+// connector bugs lived (an unloaded-instance by-id read 404ing the caller's own
+// record, an inlined 768-float embedding, an un-awaited async `unwrap` spread to
+// `{}`). The signed-REST/CLI path and the handler unit tests both exercised the
+// handlers correctly and never touched this seam, so the defects only surfaced
+// when a real connector drove `.impl`. Driving `.impl` here reproduces exactly
+// that vantage, so a reintroduced wrapper defect fails a test rather than a
+// connector in the field. `isAdmin` is threaded so the permanent-delete guard
+// can be exercised from a non-admin identity (its default).
+async function mcpToolViaImpl(agentId, tool, args, isAdmin) {
+  const { TOOLS } = await import("../node_modules/@tpsdev-ai/flair/dist/resources/mcp-tools.js");
+  const entry = TOOLS[tool];
+  if (!entry) throw new Error(`no such mcp tool '${tool}' (have: ${Object.keys(TOOLS).sort().join(", ")})`);
+  return entry.impl({ agentId, isAdmin: isAdmin === true, clientId: undefined }, args ?? {});
+}
+
 /**
  * The DELIBERATELY unfiltered read — every agent's private records, by name.
  * `internalContext()` is what an infrastructure sweep asks for on purpose; an
@@ -329,6 +352,8 @@ export class AgentFleet extends Resource {
         return run(() => recallUnscoped());
       case "bootstrapViaMcp":
         return run(() => bootstrapViaMcp(body.agentId, body.args));
+      case "mcpTool":
+        return run(() => mcpToolViaImpl(body.agentId, body.tool, body.args, body.isAdmin));
       case "buildContextWith":
         return run(() => buildContextWith(body.agentId));
       case "createWithNoContext":
