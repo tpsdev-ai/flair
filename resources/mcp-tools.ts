@@ -413,6 +413,13 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
     surface: args?.surface,
     subjects: args?.subjects,
     entities: args?.entities,
+    // flair#1199 — a /mcp connector consumes the STRUCTURED containers
+    // (soul/memories/predicted/teammateFindings), so the prose `context` mirror
+    // is OFF by default here: shipping both doubled the payload past maxTokens
+    // (the reported ~2× overrun). The resource itself defaults includeContext
+    // true (the REST/CLI prose path); this wrapper flips it for the connector,
+    // and forwards an explicit true when a caller wants the prose anyway.
+    includeContext: args?.includeContext === true,
   };
   // flair#744 slice 1 — opt-in per-memory trust block array. Forwarded ONLY
   // when requested so a plain bootstrap delegates a byte-identical body.
@@ -707,6 +714,7 @@ export const TOOLS: Record<string, ToolEntry> = {
           },
           includeTrust: { type: "boolean", description: "Also return a `trust` array with a per-included-memory trust-evidence block (provenance, author, usage, freshness, supersession). Default false." },
           abstain: { type: "boolean", description: "Opt into a task-relevance abstention verdict: also return an `abstention` object ({ abstained, bestScore, threshold }) reporting whether any memory covered `currentTask` above a global confidence threshold. Default false." },
+          includeContext: { type: "boolean", description: "Also return the prose `context` string — a human-readable mirror of the structured soul/memories/predicted/teammateFindings containers (which are the canonical payload). Default false here: the structured fields already carry everything, so shipping the prose too would double the payload." },
         },
       },
     },

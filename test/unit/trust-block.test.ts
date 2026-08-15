@@ -144,6 +144,25 @@ describe("buildTrustBlock — freshness / validity", () => {
   it("ageDays is null when createdAt is absent", () => {
     expect(buildTrustBlock({ agentId: "a" }, NOW).ageDays).toBeNull();
   });
+
+  it("#1201 — ageDays keys off updatedAt (freshness), not the original createdAt", () => {
+    // Created 12 days ago, edited today: the record is fresh, and must read as
+    // fresh — keying age off createdAt alone made the freshest record present
+    // as the stalest.
+    const created = new Date(NOW - 12 * DAY).toISOString();
+    const updated = new Date(NOW).toISOString();
+    const b = buildTrustBlock({ agentId: "a", createdAt: created, updatedAt: updated }, NOW);
+    expect(b.ageDays).toBe(0);       // fresh — off updatedAt
+    expect(b.createdAt).toBe(created); // raw createdAt still preserved
+    expect(b.updatedAt).toBe(updated);
+  });
+
+  it("#1201 — ageDays falls back to createdAt when updatedAt is absent", () => {
+    const created = new Date(NOW - 3 * DAY).toISOString();
+    const b = buildTrustBlock({ agentId: "a", createdAt: created }, NOW);
+    expect(b.ageDays).toBe(3);
+    expect(b.updatedAt).toBeNull();
+  });
 });
 
 describe("buildTrustBlock — supersession", () => {

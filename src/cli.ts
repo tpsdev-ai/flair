@@ -15631,7 +15631,13 @@ program
         console.error(`${render.icons.error} No context available.`);
         process.exit(1);
       }
-      const tokensUsed = result.tokenEstimate ?? 0;
+      // flair#1199 — the budget footer reflects the PROSE the human injects
+      // (stdout = result.context), not the full serialized payload. tokenEstimate
+      // now measures the whole response (structured containers + prose), which
+      // the CLI's structured fields the human doesn't read would inflate.
+      const tokensUsed = typeof result.context === "string" && result.context.length > 0
+        ? Math.ceil(result.context.length / 4)
+        : (result.tokenEstimate ?? 0);
       const maxTokens = parseInt(opts.maxTokens, 10);
       const included = result.memoriesIncluded ?? 0;
       const truncated = result.memoriesTruncated ?? 0;
