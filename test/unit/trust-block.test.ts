@@ -145,23 +145,42 @@ describe("buildTrustBlock — freshness / validity", () => {
     expect(buildTrustBlock({ agentId: "a" }, NOW).ageDays).toBeNull();
   });
 
-  it("#1201 — ageDays keys off updatedAt (freshness), not the original createdAt", () => {
-    // Created 12 days ago, edited today: the record is fresh, and must read as
-    // fresh — keying age off createdAt alone made the freshest record present
-    // as the stalest.
+  it("#1201 (refined) — ageDays is TRUE AGE off createdAt; staleDays is FRESHNESS off updatedAt (carried separately, not collapsed)", () => {
+    // Created 12 days ago, edited today: its TRUE AGE is 12 days, but it is
+    // FRESH (last touched today). The first #1201 pass keyed ageDays off
+    // updatedAt and reported ageDays 0 here — losing the record's true age. Both
+    // signals are now carried: ageDays 12 (off createdAt), staleDays 0 (off
+    // updatedAt).
     const created = new Date(NOW - 12 * DAY).toISOString();
     const updated = new Date(NOW).toISOString();
     const b = buildTrustBlock({ agentId: "a", createdAt: created, updatedAt: updated }, NOW);
-    expect(b.ageDays).toBe(0);       // fresh — off updatedAt
+    expect(b.ageDays).toBe(12);      // true age — off createdAt (mutation-check anchor for #1201)
+    expect(b.staleDays).toBe(0);     // fresh — off updatedAt
     expect(b.createdAt).toBe(created); // raw createdAt still preserved
     expect(b.updatedAt).toBe(updated);
   });
 
-  it("#1201 — ageDays falls back to createdAt when updatedAt is absent", () => {
+  it("#1201 (refined) — staleDays falls back to createdAt when updatedAt is absent; ageDays stays off createdAt", () => {
     const created = new Date(NOW - 3 * DAY).toISOString();
     const b = buildTrustBlock({ agentId: "a", createdAt: created }, NOW);
-    expect(b.ageDays).toBe(3);
+    expect(b.ageDays).toBe(3);       // off createdAt
+    expect(b.staleDays).toBe(3);     // falls back to createdAt (no updatedAt)
     expect(b.updatedAt).toBeNull();
+  });
+
+  it("#1201 (refined) — for a never-updated record (updatedAt == createdAt), ageDays == staleDays", () => {
+    const t = new Date(NOW - 5 * DAY).toISOString();
+    const b = buildTrustBlock({ agentId: "a", createdAt: t, updatedAt: t }, NOW);
+    expect(b.ageDays).toBe(5);
+    expect(b.staleDays).toBe(5);
+  });
+
+  it("#1201 (refined) — ageDays falls back to updatedAt when createdAt is absent", () => {
+    const updated = new Date(NOW - 4 * DAY).toISOString();
+    const b = buildTrustBlock({ agentId: "a", updatedAt: updated }, NOW);
+    expect(b.ageDays).toBe(4);       // fallback to updatedAt
+    expect(b.staleDays).toBe(4);
+    expect(b.createdAt).toBeNull();
   });
 });
 

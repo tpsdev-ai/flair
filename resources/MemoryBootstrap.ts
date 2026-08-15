@@ -80,8 +80,8 @@ import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
  *
  * Response:
  *   { context, sections, tokenEstimate, memoriesIncluded, memoriesAvailable,
- *     teammateFindingsIncluded, agentId, scope, soul, memories, predicted,
- *     teammateFindings[, currentTaskHint][, predictedHint] }
+ *     teammateFindingsIncluded, teammateFindingsTruncated, agentId, scope, soul,
+ *     memories, predicted, teammateFindings, events[, currentTaskHint][, predictedHint] }
  *   The self-describing keys (flair#1182 part 1) — `agentId` (resolved caller),
  *   `scope` (read model applied to the caller), `soul`/`memories`/`predicted`
  *   (the caller's OWN records as structured containers), and `currentTaskHint`
@@ -91,8 +91,24 @@ import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
  *   mirror (opt-in via includeContext). Cross-agent teammate findings ship in
  *   the `teammateFindings` container (own memories in `memories`), counted by
  *   `teammateFindingsIncluded` (a separate denominator from `memoriesIncluded`,
- *   which is own-scoped so it never exceeds `memoriesAvailable`). `tokenEstimate`
- *   reflects the ACTUAL serialized payload, and `maxTokens` bounds it.
+ *   which is own-scoped so it never exceeds `memoriesAvailable`). flair#1206 —
+ *   org events ship in their OWN structured `events` container (ALWAYS present,
+ *   `[]` when none), so a connector reading the structured payload gets them even
+ *   when the prose `context` is off (the /mcp default); before #1206 they lived
+ *   ONLY in the prose string and were orphaned at includeContext=false.
+ *
+ *   flair#1199 CAP CONTRACT (corrected): `maxTokens` is the HARD cap on CONTENT
+ *   SELECTION — the shared `tokenBudget` starts at `maxTokens` and every admitted
+ *   soul/memory/finding line is gated against the remaining budget, so the sum of
+ *   selected CONTENT never exceeds `maxTokens`. `tokenEstimate` HONESTLY reports
+ *   the real serialized payload (`JSON.stringify(responseBody)`), which includes
+ *   the structured-container JSON scaffolding and so MAY exceed `maxTokens` by
+ *   that overhead — measurement (honest reporting) is deliberately decoupled from
+ *   budgeting (what to select). This is the flair#1207 fix: #1199 had folded a
+ *   per-item structured overhead + a scaffolding reserve INTO the selection
+ *   budget, which silently shrank recall below 0.44.6 for the same `maxTokens`;
+ *   the overhead is a reporting concern (already captured by `tokenEstimate`),
+ *   never a selection constraint, so it no longer shrinks the content budget.
  *   `predictedHint` is present only when subjects were provided but `predicted`
  *   came back empty.
  */
@@ -134,17 +150,19 @@ const MAX_CANDIDATE_POOL = 100;
 // JS dot-product scan's `.filter((s) => s.score > 0.3)`.
 const TASK_RELEVANCE_FLOOR = 0.3;
 
-// flair#1199 — per-memory structured-payload overhead charged against the token
-// budget IN ADDITION to the rendered prose line. Each included memory ships as a
-// structured object ({id, content, durability, createdAt, updatedAt, agentId,
-// subject, section, ...}) which is the CANONICAL payload; its JSON keys cost
-// ~30-40 tokens beyond the prose line the fill loop measures. Charging it here
-// keeps the ACTUAL serialized payload (measured by tokenEstimate) within
-// maxTokens — the prose line alone under-charged, so the structured containers
-// crossed the cap. Sized to the non-content JSON a lean memory carries (id +
-// createdAt + updatedAt + agentId + durability + subject + section + key names,
-// ~55-70 tokens); conservative (errs slightly high, never low).
-const STRUCT_ITEM_OVERHEAD_TOKENS = 70;
+// flair#1207 — the per-item structured-payload overhead that #1199 charged
+// against the content-selection budget (a `+ STRUCT_ITEM_OVERHEAD_TOKENS = 70`
+// added to every item's cost, PLUS a `structOverheadReserve` pre-deducted from
+// the starting budget) has been REMOVED. It conflated measurement with
+// budgeting: `tokenEstimate` already measures the real serialized payload
+// (JSON.stringify(responseBody)) — the structured JSON scaffolding overhead is
+// captured there, honestly. Folding it into the SELECTION budget too
+// double-penalized and silently shrank recall below 0.44.6 for the same
+// `maxTokens` (6 findings → 3). The content budget is now `maxTokens` again
+// (0.44.6 selection capacity), and each item's cost is just the rendered prose
+// line — while `tokenEstimate` keeps reporting the true serialized size, which
+// may exceed `maxTokens` by the scaffolding overhead. See the module-doc CAP
+// CONTRACT above.
 
 // Rough token estimate: ~4 chars per token for English text
 function estimateTokens(text: string): number {
@@ -251,19 +269,22 @@ export class BootstrapMemories extends Resource {
       collision: [],
       events: [],
     };
-    // flair#1199 — the structured containers (soul/memories/predicted/
-    // teammateFindings) are the CANONICAL payload, and `tokenEstimate` now
-    // reports the ACTUAL serialized bytes. Reserve headroom for the JSON
-    // scaffolding those containers and the self-describing keys (scope/sections/
-    // counters) add on top of the raw content, so `maxTokens` bounds the real
-    // payload — not just the prose. Without this the containers ship on top of
-    // the memory-line budget and blow the cap (the reported 4000→4275+ overrun).
-    const structOverheadReserve = Math.min(600, Math.floor(maxTokens * 0.15));
+    // flair#1207 — the content-SELECTION budget is `maxTokens`, matching 0.44.6
+    // capacity. #1199 pre-deducted a `structOverheadReserve` (min(600, 15% of
+    // maxTokens)) here to "reserve headroom" for the structured-container JSON
+    // scaffolding, on the theory that `maxTokens` should bound the serialized
+    // payload. That silently shrank the content budget and, combined with the
+    // per-item overhead (also removed), cut recall below 0.44.6 for the same
+    // `maxTokens` (#1207). The reserve is gone: `maxTokens` is the HARD cap on
+    // CONTENT SELECTION only. `tokenEstimate` (below) still reports the real
+    // serialized size honestly — which may exceed `maxTokens` by the scaffolding
+    // overhead, exactly as 0.44.6's payload did (0.44.6 just under-measured it).
     // Single shared budget across soul + every memory section (soul used to be
     // budgeted SEPARATELY and added ON TOP, so context alone could reach
-    // 1.4×maxTokens; #1199). Content selected therefore stays within
-    // maxTokens − reserve, and the serialized payload within maxTokens.
-    let tokenBudget = Math.max(0, maxTokens - structOverheadReserve);
+    // 1.4×maxTokens; #1199 folded soul into this shared budget — that part
+    // stays). Every admitted line is gated against the remaining budget, so the
+    // sum of selected CONTENT never exceeds `maxTokens`.
+    let tokenBudget = Math.max(0, maxTokens);
     // Own memories included in the payload (permanent + recent + predicted +
     // own task-relevant). Denominator is `memoriesAvailable` (own-scoped), so
     // memoriesIncluded ≤ memoriesAvailable always holds (#1199 coherent
@@ -275,6 +296,13 @@ export class BootstrapMemories extends Resource {
     // denominator than own memories): counting these into `memoriesIncluded`
     // is what let one client see included(9) > available(3).
     let teammateFindingsIncluded = 0;
+    // flair#1207 — teammate findings SKIPPED for size in the task-relevant
+    // packing loop. That loop `continue`s past an over-budget record silently;
+    // without a counter, a client can't tell "no relevant teammate finding" from
+    // "a relevant one existed but didn't fit the budget" (Sherlock's #1207
+    // self-describing-size-skip note; own-memory size-skips already increment
+    // `memoriesTruncated`, but that loop never did — now both do).
+    let teammateFindingsTruncated = 0;
 
     // flair#1182 (part 1) — self-describing bootstrap. These structured
     // container keys are ALWAYS emitted on the response (empty `{}`/`[]` when
@@ -297,6 +325,17 @@ export class BootstrapMemories extends Resource {
     // them. Kept SEPARATE from `memories`/`predicted` (which stay own-only per
     // the #1182 boundary) and clearly attributed via `source`.
     const includedTeammateFindings: any[] = [];
+    // flair#1206 — org events get their OWN structured container. Before #1206
+    // they lived ONLY in the prose `context` string ("## Recent Org Events"),
+    // so at includeContext=false (the /mcp default) they were counted in
+    // `sections.events` and measured into `tokenEstimate` (when prose was on) but
+    // NEVER delivered in any field a connector could read — orphaned. Populated
+    // from the SAME deduped+sliced set the prose lines are (so count, charge and
+    // delivery all key off one thing), ALWAYS emitted (`[]` when none), and the
+    // targetIds relevance filter is already applied upstream (see the OrgEvent
+    // read below). Declared out here so it is in scope for the response body even
+    // if the events read (in a try/catch) yields nothing.
+    const includedEvents: any[] = [];
     const leanMemory = (m: any, section: string) => ({
       id: m.id,
       content: m.content,
@@ -556,7 +595,7 @@ export class BootstrapMemories extends Resource {
     const permanent = permanentRows.filter((m) => !permanentSupersededIds.has(m.id));
     for (const m of permanent) {
       const line = formatMemory(m, agentId);
-      const cost = estimateTokens(line) + STRUCT_ITEM_OVERHEAD_TOKENS; // #1199 structured cost
+      const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
       if (cost <= tokenBudget) {
         sections.permanent.push(line);
         includedOwnMemories.push(leanMemory(m, "permanent"));
@@ -624,7 +663,7 @@ export class BootstrapMemories extends Resource {
     let recentSpent = 0;
     for (const m of recent) {
       const line = formatMemory(m, agentId);
-      const cost = estimateTokens(line) + STRUCT_ITEM_OVERHEAD_TOKENS; // #1199 structured cost
+      const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
       if (recentSpent + cost > recentBudget) {
         memoriesTruncated++;
         continue;
@@ -671,7 +710,7 @@ export class BootstrapMemories extends Resource {
       let predictedSpent = 0;
       for (const m of subjectMemories) {
         const line = formatMemory(m, agentId);
-        const cost = estimateTokens(line) + STRUCT_ITEM_OVERHEAD_TOKENS; // #1199 structured cost
+        const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
         if (predictedSpent + cost > predictedBudget) {
           memoriesTruncated++;
           continue;
@@ -852,8 +891,17 @@ export class BootstrapMemories extends Resource {
         // section double-spends.
         for (const { memory: m } of scored) {
           const line = formatMemory(m, agentId);
-          const cost = estimateTokens(line) + STRUCT_ITEM_OVERHEAD_TOKENS; // #1199 structured cost
-          if (cost > tokenBudget) continue;
+          const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
+          if (cost > tokenBudget) {
+            // flair#1207 — a size-skip in the score-ordered task-relevant loop
+            // is no longer silent: record it on the counter matching the record's
+            // denominator (own → memoriesTruncated, teammate → the separate
+            // teammateFindingsTruncated), so a client can distinguish "no relevant
+            // finding" from "a relevant finding didn't fit the budget".
+            if (m._source) teammateFindingsTruncated++;
+            else memoriesTruncated++;
+            continue;
+          }
           if (m._source) {
             sections.teammate.push(line);
             // flair#1199 — cross-agent teammate findings join their OWN
@@ -1058,6 +1106,24 @@ export class BootstrapMemories extends Resource {
         const mins = Math.floor(elapsed / 60_000);
         const relTime = mins < 60 ? `${mins}min ago` : `${Math.floor(mins / 60)}h ago`;
         sections.events.push(`- ${evt.kind}: ${evt.summary} (${relTime})`);
+        // flair#1206 — the SAME deduped+sliced event, structured, so a connector
+        // reading the containers gets it when prose `context` is off (the /mcp
+        // default). Same set as the prose line ⇒ `sections.events` (the count),
+        // the `tokenEstimate` charge (this array is always in the body), and the
+        // delivery all key off one thing. Optional fields (detail/targetIds/scope)
+        // are omitted when absent so the object stays lean. The targetIds
+        // relevance filter and #1200 content-signature dedup were already applied
+        // upstream (eventResults → eventBySignature), so this is a pure move from
+        // prose to structured — no scope widening, no re-introduced duplicates.
+        includedEvents.push({
+          id: evt.id,
+          kind: evt.kind,
+          summary: evt.summary,
+          ...(evt.detail != null ? { detail: evt.detail } : {}),
+          ...(Array.isArray(evt.targetIds) && evt.targetIds.length > 0 ? { targetIds: evt.targetIds } : {}),
+          createdAt: evt.createdAt ?? null,
+          ...(evt.scope != null ? { scope: evt.scope } : {}),
+        });
       }
     } catch {
       // non-fatal: OrgEvent table may not exist yet
@@ -1201,6 +1267,13 @@ export class BootstrapMemories extends Resource {
       // (always present, `[]` when none), so a connector that consumes the
       // containers still gets them when prose `context` is off.
       teammateFindings: includedTeammateFindings,
+      // flair#1206 — org events as a structured container (always present, `[]`
+      // when none, same self-describing-empty-state pattern as the containers
+      // above). Before #1206 events lived ONLY in the prose `context`, so at the
+      // /mcp default (includeContext=false) they were counted+measured but never
+      // delivered. Deduped (#1200) and targetIds-scoped (same set as the prose
+      // "## Recent Org Events" lines), so count/charge/delivery all agree.
+      events: includedEvents,
       ...(currentTaskHint ? { currentTaskHint } : {}),
       ...(predictedHint ? { predictedHint } : {}),
       ...(trust ? { trust } : {}),
@@ -1228,15 +1301,26 @@ export class BootstrapMemories extends Resource {
       // so it's never confused with the own-memory counters.
       teammateFindingsIncluded,
       memoriesTruncated,
+      // flair#1207 — teammate findings skipped for size in the task-relevant loop
+      // (own size-skips there increment memoriesTruncated). Surfacing this makes
+      // a size-skip self-describing: "a relevant teammate finding didn't fit"
+      // is now distinguishable from "no relevant teammate finding".
+      teammateFindingsTruncated,
     };
 
     // flair#1199 — tokenEstimate must reflect the ACTUAL serialized payload the
     // caller receives (the structured containers included), not just the prose
     // `context`. The old `soulTokens + memoryTokens` counted only the context
     // string, so it under-reported by ~2× once the structured fields shipped
-    // alongside — the reported "maxTokens 4000 → tokenEstimate 4275 while the
-    // real payload was well over the cap". Measured over the assembled body
-    // (the ~1-line tokenEstimate field it omits is negligible).
+    // alongside. Measured over the assembled body (the ~1-line tokenEstimate
+    // field it omits is negligible). flair#1207 CAP CONTRACT: this is an HONEST
+    // report of the real serialized size, NOT a value bounded by `maxTokens`.
+    // `maxTokens` is the hard cap on CONTENT SELECTION (the shared tokenBudget);
+    // the structured-container JSON scaffolding is genuine payload the caller
+    // pays for, so tokenEstimate MAY exceed `maxTokens` by that overhead. Do not
+    // "fix" an over-maxTokens tokenEstimate by shrinking selection — that is the
+    // exact #1199→#1207 regression (it dropped relevant findings). If the real
+    // payload consistently overruns for a use case, raise `maxTokens`.
     const tokenEstimate = estimateTokens(JSON.stringify(responseBody));
     return { ...responseBody, tokenEstimate };
   }
