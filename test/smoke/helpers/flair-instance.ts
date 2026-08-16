@@ -209,6 +209,85 @@ export async function writeMemory(
 }
 
 /**
+ * Warm the embedding model before the timed golden-path assertions run.
+ *
+ * flair#1219 — the flake this kills: the embedding backend
+ * (harper-fabric-embeddings → llama.cpp) loads the model lazily on the FIRST
+ * embedding call, not at Harper boot. `/Health` returning 200 therefore does
+ * NOT mean the model is ready. On a cold or loaded CI runner that first load
+ * can take well over 10s — longer than `writeMemory`'s client-side
+ * `AbortSignal.timeout(10_000)` on `PUT /Memory` — so whichever timed step is
+ * first (Step 2, Write memory) intermittently died with
+ * `TimeoutError: The operation timed out` at ~10s. It reproduces green
+ * locally where the model is already warm (a warm write is ~3s). Confirmed
+ * across #1217/#1221/#1222.
+ *
+ * This helper pays the cold-start cost UP FRONT, on a throwaway agent+memory,
+ * with a generous budget and a couple of retries, so the model is hot before
+ * the measured Step-2 write ever runs. It exercises the exact same path the
+ * timed step does (create agent → PUT /Memory, admin-authed), so it warms
+ * precisely what Step 2 needs. It creates and deletes its own throwaway agent,
+ * leaving no residue in the instance.
+ *
+ * NOTE: this deliberately does NOT weaken `writeMemory`'s 10s timeout — that
+ * timeout is a real client-side guard and stays put. The fix is to ensure the
+ * measured write is never the one that pays for the model load.
+ */
+export async function warmEmbeddingModel(
+  flair: FlairInstance,
+  opts?: { timeoutMs?: number; attempts?: number },
+): Promise<{ elapsedMs: number; attempts: number }> {
+  const timeoutMs = opts?.timeoutMs ?? 90_000;
+  const maxAttempts = opts?.attempts ?? 3;
+
+  // A real throwaway agent so the write is fully valid and reaches the
+  // server-side embedding step (Memory.put → getEmbedding) rather than being
+  // rejected before it. Mirrors Step 1 + Step 2 of the golden path.
+  const warmAgentId = await createAgent(flair.opsUrl, flair.authHeader);
+  const t0 = performance.now();
+  let lastErr: unknown;
+
+  try {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const memId = `${warmAgentId}-warmup-${Date.now()}-${randomBytes(4).toString("hex")}`;
+      const body = {
+        id: memId,
+        agentId: warmAgentId,
+        content: `embedding warm-up ${memId}`,
+        type: "memory",
+        durability: "ephemeral",
+        createdAt: new Date().toISOString(),
+      };
+      try {
+        // Generous per-attempt budget: this call is EXPECTED to absorb the
+        // cold model load, so it must not use writeMemory's 10s abort.
+        const res = await fetch(`${flair.baseUrl}/Memory/${encodeURIComponent(memId)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: flair.authHeader },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (res.ok) {
+          return { elapsedMs: Math.round(performance.now() - t0), attempts: attempt };
+        }
+        lastErr = new Error(`HTTP ${res.status} ${await res.text().catch(() => "")}`);
+      } catch (err) {
+        lastErr = err;
+      }
+      // Brief backoff before retrying a still-loading model.
+      if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 1000));
+    }
+    throw new Error(
+      `warmEmbeddingModel: embedding model did not become ready within ` +
+      `${maxAttempts} attempt(s) @ ${timeoutMs}ms each: ${String(lastErr)}`,
+    );
+  } finally {
+    // Never let a warm-up leak an agent into the instance, even on failure.
+    await flair.cleanup([warmAgentId]).catch(() => {});
+  }
+}
+
+/**
  * Search memories via the Flair REST API.
  */
 export async function searchMemories(
