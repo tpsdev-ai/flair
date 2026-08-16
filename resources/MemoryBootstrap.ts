@@ -101,20 +101,35 @@ import { estimateTokens } from "./token-estimate.js";
  *
  *   CAP CONTRACT: `maxTokens` is the HARD cap on CONTENT SELECTION — the shared
  *   `tokenBudget` starts at `maxTokens` and every admitted soul/memory/finding
- *   line AND every org event (flair#1199 — events are content too; before this
- *   they were assembled but NEVER charged, so a maxTokens=4000 request serialized
- *   at 6286) is gated against the remaining budget, so the sum of selected CONTENT
- *   never exceeds `maxTokens`. `tokenEstimate` HONESTLY reports the real serialized
- *   payload (`JSON.stringify(responseBody)`), which includes the FIXED structured-
- *   container JSON scaffolding (keys/braces, counters, the sections map) and so may
- *   exceed `maxTokens` slightly by that bounded overhead — measurement is decoupled
- *   from budgeting, but the overhead is now scaffolding ONLY, never uncounted
- *   content. The connector-conformance suite asserts tokenEstimate <= maxTokens
- *   within a small tolerance for that scaffolding. flair#1207: #1199 had ALSO
- *   folded a per-item structured overhead + a scaffolding reserve INTO the
- *   selection budget, which silently shrank recall below 0.44.6 for the same
- *   `maxTokens`; that per-item overhead is a reporting concern (already captured by
- *   `tokenEstimate`) and no longer shrinks the content budget.
+ *   AND every org event (flair#1199 — events are content too; before this they
+ *   were assembled but NEVER charged, so a maxTokens=4000 request serialized at
+ *   6286) is gated against the remaining budget, so the sum of selected CONTENT
+ *   never exceeds `maxTokens`. Each item is charged the cost of what it ACTUALLY
+ *   SHIPS on the requested surface (see contentCost): on the /mcp connector path
+ *   (includeContext=false) the prose `context` is a pointer, so only the
+ *   STRUCTURED container object ships and is charged; on the REST/CLI prose path
+ *   (includeContext=true) the prose IS the shipped surface and is charged (0.44.6
+ *   capacity — flair#1207). `tokenEstimate` HONESTLY reports the real serialized
+ *   payload (`JSON.stringify(responseBody)`). On the connector path — where the
+ *   selection charge and `tokenEstimate` measure the SAME structured bytes —
+ *   `tokenEstimate` exceeds `maxTokens` only by the FIXED JSON scaffolding
+ *   (keys/braces, counters, the sections map, hints); the connector-conformance
+ *   budgetCap asserts tokenEstimate <= maxTokens within a small tolerance for
+ *   exactly that scaffolding. On the prose path the payload ALSO carries the
+ *   structured mirror, so `tokenEstimate` may exceed `maxTokens` by that mirror —
+ *   that overage is honest measurement, and shrinking prose selection to hide it
+ *   is the flair#1207 regression (below). flair#1199 (0.44.11): charging the
+ *   PROSE line but shipping the heavier STRUCTURED object on the /mcp path let
+ *   teammate findings ride OUTSIDE the enforced budget (soulTokens 377 +
+ *   memoryTokens 3574 = 3951 prose, just under a 4000 cap, yet tokenEstimate 5337
+ *   = +33%; teammateFindingsIncluded crept 4→5) — fixed by charging structured
+ *   on the connector path. flair#1207: #1199 had ALSO folded a per-item
+ *   structured overhead + a scaffolding reserve INTO the selection budget, which
+ *   silently shrank recall below 0.44.6 for the same `maxTokens`; that flat
+ *   per-item overhead is a reporting concern (already captured by `tokenEstimate`)
+ *   and no longer shrinks the content budget — the 0.44.11 fix charges the
+ *   item's REAL shipped serialization, not a flat surcharge, and only on the path
+ *   where that serialization is the shipped surface.
  *
  *   COUNT CONTRACT (flair#1207): `memoriesIncluded + memoriesTruncated <=
  *   memoriesAvailable` — included and truncated are disjoint sets of UNIQUE own
@@ -130,6 +145,12 @@ import { estimateTokens } from "./token-estimate.js";
 // Collision surfacing (flair#681) tunables.
 const COLLISION_WINDOW_DAYS = 7;
 const MAX_COLLISION_ENTRIES = 10;
+
+// flair#1201/#1225 — trust-block sections that are a lifecycle-window LOAD, not
+// a retrieval surface. A trust entry from one of these carries `matchQuality:
+// null` (no relevance score to band), which is CORRECT (Kern's #1220 ruling),
+// never a scoring failure — see the `matchQualityNote` in the response tail.
+const LIFECYCLE_SECTIONS = new Set(["permanent", "recent", "predicted"]);
 
 // flair#1199/#1206 — the default cap on how many org events bootstrap ships.
 // Overridable per-request via `maxEvents`. Event slots are scarce AND (as of
@@ -401,6 +422,36 @@ export class BootstrapMemories extends Resource {
       section,
     });
 
+    // flair#1199 (0.44.11) — the REAL cost an admitted content item adds to the
+    // serialized payload the caller RECEIVES, which is exactly what
+    // `tokenEstimate` measures. This is the fix for the teammate-findings
+    // budget blowout: the selector used to charge every memory/finding its
+    // PROSE line (`formatMemory`) but, on the /mcp connector path, ship the
+    // heavier STRUCTURED container object — and `tokenEstimate` measures the
+    // structured object. A teammate finding carries `id` + TWO ISO timestamps +
+    // `source` + `section` + JSON field names/quotes that the prose line does
+    // not, so the shipped object runs ~1.5–1.7× its prose line. Charging prose
+    // but shipping structured let several teammate findings ride OUTSIDE the
+    // enforced budget: a maxTokens=4000 bootstrap reported soulTokens 377 +
+    // memoryTokens 3574 = 3951 (prose, just under cap) yet serialized at 5337
+    // (+33%), and teammateFindingsIncluded crept 4→5. So charge what SHIPS:
+    //   - /mcp connector path (includeContext=false): the prose `context` is a
+    //     compact pointer (no bodies), so ONLY the structured container ships —
+    //     charge its serialized size. Now the sum of admitted content ≈
+    //     `tokenEstimate` minus the FIXED JSON scaffolding, so `tokenEstimate`
+    //     stays within maxTokens + the small scaffolding tolerance.
+    //   - REST/CLI prose path (includeContext=true): the prose IS the primary
+    //     shipped surface and flair#1207 deliberately fixed the selection budget
+    //     at 0.44.6 (prose) capacity — `tokenEstimate` is HONEST there and may
+    //     exceed maxTokens by the structured mirror it also ships. Charging
+    //     structured on THAT path would re-shrink prose recall below 0.44.6
+    //     (the exact #1207 regression). So keep charging prose on the prose
+    //     path. This is "fix the budget INPUT, not the cap": the figure the
+    //     selector tests against maxTokens is now the figure that becomes
+    //     `tokenEstimate` on each path.
+    const contentCost = (structured: unknown, proseLine: string): number =>
+      includeContext ? estimateTokens(proseLine) : estimateTokens(JSON.stringify(structured));
+
     // --- 1. Soul records (budgeted — prioritized by key importance) ---
     // Soul is who you are, but we still need to respect token budgets.
     // Workspace files (SOUL.md, AGENTS.md) can be massive — they're already
@@ -647,10 +698,14 @@ export class BootstrapMemories extends Resource {
     const permanent = permanentRows.filter((m) => !permanentSupersededIds.has(m.id));
     for (const m of permanent) {
       const line = formatMemory(m, agentId);
-      const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
+      const struct = leanMemory(m, "permanent");
+      // #1199 (0.44.11) — charge what SHIPS (structured on the /mcp path, prose
+      // on the REST path); see contentCost. #1207 stays honored: on the prose
+      // path this is still the prose-line cost, so REST recall is unchanged.
+      const cost = contentCost(struct, line);
       if (cost <= tokenBudget) {
         sections.permanent.push(line);
-        includedOwnMemories.push(leanMemory(m, "permanent"));
+        includedOwnMemories.push(struct);
         if (includeTrust) includedTrustMemories.push({ m, section: "permanent" });
         tokenBudget -= cost;
         includedOwnIds.add(m.id); // #1207 — count by unique own-memory id
@@ -715,13 +770,14 @@ export class BootstrapMemories extends Resource {
     let recentSpent = 0;
     for (const m of recent) {
       const line = formatMemory(m, agentId);
-      const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
+      const struct = leanMemory(m, "recent");
+      const cost = contentCost(struct, line); // #1199 (0.44.11) — charge what ships; see contentCost
       if (recentSpent + cost > recentBudget) {
         truncatedOwnIds.add(m.id); // #1207 — budget-skip; may still be admitted later via the task-relevant loop (deduped at the end)
         continue;
       }
       sections.recent.push(line);
-      includedOwnMemories.push(leanMemory(m, "recent"));
+      includedOwnMemories.push(struct);
       if (includeTrust) includedTrustMemories.push({ m, section: "recent" });
       recentSpent += cost;
       tokenBudget -= cost;
@@ -761,13 +817,14 @@ export class BootstrapMemories extends Resource {
       let predictedSpent = 0;
       for (const m of subjectMemories) {
         const line = formatMemory(m, agentId);
-        const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
+        const struct = leanMemory(m, "predicted");
+        const cost = contentCost(struct, line); // #1199 (0.44.11) — charge what ships; see contentCost
         if (predictedSpent + cost > predictedBudget) {
           truncatedOwnIds.add(m.id); // #1207 — budget-skip (deduped against inclusions at the end)
           continue;
         }
         sections.predicted.push(line);
-        includedPredicted.push(leanMemory(m, "predicted"));
+        includedPredicted.push(struct);
         if (includeTrust) includedTrustMemories.push({ m, section: "predicted" });
         predictedSpent += cost;
         tokenBudget -= cost;
@@ -943,7 +1000,29 @@ export class BootstrapMemories extends Resource {
         // section double-spends.
         for (const { memory: m } of scored) {
           const line = formatMemory(m, agentId);
-          const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
+          // flair#1199 (0.44.11) — build the STRUCTURED container object BEFORE
+          // the budget check so the finding is charged the cost of what actually
+          // ships (structured on the /mcp path), not its cheaper prose line. A
+          // teammate finding's structured object (id + two ISO timestamps +
+          // source + section) runs well over its prose line, and it — not the
+          // prose — is what `tokenEstimate` measures on the connector path. This
+          // is the fix for the teammate-findings blowout: charging prose but
+          // shipping structured let extra findings ride outside the enforced
+          // budget (see contentCost). Cross-agent findings (`m._source` set)
+          // ship in `teammateFindings`; own findings in `memories`.
+          const struct = m._source
+            ? {
+                id: m.id,
+                content: m.content,
+                durability: m.durability ?? null,
+                createdAt: m.createdAt ?? null,
+                updatedAt: m.updatedAt ?? null,
+                subject: m.subject ?? null,
+                source: m._source,
+                section: "teammate",
+              }
+            : leanMemory(m, "relevant");
+          const cost = contentCost(struct, line);
           if (cost > tokenBudget) {
             // flair#1207 — a size-skip in the score-ordered task-relevant loop
             // is no longer silent: record it on the denominator matching the
@@ -962,16 +1041,7 @@ export class BootstrapMemories extends Resource {
             // off. Counted separately (teammateFindingsIncluded), NOT into
             // memoriesIncluded — that different-denominator mix is what let
             // included exceed available.
-            includedTeammateFindings.push({
-              id: m.id,
-              content: m.content,
-              durability: m.durability ?? null,
-              createdAt: m.createdAt ?? null,
-              updatedAt: m.updatedAt ?? null,
-              subject: m.subject ?? null,
-              source: m._source,
-              section: "teammate",
-            });
+            includedTeammateFindings.push(struct);
             if (includeTrust) includedTrustMemories.push({ m, section: "teammate" });
             tokenBudget -= cost;
             teammateFindingsIncluded++;
@@ -979,7 +1049,7 @@ export class BootstrapMemories extends Resource {
             sections.relevant.push(line);
             // flair#1182 — own task-relevant records join the `memories`
             // container.
-            includedOwnMemories.push(leanMemory(m, "relevant"));
+            includedOwnMemories.push(struct);
             if (includeTrust) includedTrustMemories.push({ m, section: "relevant" });
             tokenBudget -= cost;
             includedOwnIds.add(m.id); // #1207 — count by unique own-memory id
@@ -1303,9 +1373,30 @@ export class BootstrapMemories extends Resource {
     // absent ⇒ the response is byte-identical to pre-slice-1. flair#1201 — each
     // entry carries its `section` so `matchQuality: null` on a lifecycle section
     // reads as "not a retrieval surface", not as a scoring failure on the
-    // caller's own records.
+    // caller's own records. flair#1225 (0.44.11) — the null on a lifecycle
+    // section is now SELF-EXPLAINING (matchQualityNote below), not just legible
+    // via `section`.
     const trust = includeTrust
-      ? includedTrustMemories.map(({ m, section }) => ({ id: m.id, section, ...buildTrustBlock(m) }))
+      ? includedTrustMemories.map(({ m, section }) => {
+          const block = buildTrustBlock(m);
+          // flair#1225 — Kern ruled (on #1220) that a null `matchQuality` on an
+          // own-recent (lifecycle) entry is CORRECT: lifecycle sections
+          // (permanent/recent/predicted) are a window LOAD, not a retrieval
+          // surface, so there is no similarity to band — the null means "not
+          // scored here", never a scoring failure on the caller's own records
+          // (the #1201 misread: own-recent null beside a teammate band). Behavior
+          // is unchanged (per Kern); this only makes the null self-describing in
+          // the payload — Fix 3's "any absent field says why" — so a connector
+          // reads it right without knowing the #1201 contract.
+          const matchQualityNote = block.matchQuality === null
+            ? (LIFECYCLE_SECTIONS.has(section)
+                ? `matchQuality is null because '${section}' is a lifecycle-window section, not a retrieval `
+                  + `surface — there is no relevance score to band. This is correct (per flair#1225), not a scoring failure.`
+                : "matchQuality is null because no semantic similarity was attached to this result "
+                  + "(e.g. a by-id read or a keyword-only degraded match).")
+            : undefined;
+          return { id: m.id, section, ...block, ...(matchQualityNote ? { matchQualityNote } : {}) };
+        })
       : undefined;
 
     // flair#744 slice 2 — opt-in abstention verdict for the task-relevance
@@ -1349,6 +1440,39 @@ export class BootstrapMemories extends Resource {
         + `subjects — it fills as you store memories tagged with these subjects.`
       : undefined;
 
+    // flair#1182 (0.44.11) — GENERALIZE the empty-container "say why" rule
+    // beyond predictedHint. `events: []` (deliberate no-op filtering) was
+    // byte-indistinguishable from the 0.44.8 silent-drop regression, where a
+    // container that SHOULD have had content shipped empty — a connector could
+    // only tell the difference by diffing against a previous payload. The rule
+    // (now applied consistently across the structured containers): any container
+    // that ships EMPTY carries a short hint naming WHY it is empty and what
+    // fills it, so "deliberately empty" is never confused with "silently
+    // dropped". Present ONLY when the container is empty (a populated container
+    // needs no hint), so a healthy payload is unchanged.
+
+    // events: [] — no org event in the lookback window was relevant to the
+    // caller after zero-row no-op auto-heal filtering (#1200). Present-but-empty
+    // by design, not a drop.
+    const eventsHint = includedEvents.length === 0
+      ? "No org events in the lookback window were relevant to you (org-wide, or targeted at you) "
+        + "after zero-row no-op auto-heal filtering. This container is present-but-empty by design, not dropped."
+      : undefined;
+
+    // teammateFindings: [] — name WHICH legitimate empty this is (no task → no
+    // retrieval; matched-but-budget-truncated; or nothing cleared the relevance
+    // floor), so it never reads as a silent drop.
+    const teammateFindingsHint = includedTeammateFindings.length === 0
+      ? (!taskProvided
+          ? "No teammateFindings: cross-agent findings are retrieved against your currentTask, and none was provided. "
+            + "Pass currentTask to populate this."
+          : teammateFindingsTruncated > 0
+            ? `No teammateFindings fit the token budget: ${teammateFindingsTruncated} relevant cross-agent finding(s) `
+              + "cleared the relevance floor but were budget-truncated. Raise maxTokens to include them."
+            : "No cross-agent (teammate) memory cleared the task-relevance floor for this currentTask. "
+              + "This container is present-but-empty by design, not dropped.")
+      : undefined;
+
     const responseBody: Record<string, unknown> = {
       context,
       // flair#1182 (part 1) — always-present self-describing keys: who the
@@ -1373,6 +1497,11 @@ export class BootstrapMemories extends Resource {
       events: includedEvents,
       ...(currentTaskHint ? { currentTaskHint } : {}),
       ...(predictedHint ? { predictedHint } : {}),
+      // flair#1182 (0.44.11) — empty-container hints, present only when the
+      // container ships empty (see above), so a deliberately-empty container is
+      // never confused with a silent drop.
+      ...(eventsHint ? { eventsHint } : {}),
+      ...(teammateFindingsHint ? { teammateFindingsHint } : {}),
       ...(trust ? { trust } : {}),
       ...(abstention ? { abstention } : {}),
       sections: {
@@ -1425,16 +1554,20 @@ export class BootstrapMemories extends Resource {
     // the real serialized size. Every CONTENT section — soul, memories, findings,
     // AND events (flair#1199) — is now gated against the shared `maxTokens`
     // budget, so no section blows the budget with uncounted content the way the
-    // 0.44.9 events array did (maxTokens=4000 → 6286). tokenEstimate may still
-    // exceed `maxTokens` slightly, by the FIXED structural JSON scaffolding
-    // (container keys/braces, counters, sections map, char/4 rounding) — that is
-    // genuine payload the caller pays for, and it is small and bounded, NOT
-    // uncounted content. The connector-conformance suite asserts
-    // tokenEstimate <= maxTokens within a small tolerance for exactly that
-    // scaffolding. Do NOT "fix" a small over-maxTokens tokenEstimate by shrinking
-    // memory selection — that is the #1199→#1207 regression (it dropped relevant
-    // findings, charging a per-item overhead against the content budget). If the
-    // real payload consistently overruns for a use case, raise `maxTokens`.
+    // 0.44.9 events array did (maxTokens=4000 → 6286). flair#1199 (0.44.11): on
+    // the /mcp connector path each content item is charged its STRUCTURED shipped
+    // cost — the same bytes tokenEstimate measures — so tokenEstimate exceeds
+    // `maxTokens` only by the FIXED structural JSON scaffolding (container
+    // keys/braces, counters, sections map, hints, char/4 rounding): genuine
+    // payload the caller pays for, small and bounded, NOT uncounted content. The
+    // connector-conformance suite asserts tokenEstimate <= maxTokens within a
+    // small tolerance for exactly that scaffolding. On the PROSE path
+    // (includeContext=true) the payload ALSO carries the structured mirror, so
+    // tokenEstimate legitimately exceeds `maxTokens` by that mirror — do NOT
+    // "fix" THAT overrun by shrinking prose selection: that is the #1199→#1207
+    // regression (it dropped relevant findings, charging a flat per-item overhead
+    // against the content budget). If the real payload consistently overruns for
+    // a use case, raise `maxTokens`.
     const tokenEstimate = estimateTokens(JSON.stringify(responseBody));
     return { ...responseBody, tokenEstimate };
   }

@@ -240,6 +240,14 @@ Writes are scoped per-agent (your `FLAIR_AGENT_ID`) and enforced by Flair's serv
 
 Which memories are non-private is decided at write time, and the default is not "shared". `memory_store` defaults `durability` to `standard`, and the server derives visibility from durability — `permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private` — so **a bare `memory_store` call writes an owner-only memory that no other agent can read.** Pass `visibility: "shared"` (or `"private"`, to be explicit) to say what you mean; the tool reports the visibility the write actually landed on so an agent can confirm it rather than assume.
 
+### Reading the `bootstrap` payload
+
+`bootstrap` returns the canonical structured containers — `soul`, `memories`, `predicted`, `teammateFindings`, `events` — plus counts and a `tokenEstimate`. The containers are **always present** (empty `[]`/`{}` when there's nothing), so an empty container is distinguishable from an unsupported one.
+
+**Empty containers say why they're empty (flair#1182).** When a structured container ships empty, the payload carries a short hint naming the reason and what fills it — `eventsHint`, `teammateFindingsHint`, `predictedHint`. This is present *only* when the container is empty, so a deliberately-empty container is never confused with a silent drop (a connector never has to diff against a previous payload to tell the two apart).
+
+**`matchQuality` is null on lifecycle sections — by design (flair#1225).** With `includeTrust: true`, each included memory carries a per-memory trust block, section-tagged, whose `matchQuality` is a `strong`/`moderate`/`breadcrumb` confidence band. On the **lifecycle sections** (`permanent`, `recent`, `predicted`) `matchQuality` is `null`: those are a lifecycle-window *load*, not a retrieval surface, so there is no relevance score to band. This is **correct, not a scoring failure** — an own-recent `null` next to a teammate's band does not mean your own records "scored worse". A retrieval band is only meaningful on the retrieval sections (`relevant`, `teammate`). The entry's `section` field makes this legible, and a `matchQualityNote` on any null entry states the reason inline.
+
 ---
 
 ## Configuration reference
