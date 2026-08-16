@@ -8292,6 +8292,127 @@ export function decideCandidateAction(
   return { ok: true };
 }
 
+// ─── ADK tag-lineage on promote (#1205 slice 1205a — Sherlock security req) ───
+// ADK session records are written by adk-flair (memory_service.py) under a
+// SHARED-namespace agentId, with per-user separation carried ENTIRELY by a
+// compound scope tag `adk:<app>:<user>`. That tag is the access-control
+// boundary. A candidate distilled from those records therefore MUST carry the
+// scope tag when promoted, or the promoted claim lands in the shared agentId
+// memory retrievable by every other user of the app — a cross-user leak.
+//
+// `rem promote` historically hard-coded `["nightly-rem-promoted", from:<id>]`
+// and DROPPED the source tag. We now propagate the source scope tag for
+// ADK-sourced candidates, and FAIL CLOSED (refuse) when a candidate is
+// ADK-sourced but its scope tag can't be uniquely+completely determined.
+//
+// SCOPING (deliberate, per spec): fail-closed applies ONLY to ADK-sourced
+// candidates. Non-ADK candidates carry no `adk:` tag and promote byte-for-byte
+// as before — a transient/deleted source on a non-ADK candidate must NOT block
+// its promotion.
+//
+// SEAM (foundation only; the distillation engine is slice #1205b): ADK-sourcing
+// is detected here by re-reading the candidate's source memories and inspecting
+// their tags. That leaves ONE residual fail-open: an ADK-sourced candidate all
+// of whose source memories are unreadable (deleted/transient) yields no `adk:`
+// evidence and is treated as non-ADK. Closing that corner without regressing
+// non-ADK promotion requires the ENGINE to stamp the authoritative scope tag
+// onto the MemoryCandidate row at distillation time (it distills per single
+// scope:tagged tag, so it knows it authoritatively). `derivePromotedTags` is
+// written so that override can be threaded in later without touching callers.
+
+export const ADK_SCOPE_TAG_PREFIX = "adk:";
+
+export type SourceMemoryFetch =
+  | { ok: true; tags: string[] } // source memory was read; these are its tags
+  | { ok: false }; // source memory could not be read (missing/transient/authz)
+
+export type PromotedTagsDecision =
+  | { ok: true; tags: string[]; adkSourced: boolean }
+  | { ok: false; reason: string };
+
+/**
+ * Decide the tag set for a promoted Memory given the candidate id and the
+ * result of fetching each of its source memories. Pure — no I/O; the action
+ * callback does the fetching and threads the results here so this is unit-
+ * testable and the fail-closed logic is exercised directly.
+ *
+ *  - No `adk:` scope tag across readable sources → NON-ADK candidate; return
+ *    the provenance tags only (unchanged behavior).
+ *  - Exactly one `adk:` scope tag AND every source readable → ADK-sourced;
+ *    return [scopeTag, ...provenance].
+ *  - `adk:` evidence present but the scope tag is ambiguous (>1 distinct tag)
+ *    OR incomplete (some source unreadable) → REFUSE (fail-closed): a
+ *    tagless/mis-tagged claim in a shared ADK namespace is a cross-user leak,
+ *    not a benign miss.
+ */
+export function derivePromotedTags(
+  candidateId: string,
+  sources: SourceMemoryFetch[],
+): PromotedTagsDecision {
+  const provenance = ["nightly-rem-promoted", `from:${candidateId}`];
+
+  const adkTags = new Set<string>();
+  let anySourceUnreadable = false;
+  for (const s of sources) {
+    if (!s.ok) {
+      anySourceUnreadable = true;
+      continue;
+    }
+    for (const t of s.tags) {
+      if (typeof t === "string" && t.startsWith(ADK_SCOPE_TAG_PREFIX)) adkTags.add(t);
+    }
+  }
+
+  // No positive ADK evidence → non-ADK. An unreadable source with zero ADK
+  // evidence does NOT fail closed here (that would regress non-ADK promotion);
+  // see the SEAM note above.
+  if (adkTags.size === 0) {
+    return { ok: true, tags: provenance, adkSourced: false };
+  }
+
+  if (adkTags.size > 1) {
+    return {
+      ok: false,
+      reason: `ADK-sourced candidate spans multiple scope tags (${[...adkTags].sort().join(", ")}); refusing to promote — a merged cross-user claim would leak across users`,
+    };
+  }
+  if (anySourceUnreadable) {
+    return {
+      ok: false,
+      reason: `ADK-sourced candidate has unreadable source memories; the per-user scope tag cannot be confirmed — refusing to promote (fail-closed)`,
+    };
+  }
+  const scopeTag = [...adkTags][0];
+  return { ok: true, tags: [scopeTag, ...provenance], adkSourced: true };
+}
+
+// ─── Machine reviewer namespace (#1205 slice 1205a — Sherlock security req 4) ─
+// A promotion records a reviewerId that feeds audit/attribution
+// (schemas/memory.graphql:209). An automated (machine-driven) promotion path
+// must record a reviewerId that can NEVER be mistaken for a human/agent
+// reviewer, so attribution isn't laundered. Reserve the `machine:` namespace
+// for that, and forbid the human `--reviewer` path from claiming it.
+
+export const MACHINE_REVIEWER_PREFIX = "machine:";
+/** Canonical machine reviewerId for the ADK auto-promote consumer (#1205b). */
+export const MACHINE_REVIEWER_ADK_AUTO_PROMOTE = "machine:adk-auto-promote";
+
+/** True iff `id` is in the reserved machine-reviewer namespace — i.e. it
+ *  denotes an automated path, not a human or agent reviewer. */
+export function isMachineReviewerId(id: string | undefined | null): boolean {
+  return typeof id === "string" && id.startsWith(MACHINE_REVIEWER_PREFIX);
+}
+
+/** The human `flair rem promote` path must not record a reviewerId in the
+ *  reserved machine namespace — that would launder automated attribution onto
+ *  a human-operated promotion. Returns an error string, or null if allowed. */
+export function validateHumanReviewerId(reviewerId: string): string | null {
+  if (isMachineReviewerId(reviewerId)) {
+    return `--reviewer '${reviewerId}' uses the reserved '${MACHINE_REVIEWER_PREFIX}' namespace (reserved for automated promotion); use a human/agent reviewer id`;
+  }
+  return null;
+}
+
 // ─── flair rem promote ───────────────────────────────────────────────────────
 // Slice 2 of FLAIR-NIGHTLY-REM (ops-2qq). Promote a candidate to either Soul
 // or persistent Memory. Both --rationale and --to are required (spec § 5: no
@@ -8320,6 +8441,13 @@ rem
       process.exit(1);
     }
     const reviewerId = opts.reviewer || process.env.FLAIR_AGENT_ID || "admin";
+    // The human promote path must not record a reserved machine reviewerId
+    // (Sherlock #4): that would launder automated attribution.
+    const reviewerErr = validateHumanReviewerId(reviewerId);
+    if (reviewerErr) {
+      console.error(`Error: ${reviewerErr}`);
+      process.exit(1);
+    }
 
     try {
       // Fetch the candidate
@@ -8332,6 +8460,42 @@ rem
         process.exit(1);
       }
 
+      // ADK tag-lineage (#1205a): re-read the candidate's source memories and
+      // derive the promoted-claim tag set. Fail-closed for ADK-sourced
+      // candidates whose per-user scope tag can't be confirmed; unchanged for
+      // non-ADK candidates. See derivePromotedTags for the fail-closed rules.
+      const sourceIds: string[] = Array.isArray(candidate.sourceMemoryIds) ? candidate.sourceMemoryIds : [];
+      const sourceFetches: SourceMemoryFetch[] = [];
+      for (const sid of sourceIds) {
+        try {
+          const mem = await api("GET", `/Memory/${encodeURIComponent(String(sid))}`);
+          if (mem && !mem.error) {
+            sourceFetches.push({ ok: true, tags: Array.isArray(mem.tags) ? mem.tags : [] });
+          } else {
+            sourceFetches.push({ ok: false });
+          }
+        } catch {
+          sourceFetches.push({ ok: false });
+        }
+      }
+      const tagDecision = derivePromotedTags(candidateId, sourceFetches);
+      if (!tagDecision.ok) {
+        console.error(`Error: candidate ${candidateId} — ${(tagDecision as { ok: false; reason: string }).reason}`);
+        process.exit(1);
+      }
+      // Soul entries are agentId-scoped and cannot carry a per-user scope tag,
+      // so an ADK-sourced candidate promoted to Soul is a cross-user leak by
+      // construction — fail closed. (Server-side trust-tier enforcement that
+      // hard-locks the target is the engine slice #1205b; this is the CLI-side
+      // foundation.)
+      if (opts.to === "soul" && (tagDecision as { adkSourced?: boolean }).adkSourced) {
+        console.error(
+          `Error: candidate ${candidateId} is ADK-sourced (scope tag ${tagDecision.tags[0]}); Soul is agentId-scoped and cannot carry a per-user scope tag — refusing to promote to Soul (would leak across users). Promote ADK-sourced candidates to memory.`,
+        );
+        process.exit(1);
+      }
+      const promotedTags = tagDecision.tags;
+
       const decidedAt = new Date().toISOString();
 
       // Write the resulting Soul or Memory entry
@@ -8342,7 +8506,7 @@ rem
           agentId: candidate.agentId,
           content: candidate.claim,
           durability: "persistent",
-          tags: ["nightly-rem-promoted", `from:${candidateId}`],
+          tags: promotedTags,
           derivedFrom: candidate.sourceMemoryIds ?? [],
           promotionStatus: "approved",
           promotedAt: decidedAt,

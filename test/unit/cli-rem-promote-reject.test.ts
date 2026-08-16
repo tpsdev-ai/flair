@@ -9,7 +9,17 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { validatePromoteOpts, validateRejectOpts, decideCandidateAction } from "../../src/cli.ts";
+import {
+  validatePromoteOpts,
+  validateRejectOpts,
+  decideCandidateAction,
+  derivePromotedTags,
+  isMachineReviewerId,
+  validateHumanReviewerId,
+  MACHINE_REVIEWER_PREFIX,
+  MACHINE_REVIEWER_ADK_AUTO_PROMOTE,
+  type SourceMemoryFetch,
+} from "../../src/cli.ts";
 
 describe("validatePromoteOpts", () => {
   test("accepts a fully-specified memory promotion", () => {
@@ -115,5 +125,120 @@ describe("decideCandidateAction", () => {
     expect(r.severity).toBe("info");
     expect(r.message).toMatch(/already rejected on 2026-05-03/);
     expect(r.message).toMatch(/by flint/);
+  });
+});
+
+// ─── ADK tag-lineage on promote (#1205a) ─────────────────────────────────────
+
+const ADK_TAG = "adk:myapp:alice%3Aadmin"; // an escaped compound scope tag
+const OTHER_ADK_TAG = "adk:myapp:bob";
+
+describe("derivePromotedTags", () => {
+  test("NON-ADK candidate (readable sources, no adk tag) → provenance only, unchanged", () => {
+    // Positive control: this MUST match the historical hard-coded tag set so
+    // non-ADK promotion is byte-for-byte unchanged.
+    const sources: SourceMemoryFetch[] = [
+      { ok: true, tags: ["episodic", "topic:infra"] },
+      { ok: true, tags: [] },
+    ];
+    const r = derivePromotedTags("cand_1", sources);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("unreachable");
+    expect(r.adkSourced).toBe(false);
+    expect(r.tags).toEqual(["nightly-rem-promoted", "from:cand_1"]);
+  });
+
+  test("NON-ADK candidate with an unreadable source (no adk evidence) → still promotes, unchanged", () => {
+    // A transient/deleted source on a non-ADK candidate must NOT fail closed.
+    const sources: SourceMemoryFetch[] = [
+      { ok: true, tags: ["episodic"] },
+      { ok: false },
+    ];
+    const r = derivePromotedTags("cand_2", sources);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("unreachable");
+    expect(r.adkSourced).toBe(false);
+    expect(r.tags).toEqual(["nightly-rem-promoted", "from:cand_2"]);
+  });
+
+  test("candidate with NO sources → non-ADK, provenance only", () => {
+    const r = derivePromotedTags("cand_3", []);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("unreachable");
+    expect(r.adkSourced).toBe(false);
+    expect(r.tags).toEqual(["nightly-rem-promoted", "from:cand_3"]);
+  });
+
+  test("ADK-sourced (single tag, all readable) → propagates scope tag ALONGSIDE provenance", () => {
+    const sources: SourceMemoryFetch[] = [
+      { ok: true, tags: [ADK_TAG, "episodic"] },
+      { ok: true, tags: [ADK_TAG] },
+    ];
+    const r = derivePromotedTags("cand_4", sources);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("unreachable");
+    expect(r.adkSourced).toBe(true);
+    expect(r.tags).toEqual([ADK_TAG, "nightly-rem-promoted", "from:cand_4"]);
+    // provenance tags are retained (added to, not replaced by, the scope tag):
+    expect(r.tags).toContain("nightly-rem-promoted");
+    expect(r.tags).toContain("from:cand_4");
+  });
+
+  test("ADK-sourced but a source is UNREADABLE → FAIL CLOSED", () => {
+    const sources: SourceMemoryFetch[] = [
+      { ok: true, tags: [ADK_TAG] },
+      { ok: false }, // could carry a different scope tag — cannot confirm
+    ];
+    const r = derivePromotedTags("cand_5", sources);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.reason).toMatch(/unreadable|fail-closed/i);
+  });
+
+  test("ADK-sourced spanning MULTIPLE distinct scope tags → FAIL CLOSED", () => {
+    const sources: SourceMemoryFetch[] = [
+      { ok: true, tags: [ADK_TAG] },
+      { ok: true, tags: [OTHER_ADK_TAG] },
+    ];
+    const r = derivePromotedTags("cand_6", sources);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("unreachable");
+    expect(r.reason).toMatch(/multiple scope tags/i);
+    expect(r.reason).toContain(ADK_TAG);
+    expect(r.reason).toContain(OTHER_ADK_TAG);
+  });
+});
+
+// ─── Machine reviewer namespace (#1205a, Sherlock #4) ────────────────────────
+
+describe("isMachineReviewerId / machine reviewer namespace", () => {
+  test("the canonical machine reviewerId is in the reserved namespace and distinguishable", () => {
+    expect(MACHINE_REVIEWER_ADK_AUTO_PROMOTE.startsWith(MACHINE_REVIEWER_PREFIX)).toBe(true);
+    expect(isMachineReviewerId(MACHINE_REVIEWER_ADK_AUTO_PROMOTE)).toBe(true);
+  });
+
+  test("machine ids are recognized; human/agent ids are not", () => {
+    expect(isMachineReviewerId("machine:adk-auto-promote")).toBe(true);
+    expect(isMachineReviewerId("machine:anything")).toBe(true);
+    expect(isMachineReviewerId("admin")).toBe(false);
+    expect(isMachineReviewerId("flint")).toBe(false);
+    expect(isMachineReviewerId("adk:app:user")).toBe(false); // not a reviewer namespace
+    expect(isMachineReviewerId("")).toBe(false);
+    expect(isMachineReviewerId(undefined)).toBe(false);
+    expect(isMachineReviewerId(null)).toBe(false);
+  });
+});
+
+describe("validateHumanReviewerId", () => {
+  test("allows a human/agent reviewer id", () => {
+    expect(validateHumanReviewerId("admin")).toBeNull();
+    expect(validateHumanReviewerId("flint")).toBeNull();
+  });
+
+  test("rejects a human --reviewer that claims the reserved machine namespace", () => {
+    const err = validateHumanReviewerId(MACHINE_REVIEWER_ADK_AUTO_PROMOTE);
+    expect(err).not.toBeNull();
+    expect(err).toMatch(/reserved/);
+    expect(err).toContain(MACHINE_REVIEWER_PREFIX);
   });
 });

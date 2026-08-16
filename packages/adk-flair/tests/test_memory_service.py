@@ -82,12 +82,41 @@ class TestCompoundTag:
 
     def test_sanitizes_colons(self):
         from adk_flair.memory_service import _compound_tag
-        assert _compound_tag("my:app", "org:admin") == "adk:my_app:org_admin"
+        # Colons in a segment are percent-encoded (%3A) so the compound-tag
+        # delimiter ':' remains the only literal colon in the tag.
+        assert _compound_tag("my:app", "org:admin") == "adk:my%3Aapp:org%3Aadmin"
 
     def test_sanitize_tag_segment(self):
         from adk_flair.memory_service import _sanitize_tag_segment
-        assert _sanitize_tag_segment("a:b:c") == "a_b_c"
+        assert _sanitize_tag_segment("a:b:c") == "a%3Ab%3Ac"
         assert _sanitize_tag_segment("normal") == "normal"
+
+    def test_no_collision_between_colon_and_underscore(self):
+        """Regression for #1205 (Sherlock): the old ':' -> '_' scheme mapped
+        'alice:admin' and 'alice_admin' to the SAME tag. They must now differ,
+        because the compound tag is the per-user access-control boundary."""
+        from adk_flair.memory_service import _sanitize_tag_segment, _compound_tag
+        assert _sanitize_tag_segment("alice:admin") != _sanitize_tag_segment("alice_admin")
+        assert _compound_tag("app", "alice:admin") != _compound_tag("app", "alice_admin")
+        # And the specific values, to pin the encoding:
+        assert _sanitize_tag_segment("alice:admin") == "alice%3Aadmin"
+        assert _sanitize_tag_segment("alice_admin") == "alice%5Fadmin"
+
+    def test_encoding_is_injective_on_tricky_pairs(self):
+        """Distinct inputs -> distinct outputs, including inputs that contain
+        the escape sequences literally (the fail-open trap of a naive scheme)."""
+        from adk_flair.memory_service import _sanitize_tag_segment
+        tricky = ["alice:admin", "alice_admin", "alice%3Aadmin", "alice%5Fadmin",
+                  "alice%admin", "alice", "a:b_c", "a_b:c", "%25", ":", "_", "%"]
+        encoded = [_sanitize_tag_segment(x) for x in tricky]
+        assert len(set(encoded)) == len(set(tricky)), "encoding collapsed distinct inputs"
+
+    def test_round_trip(self):
+        """desanitize(sanitize(x)) == x for every reserved-char combination."""
+        from adk_flair.memory_service import _sanitize_tag_segment, _desanitize_tag_segment
+        for x in ["", "normal", "alice:admin", "alice_admin", "a:b_c:d",
+                  "%", "%25", "%3A", "%5F", "%253A", "::__%%", "user@host:1_2"]:
+            assert _desanitize_tag_segment(_sanitize_tag_segment(x)) == x, x
 
 
 class TestDeterministicRecordId:
@@ -314,6 +343,34 @@ class TestSearchMemory:
         )
         assert len(result.memories) == 1
         assert result.memories[0].id == "mem-2"
+
+    @pytest.mark.asyncio
+    async def test_reverification_matches_escaped_compound_tag(self, service):
+        """A user_id that requires escaping still matches on read: the encoded
+        compound tag written on ingest is the same one re-verified on search,
+        and a colliding-under-the-OLD-scheme neighbour ('alice_admin') is
+        NOT accepted for user_id='alice:admin'."""
+        from adk_flair.memory_service import _compound_tag
+
+        wanted = _compound_tag("app", "alice:admin")      # adk:app:alice%3Aadmin
+        neighbour = _compound_tag("app", "alice_admin")   # adk:app:alice%5Fadmin
+        assert wanted != neighbour
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {
+            "results": [
+                {"id": "mine", "content": "kept", "tags": [wanted]},
+                {"id": "neighbour", "content": "dropped", "tags": [neighbour]},
+            ],
+        }
+        service._client.request.return_value = mock_resp
+
+        result = await service.search_memory(
+            app_name="app", user_id="alice:admin", query="test",
+        )
+        assert [m.id for m in result.memories] == ["mine"]
 
     @pytest.mark.asyncio
     async def test_flair_down_returns_empty_with_warning(self, service, caplog):
