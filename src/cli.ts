@@ -8786,6 +8786,11 @@ remNightly
       if (row.candidates) {
         console.log(`Staged:     ${row.candidates.length} candidate${row.candidates.length === 1 ? "" : "s"}`);
       }
+      // row.autoPromoted populates when step 5b (#1205b-2 ADK auto-promote) ran
+      // this cycle — i.e. a non-dry-run cycle for an ADK agentId.
+      if (row.autoPromoted) {
+        console.log(`Auto-promoted: ${row.autoPromoted.promoted} to own memory (${row.autoPromoted.skipped} left pending)`);
+      }
       // row.dedup populates when step 6 (instance-wide dedup-cluster stat,
       // flair-quality Slice 1c) succeeded this cycle. Absent on dry-run skip
       // or a non-fatal failure (see Errors below — e.g. non-admin caller).

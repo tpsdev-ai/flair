@@ -588,8 +588,14 @@ describe("deriveActiveAdkTags (#1205b-1)", () => {
 function makeTagAwareApi(opts: {
   activeTags: string[];
   reflect: (body: any) => any; // maps the /ReflectMemories body → response (or throws)
-}): { api: ApiCall; reflectCalls: any[] } {
+  // #1205b-2: maps the /AutoPromoteCandidates body → response (or throws).
+  // Defaults to a no-op sweep (nothing eligible) so the existing #1205b-1
+  // tag-aware tests, which now trigger the post-distillation auto-promote step,
+  // stay green.
+  autoPromote?: (body: any) => any;
+}): { api: ApiCall; reflectCalls: any[]; autoPromoteCalls: any[] } {
   const reflectCalls: any[] = [];
+  const autoPromoteCalls: any[] = [];
   const createdAt = new Date().toISOString(); // within the default 48h window
   const memories = opts.activeTags.map((t, i) => ({
     id: `m-${i}`, agentId: "test-agent", content: "session", tags: [t], durability: "standard", createdAt,
@@ -604,12 +610,16 @@ function makeTagAwareApi(opts: {
       reflectCalls.push(body);
       return opts.reflect(body);
     }
+    if (key === "POST:/AutoPromoteCandidates") {
+      autoPromoteCalls.push(body);
+      return opts.autoPromote ? opts.autoPromote(body) : { agentId: "test-agent", promoted: [], skipped: [], count: 0, considered: 0 };
+    }
     if (key === "POST:/MemoryDedupStats") {
       return { clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-08-16T03:00:00.000Z" };
     }
     throw new Error(`unexpected api: ${key}`);
   };
-  return { api, reflectCalls };
+  return { api, reflectCalls, autoPromoteCalls };
 }
 
 describe("tag-aware distillation cycle (#1205b-1)", () => {
@@ -701,11 +711,88 @@ describe("tag-aware distillation cycle (#1205b-1)", () => {
       if (key === "POST:/MemoryCandidate/search_by_conditions") return [];
       if (key === "POST:/MemoryMaintenance") return { expired: 0, archived: 0 };
       if (key === "POST:/ReflectMemories") { reflectCalls.push(body); return { candidates: [], count: 0, model: "default" }; }
+      if (key === "POST:/AutoPromoteCandidates") return { agentId: "test-agent", promoted: [], skipped: [], count: 0, considered: 0 };
       if (key === "POST:/MemoryDedupStats") return { clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "x" };
       throw new Error(`unexpected api: ${key}`);
     };
     await runNightlyCycle(baseOpts({ apiCall: api, distillSince: cutoff }));
     // Only the RECENT tag (alice) is distilled; carol (old-only) is skipped.
     expect(reflectCalls.map((c) => c.tag)).toEqual(["adk:app:alice"]);
+  });
+});
+
+// ─── #1205b-2: post-distillation ADK auto-promote wiring ─────────────────────
+// The SERVER (resources/AutoPromoteCandidates.ts) enforces every security
+// invariant; these runner tests only assert the runner TRIGGERS the sweep at the
+// right time (ADK agentId, not dry-run, not for non-ADK agents) and records its
+// outcome. The end-to-end security acceptance lives in
+// test/integration/adk-auto-promote-1205b2.test.ts.
+describe("ADK auto-promote wiring (#1205b-2)", () => {
+  it("calls /AutoPromoteCandidates ONCE after distillation for an ADK agentId, with a bounded limit", async () => {
+    const { api, autoPromoteCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice", "adk:app:bob"],
+      reflect: (body) => ({ candidates: [{ id: `cand_${(body.tag as string).split(":").pop()}` }], count: 1, model: "default" }),
+      autoPromote: () => ({ agentId: "test-agent", promoted: ["m-1", "m-2"], skipped: [{ id: "c-x", reason: "no_adk_scope_tag" }], count: 2, considered: 3 }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+
+    expect(r.status).toBe("completed");
+    // exactly one sweep, for this agentId, bounded by a positive limit.
+    expect(autoPromoteCalls.length).toBe(1);
+    expect(autoPromoteCalls[0].agentId).toBe("test-agent");
+    expect(typeof autoPromoteCalls[0].limit).toBe("number");
+    expect(autoPromoteCalls[0].limit).toBeGreaterThan(0);
+    // outcome recorded on the audit row.
+    expect(r.logRow.autoPromoted).toEqual({ promoted: 2, skipped: 1 });
+    expect(r.logRow.errors).toEqual([]);
+  });
+
+  it("does NOT call /AutoPromoteCandidates for a NON-ADK agent (no adk tags)", async () => {
+    const { api, autoPromoteCalls } = makeTagAwareApi({
+      activeTags: [],
+      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+
+    expect(r.status).toBe("completed");
+    expect(autoPromoteCalls.length).toBe(0);
+    expect(r.logRow.autoPromoted).toBeUndefined();
+  });
+
+  it("dry-run skips the auto-promote sweep entirely (a side effect, like distillation)", async () => {
+    const { api, autoPromoteCalls, reflectCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice"],
+      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api, dryRun: true }));
+
+    expect(r.status).toBe("dry-run");
+    expect(reflectCalls.length).toBe(0);
+    expect(autoPromoteCalls.length).toBe(0);
+    expect(r.logRow.autoPromoted).toBeUndefined();
+  });
+
+  it("an auto-promote failure is NON-FATAL: recorded in errors, cycle completes", async () => {
+    const { api } = makeTagAwareApi({
+      activeTags: ["adk:app:alice"],
+      reflect: () => ({ candidates: [{ id: "cand_alice" }], count: 1, model: "default" }),
+      autoPromote: () => { throw new Error("fetch failed: connection reset"); },
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+
+    // distillation + maintenance still stand; the cycle is not aborted.
+    expect(r.status).toBe("completed");
+    expect(r.logRow.candidates).toEqual(["cand_alice"]);
+    expect(r.logRow.autoPromoted).toBeUndefined();
+    expect(r.logRow.errors.some((e) => e.startsWith("auto-promote:"))).toBe(true);
+  });
+
+  it("respects a caller-provided maxAutoPromotePerCycle as the sweep limit", async () => {
+    const { api, autoPromoteCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice"],
+      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+    });
+    await runNightlyCycle(baseOpts({ apiCall: api, maxAutoPromotePerCycle: 7 }));
+    expect(autoPromoteCalls[0].limit).toBe(7);
   });
 });

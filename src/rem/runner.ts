@@ -91,6 +91,18 @@ export const DEFAULT_DISTILL_LOOKBACK_MS = 48 * 3600_000;
  */
 export const DEFAULT_MAX_TAGS_PER_CYCLE = 200;
 
+/**
+ * Per-cycle ceiling on ADK candidate auto-promotions (#1205b-2). The nightly
+ * cycle sweeps this agent's pending, scopeTag-bearing candidates and promotes
+ * the eligible ones to own memory server-side (POST /AutoPromoteCandidates).
+ * This bounds the blast radius of one cycle (Kern's cost-ceiling note); the
+ * resource applies the same cap, and any overflow stays `pending` for a later
+ * cycle. Mirror of resources/auto-promote-lib.ts's DEFAULT_MAX_AUTO_PROMOTE_
+ * PER_CYCLE, duplicated across the npm-packaging boundary (src/ can't import
+ * resources/ — see src/cli.ts) and kept in sync by value.
+ */
+export const DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE = 200;
+
 export type ApiCall = (method: string, path: string, body?: unknown) => Promise<any>;
 
 export interface RunnerOpts {
@@ -120,6 +132,12 @@ export interface RunnerOpts {
    * DEFAULT_MAX_TAGS_PER_CYCLE). Override in tests.
    */
   maxTagsPerCycle?: number;
+  /**
+   * #1205b-2: per-cycle cap on ADK candidate auto-promotions (default
+   * DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE), passed to /AutoPromoteCandidates.
+   * Override in tests.
+   */
+  maxAutoPromotePerCycle?: number;
 }
 
 export type RunnerStatus = "paused" | "completed" | "dry-run" | "failed";
@@ -154,6 +172,19 @@ export interface RunnerLogRow {
   expired?: number;
   consolidated?: number;
   candidates?: string[];
+  /**
+   * #1205b-2: outcome of the server-side ADK auto-promote step (POST
+   * /AutoPromoteCandidates), populated only when this cycle ran it — i.e. a
+   * non-dry-run cycle for an ADK agentId (active adk: tags this cycle).
+   * `promoted` is the count of candidates auto-promoted to own memory this
+   * cycle; `skipped` the count left pending by a fail-closed gate (absent
+   * scope tag, content-safety, already-decided). Absent for dry-run / non-ADK
+   * cycles, exactly like `candidates`.
+   */
+  autoPromoted?: {
+    promoted: number;
+    skipped: number;
+  };
   /**
    * flair-quality Slice 1c: instance-wide near-duplicate CLUSTER count,
    * populated when the POST /MemoryDedupStats step (below) succeeds this
@@ -449,6 +480,9 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   // exactly as before. The single-node-runs-the-timer property is unchanged:
   // this all runs inside the one cycle on the one node.
   let candidates: string[] | undefined;
+  // #1205b-2: outcome of the post-distillation auto-promote step, assigned
+  // inside the !dryRun block below (only when this is an ADK agentId).
+  let autoPromoted: RunnerLogRow["autoPromoted"];
 
   const collectStagedIds = (obj: Record<string, unknown>): string[] =>
     asArray(obj.candidates)
@@ -524,6 +558,34 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         errors.push(`distillation: ${describeApiError(err?.message ?? err)}`);
       }
     }
+
+    // ── Step 5b (#1205b-2): server-side ADK auto-promote ───────────────────────
+    // Only for an ADK agentId (active adk: tags this cycle) — a non-ADK agent
+    // has no scopeTag-bearing candidates, so there is nothing to auto-promote
+    // and no call is made. The SERVER enforces every security invariant
+    // (memory-only target, fail-closed tag lineage, content-safety, machine
+    // reviewerId) — the runner only TRIGGERS the sweep; it never itself decides
+    // where a claim lands. Non-fatal like distillation: a failure is recorded
+    // and the candidates stay pending (re-swept next cycle, or promotable by the
+    // human `rem promote` path). Bounded by the per-cycle cap.
+    if (activeAdkTags.length > 0) {
+      try {
+        const apRaw = await opts.apiCall("POST", "/AutoPromoteCandidates", {
+          agentId: opts.agentId,
+          limit: opts.maxAutoPromotePerCycle ?? DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE,
+        });
+        const obj = (apRaw && typeof apRaw === "object") ? (apRaw as Record<string, unknown>) : {};
+        if (obj.error) {
+          errors.push(`auto-promote: ${describeApiError(obj.error)}`);
+        } else {
+          const promotedCount = typeof obj.count === "number" ? obj.count : asArray(obj.promoted).length;
+          const skippedCount = asArray(obj.skipped).length;
+          autoPromoted = { promoted: promotedCount, skipped: skippedCount };
+        }
+      } catch (err: any) {
+        errors.push(`auto-promote: ${describeApiError(err?.message ?? err)}`);
+      }
+    }
   }
 
   // Step 6 (flair-quality Slice 1c): instance-wide dedup-cluster stat.
@@ -583,6 +645,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     archived,
     expired,
     candidates,
+    autoPromoted,
     dedup,
     durationMs: Date.now() - startedMs,
     errors,
