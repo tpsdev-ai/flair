@@ -4,6 +4,16 @@ Measures Flair's recall precision (p@3, MRR) against a **harder, representative
 synthetic corpus**, on a **fully ephemeral Harper instance**. It never touches
 any live checkout, the live `:9926` service, or any production memory.
 
+> **Which recall tool is which (#1216).** This harness is the **scoring-config
+> diagnostic** — its job is composite-vs-raw / prefix A/B ("does this config
+> regress"), and it is manually invoked, not a CI gate. The **authoritative
+> recall-quality number** (recall@1/5/10, nDCG@10, MRR with fixed curated
+> labels, gated in CI) lives next door in
+> [`../recall-eval`](../recall-eval/README.md). They share one corpus
+> (`corpus.ts`, reused by both) and one ingest/retrieve implementation
+> (`packages/flair-bench/lib/`), so the two can never diverge on how memories
+> are written or read — they only ask different questions.
+
 ## Why this exists
 
 Two recall tools already live in `ops/tools/agent-fabric/`:
