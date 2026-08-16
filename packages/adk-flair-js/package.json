@@ -1,6 +1,6 @@
 {
   "name": "@tpsdev-ai/adk-flair",
-  "version": "0.44.9",
+  "version": "0.44.10",
   "description": "Flair memory backend for Google ADK — self-hosted, federated, portable agent memory",
   "type": "module",
   "main": "dist/index.js",

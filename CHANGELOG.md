@@ -18,6 +18,111 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.10] - 2026-08-16
+
+### Added
+
+- **REM nightly distillation is now per-user (per-tag) for ADK agents.**
+  adk-flair collapses every `(app, user)` into one Flair agentId, separating
+  users only by an `adk:<app>:<user>` tag; the nightly runner previously
+  distilled per-agentId (`scope:"recent"`), mixing every user's sessions into
+  shared claims (cross-user bleed). The cycle now derives the active
+  `adk:<app>:<user>` tags for the agent (from the memories it already fetches
+  for the snapshot — no extra query — with a recency cutoff that skips idle
+  tags and is scoped to the agent's own records) and runs `ReflectMemories`
+  once per tag under `scope:"tagged"`, so each user's candidates are distilled
+  only from that user's sessions. Ordinary single-tenant agents (no `adk:`
+  tags) fall back to the unchanged agentId-only distill. Candidates distilled
+  under a tag now carry a `scopeTag` field, which `flair rem promote` consumes
+  as the authoritative per-user lineage tag directly — closing the seam where a
+  candidate whose source memories were all unreadable would otherwise promote
+  tagless into the shared agentId namespace. Candidates still land
+  `status:"pending"` for the existing human `rem promote` path (no
+  auto-promote). Refs #1205.
+
+- **Connector-conformance suite for the `/mcp` tools.** Every shipped `/mcp`
+  tool now has a declarative consumer contract (shape + semantic invariants),
+  co-located with its definition, driven against a seeded store through the tool's
+  real implementation. The suite codifies the historical connector-bug classes —
+  counted-equals-delivered, charged-equals-shipped, dedup-by-content-signature,
+  self-describing empty containers, the same-estimator `tokenEstimate` check, and
+  no leaked internal fields — and a fail-closed completeness check fails the build
+  if a new tool ships without a contract.
+
+- **Deterministic recall-quality eval + CI gate (flair-bench Layer 1).** A new
+  fixed-corpus, fixed-label, fixed-seed recall eval computes recall@1/5/10,
+  nDCG@10 and MRR against hand-curated relevant-memory labels, through Flair's
+  real BM25+RRF retrieval at documented defaults — no LLM judge, no
+  corpus-derived relevance. It is measured ±0.000 across runs and gates CI on
+  per-metric floors set a margin of ≥2 whole queries above that noise band, so a
+  breach is a real regression rather than sampling wobble. This is now the
+  authoritative recall-quality number; the `flair quality` recall spot-check
+  remains a live-health cratering probe (its self-pollution caveats are tracked
+  in flair#967 / #857 / #996), and the composite-vs-raw recall-harness remains
+  the scoring-config diagnostic. The shared ingest/retrieve/metrics plumbing
+  (`packages/flair-bench/lib/`) is the foundation the LongMemEval_s harness
+  (Layer 2) builds on unchanged.
+
+- **Reserved the `machine:` reviewer namespace for automated promotions.**
+  Promotions record a `reviewerId` for audit and attribution. The `machine:`
+  prefix (canonical `machine:adk-auto-promote`) is now reserved for
+  machine-driven promotion paths so automated decisions can never be mistaken
+  for a human or agent reviewer, and `flair rem promote --reviewer` refuses any
+  value in that namespace.
+
+### Fixed
+
+- **`bootstrap` org events now respect `maxTokens`, drop boot noise, and the
+  counters add up.** The structured `events` array was assembled but never
+  charged against the token budget, and every event shipped a verbose `detail`
+  blob — a `maxTokens: 4000` request serialized at ~6286 (flair#1199). Events are
+  now counted against the shared budget like every other content section, ship
+  LEAN by default (opt the `detail` JSON back in with `includeEventDetail: true`),
+  and honor a `maxEvents` cap. Zero-row no-op auto-heal migration events (the
+  "graph-heal verified / migration success (0 rows)" pairs that fire every boot)
+  are suppressed at render, freeing the scarce event slots for signal — the
+  migration ledger still records every one (flair#1200). Count arithmetic is
+  fixed too: `memoriesIncluded + memoriesTruncated` can no longer exceed
+  `memoriesAvailable` (a memory considered in two sections was double-counted),
+  and teammate findings now report `teammateFindingsMatched` (the relevance-floor
+  pool) so `teammateFindingsTruncated` reads as "relevant but no budget," not
+  "every candidate not selected" (flair#1207). The connector-conformance suite
+  gains two invariants that catch these classes: `tokenEstimate <= maxTokens`
+  (within a scaffolding tolerance) and `included + truncated <= available`.
+  Connectors simply get a payload that fits the budget they asked for.
+
+- **`/mcp` read paths no longer leak internal fields or throw a misdirecting
+  error.** `memory_get` now strips `embeddingModel` alongside `embedding` (the
+  write tools already dropped both, so the read path was the last leak), and
+  `memory_update` against a non-existent id now returns a clean `not found`
+  instead of throwing `Invalid primary key of null`. Nothing to do — connectors
+  simply stop seeing an internal model-id field and get a parseable 404.
+
+### Security
+
+- **adk-flair: closed a tag-collision in the per-user scope tag (Python and
+  JavaScript adapters).** Both the `adk-flair` (Python) and `@tpsdev-ai/adk-flair`
+  (JavaScript) memory adapters built the `adk:<app>:<user>` scope tag by
+  replacing `:` with `_`, so distinct identities like `alice:admin` and
+  `alice_admin` collapsed to the same tag. Because that tag is the per-user
+  access-control boundary, the collision could contaminate memory across users.
+  Segments are now percent-encoded (reversible, collision-free) in both
+  packages; no action is needed for existing installs, though any tag written
+  for a user id containing `:` or `_` will differ from what the old scheme
+  produced.
+
+- **`flair rem promote` now preserves the source scope tag and fails closed
+  for ADK-sourced candidates.** Promotion previously stamped only
+  `nightly-rem-promoted` / `from:<id>` and dropped the candidate's source tag.
+  For a candidate distilled from ADK session records (a source memory carries
+  an `adk:<app>:<user>` tag), the promoted claim now carries that scope tag
+  alongside the provenance tags. If such a candidate is ADK-sourced but its
+  scope tag cannot be uniquely and completely determined (multiple distinct
+  tags, or an unreadable source), or if it targets Soul (which is agent-scoped
+  and cannot carry a per-user tag), promotion is refused rather than writing a
+  claim that could leak across users. Non-ADK candidates promote exactly as
+  before.
+
 ## [0.44.9] - 2026-08-15
 
 ### Added
