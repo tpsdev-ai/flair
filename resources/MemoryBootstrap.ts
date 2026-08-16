@@ -23,6 +23,7 @@ import {
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
 import { buildTrustBlock } from "./trust-block.js";
 import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
+import { estimateTokens } from "./token-estimate.js";
 
 /**
  * POST /MemoryBootstrap
@@ -164,10 +165,10 @@ const TASK_RELEVANCE_FLOOR = 0.3;
 // may exceed `maxTokens` by the scaffolding overhead. See the module-doc CAP
 // CONTRACT above.
 
-// Rough token estimate: ~4 chars per token for English text
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
+// Token estimate (~4 chars per token for English text) now lives in the
+// harper-free ./token-estimate.js module, so the content-selection budget, the
+// reported `tokenEstimate`, and the flair#1213 conformance tokenEstimate
+// invariant are all computed with ONE definition. See that module's header.
 
 // `agentId` is the BOOTSTRAPPING agent (the caller) — used only to decide
 // whether to annotate attribution, never to change what's read (that

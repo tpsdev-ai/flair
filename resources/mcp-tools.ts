@@ -163,14 +163,35 @@ async function unwrap(value: any): Promise<any> {
 }
 
 /**
- * flair#1188 — remove the raw `embedding` vector from a record before it is
- * returned over the MCP surface. A stored memory carries a 768-float
- * `embedding` (the HNSW vector); inlined into a tool result that is thousands
- * of noise tokens per record on chat connectors that have a fixed context
- * budget, and the caller can never do anything useful with it. Returns a
- * shallow copy WITHOUT `embedding` (never mutates the source record), and
- * passes through anything that is not a plain record — null, primitives,
- * arrays, and the `{ error, status }` shapes `unwrap` produces — untouched.
+ * flair#1188 — the internal, embedding-engine-owned fields a memory record
+ * carries that must NEVER cross the MCP surface. Both are server-managed and
+ * useless (or misleading) to a connector:
+ *
+ *   - `embedding`     — the raw 768-float HNSW vector; thousands of noise
+ *                       tokens per record on a fixed-budget chat connector, and
+ *                       the caller can do nothing with it (flair#1188).
+ *   - `embeddingModel` — the model id stamped on every write
+ *                       (resources/Memory.ts stamps `content.embeddingModel =
+ *                       getModelId()`; schemas/memory.graphql declares it
+ *                       @indexed). The WRITE wrappers already treat it as
+ *                       internal — memory_update `delete`s it from both the
+ *                       overwrite and the supersede record — so the READ path
+ *                       must strip it too, or memory_get leaks an internal
+ *                       field the write echoes hide (flair#1213, Sherlock #1).
+ *
+ * Exported so the flair#1213 conformance "no leaked internal fields" invariant
+ * enumerates the SAME list this function strips: the strip and the assertion
+ * cannot drift, and adding a field here automatically extends both.
+ */
+export const INTERNAL_MEMORY_FIELDS = ["embedding", "embeddingModel"] as const;
+
+/**
+ * flair#1188 / flair#1213 — remove the internal embedding-engine fields (see
+ * `INTERNAL_MEMORY_FIELDS`) from a record before it is returned over the MCP
+ * surface. Returns a shallow copy WITHOUT those fields (never mutates the
+ * source record), and passes through anything that is not a plain record —
+ * null, primitives, arrays, and the `{ error, status }` shapes `unwrap`
+ * produces — untouched.
  *
  * `memory_search` already projects with an explicit select that omits
  * `embedding` (resources/semantic-retrieval-core.ts's DEFAULT_SELECT), and
@@ -178,11 +199,17 @@ async function unwrap(value: any): Promise<any> {
  * needed on the FULL-record read/write paths (memory_get, and the write
  * responses that echo the stored row).
  */
-function stripEmbedding(value: any): any {
+function stripInternalFields(value: any): any {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  if (!("embedding" in value)) return value;
-  const { embedding, ...rest } = value;
-  return rest;
+  let out = value;
+  let copied = false;
+  for (const field of INTERNAL_MEMORY_FIELDS) {
+    if (field in out) {
+      if (!copied) { out = { ...out }; copied = true; }
+      delete out[field];
+    }
+  }
+  return out;
 }
 
 // ── Tool implementations (thin wrappers over existing handlers) ──────────────
@@ -261,7 +288,7 @@ async function memoryStore(agent: ResolvedAgent, args: any) {
   // flair#1188 — memory_store's response goes through the same buildWriteResponse
   // echo as memory_update; strip the server-regenerated embedding so no write
   // tool ever inlines the vector. No-op when the response carries none.
-  return stripEmbedding(await unwrap(await h.post(body)));
+  return stripInternalFields(await unwrap(await h.post(body)));
 }
 
 /**
@@ -294,8 +321,18 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
   // `new Cls(undefined, ctx).get(id)` returned `undefined` for the caller's own
   // record (getProperty on an unloaded instance), so memory_update 404'd
   // ("memory not found") on the connector path before it ever reached a write.
-  const existing = await Cls.get(id, delegationContext(agent));
-  if (!existing) {
+  //
+  // flair#1213 — the get MUST be `unwrap`ped (as memoryGet does), not consumed
+  // raw. Memory.get()'s makeByIdReadGate returns a NOT_FOUND() *Response* (404)
+  // for an absent or non-readable id — a TRUTHY object with no `id` — so the
+  // bare `if (!existing)` guard never fired: the code fell through and PUT a
+  // record whose id spread off the Response as `undefined`, throwing the
+  // MISDIRECTING "Invalid primary key of null" instead of a clean 404. This is
+  // the same by-id-read-on-the-connector-seam class as #1181, caught by the
+  // conformance error contract (Kern #5). Unwrap, then treat a 404/error/absent
+  // result as "not found".
+  const existing = await unwrap(await Cls.get(id, delegationContext(agent)));
+  if (!existing || (existing as any).error != null || (existing as any).status === 404) {
     return { error: "memory not found", status: 404 };
   }
 
@@ -337,7 +374,7 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
     // flair#1188 — the write response echoes the stored row (Memory.post
     // regenerates the embedding server-side), so strip the vector before it
     // returns over the MCP surface. No-op when the response carries none.
-    return stripEmbedding(await unwrap(await coll.post(record)));
+    return stripInternalFields(await unwrap(await coll.post(record)));
   }
 
   const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
@@ -356,7 +393,7 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
   // Memory.put()'s own ownership gate — no scope change, same as the read.
   // flair#1188 — strip the embedding from the echoed write response (Memory.put
   // regenerates the vector server-side); no-op when the response carries none.
-  return stripEmbedding(await unwrap(await Cls.put(merged, delegationContext(agent))));
+  return stripInternalFields(await unwrap(await Cls.put(merged, delegationContext(agent))));
 }
 
 async function memoryGet(agent: ResolvedAgent, args: any) {
@@ -385,7 +422,7 @@ async function memoryGet(agent: ResolvedAgent, args: any) {
   // Strip it by default so a chat connector isn't flooded with thousands of
   // useless tokens per record; return it only when the caller explicitly opts
   // in via includeEmbedding.
-  return args?.includeEmbedding === true ? result : stripEmbedding(result);
+  return args?.includeEmbedding === true ? result : stripInternalFields(result);
 }
 
 async function memoryDelete(agent: ResolvedAgent, args: any) {
@@ -546,15 +583,192 @@ async function recordUsage(agent: ResolvedAgent, args: any) {
 
 type ToolImpl = (agent: ResolvedAgent, args: any) => Promise<any>;
 
+// ── flair#1213 — the connector CONSUMER CONTRACT, co-located with each tool ──
+//
+// Each ToolEntry below carries a declarative `contract`: the SHAPE and
+// SEMANTICS a /mcp connector is entitled to rely on from that tool. It lives
+// RIGHT NEXT TO the tool's def+impl (Kern #2) so a response-shape change to the
+// wrapper prompts a contract update in the same diff — the completeness check
+// catches a MISSING contract, co-location is what keeps a present one from going
+// STALE. The conformance suite
+// (test/integration/mcp-connector-conformance-suite.test.ts) reads these,
+// drives each tool's REAL `.impl` against a seeded store, and asserts every
+// declared field/type/invariant. The historical connector bugs
+// (#1181/#1188/#1182/#1199/#1200/#1206) each map to an invariant below, proven
+// by the mutation-validation log in the PR: revert the fix ⇒ a conformance test
+// goes red.
+
+type FieldType = "string" | "number" | "boolean" | "object" | "array";
+
+/** Semantic invariants — the class each historical connector bug lived in. */
+export interface ToolInvariants {
+  /**
+   * A self-describing COUNT field must equal the TOTAL length of the
+   * container(s) it describes: counted == delivered (flair#1199
+   * memoriesIncluded/teammateFindingsIncluded; flair#1206 sections.events).
+   * `count` may be a dotted path (e.g. "sections.events"); `containers` are
+   * top-level arrays whose lengths SUM to the count.
+   *
+   * `containers` is a list, not a single name, because `memoriesIncluded`
+   * legitimately spans TWO delivered own-memory containers: `memories`
+   * (permanent/recent/relevant) AND `predicted` (subject-matched) — both are
+   * own memories, both are counted (resources/MemoryBootstrap.ts increments
+   * memoriesIncluded at the predicted push too). Asserting it against
+   * `memories` alone would false-fail whenever predicted is non-empty; the
+   * correct invariant is memoriesIncluded === memories.length + predicted.length.
+   */
+  countEqualsDelivered?: Array<{ count: string; containers: string[] }>;
+  /**
+   * Containers that must be PRESENT and correctly typed even when the caller
+   * has none — an empty `[]`/`{}` with a hint, never a bare `{}`, a missing
+   * key, or `undefined` (self-describing empty, flair#1182).
+   */
+  selfDescribingEmpty?: Array<{ path: string; type: "array" | "object" }>;
+  /**
+   * No two entries in `container` share the same tuple of `signatureFields`
+   * (flair#1200 dedup). The signature is the SEMANTIC content key the tool
+   * actually dedups on — for org-events `kind+summary+detail+targetIds`
+   * (resources/MemoryBootstrap.ts's eventBySignature), the exact fields that
+   * stay EQUAL across physical duplicate rows. It deliberately excludes `id`
+   * and `createdAt`, which VARY between those rows (OrgEvent.post keys the id
+   * off a millisecond timestamp), so keying on either would miss the dupe the
+   * fixture seeds. See the conformance suite's fixture note.
+   */
+  dedupSignature?: { container: string; signatureFields: string[] };
+  /**
+   * `tokenEstimate` must equal the wrapper's OWN estimator applied to the
+   * delivered payload: estimateTokens(JSON.stringify(result minus excludeKeys))
+   * (flair#1199 double-serialization; Kern #1 / Sherlock #2). Same estimator,
+   * not a byte length or a different tokenizer — so it catches the class
+   * without being brittle to a future estimator change. `excludeKeys` are the
+   * fields added AFTER the estimate was taken (tokenEstimate itself, and the
+   * wrapper-injected flairVersion).
+   */
+  tokenEstimate?: { field: string; excludeKeys: string[] };
+  /**
+   * At the /mcp default the prose `field` (context) must be a compact POINTER,
+   * never a second copy of the structured bodies — the structured containers
+   * are canonical; prose is opt-in via includeContext (flair#1199). The suite
+   * asserts it carries none of the delivered event summaries / memory contents.
+   */
+  proseContextIsPointerAtDefault?: { field: string };
+  /**
+   * Per-element rules for a named array container: every element carries
+   * `requiredFields` and leaks none of `forbiddenFields`. Lets the leaked-
+   * internal-fields invariant (#1188) bite on bootstrap's `memories` and the
+   * shape invariant on its `events`, not just the flat record tools.
+   */
+  containerRules?: Array<{ container: string; requiredFields?: string[]; forbiddenFields?: readonly string[] }>;
+  /**
+   * Documents that the suite's UNIVERSAL structural check applies here (it runs
+   * on every tool regardless): no field value is a JSON-stringified object/
+   * array, and nothing serialized to a pending Promise or `[object Object]`
+   * (flair#1199/#1182 — the payload is fully resolved and structured).
+   */
+  fullyResolved?: boolean;
+}
+
+/**
+ * The declarative consumer contract for one /mcp tool. `requiredFields`,
+ * `fieldTypes` and `forbiddenFields` describe the RESULT OBJECT the tool
+ * returns; `invariants` carry the cross-field semantics; `errorShape` pins the
+ * one error case a connector must be able to parse (Kern #5).
+ */
+export interface ToolContract {
+  /** One line: what a connector gets back from this tool. */
+  summary: string;
+  /** Fields that MUST be present (and not undefined) on the result object. */
+  requiredFields?: string[];
+  /** Expected JS type per field on the result object. */
+  fieldTypes?: Record<string, FieldType>;
+  /**
+   * Fields that must NEVER appear on the result object. For the memory record
+   * tools this is `INTERNAL_MEMORY_FIELDS` — BOTH `embedding` and
+   * `embeddingModel` (flair#1188 + flair#1213 Sherlock #1), so the invariant
+   * bites on either leak.
+   */
+  forbiddenFields?: readonly string[];
+  invariants?: ToolInvariants;
+  /**
+   * One error case: the shape a connector must be able to parse when the tool
+   * refuses. `trigger` is a human note on how the suite provokes it; the
+   * response must carry every field in `fields` and leak none in `mustNotLeak`
+   * (no stack traces / internal paths).
+   */
+  errorShape?: { trigger: string; fields: string[]; mustNotLeak?: readonly string[] };
+}
+
 /**
  * The tool registry: definition (for tools/list) + implementation (for
- * tools/call), keyed by tool name. The single source of truth for BOTH the
- * advertised surface and the dispatch table — so tools/list and tools/call
- * cannot drift (a tool listed but not callable, or vice versa, is impossible).
+ * tools/call) + the connector CONTRACT (for the flair#1213 conformance suite),
+ * keyed by tool name. The single source of truth for the advertised surface,
+ * the dispatch table, AND the consumer contract — so none of the three can
+ * drift (a tool listed but not callable, or shipped without a contract, is
+ * impossible: `contract` is required by the type and by
+ * `checkContractCompleteness` at runtime).
  */
 interface ToolEntry {
   def: McpToolDef;
   impl: ToolImpl;
+  contract: ToolContract;
+}
+
+/** The result of the flair#1213 completeness gate. */
+export interface CompletenessResult {
+  ok: boolean;
+  /** How many tools the gate actually enumerated. `> 0` on any non-vacuous run. */
+  examined: number;
+  /** Tool names shipped with no contract. */
+  missing: string[];
+  reason?: string;
+}
+
+/**
+ * flair#1213 completeness gate — FAIL-CLOSED (the flair#953 lesson, Sherlock
+ * #3). Every tool shipped in `tools` must carry a `.contract`; a new /mcp tool
+ * without one fails the build.
+ *
+ * The fail-closed part is the point: if the registry cannot be enumerated — it
+ * is not a plain object (a broken import left it `undefined`), or it is empty —
+ * this returns `ok:false` with `examined:0`, NEVER a vacuous "0 tools examined,
+ * 0 missing, pass". A check that could not run must not render as passed. The
+ * conformance suite asserts both `ok` AND `examined > 0` so the vacuous path
+ * cannot masquerade as coverage; the fail-closed unit test exercises every
+ * branch.
+ */
+export function checkContractCompleteness(
+  tools: Record<string, ToolEntry> | Record<string, { contract?: unknown }> | undefined | null,
+): CompletenessResult {
+  if (!tools || typeof tools !== "object" || Array.isArray(tools)) {
+    return {
+      ok: false,
+      examined: 0,
+      missing: [],
+      reason: "TOOLS registry is not an enumerable object (unloadable import?) — refusing to pass vacuously",
+    };
+  }
+  const names = Object.keys(tools);
+  if (names.length === 0) {
+    return {
+      ok: false,
+      examined: 0,
+      missing: [],
+      reason: "TOOLS registry is empty — refusing to pass vacuously (a new tool must carry a conformance contract)",
+    };
+  }
+  const missing = names.filter((n) => {
+    const entry = (tools as Record<string, { contract?: unknown }>)[n];
+    return !entry || !entry.contract || typeof entry.contract !== "object";
+  });
+  return {
+    ok: missing.length === 0,
+    examined: names.length,
+    missing,
+    reason: missing.length
+      ? `${missing.length} tool(s) shipped with no conformance contract: ${missing.join(", ")}. `
+        + "Add a `contract` to each in resources/mcp-tools.ts (co-located with its def+impl)."
+      : undefined,
+  };
 }
 
 /**
@@ -612,6 +826,16 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: memorySearch,
+    contract: {
+      summary: "{ results: MemoryRecord[] } — semantic hits scoped to the caller's own + granted memories; each hit carries content, never the raw embedding.",
+      requiredFields: ["results"],
+      fieldTypes: { results: "array" },
+      invariants: {
+        selfDescribingEmpty: [{ path: "results", type: "array" }],
+        containerRules: [{ container: "results", requiredFields: ["id", "content"], forbiddenFields: INTERNAL_MEMORY_FIELDS }],
+        fullyResolved: true,
+      },
+    },
   },
   memory_store: {
     def: {
@@ -641,6 +865,14 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: memoryStore,
+    contract: {
+      summary: "Write echo { id, written:true, deduplicated } — the new id + confirmation. No internal embedding fields; round-trips via memory_get.",
+      requiredFields: ["id", "written"],
+      fieldTypes: { id: "string", written: "boolean", deduplicated: "boolean" },
+      forbiddenFields: INTERNAL_MEMORY_FIELDS,
+      invariants: { fullyResolved: true },
+      errorShape: { trigger: "an unrecognized visibility value (e.g. \"prvate\")", fields: ["error", "status"], mustNotLeak: INTERNAL_MEMORY_FIELDS },
+    },
   },
   memory_update: {
     def: {
@@ -660,6 +892,14 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: memoryUpdate,
+    contract: {
+      summary: "Write echo { id, written:true } for the in-place overwrite (or supersede). No internal embedding fields; the change round-trips via memory_get.",
+      requiredFields: ["id", "written"],
+      fieldTypes: { id: "string", written: "boolean" },
+      forbiddenFields: INTERNAL_MEMORY_FIELDS,
+      invariants: { fullyResolved: true },
+      errorShape: { trigger: "updating a non-existent id", fields: ["error", "status"] },
+    },
   },
   memory_get: {
     def: {
@@ -678,6 +918,14 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: memoryGet,
+    contract: {
+      summary: "The full memory record { id, agentId, content, durability, createdAt, ... } for the caller's own id — embedding + embeddingModel stripped by default.",
+      requiredFields: ["id", "agentId", "content", "createdAt"],
+      fieldTypes: { id: "string", agentId: "string", content: "string" },
+      forbiddenFields: INTERNAL_MEMORY_FIELDS,
+      invariants: { fullyResolved: true },
+      errorShape: { trigger: "get a non-existent / unowned id (makeByIdReadGate 404)", fields: ["error", "status"] },
+    },
   },
   memory_delete: {
     def: {
@@ -691,6 +939,11 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: memoryDelete,
+    contract: {
+      summary: "Deletes the caller's own memory (success echo is thin). The permanent-memory guard returns { error, status:403 } for a non-admin; the row round-trips as gone via memory_get.",
+      invariants: { fullyResolved: true },
+      errorShape: { trigger: "a non-admin deletes a permanent memory", fields: ["error", "status"] },
+    },
   },
   bootstrap: {
     def: {
@@ -719,6 +972,51 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: bootstrap,
+    contract: {
+      summary:
+        "Session context: { agentId, soul, memories, predicted, teammateFindings, events, sections, tokenEstimate, memoriesIncluded, ..., context, flairVersion }. "
+        + "Structured containers are canonical and always present; prose `context` is a pointer at the /mcp default (includeContext opt-in).",
+      requiredFields: [
+        "agentId", "soul", "memories", "predicted", "teammateFindings", "events",
+        "sections", "tokenEstimate", "memoriesIncluded", "memoriesAvailable",
+        "teammateFindingsIncluded", "context", "flairVersion",
+      ],
+      fieldTypes: {
+        agentId: "string", soul: "object", memories: "array", predicted: "array",
+        teammateFindings: "array", events: "array", sections: "object",
+        tokenEstimate: "number", memoriesIncluded: "number", memoriesAvailable: "number",
+        teammateFindingsIncluded: "number", context: "string", flairVersion: "string",
+      },
+      invariants: {
+        // count == delivered — the historical count/charge/deliver drift.
+        countEqualsDelivered: [
+          // memoriesIncluded spans BOTH own-memory containers (see the type doc).
+          { count: "memoriesIncluded", containers: ["memories", "predicted"] },     // #1199
+          { count: "teammateFindingsIncluded", containers: ["teammateFindings"] },  // #1199
+          { count: "sections.events", containers: ["events"] },                     // #1206
+        ],
+        // present + typed even when empty — never a bare {} / missing key (#1182).
+        selfDescribingEmpty: [
+          { path: "soul", type: "object" }, { path: "memories", type: "array" },
+          { path: "predicted", type: "array" }, { path: "teammateFindings", type: "array" },
+          { path: "events", type: "array" }, { path: "sections", type: "object" },
+        ],
+        // #1200 — dedup by the SEMANTIC content key (excludes id/createdAt, which
+        // vary across physical duplicate rows). See ToolInvariants.dedupSignature.
+        dedupSignature: { container: "events", signatureFields: ["kind", "summary", "detail", "targetIds"] },
+        // #1199 — tokenEstimate via the wrapper's own estimator over the delivered
+        // payload (minus the two fields added after it was measured).
+        tokenEstimate: { field: "tokenEstimate", excludeKeys: ["tokenEstimate", "flairVersion"] },
+        // #1199 — prose is a pointer at the default, not a second copy.
+        proseContextIsPointerAtDefault: { field: "context" },
+        // shape of the structured containers a connector reads; #1188 leak bites on memories.
+        containerRules: [
+          { container: "events", requiredFields: ["id", "kind", "summary", "createdAt"] },
+          { container: "memories", requiredFields: ["id", "content"], forbiddenFields: INTERNAL_MEMORY_FIELDS },
+        ],
+        fullyResolved: true, // #1182 — never a spread pending Promise collapsing to {flairVersion}.
+      },
+    },
   },
   soul_set: {
     def: {
@@ -734,6 +1032,10 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: soulSet,
+    contract: {
+      summary: "Writes a soul entry keyed `${agentId}:${key}`, attributed to the caller. Correctness is proven by the soul_get round-trip — this is the write flair#1181 broke on the connector path.",
+      invariants: { fullyResolved: true },
+    },
   },
   soul_get: {
     def: {
@@ -747,6 +1049,12 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: soulGet,
+    contract: {
+      summary: "The soul entry { id, agentId, key, value, createdAt } for the caller's own `${agentId}:${key}`.",
+      requiredFields: ["id", "agentId", "key", "value", "createdAt"],
+      fieldTypes: { id: "string", agentId: "string", key: "string", value: "string" },
+      invariants: { fullyResolved: true },
+    },
   },
   flair_workspace_set: {
     def: {
@@ -767,6 +1075,10 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: workspaceSet,
+    contract: {
+      summary: "Writes the caller's workspace state keyed `${agentId}:${ref}`, attributed to the caller (never the body). The echo is thin; persistence is verified in storage.",
+      invariants: { fullyResolved: true },
+    },
   },
   flair_orgevent: {
     def: {
@@ -786,6 +1098,10 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: orgEvent,
+    contract: {
+      summary: "Publishes an org event attributed to the caller (authorId from identity, never the body). The echo is thin; persistence is verified in storage.",
+      invariants: { fullyResolved: true },
+    },
   },
   attention: {
     def: {
@@ -805,6 +1121,15 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: attention,
+    contract: {
+      summary: "Grouped-by-source view { entity, windowDays, since, groups:{memory,relationship,workspaceState,presence,orgEvent}, counts } for entity E over N days.",
+      requiredFields: ["entity", "windowDays", "groups", "counts"],
+      fieldTypes: { entity: "string", windowDays: "number", groups: "object", counts: "object" },
+      invariants: {
+        selfDescribingEmpty: [{ path: "groups", type: "object" }, { path: "counts", type: "object" }],
+        fullyResolved: true,
+      },
+    },
   },
   record_usage: {
     def: {
@@ -823,6 +1148,12 @@ export const TOOLS: Record<string, ToolEntry> = {
       },
     },
     impl: recordUsage,
+    contract: {
+      summary: "Invariant acknowledgement { recorded:true } — byte-identical regardless of how many ids counted (no id enumeration, Sherlock).",
+      requiredFields: ["recorded"],
+      fieldTypes: { recorded: "boolean" },
+      invariants: { fullyResolved: true },
+    },
   },
 };
 
