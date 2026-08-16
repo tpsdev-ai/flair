@@ -69,13 +69,19 @@ const AGENT2 = `mcpconf-other-${sfx}`;
 // agent alone (targetIds), so a tight-budget bootstrap as AGENT_BUDGET makes the
 // events-budget fix load-bearing without disturbing AGENT's event assertions.
 const AGENT_BUDGET = `mcpconf-budget-${sfx}`;
-// flair#1207 count-coherence subject: exactly ONE own memory, aged out of the
-// recent window but subject-tagged AND task-matching, so it lands in BOTH
-// `predicted` and the task-relevant pool — the predicted→relevant double-admit
-// the fix prevents. available:1 must never be exceeded by included.
+// flair#1207 count-coherence subject: exactly ONE own memory, EMBEDDED (stored
+// through the real memory_store tool so it enters the HNSW candidate pool) and
+// LONG, bootstrapped at a tight budget where it overflows the recent 40%
+// sub-budget (→ truncated) but still fits the full remaining budget in the
+// task-relevant loop (→ included). That is the canonical 0.44.9 over-count: the
+// SAME memory truncated in one section and included in another. With the fix the
+// counters are unique-id sets (included:1, truncated:0); reverting it double-
+// counts (included:1 + truncated:1 = 2 > available:1).
 const AGENT_COUNT = `mcpconf-count-${sfx}`;
-const COUNT_SUBJECT = `coherencetopic${sfx}`;
-const COUNT_MEMORY = `saga ledger federation trust boundary decision ${sfx}`;
+const COUNT_MEMORY =
+  `saga ledger federation trust boundary decision ${sfx} — ` +
+  ("the recall budget accounting must charge and count every admitted record exactly once across sections, " +
+   "never double-counting a memory that was budget-skipped in one section and then admitted in another. ").repeat(30);
 const SOUL_ROLE = `MCP conformance test subject ${sfx}`;
 
 // A directly-seeded memory carrying KNOWN embedding + embeddingModel — the
@@ -273,19 +279,15 @@ beforeAll(async () => {
   });
 
   // ── flair#1207 count-coherence fixture ─────────────────────────────────────
-  // AGENT_COUNT owns EXACTLY ONE memory: aged 40 days (outside the recent
-  // window, so `recent` skips it), subject-tagged (so `predicted` picks it up),
-  // and content that a matching currentTask retrieves (so the task-relevant loop
-  // sees it too). With the fix it is admitted ONCE (included:1 <= available:1);
-  // reverting the fix re-admits it in `relevant` → included:2 > available:1.
+  // AGENT_COUNT owns EXACTLY ONE memory, stored through the real memory_store
+  // tool so it carries a genuine embedding (the ops-inserted rows above do NOT,
+  // and the bootstrap candidate pool is HNSW-only — an un-embedded memory never
+  // reaches the task-relevant loop, so the over-count path can't fire). The test
+  // bootstraps at a tight budget where this long memory overflows the recent 40%
+  // sub-budget (truncated) yet fits the full remaining budget in the task-relevant
+  // loop (included) — the same memory in two sections.
   await fleet("register", { id: AGENT_COUNT });
-  await seedInsert("Memory", {
-    id: `${AGENT_COUNT}-${randomUUID()}`, agentId: AGENT_COUNT,
-    content: COUNT_MEMORY, subject: COUNT_SUBJECT,
-    durability: "standard", visibility: "private",
-    createdAt: new Date(Date.now() - 40 * 24 * 3600_000).toISOString(),
-    validFrom: new Date(Date.now() - 40 * 24 * 3600_000).toISOString(),
-  });
+  await tool("memory_store", { content: COUNT_MEMORY, durability: "standard" }, { agentId: AGENT_COUNT });
 }, 300_000);
 
 afterAll(async () => {
@@ -536,22 +538,26 @@ describe("/mcp connector conformance — each tool honors its declared contract"
     expect(withDetail.tokenEstimate, "detail path still respects the (larger) budget").toBeLessThanOrEqual(Math.ceil(6000 * 1.25));
   }, 120_000);
 
-  test("bootstrap: count arithmetic stays coherent — a predicted+task-relevant own memory is admitted once (#1207 — countCoherence bites on revert)", async () => {
+  test("bootstrap: count arithmetic stays coherent — a memory truncated in one section and admitted in another is counted once (#1207 — countCoherence bites on revert)", async () => {
+    // Tight budget: the long memory overflows the recent 40% sub-budget (→ the
+    // recent loop truncates it) but fits the full remaining budget in the
+    // task-relevant loop (→ it's admitted there). Reverting the count fix counts
+    // it in BOTH denominators (included:1 + truncated:1 = 2 > available:1).
     const body = await tool(
       "bootstrap",
-      { currentTask: COUNT_MEMORY, subjects: [COUNT_SUBJECT], maxTokens: 8000 },
+      { currentTask: COUNT_MEMORY, maxTokens: 3000 },
       { agentId: AGENT_COUNT },
     );
     conform("bootstrap", body, C("bootstrap")); // countCoherence runs here
     // The single own memory exists and is available.
     expect(body.memoriesAvailable, "exactly one own memory available").toBe(1);
-    // It is admitted EXACTLY once across memories+predicted (never double-counted
-    // into both `predicted` and `relevant` — the #1207 over-count).
+    // It is delivered (admitted via the task-relevant loop after the recent skip).
     expect(body.memoriesIncluded, "the one memory is included exactly once").toBe(1);
     expect(body.memories.length + body.predicted.length, "delivered own containers hold exactly one copy").toBe(1);
+    // The load-bearing #1207 invariant: included and truncated are disjoint.
     expect(
       body.memoriesIncluded + body.memoriesTruncated,
-      "included + truncated must not exceed available (#1207)",
+      `included(${body.memoriesIncluded}) + truncated(${body.memoriesTruncated}) must not exceed available(${body.memoriesAvailable}) (#1207)`,
     ).toBeLessThanOrEqual(body.memoriesAvailable);
   }, 120_000);
 
