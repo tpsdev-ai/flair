@@ -18,6 +18,7 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import {
   resolveFlairInstance,
+  warmEmbeddingModel,
   createAgent,
   writeMemory,
   searchMemories,
@@ -43,10 +44,27 @@ let markerId: string;
 const RANDOM = `smoke-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const MARKER_CONTENT = `Smoke test marker ${RANDOM}`;
 
+// flair#1219: cold-start budget for warming the embedding model in beforeAll.
+// The model loads lazily on the first embed call and that load can exceed the
+// per-write 10s client timeout on a cold/loaded CI runner, so the warm-up must
+// be allowed to run well past both the default hook timeout and that 10s abort.
+const WARMUP_TIMEOUT_MS = 120_000;
+
 beforeAll(async () => {
   flair = await resolveFlairInstance();
   console.log(`[golden-path] Flair instance: ${flair.baseUrl}`);
-});
+
+  // flair#1219: warm the embedding model BEFORE any timed step. `/Health` 200
+  // does not imply the embedding model is loaded — it loads lazily on the first
+  // embed call. Paying that cold-start cost here (on a throwaway agent+memory)
+  // guarantees the measured Step-2 write is a warm write, never the one that
+  // absorbs the model load. Without this, Step 2 flaked with
+  // `TimeoutError: The operation timed out` at ~10s on cold CI runners.
+  const warm = await warmEmbeddingModel(flair);
+  console.log(
+    `[golden-path] Embedding model warm (${warm.elapsedMs}ms, ${warm.attempts} attempt(s))`,
+  );
+}, WARMUP_TIMEOUT_MS);
 
 afterAll(async () => {
   if (flair && agentId) {
