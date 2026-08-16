@@ -7,7 +7,11 @@
  *   3. Maintenance — delegate to /MemoryMaintenance (same code path `flair rem light` uses).
  *   4. Trust-tier filter on input memories — permanently deferred (see below).
  *   5. Distillation — call /ReflectMemories with execute:true, persist staged
- *      candidate ids to the audit row.
+ *      candidate ids to the audit row. TAG-AWARE (#1205b-1): enumerate the
+ *      active adk:<app>:<user> tags for the agentId and distill ONCE PER TAG
+ *      under scope:"tagged" (per-user isolation, no cross-user bleed); fall
+ *      back to the agentId-only scope:"recent" distill when there are no adk:
+ *      tags (ordinary single-tenant agents, unchanged).
  *   6. Instance-wide dedup-cluster stat — call /MemoryDedupStats (flair-
  *      quality Slice 1c). NOT part of FLAIR-NIGHTLY-REM's original per-agent
  *      § 4 list — added because a near-duplicate cluster count is inherently
@@ -56,6 +60,37 @@ import { createSnapshot } from "./snapshot.js";
 export const REM_PAUSE_FLAG = resolve(homedir(), ".flair", "rem.paused");
 export const REM_NIGHTLY_LOG = resolve(homedir(), ".flair", "logs", "rem-nightly.jsonl");
 
+// ─── ADK per-tag distillation (#1205b-1) ─────────────────────────────────────
+// adk-flair collapses (app_name, user_id) → ONE Flair agentId, distinguishing
+// users ONLY by a per-user tag `adk:<app>:<user>` (see the adk-flair
+// memory_service compound-tag). An agentId-wide distill (scope:"recent")
+// therefore mixes every user's sessions into shared claims — the cross-user
+// bleed #1205 fixes. The tag-aware cycle instead distills once per active
+// adk: tag under scope:"tagged", so each user's claims come only from that
+// user's sessions.
+export const ADK_TAG_PREFIX = "adk:";
+
+/**
+ * Recency window (ms) used to decide which adk: tags are ACTIVE — a tag is
+ * enumerated (and distilled) only if it has memory records created within this
+ * window. This is BOTH the bound that keeps enumeration off a full-table scan
+ * (the query filters on the indexed `createdAt`) AND the threshold-gate that
+ * skips idle users for free (Kern 1a). 48h (not 24h) so a single missed
+ * nightly cycle doesn't skip a user who was active only in the gap; distilling
+ * a tag pulls ALL its memories regardless, so a skipped cycle only delays, it
+ * never loses content.
+ */
+export const DEFAULT_DISTILL_LOOKBACK_MS = 48 * 3600_000;
+
+/**
+ * Per-cycle ceiling on tag-driven /ReflectMemories calls (one LLM call each),
+ * so a burst of active ADK users can't starve the nightly window for other
+ * agents (Kern 1b). Sequential, not concurrent — matches the runner's existing
+ * single-threaded shape. If more tags are active than this, the overflow is
+ * recorded in `errors` and picked up on subsequent cycles (they stay active).
+ */
+export const DEFAULT_MAX_TAGS_PER_CYCLE = 200;
+
 export type ApiCall = (method: string, path: string, body?: unknown) => Promise<any>;
 
 export interface RunnerOpts {
@@ -74,6 +109,17 @@ export interface RunnerOpts {
   dryRun?: boolean;
   /** Override "now" (testing). */
   nowOverride?: Date;
+  /**
+   * #1205b-1: recency cutoff for adk: tag enumeration — only tags with memory
+   * records created at/after this instant are treated as ACTIVE and distilled.
+   * Defaults to now − DEFAULT_DISTILL_LOOKBACK_MS. Override in tests.
+   */
+  distillSince?: Date;
+  /**
+   * #1205b-1: per-cycle cap on tag-driven distillation calls (default
+   * DEFAULT_MAX_TAGS_PER_CYCLE). Override in tests.
+   */
+  maxTagsPerCycle?: number;
 }
 
 export type RunnerStatus = "paused" | "completed" | "dry-run" | "failed";
@@ -214,6 +260,55 @@ async function fetchPendingCandidateCount(api: ApiCall, agentId: string): Promis
 }
 
 /**
+ * Derive the DISTINCT active `adk:<app>:<user>` tags from an agent's memory
+ * set (#1205b-1). "Active" = the memory was created at/after `sinceDate`.
+ * Returns the distinct set, sorted for determinism.
+ *
+ * Operates over the memories the runner ALREADY fetched for the snapshot
+ * (step 2's `GET /Memory?agentId=<id>`), so enumeration adds NO extra query
+ * and NO additional table scan on top of what the cycle already does — a
+ * separate bounded distinct-tag DB query is NOT available here: the Memory
+ * resource exposes no REST `search_by_conditions` handler (that verb 405s —
+ * only MemoryCandidate overrides it), and Harper's ops-API `search_by_
+ * conditions` needs admin creds the agent-authed nightly runner doesn't carry.
+ * Reusing the already-loaded set is cheaper than either (no second round-trip)
+ * and sidesteps that seam entirely. See the module header + issue #1205.
+ *
+ * The recency cutoff is applied in-memory here as the threshold-gate (Kern 1a):
+ * a tag with no records at/after `sinceDate` is idle and is skipped for free.
+ * Distilling a tag later still pulls ALL its memories (scope:"tagged" ignores
+ * recency), so a skipped cycle only delays, never loses.
+ *
+ * OWNER-ONLY (Sherlock's user-enumeration-oracle flag): tags are collected
+ * ONLY from records whose `agentId` equals `agentId` (the runner's own id).
+ * This is load-bearing, NOT belt-and-suspenders: the snapshot fetch
+ * (`GET /Memory?agentId=<id>`) resolves through Memory's "open-within-org"
+ * read scope and returns org-wide rows — the `?agentId=` query param is NOT an
+ * owner filter (verified empirically against Harper, #1205b-1). Without this
+ * per-record agentId check the runner would enumerate (and try to distill)
+ * OTHER agents' adk tags — a cross-agent user-enumeration oracle. Filtering
+ * here confines enumeration to the runner's own users, and the reduction is
+ * pure in-process (no endpoint an attacker could point at another id).
+ */
+export function deriveActiveAdkTags(memories: any[], sinceDate: Date, agentId: string): string[] {
+  const tags = new Set<string>();
+  for (const m of memories) {
+    if (!m || typeof m !== "object") continue;
+    // Owner scope: only this agent's own records (the fetch is org-wide).
+    if (m.agentId !== agentId) continue;
+    const createdAt = m.createdAt;
+    // Recency / threshold gate: skip idle tags (no record since the cutoff).
+    if (!createdAt || new Date(createdAt) < sinceDate) continue;
+    const mt = m.tags;
+    if (!Array.isArray(mt)) continue;
+    for (const t of mt) {
+      if (typeof t === "string" && t.startsWith(ADK_TAG_PREFIX)) tags.add(t);
+    }
+  }
+  return [...tags].sort();
+}
+
+/**
  * Runs one nightly cycle for the given agent. See module header for steps.
  * Pure orchestration; all I/O goes through injected dependencies.
  */
@@ -250,11 +345,15 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   let memoryCount = 0;
   let soulCount = 0;
   let pendingCandidates = 0;
+  // #1205b-1: the memories fetched here (for the snapshot) are reused by the
+  // step-5 tag enumeration — no second fetch. Hoisted so step 5 can read them.
+  let fetchedMemories: any[] = [];
 
   try {
     // Fetch agent data
     const memoriesRaw = await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`);
     const memories = asArray(memoriesRaw);
+    fetchedMemories = memories;
     memoryCount = memories.length;
 
     const soulRaw = await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`);
@@ -339,33 +438,91 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   // the same way dryRun skips the snapshot write.
   // When the call IS attempted (success or failure), the audit row's `slice`
   // flips to "2" — "2-maintenance" is reserved for the dry-run skip case.
+  //
+  // #1205b-1 — TAG-AWARE distillation. First enumerate the active
+  // adk:<app>:<user> tags for this agentId. If any exist, this is (or includes)
+  // an ADK agentId whose users share one agentId and are separated ONLY by
+  // tag: distill ONCE PER TAG under scope:"tagged" so each user's candidates
+  // are distilled from that user's sessions alone (no cross-user bleed). If
+  // NONE exist, this is an ordinary single-tenant agent — fall back to the
+  // unchanged agentId-only scope:"recent" distill so non-ADK agents behave
+  // exactly as before. The single-node-runs-the-timer property is unchanged:
+  // this all runs inside the one cycle on the one node.
   let candidates: string[] | undefined;
+
+  const collectStagedIds = (obj: Record<string, unknown>): string[] =>
+    asArray(obj.candidates)
+      .map((c) => (c && typeof c === "object" ? (c as Record<string, unknown>).id : c))
+      .filter((id): id is string => typeof id === "string");
 
   if (!opts.dryRun) {
     sliceLabel = "2";
-    try {
-      const reflectRaw = await opts.apiCall("POST", "/ReflectMemories", {
-        agentId: opts.agentId,
-        execute: true,
-      });
-      const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
-      if (obj.error) {
-        // Defensive: a 200 response shouldn't carry { error }, since
-        // MemoryReflect signals failure via HTTP status (503/502) — apiCall
-        // implementations throw for those. Handled the same way regardless.
-        errors.push(`distillation: ${describeApiError(obj.error)}`);
-      } else {
-        const staged = asArray(obj.candidates);
-        candidates = staged
-          .map((c) => (c && typeof c === "object" ? (c as Record<string, unknown>).id : c))
-          .filter((id): id is string => typeof id === "string");
+
+    const distillSince = opts.distillSince ?? new Date(startedMs - DEFAULT_DISTILL_LOOKBACK_MS);
+    const maxTags = opts.maxTagsPerCycle ?? DEFAULT_MAX_TAGS_PER_CYCLE;
+    // Derive active adk: tags from the memories already fetched in step 2 — no
+    // extra query/scan. See deriveActiveAdkTags for why a separate bounded DB
+    // query isn't available (Memory has no REST search handler; ops-API needs
+    // admin the runner lacks).
+    const activeAdkTags = deriveActiveAdkTags(fetchedMemories, distillSince, opts.agentId);
+
+    if (activeAdkTags.length > 0) {
+      // Per-tag distillation path (ADK). One scope:"tagged" call per active
+      // tag; aggregate every batch's staged ids into the single `candidates`
+      // list. A per-tag failure is recorded and does NOT abort the remaining
+      // tags (or the cycle) — the same non-fatal discipline the agentId-only
+      // path uses below.
+      const staged: string[] = [];
+      const tagsToRun = activeAdkTags.slice(0, maxTags);
+      if (activeAdkTags.length > maxTags) {
+        errors.push(
+          `distillation: ${activeAdkTags.length} active adk tags exceed the per-cycle cap (${maxTags}); ${activeAdkTags.length - maxTags} deferred to a later cycle`,
+        );
       }
-    } catch (err: any) {
-      // Distillation failure is recorded, not fatal — maintenance already
-      // succeeded and the cycle's guaranteed steps are done (spec § 3B item
-      // 3). Zero partial candidates is guaranteed server-side (all-or-
-      // nothing staging in /ReflectMemories).
-      errors.push(`distillation: ${describeApiError(err?.message ?? err)}`);
+      for (const tag of tagsToRun) {
+        try {
+          const reflectRaw = await opts.apiCall("POST", "/ReflectMemories", {
+            agentId: opts.agentId,
+            execute: true,
+            scope: "tagged",
+            tag,
+          });
+          const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
+          if (obj.error) {
+            errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
+          } else {
+            staged.push(...collectStagedIds(obj));
+          }
+        } catch (err: any) {
+          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
+        }
+      }
+      // `candidates` is defined (even if empty) whenever distillation was
+      // ATTEMPTED this cycle — same contract as the agentId-only path.
+      candidates = staged;
+    } else {
+      // AgentId-only path (non-ADK, unchanged pre-#1205b behavior).
+      try {
+        const reflectRaw = await opts.apiCall("POST", "/ReflectMemories", {
+          agentId: opts.agentId,
+          execute: true,
+        });
+        const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
+        if (obj.error) {
+          // Defensive: a 200 response shouldn't carry { error }, since
+          // MemoryReflect signals failure via HTTP status (503/502) — apiCall
+          // implementations throw for those. Handled the same way regardless.
+          errors.push(`distillation: ${describeApiError(obj.error)}`);
+        } else {
+          candidates = collectStagedIds(obj);
+        }
+      } catch (err: any) {
+        // Distillation failure is recorded, not fatal — maintenance already
+        // succeeded and the cycle's guaranteed steps are done (spec § 3B item
+        // 3). Zero partial candidates is guaranteed server-side (all-or-
+        // nothing staging in /ReflectMemories).
+        errors.push(`distillation: ${describeApiError(err?.message ?? err)}`);
+      }
     }
   }
 

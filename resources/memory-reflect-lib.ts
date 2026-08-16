@@ -391,3 +391,86 @@ export function dedupeCandidates(candidates: RawCandidate[], existingPendingClai
   const existingNormalized = new Set(existingPendingClaims.map(normalizeClaim));
   return candidates.filter((c) => !existingNormalized.has(normalizeClaim(c.claim)));
 }
+
+// ─── Scope selection (the cross-user-bleed boundary — #1205b-1) ──────────────
+//
+// The per-user isolation that prevents cross-user bleed lives HERE, not in the
+// LLM: /ReflectMemories only ever hands the model the memories this predicate
+// admits, and generateCandidates() then enforces every candidate's
+// sourceMemoryIds ⊆ the gathered set (parseAndValidateCandidates,
+// "source_id_out_of_set"). So the gathered set is the *ceiling* on any
+// candidate's sources — if this predicate admits only ONE adk:<app>:<user>
+// tag's memories, a candidate physically cannot cite another user's memory.
+//
+// scope:"tagged" is the isolation mode the tag-aware nightly runner
+// (src/rem/runner.ts) drives once per active adk:<app>:<user> tag. scope:
+// "recent"/"all" are the pre-#1205b agentId-wide modes — correct for a
+// single-tenant agent, but for an ADK agentId (which collapses every
+// (app,user) into one agentId, distinguishing users only by tag) they gather
+// EVERY user's memories together, which is exactly the bleed #1205 fixes.
+//
+// Extracted as a pure predicate so the isolation is unit-testable without
+// Harper (the resource's gather loop streams from databases.flair.Memory).
+// Archived/permanent filtering stays in the resource — those are eligibility
+// rules, not scope selection.
+export function memoryMatchesReflectScope(
+  record: { tags?: string[] | null; createdAt?: string | null },
+  params: { scope: string; tag?: string; sinceDate: Date },
+): boolean {
+  const { scope, tag, sinceDate } = params;
+  if (scope === "tagged") {
+    // No tag ⇒ admit nothing. A tagged reflection with no tag must gather an
+    // EMPTY set (fail-closed), never fall through to admitting everything —
+    // that would silently become an agentId-wide distill (cross-user bleed).
+    if (!tag) return false;
+    return (record.tags ?? []).includes(tag);
+  }
+  if (scope === "recent") {
+    if (!record.createdAt) return false;
+    return new Date(record.createdAt) >= sinceDate;
+  }
+  // scope === "all" (or any unknown scope) admits everything eligible.
+  return true;
+}
+
+// ─── Staged candidate row (stamps the authoritative scope tag — #1205b-1) ────
+//
+// Builds the MemoryCandidate row /ReflectMemories persists. The load-bearing
+// addition over an inline object literal is `scopeTag`: when the distillation
+// ran under scope:"tagged" with a known tag, that tag is AUTHORITATIVE context
+// (the engine distilled exactly that one tag), so it is stamped onto the row.
+// Downstream promotion (src/cli.ts derivePromotedTags' stamped-tag override)
+// consumes this stamped tag directly instead of re-reading the source
+// memories — which closes the #1205a seam: an ADK-sourced candidate whose
+// sources are all later unreadable still carries its per-user scope tag and
+// promotes correctly (never tagless into the shared agentId namespace).
+//
+// Non-tagged distillations (scope:"recent"/"all") leave scopeTag ABSENT
+// (undefined) — the field is nullable/additive and promotion falls back to the
+// source-re-read classification for those, unchanged.
+export function buildStagedCandidateRow(params: {
+  id: string;
+  agentId: string;
+  claim: string;
+  sourceMemoryIds: string[];
+  rationalePrompt: string;
+  generatedBy: string;
+  generatedAt: string;
+  scope: string;
+  tag?: string;
+}): Record<string, unknown> {
+  const row: Record<string, unknown> = {
+    id: params.id,
+    agentId: params.agentId,
+    claim: params.claim,
+    sourceMemoryIds: params.sourceMemoryIds,
+    rationalePrompt: params.rationalePrompt,
+    generatedBy: params.generatedBy,
+    generatedAt: params.generatedAt,
+    status: "pending",
+  };
+  if (params.scope === "tagged" && typeof params.tag === "string" && params.tag.length > 0) {
+    row.scopeTag = params.tag;
+  }
+  return row;
+}

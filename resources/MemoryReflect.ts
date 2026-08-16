@@ -47,6 +47,8 @@ import {
   resolveReflectActor,
   generateCandidates,
   dedupeCandidates,
+  memoryMatchesReflectScope,
+  buildStagedCandidateRow,
   type ReflectMemoryInput,
 } from "./memory-reflect-lib.js";
 
@@ -95,12 +97,11 @@ export class ReflectMemories extends Resource {
       if (record.archived) continue;
       if (record.durability === "permanent") continue; // permanent memories don't need reflection
 
-      if (scope === "tagged") {
-        if (!tag || !(record.tags ?? []).includes(tag)) continue;
-      } else if (scope === "recent") {
-        if (!record.createdAt || new Date(record.createdAt) < sinceDate) continue;
-      }
-      // scope="all" passes everything
+      // Scope selection — the cross-user-bleed boundary (#1205b-1). See
+      // memoryMatchesReflectScope's doc: scope:"tagged" admits ONLY the one
+      // adk:<app>:<user> tag's memories, so a candidate distilled here can
+      // never cite another user's memory.
+      if (!memoryMatchesReflectScope(record, { scope, tag, sinceDate })) continue;
 
       const { embedding, ...rest } = record;
       memories.push(rest);
@@ -183,7 +184,11 @@ export class ReflectMemories extends Resource {
     const generatedAt = new Date().toISOString();
     const staged: any[] = [];
     for (const c of toStage) {
-      const row = {
+      // #1205b-1: buildStagedCandidateRow stamps `scopeTag` when this run was
+      // scope:"tagged" — the authoritative per-user tag promotion consumes
+      // directly (closing the #1205a source-re-read seam). Non-tagged runs
+      // leave scopeTag absent, unchanged.
+      const row = buildStagedCandidateRow({
         id: `cand_${randomBytes(8).toString("hex")}`,
         agentId,
         claim: c.claim,
@@ -191,8 +196,9 @@ export class ReflectMemories extends Resource {
         rationalePrompt: executePrompt,
         generatedBy: resolvedModel,
         generatedAt,
-        status: "pending",
-      };
+        scope,
+        tag,
+      });
       await (databases as any).flair.MemoryCandidate.put(row);
       staged.push(row);
     }
