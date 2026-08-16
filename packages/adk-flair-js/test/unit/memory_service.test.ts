@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
 import { FlairMemoryService } from "../../src/memory_service.js";
-import { compoundTag, sanitizeTagSegment } from "../../src/tag.js";
+import { compoundTag, sanitizeTagSegment, desanitizeTagSegment } from "../../src/tag.js";
 import { loadEd25519Key, signRequest, expandHome } from "../../src/signing.js";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -75,12 +75,44 @@ describe("tag helpers", () => {
   });
 
   it("sanitizes colons in segments", () => {
-    expect(sanitizeTagSegment("org:admin")).toBe("org_admin");
-    expect(compoundTag("app:name", "user:id")).toBe("adk:app_name:user_id");
+    // Colons are percent-encoded (%3A) so the compound-tag delimiter ':'
+    // remains the only literal colon in the tag.
+    expect(sanitizeTagSegment("org:admin")).toBe("org%3Aadmin");
+    expect(compoundTag("app:name", "user:id")).toBe("adk:app%3Aname:user%3Aid");
   });
 
   it("handles empty segments", () => {
     expect(compoundTag("app", "")).toBe("adk:app:");
+  });
+
+  it("does not collide ':' and '_' (regression #1205, Sherlock)", () => {
+    // The old ':' -> '_' scheme mapped 'alice:admin' and 'alice_admin' to the
+    // SAME tag. They must now differ — the compound tag is the per-user
+    // access-control boundary. (Mirrors the Python suite.)
+    expect(sanitizeTagSegment("alice:admin")).not.toBe(sanitizeTagSegment("alice_admin"));
+    expect(compoundTag("app", "alice:admin")).not.toBe(compoundTag("app", "alice_admin"));
+    expect(sanitizeTagSegment("alice:admin")).toBe("alice%3Aadmin");
+    expect(sanitizeTagSegment("alice_admin")).toBe("alice%5Fadmin");
+  });
+
+  it("encoding is injective, incl. the literal-escape trap", () => {
+    // 'alice%3Aadmin' (literal) must not collide with 'alice:admin' (encoded).
+    const tricky = [
+      "alice:admin", "alice_admin", "alice%3Aadmin", "alice%5Fadmin",
+      "alice%admin", "alice", "a:b_c", "a_b:c", "%25", ":", "_", "%",
+    ];
+    const encoded = tricky.map(sanitizeTagSegment);
+    expect(new Set(encoded).size).toBe(new Set(tricky).size);
+  });
+
+  it("round-trips through desanitize for every reserved-char combination", () => {
+    const inputs = [
+      "", "normal", "alice:admin", "alice_admin", "a:b_c:d",
+      "%", "%25", "%3A", "%5F", "%253A", "::__%%", "user@host:1_2",
+    ];
+    for (const x of inputs) {
+      expect(desanitizeTagSegment(sanitizeTagSegment(x))).toBe(x);
+    }
   });
 });
 
@@ -433,6 +465,37 @@ describe("searchMemory", () => {
     expect(texts).toContain("alice fact");
     expect(texts).toContain("alice fact 2");
     expect(texts).not.toContain("bob fact");
+  });
+
+  it("re-verification matches the escaped compound tag on read", async () => {
+    // A userId that requires escaping still matches on read: the encoded
+    // compound tag written on ingest is the one re-verified on search, and a
+    // neighbour that COLLIDED under the old scheme ('alice_admin') is NOT
+    // accepted for userId='alice:admin'. (Mirrors the Python suite.)
+    const wanted = compoundTag("my-app", "alice:admin");     // adk:my-app:alice%3Aadmin
+    const neighbour = compoundTag("my-app", "alice_admin");  // adk:my-app:alice%5Fadmin
+    expect(wanted).not.toBe(neighbour);
+
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          results: [
+            { content: "mine", tags: [wanted] },
+            { content: "neighbour", tags: [neighbour] },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+
+    const result = await service.searchMemory({
+      appName: "my-app",
+      userId: "alice:admin",
+      query: "fact",
+    });
+
+    const texts = result.memories.map((m) => (m.content?.parts?.[0] as { text?: string })?.text);
+    expect(texts).toEqual(["mine"]);
   });
 
   it("returns empty on HTTP error", async () => {

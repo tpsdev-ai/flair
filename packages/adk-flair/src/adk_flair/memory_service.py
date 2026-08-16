@@ -53,8 +53,37 @@ _TAG_PREFIX = "adk"
 
 
 def _sanitize_tag_segment(value: str) -> str:
-    """Replace colons in a tag segment so the compound tag delimiter is unambiguous."""
-    return value.replace(":", "_")
+    """Percent-encode the reserved characters in a tag segment so distinct
+    inputs never collide and the compound-tag delimiter ':' stays unambiguous.
+
+    The old scheme replaced ':' -> '_', which COLLIDED: ``user_id="alice:admin"``
+    and ``user_id="alice_admin"`` both sanitized to ``alice_admin`` — one
+    tag for two distinct identities. Once the compound tag is the per-user
+    access-control boundary (ADK session distillation, #1205), that collision
+    is a cross-user contamination bug.
+
+    This encoding is reversible and collision-free. ``%`` is escaped FIRST so
+    it can introduce escapes, then ``:`` (the delimiter) and ``_`` (the old
+    escape char). Because every escape starts with an already-escaped ``%``,
+    no input can forge another input's encoding — see _desanitize_tag_segment
+    for the exact inverse.
+    """
+    return (
+        value.replace("%", "%25")
+        .replace(":", "%3A")
+        .replace("_", "%5F")
+    )
+
+
+def _desanitize_tag_segment(value: str) -> str:
+    """Inverse of _sanitize_tag_segment. ``%25`` is decoded LAST so a literal
+    ``%3A`` in the original input (which encoded to ``%253A``) is not mistaken
+    for an encoded ':'. Round-trips exactly: desanitize(sanitize(x)) == x."""
+    return (
+        value.replace("%3A", ":")
+        .replace("%5F", "_")
+        .replace("%25", "%")
+    )
 
 
 def _compound_tag(app_name: str, user_id: str) -> str:
