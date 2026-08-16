@@ -5,5 +5,5 @@
  */
 
 export { FlairMemoryService } from "./memory_service.js";
-export { compoundTag, sanitizeTagSegment } from "./tag.js";
+export { compoundTag, sanitizeTagSegment, desanitizeTagSegment } from "./tag.js";
 export { loadEd25519Key, signRequest } from "./signing.js";
