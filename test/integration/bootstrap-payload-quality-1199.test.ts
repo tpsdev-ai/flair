@@ -36,6 +36,9 @@ let appDir: string;
 const sfx = Date.now().toString(36);
 const AGENT = `boot1199-${sfx}`;
 const TEAMMATE = `boot1199-mate-${sfx}`;
+// A dedicated agent for test (b)'s permanent-memory FLOOD, so it never pollutes
+// AGENT's store for the later events/trust tests (see (b) for the full rationale).
+const BULK_AGENT = `boot1199-bulk-${sfx}`;
 const SOUL_ROLE = `Payload-quality test subject ${sfx}`;
 
 // Distinctive markers so an assertion can locate a specific body unambiguously.
@@ -62,9 +65,9 @@ async function fleet(op: string, body: Record<string, unknown> = {}): Promise<an
   return JSON.parse(text);
 }
 
-/** Call the shipped /mcp bootstrap wrapper as AGENT. */
-async function bootstrap(args: Record<string, unknown> = {}): Promise<any> {
-  const res = await fleet("mcpTool", { agentId: AGENT, tool: "bootstrap", args, isAdmin: false });
+/** Call the shipped /mcp bootstrap wrapper (as AGENT by default). */
+async function bootstrap(args: Record<string, unknown> = {}, agentId: string = AGENT): Promise<any> {
+  const res = await fleet("mcpTool", { agentId, tool: "bootstrap", args, isAdmin: false });
   expect(res.ok, `bootstrap failed: ${JSON.stringify(res).slice(0, 500)}`).toBe(true);
   return res.value;
 }
@@ -182,9 +185,17 @@ describe("flair#1199/#1200/#1201 — bootstrap payload quality", () => {
     // Seed enough permanent content to overflow the cap even at the RESTORED
     // (0.44.6) selection capacity — so the cap demonstrably engages after the
     // #1207 budget restore (60 records × ~90 prose tokens ≫ the 3000 budget).
+    // Owned by a DEDICATED agent (BULK_AGENT), not AGENT: the greedy permanent
+    // section fills the whole budget with this flood, and since 0.44.11 charges
+    // the /mcp path its STRUCTURED shipped cost (heavier than the prose line), a
+    // 60-permanent flood in AGENT's store would starve the events/trust sections
+    // the LATER (d')/(e) tests read (they bootstrap AGENT). Scoping it here keeps
+    // AGENT's store clean for those tests — the same isolation discipline the
+    // teammate-budget fixture uses for its non-private findings.
+    await fleet("register", { id: BULK_AGENT });
     for (let i = 0; i < 60; i++) {
       await seedInsert("Memory", {
-        id: `${AGENT}-bulk-${i}-${randomUUID()}`, agentId: AGENT,
+        id: `${BULK_AGENT}-bulk-${i}-${randomUUID()}`, agentId: BULK_AGENT,
         content: `bulk permanent memory ${i} ${sfx} ` + "lorem ipsum dolor sit amet ".repeat(12),
         durability: "permanent", visibility: "private", createdAt: nowIso(), updatedAt: nowIso(),
         validFrom: nowIso(),
@@ -192,7 +203,7 @@ describe("flair#1199/#1200/#1201 — bootstrap payload quality", () => {
     }
 
     const maxTokens = 3000;
-    const body = await bootstrap({ maxTokens });
+    const body = await bootstrap({ maxTokens }, BULK_AGENT);
 
     // Honesty: tokenEstimate equals estimateTokens over the exact serialized body
     // the caller received (minus the wrapper-appended flairVersion + the
