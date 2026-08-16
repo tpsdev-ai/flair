@@ -13960,7 +13960,14 @@ program
 // a real user query, so a high score means "recall is functioning", not
 // "recall is optimal". Its job is to catch recall CRATERING (embeddings
 // down, index busted) — the score collapsing toward 0 is the signal, not
-// fine-grained precision grading. Requires an actual agent identity to
+// fine-grained precision grading. NOTE (#1216): this cue-from-the-memory
+// design is self-polluting as a recall-QUALITY metric — relevance is
+// query/corpus overlap by construction, so near-duplicate density reads as a
+// recall collapse (flair#967 / #857 / #996). It is deliberately NOT the
+// recall-quality number; that authority is the deterministic, fixed-label,
+// CI-gated eval at test/bench/recall-eval (recall@k / nDCG@10 / MRR). This
+// probe stays scoped to live-health cratering only. Requires an actual
+// agent identity to
 // query AS (semantic search is agent-scoped) — no identity, fewer than the
 // sample-size memories to sample, or a search error all degrade to `null` +
 // a `gaps` entry, same graceful-degradation contract as every metric here —
