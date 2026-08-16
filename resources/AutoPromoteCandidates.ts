@@ -116,10 +116,22 @@ export class AutoPromoteCandidates extends Resource {
     const skipped: SkipRecord[] = [];
     let considered = 0;
 
-    for await (const c of (databases as any).flair.MemoryCandidate.search({})) {
+    // Bounded enumeration (Sherlock non-blocking + Kern's cost ceiling): filter
+    // to THIS agent's PENDING candidates in the DB query so a large backlog of
+    // other-status / other-agent rows is never scanned each cycle. The JS
+    // agentId/status re-checks below stay as FAIL-CLOSED defense-in-depth — the
+    // owner-scope guarantee does not rely on the query alone.
+    const candidateQuery = {
+      operator: "and",
+      conditions: [
+        { attribute: "agentId", comparator: "equals", value: agentId },
+        { attribute: "status", comparator: "equals", value: "pending" },
+      ],
+    };
+    for await (const c of (databases as any).flair.MemoryCandidate.search(candidateQuery)) {
       if (!c || typeof c !== "object") continue;
-      if (c.agentId !== agentId) continue;   // owner scope (no cross-agent)
-      if (c.status !== "pending") continue;   // perf pre-skip (not the gate)
+      if (c.agentId !== agentId) continue;   // owner scope (no cross-agent) — defense-in-depth
+      if (c.status !== "pending") continue;   // defense-in-depth
       considered++;
 
       const decision = decideAutoPromote(c);
@@ -135,6 +147,20 @@ export class AutoPromoteCandidates extends Resource {
         agentId,
         content: c.claim,
         durability: "persistent",
+        // ── visibility: PRIVATE, explicit (Sherlock cross-agent leak fix) ──────
+        // MUST be set. Memory.put() defaults an unset visibility from durability
+        // (Memory.ts) and "persistent" defaults to "shared" — and "shared" is
+        // ORG-OPEN (memory-read-scope.ts): readable by EVERY verified agent on
+        // the instance. The source episodes are the user's PRIVATE session data
+        // (durability:"standard" → default private), and the per-user boundary
+        // is adk-flair's CLIENT-SIDE tag re-verification, which OTHER agents do
+        // NOT run. So a shared auto-promoted claim would leak a user's distilled
+        // private data to every agent on the box — unattended. "private" is
+        // owner-only, so the claim is reachable ONLY through the app agent's own
+        // tag-filtered search (which re-verifies the tag) and is invisible to
+        // every other agent. This keeps the blast radius inside the one agentId,
+        // which is the entire #1205 safety argument.
+        visibility: "private",
         // scopeTag FIRST — the per-user access-control boundary (Req 2).
         tags: buildAutoPromotedTags(c.id, decision.scopeTag),
         derivedFrom: Array.isArray(c.sourceMemoryIds) ? c.sourceMemoryIds : [],

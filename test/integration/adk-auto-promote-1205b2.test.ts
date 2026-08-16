@@ -203,6 +203,26 @@ describe("ADK auto-promote — unattended own-memory promotion (#1205b-2)", () =
     expect(bobView).not.toContain(CLAIM_ALICE);
   }, 30_000);
 
+  test("Req 2 — CROSS-AGENT ISOLATION: a DIFFERENT agent cannot read any auto-promoted claim (private, owner-only)", async () => {
+    // The within-agent tag isolation above (alice vs bob) is only enforced by
+    // adk-flair's CLIENT-SIDE tag re-verification — which a DIFFERENT agent does
+    // not run. So the promoted claim MUST also be invisible at Flair's own read
+    // scope: it is written visibility:"private" (owner-only), not "shared"
+    // (org-open, the durability default for "persistent"). otherAgent reads the
+    // app agent's memories through normal read scope — (agentId==reader) OR
+    // (visibility!='private') — and must see NONE of the promoted claims.
+    //
+    // This is the assertion that would have caught the leak: otherAgent already
+    // gets 403 trying to SWEEP (below), but a shared write would still be READ-
+    // able here. Mutation-check: set the memRow visibility to "shared" (or drop
+    // the field so it defaults to shared) → otherAgent sees the claims → FAIL.
+    const raw = await authJSON(harper, otherAgent, "GET", `/Memory?agentId=${encodeURIComponent(appAgent.id)}`);
+    const visible = Array.isArray(raw) ? raw : (raw?.results ?? raw?.items ?? []);
+    const contents = visible.map((m: any) => m.content);
+    expect(contents).not.toContain(CLAIM_ALICE);
+    expect(contents).not.toContain(CLAIM_BOB);
+  }, 30_000);
+
   test("Req 2 — FAIL-CLOSED: absent/blank scopeTag candidates are NOT promoted and stay pending", async () => {
     // No Memory carries the tagless/empty-tag claims.
     const all = await ownMemories(harper, appAgent);
