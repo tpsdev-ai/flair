@@ -464,6 +464,12 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
   // flair#744 slice 2 — opt-in task-relevance abstention verdict. Forwarded
   // ONLY when requested so a plain bootstrap delegates a byte-identical body.
   if (args?.abstain === true) body.abstain = true;
+  // flair#1199 — org-event knobs. `includeEventDetail` opts the verbose per-event
+  // `detail` JSON back in (default OFF: a connector reads lean events); `maxEvents`
+  // overrides the default cap. Both forwarded ONLY when set, so a plain bootstrap
+  // delegates a byte-identical body.
+  if (args?.includeEventDetail === true) body.includeEventDetail = true;
+  if (args?.maxEvents !== undefined) body.maxEvents = args.maxEvents;
   // flair#831 — attach the running Flair version to the RESPONSE (not the
   // delegated request body) so the calling agent learns the server version
   // on its very first call.
@@ -645,6 +651,33 @@ export interface ToolInvariants {
    * wrapper-injected flairVersion).
    */
   tokenEstimate?: { field: string; excludeKeys: string[] };
+  /**
+   * The reported serialized-payload estimate must not blow the requested budget:
+   * `result[estimate] <= result[budget] * (1 + tolerance)` (flair#1199 — the
+   * events blowout: a maxTokens=4000 request serialized at 6286 because the
+   * org-events array was assembled but NEVER charged against the budget). Both
+   * fields are read off the RESULT (bootstrap echoes `maxTokens`), so the
+   * invariant is self-contained. `tolerance` absorbs the FIXED structural JSON
+   * scaffolding (container keys/braces, counters, the sections map) and the
+   * per-item gap between the prose-line cost the memory sections charge and the
+   * larger structured object they deliver — the deliberate #1207 measurement/
+   * budgeting decoupling (memories are charged at prose-line cost to preserve
+   * recall; tokenEstimate honestly measures the structured payload). It is sized
+   * so a healthy connector payload passes but uncounted CONTENT (the events
+   * regression) does not — against the suite's controlled seed store, not as a
+   * universal runtime bound for an arbitrarily memory-heavy store.
+   */
+  budgetCap?: { estimate: string; budget: string; tolerance: number };
+  /**
+   * Count coherence (flair#1207): for each triple, `included + truncated <=
+   * available`. 0.44.9 reported available:3 included:2 truncated:2 (2+2 > 3)
+   * because a memory budget-skipped in one section was re-counted in the
+   * task-relevant loop, and a predicted memory could be admitted twice. Included
+   * and truncated must be DISJOINT subsets of the available pool. Applied to the
+   * own-memory triple (memoriesIncluded/Truncated/Available) and the teammate
+   * triple (teammateFindingsIncluded/Truncated/Matched).
+   */
+  countCoherence?: Array<{ included: string; truncated: string; available: string }>;
   /**
    * At the /mcp default the prose `field` (context) must be a compact POINTER,
    * never a second copy of the structured bodies — the structured containers
@@ -968,6 +1001,8 @@ export const TOOLS: Record<string, ToolEntry> = {
           includeTrust: { type: "boolean", description: "Also return a `trust` array with a per-included-memory trust-evidence block (provenance, author, usage, freshness, supersession). Default false." },
           abstain: { type: "boolean", description: "Opt into a task-relevance abstention verdict: also return an `abstention` object ({ abstained, bestScore, threshold }) reporting whether any memory covered `currentTask` above a global confidence threshold. Default false." },
           includeContext: { type: "boolean", description: "Also return the prose `context` string — a human-readable mirror of the structured soul/memories/predicted/teammateFindings containers (which are the canonical payload). Default false here: the structured fields already carry everything, so shipping the prose too would double the payload." },
+          maxEvents: { type: "number", description: "Cap on how many recent org events to return (default 10). Events are counted against maxTokens like every other content section." },
+          includeEventDetail: { type: "boolean", description: "Also include each org event's verbose `detail` JSON (migration internals, etc.). Default false: bootstrap ships lean events (id/kind/summary/createdAt/targetIds/scope); `detail` mostly restates the summary and is pure bloat for a connector." },
         },
       },
     },
@@ -978,14 +1013,17 @@ export const TOOLS: Record<string, ToolEntry> = {
         + "Structured containers are canonical and always present; prose `context` is a pointer at the /mcp default (includeContext opt-in).",
       requiredFields: [
         "agentId", "soul", "memories", "predicted", "teammateFindings", "events",
-        "sections", "tokenEstimate", "memoriesIncluded", "memoriesAvailable",
-        "teammateFindingsIncluded", "context", "flairVersion",
+        "sections", "tokenEstimate", "maxTokens", "memoriesIncluded", "memoriesAvailable",
+        "memoriesTruncated", "teammateFindingsIncluded", "teammateFindingsTruncated",
+        "teammateFindingsMatched", "context", "flairVersion",
       ],
       fieldTypes: {
         agentId: "string", soul: "object", memories: "array", predicted: "array",
         teammateFindings: "array", events: "array", sections: "object",
-        tokenEstimate: "number", memoriesIncluded: "number", memoriesAvailable: "number",
-        teammateFindingsIncluded: "number", context: "string", flairVersion: "string",
+        tokenEstimate: "number", maxTokens: "number", memoriesIncluded: "number",
+        memoriesAvailable: "number", memoriesTruncated: "number",
+        teammateFindingsIncluded: "number", teammateFindingsTruncated: "number",
+        teammateFindingsMatched: "number", context: "string", flairVersion: "string",
       },
       invariants: {
         // count == delivered — the historical count/charge/deliver drift.
@@ -1007,6 +1045,17 @@ export const TOOLS: Record<string, ToolEntry> = {
         // #1199 — tokenEstimate via the wrapper's own estimator over the delivered
         // payload (minus the two fields added after it was measured).
         tokenEstimate: { field: "tokenEstimate", excludeKeys: ["tokenEstimate", "flairVersion"] },
+        // #1199 — the reported estimate must respect the requested budget: the
+        // events blowout (uncounted org events) drove maxTokens=4000 → 6286. The
+        // tolerance covers the fixed JSON scaffolding + the #1207 prose-vs-
+        // structured charge gap; uncounted content does not fit under it.
+        budgetCap: { estimate: "tokenEstimate", budget: "maxTokens", tolerance: 0.25 },
+        // #1207 — count arithmetic: included + truncated <= available, for own
+        // memories AND teammate findings (each a disjoint split of its pool).
+        countCoherence: [
+          { included: "memoriesIncluded", truncated: "memoriesTruncated", available: "memoriesAvailable" },
+          { included: "teammateFindingsIncluded", truncated: "teammateFindingsTruncated", available: "teammateFindingsMatched" },
+        ],
         // #1199 — prose is a pointer at the default, not a second copy.
         proseContextIsPointerAtDefault: { field: "context" },
         // shape of the structured containers a connector reads; #1188 leak bites on memories.
