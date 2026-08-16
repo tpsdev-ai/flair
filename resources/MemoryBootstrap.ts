@@ -2,7 +2,7 @@ import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
 import { getEmbedding } from "./embeddings-provider.js";
 import { wrapUntrusted } from "./content-safety.js";
-import { isTeammate, formatTeamLine } from "./memory-bootstrap-lib.js";
+import { isTeammate, formatTeamLine, isZeroRowNoOpEvent } from "./memory-bootstrap-lib.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { isValidEntity } from "./entity-vocab.js";
 import { withDetachedTxn } from "./table-helpers.js";
@@ -80,9 +80,10 @@ import { estimateTokens } from "./token-estimate.js";
  *   row's `entities`.
  *
  * Response:
- *   { context, sections, tokenEstimate, memoriesIncluded, memoriesAvailable,
- *     teammateFindingsIncluded, teammateFindingsTruncated, agentId, scope, soul,
- *     memories, predicted, teammateFindings, events[, currentTaskHint][, predictedHint] }
+ *   { context, sections, tokenEstimate, maxTokens, memoriesIncluded, memoriesAvailable,
+ *     memoriesTruncated, teammateFindingsIncluded, teammateFindingsTruncated,
+ *     teammateFindingsMatched, agentId, scope, soul, memories, predicted,
+ *     teammateFindings, events[, currentTaskHint][, predictedHint] }
  *   The self-describing keys (flair#1182 part 1) — `agentId` (resolved caller),
  *   `scope` (read model applied to the caller), `soul`/`memories`/`predicted`
  *   (the caller's OWN records as structured containers), and `currentTaskHint`
@@ -98,18 +99,30 @@ import { estimateTokens } from "./token-estimate.js";
  *   when the prose `context` is off (the /mcp default); before #1206 they lived
  *   ONLY in the prose string and were orphaned at includeContext=false.
  *
- *   flair#1199 CAP CONTRACT (corrected): `maxTokens` is the HARD cap on CONTENT
- *   SELECTION — the shared `tokenBudget` starts at `maxTokens` and every admitted
- *   soul/memory/finding line is gated against the remaining budget, so the sum of
- *   selected CONTENT never exceeds `maxTokens`. `tokenEstimate` HONESTLY reports
- *   the real serialized payload (`JSON.stringify(responseBody)`), which includes
- *   the structured-container JSON scaffolding and so MAY exceed `maxTokens` by
- *   that overhead — measurement (honest reporting) is deliberately decoupled from
- *   budgeting (what to select). This is the flair#1207 fix: #1199 had folded a
- *   per-item structured overhead + a scaffolding reserve INTO the selection
- *   budget, which silently shrank recall below 0.44.6 for the same `maxTokens`;
- *   the overhead is a reporting concern (already captured by `tokenEstimate`),
- *   never a selection constraint, so it no longer shrinks the content budget.
+ *   CAP CONTRACT: `maxTokens` is the HARD cap on CONTENT SELECTION — the shared
+ *   `tokenBudget` starts at `maxTokens` and every admitted soul/memory/finding
+ *   line AND every org event (flair#1199 — events are content too; before this
+ *   they were assembled but NEVER charged, so a maxTokens=4000 request serialized
+ *   at 6286) is gated against the remaining budget, so the sum of selected CONTENT
+ *   never exceeds `maxTokens`. `tokenEstimate` HONESTLY reports the real serialized
+ *   payload (`JSON.stringify(responseBody)`), which includes the FIXED structured-
+ *   container JSON scaffolding (keys/braces, counters, the sections map) and so may
+ *   exceed `maxTokens` slightly by that bounded overhead — measurement is decoupled
+ *   from budgeting, but the overhead is now scaffolding ONLY, never uncounted
+ *   content. The connector-conformance suite asserts tokenEstimate <= maxTokens
+ *   within a small tolerance for that scaffolding. flair#1207: #1199 had ALSO
+ *   folded a per-item structured overhead + a scaffolding reserve INTO the
+ *   selection budget, which silently shrank recall below 0.44.6 for the same
+ *   `maxTokens`; that per-item overhead is a reporting concern (already captured by
+ *   `tokenEstimate`) and no longer shrinks the content budget.
+ *
+ *   COUNT CONTRACT (flair#1207): `memoriesIncluded + memoriesTruncated <=
+ *   memoriesAvailable` — included and truncated are disjoint sets of UNIQUE own
+ *   memories (a memory budget-skipped in one section but admitted in another counts
+ *   as included, never both). `teammateFindingsMatched` is the teammate match pool
+ *   that cleared the relevance floor; `teammateFindingsIncluded +
+ *   teammateFindingsTruncated == teammateFindingsMatched`, so "truncated" means
+ *   "relevant but no budget," not "every candidate not selected."
  *   `predictedHint` is present only when subjects were provided but `predicted`
  *   came back empty.
  */
@@ -117,6 +130,13 @@ import { estimateTokens } from "./token-estimate.js";
 // Collision surfacing (flair#681) tunables.
 const COLLISION_WINDOW_DAYS = 7;
 const MAX_COLLISION_ENTRIES = 10;
+
+// flair#1199/#1206 — the default cap on how many org events bootstrap ships.
+// Overridable per-request via `maxEvents`. Event slots are scarce AND (as of
+// #1199) token-charged, so this bounds both the count and the spend; the shared
+// tokenBudget is the harder ceiling (an event that doesn't fit is skipped even
+// under the cap).
+const MAX_ORG_EVENTS = 10;
 
 // ─── Bootstrap scale fix (flair-bootstrap-scale-fix) tunables ───────────────
 //
@@ -216,6 +236,16 @@ export class BootstrapMemories extends Resource {
       subjects,    // e.g., ["flair", "auth"] — entities to preload context for
       includeTrust = false,  // flair#744 slice 1 — opt-in per-memory trust block
       abstain = false,       // flair#744 slice 2 — opt-in task-relevance abstention
+      // flair#1199 — org-event knobs. `maxEvents` caps how many events ship
+      // (default MAX_ORG_EVENTS); `includeEventDetail` gates the verbose per-event
+      // `detail` JSON (default OFF — mirrors the includeContext opt-in). By
+      // default bootstrap ships LEAN events (id/kind/summary/createdAt/targetIds/
+      // scope); `detail` restates the summary + migration internals and is pure
+      // bloat for a connector, so it is opt-in. Both are also counted against the
+      // shared tokenBudget below (before #1199 the events array was assembled but
+      // NEVER charged, so a maxTokens=4000 request serialized well past budget).
+      maxEvents,
+      includeEventDetail = false,
       // flair#1199 — whether to assemble the prose `context` string. The
       // structured containers (soul/memories/predicted/teammateFindings) are the
       // CANONICAL payload; `context` is a human/agent-readable MIRROR of the same
@@ -293,16 +323,37 @@ export class BootstrapMemories extends Resource {
     let memoriesIncluded = 0;
     let memoriesAvailable = 0;
     let memoriesTruncated = 0;
+    // flair#1207 — count arithmetic by UNIQUE own-memory id, not raw increments.
+    // The invariant `memoriesIncluded + memoriesTruncated <= memoriesAvailable`
+    // MUST hold (0.44.9 reported available:3 included:2 truncated:2 — 2+2 > 3).
+    // Two bugs produced the over-count, both fixed by keying off these sets:
+    //   (1) a memory truncated for budget in an EARLY section (e.g. recent's
+    //       40% sub-budget) reappears in the task-relevant candidate pool and is
+    //       counted AGAIN (truncated twice, or truncated-then-included) — the
+    //       same physical memory in two denominators; and
+    //   (2) the task-relevant loop's "already included" exclusion set was built
+    //       POSITIONALLY (recent.filter by index) and omitted `predicted`, so a
+    //       predicted memory could be re-admitted to `relevant`.
+    // `includedOwnIds` is now THE authoritative "own memory already placed" set
+    // (used as the exclusion set in the predicted + task-relevant loops, replacing
+    // the positional hack); `truncatedOwnIds` records own budget-skips. Final
+    // counts are DERIVED from these sets (truncated = truncated-but-not-included),
+    // so both are disjoint subsets of memoriesAvailable and the invariant holds.
+    const includedOwnIds = new Set<string>();
+    const truncatedOwnIds = new Set<string>();
     // flair#1199 — cross-agent teammate findings included (a DIFFERENT
     // denominator than own memories): counting these into `memoriesIncluded`
     // is what let one client see included(9) > available(3).
     let teammateFindingsIncluded = 0;
     // flair#1207 — teammate findings SKIPPED for size in the task-relevant
-    // packing loop. That loop `continue`s past an over-budget record silently;
-    // without a counter, a client can't tell "no relevant teammate finding" from
-    // "a relevant one existed but didn't fit the budget" (Sherlock's #1207
-    // self-describing-size-skip note; own-memory size-skips already increment
-    // `memoriesTruncated`, but that loop never did — now both do).
+    // packing loop (cleared the relevance floor but didn't fit the BUDGET).
+    // Reported ALONGSIDE `teammateFindingsMatched` (the whole floor-clearing pool
+    // considered), so "truncated" unambiguously means "relevant-but-no-budget",
+    // NOT "every candidate not selected" — 0.44.9's `truncated:89` beside
+    // `included:4` read as "89 relevant findings cut" with no pool to anchor it
+    // (heskew's #1207 nit). Both are disjoint-and-exhaustive over the matched
+    // pool (each matched teammate finding is EITHER included OR truncated), so
+    // teammateFindingsIncluded + teammateFindingsTruncated == teammateFindingsMatched.
     let teammateFindingsTruncated = 0;
 
     // flair#1182 (part 1) — self-describing bootstrap. These structured
@@ -602,9 +653,9 @@ export class BootstrapMemories extends Resource {
         includedOwnMemories.push(leanMemory(m, "permanent"));
         if (includeTrust) includedTrustMemories.push({ m, section: "permanent" });
         tokenBudget -= cost;
-        memoriesIncluded++;
+        includedOwnIds.add(m.id); // #1207 — count by unique own-memory id
       } else {
-        memoriesTruncated++;
+        truncatedOwnIds.add(m.id); // #1207 — budget-skip, deduped against inclusions at the end
       }
     }
 
@@ -666,7 +717,7 @@ export class BootstrapMemories extends Resource {
       const line = formatMemory(m, agentId);
       const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
       if (recentSpent + cost > recentBudget) {
-        memoriesTruncated++;
+        truncatedOwnIds.add(m.id); // #1207 — budget-skip; may still be admitted later via the task-relevant loop (deduped at the end)
         continue;
       }
       sections.recent.push(line);
@@ -674,7 +725,7 @@ export class BootstrapMemories extends Resource {
       if (includeTrust) includedTrustMemories.push({ m, section: "recent" });
       recentSpent += cost;
       tokenBudget -= cost;
-      memoriesIncluded++;
+      includedOwnIds.add(m.id); // #1207 — count by unique own-memory id
     }
 
     // --- 3b. Subject-predicted context ---
@@ -687,11 +738,10 @@ export class BootstrapMemories extends Resource {
       : [];
 
     if (predictedSubjects.length > 0 && tokenBudget > 200) {
-      const includedIds = new Set([
-        ...permanent.map((m: any) => m.id),
-        ...recent.filter((_: any, i: number) => i < sections.recent.length).map((m: any) => m.id),
-      ]);
-
+      // flair#1207 — exclude by the AUTHORITATIVE included-own set (permanent +
+      // recent actually admitted), not the old positional `recent.filter(by
+      // index)` hack, which mis-tracked when the recent loop skipped an early
+      // memory for budget and admitted a later one.
       // Draws from the SAME bounded own-scoped, non-permanent set "recent"
       // uses (nonPermanentActive — see that fetch's doc above for the
       // shared-source rationale and OWN_NONPERMANENT_FETCH_LIMIT's bound).
@@ -700,7 +750,7 @@ export class BootstrapMemories extends Resource {
       // pre-refactor filter shape.
       const subjectMemories = nonPermanentActive
         .filter((m: any) =>
-          !includedIds.has(m.id) &&
+          !includedOwnIds.has(m.id) &&
           m.subject &&
           predictedSubjects.includes(m.subject.toLowerCase()) &&
           m.durability !== "permanent" // already loaded
@@ -713,7 +763,7 @@ export class BootstrapMemories extends Resource {
         const line = formatMemory(m, agentId);
         const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
         if (predictedSpent + cost > predictedBudget) {
-          memoriesTruncated++;
+          truncatedOwnIds.add(m.id); // #1207 — budget-skip (deduped against inclusions at the end)
           continue;
         }
         sections.predicted.push(line);
@@ -721,8 +771,7 @@ export class BootstrapMemories extends Resource {
         if (includeTrust) includedTrustMemories.push({ m, section: "predicted" });
         predictedSpent += cost;
         tokenBudget -= cost;
-        memoriesIncluded++;
-        includedIds.add(m.id);
+        includedOwnIds.add(m.id); // #1207 — count by unique own-memory id; also the task-relevant loop's exclusion set (no predicted→relevant double-admit)
       }
     }
 
@@ -776,11 +825,13 @@ export class BootstrapMemories extends Resource {
       } catch {}
 
       if (queryEmbedding) {
-        // Score all non-included memories by relevance
-        const includedIds = new Set([
-          ...permanent.map((m) => m.id),
-          ...recent.filter((_, i) => i < sections.recent.length).map((m) => m.id),
-        ]);
+        // flair#1207 — exclude own memories ALREADY placed via the authoritative
+        // set (permanent + recent + predicted actually admitted). The old set was
+        // built positionally (recent.filter by index) AND omitted `predicted`, so
+        // a predicted memory could be re-admitted here — double-counting it into
+        // memoriesIncluded and shipping it twice (once in `predicted`, once in
+        // `memories`). Keying off includedOwnIds fixes both.
+        const includedIds = includedOwnIds;
 
         // Bounded HNSW candidate pool (flair-bootstrap-scale-fix) — replaces
         // the full-corpus JS dot-product scan (`allMemories` × queryEmbedding,
@@ -895,12 +946,12 @@ export class BootstrapMemories extends Resource {
           const cost = estimateTokens(line); // #1207 — prose-line cost only; overhead is a reporting concern (tokenEstimate), not a selection constraint
           if (cost > tokenBudget) {
             // flair#1207 — a size-skip in the score-ordered task-relevant loop
-            // is no longer silent: record it on the counter matching the record's
-            // denominator (own → memoriesTruncated, teammate → the separate
+            // is no longer silent: record it on the denominator matching the
+            // record's origin (own → truncatedOwnIds, teammate → the separate
             // teammateFindingsTruncated), so a client can distinguish "no relevant
             // finding" from "a relevant finding didn't fit the budget".
             if (m._source) teammateFindingsTruncated++;
-            else memoriesTruncated++;
+            else truncatedOwnIds.add(m.id);
             continue;
           }
           if (m._source) {
@@ -931,7 +982,7 @@ export class BootstrapMemories extends Resource {
             includedOwnMemories.push(leanMemory(m, "relevant"));
             if (includeTrust) includedTrustMemories.push({ m, section: "relevant" });
             tokenBudget -= cost;
-            memoriesIncluded++;
+            includedOwnIds.add(m.id); // #1207 — count by unique own-memory id
           }
         }
       }
@@ -1077,6 +1128,14 @@ export class BootstrapMemories extends Resource {
         const targets = event.targetIds;
         const isRelevant = !targets || targets.length === 0 || targets.includes(agentId);
         if (!isRelevant) continue;
+        // flair#1200 — suppress zero-row no-op auto-heal migration events at
+        // render. On a healthy store every boot emits a "migration graph-heal
+        // success (0 rows processed)" ledger event beside an "HNSW graph-heal:
+        // recall verified healthy" observability event — near-identical, zero
+        // signal, and (as of #1199) token-charged. Filtered HERE only: the
+        // ledger still records every migration on the table (invariant IV is
+        // untouched — this is a display filter, never a write-path change).
+        if (isZeroRowNoOpEvent(event)) continue;
         eventResults.push(event);
       }
 
@@ -1085,10 +1144,10 @@ export class BootstrapMemories extends Resource {
       // that double-fires, or the same broadcast emitted from two paths); each
       // physical row has a distinct id/createdAt (OrgEvent.post keys the id off
       // a millisecond timestamp), so they aren't caught by primary-key upsert
-      // and render as exact dupes. Org-event slots are scarce (10), so dedup
-      // BEFORE the slice — otherwise ~half the slots are wasted on duplicates.
-      // Keyed on the CONTENT (kind + summary + detail + targets), keeping the
-      // most-recent occurrence per signature.
+      // and render as exact dupes. Org-event slots are scarce, so dedup BEFORE
+      // admission — otherwise ~half the slots are wasted on duplicates. Keyed on
+      // the CONTENT (kind + summary + detail + targets), keeping the most-recent
+      // occurrence per signature.
       const eventBySignature = new Map<string, any>();
       for (const evt of eventResults) {
         const sig = JSON.stringify([
@@ -1100,35 +1159,72 @@ export class BootstrapMemories extends Resource {
         const prev = eventBySignature.get(sig);
         if (!prev || (evt.createdAt || "") > (prev.createdAt || "")) eventBySignature.set(sig, evt);
       }
+      // flair#1199 — admit events in RECENCY order (most recent first, the
+      // score-analogue for events) against the SHARED tokenBudget, capped at
+      // `maxEvents`. Before #1199 the events array was assembled uncounted and
+      // NEVER charged: a maxTokens=4000 request serialized at 6286 (+57%), the
+      // bulk being 10 events each shipping a `detail` JSON. Now each event's
+      // REAL serialized cost (the structured object that actually ships — lean by
+      // default, `detail` only under includeEventDetail) is charged against the
+      // remaining budget, so events respect maxTokens the same way every other
+      // content section does. An event that doesn't fit is skipped, not silently
+      // over-budget; smaller later events may still fit (hence continue, not
+      // break), and admission stops at the maxEvents cap.
+      const eventCap = Number.isFinite(maxEvents) && (maxEvents as number) >= 0
+        ? Math.floor(maxEvents as number)
+        : MAX_ORG_EVENTS;
       const dedupedEvents = [...eventBySignature.values()]
-        .sort((a: any, b: any) => (a.createdAt || "").localeCompare(b.createdAt || ""));
-      for (const evt of dedupedEvents.slice(0, 10)) {
+        .sort((a: any, b: any) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+      for (const evt of dedupedEvents) {
+        if (sections.events.length >= eventCap) break;
+        // The structured object a connector actually reads (flair#1206). Lean by
+        // default; `detail` (the verbose migration-internals/summary-restating
+        // JSON) only when explicitly requested. Optional fields are omitted when
+        // absent so the object stays compact.
+        const structured: Record<string, unknown> = {
+          id: evt.id,
+          kind: evt.kind,
+          summary: evt.summary,
+          ...(includeEventDetail && evt.detail != null ? { detail: evt.detail } : {}),
+          ...(Array.isArray(evt.targetIds) && evt.targetIds.length > 0 ? { targetIds: evt.targetIds } : {}),
+          createdAt: evt.createdAt ?? null,
+          ...(evt.scope != null ? { scope: evt.scope } : {}),
+        };
+        // Charge the REAL serialized cost of what ships (structured object on the
+        // /mcp path; the prose line is a subset of it). This is the #1199 fix:
+        // events are content and must be budgeted like content.
+        const cost = estimateTokens(JSON.stringify(structured));
+        if (cost > tokenBudget) continue;
         const elapsed = Date.now() - new Date(evt.createdAt).getTime();
         const mins = Math.floor(elapsed / 60_000);
         const relTime = mins < 60 ? `${mins}min ago` : `${Math.floor(mins / 60)}h ago`;
         sections.events.push(`- ${evt.kind}: ${evt.summary} (${relTime})`);
-        // flair#1206 — the SAME deduped+sliced event, structured, so a connector
-        // reading the containers gets it when prose `context` is off (the /mcp
-        // default). Same set as the prose line ⇒ `sections.events` (the count),
-        // the `tokenEstimate` charge (this array is always in the body), and the
-        // delivery all key off one thing. Optional fields (detail/targetIds/scope)
-        // are omitted when absent so the object stays lean. The targetIds
-        // relevance filter and #1200 content-signature dedup were already applied
-        // upstream (eventResults → eventBySignature), so this is a pure move from
-        // prose to structured — no scope widening, no re-introduced duplicates.
-        includedEvents.push({
-          id: evt.id,
-          kind: evt.kind,
-          summary: evt.summary,
-          ...(evt.detail != null ? { detail: evt.detail } : {}),
-          ...(Array.isArray(evt.targetIds) && evt.targetIds.length > 0 ? { targetIds: evt.targetIds } : {}),
-          createdAt: evt.createdAt ?? null,
-          ...(evt.scope != null ? { scope: evt.scope } : {}),
-        });
+        // Same admitted event ⇒ `sections.events` (the count), the `tokenEstimate`
+        // charge, and the structured delivery all key off ONE thing.
+        includedEvents.push(structured);
+        tokenBudget -= cost;
       }
     } catch {
       // non-fatal: OrgEvent table may not exist yet
     }
+
+    // flair#1207 — derive the own-memory counters from the unique-id sets so the
+    // invariant memoriesIncluded + memoriesTruncated <= memoriesAvailable holds.
+    // `truncated` counts only own memories that were budget-skipped AND never
+    // ultimately admitted (a memory skipped in `recent` but later admitted via
+    // the task-relevant loop is INCLUDED, not truncated) — so included/truncated
+    // are disjoint subsets of the own corpus (memoriesAvailable), never
+    // double-counting the same physical memory across sections.
+    memoriesIncluded = includedOwnIds.size;
+    let memoriesTruncatedUnique = 0;
+    for (const id of truncatedOwnIds) if (!includedOwnIds.has(id)) memoriesTruncatedUnique++;
+    memoriesTruncated = memoriesTruncatedUnique;
+    // flair#1207 — the teammate MATCH POOL considered (cleared the relevance
+    // floor, drawn from the bounded candidate pool): every matched teammate
+    // finding is EITHER included OR budget-truncated, so this equals their sum.
+    // Reporting it anchors `teammateFindingsTruncated` as "relevant-but-no-budget"
+    // rather than an unexplained large number beside a small `included`.
+    const teammateFindingsMatched = teammateFindingsIncluded + teammateFindingsTruncated;
 
     // --- Build context string ---
     const parts: string[] = [];
@@ -1294,8 +1390,14 @@ export class BootstrapMemories extends Resource {
       },
       soulTokens,
       memoryTokens,
+      // flair#1199 — the content-selection budget this response was built
+      // against (echoed so a connector can relate tokenEstimate to the budget it
+      // asked for — and so the conformance tokenEstimate<=maxTokens invariant is
+      // self-contained). Defaults to 4000 when unset.
+      maxTokens,
       // flair#1199 — own memories included (denominator: memoriesAvailable, also
-      // own-scoped), so memoriesIncluded ≤ memoriesAvailable always holds.
+      // own-scoped). flair#1207 — DERIVED from unique own-memory ids, so
+      // memoriesIncluded + memoriesTruncated <= memoriesAvailable always holds.
       memoriesIncluded,
       memoriesAvailable,
       // Cross-agent teammate findings included — a SEPARATE denominator, labelled
@@ -1303,10 +1405,15 @@ export class BootstrapMemories extends Resource {
       teammateFindingsIncluded,
       memoriesTruncated,
       // flair#1207 — teammate findings skipped for size in the task-relevant loop
-      // (own size-skips there increment memoriesTruncated). Surfacing this makes
-      // a size-skip self-describing: "a relevant teammate finding didn't fit"
-      // is now distinguishable from "no relevant teammate finding".
+      // (own size-skips there feed truncatedOwnIds). Surfacing this makes a
+      // size-skip self-describing: "a relevant teammate finding didn't fit" is
+      // now distinguishable from "no relevant teammate finding".
       teammateFindingsTruncated,
+      // flair#1207 — the teammate match POOL considered (cleared the relevance
+      // floor). teammateFindingsIncluded + teammateFindingsTruncated ==
+      // teammateFindingsMatched, so "truncated" reads as "relevant-but-no-budget"
+      // against a stated pool, not an unanchored large number.
+      teammateFindingsMatched,
     };
 
     // flair#1199 — tokenEstimate must reflect the ACTUAL serialized payload the
@@ -1314,14 +1421,20 @@ export class BootstrapMemories extends Resource {
     // `context`. The old `soulTokens + memoryTokens` counted only the context
     // string, so it under-reported by ~2× once the structured fields shipped
     // alongside. Measured over the assembled body (the ~1-line tokenEstimate
-    // field it omits is negligible). flair#1207 CAP CONTRACT: this is an HONEST
-    // report of the real serialized size, NOT a value bounded by `maxTokens`.
-    // `maxTokens` is the hard cap on CONTENT SELECTION (the shared tokenBudget);
-    // the structured-container JSON scaffolding is genuine payload the caller
-    // pays for, so tokenEstimate MAY exceed `maxTokens` by that overhead. Do not
-    // "fix" an over-maxTokens tokenEstimate by shrinking selection — that is the
-    // exact #1199→#1207 regression (it dropped relevant findings). If the real
-    // payload consistently overruns for a use case, raise `maxTokens`.
+    // field it omits is negligible). CAP CONTRACT: this is an HONEST report of
+    // the real serialized size. Every CONTENT section — soul, memories, findings,
+    // AND events (flair#1199) — is now gated against the shared `maxTokens`
+    // budget, so no section blows the budget with uncounted content the way the
+    // 0.44.9 events array did (maxTokens=4000 → 6286). tokenEstimate may still
+    // exceed `maxTokens` slightly, by the FIXED structural JSON scaffolding
+    // (container keys/braces, counters, sections map, char/4 rounding) — that is
+    // genuine payload the caller pays for, and it is small and bounded, NOT
+    // uncounted content. The connector-conformance suite asserts
+    // tokenEstimate <= maxTokens within a small tolerance for exactly that
+    // scaffolding. Do NOT "fix" a small over-maxTokens tokenEstimate by shrinking
+    // memory selection — that is the #1199→#1207 regression (it dropped relevant
+    // findings, charging a per-item overhead against the content budget). If the
+    // real payload consistently overruns for a use case, raise `maxTokens`.
     const tokenEstimate = estimateTokens(JSON.stringify(responseBody));
     return { ...responseBody, tokenEstimate };
   }

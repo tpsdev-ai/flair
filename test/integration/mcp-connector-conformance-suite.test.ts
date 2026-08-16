@@ -28,6 +28,13 @@
 //          → the dedup-by-content-signature invariant goes red.
 //   #1206  org events were counted+charged but not delivered structurally
 //          → count==delivered (sections.events) + requiredFields(events) go red.
+//   #1199b org events were assembled but NEVER charged against the budget, and
+//          each shipped a verbose `detail` — maxTokens=4000 serialized at 6286
+//          → the budgetCap invariant (tokenEstimate <= maxTokens + tolerance)
+//            goes red once the events-budget fix is reverted (heavy-event fixture).
+//   #1207  memoriesIncluded + memoriesTruncated exceeded memoriesAvailable
+//          (a memory counted in two sections; a predicted memory re-admitted)
+//          → the countCoherence invariant goes red once the count fix is reverted.
 //
 // The completeness check (checkContractCompleteness) is CI-gated in THIS lane:
 // a new /mcp tool shipped without a contract fails the build, fail-closed.
@@ -58,6 +65,23 @@ let appDir: string;
 const sfx = Date.now().toString(36);
 const AGENT = `mcpconf-${sfx}`;
 const AGENT2 = `mcpconf-other-${sfx}`;
+// flair#1199 budget-cap subject: heavy detail-bearing events targeted at this
+// agent alone (targetIds), so a tight-budget bootstrap as AGENT_BUDGET makes the
+// events-budget fix load-bearing without disturbing AGENT's event assertions.
+const AGENT_BUDGET = `mcpconf-budget-${sfx}`;
+// flair#1207 count-coherence subject: exactly ONE own memory, EMBEDDED (stored
+// through the real memory_store tool so it enters the HNSW candidate pool) and
+// LONG, bootstrapped at a tight budget where it overflows the recent 40%
+// sub-budget (→ truncated) but still fits the full remaining budget in the
+// task-relevant loop (→ included). That is the canonical 0.44.9 over-count: the
+// SAME memory truncated in one section and included in another. With the fix the
+// counters are unique-id sets (included:1, truncated:0); reverting it double-
+// counts (included:1 + truncated:1 = 2 > available:1).
+const AGENT_COUNT = `mcpconf-count-${sfx}`;
+const COUNT_MEMORY =
+  `saga ledger federation trust boundary decision ${sfx} — ` +
+  ("the recall budget accounting must charge and count every admitted record exactly once across sections, " +
+   "never double-counting a memory that was budget-skipped in one section and then admitted in another. ").repeat(30);
 const SOUL_ROLE = `MCP conformance test subject ${sfx}`;
 
 // A directly-seeded memory carrying KNOWN embedding + embeddingModel — the
@@ -211,6 +235,59 @@ beforeAll(async () => {
     id: `conf-other-${EV}`, authorId: author, kind: "handoff", summary: OTHER_SUMMARY,
     scope: "direct", targetIds: [`someone-else-${EV}`], createdAt: new Date().toISOString(),
   });
+
+  // ── flair#1199 budget-cap fixture ──────────────────────────────────────────
+  // AGENT_BUDGET: a few small own memories + MANY events that each carry a
+  // verbose `detail` blob (the #1199 shape — detail restates the summary +
+  // internals), targeted at AGENT_BUDGET so they don't pollute AGENT's assertions.
+  // With the fix a tight-budget bootstrap ships LEAN events well within budget;
+  // revert the events-budget fix and the uncounted detail-bearing events blow it.
+  await fleet("register", { id: AGENT_BUDGET });
+  for (let i = 0; i < 4; i++) {
+    await seedInsert("Memory", {
+      id: `${AGENT_BUDGET}-${randomUUID()}`, agentId: AGENT_BUDGET,
+      content: `${SEARCH_TOKEN} budget own-memory ${i} ${sfx}`,
+      durability: "standard", visibility: "private",
+      createdAt: new Date(Date.now() - i * 1000).toISOString(), validFrom: new Date().toISOString(),
+    });
+  }
+  const HEAVY_DETAIL = JSON.stringify({
+    migrationId: "noop", verified: true, embeddedVectorCount: 549,
+    runningVersion: "0.44.10", verifiedAt: new Date().toISOString(), notes: "x".repeat(600),
+  });
+  for (let i = 0; i < 12; i++) {
+    await seedInsert("OrgEvent", {
+      id: `conf-heavy-${i}-${EV}`, authorId: author, kind: "status",
+      summary: `conf-1199 heavy event ${i} ${EV} — recall verified healthy (549 embedded vectors)`,
+      detail: HEAVY_DETAIL, scope: "direct", targetIds: [AGENT_BUDGET],
+      createdAt: new Date(Date.now() - i * 1000).toISOString(),
+    });
+  }
+  // Zero-row no-op auto-heal PAIR (#1200) targeted at AGENT_BUDGET — must be
+  // suppressed at render (the ledger still records them; this is a display filter).
+  await seedInsert("OrgEvent", {
+    id: `conf-heal-ledger-${EV}`, authorId: "flair-migrations", kind: "migration", scope: "full",
+    summary: `conf-1200 migration graph-heal success (0 rows processed) ${EV}`,
+    detail: JSON.stringify({ migrationId: "graph-heal", outcome: "success", rowsProcessed: 0, rowsRemaining: 0 }),
+    targetIds: [AGENT_BUDGET], createdAt: new Date().toISOString(),
+  });
+  await seedInsert("OrgEvent", {
+    id: `conf-heal-verify-${EV}`, authorId: "flair-migrations", kind: "migration", scope: "full",
+    summary: `conf-1200 HNSW graph-heal recall verified healthy ${EV}`,
+    detail: JSON.stringify({ migrationId: "graph-heal", verified: true, canaryRank1: true, embeddedVectorCount: 549 }),
+    targetIds: [AGENT_BUDGET], createdAt: new Date().toISOString(),
+  });
+
+  // ── flair#1207 count-coherence fixture ─────────────────────────────────────
+  // AGENT_COUNT owns EXACTLY ONE memory, stored through the real memory_store
+  // tool so it carries a genuine embedding (the ops-inserted rows above do NOT,
+  // and the bootstrap candidate pool is HNSW-only — an un-embedded memory never
+  // reaches the task-relevant loop, so the over-count path can't fire). The test
+  // bootstraps at a tight budget where this long memory overflows the recent 40%
+  // sub-budget (truncated) yet fits the full remaining budget in the task-relevant
+  // loop (included) — the same memory in two sections.
+  await fleet("register", { id: AGENT_COUNT });
+  await tool("memory_store", { content: COUNT_MEMORY, durability: "standard" }, { agentId: AGENT_COUNT });
 }, 300_000);
 
 afterAll(async () => {
@@ -328,6 +405,35 @@ function conform(toolName: string, result: any, contract: ToolContract): void {
     ).toBe(expected);
   }
 
+  if (inv.budgetCap) {
+    const { estimate, budget, tolerance } = inv.budgetCap;
+    const est = result?.[estimate];
+    const bud = result?.[budget];
+    expect(typeof est, `${toolName}: ${estimate} must be a number for budgetCap`).toBe("number");
+    expect(typeof bud, `${toolName}: ${budget} must be a number for budgetCap`).toBe("number");
+    // Ceiling = requested budget + tolerance for fixed JSON scaffolding and the
+    // #1207 prose-vs-structured charge gap. Uncounted CONTENT (the #1199 events
+    // regression) overshoots this; a healthy connector payload does not.
+    const ceiling = Math.ceil(bud * (1 + tolerance));
+    expect(
+      est <= ceiling,
+      `${toolName}: ${estimate} (=${est}) must be <= ${budget} (=${bud}) + ${Math.round(tolerance * 100)}% scaffolding tolerance (=${ceiling}) — payload must respect the requested budget (#1199 events blowout)`,
+    ).toBe(true);
+  }
+
+  for (const { included, truncated, available } of inv.countCoherence ?? []) {
+    const inc = result?.[included];
+    const tru = result?.[truncated];
+    const avail = result?.[available];
+    expect(typeof inc, `${toolName}: ${included} must be a number`).toBe("number");
+    expect(typeof tru, `${toolName}: ${truncated} must be a number`).toBe("number");
+    expect(typeof avail, `${toolName}: ${available} must be a number`).toBe("number");
+    expect(
+      inc + tru <= avail,
+      `${toolName}: ${included}(=${inc}) + ${truncated}(=${tru}) must be <= ${available}(=${avail}) — included and truncated are disjoint subsets of the pool (#1207 over-count)`,
+    ).toBe(true);
+  }
+
   if (inv.proseContextIsPointerAtDefault) {
     const ctx = result?.[inv.proseContextIsPointerAtDefault.field] ?? "";
     expect(typeof ctx, `${toolName}: prose context must be a string`).toBe("string");
@@ -405,6 +511,54 @@ describe("/mcp connector conformance — each tool honors its declared contract"
     expect(summaries.filter((s: string) => s === DUP_SUMMARY).length, "the byte-identical duplicate pair must collapse to ONE (#1200)").toBe(1);
     // memoriesIncluded spans memories+predicted, and there IS own content.
     expect(body.memories.length, "own memories delivered").toBeGreaterThan(0);
+  }, 120_000);
+
+  test("bootstrap: events respect maxTokens and zero-row heals are suppressed (#1199/#1200 — budgetCap bites on revert)", async () => {
+    // Tight budget + many detail-bearing events targeted at this agent. The
+    // contract's budgetCap invariant runs inside conform(); it PASSES here (lean
+    // events, budget-charged) and FAILS if the events-budget fix is reverted
+    // (uncounted, detail-bearing events overshoot maxTokens*(1+tolerance)).
+    const body = await tool("bootstrap", { currentTask: "budget sweep", maxTokens: 2000 }, { agentId: AGENT_BUDGET });
+    conform("bootstrap", body, C("bootstrap"));
+    expect(body.maxTokens, "maxTokens echoed").toBe(2000);
+    // Load-bearing #1199 proof: the serialized payload stays within the budget
+    // (plus the scaffolding tolerance) even with a dozen heavy events available.
+    expect(body.tokenEstimate, `tokenEstimate ${body.tokenEstimate} must respect maxTokens 2000`).toBeLessThanOrEqual(Math.ceil(2000 * 1.25));
+    // The events section is populated (the heavy events are relevant to us)…
+    expect(body.events.length, "heavy events delivered").toBeGreaterThan(0);
+    // …lean by default (no verbose detail on the connector path)…
+    expect(body.events.some((e: any) => e.detail != null), "events are lean by default (no detail)").toBe(false);
+    // …and #1200 zero-row auto-heal events are suppressed at render.
+    const evText = body.events.map((e: any) => e.summary).join(" | ");
+    expect(evText.includes("graph-heal"), "graph-heal verify event suppressed (#1200)").toBe(false);
+    expect(evText.includes("0 rows processed"), "zero-row ledger heal event suppressed (#1200)").toBe(false);
+    // includeEventDetail:true opts the verbose detail back in (still budget-capped).
+    const withDetail = await tool("bootstrap", { currentTask: "budget sweep", maxTokens: 6000, includeEventDetail: true }, { agentId: AGENT_BUDGET });
+    expect(withDetail.events.some((e: any) => e.detail != null), "includeEventDetail:true returns detail").toBe(true);
+    expect(withDetail.tokenEstimate, "detail path still respects the (larger) budget").toBeLessThanOrEqual(Math.ceil(6000 * 1.25));
+  }, 120_000);
+
+  test("bootstrap: count arithmetic stays coherent — a memory truncated in one section and admitted in another is counted once (#1207 — countCoherence bites on revert)", async () => {
+    // Tight budget: the long memory overflows the recent 40% sub-budget (→ the
+    // recent loop truncates it) but fits the full remaining budget in the
+    // task-relevant loop (→ it's admitted there). Reverting the count fix counts
+    // it in BOTH denominators (included:1 + truncated:1 = 2 > available:1).
+    const body = await tool(
+      "bootstrap",
+      { currentTask: COUNT_MEMORY, maxTokens: 3000 },
+      { agentId: AGENT_COUNT },
+    );
+    conform("bootstrap", body, C("bootstrap")); // countCoherence runs here
+    // The single own memory exists and is available.
+    expect(body.memoriesAvailable, "exactly one own memory available").toBe(1);
+    // It is delivered (admitted via the task-relevant loop after the recent skip).
+    expect(body.memoriesIncluded, "the one memory is included exactly once").toBe(1);
+    expect(body.memories.length + body.predicted.length, "delivered own containers hold exactly one copy").toBe(1);
+    // The load-bearing #1207 invariant: included and truncated are disjoint.
+    expect(
+      body.memoriesIncluded + body.memoriesTruncated,
+      `included(${body.memoriesIncluded}) + truncated(${body.memoriesTruncated}) must not exceed available(${body.memoriesAvailable}) (#1207)`,
+    ).toBeLessThanOrEqual(body.memoriesAvailable);
   }, 120_000);
 
   test("memory_search: { results } with content-bearing hits and no embedding fields on any hit", async () => {

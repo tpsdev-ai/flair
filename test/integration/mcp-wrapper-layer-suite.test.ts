@@ -413,8 +413,14 @@ describe("/mcp TOOLS wrapper layer — every tool driven through its real .impl"
     // Shape: the targeted entry carries the fields a connector reads.
     const mine = body.events.find((e: any) => e.summary === MINE_SUMMARY);
     expect(mine.kind, "structured entry carries kind").toBe("handoff");
-    expect(mine.detail, "optional detail is carried when present").toBe("please pick this up");
     expect(Array.isArray(mine.targetIds) && mine.targetIds.includes(AGENT), "targetIds carried when present").toBe(true);
+    // flair#1199 — events are LEAN by default (no verbose `detail`): the detail
+    // restates the summary + internals and blew the token budget when always
+    // shipped. It is now opt-in via includeEventDetail.
+    expect(mine.detail, "detail is omitted by default (lean events, #1199)").toBeUndefined();
+    const withDetail = await tool("bootstrap", { currentTask: "events wrapper check", maxTokens: 8000, includeEventDetail: true });
+    const mineDetailed = withDetail.events.find((e: any) => e.summary === MINE_SUMMARY);
+    expect(mineDetailed?.detail, "includeEventDetail:true carries the detail").toBe("please pick this up");
     // Delivery is independent of prose: at the default, context carries no bodies.
     expect(body.context, "default prose context does not carry the event body").not.toContain(ORG_SUMMARY);
     // Count coherence: the self-describing count equals the shipped array length.
