@@ -18,6 +18,100 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.11] - 2026-08-16
+
+### Added
+
+- **ADK-distilled session claims are now auto-promoted to the user's own
+  memory, unattended.** After the per-user nightly distillation (#1205b-1)
+  stages `MemoryCandidate`s each carrying an `adk:<app>:<user>` scope tag, the
+  nightly cycle promotes the eligible ones to persistent memory server-side via
+  a new `POST /AutoPromoteCandidates` resource — no human `rem promote` step for
+  this narrow path. It runs only for ADK agents (an agentId with active `adk:`
+  tags), is bounded per cycle, and is non-fatal (a failure is recorded and the
+  candidates stay pending). Non-ADK candidates are unchanged: they still require
+  the human `rem promote`. `flair rem nightly run-once` reports the count
+  auto-promoted. Refs #1205 (completes the feature).
+
+- **`bootstrap` now explains WHY any empty structured container is empty.** An
+  empty `events: []` was byte-indistinguishable from the 0.44.8 regression where
+  events were silently dropped — a connector could only tell the difference by
+  diffing against a previous payload (flair#1182). The self-describing rule that
+  already covered `predicted` is now applied across the containers: when a
+  container ships empty the payload carries a short hint naming the reason and
+  what fills it — `eventsHint`, `teammateFindingsHint` (alongside the existing
+  `predictedHint`) — present only when that container is empty, so a healthy
+  payload is unchanged. With `includeTrust: true`, a trust entry whose
+  `matchQuality` is `null` now carries a `matchQualityNote` saying why: on the
+  lifecycle sections (`permanent`/`recent`/`predicted`) a null band is correct —
+  those are a window load, not a retrieval surface — not a scoring failure on
+  your own records (flair#1225, documented in `docs/mcp-clients.md`).
+
+- **LongMemEval_s end-to-end benchmark (Layer 2).** A new `flair-bench`
+  harness (`test/bench/longmemeval/`) that ingests each LongMemEval_s question's
+  multi-session history into real Flair, retrieves via Flair's real BM25+RRF
+  retrieval, has a pinned reader answer, and has a pinned local judge grade it —
+  across four arms (flair, vector-only, full-context, no-context). Everything is
+  pinned for local reproducibility: the dataset (HF commit + sha256), the judge
+  and reader (Ollama manifest digests), num_ctx, retrieval config, and the exact
+  grading prompts — all folded into a content-addressed run artifact. Judge and
+  reader run locally via Ollama, so anyone re-runs the exact number with no
+  external API key or spend. The harness produces numbers; publishing one is a
+  separate, gated human decision recorded against the artifact hash. Repo-
+  internal tooling — not part of the published `@tpsdev-ai/flair-bench` package.
+
+### Fixed
+
+- **`bootstrap` over the /mcp connector now respects `maxTokens` when teammate
+  findings are present.** The token budget charged each memory and teammate
+  finding its short *prose* line, but on the connector path (where the prose
+  `context` is a pointer) it is the heavier *structured* container object that
+  actually ships — and that object is what `tokenEstimate` measures. Teammate
+  findings, which carry an id, two timestamps and a source, ran well over their
+  prose line, so several rode outside the enforced budget: a `maxTokens: 4000`
+  bootstrap could serialize at ~5300 (+33%) with no org events involved
+  (flair#1199). The selector now charges each item what it actually ships on the
+  requested surface — the structured object on the connector path, the prose line
+  on the REST/CLI prose path (which keeps its 0.44.6 selection capacity, flair#1207
+  unchanged) — so a connector's payload stays within `maxTokens` plus a small,
+  fixed JSON-scaffolding tolerance. A teammate-heavy conformance fixture now makes
+  the budget-cap invariant catch this class (it fails if the fix is reverted).
+
+- **Golden-path smoke suite no longer flakes on a cold-start embedding
+  timeout.** The embedding backend loads its model lazily on the first embed
+  call, and `/Health` returning 200 does not mean that load has finished — so on
+  a cold or loaded CI runner the first timed write (Step 2) could pay the model
+  load and exceed `writeMemory`'s 10s client abort, surfacing as
+  `TimeoutError: The operation timed out` at ~10s (flair#1219, seen across
+  #1217/#1221/#1222). The suite now warms the embedding model in `beforeAll` via
+  a throwaway agent+memory write with a generous budget, so the measured
+  golden-path write is always a warm write. Test-only: production
+  `writeMemory`'s 10s timeout is unchanged.
+
+### Security
+
+- **Unattended ADK auto-promote enforces four authz invariants server-side.**
+  Because auto-promotion (see Added) removes the human reviewer that also
+  guarded content and scope, the `AutoPromoteCandidates` resource enforces, in
+  the server layer (never a flippable CLI flag): (1) the target is hard-locked
+  to `memory` — there is no Soul code path, and an explicit non-memory target is
+  refused, so an ADK-sourced claim can never land in the agentId-scoped Soul
+  (cross-user by construction); (2) tag lineage is fail-closed — a candidate is
+  promoted only if it carries an authoritative `adk:<app>:<user>` scope tag,
+  which the promoted memory then carries, and the promoted memory is written
+  `visibility:"private"` (owner-only) — NOT the `shared` (org-open) default a
+  `persistent` write would otherwise get, which would make the distilled private
+  session claim readable by every agent on the instance. So a claim is
+  retrievable only through its own app agent's tag-filtered search (which
+  re-verifies the tag), invisible both to another user's tag filter and to any
+  other agent; a tagless promotion into the shared agentId namespace is refused,
+  not written; (3) the claim is
+  content-safety scanned strict — a prompt-injection payload is never
+  auto-promoted regardless of `FLAIR_CONTENT_SAFETY`; (4) the promoted memory
+  and its candidate record a reserved `machine:adk-auto-promote` reviewerId,
+  never mistakable for a human or agent reviewer. A non-admin caller can sweep
+  only its own candidates. Refs #1205.
+
 ## [0.44.10] - 2026-08-16
 
 ### Added
