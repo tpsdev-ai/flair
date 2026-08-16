@@ -88,8 +88,11 @@ export const INGESTION = {
 export const OLLAMA_HOST = process.env.LME_OLLAMA_HOST ?? "http://192.168.2.64:11434";
 
 // Cross-family self-preference control — fail loud if it is ever violated.
+// Compared as strings on purpose: the pinned literals differ today, but this is
+// a runtime guard against a FUTURE config edit that sets them equal, so the
+// comparison must not be narrowed away by the const-literal types.
 export function assertCrossFamily(): void {
-  if (JUDGE.family === READER.family) {
+  if ((JUDGE.family as string) === (READER.family as string)) {
     throw new Error(
       `self-preference control violated: judge family (${JUDGE.family}) === reader family (${READER.family}). ` +
       `The judge must be a different family than the reader.`,
