@@ -15,7 +15,14 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runNightlyCycle, type ApiCall, type RunnerOpts } from "../src/rem/runner.ts";
+import {
+  runNightlyCycle,
+  deriveActiveAdkTags,
+  ADK_TAG_PREFIX,
+  DEFAULT_MAX_TAGS_PER_CYCLE,
+  type ApiCall,
+  type RunnerOpts,
+} from "../src/rem/runner.ts";
 
 const sampleMemories = [
   { id: "m1", agentId: "test-agent", content: "first memory", durability: "persistent" },
@@ -64,6 +71,9 @@ function baseOpts(overrides: Partial<RunnerOpts> = {}): RunnerOpts {
       "GET:/Memory": () => [{ id: "m1" }, { id: "m2" }],
       "GET:/Soul": () => [{ id: "soul-test-agent", agentId: "test-agent" }],
       "POST:/MemoryCandidate/search_by_conditions": () => [],
+      // #1205b-1: default test-agent is a non-ADK agent — enumeration returns
+      // no adk: tags, so the cycle takes the unchanged agentId-only path.
+      "POST:/Memory/search_by_conditions": () => [],
       "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
       "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default" }),
       "POST:/MemoryDedupStats": () => ({ clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-07-22T03:00:00.000Z" }),
@@ -496,5 +506,206 @@ describe("log append behavior", () => {
     expect(existsSync(join(testRoot, "logs"))).toBe(false);
     await runNightlyCycle(baseOpts());
     expect(existsSync(logPath)).toBe(true);
+  });
+});
+
+// ─── #1205b-1: tag-aware, per-user distillation ──────────────────────────────
+//
+// The core defect this slice fixes: adk-flair collapses (app,user) → one
+// agentId, so an agentId-wide distill mixes every user's sessions. The
+// tag-aware cycle enumerates the active adk:<app>:<user> tags and distills once
+// per tag under scope:"tagged", so each user's candidates come from that user
+// alone. See src/rem/runner.ts step 5.
+
+describe("deriveActiveAdkTags (#1205b-1)", () => {
+  // Pure reduction over the memories the runner ALREADY fetched for the
+  // snapshot (no separate DB query — the Memory resource has no REST
+  // search_by_conditions handler; see deriveActiveAdkTags' doc). The recency
+  // cutoff is the in-memory threshold-gate.
+  const since = new Date("2026-08-14T00:00:00.000Z");
+  const recent = "2026-08-16T00:00:00.000Z";
+  const old = "2026-08-01T00:00:00.000Z";
+  const AGENT = "app-agent";
+
+  it("returns DISTINCT active adk tags, sorted; non-adk tags dropped", () => {
+    const mems = [
+      { agentId: AGENT, tags: ["adk:app:alice", "episodic"], createdAt: recent },
+      { agentId: AGENT, tags: ["adk:app:bob"], createdAt: recent },
+      { agentId: AGENT, tags: ["adk:app:alice"], createdAt: recent }, // dupe → deduped
+      { agentId: AGENT, tags: ["topic:infra"], createdAt: recent },   // non-adk → dropped
+    ];
+    const tags = deriveActiveAdkTags(mems, since, AGENT);
+    expect(tags).toEqual(["adk:app:alice", "adk:app:bob"]);
+    expect(tags).not.toContain("episodic");
+    expect(tags).not.toContain("topic:infra");
+  });
+
+  it("OWNER-SCOPED: tags from OTHER agents' records are excluded (no cross-agent oracle)", () => {
+    // The snapshot fetch is org-wide (Memory is open-within-org); enumeration
+    // must confine to the runner's own agentId.
+    const mems = [
+      { agentId: AGENT, tags: ["adk:app:alice"], createdAt: recent },
+      { agentId: "other-agent", tags: ["adk:otherapp:eve"], createdAt: recent }, // NOT ours
+    ];
+    const tags = deriveActiveAdkTags(mems, since, AGENT);
+    expect(tags).toEqual(["adk:app:alice"]);
+    expect(tags).not.toContain("adk:otherapp:eve");
+  });
+
+  it("recency cutoff (threshold-gate): a tag whose only records predate the cutoff is skipped", () => {
+    const mems = [
+      { agentId: AGENT, tags: ["adk:app:carol"], createdAt: old },     // idle → skipped
+      { agentId: AGENT, tags: ["adk:app:alice"], createdAt: recent },
+    ];
+    expect(deriveActiveAdkTags(mems, since, AGENT)).toEqual(["adk:app:alice"]);
+  });
+
+  it("tolerates missing/malformed rows, tags, and createdAt", () => {
+    const mems = [
+      null,
+      {},
+      { agentId: AGENT, tags: null, createdAt: recent },
+      { agentId: AGENT, tags: ["adk:x"], createdAt: undefined }, // no createdAt → skipped
+      { agentId: AGENT, tags: ["adk:app:alice"], createdAt: recent },
+    ] as any[];
+    expect(deriveActiveAdkTags(mems, since, AGENT)).toEqual(["adk:app:alice"]);
+  });
+
+  it("empty input → []", () => {
+    expect(deriveActiveAdkTags([], since, AGENT)).toEqual([]);
+  });
+
+  it("selects tags by ADK_TAG_PREFIX", () => {
+    expect(ADK_TAG_PREFIX).toBe("adk:");
+    expect(deriveActiveAdkTags([{ agentId: AGENT, tags: ["adk:app:z"], createdAt: recent }], since, AGENT)).toEqual(["adk:app:z"]);
+  });
+});
+
+// Build an apiCall for a cycle. `GET /Memory` returns one recent session
+// memory per active tag — that is the SAME set the runner snapshots AND derives
+// active adk tags from (#1205b-1). Each scope:"tagged" reflect returns that
+// tag's staged candidates.
+function makeTagAwareApi(opts: {
+  activeTags: string[];
+  reflect: (body: any) => any; // maps the /ReflectMemories body → response (or throws)
+}): { api: ApiCall; reflectCalls: any[] } {
+  const reflectCalls: any[] = [];
+  const createdAt = new Date().toISOString(); // within the default 48h window
+  const memories = opts.activeTags.map((t, i) => ({
+    id: `m-${i}`, agentId: "test-agent", content: "session", tags: [t], durability: "standard", createdAt,
+  }));
+  const api: ApiCall = async (method, path, body) => {
+    const key = `${method}:${path.split("?")[0]}`;
+    if (method === "GET" && path.startsWith("/Memory?")) return memories;
+    if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
+    if (key === "POST:/MemoryCandidate/search_by_conditions") return [];
+    if (key === "POST:/MemoryMaintenance") return { expired: 0, archived: 0, total: 0, errors: 0 };
+    if (key === "POST:/ReflectMemories") {
+      reflectCalls.push(body);
+      return opts.reflect(body);
+    }
+    if (key === "POST:/MemoryDedupStats") {
+      return { clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "2026-08-16T03:00:00.000Z" };
+    }
+    throw new Error(`unexpected api: ${key}`);
+  };
+  return { api, reflectCalls };
+}
+
+describe("tag-aware distillation cycle (#1205b-1)", () => {
+  it("PER-TAG: one scope:tagged /ReflectMemories call per active adk tag; candidates aggregated", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice", "adk:app:bob"],
+      reflect: (body) => {
+        const tag = body.tag as string;
+        const user = tag.split(":").pop();
+        return { candidates: [{ id: `cand_${user}` }], count: 1, model: "default" };
+      },
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+
+    expect(r.status).toBe("completed");
+    // exactly one reflect call per tag, each scope:tagged + execute:true.
+    expect(reflectCalls.length).toBe(2);
+    for (const call of reflectCalls) {
+      expect(call.execute).toBe(true);
+      expect(call.scope).toBe("tagged");
+      expect(call.agentId).toBe("test-agent");
+      expect(typeof call.tag).toBe("string");
+    }
+    expect(reflectCalls.map((c) => c.tag).sort()).toEqual(["adk:app:alice", "adk:app:bob"]);
+    // NO agentId-only (scope-less) reflect call happened — that is the bleed path.
+    expect(reflectCalls.some((c) => c.scope === undefined)).toBe(false);
+    // aggregated staged ids from every tag.
+    expect((r.logRow.candidates ?? []).sort()).toEqual(["cand_alice", "cand_bob"]);
+    expect(r.logRow.slice).toBe("2");
+    expect(r.logRow.errors).toEqual([]);
+  });
+
+  it("NON-ADK fallback: no adk tags → a SINGLE agentId-only distill (unchanged pre-#1205b behavior)", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: [],
+      reflect: () => ({ candidates: [{ id: "cand_recent" }], count: 1, model: "default" }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+
+    expect(r.status).toBe("completed");
+    expect(reflectCalls.length).toBe(1);
+    // agentId-only: no scope, no tag — exactly the old call shape.
+    expect(reflectCalls[0]).toEqual({ agentId: "test-agent", execute: true });
+    expect(r.logRow.candidates).toEqual(["cand_recent"]);
+  });
+
+  it("a per-tag failure is NON-FATAL: other tags still distill, cycle completes, error recorded", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice", "adk:app:bob"],
+      reflect: (body) => {
+        if (body.tag === "adk:app:bob") throw new Error("fetch failed: connection reset");
+        return { candidates: [{ id: "cand_alice" }], count: 1, model: "default" };
+      },
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+
+    expect(r.status).toBe("completed");
+    expect(reflectCalls.length).toBe(2); // both attempted
+    expect(r.logRow.candidates).toEqual(["cand_alice"]); // alice's still staged
+    expect(r.logRow.errors.length).toBe(1);
+    expect(r.logRow.errors[0]).toContain("distillation[adk:app:bob]:");
+  });
+
+  it("respects the per-cycle tag cap; overflow deferred and recorded", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: ["adk:app:alice", "adk:app:bob", "adk:app:carol"],
+      reflect: (body) => ({ candidates: [{ id: `cand_${body.tag.split(":").pop()}` }], count: 1, model: "default" }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api, maxTagsPerCycle: 2 }));
+
+    expect(r.status).toBe("completed");
+    expect(reflectCalls.length).toBe(2); // capped
+    expect(r.logRow.errors.some((e) => e.includes("exceed the per-cycle cap"))).toBe(true);
+    expect(DEFAULT_MAX_TAGS_PER_CYCLE).toBeGreaterThan(0);
+  });
+
+  it("recency cutoff gates which tags distill: old-only tags are skipped end-to-end", async () => {
+    const reflectCalls: any[] = [];
+    const cutoff = new Date("2026-08-15T00:00:00.000Z");
+    // carol's records predate the cutoff (idle); alice's are recent (active).
+    const memories = [
+      { id: "m-old", agentId: "test-agent", tags: ["adk:app:carol"], createdAt: "2026-08-01T00:00:00.000Z" },
+      { id: "m-new", agentId: "test-agent", tags: ["adk:app:alice"], createdAt: "2026-08-16T00:00:00.000Z" },
+    ];
+    const api: ApiCall = async (method, path, body) => {
+      const key = `${method}:${path.split("?")[0]}`;
+      if (method === "GET" && path.startsWith("/Memory?")) return memories;
+      if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
+      if (key === "POST:/MemoryCandidate/search_by_conditions") return [];
+      if (key === "POST:/MemoryMaintenance") return { expired: 0, archived: 0 };
+      if (key === "POST:/ReflectMemories") { reflectCalls.push(body); return { candidates: [], count: 0, model: "default" }; }
+      if (key === "POST:/MemoryDedupStats") return { clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "x" };
+      throw new Error(`unexpected api: ${key}`);
+    };
+    await runNightlyCycle(baseOpts({ apiCall: api, distillSince: cutoff }));
+    // Only the RECENT tag (alice) is distilled; carol (old-only) is skipped.
+    expect(reflectCalls.map((c) => c.tag)).toEqual(["adk:app:alice"]);
   });
 });

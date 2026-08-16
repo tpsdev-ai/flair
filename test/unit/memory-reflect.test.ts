@@ -21,6 +21,8 @@ import {
   parseAndValidateCandidates,
   generateCandidates,
   dedupeCandidates,
+  memoryMatchesReflectScope,
+  buildStagedCandidateRow,
   normalizeClaim,
   type GenerateFn,
   type RawCandidate,
@@ -375,5 +377,102 @@ describe("dedupeCandidates", () => {
   test("no existing pending claims — nothing is skipped", () => {
     const candidates: RawCandidate[] = [{ claim: "a claim", sourceMemoryIds: ["m1"] }];
     expect(dedupeCandidates(candidates, [])).toHaveLength(1);
+  });
+});
+
+// ─── #1205b-1: scope selection — the cross-user-bleed boundary ───────────────
+//
+// This is the load-bearing isolation the whole slice turns on. Two ADK users
+// share ONE agentId, separated only by an adk:<app>:<user> tag. The predicate
+// below decides which memories /ReflectMemories hands the model; a candidate's
+// sourceMemoryIds are then enforced ⊆ that gathered set. So proving the
+// predicate admits ONLY one user's memories under scope:"tagged" proves a
+// candidate physically cannot cite another user's memory.
+describe("memoryMatchesReflectScope — per-user isolation (#1205b-1)", () => {
+  const USER_A = "adk:myapp:alice";
+  const USER_B = "adk:myapp:bob";
+  const sinceDate = new Date("2026-08-15T00:00:00.000Z");
+
+  const memA = { tags: [USER_A], createdAt: "2026-08-16T09:00:00.000Z" };
+  const memB = { tags: [USER_B], createdAt: "2026-08-16T09:05:00.000Z" };
+  const oldA = { tags: [USER_A], createdAt: "2026-08-01T00:00:00.000Z" }; // before cutoff
+
+  test("scope:tagged with user A's tag admits A, REJECTS B (no bleed)", () => {
+    expect(memoryMatchesReflectScope(memA, { scope: "tagged", tag: USER_A, sinceDate })).toBe(true);
+    expect(memoryMatchesReflectScope(memB, { scope: "tagged", tag: USER_A, sinceDate })).toBe(false);
+  });
+
+  test("scope:tagged with user B's tag admits B, REJECTS A (symmetric isolation)", () => {
+    expect(memoryMatchesReflectScope(memB, { scope: "tagged", tag: USER_B, sinceDate })).toBe(true);
+    expect(memoryMatchesReflectScope(memA, { scope: "tagged", tag: USER_B, sinceDate })).toBe(false);
+  });
+
+  test("scope:tagged ignores the recency cutoff — a tag pulls ALL its memories, even old ones", () => {
+    // Idempotency-adjacent: the recency cutoff gates WHICH TAGS are active
+    // (runner enumeration), not which memories within a tag are distilled.
+    expect(memoryMatchesReflectScope(oldA, { scope: "tagged", tag: USER_A, sinceDate })).toBe(true);
+  });
+
+  test("scope:tagged with NO tag fails closed — admits NOTHING (never a silent agentId-wide distill)", () => {
+    // The bleed trap: a tagged run that lost its tag must gather an EMPTY set,
+    // not fall through to admitting everything.
+    expect(memoryMatchesReflectScope(memA, { scope: "tagged", tag: undefined, sinceDate })).toBe(false);
+    expect(memoryMatchesReflectScope(memB, { scope: "tagged", tag: "", sinceDate })).toBe(false);
+  });
+
+  // MUTATION CHECK: scope:"recent" (the pre-#1205b agentId-only mode) admits
+  // BOTH users' memories together — the exact cross-user bleed. This is the
+  // behavior the tag-aware runner replaces; if a future change reverts the
+  // runner to scope:"recent" for an ADK agentId, both users feed one gathered
+  // set and candidates bleed.
+  test("scope:recent admits BOTH users (documents the bleed the tagged path prevents)", () => {
+    expect(memoryMatchesReflectScope(memA, { scope: "recent", sinceDate })).toBe(true);
+    expect(memoryMatchesReflectScope(memB, { scope: "recent", sinceDate })).toBe(true);
+  });
+
+  test("scope:recent respects the recency cutoff", () => {
+    expect(memoryMatchesReflectScope(oldA, { scope: "recent", sinceDate })).toBe(false);
+    expect(memoryMatchesReflectScope({ tags: [], createdAt: null }, { scope: "recent", sinceDate })).toBe(false);
+  });
+
+  test("scope:all admits everything eligible", () => {
+    expect(memoryMatchesReflectScope(oldA, { scope: "all", sinceDate })).toBe(true);
+    expect(memoryMatchesReflectScope(memB, { scope: "all", sinceDate })).toBe(true);
+  });
+});
+
+// ─── #1205b-1: staged candidate row stamps the authoritative scope tag ───────
+describe("buildStagedCandidateRow — scopeTag stamping (#1205b-1)", () => {
+  const base = {
+    id: "cand_x",
+    agentId: "app-agent",
+    claim: "a distilled claim",
+    sourceMemoryIds: ["m1", "m2"],
+    rationalePrompt: "prompt",
+    generatedBy: "default",
+    generatedAt: "2026-08-16T03:00:00.000Z",
+  };
+
+  test("scope:tagged stamps scopeTag with the distillation tag", () => {
+    const row = buildStagedCandidateRow({ ...base, scope: "tagged", tag: "adk:myapp:alice" });
+    expect(row.scopeTag).toBe("adk:myapp:alice");
+    expect(row.status).toBe("pending");
+    expect(row.agentId).toBe("app-agent");
+    expect(row.sourceMemoryIds).toEqual(["m1", "m2"]);
+  });
+
+  test("scope:recent leaves scopeTag ABSENT (unchanged non-tagged path)", () => {
+    const row = buildStagedCandidateRow({ ...base, scope: "recent" });
+    expect("scopeTag" in row).toBe(false);
+  });
+
+  test("scope:all leaves scopeTag ABSENT", () => {
+    const row = buildStagedCandidateRow({ ...base, scope: "all" });
+    expect("scopeTag" in row).toBe(false);
+  });
+
+  test("scope:tagged with an empty/absent tag does NOT stamp (fail-safe)", () => {
+    expect("scopeTag" in buildStagedCandidateRow({ ...base, scope: "tagged", tag: "" })).toBe(false);
+    expect("scopeTag" in buildStagedCandidateRow({ ...base, scope: "tagged" })).toBe(false);
   });
 });

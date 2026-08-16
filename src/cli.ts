@@ -8336,6 +8336,21 @@ export type PromotedTagsDecision =
  * callback does the fetching and threads the results here so this is unit-
  * testable and the fail-closed logic is exercised directly.
  *
+ * `stampedScopeTag` (#1205b-1 — the engine slice the #1205a SEAM note below
+ * anticipated): the authoritative scope:"tagged" tag the distillation engine
+ * stamped onto the MemoryCandidate row (resources/MemoryReflect.ts →
+ * buildStagedCandidateRow). When present it is AUTHORITATIVE and short-circuits
+ * the source re-read entirely — the engine distilled under exactly this one
+ * tag, so it knows the per-user scope tag independent of whether the source
+ * memories are still readable. This closes the residual fail-open the SEAM
+ * note describes: a candidate all of whose sources are unreadable yields no
+ * `adk:` evidence and would otherwise be mis-classified NON-ADK and promoted
+ * tagless into the shared agentId namespace (a cross-user leak). Threading it
+ * in as an optional trailing arg keeps every pre-#1205b caller (and every
+ * candidate that never carried a stamp) on the unchanged source-re-read path.
+ *
+ * With NO stamp (undefined/empty) the source-re-read classification runs
+ * exactly as in #1205a:
  *  - No `adk:` scope tag across readable sources → NON-ADK candidate; return
  *    the provenance tags only (unchanged behavior).
  *  - Exactly one `adk:` scope tag AND every source readable → ADK-sourced;
@@ -8348,8 +8363,21 @@ export type PromotedTagsDecision =
 export function derivePromotedTags(
   candidateId: string,
   sources: SourceMemoryFetch[],
+  stampedScopeTag?: string | null,
 ): PromotedTagsDecision {
   const provenance = ["nightly-rem-promoted", `from:${candidateId}`];
+
+  // #1205b-1: a stamped scope tag is AUTHORITATIVE — consume it directly, never
+  // re-read sources. This is the seam closure: correctness no longer depends on
+  // source readability. `adkSourced` (which gates the Soul-promotion refusal in
+  // the promote action) tracks whether the stamped tag is an ADK scope tag.
+  if (typeof stampedScopeTag === "string" && stampedScopeTag.length > 0) {
+    return {
+      ok: true,
+      tags: [stampedScopeTag, ...provenance],
+      adkSourced: stampedScopeTag.startsWith(ADK_SCOPE_TAG_PREFIX),
+    };
+  }
 
   const adkTags = new Set<string>();
   let anySourceUnreadable = false;
@@ -8460,25 +8488,36 @@ rem
         process.exit(1);
       }
 
-      // ADK tag-lineage (#1205a): re-read the candidate's source memories and
-      // derive the promoted-claim tag set. Fail-closed for ADK-sourced
-      // candidates whose per-user scope tag can't be confirmed; unchanged for
-      // non-ADK candidates. See derivePromotedTags for the fail-closed rules.
-      const sourceIds: string[] = Array.isArray(candidate.sourceMemoryIds) ? candidate.sourceMemoryIds : [];
+      // ADK tag-lineage: derive the promoted-claim tag set.
+      //
+      // #1205b-1: if the engine stamped an authoritative `scopeTag` on the
+      // candidate (scope:"tagged" distillation), consume it DIRECTLY and skip
+      // the source re-read — correctness no longer depends on the source
+      // memories still being readable (the #1205a seam closure). We only fall
+      // back to re-reading sources when there is NO stamp (a pre-#1205b
+      // candidate, or a non-tagged distillation).
+      const stampedScopeTag: string | undefined =
+        typeof candidate.scopeTag === "string" && candidate.scopeTag.length > 0 ? candidate.scopeTag : undefined;
       const sourceFetches: SourceMemoryFetch[] = [];
-      for (const sid of sourceIds) {
-        try {
-          const mem = await api("GET", `/Memory/${encodeURIComponent(String(sid))}`);
-          if (mem && !mem.error) {
-            sourceFetches.push({ ok: true, tags: Array.isArray(mem.tags) ? mem.tags : [] });
-          } else {
+      if (!stampedScopeTag) {
+        // No authoritative stamp — re-read sources to classify. Fail-closed for
+        // ADK-sourced candidates whose per-user scope tag can't be confirmed;
+        // unchanged for non-ADK candidates. See derivePromotedTags for rules.
+        const sourceIds: string[] = Array.isArray(candidate.sourceMemoryIds) ? candidate.sourceMemoryIds : [];
+        for (const sid of sourceIds) {
+          try {
+            const mem = await api("GET", `/Memory/${encodeURIComponent(String(sid))}`);
+            if (mem && !mem.error) {
+              sourceFetches.push({ ok: true, tags: Array.isArray(mem.tags) ? mem.tags : [] });
+            } else {
+              sourceFetches.push({ ok: false });
+            }
+          } catch {
             sourceFetches.push({ ok: false });
           }
-        } catch {
-          sourceFetches.push({ ok: false });
         }
       }
-      const tagDecision = derivePromotedTags(candidateId, sourceFetches);
+      const tagDecision = derivePromotedTags(candidateId, sourceFetches, stampedScopeTag);
       if (!tagDecision.ok) {
         console.error(`Error: candidate ${candidateId} — ${(tagDecision as { ok: false; reason: string }).reason}`);
         process.exit(1);

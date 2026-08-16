@@ -210,4 +210,13 @@ type MemoryCandidate @table(database: "flair") @export {
   reviewRationale: String          # required on promote/reject (no rubber-stamp)
   decidedAt: String
   supersedes: String @indexed      # previous rejected candidate this replaces
+  scopeTag: String                 # #1205b-1: the authoritative scope:"tagged" tag this candidate was
+                                   # distilled under (e.g. adk:<app>:<user>). Stamped at distillation time by
+                                   # resources/MemoryReflect.ts when scope="tagged", so promotion can consume
+                                   # the per-user scope tag DIRECTLY (src/cli.ts derivePromotedTags' stamped-tag
+                                   # override) instead of re-reading source memories — closing the #1205a seam
+                                   # where an ADK-sourced candidate with all-unreadable sources yields no adk:
+                                   # evidence and would promote tagless (a cross-user leak). Nullable/additive —
+                                   # pre-#1205b candidates and non-tagged (scope:"recent"/"all") distillations
+                                   # read null, unchanged behavior (clean-upgrade-path gate).
 }

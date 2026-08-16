@@ -209,6 +209,83 @@ describe("derivePromotedTags", () => {
   });
 });
 
+// ─── #1205b-1: stamped scopeTag override (closes the #1205a seam) ─────────────
+//
+// The engine (resources/MemoryReflect.ts) now stamps the authoritative
+// scope:"tagged" tag onto each candidate. derivePromotedTags consumes it
+// DIRECTLY — the seam #1205a documented (an ADK-sourced candidate all of whose
+// sources are unreadable yields no adk: evidence → mis-classified NON-ADK →
+// promoted TAGLESS into the shared agentId namespace, a cross-user leak).
+describe("derivePromotedTags — stamped scopeTag override (#1205b-1)", () => {
+  test("stamped ADK tag is AUTHORITATIVE even when EVERY source is unreadable (seam CLOSED)", () => {
+    // #1205a WITHOUT a stamp fails closed on this exact input (see the "a
+    // source is UNREADABLE → FAIL CLOSED" test above using source evidence).
+    // With the stamp, promotion succeeds and carries the correct per-user tag —
+    // that is the seam closure.
+    const allUnreadable: SourceMemoryFetch[] = [{ ok: false }, { ok: false }];
+    const r = derivePromotedTags("cand_7", allUnreadable, ADK_TAG);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("unreachable");
+    expect(r.adkSourced).toBe(true);
+    expect(r.tags).toEqual([ADK_TAG, "nightly-rem-promoted", "from:cand_7"]);
+  });
+
+  test("stamped tag is consumed with NO sources fetched at all (source re-read is skipped)", () => {
+    const r = derivePromotedTags("cand_8", [], ADK_TAG);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("unreachable");
+    expect(r.adkSourced).toBe(true);
+    expect(r.tags).toEqual([ADK_TAG, "nightly-rem-promoted", "from:cand_8"]);
+  });
+
+  test("stamped tag WINS over source evidence — it is authoritative, not a fallback", () => {
+    // Sources say OTHER_ADK_TAG; the stamp says ADK_TAG. The stamp is the tag
+    // the engine actually distilled under, so it wins. (In practice they agree;
+    // this pins that the stamp is not merely a tiebreaker for the unreadable
+    // case.)
+    const sources: SourceMemoryFetch[] = [{ ok: true, tags: [OTHER_ADK_TAG] }];
+    const r = derivePromotedTags("cand_9", sources, ADK_TAG);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("unreachable");
+    expect(r.tags[0]).toBe(ADK_TAG);
+    expect(r.tags).not.toContain(OTHER_ADK_TAG);
+  });
+
+  test("a stamped NON-adk tag is preserved but NOT flagged adkSourced", () => {
+    // scope:"tagged" is general; a non-adk tagged distillation stamps its tag
+    // too. Lineage is preserved; adkSourced (which gates the Soul refusal)
+    // stays false so ordinary tagged promotion isn't newly blocked.
+    const r = derivePromotedTags("cand_10", [], "topic:infra");
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("unreachable");
+    expect(r.adkSourced).toBe(false);
+    expect(r.tags).toEqual(["topic:infra", "nightly-rem-promoted", "from:cand_10"]);
+  });
+
+  // MUTATION CHECK: with NO stamp (undefined) on all-unreadable ADK sources,
+  // the function must FALL BACK to the #1205a source-re-read path. Here there
+  // is no adk: evidence (sources unreadable), so it classifies NON-ADK and
+  // promotes tagless — the very seam the stamp closes. This proves the override
+  // is what does the work, not something else.
+  test("MUTATION: no stamp + all-unreadable sources → falls back, NON-adk, tagless (the seam, still open without a stamp)", () => {
+    const allUnreadable: SourceMemoryFetch[] = [{ ok: false }, { ok: false }];
+    const r = derivePromotedTags("cand_11", allUnreadable, undefined);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("unreachable");
+    expect(r.adkSourced).toBe(false);
+    expect(r.tags).toEqual(["nightly-rem-promoted", "from:cand_11"]);
+  });
+
+  test("empty-string stamp is treated as NO stamp (falls back to source re-read)", () => {
+    const sources: SourceMemoryFetch[] = [{ ok: true, tags: [ADK_TAG] }, { ok: true, tags: [ADK_TAG] }];
+    const r = derivePromotedTags("cand_12", sources, "");
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("unreachable");
+    // Fell back to source evidence (single readable adk tag) → still correct.
+    expect(r.tags).toEqual([ADK_TAG, "nightly-rem-promoted", "from:cand_12"]);
+  });
+});
+
 // ─── Machine reviewer namespace (#1205a, Sherlock #4) ────────────────────────
 
 describe("isMachineReviewerId / machine reviewer namespace", () => {
