@@ -9,7 +9,7 @@
     {
       "name": "flair",
       "source": "./packages/cursor-flair",
-      "description": "Self-hosted identity, memory, and soul for Cursor agents via @tpsdev-ai/flair-mcp."
+      "description": "Self-hosted identity, memory, and soul for Cursor agents. Your memories live in your own Flair instance — not a cloud memory SaaS."
     }
   ]
 }
