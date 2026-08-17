@@ -1,0 +1,8 @@
+{
+  "name": "@tpsdev-ai/cursor-flair",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cursor Marketplace plugin bundle for Flair (not an npm runtime).",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" }
+}

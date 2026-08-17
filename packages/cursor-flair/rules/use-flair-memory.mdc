@@ -1,0 +1,18 @@
+---
+description: Use Flair MCP tools for identity, memory, and soul. Bootstrap before answering from memory.
+alwaysApply: true
+---
+
+You have Flair MCP tools on the server named `flair`. Memory lives in the user's Flair/Harper instance, not in Cursor cloud.
+
+At session start, after a compact, or after a long gap, call `bootstrap` before answering from memory. Do not invent prior context.
+
+On a task switch or "what did we decide about X?", use the context-loader skill (`bootstrap` once, then 2–3 `memory_search` angles).
+
+Store durable decisions, lessons, preferences, and explicit "remember this" facts with `memory_store`. Confirm with the returned id and a short preview.
+
+If Flair tools fail, use the health skill. Report the configured `FLAIR_URL` and `FLAIR_AGENT_ID` (never secrets) and ask for a reachable Flair origin.
+
+Do not run `flair-session-start` — that hook is Claude-only and is not part of this plugin.
+
+Do not invent a dream, consolidate, export, or wipe-all flow. The tools on this server are: `memory_search`, `memory_store`, `memory_update`, `memory_get`, `memory_delete`, `relationship_store`, `bootstrap`, `soul_set`, `soul_get`, `flair_workspace_set`, `flair_orgevent`.

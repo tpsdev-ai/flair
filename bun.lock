@@ -31,6 +31,10 @@
         "@google/genai": "^1.52.0",
       },
     },
+    "packages/cursor-flair": {
+      "name": "@tpsdev-ai/cursor-flair",
+      "version": "0.1.0",
+    },
     "packages/flair-bench": {
       "name": "@tpsdev-ai/flair-bench",
       "version": "0.44.12",
@@ -686,6 +690,8 @@
     "@tootallnate/quickjs-emscripten": ["@tootallnate/quickjs-emscripten@0.23.0", "", {}, "sha512-C5Mc6rdnsaJDjO3UpGW/CQTHtCKaYlScZTly4JIu97Jxo/odCiH0ITnDXSJPTOrEKk/ycSZ0AOgTmkDtkOsvIA=="],
 
     "@tpsdev-ai/adk-flair": ["@tpsdev-ai/adk-flair@workspace:packages/adk-flair-js"],
+
+    "@tpsdev-ai/cursor-flair": ["@tpsdev-ai/cursor-flair@workspace:packages/cursor-flair"],
 
     "@tpsdev-ai/flair-bench": ["@tpsdev-ai/flair-bench@workspace:packages/flair-bench"],
 

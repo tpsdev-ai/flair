@@ -1,0 +1,55 @@
+{
+  "name": "flair",
+  "displayName": "Flair",
+  "version": "0.1.0",
+  "description": "Self-hosted identity, memory, and soul for AI agents. Persistent semantic memory, personality (soul), and relationships via a local or remote Flair/Harper instance — not a cloud memory SaaS.",
+  "author": {
+    "name": "Nathan Heskew"
+  },
+  "homepage": "https://tps.dev/#flair",
+  "repository": "https://github.com/tpsdev-ai/flair",
+  "license": "Apache-2.0",
+  "keywords": [
+    "flair",
+    "memory",
+    "mcp",
+    "identity",
+    "soul",
+    "semantic-search",
+    "self-hosted",
+    "harper"
+  ],
+  "logo": "assets/logo.svg",
+  "variables": {
+    "type": "object",
+    "properties": {
+      "FLAIR_AGENT_ID": {
+        "type": "string",
+        "title": "Flair agent ID",
+        "description": "Agent identity for memory scoping. Must match `flair agent add <id>`."
+      },
+      "FLAIR_URL": {
+        "type": "string",
+        "title": "Flair URL",
+        "description": "Reachable Flair HTTP origin. Local Cursor can use the default. Grok Bot / cloud agents cannot see the user's laptop localhost — they need a hosted or tunneled instance.",
+        "default": "http://127.0.0.1:19926"
+      },
+      "FLAIR_KEY_PATH": {
+        "type": "string",
+        "title": "Ed25519 key path",
+        "description": "Optional path to the Ed25519 key. Defaults to ~/.flair/keys/<id>.key on the machine that runs npx. Do not put this in mcp.json — set it in the host env of that machine."
+      },
+      "FLAIR_ADMIN_USER": {
+        "type": "string",
+        "title": "Admin username",
+        "description": "Optional Basic auth username for standalone Flair when a key file cannot be mounted. Never commit values. Set in the host env of the machine that runs npx, not in mcp.json."
+      },
+      "FLAIR_ADMIN_PASSWORD": {
+        "type": "string",
+        "title": "Admin password",
+        "description": "Optional Basic auth password for standalone Flair when a key file cannot be mounted. Never commit values. Set in the host env of the machine that runs npx, not in mcp.json."
+      }
+    },
+    "required": ["FLAIR_AGENT_ID"]
+  }
+}
