@@ -1,0 +1,40 @@
+{
+  "name": "flair",
+  "displayName": "Flair",
+  "version": "0.1.0",
+  "description": "Self-hosted identity, memory, and soul for AI agents. Persistent semantic memory, personality (soul), and relationships via a local or remote Flair/Harper instance — not a cloud memory SaaS.",
+  "author": {
+    "name": "TPS Dev AI"
+  },
+  "homepage": "https://tps.dev/#flair",
+  "repository": "https://github.com/tpsdev-ai/flair",
+  "license": "Apache-2.0",
+  "keywords": [
+    "flair",
+    "memory",
+    "mcp",
+    "identity",
+    "soul",
+    "semantic-search",
+    "self-hosted",
+    "harper"
+  ],
+  "logo": "assets/logo.png",
+  "variables": {
+    "type": "object",
+    "properties": {
+      "FLAIR_AGENT_ID": {
+        "type": "string",
+        "title": "Flair agent ID",
+        "description": "Agent identity for memory scoping. Must match `flair agent add <id>`."
+      },
+      "FLAIR_URL": {
+        "type": "string",
+        "title": "Flair URL",
+        "description": "Reachable Flair HTTP origin. Local Cursor can use the default. Grok Bot / cloud agents cannot see the user's laptop localhost — they need a hosted or tunneled instance.",
+        "default": "http://127.0.0.1:19926"
+      }
+    },
+    "required": ["FLAIR_AGENT_ID"]
+  }
+}

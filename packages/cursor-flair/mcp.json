@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "flair": {
+      "command": "npx",
+      "args": ["-y", "@tpsdev-ai/flair-mcp@0.44.12"],
+      "env": {
+        "FLAIR_AGENT_ID": "${FLAIR_AGENT_ID}",
+        "FLAIR_URL": "${FLAIR_URL}",
+        "FLAIR_CLIENT": "cursor"
+      }
+    }
+  }
+}

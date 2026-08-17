@@ -1193,7 +1193,8 @@ jobs:
           # the failure this list exists to catch.
           #   hermes-flair — Python plugin, no TypeScript sources.
           #   adk-flair — Python package, typechecked by its own tooling (pytest/mypy), not tsc.
-          ALLOWED_UNTYPED="hermes-flair adk-flair"
+          #   cursor-flair — Cursor Marketplace plugin bundle (manifests + skills, no TypeScript).
+          ALLOWED_UNTYPED="hermes-flair adk-flair cursor-flair"
 
           FAIL=0
           CHECKED=0

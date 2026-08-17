@@ -1,0 +1,15 @@
+{
+  "name": "flair-plugins",
+  "owner": { "name": "TPS Dev AI" },
+  "metadata": {
+    "description": "Official Flair plugins for Cursor",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "flair",
+      "source": "./packages/cursor-flair",
+      "description": "Self-hosted identity, memory, and soul for Cursor agents. Your memories live in your own Flair instance — not a cloud memory SaaS."
+    }
+  ]
+}
