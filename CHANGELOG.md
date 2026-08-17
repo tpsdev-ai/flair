@@ -18,6 +18,48 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.12] - 2026-08-17
+
+### Added
+
+- **Explicit durability and visibility on `add_memory()`.** The adk-flair Python
+  adapter's explicit write API now accepts optional `durability` and `visibility`
+  keyword arguments. Omitted behaviour is byte-identical (durability `standard`,
+  no visibility key — server applies its durability-keyed default). Supplied values
+  are included in the POST body and validated server-side. Enum-restricted on the
+  client side (`permanent`/`persistent`/`standard`/`ephemeral` and `private`/`shared`);
+  unknown values raise `ValueError` before any network call.
+
+### Fixed
+
+- **LongMemEval `artifactHash` is now reproducible.** `buildArtifact` previously
+  stamped `generatedAt` (wall clock) and `host` into the artifact before hashing,
+  so two runs with identical config and numbers produced different hashes. The
+  artifact is now partitioned into hashed content (`schema`, `validationSlice`,
+  `configHash`, `config`, `runHashes`, `aggregate`, `gitCommit`) and unhashed
+  provenance (`generatedAt`, `host`, `notice`, `artifactHash`); provenance is
+  stamped after hashing and stripped before verification, so identical content
+  hashes identically regardless of where or when it ran.
+
+- **Server-side durability enum validation.** A writer-supplied `durability` that
+  is not one of `permanent`/`persistent`/`standard`/`ephemeral` is now refused with
+  a 400 naming the valid set, instead of being silently accepted and landing on the
+  narrower private branch by accident. Absent durability is unchanged (defaulted to
+  `standard`). Applied to both `Memory.post` and `Memory.put`; the adk-flair Python
+  adapter's `_VALID_DURABILITIES`/`_VALID_VISIBILITIES` frozensets were also moved to
+  module level (cosmetic).
+
+- **Per-memory trust blocks are now charged against the bootstrap token budget.**
+  When `includeTrust:true`, each candidate memory's projected trust block (the
+  `buildTrustBlock(m)` serialization, including the conditional `matchQualityNote`)
+  is charged against `tokenBudget` at the same admission moment as its content
+  cost, at all five admission sites (permanent/recent/predicted/teammate/relevant).
+  Previously the trust array was built post-admission and serialized without ever
+  being counted, so `tokenEstimate` could overshoot `maxTokens * 1.25` on the
+  `/mcp` connector path (measured ~772 uncounted tokens on 0.44.11). The
+  `includeTrust:false` path is byte-identical — no trust cost is charged when
+  trust is off, so content-only selection is unchanged.
+
 ## [0.44.11] - 2026-08-16
 
 ### Added
