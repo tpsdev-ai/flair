@@ -8,6 +8,13 @@
  *
  *   artifactHash = sha256( canonical( configHash + per-run hashes + numbers ) )
  *
+ * The artifact is partitioned into hashed CONTENT (schema, validationSlice,
+ * configHash, config, runHashes, aggregate, gitCommit) and unhashed PROVENANCE
+ * (generatedAt, host, notice, artifactHash). Provenance is stamped AFTER hashing
+ * and stripped BEFORE verification, so two runs with identical content hash
+ * identically regardless of wall clock or host — host-invariance IS the
+ * reproducibility claim.
+ *
  * A human sign-off is recorded against a specific artifactHash — "approved to
  * publish artifact <hash>", not "the number seemed fine at some point". A
  * reviewer can recompute the hash from the committed config + the recorded
@@ -30,18 +37,23 @@ export interface RunRecord {
 }
 
 export interface Artifact {
+  // ── Hashed CONTENT — everything that determines the measured number. ──
   schema: string;
-  notice: string;
   validationSlice: boolean;
-  generatedAt: string;
   gitCommit: string | null;
-  host: { ollama: string; benchHost: string };
   configHash: string;
   config: unknown;          // the full pinned manifest (self-describing artifact)
   runHashes: string[];
   aggregate: ArmAggregate[];
+
+  // ── Unhashed PROVENANCE — stamped AFTER hashing, stripped BEFORE verify. ──
+  // These describe WHERE/WHEN the number was produced, not WHAT it is, so they
+  // must never enter the hash (host-invariance IS the reproducibility claim).
+  notice: string;
+  generatedAt: string;
+  host: { ollama: string; benchHost: string };
   /** Filled in AFTER hashing (excluded from the hash — the hash addresses
-   *  everything above it). */
+   *  the content partition above it). */
   artifactHash?: string;
 }
 
@@ -60,6 +72,18 @@ export interface BuildArtifactInput {
   validationSlice: boolean;
 }
 
+/** Provenance fields — stamped AFTER hashing and stripped BEFORE verification.
+ *  Everything else is hashed content. This list is the single source of truth
+ *  for the partition, so buildArtifact and verifyArtifactHash can never drift. */
+const PROVENANCE_KEYS = ["generatedAt", "host", "notice", "artifactHash"] as const;
+
+/** The hashed-content partition of an artifact: everything except provenance. */
+function hashedContent(art: Artifact): Record<string, unknown> {
+  const content: Record<string, unknown> = { ...art };
+  for (const key of PROVENANCE_KEYS) delete content[key];
+  return content;
+}
+
 export function buildArtifact(input: BuildArtifactInput): Artifact {
   const art: Artifact = {
     schema: "longmemeval-s.layer2.artifact/1",
@@ -76,17 +100,19 @@ export function buildArtifact(input: BuildArtifactInput): Artifact {
     runHashes: input.runHashes,
     aggregate: input.aggregate,
   };
-  // Hash everything above artifactHash. canonicalJson sorts keys, and
-  // artifactHash is absent at this point, so it cannot address itself.
-  art.artifactHash = sha256hex(canonicalJson(art));
+  // Hash the CONTENT partition only — provenance (generatedAt, host, notice) is
+  // excluded so two runs with identical content hash identically regardless of
+  // wall clock or host. canonicalJson sorts keys, and artifactHash is absent at
+  // this point, so it cannot address itself.
+  art.artifactHash = sha256hex(canonicalJson(hashedContent(art)));
   return art;
 }
 
-/** Recompute the hash of an artifact object (verification): strip artifactHash,
- *  canonicalise, sha256 — must equal the stored artifactHash. */
+/** Recompute the hash of an artifact object (verification): strip the provenance
+ *  partition (generatedAt, host, notice, artifactHash), canonicalise, sha256 —
+ *  must equal the stored artifactHash. */
 export function verifyArtifactHash(art: Artifact): boolean {
-  const { artifactHash, ...rest } = art;
-  return sha256hex(canonicalJson(rest)) === artifactHash;
+  return sha256hex(canonicalJson(hashedContent(art))) === art.artifactHash;
 }
 
 export function writeArtifact(art: Artifact, outDir: string): string {
