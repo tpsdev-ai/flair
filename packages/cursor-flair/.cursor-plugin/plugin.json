@@ -19,7 +19,7 @@
     "self-hosted",
     "harper"
   ],
-  "logo": "assets/logo.svg",
+  "logo": "assets/logo.jpg",
   "variables": {
     "type": "object",
     "properties": {
