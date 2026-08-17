@@ -1,5 +1,8 @@
 import { describe, test, expect } from "bun:test";
-import { buildArtifact, verifyArtifactHash, hashRunResults } from "../bench/longmemeval/artifact";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { buildArtifact, verifyArtifactHash, writeArtifact, hashRunResults } from "../bench/longmemeval/artifact";
 import { configManifest, hashConfig, canonicalJson } from "../bench/longmemeval/config";
 
 // The publish gate is STRUCTURAL (Sherlock #4): the run emits a content-
@@ -24,13 +27,30 @@ describe("artifact — content addressing", () => {
     expect(verifyArtifactHash(art)).toBe(true);
   });
 
-  test("identical inputs → identical artifactHash (excluding volatile generatedAt)", () => {
+  test("identical inputs at different wall-times → identical artifactHash (reproducibility)", async () => {
     const a = buildArtifact(baseInput());
+    await new Promise((r) => setTimeout(r, 5)); // force a different wall-clock ms
     const b = buildArtifact(baseInput());
-    // generatedAt differs by wall-clock, so the whole-artifact hash may differ;
-    // the config + run hashes are what's reproducible.
-    expect(a.configHash).toBe(b.configHash);
-    expect(a.runHashes).toEqual(b.runHashes);
+    // The wall clock DID differ — but it is provenance, not content, so the
+    // hash must be identical. This is the whole reproducibility claim.
+    expect(a.generatedAt).not.toBe(b.generatedAt);
+    expect(a.artifactHash).toBe(b.artifactHash);
+  });
+
+  test("mutating one aggregate number changes the artifactHash (tamper-evident)", () => {
+    const a = buildArtifact(baseInput());
+    const b = buildArtifact({
+      ...baseInput(),
+      aggregate: [{ arm: "flair", overallAccuracy: { mean: 0.42, std: 0, runs: [0.42] } }] as any,
+    });
+    expect(b.artifactHash).not.toBe(a.artifactHash);
+  });
+
+  test("verifyArtifactHash round-trips a written artifact", () => {
+    const art = buildArtifact(baseInput());
+    const path = writeArtifact(art, join(tmpdir(), "lme-artifact-test"));
+    const written = JSON.parse(readFileSync(path, "utf8"));
+    expect(verifyArtifactHash(written)).toBe(true);
   });
 
   test("a changed number changes the artifactHash (tamper-evident)", () => {
