@@ -152,6 +152,36 @@ const MAX_COLLISION_ENTRIES = 10;
 // never a scoring failure — see the `matchQualityNote` in the response tail.
 const LIFECYCLE_SECTIONS = new Set(["permanent", "recent", "predicted"]);
 
+// flair#1199 trust-admission — build the EXACT trust entry that ships for one
+// included memory (id + section + block + the conditional matchQualityNote), so
+// the admission loop can charge its REAL serialized cost at the same moment it
+// charges the content cost. Single source of truth: the response tail reuses
+// this same builder, so the charged size and the shipped size can never drift
+// (the #1226 "charge what ships" principle, extended to the per-item trust
+// block). The block is assembled purely for SIZING + the response — its content
+// never enters any authority/scope/attribution/dedup decision (the #735/#744
+// zero-authority invariant).
+//
+// flair#1225 — Kern ruled (on #1220) that a null `matchQuality` on an own-recent
+// (lifecycle) entry is CORRECT: lifecycle sections (permanent/recent/predicted)
+// are a window LOAD, not a retrieval surface, so there is no similarity to band
+// — the null means "not scored here", never a scoring failure on the caller's
+// own records (the #1201 misread: own-recent null beside a teammate band).
+// Behavior is unchanged (per Kern); the matchQualityNote only makes the null
+// self-describing in the payload — Fix 3's "any absent field says why" — so a
+// connector reads it right without knowing the #1201 contract.
+function buildTrustEntry(m: any, section: string): Record<string, unknown> {
+  const block = buildTrustBlock(m);
+  const matchQualityNote = block.matchQuality === null
+    ? (LIFECYCLE_SECTIONS.has(section)
+        ? `matchQuality is null because '${section}' is a lifecycle-window section, not a retrieval `
+          + `surface — there is no relevance score to band. This is correct (per flair#1225), not a scoring failure.`
+        : "matchQuality is null because no semantic similarity was attached to this result "
+          + "(e.g. a by-id read or a keyword-only degraded match).")
+    : undefined;
+  return { id: m.id, section, ...block, ...(matchQualityNote ? { matchQualityNote } : {}) };
+}
+
 // flair#1199/#1206 — the default cap on how many org events bootstrap ships.
 // Overridable per-request via `maxEvents`. Event slots are scarce AND (as of
 // #1199) token-charged, so this bounds both the count and the spend; the shared
@@ -646,7 +676,7 @@ export class BootstrapMemories extends Resource {
     // (relevant/teammate) is applied by the SAME rule to own and teammate
     // records. Fixes the "own recent → null while teammate → strong looks like
     // my own records scored worse" misread.
-    const includedTrustMemories: { m: any; section: string }[] = [];
+    const includedTrustMemories: Record<string, unknown>[] = [];
 
     // flair#744 slice 2 — the best absolute semantic similarity seen while
     // scoring the task-relevant candidate pool (section 4). Drives the opt-in
@@ -703,11 +733,16 @@ export class BootstrapMemories extends Resource {
       // on the REST path); see contentCost. #1207 stays honored: on the prose
       // path this is still the prose-line cost, so REST recall is unchanged.
       const cost = contentCost(struct, line);
-      if (cost <= tokenBudget) {
+      // flair#1199 trust-admission — charge the trust block's real serialized
+      // cost at the same moment as the content cost (per-item trust is CONTENT,
+      // not fixed scaffolding; see buildTrustEntry).
+      const trustEntry = includeTrust ? buildTrustEntry(m, "permanent") : null;
+      const trustCost = trustEntry ? estimateTokens(JSON.stringify(trustEntry)) : 0;
+      if (cost + trustCost <= tokenBudget) {
         sections.permanent.push(line);
         includedOwnMemories.push(struct);
-        if (includeTrust) includedTrustMemories.push({ m, section: "permanent" });
-        tokenBudget -= cost;
+        if (trustEntry) includedTrustMemories.push(trustEntry);
+        tokenBudget -= cost + trustCost;
         includedOwnIds.add(m.id); // #1207 — count by unique own-memory id
       } else {
         truncatedOwnIds.add(m.id); // #1207 — budget-skip, deduped against inclusions at the end
@@ -772,15 +807,19 @@ export class BootstrapMemories extends Resource {
       const line = formatMemory(m, agentId);
       const struct = leanMemory(m, "recent");
       const cost = contentCost(struct, line); // #1199 (0.44.11) — charge what ships; see contentCost
-      if (recentSpent + cost > recentBudget) {
+      // flair#1199 trust-admission — charge the trust block's real serialized
+      // cost against BOTH the recent sub-budget and the shared tokenBudget.
+      const trustEntry = includeTrust ? buildTrustEntry(m, "recent") : null;
+      const trustCost = trustEntry ? estimateTokens(JSON.stringify(trustEntry)) : 0;
+      if (recentSpent + cost + trustCost > recentBudget) {
         truncatedOwnIds.add(m.id); // #1207 — budget-skip; may still be admitted later via the task-relevant loop (deduped at the end)
         continue;
       }
       sections.recent.push(line);
       includedOwnMemories.push(struct);
-      if (includeTrust) includedTrustMemories.push({ m, section: "recent" });
-      recentSpent += cost;
-      tokenBudget -= cost;
+      if (trustEntry) includedTrustMemories.push(trustEntry);
+      recentSpent += cost + trustCost;
+      tokenBudget -= cost + trustCost;
       includedOwnIds.add(m.id); // #1207 — count by unique own-memory id
     }
 
@@ -819,15 +858,19 @@ export class BootstrapMemories extends Resource {
         const line = formatMemory(m, agentId);
         const struct = leanMemory(m, "predicted");
         const cost = contentCost(struct, line); // #1199 (0.44.11) — charge what ships; see contentCost
-        if (predictedSpent + cost > predictedBudget) {
+        // flair#1199 trust-admission — charge the trust block's real serialized
+        // cost against BOTH the predicted sub-budget and the shared tokenBudget.
+        const trustEntry = includeTrust ? buildTrustEntry(m, "predicted") : null;
+        const trustCost = trustEntry ? estimateTokens(JSON.stringify(trustEntry)) : 0;
+        if (predictedSpent + cost + trustCost > predictedBudget) {
           truncatedOwnIds.add(m.id); // #1207 — budget-skip (deduped against inclusions at the end)
           continue;
         }
         sections.predicted.push(line);
         includedPredicted.push(struct);
-        if (includeTrust) includedTrustMemories.push({ m, section: "predicted" });
-        predictedSpent += cost;
-        tokenBudget -= cost;
+        if (trustEntry) includedTrustMemories.push(trustEntry);
+        predictedSpent += cost + trustCost;
+        tokenBudget -= cost + trustCost;
         includedOwnIds.add(m.id); // #1207 — count by unique own-memory id; also the task-relevant loop's exclusion set (no predicted→relevant double-admit)
       }
     }
@@ -1023,7 +1066,13 @@ export class BootstrapMemories extends Resource {
               }
             : leanMemory(m, "relevant");
           const cost = contentCost(struct, line);
-          if (cost > tokenBudget) {
+          // flair#1199 trust-admission — charge the trust block's real serialized
+          // cost at the same moment as the content cost. The section (teammate vs
+          // relevant) is decided by `m._source`, so build the entry with the right
+          // section before the budget check.
+          const trustEntry = includeTrust ? buildTrustEntry(m, m._source ? "teammate" : "relevant") : null;
+          const trustCost = trustEntry ? estimateTokens(JSON.stringify(trustEntry)) : 0;
+          if (cost + trustCost > tokenBudget) {
             // flair#1207 — a size-skip in the score-ordered task-relevant loop
             // is no longer silent: record it on the denominator matching the
             // record's origin (own → truncatedOwnIds, teammate → the separate
@@ -1042,16 +1091,16 @@ export class BootstrapMemories extends Resource {
             // memoriesIncluded — that different-denominator mix is what let
             // included exceed available.
             includedTeammateFindings.push(struct);
-            if (includeTrust) includedTrustMemories.push({ m, section: "teammate" });
-            tokenBudget -= cost;
+            if (trustEntry) includedTrustMemories.push(trustEntry);
+            tokenBudget -= cost + trustCost;
             teammateFindingsIncluded++;
           } else {
             sections.relevant.push(line);
             // flair#1182 — own task-relevant records join the `memories`
             // container.
             includedOwnMemories.push(struct);
-            if (includeTrust) includedTrustMemories.push({ m, section: "relevant" });
-            tokenBudget -= cost;
+            if (trustEntry) includedTrustMemories.push(trustEntry);
+            tokenBudget -= cost + trustCost;
             includedOwnIds.add(m.id); // #1207 — count by unique own-memory id
           }
         }
@@ -1376,28 +1425,12 @@ export class BootstrapMemories extends Resource {
     // caller's own records. flair#1225 (0.44.11) — the null on a lifecycle
     // section is now SELF-EXPLAINING (matchQualityNote below), not just legible
     // via `section`.
-    const trust = includeTrust
-      ? includedTrustMemories.map(({ m, section }) => {
-          const block = buildTrustBlock(m);
-          // flair#1225 — Kern ruled (on #1220) that a null `matchQuality` on an
-          // own-recent (lifecycle) entry is CORRECT: lifecycle sections
-          // (permanent/recent/predicted) are a window LOAD, not a retrieval
-          // surface, so there is no similarity to band — the null means "not
-          // scored here", never a scoring failure on the caller's own records
-          // (the #1201 misread: own-recent null beside a teammate band). Behavior
-          // is unchanged (per Kern); this only makes the null self-describing in
-          // the payload — Fix 3's "any absent field says why" — so a connector
-          // reads it right without knowing the #1201 contract.
-          const matchQualityNote = block.matchQuality === null
-            ? (LIFECYCLE_SECTIONS.has(section)
-                ? `matchQuality is null because '${section}' is a lifecycle-window section, not a retrieval `
-                  + `surface — there is no relevance score to band. This is correct (per flair#1225), not a scoring failure.`
-                : "matchQuality is null because no semantic similarity was attached to this result "
-                  + "(e.g. a by-id read or a keyword-only degraded match).")
-            : undefined;
-          return { id: m.id, section, ...block, ...(matchQualityNote ? { matchQualityNote } : {}) };
-        })
-      : undefined;
+    // flair#1199 trust-admission — the trust entries were built (and their real
+    // serialized cost charged) at admission time via buildTrustEntry, so the
+    // response tail just ships them as-is. The #1225 matchQualityNote logic now
+    // lives in buildTrustEntry (single source of truth — the charged size and
+    // the shipped size can never drift).
+    const trust = includeTrust ? includedTrustMemories : undefined;
 
     // flair#744 slice 2 — opt-in abstention verdict for the task-relevance
     // surface. Present ONLY when `abstain` is requested (byte-identical to
