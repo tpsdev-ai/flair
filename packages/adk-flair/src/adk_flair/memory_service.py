@@ -428,9 +428,37 @@ class FlairMemoryService(BaseMemoryService):
         user_id: str,
         memories: Sequence[MemoryEntry],
         custom_metadata: Optional[Mapping[str, object]] = None,
+        durability: Optional[str] = None,
+        visibility: Optional[str] = None,
     ) -> None:
-        """Direct memory writes — each MemoryEntry becomes a Flair record."""
+        """Direct memory writes — each MemoryEntry becomes a Flair record.
+
+        Optional knobs (trust-anchor opt-in, never model-selected):
+            durability: one of permanent, persistent, standard, ephemeral.
+                Omitted → "standard" in the body (unchanged behaviour).
+            visibility: one of private, shared.
+                Omitted → no visibility key in the body (server applies its
+                durability-keyed default). Supplied → included verbatim.
+        """
         tag = _compound_tag(app_name, user_id)
+
+        # ── Validate explicit durability ─────────────────────────────────
+        _VALID_DURABILITIES = frozenset(
+            ["permanent", "persistent", "standard", "ephemeral"]
+        )
+        if durability is not None and durability not in _VALID_DURABILITIES:
+            raise ValueError(
+                f"durability must be one of {sorted(_VALID_DURABILITIES)} "
+                f"(got: {durability!r})"
+            )
+
+        # ── Validate explicit visibility ─────────────────────────────────
+        _VALID_VISIBILITIES = frozenset(["private", "shared"])
+        if visibility is not None and visibility not in _VALID_VISIBILITIES:
+            raise ValueError(
+                f"visibility must be one of {sorted(_VALID_VISIBILITIES)} "
+                f"(got: {visibility!r})"
+            )
 
         # custom_metadata warn-once
         if custom_metadata:
@@ -454,10 +482,12 @@ class FlairMemoryService(BaseMemoryService):
                 "agentId": self._agent_id,
                 "content": content_text,
                 "type": "session",
-                "durability": "standard",
+                "durability": durability if durability is not None else "standard",
                 "tags": [tag],
                 "createdAt": mem.timestamp or _iso_now(),
             }
+            if visibility is not None:
+                body["visibility"] = visibility
             if mem.author:
                 body["author"] = mem.author
             try:

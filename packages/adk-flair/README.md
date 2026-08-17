@@ -84,6 +84,32 @@ FlairMemoryService(
 )
 ```
 
+### Explicit durability and visibility (opt-in)
+
+The `add_memory()` method accepts optional `durability` and `visibility` keyword
+args that let application code control how memories persist and who can read them:
+
+```python
+await memory_service.add_memory(
+    app_name="my-app",
+    user_id="user-123",
+    memories=[...],
+    durability="persistent",     # permanent | persistent | standard | ephemeral
+    visibility="shared",         # private | shared
+)
+```
+
+- **Omitted (default)** -> `durability=standard`, **no visibility key** in the
+  POST body. The server applies its durability-keyed default
+  (standard/ephemeral -> `private`, permanent/persistent -> `shared`).
+- **Supplied** -> included in the POST body verbatim. The server still validates
+  against the allowed enum values (same set: `permanent`, `persistent`, `standard`,
+  `ephemeral` for durability; `private`, `shared` for visibility).
+
+These knobs are a **trust-anchor opt-in**: application code sets them, not the
+LLM. If your adapter wraps `add_memory()` in an LLM-callable tool, **fix the
+durability/visibility flags in the wrapper** -- the model should never choose them.
+
 ## services.py registration
 
 To use `adk-flair` via the `flair://` URI scheme (CLI, dev UI, eval harness),
@@ -136,8 +162,9 @@ use per-org Flair principals (the org layer).
 ### Tag encoding
 
 The compound scope tag uses `:` as a delimiter (`adk:<app_name>:<user_id>`).
-Colons in `app_name` or `user_id` are replaced with `_` to prevent delimiter
-ambiguity. A `user_id` of `org:admin` becomes the tag segment `org_admin`.
+Reserved characters (`:`, `_`, `%`) are percent-encoded so distinct inputs never
+collide: `user_id = "alice:admin"` → `alice%3Aadmin` (not `alice_admin`).
+This is a reversible, collision-free encoding.
 
 ### Key safety
 
