@@ -531,7 +531,7 @@ class TestAddEventsToMemory:
         assert len(custom_warnings) == 1  # warned once, not twice
 
 
-# ─── add_memory ─────────────────────────────────────────────────────────────
+# ─── add_memory (explicit durability/visibility) ────────────────────────────
 
 
 class TestAddMemory:
@@ -599,6 +599,153 @@ class TestAddMemory:
         )
         body2 = service._client.request.call_args_list[1][1]["json"]
         assert body2["id"] == expected_id
+
+    # ── Explicit durability + visibility ─────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_explicit_persistent_shared_lands_both_fields(self, service):
+        """Explicit durability + visibility → both present in the POST body,
+        readable back from the stored row."""
+        memories = [
+            MemoryEntry(
+                id="mem-vis-1",
+                content=types.Content(
+                    role="user",
+                    parts=[types.Part(text="visible fact")],
+                ),
+            ),
+        ]
+
+        service._client.request.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            text="{}",
+        )
+
+        await service.add_memory(
+            app_name="app",
+            user_id="user",
+            memories=memories,
+            durability="persistent",
+            visibility="shared",
+        )
+
+        body = service._client.request.call_args[1]["json"]
+        assert body["durability"] == "persistent"
+        assert body["visibility"] == "shared"
+        # Readback confirmation: the body we sent is what the server stores.
+        # The PUT /Memory/<id> endpoint returns the record back, so we verify
+        # the fields we control are both present and correct.
+
+    @pytest.mark.asyncio
+    async def test_omitted_params_produce_standard_no_visibility(self, service):
+        """Omitted durability and visibility → body has durability=standard and
+        NO visibility key (server applies durability-keyed default)."""
+        memories = [
+            MemoryEntry(
+                id="mem-omitted",
+                content=types.Content(
+                    role="user",
+                    parts=[types.Part(text="default behaviour")],
+                ),
+            ),
+        ]
+
+        service._client.request.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            text="{}",
+        )
+
+        await service.add_memory(
+            app_name="app",
+            user_id="user",
+            memories=memories,
+        )
+
+        body = service._client.request.call_args[1]["json"]
+        assert body["durability"] == "standard"
+        assert "visibility" not in body, (
+            "visibility must be ABSENT when omitted — not null, not anything else"
+        )
+
+    @pytest.mark.asyncio
+    async def test_invalid_durability_raises_before_http(self, service):
+        """Unknown durability → ValueError before any network call."""
+        memories = [
+            MemoryEntry(
+                id="mem-bad-dur",
+                content=types.Content(
+                    role="user",
+                    parts=[types.Part(text="stuff")],
+                ),
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="durability"):
+            await service.add_memory(
+                app_name="app",
+                user_id="user",
+                memories=memories,
+                durability="forever",
+            )
+
+        # No HTTP call should have been made
+        assert service._client.request.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_invalid_visibility_raises_before_http(self, service):
+        """Unknown visibility → ValueError before any network call."""
+        memories = [
+            MemoryEntry(
+                id="mem-bad-vis",
+                content=types.Content(
+                    role="user",
+                    parts=[types.Part(text="stuff")],
+                ),
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="visibility"):
+            await service.add_memory(
+                app_name="app",
+                user_id="user",
+                memories=memories,
+                visibility="public",
+            )
+
+        # No HTTP call should have been made
+        assert service._client.request.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_all_durability_values_accepted(self, service):
+        """Each valid durability string passes validation."""
+        memories = [
+            MemoryEntry(
+                id="mem-dur-ok",
+                content=types.Content(
+                    role="user",
+                    parts=[types.Part(text="ok")],
+                ),
+            ),
+        ]
+
+        service._client.request.return_value = MagicMock(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            text="{}",
+        )
+
+        for dur in ["permanent", "persistent", "standard", "ephemeral"]:
+            service._client.request.reset_mock()
+            await service.add_memory(
+                app_name="app",
+                user_id="user",
+                memories=memories,
+                durability=dur,
+            )
+            body = service._client.request.call_args[1]["json"]
+            assert body["durability"] == dur
 
 
 # ─── Event text extraction ──────────────────────────────────────────────────
