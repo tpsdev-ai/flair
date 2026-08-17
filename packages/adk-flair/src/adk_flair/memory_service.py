@@ -49,6 +49,11 @@ _LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
 _ALLOW_REMOTE_ENV = "FLAIR_ALLOW_REMOTE_URL"
 _TAG_PREFIX = "adk"
 
+# Valid enum values for the explicit write knobs (flair#1238 — moved to module
+# level from inside add_memory; Sherlock's cosmetic note on #1237).
+_VALID_DURABILITIES = frozenset(["permanent", "persistent", "standard", "ephemeral"])
+_VALID_VISIBILITIES = frozenset(["private", "shared"])
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -443,9 +448,6 @@ class FlairMemoryService(BaseMemoryService):
         tag = _compound_tag(app_name, user_id)
 
         # ── Validate explicit durability ─────────────────────────────────
-        _VALID_DURABILITIES = frozenset(
-            ["permanent", "persistent", "standard", "ephemeral"]
-        )
         if durability is not None and durability not in _VALID_DURABILITIES:
             raise ValueError(
                 f"durability must be one of {sorted(_VALID_DURABILITIES)} "
@@ -453,7 +455,6 @@ class FlairMemoryService(BaseMemoryService):
             )
 
         # ── Validate explicit visibility ─────────────────────────────────
-        _VALID_VISIBILITIES = frozenset(["private", "shared"])
         if visibility is not None and visibility not in _VALID_VISIBILITIES:
             raise ValueError(
                 f"visibility must be one of {sorted(_VALID_VISIBILITIES)} "

@@ -8,6 +8,7 @@ import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
 import { assertValidVisibility } from "./memory-visibility.js";
+import { assertValidDurability } from "./memory-durability.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
   DEDUP_LEXICAL_THRESHOLD_DEFAULT,
@@ -640,6 +641,23 @@ export class Memory extends (databases as any).flair.Memory {
     const usedMemoryIds = content?.usedMemoryIds;
     if (content && typeof content === "object") delete content.usedMemoryIds;
 
+    // ── flair#1238: refuse an unrecognised durability BEFORE defaulting ──
+    // defaultVisibilityForDurability treats any non-permanent/persistent string
+    // as the private branch, so an unknown durability via raw REST (or a future
+    // non-Python adapter) is silently accepted and lands on the narrower private
+    // branch by accident — fail-safe, but unvalidated by contract. Refusing at
+    // the schema boundary makes it safe by construction (mirrors the visibility
+    // guard below). Absent durability is accepted and defaulted to "standard".
+    {
+      const durabilityError = assertValidDurability(content.durability);
+      if (durabilityError) {
+        return new Response(
+          JSON.stringify({ error: "invalid_durability", message: durabilityError }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+    }
+
     content.durability ||= "standard";
     content.createdAt = new Date().toISOString();
     content.updatedAt = content.createdAt;
@@ -842,6 +860,21 @@ export class Memory extends (databases as any).flair.Memory {
     // below only when present.
     const usedMemoryIds = content?.usedMemoryIds;
     if (content && typeof content === "object") delete content.usedMemoryIds;
+
+    // ── flair#1238: refuse an unrecognised durability (mirrors post()) ──
+    // put() is the other HTTP-reachable write path (fresh create via CLI, and
+    // the update/patch path). Same guard as post(): a present-but-unknown
+    // durability is refused with 400; absent is accepted (no default stamped
+    // here — put() leaves durability untouched for updates).
+    {
+      const durabilityError = assertValidDurability(content.durability);
+      if (durabilityError) {
+        return new Response(
+          JSON.stringify({ error: "invalid_durability", message: durabilityError }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+    }
 
     const now = new Date().toISOString();
     content.updatedAt = now;
