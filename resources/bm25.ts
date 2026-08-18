@@ -136,9 +136,13 @@ export function rrfScores(rankings: string[][], universe: Iterable<string>): Map
 }
 
 // Fuse semantic + BM25 candidate id-lists via candidate-union RRF and return a
-// per-id score normalized to [0,1] (rrf / max_rrf_in_union). This normalized
-// value is the rawScore fed to compositeScore so durability/recency/rBoost and
-// the RBOOST_RELEVANCE_FLOOR / minScore thresholds still apply unchanged.
+// per-id score normalized to [0,1] (rrf / max_rrf_in_union). The top-ranked id
+// is pinned at exactly 1.0 BY CONSTRUCTION — this is a RANKING value, not a
+// similarity, and must never be reported as one (flair#985: reporting it as
+// `_score` made every stale flair-client dedup gate see a ≥0.95 "similarity"
+// on EVERY store and silently drop the write). semantic-retrieval-core.ts uses
+// it to ORDER hybrid results (and as compositeScore's ranking input); the
+// reported raw `_score` is the absolute cosine, computed separately.
 //
 //   semIds  — semantic candidate ids, best-first (from the HNSW pass).
 //   bm25Ids — BM25 candidate ids, best-first, already sliced to SEM_LIMIT and
