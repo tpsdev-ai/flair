@@ -4,6 +4,10 @@ Cursor Marketplace plugin for [Flair](https://tps.dev/#flair) — self-hosted id
 
 This bundle is **not an npm runtime**. It wires Cursor to the stdio MCP server [`@tpsdev-ai/flair-mcp`](https://www.npmjs.com/package/@tpsdev-ai/flair-mcp) and ships skills plus one always-on rule. Memories live in **your** Flair/Harper instance (local or a URL you run). Nothing is stored in Cursor cloud.
 
+## Flair vs Cursor's built-in Memories
+
+Cursor ships a native **Memories** feature: persistent notes the agent saves as you work, stored in Cursor's cloud with your Cursor account, available in Cursor. Flair is a different shape — one memory you own: self-hosted, semantically searchable, and shared across every AI you use (Cursor, Grok Bot, Claude Code, your own agents) and with your team. The two coexist: keep Memories for quick scratch notes; Flair is the memory that follows you across tools.
+
 ## Prerequisites
 
 A running Flair instance and an agent identity.

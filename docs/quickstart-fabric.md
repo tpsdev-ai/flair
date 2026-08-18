@@ -65,6 +65,8 @@ export FLAIR_URL=https://<cluster>.<org>.harperfabric.com
 flair agent add mybot --target "$FLAIR_URL" --ops-target https://<cluster>.<org>.harperfabric.com:9925 --admin-pass <fabric-admin-password>
 ```
 
+Same hygiene rule as step 0: an inline password lands in shell history and `ps`. Remote `agent add` honors **only** the explicit `--admin-pass` flag by design — `FLAIR_ADMIN_PASS` and `~/.flair/admin-pass` are this machine's *local* credentials and are never reused against a remote target — so keep the Fabric password in a mode-`0600` file and expand it at call time: `--admin-pass "$(cat <path>)"` stays out of shell history (the expanded value is still visible to local `ps` while the command runs).
+
 ```
 Keypair written: ~/.flair/keys/mybot.key
 ✅ Agent 'mybot' (mybot) registered (ops: https://<cluster>.<org>.harperfabric.com:9925) <!-- docs-freshness-allow: Fabric ops API -->
