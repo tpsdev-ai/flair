@@ -52,6 +52,7 @@ import {
   shouldSendHeartbeat,
   type PresenceActivity,
 } from "./presence.js";
+import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
 
 // ─── Error helpers ──────────────────────────────────────────────────────────
 
@@ -150,7 +151,14 @@ export async function runMcp(): Promise<void> {
 
   // ─── Client setup ────────────────────────────────────────────────────────────
 
-  const agentId = process.env.FLAIR_AGENT_ID;
+  // flair#1250: an MCP host that forwards `"FLAIR_URL": "${FLAIR_URL}"` without
+  // substituting hands us the literal `${FLAIR_URL}`. Remove such literals from
+  // the process env first, because flair-client's constructor ALSO reads
+  // process.env.FLAIR_URL as a fallback — guarding only our own reads below
+  // would be silently defeated when flair-client re-reads the raw env.
+  stripInterpolationLiteralsFromEnv();
+
+  const agentId = readEnvOrUnset("FLAIR_AGENT_ID");
   if (!agentId) {
     console.error("FLAIR_AGENT_ID is required. Set it in your .mcp.json env or shell.");
     process.exit(1);
@@ -158,8 +166,8 @@ export async function runMcp(): Promise<void> {
 
   const flair = new FlairClient({
     agentId,
-    url: process.env.FLAIR_URL,
-    keyPath: process.env.FLAIR_KEY_PATH,
+    url: readEnvOrUnset("FLAIR_URL"),
+    keyPath: readEnvOrUnset("FLAIR_KEY_PATH"),
     // flair#718 authorship-provenance: forward this stdio proxy's own
     // FLAIR_CLIENT env (set by `flair init`'s per-client wiring, e.g.
     // "claude-code"/"codex"/"gemini"/"cursor") into the client it constructs
@@ -187,8 +195,8 @@ export async function runMcp(): Promise<void> {
   // whatever timeout the main client is configured with.
   const presenceFlair = new FlairClient({
     agentId,
-    url: process.env.FLAIR_URL,
-    keyPath: process.env.FLAIR_KEY_PATH,
+    url: readEnvOrUnset("FLAIR_URL"),
+    keyPath: readEnvOrUnset("FLAIR_KEY_PATH"),
     timeoutMs: resolvePresenceTimeoutMs(),
   });
 

@@ -30,10 +30,10 @@ Set these under **Plugins → Configure**. `FLAIR_CLIENT=cursor` is set for you 
 |---|---|---|---|
 | `FLAIR_AGENT_ID` | yes | — | Must match `flair agent add <id>` |
 | `FLAIR_URL` | no | `http://127.0.0.1:19926` | Reachable Flair HTTP origin |
-| `FLAIR_KEY_PATH` | no | `~/.flair/keys/<id>.key` on the **npx host** | Schema-only; set in that machine's env if you need a non-default path |
+| `FLAIR_KEY_PATH` | no | `~/.flair/keys/<id>.key` on the **npx host** | Not a plugin variable; set in that machine's host env if you need a non-default path |
 | `FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD` | no | — | Basic auth for standalone Flair when a key file cannot be mounted. **Never commit values.** Set in the host env of the machine that runs `npx`, not in `mcp.json` |
 
-`FLAIR_KEY_PATH` and `FLAIR_ADMIN_*` are declared in the plugin schema so Configure can document them. They are **not** interpolated into `mcp.json`. An unsubstituted `${FLAIR_KEY_PATH}` would be truthy and break key auto-resolve; an unsubstituted admin password would send literal Basic auth.
+`FLAIR_KEY_PATH` and `FLAIR_ADMIN_*` are documented here in the README only — they are **not** declared as plugin variables and **not** interpolated into `mcp.json`. Set them in the host env of the machine that runs `npx`. Keeping them out of `mcp.json` is deliberate: an unsubstituted `${FLAIR_KEY_PATH}` would be truthy and break key auto-resolve, and an unsubstituted admin password would send literal Basic auth.
 
 ## Grok Bot / Cursor cloud agents
 
