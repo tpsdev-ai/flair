@@ -78,6 +78,7 @@
 import { FlairClient } from "@tpsdev-ai/flair-client";
 import { basename } from "node:path";
 import { deriveActivity, postPresenceSafe, resolvePresenceTimeoutMs, type PresencePoster } from "./presence.js";
+import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
 
 /** Claude Code SessionStart additionalContext hard limit (chars). */
 const MAX_CHARS = 10_000;
@@ -188,7 +189,14 @@ export async function runHook(
   rawInput: string,
   makeClient: (agentId: string) => BootstrapClient = defaultClientFactory,
 ): Promise<string> {
-  const agentId = process.env.FLAIR_AGENT_ID;
+  // flair#1250: drop any unsubstituted `${...}` interpolation literal from the
+  // env before the client is built, so flair-client's own process.env fallback
+  // (e.g. FLAIR_URL) can't resurrect the literal and defeat its default. See
+  // ./env-guard.ts. Runs here (not just at the call site) because the default
+  // client factory below reads process.env directly.
+  stripInterpolationLiteralsFromEnv();
+
+  const agentId = readEnvOrUnset("FLAIR_AGENT_ID");
   if (!agentId) return NOOP_OUTPUT; // no identity → no-op, never break the session
 
   let input: SessionStartInput = {};
@@ -255,8 +263,8 @@ export async function runHook(
 function defaultClientFactory(agentId: string): BootstrapClient {
   return new FlairClient({
     agentId,
-    url: process.env.FLAIR_URL,
-    keyPath: process.env.FLAIR_KEY_PATH,
+    url: readEnvOrUnset("FLAIR_URL"),
+    keyPath: readEnvOrUnset("FLAIR_KEY_PATH"),
   });
 }
 
