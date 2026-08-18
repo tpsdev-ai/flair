@@ -351,15 +351,19 @@ describe("SemanticSearch.post() — flair#1245 temporal intent BOOSTS, never har
 
   // TEST 2 — the soft nudge survives AND nothing is excluded. temporalBoost is
   // a flat multiplier (semantic-retrieval-core.ts: `finalScore *= temporalBoost`),
-  // so with scoring="raw" and one rank-1 candidate (rawScore 1.0) the _score
-  // reads back the boost directly. Recency ORDERING (recent above older) is a
+  // so with scoring="raw" the _score ratio between the boosted and plain query
+  // reads back the boost directly. Since flair#985 the raw `_score` is an
+  // ABSOLUTE value (here, with no embeddings, the +0.05 substring keyword
+  // bump), not the rank-normalized 1.0 — so the record content must
+  // substring-match BOTH query strings for the ratio to be observable on a
+  // non-zero base. Recency ORDERING (recent above older) is a
   // separate mechanism — compositeScore's recency decay — untouched by this
   // fix; this test proves only what the fix guarantees: the boost is still
   // applied and the older record is not filtered out.
   it("flair#1245: the temporalBoost soft nudge is preserved, and the older record is never hard-excluded", async () => {
     reset();
     memoryStore.set("old-widget", {
-      id: "old-widget", agentId: "agent-1", content: "widget notes", createdAt: THIRTY_DAYS_AGO(),
+      id: "old-widget", agentId: "agent-1", content: "widget notes today", createdAt: THIRTY_DAYS_AGO(),
     });
     const s = makeSearch(agentCtx("agent-1"));
     // Same single record is rank-1 in both queries ⇒ identical rawScore; the

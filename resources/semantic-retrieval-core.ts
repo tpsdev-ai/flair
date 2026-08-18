@@ -29,14 +29,29 @@
 // withDetachedTxn's transaction-chain workaround — both SemanticSearch and
 // MemoryBootstrap are Harper Resources with their own `ctx`).
 //
-// Returns results AFTER all filters, sorted best-first by `_score` — bounded
-// ONLY by the `limit` the caller chose to push down (the core never
+// Returns results AFTER all filters, sorted best-first by RETRIEVAL RANK —
+// bounded ONLY by the `limit` the caller chose to push down (the core never
 // multiplies `limit` internally; any overfetch policy — SemanticSearch's
 // CANDIDATE_MULTIPLIER, MemoryBootstrap's K formula — is the CALLER's
 // decision, made
 // before calling in). Never exposes which internal leg (BM25+RRF hybrid vs.
 // legacy HNSW-only vs. keyword-only fallback) produced a given result — the
 // output shape is identical regardless of `hybrid`.
+//
+// ── SCORE CONTRACT (flair#985) ───────────────────────────────────────────────
+// `_score` under `scoring:"raw"` is ALWAYS an ABSOLUTE similarity (cosine of
+// the query and the record's stored embedding, plus the legacy +0.05 substring
+// keyword bump) — on every path, hybrid included. It is NEVER a
+// rank-normalized value. Ordering and score are deliberately decoupled on the
+// hybrid path: results are ORDERED by the fused RRF rank (that ordering is the
+// hybrid recall win), but each result's `_score` reports its true evidence, so
+// order and `_score` can disagree. The pre-#985 hybrid path reported the
+// normalized RRF value AS `_score`, which pinned the top result of ANY query
+// at 1.0 — and every consumer thresholding `_score` as a similarity (the
+// pre-0.18 flair-client dedup gate at 0.95, `minScore`, `flair doctor`'s
+// embed-verify probe) failed open at maximal confidence. For the dedup gate
+// that meant EVERY memory_store from a stale client silently dropped its
+// content into the arbitrary top-1 match — the #985 data-loss report.
 import { databases } from "harper";
 import { withDetachedTxn } from "./table-helpers.js";
 import { wrapUntrusted } from "./content-safety.js";
@@ -147,13 +162,17 @@ export interface RetrieveCandidatesParams {
    * flair#744 slice 2 (abstention): attach an absolute semantic similarity
    * (`_semSimilarity`, cosine in [0,1]) to each embedding-leg result so the
    * ABSTENTION decision in the wrapper can read the best-match *confidence*.
-   * This is the raw cosine, NOT the ranking `_score` — the hybrid path
-   * RRF-normalizes `_score` so the top result is always ~1.0 regardless of how
-   * weak the real match is, which is unusable as a confidence floor.
+   * This is the raw cosine — historically distinct from the hybrid `_score`,
+   * which used to be RRF rank-normalized (top result pinned at ~1.0 however
+   * weak the real match); since flair#985 the raw-mode `_score` is on this
+   * same absolute scale, and `_semSimilarity` remains the opt-in per-result
+   * confidence field.
    *
    * DEFAULT false (and passed false by every non-abstain caller) ⇒ result
    * objects are byte-identical to pre-slice-2: the `_semSimilarity` field is
-   * NEVER added unless requested. The value is derived ONLY from the embedding
+   * NEVER added unless requested (the cosine is now CAPTURED unconditionally
+   * for `_score` itself, but the field attach stays opt-in). The value is
+   * derived ONLY from the embedding
    * cosine — never from any principal / tier / authority field — so surfacing
    * it cannot turn abstention into an authority side-channel.
    */
@@ -194,10 +213,12 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
     // ── (a) Semantic candidate records (best-first) ──────────────────────
     const semRecords: any[] = [];
     const semIds: string[] = [];
-    // flair#744 slice 2: absolute cosine similarity per semantic candidate
-    // (from the HNSW `$distance`), captured HERE before `$distance` is stripped
-    // downstream — the confidence signal the abstention decision reads (only
-    // when `withSemSimilarity`; empty/unused otherwise).
+    // Absolute cosine similarity per semantic candidate (from the HNSW
+    // `$distance`), captured HERE before `$distance` is stripped downstream.
+    // Captured UNCONDITIONALLY (flair#985): this is the value `_score` reports
+    // under `scoring:"raw"` — see the fused loop below — and, when
+    // `withSemSimilarity` (flair#744 slice 2), also the confidence signal the
+    // abstention decision reads via the opt-in `_semSimilarity` field.
     const semSimById = new Map<string, number>();
     if (qEmb) {
       const semQuery: any = {
@@ -221,8 +242,18 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         // record with no validTo, or a future validTo, is unaffected.
         if (record.validTo && Date.parse(record.validTo) < Date.now()) continue;
         if (!passesAllowed(record)) continue;
-        if (withSemSimilarity && record.$distance !== undefined) {
+        if (record.$distance !== undefined) {
           semSimById.set(record.id, distanceToSimilarity(record.$distance));
+        } else {
+          // Harper's cosine-sort query omits `$distance` for a SINGLETON
+          // post-filter result set (see the legacy path below and
+          // resources/SemanticSearch.ts's original writeup). Point-lookup the
+          // record and compute cosine ourselves from its real stored
+          // embedding — a missing/empty stored embedding yields 0 (safe "no
+          // semantic evidence"), never a false-high score.
+          const full = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(record.id));
+          const storedEmbedding = Array.isArray(full?.embedding) ? full.embedding : [];
+          semSimById.set(record.id, cosineSimilarity(qEmb, storedEmbedding));
         }
         semRecords.push(record);
         semIds.push(record.id);
@@ -279,32 +310,70 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
           _source: source,
+          _rank: finalScore,
         });
       }
     } else {
-      // ── Candidate-union RRF → normalized [0,1] rawScore ────────────────
+      // ── Candidate-union RRF → normalized [0,1] RANKING value ────────────
+      // flair#985: the fused RRF value ORDERS results but is never REPORTED
+      // as a score. RRF normalization pins the top candidate at exactly 1.0
+      // regardless of how weak the real match is — reporting it as `_score`
+      // (the pre-#985 behavior) silently changed the meaning of `_score` from
+      // "absolute similarity, 0.95 ≈ near-duplicate" to "relative rank". Every
+      // consumer that thresholds `_score` as a similarity then fails OPEN at
+      // maximal confidence: the pre-0.18 flair-client dedup gate (`score >=
+      // 0.95` → suppress the write) suppressed EVERY memory_store into the
+      // arbitrary top-1 — however unrelated — which is the #985 field report
+      // (4/5 writes silently lost cross-topic). `minScore`, `flair doctor`'s
+      // embed-verify probe, and compositeScore's relevance floors all carry
+      // the same absolute-scale expectation. So: rank by fusion (`_rank`,
+      // internal, stripped before return — the hybrid recall win lives in the
+      // fused ORDER), report absolute evidence (`_score` = true cosine + the
+      // legacy keyword bump, same scale as the legacy HNSW-only path below).
       const fused = fuseRrfNormalized(semIds, bm25Ids);
 
       for (const [id, rrfRaw] of fused) {
         const record = allowedById.get(id);
         if (!record) continue; // should not happen — union ⊆ allowed
-        const rawScore = rrfRaw; // already normalized to [0,1]
-        let finalScore = scoring === "raw" ? rawScore : compositeScore(rawScore, record);
+
+        // Absolute semantic similarity for this candidate. Sem-leg candidates
+        // already carry it (captured above, incl. the singleton-`$distance`
+        // fallback). A BM25-only candidate never went through the HNSW leg —
+        // point-lookup its stored embedding and compute the true cosine, so a
+        // genuinely-relevant lexical rescue reports its real similarity
+        // instead of a fabricated one (missing/legacy embedding ⇒ 0, safe).
+        let semSim = semSimById.get(id);
+        if (semSim === undefined && qEmb) {
+          const full = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(id));
+          const storedEmbedding = Array.isArray(full?.embedding) ? full.embedding : [];
+          semSim = cosineSimilarity(qEmb, storedEmbedding);
+          semSimById.set(id, semSim);
+        }
+        let keywordHit = false;
+        if (q && String(record.content || "").toLowerCase().includes(String(q).toLowerCase())) {
+          keywordHit = true;
+        }
+        const rawScore = (semSim ?? 0) + (keywordHit ? 0.05 : 0);
+        let finalScore = scoring === "raw" ? rawScore : compositeScore(rrfRaw, record);
         if (temporalBoost > 1.0) finalScore *= temporalBoost;
 
         const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
         const source = record.agentId !== agentId ? record.agentId : undefined;
-        // flair#744 slice 2: absolute cosine confidence for the abstention
-        // decision — only for records that had a semantic (HNSW) candidate; a
-        // BM25-lexical-only match carries no cosine and contributes none.
-        const semSim = withSemSimilarity ? semSimById.get(id) : undefined;
         results.push({
           ...record,
           content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
           _source: source,
-          ...(semSim !== undefined ? { _semSimilarity: semSim } : {}),
+          // Ordering key: fused rank for raw mode; composite value for
+          // composite mode (composite ordering is unchanged by #985 — its
+          // rrfRaw input and result order are exactly the pre-#985 behavior).
+          _rank: scoring === "raw" ? rrfRaw : finalScore,
+          // flair#744 slice 2: the opt-in absolute-confidence field for the
+          // abstention decision. Attach remains OPT-IN so non-abstain
+          // responses stay byte-identical (the capture above is now
+          // unconditional, but the response field is not).
+          ...(withSemSimilarity && semSim !== undefined ? { _semSimilarity: semSim } : {}),
         });
       }
     }
@@ -367,6 +436,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
         _source: source,
+        _rank: finalScore,
         ...(withSemSimilarity ? { _semSimilarity: semanticScore } : {}),
       });
     }
@@ -406,6 +476,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
         _source: source,
+        _rank: finalScore,
       });
     }
   }
@@ -424,11 +495,22 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
     filteredResults = results.filter((r: any) => !supersededIds.has(r.id));
   }
 
-  // Apply minimum score filter
+  // Apply minimum score filter — against `_score`, which is ALWAYS on the
+  // absolute-similarity scale after flair#985 (the hybrid path used to report
+  // the rank-normalized RRF value here, so `minScore: 0.95` matched the
+  // always-1.0 top-1 of ANY query instead of meaning "similarity ≥ 0.95").
   if (minScore > 0) {
     filteredResults = filteredResults.filter((r: any) => r._score >= minScore);
   }
 
-  filteredResults.sort((a: any, b: any) => b._score - a._score);
+  // Order by the internal ranking key (fused RRF rank on the hybrid raw path;
+  // identical to `_score` everywhere else), then strip it — `_rank` is an
+  // ordering key, never part of the response shape. Note the hybrid raw
+  // ordering is deliberately NOT by `_score`: the recall win of hybrid
+  // retrieval lives in the fused ORDER (a BM25 rank-1 rescue outranks weak
+  // semantic hits), while `_score` carries the honest absolute evidence for
+  // each result — the two can disagree, and that is correct.
+  filteredResults.sort((a: any, b: any) => b._rank - a._rank);
+  for (const r of filteredResults) delete r._rank;
   return filteredResults;
 }

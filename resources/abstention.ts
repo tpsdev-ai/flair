@@ -117,10 +117,11 @@ export interface AbstentionResult {
  * Reads ONLY the `_semSimilarity` number the retrieval core
  * (resources/semantic-retrieval-core.ts) attaches to each semantic-leg result
  * WHEN abstention is requested — an absolute cosine similarity in [0,1],
- * independent of the RRF normalization that makes the ranking `_score`
- * a *relative* signal (the top RRF-fused result is normalized to 1.0 regardless
- * of how weak the actual match is, so `_score` is unusable as a confidence
- * floor — this is why abstention reads the absolute similarity instead).
+ * independent of the RRF fusion that orders hybrid results. (Historically the
+ * hybrid `_score` was itself RRF rank-normalized — top result pinned at 1.0
+ * however weak the match — which is why this reads the dedicated absolute
+ * field; since flair#985 the raw `_score` is absolute too, and
+ * `_semSimilarity` stays the explicit opt-in confidence channel.)
  *
  * Returns null when NO candidate carries a `_semSimilarity` (no embedding-based
  * match at all — e.g. a keyword-only degraded search, or an empty pool). Per
