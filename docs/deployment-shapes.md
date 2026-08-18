@@ -5,7 +5,7 @@ Flair runs in one of three shapes. Pick yours and follow only that path.
 | You want to... | Shape | Start here |
 |---|---|---|
 | Run Flair on your own machine or VPS. `flair init` installs Harper, creates your agent identity, and you're running. | **Standalone local** | [standalone-local.md](standalone-local.md) |
-| Run Flair on [Harper Fabric](https://www.harperdb.io/) — managed hosting, multi-region replication, no shell on the node. You deploy a component; agents connect over HTTPS. | **Hosted on Fabric** | [hosted-on-fabric.md](hosted-on-fabric.md) |
+| Run Flair on [Harper Fabric](https://www.harperdb.io/) — managed hosting, multi-region replication, no shell on the node. You deploy a component; agents connect over HTTPS. | **Hosted on Fabric** | [quickstart-fabric.md](quickstart-fabric.md) (new-user URL) · [hosted-on-fabric.md](hosted-on-fabric.md) |
 | Load Flair into a Harper instance you already run. In-process calls — no HTTP, no second process, no key to distribute. Over HTTP it is one memory API among many. | **Embedded in a Harper app** | [embedding-in-a-harper-app.md](embedding-in-a-harper-app.md) |
 
 ---

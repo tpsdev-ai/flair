@@ -21,6 +21,9 @@ you already have, [Remote Server](../README.md#remote-server) is simpler and kee
 
 ## Quickstart
 
+New user who just needs a reachable `FLAIR_URL` for Cursor / Grok Bot? Start at
+[quickstart-fabric.md](quickstart-fabric.md). This page is the operator path.
+
 ### 1. Deploy the component
 
 ```bash

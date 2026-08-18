@@ -235,7 +235,8 @@ Full walkthrough: [federation.md](federation.md).
 ## See also
 
 - [deployment-shapes.md](deployment-shapes.md) — choose your shape
-- [quickstart.md](quickstart.md) — zero to working in 5 minutes
+- [quickstart.md](quickstart.md) — zero to working in 5 minutes (laptop)
+- [quickstart-fabric.md](quickstart-fabric.md) — reachable Harper Fabric URL for Cursor cloud / Grok Bot
 - [upgrade.md](upgrade.md) — full upgrade mechanics (re-embedding, rollback, downgrade)
 - [federation.md](federation.md) — hub-and-spoke sync between instances
 - [troubleshooting.md](troubleshooting.md) — common issues and automated diagnosis

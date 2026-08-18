@@ -347,7 +347,7 @@ flair agent add otherbot --target https://your-server:19926
 
 ### Harper Fabric
 
-Managed hosting with multi-region replication and failover. Federation runs against Harper Fabric hubs — pair your local instance to sync memories across nodes. Full guide: **[docs/deploying-on-fabric.md](docs/deploying-on-fabric.md)**.
+Managed hosting with multi-region replication and failover. Need a public URL for Cursor / Grok Bot / cloud agents? Start at **[docs/quickstart-fabric.md](docs/quickstart-fabric.md)**. Federation, pairing, and operator detail: **[docs/deploying-on-fabric.md](docs/deploying-on-fabric.md)**.
 
 ## Security
 

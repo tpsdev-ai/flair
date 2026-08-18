@@ -2,6 +2,8 @@
 
 Deploy Flair as a component to a [Harper Fabric](https://www.harperdb.io/) instance. You do not run the Harper process yourself: managed hosting, multi-region replication, no shell on the node.
 
+Need a public URL for Cursor / Grok Bot / cloud agents? Start at [quickstart-fabric.md](quickstart-fabric.md).
+
 ---
 
 ## Deploy
