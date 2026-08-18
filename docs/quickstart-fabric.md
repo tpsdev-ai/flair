@@ -91,7 +91,41 @@ In Cursor: **Plugins → Configure**
 
 Those are the two plugin schema fields. Local Cursor's `npx` can use the key from step 3 at `~/.flair/keys/mybot.key`. A cloud agent's `npx` runs on a different machine — that VM needs the key (or host-env admin credentials). See [`packages/cursor-flair/README.md`](../packages/cursor-flair/README.md).
 
-## 5. Verify
+## 5. Wire a Grok Bot agent
+
+Same connector, different panel. This is the field-verified sequence — including the two places it fails first.
+
+**One identity per agent.** Short lowercase ids (`grok-cos` for a Chief-of-Staff agent). Never share an id across agents, and never leave admin credentials as an agent's standing auth — the admin password is for registration, once.
+
+1. In the Grok Bot agent's **Tools & MCPs** panel, add the Flair connector (the same `flair-mcp` stdio server the Cursor plugin runs):
+
+   | Variable | Value |
+   |---|---|
+   | `FLAIR_URL` | `https://<cluster>.<org>.harperfabric.com` |
+   | `FLAIR_AGENT_ID` | `grok-cos` (this agent's own id) |
+
+2. Ask for a bootstrap. **The first one returns 401.** That is fail-closed working as designed: the id is not registered yet and the machine has no key. Do not "fix" it by pasting admin credentials into the agent's environment.
+
+3. Provide the Fabric admin password through the platform's secret mechanism — Grok Bot's secure secret card — never pasted in chat. It is needed once, for registration only.
+
+4. On the machine that runs the MCP process (for Grok Bot, that is the agent VM): Node.js **22 or newer** — the field machine had 20 and had to upgrade before anything else worked. Then:
+
+   ```bash
+   npm i -g @tpsdev-ai/flair
+
+   # Fabric ops is :9925 on the same host, as in step 3. docs-freshness-allow: Fabric ops API
+   flair agent add grok-cos --target https://<cluster>.<org>.harperfabric.com --ops-target https://<cluster>.<org>.harperfabric.com:9925 --admin-pass "$(cat <pass-file>)"
+   ```
+
+   Keep the pass file mode `0600`. Newer releases add `--admin-pass-file <path>`, which reads the file in-process (invisible to `ps`) — check `flair agent add --help` and prefer it when present.
+
+5. **Restart the MCP process** if it started before the key existed — it does not pick the key up mid-session. Still 401 with the key on disk? Set the key path explicitly in the agent's MCP env: `FLAIR_KEY_PATH=~/.flair/keys/grok-cos.key`. Known papercut, tracked in [flair#1271](https://github.com/tpsdev-ai/flair/issues/1271).
+
+6. Verify: ask the agent to "load my Flair bootstrap". You should get soul + memories **including shared org context** — findings written by teammate agents. A shared-visibility write from this agent is now readable by every org agent.
+
+**Account-wide connectors are shared.** A connector added at the Grok Bot account level is one identity used by every agent on that account. For per-agent identity, give each agent its own MCP entry with its own `FLAIR_AGENT_ID` — and register each id (steps 2–5).
+
+## 6. Verify
 
 ```bash
 flair status --target "$FLAIR_URL"
