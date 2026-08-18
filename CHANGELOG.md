@@ -18,6 +18,39 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.44.13] - 2026-08-18
+
+### Added
+
+- **Cursor Bugbot review rules (`.cursor/BUGBOT.md`).** Encodes flair's own review
+  taxonomy — fail-open string compares, config-default trust anchors, secret
+  handling, "a check that cannot fire", count-contract invariants, and
+  prefix/embedding asymmetry — so Cursor Bugbot reviews flair PRs against our
+  standards rather than generic rules. Advisory only; it does not gate merges.
+
+- **Official Cursor Marketplace plugin.** Repo-root `.cursor-plugin/marketplace.json`
+  points at the private `packages/cursor-flair` bundle (stdio MCP via pinned
+  `@tpsdev-ai/flair-mcp`, always-on memory rule, and skills). Not published to
+  npm. Install from the Cursor Marketplace or `~/.cursor/plugins/local/flair`.
+
+- **Harper Fabric Quick Start for a reachable `FLAIR_URL`.** New
+  [`docs/quickstart-fabric.md`](docs/quickstart-fabric.md) walks a first-time
+  Cursor / Grok Bot user through `flair deploy`, remote `flair agent add
+  --target`, and pasting the HTTPS origin into the plugin. Laptop
+  `docs/quickstart.md` stays the local path and now points at Fabric when
+  `127.0.0.1:19926` is not enough.
+
+### Fixed
+
+- **flair-mcp: an unsubstituted `${...}` env interpolation is now treated as unset.** When an MCP host forwards a config template like `"FLAIR_URL": "${FLAIR_URL}"` and the variable is unset, some hosts pass the literal string `${FLAIR_URL}` through unexpanded. flair-mcp used that literal verbatim, so flair-client's default origin (`http://localhost:19926`) never applied and the connection failed with a confusing error. flair-mcp now treats a wholesale `${...}` interpolation literal in `FLAIR_URL`, `FLAIR_AGENT_ID`, or `FLAIR_KEY_PATH` as unset, so the normal defaults apply instead. Correctly-substituted configs are unaffected — nothing to do.
+
+- **Recall no longer drops older memories when the query text merely mentions a
+  time.** A temporal word in a search query (e.g. an incidental "today" sitting
+  inside a slogan) used to derive a hard `since` cutoff that silently excluded
+  every memory older than that window — so an on-topic recall could return
+  nothing. Text-derived temporal intent now only nudges recency in ranking; it
+  never filters. An explicit `since` API parameter still hard-filters, unchanged.
+
 ## [0.44.12] - 2026-08-17
 
 ### Added
