@@ -21,6 +21,7 @@ import {
 // retrievalCount hit-tracking side effects (see resources/
 // semantic-retrieval-core.ts's module doc for the full boundary).
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
+import { hybridEnabled } from "./bm25.js";
 import { buildTrustBlock } from "./trust-block.js";
 import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 import { estimateTokens } from "./token-estimate.js";
@@ -58,8 +59,9 @@ import { estimateTokens } from "./token-estimate.js";
  *      (no new embedding code — Memory is the semantic surface, WorkspaceState/
  *      OrgEvent are the entity surface, per the K&S verdict). Gated on
  *      freshness (Presence, via the SAME internal roster path, never the raw
- *      table) and #550's existing relevance floor. See resources/
- *      collision-lib.ts for the pure join/rank/format logic.
+ *      table); drawn from #550's fused-rank scored pool (flair#1246 — no
+ *      relevance floor). See resources/collision-lib.ts for the pure
+ *      join/rank/format logic.
  *
  * Prediction: when context signals (channel, surface, subjects) are provided,
  * the bootstrap loads more aggressively — Flair is fast enough that the
@@ -135,9 +137,12 @@ import { estimateTokens } from "./token-estimate.js";
  *   memoriesAvailable` — included and truncated are disjoint sets of UNIQUE own
  *   memories (a memory budget-skipped in one section but admitted in another counts
  *   as included, never both). `teammateFindingsMatched` is the teammate match pool
- *   that cleared the relevance floor; `teammateFindingsIncluded +
- *   teammateFindingsTruncated == teammateFindingsMatched`, so "truncated" means
- *   "relevant but no budget," not "every candidate not selected."
+ *   that entered the scored candidate set — since flair#1246 that is the
+ *   K-bounded fused-rank retrieval pool (no relevance floor; the historical
+ *   `_score > 0.3` gate was measured inert and removed); `teammateFindingsIncluded
+ *   + teammateFindingsTruncated == teammateFindingsMatched` (the #1199 contract,
+ *   unchanged), so "truncated" means "retrieved but no budget," not "every
+ *   candidate not selected."
  *   `predictedHint` is present only when subjects were provided but `predicted`
  *   came back empty.
  */
@@ -217,10 +222,18 @@ const OWN_NONPERMANENT_FETCH_LIMIT = 500;
 const AVG_LINE_TOKEN_ESTIMATE = 60;
 const MIN_CANDIDATE_POOL = 50;
 const MAX_CANDIDATE_POOL = 100;
-// Bootstrap's own historical relevance floor (distinct from SemanticSearch's
-// `minScore` request param) — preserved verbatim from the original raw
-// JS dot-product scan's `.filter((s) => s.score > 0.3)`.
-const TASK_RELEVANCE_FLOOR = 0.3;
+// flair#1246 — the historical TASK_RELEVANCE_FLOOR (`_score > 0.3`, carried
+// verbatim from the original raw JS dot-product scan) is REMOVED, not
+// recalibrated: a 6-variant measurement on the shipped embedding model proved
+// it inert (126 records across field-analog/nonce/contamination/control/
+// max-dilution/scattered-senses shapes — nothing scored under ~0.44, so the
+// floor cut zero records and never delivered "show nothing when nothing's
+// relevant" either; fully-unrelated bland noise sits 0.44–0.63). Selection on
+// the task-relevant surface is fused retrieval rank + the token budget. Do
+// not reintroduce a constant floor — an absolute bar tight enough to exclude
+// bland noise (max-dilution noise cosine 0.6086) also excludes the
+// pathological on-task case (0.5656); a real relevance gate would need a
+// corpus-relative instrument, which is a new feature, not a constant.
 
 // flair#1207 — the per-item structured-payload overhead that #1199 charged
 // against the content-selection budget (a `+ STRUCT_ITEM_OVERHEAD_TOKENS = 70`
@@ -397,9 +410,10 @@ export class BootstrapMemories extends Resource {
     // is what let one client see included(9) > available(3).
     let teammateFindingsIncluded = 0;
     // flair#1207 — teammate findings SKIPPED for size in the task-relevant
-    // packing loop (cleared the relevance floor but didn't fit the BUDGET).
-    // Reported ALONGSIDE `teammateFindingsMatched` (the whole floor-clearing pool
-    // considered), so "truncated" unambiguously means "relevant-but-no-budget",
+    // packing loop (entered the scored retrieval pool but didn't fit the
+    // BUDGET; flair#1246 — the pool is the K-bounded fused-rank candidate
+    // set, no relevance floor). Reported ALONGSIDE `teammateFindingsMatched`
+    // (the whole scored pool considered), so "truncated" unambiguously means "relevant-but-no-budget",
     // NOT "every candidate not selected" — 0.44.9's `truncated:89` beside
     // `included:4` read as "89 relevant findings cut" with no pool to anchor it
     // (heskew's #1207 nit). Both are disjoint-and-exhaustive over the matched
@@ -907,12 +921,13 @@ export class BootstrapMemories extends Resource {
     }
 
     // Collision surfacing's semantic-match candidates (flair#681) — the
-    // BEST (highest-scoring) cross-agent memory per teammate from #550's
+    // BEST (top fused-rank) cross-agent memory per teammate from #550's
     // `scored` list below, captured here (before that list's tokens get
     // spent on the relevant/teammate sections) so the collision block can
-    // reuse the IDENTICAL scored+floor-gated set without recomputing or
-    // re-embedding anything. Stays empty when there's no currentTask (no
-    // `scored` list is ever built) or no cross-agent hits.
+    // reuse the IDENTICAL scored set (flair#1246 — fused retrieval rank, no
+    // floor gate) without recomputing or re-embedding anything. Stays empty
+    // when there's no currentTask (no `scored` list is ever built) or no
+    // cross-agent hits.
     const semanticTeammateMatches: SemanticMatchInput[] = [];
 
     // --- 4. Task-relevant memories (semantic search) ---
@@ -952,12 +967,27 @@ export class BootstrapMemories extends Resource {
           queryEmbedding,
           conditions: [scope.condition],
           limit: candidatePoolK,
-          // HNSW-leg pushdown ONLY (K&S verdict): no BM25 fusion for
-          // bootstrap — a different cost profile, since BM25 over the org
-          // corpus for a one-shot session-load could be MORE expensive than
-          // HNSW-only unless cached across sessions. Turning it on is an
-          // explicit opt-in follow-on, gated on its own harness run.
-          hybrid: false,
+          // flair#1246 — ONE RANKER, ONE SCALE: this pass now invokes the
+          // core in the SAME mode memory_search does (hybrid + q via the
+          // shared hybridEnabled() selector, so the FLAIR_HYBRID_RETRIEVAL
+          // kill-switch moves BOTH surfaces together — a split mode IS the
+          // #1246 bug). HNSW-only here was an accident of early code, and it
+          // made bootstrap's teammate picks diverge from search on the same
+          // store+query: a record whose task-relevance is LEXICAL (exact task
+          // terms in semantically-atypical prose) ranks BELOW bland-generic
+          // noise on pure cosine (measured at N=21: on-task 0.5656 vs noise
+          // 0.6086 — HNSW rank 6 while search fused it to rank 1), and at
+          // field scale (corpus >> candidatePoolK) that inversion becomes
+          // exclusion from the K-bounded pool entirely. The BM25 leg is the
+          // rescue: it admits the record at lexical rank 1 and union-RRF
+          // fusion carries it to the top, same as search. Perf (Kern-ratified
+          // trade): the BM25 corpus scan this adds to the bootstrap path is
+          // the same per-call scan every memory_search request already runs.
+          hybrid: hybridEnabled(),
+          // The lexical leg — same query text the embedding was computed
+          // from, so both legs rank the same question (parity with search,
+          // where `q` drives BM25 and the keyword bump).
+          q: currentTask,
           // Per-set (this K-bounded pool only, never cross-applied to the
           // permanent/recent/predicted sets above) — see this function's
           // supersededIds docs above and resources/
@@ -998,31 +1028,33 @@ export class BootstrapMemories extends Resource {
 
         // flair#744 slice 2: the best-match confidence for the abstention
         // decision — the max absolute cosine across the retrieved pool, read
-        // ONLY from `_semSimilarity` (never any principal/authority field). Note
-        // this floor (ABSTENTION_THRESHOLD ≈ 0.15) sits BELOW bootstrap's own
-        // long-standing TASK_RELEVANCE_FLOOR (0.3) that gates `scored` below, so
-        // an abstaining task (bestSim < 0.15) already has no candidate passing
-        // the floor — abstention only ADDS an explicit "nothing covered this"
-        // signal, it never removes a memory the reader would otherwise have seen.
+        // ONLY from `_semSimilarity` (never any principal/authority field).
+        // Abstention is unaffected by #1246's floor removal: it only ADDS an
+        // explicit "nothing covered this" signal against its own GLOBAL
+        // threshold (resources/abstention.ts), it never removes a memory the
+        // reader would otherwise have seen.
         if (abstain) taskBestSimilarity = bestSemanticSimilarity(candidates);
 
-        // Preserve the ORIGINAL score > 0.3 floor exactly (bootstrap's own
-        // historical relevance floor — distinct from SemanticSearch's
-        // `minScore` request param — strict inequality, applied client-side;
-        // `candidates` are already `_score`-sorted best-first, so filtering
-        // preserves that order). `retrieveCandidates()`'s cosine similarity
-        // replaces the raw JS dot product as the ranking signal (HNSW-only,
-        // no BM25) — the K&S-ratified, closest-to-a-wash choice; the
-        // recall harness gates any regression from this ranking-signal
-        // change (magnitude-sensitive dot product → normalized cosine).
+        // flair#1246 — selection is FUSED RETRIEVAL RANK + the token budget
+        // in the packing loop below; there is NO score floor (see the
+        // TASK_RELEVANCE_FLOOR removal note by the pool constants above —
+        // measured inert on the shipped embedding model). `candidates` arrive
+        // best-first on the same ranking memory_search uses (fused RRF order
+        // under hybrid; see retrieveCandidates), so this filter+map preserves
+        // that order. `score` carries `_score` — the honest absolute cosine
+        // (+ legacy keyword bump) per #985/#1267 — for display/reporting;
+        // ORDER and score can legitimately disagree (a BM25 rank-1 rescue
+        // outranks higher-cosine bland hits, which is the recall win).
         const scored = candidates
-          .filter((m: any) => !includedIds.has(m.id) && m._score > TASK_RELEVANCE_FLOOR)
+          .filter((m: any) => !includedIds.has(m.id))
           .map((m: any) => ({ memory: m, score: m._score }));
 
         // flair#681: the collision block's semantic surface — one candidate
-        // per teammate (the highest-scoring hit; `scored` is already sorted
-        // desc, so the first occurrence of a given `_source` IS the best
-        // one). `m._source` is only ever set for a cross-agent record (see
+        // per teammate (`scored` is sorted best-first by the fused retrieval
+        // rank, so the first occurrence of a given `_source` IS that
+        // teammate's best-ranked hit; its `score` field reports the honest
+        // absolute cosine, which per #985/#1267 can disagree with rank).
+        // `m._source` is only ever set for a cross-agent record (see
         // retrieveCandidates()'s `_source` tagging) — an own memory never
         // contributes here.
         const seenCollisionAgents = new Set<string>();
@@ -1112,7 +1144,8 @@ export class BootstrapMemories extends Resource {
     //   - Entity overlap (WorkspaceState + OrgEvent): exact vocabulary-string
     //     match, high-precision, no separate relevance score needed.
     //   - Semantic match (Memory, via #550/4 above): `semanticTeammateMatches`,
-    //     already floor-gated (score > 0.3) — reused as-is, no new scoring.
+    //     each teammate's best-ranked hit from the fused retrieval pool
+    //     (flair#1246 — no score floor) — reused as-is, no new scoring.
     // Gated on freshness (Presence, via the internal roster path) — a
     // teammate absent from the roster, or whose presenceStatus is "offline",
     // never surfaces regardless of how strong the entity/semantic match is.
@@ -1338,9 +1371,10 @@ export class BootstrapMemories extends Resource {
     let memoriesTruncatedUnique = 0;
     for (const id of truncatedOwnIds) if (!includedOwnIds.has(id)) memoriesTruncatedUnique++;
     memoriesTruncated = memoriesTruncatedUnique;
-    // flair#1207 — the teammate MATCH POOL considered (cleared the relevance
-    // floor, drawn from the bounded candidate pool): every matched teammate
-    // finding is EITHER included OR budget-truncated, so this equals their sum.
+    // flair#1207 — the teammate MATCH POOL considered (flair#1246: the
+    // cross-agent records that entered the scored set — drawn from the
+    // K-bounded fused-rank candidate pool, no relevance floor): every matched
+    // teammate finding is EITHER included OR budget-truncated, so this equals their sum.
     // Reporting it anchors `teammateFindingsTruncated` as "relevant-but-no-budget"
     // rather than an unexplained large number beside a small `included`.
     const teammateFindingsMatched = teammateFindingsIncluded + teammateFindingsTruncated;
@@ -1493,16 +1527,18 @@ export class BootstrapMemories extends Resource {
       : undefined;
 
     // teammateFindings: [] — name WHICH legitimate empty this is (no task → no
-    // retrieval; matched-but-budget-truncated; or nothing cleared the relevance
-    // floor), so it never reads as a silent drop.
+    // retrieval; matched-but-budget-truncated; or no cross-agent record entered
+    // the task-relevant retrieval pool at all — flair#1246: there is no
+    // relevance floor, so "empty" means empty retrieval, never a score cut),
+    // so it never reads as a silent drop.
     const teammateFindingsHint = includedTeammateFindings.length === 0
       ? (!taskProvided
           ? "No teammateFindings: cross-agent findings are retrieved against your currentTask, and none was provided. "
             + "Pass currentTask to populate this."
           : teammateFindingsTruncated > 0
             ? `No teammateFindings fit the token budget: ${teammateFindingsTruncated} relevant cross-agent finding(s) `
-              + "cleared the relevance floor but were budget-truncated. Raise maxTokens to include them."
-            : "No cross-agent (teammate) memory cleared the task-relevance floor for this currentTask. "
+              + "were retrieved but budget-truncated. Raise maxTokens to include them."
+            : "No cross-agent (teammate) memory entered the task-relevant retrieval pool for this currentTask. "
               + "This container is present-but-empty by design, not dropped.")
       : undefined;
 
@@ -1571,8 +1607,9 @@ export class BootstrapMemories extends Resource {
       // size-skip self-describing: "a relevant teammate finding didn't fit" is
       // now distinguishable from "no relevant teammate finding".
       teammateFindingsTruncated,
-      // flair#1207 — the teammate match POOL considered (cleared the relevance
-      // floor). teammateFindingsIncluded + teammateFindingsTruncated ==
+      // flair#1207 — the teammate match POOL considered (flair#1246: entered
+      // the scored fused-rank retrieval set; no relevance floor).
+      // teammateFindingsIncluded + teammateFindingsTruncated ==
       // teammateFindingsMatched, so "truncated" reads as "relevant-but-no-budget"
       // against a stated pool, not an unanchored large number.
       teammateFindingsMatched,

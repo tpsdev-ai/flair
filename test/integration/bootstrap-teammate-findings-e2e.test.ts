@@ -145,9 +145,10 @@ const ID_PRIVATE = `${owner.id}-private`;
 const ID_OWN = `${grantee.id}-own`;
 
 // Tightly-aligned domain (shared distinctive entity + subject phrase across
-// currentTask and all three memories) to clear MemoryBootstrap.ts's
-// `score > 0.3` raw-cosine threshold deterministically against the REAL
-// nomic embedding model, while keeping each memory's actual informational
+// currentTask and all three memories) so every record ranks high in
+// MemoryBootstrap.ts's task-relevant retrieval pool deterministically against
+// the REAL nomic embedding model (fused rank + budget selection since
+// flair#1246), while keeping each memory's actual informational
 // content genuinely distinct (so Memory.ts's dedup co-gate — cosine >= 0.95
 // AND lexical Jaccard >= 0.5 — never conflates them into one record).
 const CURRENT_TASK = "Prepare talking points for the Acme Corp vendor contract renegotiation meeting this week.";

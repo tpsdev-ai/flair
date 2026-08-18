@@ -92,10 +92,10 @@ export interface RetrieveCandidatesParams {
    *  (e.g. the embedding engine failed/was never called). */
   queryEmbedding?: number[] | null;
   /** Raw query text — drives BM25 lexical ranking (hybrid leg) and the
-   *  legacy keyword bump (HNSW-only leg). Optional: MemoryBootstrap never
-   *  supplies this — it has no free-text query, only a precomputed
-   *  `queryEmbedding`, and per the K&S verdict bootstrap gets HNSW-leg
-   *  pushdown only, no keyword bump. */
+   *  legacy keyword bump (HNSW-only leg). SemanticSearch passes the request
+   *  `q`; MemoryBootstrap's task-relevant pass passes `currentTask`
+   *  (flair#1246 — the same text its `queryEmbedding` was computed from, so
+   *  bootstrap and search rank on the same fused scale). */
   q?: string;
   /** Pre-built Harper conditions[] — the caller (SemanticSearch.post() /
    *  MemoryBootstrap.post()) already resolved scope.condition (and, for
@@ -144,15 +144,15 @@ export interface RetrieveCandidatesParams {
    * HNSW-only / keyword-fallback path (false). Explicit and REQUIRED — never
    * read from hybridEnabled() internally, so a caller gets a deterministic
    * mode regardless of the global FLAIR_HYBRID_RETRIEVAL env value.
-   * MemoryBootstrap ALWAYS passes false: the hybrid leg's BM25 corpus fetch
-   * (`corpusQuery` below) is an UNBOUNDED conditions-scoped scan (no
-   * `limit` — matches SemanticSearch's pre-existing, out-of-scope-for-this-PR
-   * behavior) run regardless of whether `q` is even supplied, which is
-   * exactly the kind of unbounded scan this PR removes bootstrap's need for.
-   * HNSW-leg-only for bootstrap is also the K&S-ratified default: BM25 for a
-   * one-shot session-load has a different (likely worse) cost profile than
-   * SemanticSearch's per-query BM25 — turning it on is an explicit opt-in
-   * follow-on, not this PR.
+   * Both production callers resolve it from the SAME hybridEnabled()
+   * selector — SemanticSearch since the hybrid activation, MemoryBootstrap's
+   * task-relevant pass since flair#1246 (one ranker, one scale: HNSW-only
+   * bootstrap ranked lexically-relevant records below bland-generic noise on
+   * pure cosine while search fused them to rank 1 — a structural divergence
+   * between the two surfaces on the same store+query). The hybrid leg's BM25
+   * corpus fetch (`corpusQuery` below) is an UNBOUNDED conditions-scoped
+   * scan (no `limit`), the same per-call scan every search request already
+   * runs — the Kern-ratified cost of putting bootstrap on the search ranker.
    */
   hybrid: boolean;
   /** Request context, for withDetachedTxn — both SemanticSearch and
@@ -378,8 +378,9 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       }
     }
   } else if (qEmb) {
-    // ─── HNSW vector search path (legacy, hybrid flag OFF — or a caller
-    // like MemoryBootstrap forcing HNSW-leg-only regardless of the flag) ────
+    // ─── HNSW vector search path (legacy, hybrid flag OFF — the
+    // FLAIR_HYBRID_RETRIEVAL kill-switch path for BOTH production callers
+    // since flair#1246) ─────────────────────────────────────────────────────
     const query: any = {
       sort: { attribute: "embedding", target: qEmb, distance: "cosine" },
       select: hnswSelect,
