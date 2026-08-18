@@ -221,6 +221,87 @@ describe("ephemeral memories are private-only (flair#1257)", () => {
     expect(stored?.visibility).toBe("shared");
   }, 30_000);
 
+  // ─── POST /FeedMemories — the raw-table bypass (Sherlock, #1261 review) ────
+  //
+  // FeedMemories.post() writes via the RAW table object, not the exported
+  // Memory resource, so before the fix it inherited NONE of the write guards:
+  // ephemeral+shared — and outright invalid values like "public" — landed
+  // untouched. These are the positive controls that the guards now run on
+  // this path too. Mutation-checked alongside the Memory.ts controls: with
+  // the MemoryFeed.ts guard block removed, the two refusal tests below went
+  // red (200 writes), and the omission test stored a row with NO visibility.
+  test("POSITIVE CONTROL (feed): POST /FeedMemories ephemeral+shared is refused with 400, nothing stored", async () => {
+    const id = `feed-eph-shared-${randomUUID()}`;
+    const res = await authFetch(harper, agent, "POST", "/FeedMemories", {
+      id, agentId: agent.id,
+      content: `feed journal entry that must never go org-readable ${id}`,
+      durability: "ephemeral",
+      visibility: "shared",
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("invalid_visibility_for_durability");
+    expect(body.message).toContain("private-only");
+    expect(await readStored(harper, id)).toBeNull();
+  }, 30_000);
+
+  test("POSITIVE CONTROL (feed): an invalid visibility value is refused too — the #1009 guard now covers this path", async () => {
+    const id = `feed-invalid-vis-${randomUUID()}`;
+    const res = await authFetch(harper, agent, "POST", "/FeedMemories", {
+      id, agentId: agent.id,
+      content: `feed entry with an invalid visibility value ${id}`,
+      visibility: "public",
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("invalid_visibility");
+    expect(await readStored(harper, id)).toBeNull();
+  }, 30_000);
+
+  test("(feed) ephemeral with visibility OMITTED lands STORED private — the omission leak is closed", async () => {
+    // This endpoint stamps no durability-keyed visibility default, so before
+    // the fix an ephemeral feed write with visibility omitted stored a row
+    // with NO visibility field — which the read side resolves to NON-private.
+    const id = `feed-eph-default-${randomUUID()}`;
+    const res = await authFetch(harper, agent, "POST", "/FeedMemories", {
+      id, agentId: agent.id,
+      content: `feed-captured ephemeral state, visibility omitted ${id}`,
+      durability: "ephemeral",
+    });
+    expect(res.status).toBe(200);
+    const stored = await readStored(harper, id);
+    expect(stored?.durability).toBe("ephemeral");
+    expect(stored?.visibility).toBe("private");
+  }, 30_000);
+
+  test("(feed) no over-fire: a plain feed write still works, and its visibility handling is UNCHANGED", async () => {
+    // Default (standard) feed write with no visibility: succeeds, and — pinned
+    // deliberately — still stores NO visibility field. Only the ephemeral tier
+    // gets the omission stamp; flipping every feed caller's default to private
+    // would be a behavioural change this fix must not smuggle in.
+    const id = `feed-plain-${randomUUID()}`;
+    const res = await authFetch(harper, agent, "POST", "/FeedMemories", {
+      id, agentId: agent.id,
+      content: `an ordinary feed memory, defaults all round ${id}`,
+    });
+    expect(res.status).toBe(200);
+    const stored = await readStored(harper, id);
+    expect(stored?.durability).toBe("standard");
+    expect(stored?.visibility ?? null).toBeNull();
+
+    // And an explicit persistent+shared feed write passes the tier guard.
+    const id2 = `feed-shared-${randomUUID()}`;
+    const res2 = await authFetch(harper, agent, "POST", "/FeedMemories", {
+      id: id2, agentId: agent.id,
+      content: `a persistent shared feed memory ${id2}`,
+      durability: "persistent",
+      visibility: "shared",
+    });
+    expect(res2.status).toBe(200);
+    const stored2 = await readStored(harper, id2);
+    expect(stored2?.visibility).toBe("shared");
+  }, 30_000);
+
   test("promotion OUT of ephemeral may share in the same write — the #1205 distillation shape", async () => {
     // Explicit durability on the write wins over the stored row's: lifting a
     // journal entry to persistent while sharing it is a promotion, not an
