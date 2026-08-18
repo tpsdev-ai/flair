@@ -2,6 +2,8 @@
 
 From zero to a persistent agent memory in five minutes.
 
+> **Need a reachable URL (Cursor cloud / Grok Bot / another machine)?** This guide is the laptop path — `flair init` binds `127.0.0.1:19926`, which those clients cannot see. Deploy on Harper Fabric instead: **[docs/quickstart-fabric.md](quickstart-fabric.md)**.
+
 ## 0. Prerequisites
 
 **Node.js 22 or newer.** No Docker, no database to install, no API keys — Flair runs in a single process and computes embeddings locally.

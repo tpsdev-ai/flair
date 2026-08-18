@@ -195,7 +195,8 @@ If it has a custom memory protocol, the adapter pattern is small (~200 lines). L
 
 ## See also
 
-- [Quickstart](quickstart.md) — `flair init` to working memory in 30 seconds
+- [Quickstart](quickstart.md) — `flair init` to working memory on a laptop
+- [Fabric Quickstart](quickstart-fabric.md) — `flair deploy` to a reachable Harper Fabric URL
 - [Embedding in a Harper app](embedding-in-a-harper-app.md) — run Flair as a component of your own Harper instance and call it in-process
 - [Memory bridges](bridges.md) — import/export Flair ↔ Mem0, ChatGPT, claude-project, markdown, agentic-stack (five bridges shipped)
 - [Federation](federation.md) — pair instances peer-to-peer for cross-machine sync

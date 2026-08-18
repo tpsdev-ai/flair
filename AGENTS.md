@@ -81,6 +81,6 @@ config.yaml    Flair server configuration (port via CLI or HTTP_PORT env).
 | How do I run the CLI? | `src/cli.ts` → `flair --help` |
 | What are the design rules? | `DESIGN.md` |
 | How do I contribute? | `CONTRIBUTING.md` |
-| How do I use Flair? | `README.md` → `docs/quickstart.md` |
+| How do I use Flair? | `README.md` → `docs/quickstart.md` (laptop) · `docs/quickstart-fabric.md` (reachable URL) |
 | What does the data model look like? | `schemas/` |
 | Where is planned/proposed work? | GitHub issues — not in this repo. Nothing in the tree is a proposal |

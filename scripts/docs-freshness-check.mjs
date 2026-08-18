@@ -85,7 +85,7 @@ const PROSE_DOCS = collectProseDocs();
 
 // Getting-started docs must not hardcode a concrete Flair version at all — every
 // version there should be a `vX.Y.Z` placeholder or an external tool's version.
-const GETTING_STARTED_DOCS = ["docs/quickstart.md"].filter((f) => existsSync(join(ROOT, f)));
+const GETTING_STARTED_DOCS = ["docs/quickstart.md", "docs/quickstart-fabric.md"].filter((f) => existsSync(join(ROOT, f)));
 
 const fileLines = new Map();
 function linesOf(relPath) {

@@ -116,10 +116,11 @@ Note: embeddings run on CPU in Docker (no Metal acceleration). Performance is ac
 
 Deploying to a Harper Fabric cluster is a different mechanism from the installs above — `flair deploy` pushes Flair as a cluster component instead of `npm install -g`. To upgrade an already-deployed Fabric instance in place, use `FABRIC_USER=<admin> FABRIC_PASSWORD=<pass> flair upgrade --target <fabric-url>` (or `--fabric-password-file <path>` in place of the env var), not the local upgrade path. Inline `--fabric-user`/`--fabric-password` flags also work but are discouraged — both leak to shell history and `ps`. See [`docs/upgrade.md` — Upgrading a Fabric-deployed instance](upgrade.md#upgrading-a-fabric-deployed-instance) for the full walkthrough, including the automatic post-deploy fleet-convergence sweep.
 
-For the hosted shape end to end — when to choose it, ports and auth against a managed
-Fabric endpoint, pairing local spokes to a hosted hub, and what you can and cannot
-observe without a shell on the node — see
-[`docs/deploying-on-fabric.md`](deploying-on-fabric.md).
+New user who needs a reachable `FLAIR_URL` for Cursor / Grok Bot? Start at
+[`docs/quickstart-fabric.md`](quickstart-fabric.md). For the hosted shape end to
+end — when to choose it, ports and auth against a managed Fabric endpoint, pairing
+local spokes to a hosted hub, and what you can and cannot observe without a shell
+on the node — see [`docs/deploying-on-fabric.md`](deploying-on-fabric.md).
 
 ---
 
