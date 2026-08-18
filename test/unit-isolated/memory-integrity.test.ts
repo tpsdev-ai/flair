@@ -1044,14 +1044,33 @@ describe("durability-keyed default visibility (write path)", () => {
     expect((await BaseMemory.get(r2.id)).visibility).toBe("private");
   });
 
-  it("Memory.post: an explicit visibility ALWAYS overrides the durability default", async () => {
+  it("Memory.post: an explicit visibility overrides the durability default — EXCEPT ephemeral, which is private-only (flair#1257)", async () => {
+    // Narrowing override on a durable tier: permanent defaults to shared,
+    // explicit private wins.
     const m = makeMemory(agentCtx("agent-1"));
     const r = await m.post({ agentId: "agent-1", content: "Explicitly private despite being permanent.", durability: "permanent", visibility: "private" });
     expect((await BaseMemory.get(r.id)).visibility).toBe("private");
 
+    // Widening override on a non-ephemeral tier: standard defaults to private,
+    // explicit shared wins. (This carries the claim the ephemeral+shared case
+    // below used to carry, on a tier where widening is still legal.)
+    const m3 = makeMemory(agentCtx("agent-1"));
+    const r3 = await m3.post({ agentId: "agent-1", content: "Explicitly shared while standard, long enough for the gate.", durability: "standard", visibility: "shared" });
+    expect((await BaseMemory.get(r3.id)).visibility).toBe("shared");
+
+    // ...but ephemeral+shared is REFUSED with 400 (flair#1257 hard
+    // precondition, K&S-ratified): ephemeral is the continuity-journal tier
+    // and is private-only — the pre-#1257 contract this test used to encode
+    // ("an explicit visibility ALWAYS overrides") deliberately no longer
+    // holds for it. Positive control: the refusal names the guard's error
+    // code and writes nothing.
+    const sizeBefore = memoryStore.size;
     const m2 = makeMemory(agentCtx("agent-1"));
     const r2 = await m2.post({ agentId: "agent-1", content: "Explicitly shared despite being ephemeral.", durability: "ephemeral", visibility: "shared" });
-    expect((await BaseMemory.get(r2.id)).visibility).toBe("shared");
+    expect(r2 instanceof Response).toBe(true);
+    expect((r2 as Response).status).toBe(400);
+    expect((await (r2 as Response).json()).error).toBe("invalid_visibility_for_durability");
+    expect(memoryStore.size).toBe(sizeBefore); // the refusal stored nothing
   });
 
   it("Memory.put (fresh id, not yet existing): same durability-keyed default applies", async () => {
