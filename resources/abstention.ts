@@ -47,11 +47,13 @@
  * GLOBAL / data-driven, NEVER per-principal (Sherlock binding condition 2).
  *
  * CONSERVATIVE hand-set value (0.15): well below the strong-match band real
- * embeddings produce for genuinely relevant memories, and below bootstrap's
- * own long-standing task-relevance floor (0.3, resources/MemoryBootstrap.ts's
- * TASK_RELEVANCE_FLOOR) — so abstention fires only when there is essentially
- * nothing semantically near the query, erring toward returning results rather
- * than over-abstaining. Promoting abstention to the DEFAULT recall mode, and
+ * embeddings produce for genuinely relevant memories (and below anything the
+ * flair#1246 measurement observed on the shipped model — 126 records across 6
+ * synthetic variants all scored ≥ ~0.44) — so abstention fires only when
+ * there is essentially nothing semantically near the query, erring toward
+ * returning results rather than over-abstaining. (Bootstrap's own
+ * TASK_RELEVANCE_FLOOR, which this comment once referenced, was removed by
+ * flair#1246 — that same measurement proved it inert.) Promoting abstention to the DEFAULT recall mode, and
  * tuning this value on the recall-bench corpus, is a SEPARATE follow-up (see
  * flair#744) — this slice ships the response shape at a safe opt-in floor, not
  * the calibrated default.

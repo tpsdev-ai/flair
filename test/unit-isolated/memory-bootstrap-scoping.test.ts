@@ -27,14 +27,16 @@ delete (process.env as any).FLAIR_PUBLIC;
 // technique as test/unit/memory-integrity.test.ts (constant vector → cosine
 // 1.0 between any two records using it). MemoryBootstrap.ts's task-relevant
 // path (flair-bootstrap-scale-fix: now routed through the shared
-// retrieveCandidates() core, resources/semantic-retrieval-core.ts) calls
+// retrieveCandidates() core, resources/semantic-retrieval-core.ts; since
+// flair#1246 in the SAME hybrid+q mode memory_search uses) calls
 // getEmbedding(currentTask) for the query vector; this mock's Memory.search()
 // never annotates $distance (no real HNSW sort), so retrieveCandidates()
 // falls back to its point-lookup cosine path (Memory.get(), also mocked
 // above), reading `record.embedding` directly off whatever's in the mock
-// store. The SAME 128-length vector on both sides deterministically clears
-// the `_score > 0.3` (TASK_RELEVANCE_FLOOR) threshold (cosine similarity
-// with itself = 1). memory-integrity.test.ts's own mock of this module only
+// store. The SAME 128-length vector on both sides gives a deterministic
+// cosine 1.0, ranking the record at the top of the fused candidate pool
+// (flair#1246 removed the old `_score > 0.3` TASK_RELEVANCE_FLOOR — selection
+// is fused rank + budget now). memory-integrity.test.ts's own mock of this module only
 // needs "a constant vector returned every call" (never compares its literal
 // values against anything) — length differing between the two files' mocks
 // doesn't matter to either.
@@ -281,9 +283,9 @@ describe("MemoryBootstrap.post() — centralized read-scoping", () => {
 // change whether a non-private record surfaces, or whether a private one
 // stays hidden.
 //
-// All records below carry embedding: FAKE_EMBEDDING so they clear the
-// `score > 0.3` deterministic-cosine-1.0 threshold against any currentTask
-// (mocked getEmbedding returns the same vector, see top of file). createdAt
+// All records below carry embedding: FAKE_EMBEDDING so they rank at the top
+// of the task-relevant pool (deterministic cosine 1.0 against any currentTask
+// — mocked getEmbedding returns the same vector, see top of file). createdAt
 // is pinned far in the past so nothing here is ever swept into the
 // recent/permanent sections instead — the point is to isolate the
 // task-relevant scored path exclusively.
@@ -294,7 +296,7 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     reset();
     // A teammate record only RENDERS via the task-relevant teammate section
     // (own-context sections are own-only), so make it task-relevant: embedding
-    // + currentTask (mocked getEmbedding → cosine 1.0 clears score > 0.3).
+    // + currentTask (mocked getEmbedding → cosine 1.0 tops the fused pool).
     memoryStore.set("shared-attr", {
       id: "shared-attr", agentId: "agent-owner", content: "TEAMMATE-ATTR-FINDING",
       visibility: "shared", durability: "standard", createdAt: OLD_DATE, embedding: FAKE_EMBEDDING,
