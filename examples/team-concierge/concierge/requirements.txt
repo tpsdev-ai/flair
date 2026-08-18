@@ -1,0 +1,19 @@
+# Dependencies for the Agent Engine container image (deploy/gcp/RUNBOOK.md).
+#
+# `adk deploy agent_engine` copies THIS folder into the image and runs
+# `pip install -r` on this exact file (google-adk 2.7.1 cli_deploy.py). If the
+# file is missing, the CLI generates one that omits adk-flair — and the
+# deployed container cannot import the memory backend. Local runs
+# (`pip install -e .`, adk web/run) never read this file; the example's
+# pyproject.toml stays the local dependency source.
+#
+# google-adk itself is NOT listed here on purpose: the generated Dockerfile
+# installs google-adk[a2a] pinned to the deploying environment's version
+# BEFORE these requirements, and re-pinning it here could silently diverge
+# from the CLI flags that were baked for that version.
+#
+# The explicit google-cloud-aiplatform line also pre-empts the deploy CLI's
+# _ensure_agent_engine_dependency fallback, which would otherwise append its
+# own aiplatform AND a second google-adk pin to this file at staging time.
+adk-flair>=0.44.13
+google-cloud-aiplatform[adk,agent_engines]>=1.164

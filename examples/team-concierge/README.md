@@ -151,6 +151,11 @@ an agent identity against Fabric (`flair agent add concierge --target ...
 opt-in `FLAIR_ALLOW_REMOTE_URL=1`. Never inline credentials in commands or
 config — keys stay in files, admin passwords in your secret store.
 
+To run the Concierge **managed on GCP** — Vertex AI Agent Engine with Gemini,
+memory on your Fabric hub, the identity key minted in Cloud Shell and
+delivered via Secret Manager — follow the 10-minute
+[deploy/gcp/RUNBOOK.md](deploy/gcp/RUNBOOK.md).
+
 ## Not this example
 
 - Not a multi-tenant showcase: per-user **MCP** identities (each teammate's
