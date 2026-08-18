@@ -11,6 +11,7 @@
 import type { KeyObject } from "node:crypto";
 import { createHash, createPrivateKey } from "node:crypto";
 import { loadPrivateKey, resolveKeyPath, signRequest } from "./auth.js";
+import { readEnvOrUnset } from "./env-guard.js";
 import type {
   FlairClientConfig,
   Memory,
@@ -45,17 +46,22 @@ export class FlairClient {
   private basicAuth: string | null = null;
 
   constructor(config: FlairClientConfig) {
-    this.url = (config.url ?? process.env.FLAIR_URL ?? DEFAULT_URL).replace(/\/$/, "");
-    this.agentId = config.agentId || process.env.FLAIR_AGENT_ID || "";
+    // Every env fallback below goes through readEnvOrUnset (flair#1254): a
+    // wholesale unsubstituted `${...}` interpolation literal — the shape an
+    // MCP-host config template leaves behind when it fails to substitute —
+    // reads as UNSET, so the existing defaults apply instead of the literal
+    // winning the `??`/`||` chain and poisoning the connection.
+    this.url = (config.url ?? readEnvOrUnset("FLAIR_URL") ?? DEFAULT_URL).replace(/\/$/, "");
+    this.agentId = config.agentId || readEnvOrUnset("FLAIR_AGENT_ID") || "";
     this.keyPath = config.keyPath;
     if (config.privateKey !== undefined) {
       this.rawPrivateKey = config.privateKey;
     }
-    this.claimedClient = config.claimedClient || process.env.FLAIR_CLIENT || undefined;
+    this.claimedClient = config.claimedClient || readEnvOrUnset("FLAIR_CLIENT") || undefined;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT;
     // Basic auth fallback for standalone deployments without Ed25519 keys
-    const adminUser = config.adminUser ?? process.env.FLAIR_ADMIN_USER;
-    const adminPass = config.adminPassword ?? process.env.FLAIR_ADMIN_PASSWORD;
+    const adminUser = config.adminUser ?? readEnvOrUnset("FLAIR_ADMIN_USER");
+    const adminPass = config.adminPassword ?? readEnvOrUnset("FLAIR_ADMIN_PASSWORD");
     if (adminUser && adminPass) {
       this.basicAuth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
     }

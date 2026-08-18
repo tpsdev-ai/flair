@@ -25,8 +25,10 @@ import { gzipSync } from "node:zlib";
 import {
   extractSnapshotSafely,
   validateSnapshotArchive,
+  checkSnapshotEntry,
   SnapshotPathEscapeError,
 } from "../../src/lib/safe-snapshot-extract";
+import { extractSnapshot as remExtractSnapshot } from "../../src/rem/snapshot";
 import { createDataSnapshot } from "../../src/cli";
 
 // ─── minimal ustar writer ────────────────────────────────────────────────────
@@ -354,4 +356,188 @@ describe("snapshot restore — legitimate archives still restore correctly", () 
 
     expect(readlinkSync(join(targetDir, "models", "current.bin"))).toBe("real.bin");
   });
+});
+
+// ─── flair#901 — fail-closed entry contract ─────────────────────────────────
+// The containment check must refuse an entry it cannot READ, not pass it.
+// Before this fix an empty path resolved to the target dir itself (inside, so
+// ok) and a link entry with no linkpath skipped the link branches entirely —
+// both silently approved exactly the entries a tampered archive (or a tar
+// property rename surviving to runtime) would produce.
+describe("checkSnapshotEntry — fail-closed on unrecognizable entries (flair#901)", () => {
+  test("an entry with an empty path is refused, not resolved to the target dir", () => {
+    const verdict = checkSnapshotEntry("", "File", undefined, "/some/target");
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok === false) expect(verdict.reason).toContain("cannot classify");
+  });
+
+  test("a symlink entry with NO link target is refused — the exact silent-pass shape #901 names", () => {
+    const verdict = checkSnapshotEntry("innocuous", "SymbolicLink", undefined, "/some/target");
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok === false) expect(verdict.reason).toContain("no readable link target");
+  });
+
+  test("a hard-link entry with NO link target is refused too", () => {
+    const verdict = checkSnapshotEntry("innocuous", "Link", undefined, "/some/target");
+    expect(verdict.ok).toBe(false);
+  });
+
+  test("positive control: a normal file entry still passes (the refusal is shape-triggered, not blanket)", () => {
+    expect(checkSnapshotEntry("models/weights.bin", "File", undefined, "/some/target").ok).toBe(true);
+  });
+
+  // Note on scope, verified empirically: node-tar's CURRENT parser never
+  // surfaces a symlink entry with an empty linkname to onReadEntry at all — it
+  // drops the entry before any callback runs, so no archive-level fixture can
+  // reach the linkpath-missing branch through tarList today. The branch's
+  // trigger is the FUTURE failure #901 names (an upstream property rename
+  // surviving to runtime, where linkpath reads as undefined on a well-formed
+  // link entry); the direct tests above are its positive control, and the
+  // typed ReadEntry contract is the compile-time layer in front of it.
+  test("canary: if a future tar surfaces a linkpath-less link entry from a real archive, validation must refuse it (today the parser drops the entry pre-callback)", async () => {
+    const tarball = join(root, "malformed-link.tar.gz");
+    writeTarGz(tarball, [
+      { name: "harper-config.yaml", body: "# benign\n" },
+      { name: "mystery-link", type: "2", linkname: "" },
+    ]);
+
+    // Whichever the parser does — drop the entry (today) or surface it (a
+    // future tar) — the one outcome that must never happen is a validation
+    // PASS that then extracts a link entry the check never classified.
+    let surfaced = false;
+    const { list } = await import("tar");
+    await list({ file: tarball, onReadEntry: (e) => { if (e.path === "mystery-link") surfaced = true; } });
+
+    if (surfaced) {
+      await expect(validateSnapshotArchive({ file: tarball, targetDir })).rejects.toThrow(SnapshotPathEscapeError);
+    } else {
+      // Parser dropped it: validation of the remaining (benign) entries passes,
+      // and the dropped entry cannot be extracted by the same parser either.
+      await validateSnapshotArchive({ file: tarball, targetDir });
+    }
+    expect(readdirSync(targetDir)).toEqual([]);
+  });
+});
+
+// ─── flair#903 — the sibling extracts are no longer fail-open ───────────────
+// rem's extractSnapshot and `flair session snapshot restore` extract with
+// node-tar's DEFAULTS, which contain malicious entries but discard them
+// SILENTLY — a tampered snapshot restored minus the bad parts and reported
+// success. Both now run validateSnapshotArchive first: a tampered archive
+// aborts the whole restore, names the entry, and writes nothing.
+describe("rem extractSnapshot — tampered snapshot ABORTS instead of silently partial-restoring (flair#903)", () => {
+  test('a ".." traversal entry aborts the restore: throws, creates no target dir, writes nothing', async () => {
+    const tarball = join(root, "evil-rem.tar.gz");
+    writeTarGz(tarball, [
+      { name: "memories.jsonl", body: "{}\n" },
+      { name: "../../outside/pwned-rem.txt", body: MARKER },
+    ]);
+    const restoreTarget = join(root, "nest", "rem-restore");
+
+    await expect(
+      remExtractSnapshot({ snapshotPath: tarball, targetDir: restoreTarget }),
+    ).rejects.toThrow(SnapshotPathEscapeError);
+
+    // The whole point: NOT a partial restore. The target was never created,
+    // so there is no half-populated directory to mistake for a success.
+    expect(existsSync(restoreTarget)).toBe(false);
+    expectNothingEscaped();
+  });
+
+  test("an absolute-path entry aborts the same way", async () => {
+    const tarball = join(root, "evil-rem-abs.tar.gz");
+    writeTarGz(tarball, [
+      { name: "memories.jsonl", body: "{}\n" },
+      { name: join(outsideDir, "pwned-rem-abs.txt"), body: MARKER },
+    ]);
+    const restoreTarget = join(root, "nest", "rem-restore-abs");
+
+    await expect(
+      remExtractSnapshot({ snapshotPath: tarball, targetDir: restoreTarget }),
+    ).rejects.toThrow(SnapshotPathEscapeError);
+    expect(existsSync(restoreTarget)).toBe(false);
+    expectNothingEscaped();
+  });
+
+  test("positive control: a benign snapshot still extracts and reports its entries", async () => {
+    const tarball = join(root, "good-rem.tar.gz");
+    writeTarGz(tarball, [
+      { name: "memories.jsonl", body: "{}\n" },
+      { name: "metadata.json", body: "{}\n" },
+    ]);
+    const restoreTarget = join(root, "nest", "rem-restore-good");
+
+    const result = await remExtractSnapshot({ snapshotPath: tarball, targetDir: restoreTarget });
+
+    expect(result.targetDir).toBe(restoreTarget);
+    expect(existsSync(join(restoreTarget, "memories.jsonl"))).toBe(true);
+    expect(result.entries.map((e) => e.path).sort()).toEqual(["memories.jsonl", "metadata.json"]);
+  });
+
+  test("dry-run still lists without validating or writing (read-only path unchanged)", async () => {
+    const tarball = join(root, "evil-rem-dry.tar.gz");
+    writeTarGz(tarball, [
+      { name: "memories.jsonl", body: "{}\n" },
+      { name: "../../outside/pwned-dry.txt", body: MARKER },
+    ]);
+
+    const result = await remExtractSnapshot({ snapshotPath: tarball, dryRun: true });
+    expect(result.entries.length).toBe(2);
+    expect(result.targetDir).toBeUndefined();
+    expectNothingEscaped();
+  });
+});
+
+describe("flair session snapshot restore — tampered snapshot ABORTS (flair#903, real CLI subprocess)", () => {
+  const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
+
+  async function runCli(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const proc = Bun.spawn(["bun", cliPath, ...args], {
+      // HOME-isolated: nothing in this command should touch the real ~/.flair,
+      // and this makes sure of it.
+      env: { ...process.env, HOME: root },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    return { stdout, stderr, exitCode };
+  }
+
+  test("a tampered snapshot is refused whole: non-zero exit, names the entry, target dir never created", async () => {
+    const tarball = join(root, "evil-session.tar.gz");
+    writeTarGz(tarball, [
+      { name: "session.jsonl", body: "{}\n" },
+      { name: "../../outside/pwned-session.txt", body: MARKER },
+    ]);
+    const restoreTarget = join(root, "nest", "session-restore");
+
+    const { stderr, exitCode } = await runCli([
+      "session", "snapshot", "restore", "--snapshot", tarball, "--target", restoreTarget,
+    ]);
+
+    expect(exitCode, `exit=${exitCode} stderr=${stderr.slice(0, 300)}`).not.toBe(0);
+    expect(stderr).toContain("refusing to restore");
+    expect(stderr).toContain("pwned-session.txt");
+    expect(existsSync(restoreTarget)).toBe(false);
+    expectNothingEscaped();
+  }, 30_000);
+
+  test("positive control: a benign session snapshot still restores with exit 0", async () => {
+    const tarball = join(root, "good-session.tar.gz");
+    writeTarGz(tarball, [
+      { name: "session.jsonl", body: "{}\n" },
+      { name: "metadata.json", body: "{}\n" },
+    ]);
+    const restoreTarget = join(root, "nest", "session-restore-good");
+
+    const { stderr, exitCode } = await runCli([
+      "session", "snapshot", "restore", "--snapshot", tarball, "--target", restoreTarget,
+    ]);
+
+    expect(exitCode, `exit=${exitCode} stderr=${stderr.slice(0, 300)}`).toBe(0);
+    expect(existsSync(join(restoreTarget, "session.jsonl"))).toBe(true);
+    expect(existsSync(join(restoreTarget, "metadata.json"))).toBe(true);
+  }, 30_000);
 });

@@ -20,6 +20,8 @@ import { mkdirSync, writeFileSync, statSync, chmodSync, rmSync, existsSync, read
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
+import type { ReadEntry } from "tar";
+import { validateSnapshotArchive } from "../lib/safe-snapshot-extract.js";
 
 export const SNAPSHOT_ROOT = resolve(homedir(), ".flair", "snapshots");
 
@@ -202,7 +204,7 @@ export async function extractSnapshot(opts: ExtractOpts): Promise<ExtractResult>
   const entries: ExtractEntry[] = [];
   await tarList({
     file: opts.snapshotPath,
-    onReadEntry: (e: any) => entries.push({ path: e.path, size: e.size ?? 0 }),
+    onReadEntry: (e: ReadEntry) => entries.push({ path: e.path, size: e.size ?? 0 }),
   });
 
   if (opts.dryRun) {
@@ -213,20 +215,20 @@ export async function extractSnapshot(opts: ExtractOpts): Promise<ExtractResult>
   if (existsSync(targetDir)) {
     throw new Error(`target directory already exists: ${targetDir}`);
   }
+  // flair#903 — fail CLOSED on a tampered archive. node-tar's defaults below
+  // do contain malicious entries (leading "/" stripped, ".." entries dropped,
+  // no writing through symlinks — verified on the pinned tar against all four
+  // vectors), but they discard those entries SILENTLY: the restore reported
+  // success minus the parts it never mentioned, and the operator held a
+  // partial restore they believed was complete. Validation runs BEFORE the
+  // target directory is even created: a tampered snapshot aborts the whole
+  // restore, names the offending entry, and writes nothing (same posture as
+  // the data-dir restore's extractSnapshotSafely). The default extract flags
+  // are kept as containment defense-in-depth — deliberately NOT
+  // preservePaths; if that flag is ever added here, this call MUST move to
+  // extractSnapshotSafely (see src/lib/safe-snapshot-extract.ts).
+  await validateSnapshotArchive({ file: opts.snapshotPath, targetDir });
   mkdirSync(targetDir, { recursive: true, mode: 0o700 });
-  // Deliberately NOT preservePaths, and deliberately NOT routed through
-  // src/lib/safe-snapshot-extract.ts. The snapshot path comes from the
-  // operator, so provenance here is no more controlled than the data-dir
-  // restore's — the difference is the flag, not the trust. With node-tar's
-  // defaults its own containment applies: it strips a leading "/" from entry
-  // paths, drops ".." entries, and refuses to write through a symlink,
-  // including one created earlier in the same archive. Verified against the
-  // pinned tar (7.5.20) on all four cases — absolute path, ".." traversal,
-  // in-archive symlink, pre-existing symlink in the target — each contained,
-  // with a benign control entry landing to prove the archives were valid.
-  // If `preservePaths` is ever added here, that containment is gone and this
-  // call MUST move to extractSnapshotSafely, which is why the data-dir
-  // restore needs the wrapper and this does not.
   await tarExtract({ file: opts.snapshotPath, cwd: targetDir });
 
   return { targetDir, entries };

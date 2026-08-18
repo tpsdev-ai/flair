@@ -141,6 +141,11 @@ describe("agent add / principal add — command wiring (#590)", () => {
     expect(hasOption(add, "--ops-target")).toBe(true);
   });
 
+  test("agent add has a real --admin-pass-file option (flair#1259 — read in-process, out of ps)", () => {
+    const add = findSubcommand("agent", "add");
+    expect(hasOption(add, "--admin-pass-file")).toBe(true);
+  });
+
   test("principal add still requires --admin-pass as an explicit option (flag not removed)", () => {
     const add = findSubcommand("principal", "add");
     expect(add).not.toBeUndefined();
@@ -203,7 +208,7 @@ describe("flair agent add / principal add — subprocess error paths (#590)", ()
       { HOME: tmpHome, FLAIR_ADMIN_PASS: undefined },
     );
     expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("--admin-pass is required for agent add");
+    expect(stderr).toContain("is required for agent add");
   });
 
   test("agent add with FLAIR_ADMIN_PASS env set but bad Harper connection still gets past admin-pass resolution (does not error on missing --admin-pass)", async () => {
@@ -215,7 +220,7 @@ describe("flair agent add / principal add — subprocess error paths (#590)", ()
       ["agent", "add", "test-agent-590-env", "--port", "39999"],
       { HOME: tmpHome, FLAIR_ADMIN_PASS: "env-secret-pass" },
     );
-    expect(stderr).not.toContain("--admin-pass is required for agent add");
+    expect(stderr).not.toContain("is required for agent add");
   });
 
   test("agent add with --target set (remote) and no --admin-pass: STILL errors even if FLAIR_ADMIN_PASS is set (security guard)", async () => {
@@ -224,7 +229,7 @@ describe("flair agent add / principal add — subprocess error paths (#590)", ()
       { HOME: tmpHome, FLAIR_ADMIN_PASS: "env-secret-pass" },
     );
     expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("--admin-pass is required for agent add");
+    expect(stderr).toContain("is required for agent add");
     expect(stderr).toContain("remote instance");
   });
 
@@ -239,8 +244,59 @@ describe("flair agent add / principal add — subprocess error paths (#590)", ()
       { HOME: tmpHome, FLAIR_ADMIN_PASS: undefined },
     );
     expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("--admin-pass is required for agent add");
+    expect(stderr).toContain("is required for agent add");
     expect(stderr).toContain("remote instance");
+  });
+
+  // ── flair#1259 — --admin-pass-file: explicit flag, read in-process ──────────
+
+  test("agent add with --admin-pass-file works for a REMOTE target — an explicit flag is operator intent (flair#1259, does not weaken the #1085 ambient-fallback guard)", async () => {
+    const passFile = join(tmpHome, "fabric-admin-pass");
+    writeFileSync(passFile, "fabric-secret\n", "utf-8");
+    chmodSync(passFile, 0o600);
+
+    const { stderr } = await runCli(
+      ["agent", "add", "test-agent-1259-remote-file", "--target", "https://remote.example.com:9926", "--admin-pass-file", passFile],
+      { HOME: tmpHome, FLAIR_ADMIN_PASS: undefined },
+    );
+    // Must get PAST admin-pass resolution (fails later on the network call,
+    // remote.example.com being unreachable) — proves the file leg satisfied
+    // the remote guard the way inline --admin-pass does.
+    expect(stderr).not.toContain("is required for agent add");
+  });
+
+  test("agent add with --admin-pass-file works locally too (flair#1259)", async () => {
+    const passFile = join(tmpHome, "admin-pass-explicit");
+    writeFileSync(passFile, "explicit-file-secret\n", "utf-8");
+    chmodSync(passFile, 0o600);
+
+    const { stderr } = await runCli(
+      ["agent", "add", "test-agent-1259-local-file", "--port", "39999", "--admin-pass-file", passFile],
+      { HOME: tmpHome, FLAIR_ADMIN_PASS: undefined },
+    );
+    expect(stderr).not.toContain("is required for agent add");
+  });
+
+  test("agent add --admin-pass-file enforces owner-only mode — a 0644 file is refused with an actionable chmod error (flair#1259)", async () => {
+    const passFile = join(tmpHome, "world-readable-pass");
+    writeFileSync(passFile, "leaky-secret\n", "utf-8");
+    chmodSync(passFile, 0o644);
+
+    const { stderr, exitCode } = await runCli(
+      ["agent", "add", "test-agent-1259-mode", "--target", "https://remote.example.com:9926", "--admin-pass-file", passFile],
+      { HOME: tmpHome, FLAIR_ADMIN_PASS: undefined },
+    );
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("permissions 644 are too open");
+    expect(stderr).toContain("chmod 600");
+  });
+
+  test("agent add inline --admin-pass still works for a remote target (flair#1259 adds, never replaces)", async () => {
+    const { stderr } = await runCli(
+      ["agent", "add", "test-agent-1259-inline", "--target", "https://remote.example.com:9926", "--admin-pass", "inline-secret"],
+      { HOME: tmpHome, FLAIR_ADMIN_PASS: undefined },
+    );
+    expect(stderr).not.toContain("is required for agent add");
   });
 
   test("agent add (local) with a valid ~/.flair/admin-pass file and no --admin-pass/env: does not hit the missing-admin-pass guard", async () => {
@@ -255,7 +311,7 @@ describe("flair agent add / principal add — subprocess error paths (#590)", ()
     );
     // Should fail on the network call (port 1 / no Harper running), NOT on
     // "--admin-pass is required" — proves the file fallback resolved a pass.
-    expect(stderr).not.toContain("--admin-pass is required for agent add");
+    expect(stderr).not.toContain("is required for agent add");
   });
 
   test("principal add with no --admin-pass, no env, no file: errors clearly", async () => {

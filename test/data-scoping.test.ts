@@ -21,9 +21,9 @@ function checkAgentScope(
 }
 
 /**
- * Returns 403 message if agent tries to read another agent's PRIVATE memory,
- * null otherwise (within-org-read-open — mirrors resources/memory-read-
- * scope.ts's resolveReadScope().isAllowed()). Originally (the original
+ * Returns the denial message if agent tries to read another agent's PRIVATE
+ * memory, null otherwise (within-org-read-open — mirrors resources/memory-
+ * read-scope.ts's resolveReadScope().isAllowed()). Originally (the original
  * grant-gated read model) this also required a MemoryGrant for any
  * cross-agent read of a non-private memory; that grant gate is GONE now —
  * see resources/memory-read-scope.ts's module doc for the full model
@@ -34,7 +34,14 @@ function checkAgentScope(
  * office-visibility read leak — that was an accidental leak fixed by the
  * grant-gated model; this is a deliberate, later design decision that
  * supersedes the grant gate itself.)
+ *
+ * flair#1264: the denial is the SAME generic "not found" the resource layer
+ * (Memory.get()) answers — 404, never a 403 naming the owner. A denied
+ * caller must not be able to distinguish "doesn't exist" from "exists but
+ * not yours", and must never learn who owns the id it probed.
  */
+const MEMORY_READ_DENIAL = "not found";
+
 function checkMemoryReadScope(
   authenticatedAgent: string,
   memoryOwner: string,
@@ -43,7 +50,7 @@ function checkMemoryReadScope(
 ): string | null {
   if (isAdmin) return null;
   if (memoryOwner === authenticatedAgent) return null;
-  if (memoryVisibility === "private") return `forbidden: cannot read memory owned by ${memoryOwner}`;
+  if (memoryVisibility === "private") return MEMORY_READ_DENIAL;
   return null;
 }
 
@@ -102,7 +109,10 @@ describe("checkMemoryReadScope (Memory GET by ID)", () => {
   it("blocks reading another agent's PRIVATE memory — the ONE remaining private-exclusion invariant", () => {
     const err = checkMemoryReadScope("anvil", "flint", "private", false);
     expect(err).not.toBeNull();
-    expect(err).toContain("flint");
+    // flair#1264 anti-enumeration: the denial is a generic not-found — it
+    // must never name the owning agent or otherwise confirm the id exists.
+    expect(err).toBe(MEMORY_READ_DENIAL);
+    expect(err).not.toContain("flint");
   });
 
   it("within-org-read-open: another agent's 'standard'-durability memory (no visibility field) is readable too — durability only affects the WRITE-time default, not read scoping", () => {
@@ -118,7 +128,8 @@ describe("checkMemoryReadScope (Memory GET by ID)", () => {
     expect(checkMemoryReadScope("kern", "sherlock", undefined, false)).toBeNull();
     const err = checkMemoryReadScope("kern", "sherlock", "private", false);
     expect(err).not.toBeNull();
-    expect(err).toContain("sherlock");
+    // flair#1264: denial never discloses the owner.
+    expect(err).not.toContain("sherlock");
   });
 });
 

@@ -127,11 +127,24 @@ describe("within-org-read-open — private/shared visibility + centralized read-
       expect(res.status).toBe(200);
     }, 30_000);
 
-    test("private-exclusion: grantee's GET of the PRIVATE memory is denied (never 200)", async () => {
+    test("private-exclusion: grantee's GET of the PRIVATE memory is denied as a generic 404 — no content, no owner, no existence confirmation (flair#1264)", async () => {
       const res = await authFetch(harper, grantee, "GET", `/Memory/${idPrivate}`);
-      expect([403, 404], `grantee GET private → ${res.status} (expected denied)`).toContain(res.status);
+      // flair#1264: exactly 404, matching the resource layer's anti-enumeration
+      // contract. A 403 here confirmed the id exists; the middleware's old
+      // message additionally named the owning agent.
+      expect(res.status, `grantee GET private → ${res.status} (expected 404)`).toBe(404);
       const text = await res.text();
       expect(text).not.toContain("explicitly private note");
+      expect(text).not.toContain(owner.id);
+      expect(text.toLowerCase()).not.toContain("forbidden");
+    }, 30_000);
+
+    test("cross-agent private GET is indistinguishable from a genuinely missing id (flair#1264)", async () => {
+      const denied = await authFetch(harper, grantee, "GET", `/Memory/${idPrivate}`);
+      const missing = await authFetch(harper, grantee, "GET", `/Memory/vis-owner-does-not-exist`);
+      expect(denied.status, `denied → ${denied.status}, missing → ${missing.status}`).toBe(missing.status);
+      // Same body shape, too — status parity alone still leaks if the bodies differ.
+      expect(await denied.text()).toBe(await missing.text());
     }, 30_000);
 
     test("within-org-read-open: stranger (no grant at all) CAN GET the legacy + shared memories — only the PRIVATE one is denied", async () => {
@@ -140,7 +153,8 @@ describe("within-org-read-open — private/shared visibility + centralized read-
         expect(res.status, `stranger GET ${id} → ${res.status} (expected 200 — no grant needed)`).toBe(200);
       }
       const privRes = await authFetch(harper, stranger, "GET", `/Memory/${idPrivate}`);
-      expect([403, 404], `stranger GET private → ${privRes.status} (expected denied)`).toContain(privRes.status);
+      expect(privRes.status, `stranger GET private → ${privRes.status} (expected 404, flair#1264)`).toBe(404);
+      expect(await privRes.text()).not.toContain(owner.id);
     }, 30_000);
   });
 

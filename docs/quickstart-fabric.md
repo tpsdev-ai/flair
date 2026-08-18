@@ -50,7 +50,7 @@ The target defaults to `https://<cluster>.<org>.harperfabric.com`. Override with
 
 A fleet-verify table follows. That HTTPS origin is your `FLAIR_URL`.
 
-Then set an admin password in Fabric Studio (Cluster Settings → Admin). `flair agent add` against a remote instance requires `--admin-pass` — it will not reuse `~/.flair/admin-pass` or `FLAIR_ADMIN_PASS` from your laptop.
+Then set an admin password in Fabric Studio (Cluster Settings → Admin). `flair agent add` against a remote instance requires an explicit `--admin-pass-file` or `--admin-pass` — it will not reuse `~/.flair/admin-pass` or `FLAIR_ADMIN_PASS` from your laptop.
 
 ## 3. Register an agent against the remote instance
 
@@ -61,11 +61,14 @@ On Fabric, ops lives on the **same hostname at port 9925**, not the CLI's defaul
 ```bash
 export FLAIR_URL=https://<cluster>.<org>.harperfabric.com
 
+# Keep the Fabric admin password in an owner-only file; the CLI reads it in-process.
+printf '%s\n' '<fabric-admin-password>' > ~/.flair/fabric-admin-pass && chmod 600 ~/.flair/fabric-admin-pass
+
 # Fabric ops is :9925 on the same host, not derived :442. docs-freshness-allow: Fabric ops API
-flair agent add mybot --target "$FLAIR_URL" --ops-target https://<cluster>.<org>.harperfabric.com:9925 --admin-pass <fabric-admin-password>
+flair agent add mybot --target "$FLAIR_URL" --ops-target https://<cluster>.<org>.harperfabric.com:9925 --admin-pass-file ~/.flair/fabric-admin-pass
 ```
 
-Same hygiene rule as step 0: an inline password lands in shell history and `ps`. Remote `agent add` honors **only** the explicit `--admin-pass` flag by design — `FLAIR_ADMIN_PASS` and `~/.flair/admin-pass` are this machine's *local* credentials and are never reused against a remote target — so keep the Fabric password in a mode-`0600` file and expand it at call time: `--admin-pass "$(cat <path>)"` stays out of shell history (the expanded value is still visible to local `ps` while the command runs).
+`--admin-pass-file` reads the file inside the CLI process (mode `0600` enforced), so the password never appears in shell history **or** `ps`. Inline `--admin-pass <pass>` still works but lands in both; the older `--admin-pass "$(cat <path>)"` workaround stays out of history but is still visible to local `ps` while the command runs. Remote `agent add` honors **only** an explicit flag by design — `FLAIR_ADMIN_PASS` and `~/.flair/admin-pass` are this machine's *local* credentials and are never reused against a remote target.
 
 ```
 Keypair written: ~/.flair/keys/mybot.key
