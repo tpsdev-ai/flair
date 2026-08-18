@@ -26,6 +26,9 @@ import { spawn, execFileSync, spawnSync, execSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { create as tarCreate, extract as tarExtract, list as tarList } from "tar";
+// flair#901 — tar listings/extracts type their entry callbacks against
+// node-tar's own export so an upstream property rename fails compilation.
+import type { ReadEntry as TarReadEntry } from "tar";
 import { keystore } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl, resolveDeployPublicUrl } from "./deploy.js";
 import {
@@ -4164,6 +4167,7 @@ agent
   .option("--name <name>", "Display name (defaults to id)")
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password for registration")
+  .option("--admin-pass-file <path>", "Read the admin password from a file (chmod 600 enforced). Preferred over inline --admin-pass — keeps the secret out of ps and shell history; works for remote targets too (an explicit flag is operator intent).")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--target <url>", "Remote Flair REST URL; derives the ops API URL (port-1) to seed the Agent there (env: FLAIR_TARGET)")
@@ -4182,6 +4186,22 @@ agent
       resolveEffectiveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }) ?? opsPort;
     const isRemoteTarget = typeof seedOpsTarget === "string";
 
+    // flair#1259 — --admin-pass-file resolves into the same explicit slot the
+    // inline flag uses (same shape as `flair federation sync`), read in-process
+    // via readAdminPassFileSecure so the secret never appears in ps or shell
+    // history. This does NOT weaken the #1085 remote guard below: an explicit
+    // flag naming a file IS operator intent toward this target, exactly like an
+    // explicit inline --admin-pass — what the guard blocks is the AMBIENT
+    // env/local-file fallbacks silently traveling to a third-party host.
+    if (!opts.adminPass && opts.adminPassFile) {
+      try {
+        opts.adminPass = readAdminPassFileSecure(opts.adminPassFile);
+      } catch (err: any) {
+        console.error(`Error reading --admin-pass-file ${opts.adminPassFile}: ${err.message}`);
+        process.exit(1);
+      }
+    }
+
     // #590 — local convenience fallback: FLAIR_ADMIN_PASS env, then the secure
     // ~/.flair/admin-pass file `flair init` already writes (mode 0600). Never
     // applied for a remote target — see resolveLocalAdminPass.
@@ -4196,13 +4216,14 @@ agent
     if (!adminPass) {
       if (isRemoteTarget) {
         console.error(
-          "Error: --admin-pass is required for agent add when targeting a remote instance " +
-          "(--target/--ops-target) — the local ~/.flair/admin-pass fallback is not used for remote targets."
+          "Error: --admin-pass <pass> or --admin-pass-file <path> is required for agent add when targeting " +
+          "a remote instance (--target/--ops-target) — the local ~/.flair/admin-pass and FLAIR_ADMIN_PASS " +
+          "fallbacks are never used for remote targets. Prefer --admin-pass-file: it keeps the secret out of ps."
         );
       } else {
         console.error(
-          "Error: --admin-pass is required for agent add (needed to insert into Agent table). " +
-          "Set FLAIR_ADMIN_PASS, or make sure ~/.flair/admin-pass exists (created by `flair init`)."
+          "Error: --admin-pass <pass> or --admin-pass-file <path> is required for agent add (needed to insert " +
+          "into Agent table). Set FLAIR_ADMIN_PASS, or make sure ~/.flair/admin-pass exists (created by `flair init`)."
         );
       }
       process.exit(1);
@@ -15159,7 +15180,7 @@ sessionSnapshot
     if (opts.dryRun) {
       console.log("(dry-run) snapshot contents:");
       const entries: string[] = [];
-      await tarList({ file: snapshotPath, onReadEntry: (entry: any) => entries.push(`  ${entry.path}  (${humanBytes(entry.size ?? 0)})`) });
+      await tarList({ file: snapshotPath, onReadEntry: (entry: TarReadEntry) => entries.push(`  ${entry.path}  (${humanBytes(entry.size ?? 0)})`) });
       for (const e of entries) console.log(e);
       return;
     }
@@ -15172,18 +15193,25 @@ sessionSnapshot
       console.error(`  Pass --target <new-path> or remove the existing dir.`);
       process.exit(1);
     }
+    // flair#903 — fail CLOSED on a tampered archive. node-tar's defaults below
+    // do contain malicious entries (leading "/" stripped, ".." entries
+    // dropped, no writing through a symlink — verified on the pinned tar
+    // against all four vectors), but they discard those entries SILENTLY: the
+    // restore printed the target dir as a plain success minus the parts it
+    // never mentioned. Validation runs BEFORE the target directory is even
+    // created — a tampered snapshot aborts the whole restore, names the
+    // offending entry, and writes nothing (same posture as the data-dir
+    // restore's extractSnapshotSafely). The default extract flags stay as
+    // containment defense-in-depth — deliberately NOT preservePaths; if that
+    // flag is ever added here, this call MUST move to extractSnapshotSafely.
+    // See src/lib/safe-snapshot-extract.ts.
+    try {
+      await validateSnapshotArchive({ file: snapshotPath, targetDir });
+    } catch (err: any) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
     mkdirSync(targetDir, { recursive: true, mode: 0o700 });
-    // Deliberately NOT preservePaths, and deliberately NOT routed through
-    // extractSnapshotSafely. --snapshot is an operator-supplied path, so
-    // provenance here is no more controlled than the data-dir restore's — the
-    // difference is the flag, not the trust. node-tar's defaults keep their
-    // own containment: leading "/" stripped from entry paths, ".." entries
-    // dropped, and no writing through a symlink (including one created
-    // earlier in the same archive). Verified against the pinned tar (7.5.20)
-    // on all four cases, each contained, with a benign control entry landing
-    // to prove the archives parsed. Add `preservePaths` here and that
-    // containment disappears — this call would then need extractSnapshotSafely,
-    // exactly as the data-dir restore does. See src/lib/safe-snapshot-extract.ts.
     await tarExtract({ file: snapshotPath, cwd: targetDir });
     console.log(targetDir);
     console.error(`  extracted to: ${targetDir}`);

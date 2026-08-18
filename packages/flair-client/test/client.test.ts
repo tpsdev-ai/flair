@@ -1,4 +1,4 @@
-import { describe, test, expect, mock, beforeEach, spyOn } from "bun:test";
+import { describe, test, expect, mock, beforeEach, afterEach, spyOn } from "bun:test";
 
 // Mock fetch globally
 const originalFetch = globalThis.fetch;
@@ -66,6 +66,97 @@ describe("FlairClient", () => {
       const client = new FlairClient({ agentId: "test", claimedClient: "gemini" });
       expect(client.claimedClient).toBe("gemini");
       delete process.env.FLAIR_CLIENT;
+    });
+  });
+
+  // ─── flair#1254 — unsubstituted ${...} literals in the client's OWN env
+  // fallbacks read as unset, so the existing defaults apply. Mirrors
+  // flair-mcp's #1253 boundary strip, one layer down where every consumer
+  // (CLI, adk, langgraph, n8n, ...) is covered at once.
+  describe("interpolation-literal env fallbacks (flair#1254)", () => {
+    const SAVED: Record<string, string | undefined> = {};
+    const VARS = ["FLAIR_URL", "FLAIR_AGENT_ID", "FLAIR_CLIENT", "FLAIR_ADMIN_USER", "FLAIR_ADMIN_PASSWORD"];
+    beforeEach(() => {
+      for (const v of VARS) { SAVED[v] = process.env[v]; delete process.env[v]; }
+    });
+    afterEach(() => {
+      for (const v of VARS) {
+        if (SAVED[v] === undefined) delete process.env[v];
+        else process.env[v] = SAVED[v]!;
+      }
+    });
+
+    test("positive control (#1253 mirror): url undefined + literal ${FLAIR_URL} in env resolves to DEFAULT_URL, not the literal", () => {
+      process.env.FLAIR_URL = "${FLAIR_URL}";
+      const client = new FlairClient({ url: undefined, agentId: "test" });
+      expect(client.url).toBe("http://localhost:19926");
+      expect(client.url).not.toContain("${");
+    });
+
+    test("a real FLAIR_URL env value still wins over the default (guard is literal-shaped only)", () => {
+      process.env.FLAIR_URL = "http://real-host:5555";
+      const client = new FlairClient({ agentId: "test" });
+      expect(client.url).toBe("http://real-host:5555");
+    });
+
+    test("an explicit config.url beats even a literal-free env (no behavior change)", () => {
+      process.env.FLAIR_URL = "${FLAIR_URL}";
+      const client = new FlairClient({ agentId: "test", url: "http://explicit:1234" });
+      expect(client.url).toBe("http://explicit:1234");
+    });
+
+    test("literal ${FLAIR_AGENT_ID} reads as unset — agentId falls back to empty, not the literal", () => {
+      process.env.FLAIR_AGENT_ID = "${FLAIR_AGENT_ID}";
+      const client = new FlairClient({});
+      expect(client.agentId).toBe("");
+    });
+
+    test("literal ${FLAIR_CLIENT} reads as unset — claimedClient stays undefined", () => {
+      process.env.FLAIR_CLIENT = "${FLAIR_CLIENT}";
+      const client = new FlairClient({ agentId: "test" });
+      expect(client.claimedClient).toBeUndefined();
+    });
+
+    test("literal ${FLAIR_ADMIN_USER}/${FLAIR_ADMIN_PASSWORD} read as unset — no basic-auth header is manufactured from placeholders", () => {
+      process.env.FLAIR_ADMIN_USER = "${FLAIR_ADMIN_USER}";
+      process.env.FLAIR_ADMIN_PASSWORD = "${FLAIR_ADMIN_PASSWORD}";
+      const client = new FlairClient({ agentId: "test" });
+      expect((client as any).basicAuth).toBeNull();
+    });
+
+    test("real admin env values still produce basic auth (guard does not over-fire)", () => {
+      process.env.FLAIR_ADMIN_USER = "admin";
+      process.env.FLAIR_ADMIN_PASSWORD = "s3cret";
+      const client = new FlairClient({ agentId: "test" });
+      expect((client as any).basicAuth).toStartWith("Basic ");
+    });
+
+    test("literal ${FLAIR_KEY_DIR} reads as unset — key resolution never probes a directory literally named ${FLAIR_KEY_DIR}", () => {
+      const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = require("node:fs") as typeof import("node:fs");
+      const { join } = require("node:path") as typeof import("node:path");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const savedKeyDir = process.env.FLAIR_KEY_DIR;
+      const savedCwd = process.cwd();
+      const root = mkdtempSync(join(tmpdir(), "flair-client-keydir-1254-"));
+      try {
+        // A directory LITERALLY named "${FLAIR_KEY_DIR}" relative to cwd — the
+        // path the unguarded fallback would resolve and find.
+        const literalDir = join(root, "${FLAIR_KEY_DIR}");
+        mkdirSync(literalDir, { recursive: true });
+        writeFileSync(join(literalDir, "keydir-1254-agent.key"), "not-a-real-key\n");
+        process.chdir(root);
+        process.env.FLAIR_KEY_DIR = "${FLAIR_KEY_DIR}";
+        const found = authMod.resolveKeyPath("keydir-1254-agent");
+        // Guarded: the literal reads as unset, the standard locations don't
+        // have this agent, so resolution finds nothing — instead of returning
+        // the planted file under the literal-named directory.
+        expect(found).toBeNull();
+      } finally {
+        process.chdir(savedCwd);
+        if (savedKeyDir === undefined) delete process.env.FLAIR_KEY_DIR;
+        else process.env.FLAIR_KEY_DIR = savedKeyDir;
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 });

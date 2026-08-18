@@ -43,10 +43,13 @@ export function readEnvOrUnset(
 /**
  * Connection env vars that flair-client's OWN constructor reads straight from
  * `process.env` as a fallback (see flair-client/src/client.ts:
- * `this.url = config.url ?? process.env.FLAIR_URL ?? DEFAULT_URL`). For these,
- * skipping the literal only at flair-mcp's call site is NOT enough: flair-client
- * re-reads `process.env` and resurrects the `${...}` literal, defeating its own
- * default. Such a literal has to be removed from the process env itself.
+ * `this.url = config.url ?? readEnvOrUnset("FLAIR_URL") ?? DEFAULT_URL`). For
+ * these, skipping the literal only at flair-mcp's call site was NOT enough:
+ * flair-client re-read `process.env` and resurrected the `${...}` literal,
+ * defeating its own default. As of flair#1254 flair-client's env fallbacks
+ * apply this same literal-as-unset guard themselves, so the strip below is
+ * defense-in-depth rather than the only line — kept deliberately (an older
+ * flair-client on a consumer's disk does not have #1254).
  *
  * Only FLAIR_URL qualifies today: it is re-read by flair-client AND flair-mcp
  * still constructs a client when it is a literal. FLAIR_AGENT_ID is also re-read

@@ -9,6 +9,7 @@ import { randomUUID, sign as ed25519Sign, createPrivateKey, type KeyObject } fro
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
+import { readEnvOrUnset } from "./env-guard.js";
 
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
@@ -29,8 +30,12 @@ export function resolveKeyPath(agentId: string, keyPath?: string): string | null
     const resolved = resolve(keyPath.replace(/^~/, homedir()));
     return existsSync(resolved) ? resolved : null;
   }
+  // flair#1254: an unsubstituted `${FLAIR_KEY_DIR}` literal reads as unset, so
+  // key resolution falls through to the standard locations below instead of
+  // probing a directory literally named "${FLAIR_KEY_DIR}".
+  const keyDir = readEnvOrUnset("FLAIR_KEY_DIR");
   const candidates = [
-    process.env.FLAIR_KEY_DIR ? resolve(process.env.FLAIR_KEY_DIR, `${agentId}.key`) : null,
+    keyDir ? resolve(keyDir, `${agentId}.key`) : null,
     resolve(homedir(), ".flair", "keys", `${agentId}.key`),
     resolve(homedir(), ".tps", "secrets", "flair", `${agentId}-priv.key`),
   ].filter(Boolean) as string[];

@@ -4,6 +4,7 @@ import { getEmbedding } from "./embeddings-provider.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME } from "./agent-auth.js";
 import { WINDOW_MS, isNonceReplay, recordNonce, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { resolveReadScope } from "./memory-read-scope.js";
+import { NOT_FOUND } from "./record-type-kit.js";
 import { isForbiddenOwnerMutation, resolveGuardedRecord } from "./record-owner-guard.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
 
@@ -659,11 +660,18 @@ server.http(async (request: any, nextLayer: any) => {
             // used to be a `visibility === "office"` bypass (any authenticated
             // agent, no grant needed) — that's gone; the private-exclusion is
             // now enforced the same way every other read path enforces it.
+            //
+            // Denial is the SAME 404 the resource layer returns (flair#1264):
+            // Memory.get() deliberately answers NOT_FOUND for a cross-agent
+            // private id so a denied caller can't distinguish "doesn't exist"
+            // from "exists but not yours" — a 403 here, worse yet one naming
+            // the owning agent, confirmed the id exists AND disclosed its
+            // owner, defeating that anti-enumeration contract one layer up.
+            // Reuses record-type-kit's NOT_FOUND so the two layers cannot
+            // drift apart in shape.
             const scope = await resolveReadScope(agentId);
             if (!scope.isAllowed(record)) {
-              return new Response(JSON.stringify({
-                error: `forbidden: cannot read memory owned by ${record.agentId}`,
-              }), { status: 403, headers: { "Content-Type": "application/json" } });
+              return NOT_FOUND();
             }
           }
         }

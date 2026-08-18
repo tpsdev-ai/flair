@@ -29,6 +29,14 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { extract as tarExtract, list as tarList } from "tar";
+// flair#901 — the entry contract is TYPED against node-tar's own export, so a
+// property rename in a future tar release fails at COMPILE time. That is the
+// only place a rename can be caught: at runtime the defensive coercions below
+// would quietly turn a renamed property into ""/undefined, and this file's
+// whole job is to decide from those very properties. The runtime shape checks
+// in checkSnapshotEntry are the belt to this type's suspenders — they fail
+// CLOSED on an entry whose properties don't carry what the contract promises.
+import type { ReadEntry } from "tar";
 
 /** Thrown when a snapshot entry would resolve outside the target directory. */
 export class SnapshotPathEscapeError extends Error {
@@ -80,6 +88,18 @@ export function checkSnapshotEntry(
   linkpath: string | undefined,
   resolvedTargetDir: string,
 ): { ok: true } | { ok: false; reason: string } {
+  // flair#901 fail-closed shape checks: an entry this check cannot READ is an
+  // entry it must not PASS. An empty path used to resolve to the target dir
+  // itself (inside, so ok), and a link entry with no linkpath skipped the
+  // link branches entirely — both silently approved exactly when the input
+  // was least trustworthy (tampered archive, or an upstream property rename
+  // surviving to runtime).
+  if (!entryPath) {
+    return { ok: false, reason: "entry has an empty or unreadable path — refusing an entry this check cannot classify" };
+  }
+  if ((type === "Link" || type === "SymbolicLink") && !linkpath) {
+    return { ok: false, reason: `${type === "Link" ? "hard link" : "symlink"} "${entryPath}" has no readable link target — refusing an entry this check cannot classify` };
+  }
   if (looksAbsolute(entryPath)) {
     return { ok: false, reason: `entry has an absolute path ("${entryPath}"), which would write outside the target directory` };
   }
@@ -170,11 +190,17 @@ export async function validateSnapshotArchive(opts: {
   const violations: Array<{ entryPath: string; reason: string }> = [];
   await tarList({
     file: opts.file,
-    onReadEntry: (entry: any) => {
+    // Typed against tar's ReadEntry (flair#901) — a property rename upstream
+    // now fails compilation instead of coercing to ""/undefined at runtime.
+    // The coercions below remain as the runtime belt, and they no longer
+    // default to safe: checkSnapshotEntry refuses an empty path and a
+    // link-typed entry with no link target.
+    onReadEntry: (entry: ReadEntry) => {
+      const entryPath = typeof entry.path === "string" ? entry.path : "";
       const verdict = checkSnapshotEntry(
-        String(entry.path ?? ""),
+        entryPath,
         entry.type,
-        entry.linkpath ? String(entry.linkpath) : undefined,
+        typeof entry.linkpath === "string" && entry.linkpath !== "" ? entry.linkpath : undefined,
         resolvedTargetDir,
       );
       // `verdict.ok === false` rather than `!verdict.ok`: an explicit
@@ -182,7 +208,7 @@ export async function validateSnapshotArchive(opts: {
       // to its failure member, so `reason` is known to exist here. The union
       // is deliberately shaped so a caller cannot read a reason off a success.
       if (verdict.ok === false) {
-        violations.push({ entryPath: String(entry.path ?? ""), reason: verdict.reason });
+        violations.push({ entryPath, reason: verdict.reason });
       }
     },
   });
