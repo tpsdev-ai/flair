@@ -84,3 +84,57 @@ export function assertValidVisibility(visibility: unknown): string | null {
     `permanent/persistent -> shared, standard/ephemeral -> private.`
   );
 }
+
+/** Deliberately a LOCAL literal, not an import from memory-durability.ts: this
+ *  module's zero-imports property is load-bearing (see the header — src/cli.ts
+ *  must be able to import it with no transitive baggage), and the tripwire
+ *  tests in test/unit/visibility-write-validation.test.ts pin the value to the
+ *  durability enum so the two cannot drift apart silently. */
+export const EPHEMERAL_DURABILITY = "ephemeral";
+
+/**
+ * ─── flair#1257 hard precondition: ephemeral memories are private-only ───────
+ *
+ * `ephemeral` is the continuity-journal tier: auto-captured working state,
+ * self-pruning, never meant to leave its owner. `defaultVisibilityForDurability`
+ * keys it to `private`, but a DEFAULT is not a CONSTRAINT — before this guard,
+ * an explicit `visibility:"shared"` on an ephemeral write was accepted, which
+ * would have made journal entries org-readable AND federation-pushed. Kern's
+ * #1257 ruling requires the server to REFUSE the combination so the boundary
+ * holds for every caller (REST, in-process, any adapter), not just the hooks
+ * that promise to send `private` explicitly.
+ *
+ * The rule is deliberately "ephemeral may only carry `private` or nothing",
+ * NOT "refuse ephemeral+shared": on the read side any value other than the
+ * literal "private" resolves to non-private (the migration invariant above),
+ * so an unknown value on an ephemeral row would leak exactly like "shared".
+ * assertValidVisibility refuses unknowns first at both call sites, but this
+ * guard must stay fail-closed on its own — unknown means refused, not allowed.
+ *
+ * Absent (`undefined`/`null`) is accepted: it resolves through the
+ * durability-keyed default, which for ephemeral is `private` — the documented,
+ * intentional path (and the one the continuity hooks use, belt-and-suspenders
+ * with an explicit `private`).
+ *
+ * Returns an error message, or null when the combination is acceptable.
+ * `durability` is the EFFECTIVE durability of the row being written — for
+ * Memory.put() updates, where the payload may omit durability, the caller
+ * passes the pre-existing row's durability as the fallback so a PUT that flips
+ * a stored ephemeral row to shared refuses too.
+ */
+export function assertVisibilityAllowedForDurability(
+  durability: unknown,
+  visibility: unknown,
+): string | null {
+  if (durability !== EPHEMERAL_DURABILITY) return null;
+  if (visibility === undefined || visibility === null || visibility === PRIVATE_VISIBILITY) {
+    return null;
+  }
+  return (
+    `ephemeral memories are private-only (continuity journal tier, flair#1257): ` +
+    `durability "${EPHEMERAL_DURABILITY}" cannot be written with visibility ${JSON.stringify(visibility)}. ` +
+    `Omit visibility (the durability-keyed default is "${PRIVATE_VISIBILITY}") or set it to ` +
+    `"${PRIVATE_VISIBILITY}"; for a memory other agents should read, use durability ` +
+    `"standard", "persistent", or "permanent".`
+  );
+}

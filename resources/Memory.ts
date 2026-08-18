@@ -7,7 +7,7 @@ import { scanFields, isStrictMode } from "./content-safety.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { resolveAllowedOwners } from "./memory-read-scope.js";
-import { assertValidVisibility } from "./memory-visibility.js";
+import { assertValidVisibility, assertVisibilityAllowedForDurability } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
@@ -691,6 +691,24 @@ export class Memory extends (databases as any).flair.Memory {
         }
       }
 
+      // ── flair#1257: ephemeral memories are private-only (hard precondition) ──
+      // The durability-keyed default below sends ephemeral to "private", but a
+      // default is not a constraint — an explicit visibility:"shared" here would
+      // make continuity-journal entries org-readable AND federation-pushed.
+      // Refused at the server so the boundary holds for every caller, not just
+      // the hooks that promise to send "private". content.durability is already
+      // defaulted ("standard" when absent) and enum-validated above, so this
+      // sees the row's effective durability.
+      {
+        const tierError = assertVisibilityAllowedForDurability(content.durability, content.visibility);
+        if (tierError) {
+          return new Response(
+            JSON.stringify({ error: "invalid_visibility_for_durability", message: tierError }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+      }
+
     if (content.visibility === undefined || content.visibility === null) {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }
@@ -916,6 +934,27 @@ export class Memory extends (databases as any).flair.Memory {
         if (visibilityError) {
           return new Response(
             JSON.stringify({ error: "invalid_visibility", message: visibilityError }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          );
+        }
+      }
+
+      // ── flair#1257: ephemeral memories are private-only (hard precondition) ──
+      // Same rule as post(), with one PUT-specific wrinkle: an update payload
+      // may omit durability entirely (put() stamps no durability default), so
+      // `PUT /Memory/<id> {"visibility":"shared"}` against a stored ephemeral
+      // row names no durability of its own — the EFFECTIVE durability is the
+      // pre-existing row's, and the flip must refuse just like a fresh
+      // ephemeral+shared create. An explicit durability on the write wins: a
+      // write that promotes the row OUT of ephemeral (e.g. distillation lifting
+      // it to persistent, #1205) while sharing it is a legitimate promotion,
+      // not an ephemeral share. preExisting was fetched above.
+      {
+        const effectiveDurability = content.durability ?? preExisting?.durability;
+        const tierError = assertVisibilityAllowedForDurability(effectiveDurability, content.visibility);
+        if (tierError) {
+          return new Response(
+            JSON.stringify({ error: "invalid_visibility_for_durability", message: tierError }),
             { status: 400, headers: { "content-type": "application/json" } },
           );
         }

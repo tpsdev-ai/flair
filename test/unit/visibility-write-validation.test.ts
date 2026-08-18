@@ -22,11 +22,14 @@
 import { describe, test, expect } from "bun:test";
 import {
   assertValidVisibility,
+  assertVisibilityAllowedForDurability,
   isPrivateVisibility,
+  EPHEMERAL_DURABILITY,
   PRIVATE_VISIBILITY,
   SHARED_VISIBILITY,
   WRITABLE_VISIBILITIES,
 } from "../../resources/memory-visibility.js";
+import { WRITABLE_DURABILITIES } from "../../resources/memory-durability.js";
 
 describe("assertValidVisibility — write-side rejection (flair#1009)", () => {
   test("accepts the two valid values", () => {
@@ -98,6 +101,61 @@ describe("the read predicate stays permissive — the migration invariant", () =
   });
 });
 
+// ─── flair#1257: ephemeral memories are private-only ──────────────────────────
+//
+// `ephemeral` is the continuity-journal tier. Its durability-keyed DEFAULT is
+// private, but a default is not a constraint — before #1257 an explicit
+// visibility:"shared" on an ephemeral write was accepted, making journal
+// entries org-readable and federation-pushed. These tests pin the refusal rule
+// itself; the behavioural REST proof (POST/PUT → 400) lives in
+// test/integration/ephemeral-visibility-guard-e2e.test.ts.
+describe("assertVisibilityAllowedForDurability — ephemeral is private-only (flair#1257)", () => {
+  test("refuses ephemeral + shared — the combination the guard exists for", () => {
+    const err = assertVisibilityAllowedForDurability(EPHEMERAL_DURABILITY, SHARED_VISIBILITY);
+    expect(err).not.toBeNull();
+    // Actor + state + remedy: names the tier, the refused value, and both exits.
+    expect(err).toContain("private-only");
+    expect(err).toContain('"shared"');
+    expect(err).toContain("Omit visibility");
+    expect(err).toContain("1257");
+  });
+
+  test("fail-closed: ephemeral + any PRESENT non-private value is refused, not just \"shared\"", () => {
+    // The read side resolves anything other than the literal "private" to
+    // non-private (migration invariant), so an unknown value on an ephemeral
+    // row would leak exactly like "shared". assertValidVisibility refuses
+    // unknowns first at both call sites, but this guard must not depend on
+    // that layering to be safe.
+    for (const v of ["office", "prvate", "Private", "public", "", 1, true]) {
+      expect(assertVisibilityAllowedForDurability(EPHEMERAL_DURABILITY, v)).not.toBeNull();
+    }
+  });
+
+  test("accepts ephemeral + private, and ephemeral + absent (the default path)", () => {
+    expect(assertVisibilityAllowedForDurability(EPHEMERAL_DURABILITY, PRIVATE_VISIBILITY)).toBeNull();
+    expect(assertVisibilityAllowedForDurability(EPHEMERAL_DURABILITY, undefined)).toBeNull();
+    expect(assertVisibilityAllowedForDurability(EPHEMERAL_DURABILITY, null)).toBeNull();
+  });
+
+  test("no over-fire: every NON-ephemeral durability may still write shared", () => {
+    for (const d of WRITABLE_DURABILITIES) {
+      if (d === EPHEMERAL_DURABILITY) continue;
+      expect(assertVisibilityAllowedForDurability(d, SHARED_VISIBILITY)).toBeNull();
+    }
+    // And an absent effective durability (fresh PUT with no durability and no
+    // pre-existing row) is not ephemeral, so shared passes through to the
+    // ordinary visibility rules.
+    expect(assertVisibilityAllowedForDurability(undefined, SHARED_VISIBILITY)).toBeNull();
+  });
+
+  test("drift-pin: EPHEMERAL_DURABILITY is a real member of the durability enum", () => {
+    // memory-visibility.ts declares the literal locally to keep its zero-imports
+    // property (src/cli.ts safety). This is what keeps the local literal and the
+    // enum from drifting apart silently.
+    expect(WRITABLE_DURABILITIES as readonly string[]).toContain(EPHEMERAL_DURABILITY);
+  });
+});
+
 // ─── Structural tripwire: the guard must remain WIRED ─────────────────────────
 //
 // The tests above validate `assertValidVisibility` in isolation. That is not
@@ -134,5 +192,20 @@ describe("the visibility guard stays wired into both write paths", () => {
     const defaults = src.match(/defaultVisibilityForDurability\(content\.durability\)/g) ?? [];
     const guards = src.match(/assertValidVisibility\(content\.visibility\)/g) ?? [];
     expect(guards.length).toBe(defaults.length);
+  });
+
+  test("the flair#1257 ephemeral-private guard is wired into both write paths", () => {
+    // Same shape and same limitation as the tripwire above: detects DELETION,
+    // not misbehaviour — the behavioural 400s live in the integration lane
+    // (ephemeral-visibility-guard-e2e.test.ts, which is also where the
+    // mutation-check was run: guard removed → those tests go red).
+    expect(src).toContain("assertVisibilityAllowedForDurability");
+    const calls = src.match(/assertVisibilityAllowedForDurability\(/g) ?? [];
+    // One call in post(), one in put(); the import line does not match the
+    // trailing "(". put()'s call must see the EFFECTIVE durability — the
+    // pre-existing row's when the update payload omits it — or a partial PUT
+    // flipping a stored ephemeral row to shared sails past the guard.
+    expect(calls.length).toBe(2);
+    expect(src).toContain("content.durability ?? preExisting?.durability");
   });
 });
