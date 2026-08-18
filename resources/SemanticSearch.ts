@@ -137,22 +137,22 @@ export class SemanticSearch extends Resource {
     let temporalBoost = 1.0;
     if (q && !sinceDate) {
       const lq = String(q).toLowerCase();
+      // flair#1245: a text-derived temporal match must ONLY nudge recency in
+      // ranking (temporalBoost, a soft multiplier applied in
+      // semantic-retrieval-core.ts) — it must NEVER derive a hard `sinceDate`
+      // exclusion. An incidental temporal word in the query TEXT (the #1245
+      // canary carried "today" inside a slogan) otherwise silently dropped
+      // every candidate older than the window → 0 results. Only the explicit
+      // `since` API param (set above, untouched here) still hard-filters.
       if (/\btoday\b|\bthis morning\b|\bthis afternoon\b/.test(lq)) {
-        const d = new Date(); d.setHours(0, 0, 0, 0);
-        sinceDate = d;
         temporalBoost = 1.5;
       } else if (/\byesterday\b/.test(lq)) {
-        const d = new Date(); d.setDate(d.getDate() - 1); d.setHours(0, 0, 0, 0);
-        sinceDate = d;
         temporalBoost = 1.3;
       } else if (/\bthis week\b|\blast few days\b/.test(lq)) {
-        sinceDate = new Date(Date.now() - 7 * 24 * 3600_000);
         temporalBoost = 1.2;
       } else if (/\blast week\b/.test(lq)) {
-        sinceDate = new Date(Date.now() - 14 * 24 * 3600_000);
         temporalBoost = 1.1;
       } else if (/\brecently\b|\blately\b/.test(lq)) {
-        sinceDate = new Date(Date.now() - 3 * 24 * 3600_000);
         temporalBoost = 1.3;
       }
     }

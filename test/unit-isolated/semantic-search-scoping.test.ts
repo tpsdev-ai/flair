@@ -316,3 +316,84 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
     expect(embedInputTypeCalls.every((t) => t === "query")).toBe(true);
   });
 });
+
+// ─── flair#1245: text-derived temporal intent must BOOST, not hard-EXCLUDE ───
+// These exercise the SHIPPED SemanticSearch.post() → retrieveCandidates() path
+// through this file's mocked Harper. getEmbedding() is stubbed to return null
+// (see the module-level mock above), so every `q`-bearing call here takes the
+// hybrid BM25 corpus leg, where the per-record temporal gate (sinceDate against
+// record.createdAt) is applied by isAllowedBm25Candidate() in
+// resources/bm25-filter.ts — the exact mechanism #1245 misfired through. A
+// single rank-1 BM25 candidate RRF-normalizes to rawScore 1.0, so under
+// scoring="raw" the reported _score IS the temporalBoost multiplier, which
+// makes the boost directly observable.
+describe("SemanticSearch.post() — flair#1245 temporal intent BOOSTS, never hard-EXCLUDEs", () => {
+  const THIRTY_DAYS_AGO = () => new Date(Date.now() - 30 * 24 * 3600_000).toISOString();
+
+  // TEST 1 — the #1245 regression control. An incidental temporal word in the
+  // query TEXT ("today", as in the canary's slogan) must not drop on-topic
+  // records that predate the derived window. Pre-fix this returned 0 results.
+  // MUTATION-CHECK anchor: re-adding `sinceDate = <today-midnight>` in the
+  // "today" branch of SemanticSearch.ts makes THIS test fail (0 results).
+  it("flair#1245 regression: an incidental temporal word boosts but never hard-excludes an older on-topic record", async () => {
+    reset();
+    memoryStore.set("slogan-1", {
+      id: "slogan-1", agentId: "agent-1",
+      content: "widget slogans for the campaign", createdAt: THIRTY_DAYS_AGO(),
+    });
+    const s = makeSearch(agentCtx("agent-1"));
+    // "today" appears incidentally; the query is about widget slogans, and the
+    // one matching record was created 30 days ago.
+    const res: any = await s.post({ agentId: "agent-1", q: "widget slogans for today", limit: 10 });
+    expect(res.results.length).toBeGreaterThan(0);
+    expect(res.results.map((r: any) => r.id)).toContain("slogan-1");
+  });
+
+  // TEST 2 — the soft nudge survives AND nothing is excluded. temporalBoost is
+  // a flat multiplier (semantic-retrieval-core.ts: `finalScore *= temporalBoost`),
+  // so with scoring="raw" and one rank-1 candidate (rawScore 1.0) the _score
+  // reads back the boost directly. Recency ORDERING (recent above older) is a
+  // separate mechanism — compositeScore's recency decay — untouched by this
+  // fix; this test proves only what the fix guarantees: the boost is still
+  // applied and the older record is not filtered out.
+  it("flair#1245: the temporalBoost soft nudge is preserved, and the older record is never hard-excluded", async () => {
+    reset();
+    memoryStore.set("old-widget", {
+      id: "old-widget", agentId: "agent-1", content: "widget notes", createdAt: THIRTY_DAYS_AGO(),
+    });
+    const s = makeSearch(agentCtx("agent-1"));
+    // Same single record is rank-1 in both queries ⇒ identical rawScore; the
+    // ONLY difference is the incidental "today" ⇒ temporalBoost 1.5.
+    const plain: any = await s.post({ agentId: "agent-1", q: "widget notes", scoring: "raw", limit: 10 });
+    const boosted: any = await s.post({ agentId: "agent-1", q: "widget notes today", scoring: "raw", limit: 10 });
+
+    // (a) NOT EXCLUDED: the 30-day-old record surfaces under the temporal query.
+    const boostedRec = boosted.results.find((r: any) => r.id === "old-widget");
+    const plainRec = plain.results.find((r: any) => r.id === "old-widget");
+    expect(boostedRec).toBeDefined();
+    expect(plainRec).toBeDefined();
+
+    // (b) BOOST PRESERVED: "today" multiplies the score by 1.5; it does not filter.
+    expect(boostedRec._score).toBeGreaterThan(plainRec._score);
+    expect(boostedRec._score / plainRec._score).toBeCloseTo(1.5, 2);
+  });
+
+  // TEST 3 — the positive control proving intentional filtering is intact. The
+  // EXPLICIT `since` API param (SemanticSearch.ts's `since ? new Date(since) : null`,
+  // deliberately left untouched) must STILL hard-filter older records out.
+  it("flair#1245: an explicit `since` param still hard-filters (intentional time-filtering unchanged)", async () => {
+    reset();
+    memoryStore.set("old-widget", {
+      id: "old-widget", agentId: "agent-1", content: "widget notes", createdAt: THIRTY_DAYS_AGO(),
+    });
+    memoryStore.set("new-widget", {
+      id: "new-widget", agentId: "agent-1", content: "widget notes", createdAt: new Date().toISOString(),
+    });
+    const s = makeSearch(agentCtx("agent-1"));
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
+    const res: any = await s.post({ agentId: "agent-1", q: "widget notes", since: sevenDaysAgo, limit: 10 });
+    const ids = res.results.map((r: any) => r.id);
+    expect(ids).toContain("new-widget");     // within the explicit window
+    expect(ids).not.toContain("old-widget"); // 30 days old ⇒ hard-excluded by `since`
+  });
+});
