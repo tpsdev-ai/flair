@@ -1,0 +1,70 @@
+[18:00:09.683] Using @harperfast/harper-pro 5.2.2 at /private/tmp/claude-501/-Users-squeued-agents-flint/bc131193-b477-46bc-bbbb-400b2d96dfce/scratchpad/hp-sandbox/node_modules/@harperfast/harper-pro
+
+══════════════════════════════════════════════════════════════════════════════
+[18:00:09.684] LANE CONTROL — retention 1m, reconnect WITHIN retention (incremental catch-up expected)
+══════════════════════════════════════════════════════════════════════════════
+[18:00:09.690] [node-a] install → /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-a-dZIT8d (ops:52742 http:52743 repl:52744)
+[18:00:12.580] [node-b] install → /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-b-kXkFwU (ops:52748 http:52749 repl:52750)
+[18:00:17.042] [node-a] up (pid 72057)
+[18:00:19.051] [node-b] up (pid 72062)
+[18:00:19.051] add_node: registering node-b from node-a (basic-auth bootstrap, plain ws for a local repro)
+[18:00:19.073] add_node → {"message":"Successfully added 'ws://127.0.0.1:52750' to cluster"}
+[18:00:19.073] add_node: registering node-a from node-b (basic-auth bootstrap, plain ws for a local repro)
+[18:00:19.093] add_node → {"message":"Successfully added 'ws://127.0.0.1:52744' to cluster"}
+[18:00:19.093] restarting node-b so its replication dialer picks up the header-form auth record
+[18:00:19.192] [node-b] stopped
+[18:00:20.199] [node-b] up (pid 72067)
+[18:00:22.210] both replication directions authenticated and connected
+[18:00:22.210] creating audited table repro.doc on node-a
+[18:00:24.382] PASS  replication live: both nodes hold 25 rows — actual: a=25 b=25
+
+══════════════════════════════════════════════════════════════════════════════
+[18:00:24.382] STEP: instrument positive control — a NORMAL delete must appear in read_transaction_log
+══════════════════════════════════════════════════════════════════════════════
+[18:00:24.394] PASS  node-a txn log shows the canary 'delete' entry — actual: [{"operation":"delete","user_name":"admin","timestamp":1787076024384.122,"ids":["canary"],"records":[null]}]
+[18:00:24.394] PASS  node-b txn log shows the canary 'delete' entry (receiver-side deletes ARE audited) — actual: [{"operation":"delete","user_name":"admin","timestamp":1787076024384.122,"ids":["canary"],"records":[null]}]
+
+══════════════════════════════════════════════════════════════════════════════
+[18:00:24.394] STEP: partition — stopping node-b
+══════════════════════════════════════════════════════════════════════════════
+[18:00:24.498] [node-b] stopped
+[18:00:24.499] writing 10 rows on node-a only (node-b is down): part-001..part-010
+[18:00:24.573] PASS  node-a now holds 34 rows (only-copy of the 10) — actual: 34
+[18:00:24.573] control lane: reconnecting promptly (well within retention)
+
+══════════════════════════════════════════════════════════════════════════════
+[18:00:29.576] STEP: reconnect — restarting node-b after 5s of partition
+══════════════════════════════════════════════════════════════════════════════
+[18:00:30.583] [node-b] up (pid 72082)
+[18:00:30.590] counts a/b: 34/24
+[18:00:34.599] counts a/b: 34/34
+[18:00:38.608] counts a/b: 34/34
+[18:00:42.618] counts a/b: 34/34
+[18:00:46.627] counts a/b: 34/34
+
+══════════════════════════════════════════════════════════════════════════════
+[18:00:46.627] ASSERTIONS
+══════════════════════════════════════════════════════════════════════════════
+[18:00:46.627] [node-a] base-copy log lines since partition: (none)
+[18:00:46.627] [node-b] base-copy log lines since partition:
+    2026-08-18T18:00:20.788Z [http/1] [info] [replication]: Replicating all tables to node-a
+    2026-08-18T18:00:22.516Z [http/1] [info] [replication]: Replicating all tables to node-a
+[18:00:46.627] PASS  control: NO forced base copy (incremental catch-up served the reconnect) — actual: node-a:false node-b:false
+[18:00:46.640] record_count: node-a=34 node-b=34 (expected 34 if nothing is discarded)
+[18:00:46.641] partition-era rows on node-a: 10/10 present
+[18:00:46.641] partition-era rows on node-b: 10/10 present
+[18:00:46.648] 'delete' txn-log entries naming partition-era ids: node-a=0 node-b=0
+[18:00:46.648] txn-log entries mentioning 'reload': node-a=0 node-b=0
+[18:00:46.648] hdb.log lines mentioning 'reload' since partition: node-a=[] node-b=[]
+
+══════════════════════════════════════════════════════════════════════════════
+[18:00:46.648] VERDICT — lane control
+══════════════════════════════════════════════════════════════════════════════
+[18:00:46.648] PASS  control: rows replicated to node-b and nothing was lost — actual: a=34 b=34 missingA=0 missingB=0
+[18:00:46.648] node dirs (removed on exit): /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-a-dZIT8d /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-b-kXkFwU
+[18:00:46.768] [node-a] stopped
+[18:00:46.841] [node-b] stopped
+
+══════════════════════════════════════════════════════════════════════════════
+[18:00:46.849] DONE — all checks passed
+══════════════════════════════════════════════════════════════════════════════
