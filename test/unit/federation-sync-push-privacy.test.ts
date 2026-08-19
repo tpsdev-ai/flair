@@ -126,6 +126,69 @@ describe("federation sync push — private-visibility filter", () => {
     expect(pushedRecordIds()).toEqual([]);
   });
 
+  /**
+   * flair#1232: the quiet path used to print "No changes since last sync."
+   * whenever totalBatches === 0 — including the case where rows WERE found
+   * since the cursor and every one was withheld as private. That message
+   * sent operators on a cursor/token/hub-loss hunt. The two stories below
+   * lock the distinction: withheld-private vs truly empty. Count + reason
+   * only; private content must not appear in the printed line.
+   */
+  function captureLogs(): { stdout: string[]; restore: () => void } {
+    const stdout: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: any[]) => { stdout.push(args.map((a) => String(a)).join(" ")); };
+    return { stdout, restore: () => { console.log = origLog; } };
+  }
+
+  it("quiet path reports withheld-private count when every found row is private", async () => {
+    const secret = "SECRET CONTENT MUST NOT APPEAR IN THE MESSAGE";
+    const privateRows = Array.from({ length: 35 }, (_, i) => ({
+      id: `mem-private-${i}`,
+      agentId: "a1",
+      content: secret,
+      visibility: "private",
+      updatedAt: "2025-06-01T00:00:00.000Z",
+      createdAt: "2025-06-01T00:00:00.000Z",
+    }));
+    installMock(privateRows);
+
+    const logs = captureLogs();
+    try {
+      const { runFederationSyncOnce } = await import("../../src/cli");
+      const result = await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });
+
+      expect(result.error).toBeUndefined();
+      expect(pushedRecordIds()).toEqual([]);
+      expect(logs.stdout).toContain("No federable changes since last sync (35 rows held back: private visibility).");
+      expect(logs.stdout).not.toContain("No changes since last sync.");
+      expect(logs.stdout.join("\n")).not.toContain(secret);
+      // Liveness ping still fires — observability change only.
+      const emptyPings = hubSyncCalls().filter((c) => (c.body?.records ?? []).length === 0);
+      expect(emptyPings).toHaveLength(1);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("quiet path still reads as no changes when nothing was found since the cursor", async () => {
+    installMock([]);
+
+    const logs = captureLogs();
+    try {
+      const { runFederationSyncOnce } = await import("../../src/cli");
+      const result = await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });
+
+      expect(result.error).toBeUndefined();
+      expect(pushedRecordIds()).toEqual([]);
+      expect(logs.stdout).toContain("No changes since last sync.");
+      expect(logs.stdout.join("\n")).not.toContain("held back");
+      expect(logs.stdout.join("\n")).not.toContain("private visibility");
+    } finally {
+      logs.restore();
+    }
+  });
+
   it("pushes a shared Memory row", async () => {
     installMock([
       { id: "mem-shared", agentId: "a1", content: "team update", visibility: "shared", updatedAt: "2025-06-01T00:00:00.000Z", createdAt: "2025-06-01T00:00:00.000Z" },
