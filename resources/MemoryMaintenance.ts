@@ -62,8 +62,16 @@ export class MemoryMaintenance extends Resource {
         if (targetAgent && record.agentId !== targetAgent) continue;
         stats.total++;
 
-        // 1. Delete expired memories
-        if (record.expiresAt && new Date(record.expiresAt) < now) {
+        // 1. Delete expired ephemeral memories. expiresAt is only a reap
+        // signal for the ephemeral tier (docstring + Memory.post() TTL
+        // stamp). A non-ephemeral row that acquired one (bug, import, API
+        // misuse) must survive — missing / unexpected durability is treated
+        // as non-ephemeral so we do not silently reap durable rows.
+        if (
+          record.durability === "ephemeral" &&
+          record.expiresAt &&
+          new Date(record.expiresAt) < now
+        ) {
           if (!dryRun) {
             try {
               await (databases as any).flair.Memory.delete(record.id);
