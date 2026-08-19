@@ -57,13 +57,14 @@
  * `flair federation sync --admin-pass-file`, which reads it through
  * readAdminPassFileSecure() and refuses a file that is not owner-only.
  */
-import { existsSync, chmodSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, chmodSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { escapeXml } from "../lib/xml-escape.js";
 import {
   type SchedulerPlatform,
+  type FirstRunVerification,
   detectPlatform as detectPlatformFor,
   spawnReport,
   readTemplate,
@@ -71,6 +72,9 @@ import {
   writeFileWithDir,
   interpretActiveResult,
   describeLoadFailure as describeLoadFailureFor,
+  describeExitCode,
+  resolveNodeBin,
+  verifyFirstRun,
   STATUS_CHECK_TIMEOUT_MS,
 } from "../lib/scheduler-platform.js";
 
@@ -102,6 +106,11 @@ export const MAX_INTERVAL_SECONDS = 86_400;
 export interface FederationSchedulerSubstitutions {
   /** Absolute path to the flair binary the shim should invoke. */
   FLAIR_BIN: string;
+  /**
+   * Absolute path to the node binary that runs FLAIR_BIN, resolved at enable
+   * time (#1231). Baked in so the shim performs zero PATH lookups at run time.
+   */
+  NODE_BIN: string;
   /** Absolute path to the shim script the scheduler should call. */
   SHIM_PATH: string;
   /** Operator's home directory (HOME env var value). */
@@ -130,6 +139,12 @@ export interface EnableOpts {
   target?: string;
   /** Absolute path to the flair binary. Defaults to argv[1]. */
   flairBin?: string;
+  /**
+   * Absolute path to the node binary baked into the shim. Defaults to
+   * resolveNodeBin() — the enabling runtime's own binary, or `command -v
+   * node` resolved once at enable time (#1231).
+   */
+  nodeBin?: string;
   /** Override platform for testing. */
   platformOverride?: SchedulerPlatform;
   /** Override target paths for testing. */
@@ -152,6 +167,19 @@ export interface EnableResult {
   intervalSeconds: number;
   loadCommand: string[];
   loadResult?: { code: number | null; stdout: string; stderr: string };
+  /**
+   * True ONLY when the service manager was observed to run the job once and
+   * it exited 0 (#1231). formatEnableReport() refuses the success headline
+   * without it — a load command exiting 0 proves the job was ACCEPTED, not
+   * that it can RUN.
+   */
+  firstRunVerified: boolean;
+  /**
+   * How verification concluded. Absent when it was never attempted: load
+   * skipped (tests) or load failed (a load failure is its own failure mode —
+   * verification is only attempted after the load exits 0).
+   */
+  firstRun?: FirstRunVerification;
 }
 
 export interface DisableOpts {
@@ -228,7 +256,7 @@ export function validateInterval(intervalSeconds: number): void {
   }
 }
 
-function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string): FederationSchedulerSubstitutions {
+function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string, nodeBin: string): FederationSchedulerSubstitutions {
   validateInterval(opts.intervalSeconds);
   const adminPassFile = opts.adminPassFile ?? "";
   if (adminPassFile && !existsSync(adminPassFile)) {
@@ -239,6 +267,7 @@ function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string
   }
   return {
     FLAIR_BIN: flairBin,
+    NODE_BIN: nodeBin,
     SHIM_PATH: shimPath,
     HOME: opts.homeOverride ?? homedir(),
     INTERVAL_SECONDS: String(opts.intervalSeconds),
@@ -265,9 +294,31 @@ function launchdDomain(): string {
 export function enableScheduler(opts: EnableOpts): EnableResult {
   const plat = detectPlatform(opts.platformOverride);
   const flairBin = opts.flairBin ?? process.argv[1] ?? "flair";
+  const nodeBin = resolveNodeBin(opts.nodeBin);
   const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
   const templateRoot = opts.templateRootOverride ?? defaultTemplateRoot();
-  const subs = buildSubstitutions(opts, shimPath, flairBin);
+  const subs = buildSubstitutions(opts, shimPath, flairBin, nodeBin);
+
+  // 0. Create the log directory the unit files point stdout/stderr at.
+  // Nothing else ever creates it — launchd kills a job whose StandardOutPath
+  // directory is missing (spawn error 209) and systemd fails the unit (#1231).
+  //
+  // Mode 0700 is load-bearing, NOT cosmetic: this directory also receives
+  // REM's nightly log, which carries distillation CANDIDATE CONTENT — actual
+  // memory text, not just sync counts and errors. Relaxing it to 0755 (e.g.
+  // "for shared debugging") would expose memory content to every local user.
+  const logsDir = resolve(subs.HOME, ".flair", "logs");
+  try {
+    mkdirSync(logsDir, { recursive: true, mode: 0o700 });
+  } catch (err: any) {
+    throw new Error(
+      `could not create the scheduler log directory ${logsDir}: ${err?.message ?? err}. ` +
+        `The service manager writes the job's stdout/stderr there; without it the first run dies ` +
+        `before producing any output. Fix whatever blocks creating that directory, then re-run ` +
+        `\`flair federation sync enable\`.`,
+    );
+  }
+  const stderrLogPath = resolve(logsDir, "federation-sync.stderr.log");
 
   // 1. Deploy the shim (always — both platforms invoke it).
   const shimContents = renderTemplate(readTemplate(templateRoot, "bin/flair-federation-sync.sh.tmpl"), subs);
@@ -285,14 +336,28 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
 
     const loadCommand = ["launchctl", "bootstrap", launchdDomain(), plistPath];
     let loadResult: EnableResult["loadResult"];
+    let firstRun: FirstRunVerification | undefined;
     if (!opts.skipLoad) {
       // Bootout first in case a prior install left the job loaded — this is
       // what makes re-running enable (e.g. to change --interval) idempotent
       // rather than a "service already loaded" failure.
       spawnReport(["launchctl", "bootout", launchdDomain(), plistPath]);
       loadResult = spawnReport(loadCommand);
+      if (loadResult.code === 0) {
+        // Ordering gate (#1231): verify the first run ONLY after the load
+        // exited 0. A load failure is its own failure mode with its own
+        // remedy — kickstarting on top of it would blur which actor failed.
+        firstRun = verifyFirstRun({
+          plat,
+          darwinTarget: `${launchdDomain()}/${LAUNCHD_LABEL}`,
+          stderrLogPath,
+        });
+      }
     }
-    return { platform: plat, shimPath, schedulerPath: plistPath, intervalSeconds: opts.intervalSeconds, loadCommand, loadResult };
+    return {
+      platform: plat, shimPath, schedulerPath: plistPath, intervalSeconds: opts.intervalSeconds,
+      loadCommand, loadResult, firstRunVerified: firstRun?.verified === true, firstRun,
+    };
   }
 
   // Linux: systemd user units.
@@ -306,14 +371,24 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
 
   const loadCommand = ["systemctl", "--user", "enable", "--now", SYSTEMD_TIMER_UNIT];
   let loadResult: EnableResult["loadResult"];
+  let firstRun: FirstRunVerification | undefined;
   if (!opts.skipLoad) {
     spawnReport(["systemctl", "--user", "daemon-reload"]);
     // Restart so a changed --interval takes effect on re-enable; `enable
     // --now` alone leaves an already-running timer on its old schedule.
     loadResult = spawnReport(loadCommand);
-    if (loadResult.code === 0) spawnReport(["systemctl", "--user", "restart", SYSTEMD_TIMER_UNIT]);
+    if (loadResult.code === 0) {
+      spawnReport(["systemctl", "--user", "restart", SYSTEMD_TIMER_UNIT]);
+      // Ordering gate (#1231): only after the load exited 0. Starts the
+      // SERVICE unit directly (oneshot ⇒ blocks until the run exits) rather
+      // than waiting out the timer.
+      firstRun = verifyFirstRun({ plat, linuxServiceUnit: SYSTEMD_SERVICE_UNIT, stderrLogPath });
+    }
   }
-  return { platform: plat, shimPath, schedulerPath: timerPath, intervalSeconds: opts.intervalSeconds, loadCommand, loadResult };
+  return {
+    platform: plat, shimPath, schedulerPath: timerPath, intervalSeconds: opts.intervalSeconds,
+    loadCommand, loadResult, firstRunVerified: firstRun?.verified === true, firstRun,
+  };
 }
 
 /** Removes the scheduler entry. Peer records and sync history are untouched. */
@@ -649,6 +724,14 @@ export interface FormattedReport {
  * success-vs-failure decision (flair#850: never print a success headline
  * before activation is known to have succeeded), extracted from the CLI
  * action so it is unit-testable without spawning launchctl/systemctl.
+ *
+ * flair#1231 deepened the #850 rule by one layer: activation exiting 0 proves
+ * the service manager ACCEPTED the job, not that the job can run — a stripped
+ * exec bit and a missing log directory both passed activation and killed the
+ * first real run invisibly. So the ✅ headline is now additionally gated on
+ * `firstRunVerified`: success may not be claimed until the thing the operator
+ * asked for — a sync run through the service manager — has been observed to
+ * happen once.
  */
 export function formatEnableReport(r: EnableResult, input: { adminPassFile?: string; target?: string }): FormattedReport {
   const activationFailed = !!r.loadResult && r.loadResult.code !== 0;
@@ -676,6 +759,53 @@ export function formatEnableReport(r: EnableResult, input: { adminPassFile?: str
     return { lines, ok: false };
   }
 
+  if (!r.firstRunVerified) {
+    const fr = r.firstRun;
+    const headline =
+      fr?.outcome === "run-failed"
+        ? `⚠️  Federation sync driver installed but the first run FAILED (${describeExitCode(fr.exitCode)})`
+        : fr?.outcome === "timeout"
+          ? `⚠️  Federation sync driver installed but the first run did not complete within ${Math.round(fr.budgetMs / 1000)}s — cannot confirm it works`
+          : fr?.outcome === "manager-unavailable"
+            ? `⚠️  Federation sync driver installed but the service manager is unreachable — cannot verify the first run`
+            : fr?.outcome === "start-failed"
+              ? `⚠️  Federation sync driver installed but the first run could not be started`
+              : `⚠️  Federation sync driver installed but the first run was never verified`;
+    const lines = [
+      headline,
+      `   Interval:    every ${r.intervalSeconds}s`,
+      `   Scheduler:   ${r.schedulerPath}`,
+      `   Shim:        ${r.shimPath}`,
+      credLine,
+    ];
+    if (input.target) lines.push(`   Target:      ${input.target}`);
+    if (r.loadResult) lines.push(`   Load:        ${r.loadCommand.join(" ")} → ok`);
+    if (fr) {
+      lines.push(`   First run:   ${fr.detail}`);
+      if (fr.stderrTail) {
+        lines.push(`   Log tail (${fr.logPath}):`);
+        for (const l of fr.stderrTail.split("\n")) lines.push(`     ${l}`);
+      } else if (fr.logEmpty) {
+        lines.push(`   Log file ${fr.logPath} exists but is EMPTY — the run died before writing anything.`);
+      } else {
+        lines.push(`   No log file at ${fr.logPath}.`);
+      }
+    }
+    lines.push("");
+    if (fr?.outcome === "timeout") {
+      lines.push(`   The run may legitimately still be going. Check the log above and \`flair federation status\`;`);
+      lines.push(`   nothing has been CONFIRMED to sync yet.`);
+    } else if (fr?.outcome === "manager-unavailable") {
+      lines.push(`   The driver files are installed, but launchctl/systemctl could not be consulted, so whether`);
+      lines.push(`   sync runs is UNKNOWN. Fix the service manager for this session, then re-run \`flair federation sync enable\`.`);
+    } else {
+      lines.push(`   Nothing has synced. Fix the cause above, then re-run \`flair federation sync enable\`.`);
+    }
+    lines.push("");
+    lines.push(`   Check anytime with: flair federation sync status`);
+    return { lines, ok: false };
+  }
+
   const lines = [
     `✅ Federation sync driver enabled (${r.platform})`,
     `   Interval:    every ${r.intervalSeconds}s`,
@@ -685,9 +815,10 @@ export function formatEnableReport(r: EnableResult, input: { adminPassFile?: str
   ];
   if (input.target) lines.push(`   Target:      ${input.target}`);
   if (r.loadResult) lines.push(`   Load:        ${r.loadCommand.join(" ")} → ok`);
+  lines.push(`   First run:   completed through the service manager, exit 0`);
   lines.push("");
-  lines.push(`The first sync runs immediately. Confirm with \`flair federation status\`,`);
-  lines.push(`which now reports whether anything is actually driving sync.`);
+  lines.push(`Confirm anytime with \`flair federation status\`,`);
+  lines.push(`which reports whether anything is actually driving sync.`);
   lines.push(`Disable with \`flair federation sync disable\`.`);
   return { lines, ok: true };
 }

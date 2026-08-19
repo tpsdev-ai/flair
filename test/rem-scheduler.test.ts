@@ -23,8 +23,10 @@ import {
   type EnableResult,
   type SchedulerStatus,
 } from "../src/rem/scheduler.ts";
+import { type FirstRunVerification } from "../src/lib/scheduler-platform.ts";
 
 let testRoot: string;
+let home: string;
 let shimPath: string;
 let plistPath: string;
 let timerPath: string;
@@ -33,6 +35,8 @@ let templateRoot: string;
 
 beforeEach(() => {
   testRoot = mkdtempSync(join(tmpdir(), "flair-rem-scheduler-test-"));
+  home = join(testRoot, "home");
+  mkdirSync(home, { recursive: true });
   shimPath = join(testRoot, "bin", "flair-rem-nightly");
   plistPath = join(testRoot, "LaunchAgents", "dev.flair.rem.nightly.plist");
   timerPath = join(testRoot, "systemd", "flair-rem-nightly.timer");
@@ -51,10 +55,16 @@ function baseOpts(overrides: Partial<EnableOpts> = {}): EnableOpts {
     hour: 3,
     minute: 0,
     flairBin: "/usr/local/bin/flair",
+    // Pinned so shim-content assertions are hermetic — no dependency on what
+    // resolveNodeBin() finds on the machine running the tests.
+    nodeBin: "/usr/local/bin/node",
     shimPathOverride: shimPath,
     launchdPlistOverride: plistPath,
     systemdTimerOverride: timerPath,
     systemdServiceOverride: servicePath,
+    // #1231: enable now mkdirs HOME/.flair/logs — keep it inside the temp
+    // tree, never the real home directory.
+    homeOverride: home,
     templateRootOverride: templateRoot,
     skipLoad: true,
     ...overrides,
@@ -63,6 +73,7 @@ function baseOpts(overrides: Partial<EnableOpts> = {}): EnableOpts {
 
 const sampleSubs: SchedulerSubstitutions = {
   FLAIR_BIN: "/usr/local/bin/flair",
+  NODE_BIN: "/usr/local/bin/node",
   SHIM_PATH: "/Users/test/.flair/bin/flair-rem-nightly",
   HOME: "/Users/test",
   AGENT_ID: "test-agent",
@@ -116,8 +127,24 @@ describe("enableScheduler (darwin)", () => {
     expect(plist).not.toContain("{{");
 
     const shim = readFileSync(shimPath, "utf-8");
-    expect(shim).toContain("/usr/local/bin/flair rem nightly run-once");
+    // #1231: run the CLI UNDER NODE (read permission suffices — survives
+    // npm-pack tarball extraction stripping the exec bit), with the node
+    // binary resolved to an ABSOLUTE path at enable time (no run-time PATH
+    // lookup). This replaces the old direct-exec pin.
+    expect(shim).toContain(`exec "/usr/local/bin/node" "/usr/local/bin/flair" rem nightly run-once`);
+    expect(shim).not.toContain("exec /usr/local/bin/flair");
+    expect(shim).not.toMatch(/exec\s+node\b/);
     expect(shim).toContain("#!/bin/sh");
+  });
+
+  it("creates HOME/.flair/logs with mode 0700 (#1231 — launchd spawn error 209 otherwise)", () => {
+    const logsDir = join(home, ".flair", "logs");
+    expect(existsSync(logsDir)).toBe(false);
+    enableScheduler(baseOpts({ platformOverride: "darwin" }));
+    expect(existsSync(logsDir)).toBe(true);
+    // 0700 is load-bearing: the REM nightly log carries distillation
+    // candidate CONTENT (memory text), not just counts.
+    expect(statSync(logsDir).mode & 0o777).toBe(0o700);
   });
 
   it("does not invoke launchctl when skipLoad=true", () => {
@@ -154,6 +181,14 @@ describe("enableScheduler (linux)", () => {
     const r = enableScheduler(baseOpts({ platformOverride: "linux", hour: 7, minute: 5 }));
     const timer = readFileSync(timerPath, "utf-8");
     expect(timer).toContain("OnCalendar=*-*-* 07:05:00");
+  });
+
+  it("creates HOME/.flair/logs with mode 0700 (#1231 — systemd append: targets need the directory)", () => {
+    const logsDir = join(home, ".flair", "logs");
+    expect(existsSync(logsDir)).toBe(false);
+    enableScheduler(baseOpts({ platformOverride: "linux" }));
+    expect(existsSync(logsDir)).toBe(true);
+    expect(statSync(logsDir).mode & 0o777).toBe(0o700);
   });
 });
 
@@ -353,6 +388,21 @@ describe("describeLoadFailure (flair#850 — remedy naming)", () => {
 
 describe("formatEnableReport (flair#850 — the core honesty fix)", () => {
   const reportInput = { hour: 3, minute: 0, agentId: "test-agent", flairUrl: "http://127.0.0.1:9926" };
+  const LOG_PATH = "/home/test/.flair/logs/rem-nightly.stderr.log";
+
+  function verifiedRun(over: Partial<FirstRunVerification> = {}): FirstRunVerification {
+    return {
+      verified: true,
+      outcome: "success",
+      exitCode: 0,
+      detail: "systemctl --user start flair-rem-nightly.service → ok",
+      logPath: LOG_PATH,
+      stderrTail: "",
+      logEmpty: false,
+      budgetMs: 12_000,
+      ...over,
+    };
+  }
 
   function baseEnableResult(overrides: Partial<EnableResult> = {}): EnableResult {
     return {
@@ -360,11 +410,13 @@ describe("formatEnableReport (flair#850 — the core honesty fix)", () => {
       shimPath: "/home/test/.flair/bin/flair-rem-nightly",
       schedulerPath: "/home/test/.config/systemd/user/flair-rem-nightly.timer",
       loadCommand: ["systemctl", "--user", "enable", "--now", "flair-rem-nightly.timer"],
+      firstRunVerified: true,
+      firstRun: verifiedRun(),
       ...overrides,
     };
   }
 
-  it("SUCCESS PATH: reports success when loadResult.code === 0", () => {
+  it("SUCCESS PATH: reports success when loadResult.code === 0 AND the first run was verified", () => {
     const r = baseEnableResult({ loadResult: { code: 0, stdout: "", stderr: "" } });
     const { lines, ok } = formatEnableReport(r, reportInput);
     expect(ok).toBe(true);
@@ -372,11 +424,16 @@ describe("formatEnableReport (flair#850 — the core honesty fix)", () => {
     expect(lines.join("\n")).not.toMatch(/NOT activated/);
   });
 
-  it("SUCCESS PATH: reports success when loadResult is absent (test-only skipLoad shape)", () => {
-    const r = baseEnableResult({ loadResult: undefined });
+  it("NO-CLAIM PATH (#1231): a loadResult-absent result WITHOUT firstRunVerified no longer reads as success", () => {
+    // Pre-#1231 this shape was treated as success ("the CLI never sets
+    // skipLoad"). That was one layer short: nothing about this result proves
+    // a run ever happened, so the headline is now withheld.
+    const r = baseEnableResult({ loadResult: undefined, firstRunVerified: false, firstRun: undefined });
     const { lines, ok } = formatEnableReport(r, reportInput);
-    expect(ok).toBe(true);
-    expect(lines.join("\n")).toContain("✅ REM nightly scheduler enabled");
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).not.toContain("✅ REM nightly scheduler enabled");
+    expect(text).toContain("never verified");
   });
 
   it("FAILURE PATH: does NOT print a success headline when loadResult.code !== 0", () => {
@@ -436,6 +493,89 @@ describe("formatEnableReport (flair#850 — the core honesty fix)", () => {
     expect(text).not.toContain("✅ REM nightly scheduler enabled");
     expect(text).toMatch(/NOT activated/);
     expect(text).toContain("Re-run the activation command above manually");
+  });
+
+  // ── #1231: activation succeeded, but the first RUN was not verified ──────
+  // The load command exiting 0 proves the service manager ACCEPTED the job,
+  // not that the job can run. The ✅ headline is additionally gated on
+  // firstRunVerified.
+
+  function failedRun(over: Partial<FirstRunVerification> = {}): FirstRunVerification {
+    return {
+      verified: false,
+      outcome: "run-failed",
+      exitCode: 126,
+      detail: "launchctl print gui/501/dev.flair.rem.nightly → last exit code = 126",
+      logPath: LOG_PATH,
+      stderrTail: "",
+      logEmpty: false,
+      budgetMs: 12_000,
+      ...over,
+    };
+  }
+
+  it("#1231: load ok + first run FAILED refuses the ✅ headline with exit status + remedy", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 0, stdout: "", stderr: "" },
+      firstRunVerified: false,
+      firstRun: failedRun({ stderrTail: "Error: connect ECONNREFUSED 127.0.0.1:9926" }),
+    });
+    const { lines, ok } = formatEnableReport(r, reportInput);
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).not.toContain("✅ REM nightly scheduler enabled");
+    expect(text).toContain("first run FAILED");
+    expect(text).toContain("exit 126");
+    // Kern's addition: the stderr tail from the log file is part of the report.
+    expect(text).toContain("ECONNREFUSED");
+    expect(text).toContain(LOG_PATH);
+    // Remedy names THIS command.
+    expect(text).toContain("flair rem nightly enable");
+  });
+
+  it("#1231: an EMPTY log file after a failed run is itself reported as diagnostic", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 0, stdout: "", stderr: "" },
+      firstRunVerified: false,
+      firstRun: failedRun({ exitCode: 209, logEmpty: true }),
+    });
+    const text = formatEnableReport(r, reportInput).lines.join("\n");
+    expect(text).toContain("EMPTY");
+    expect(text).toContain("died before writing");
+  });
+
+  it("#1231: timeout withholds the headline but says the run may still be going", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 0, stdout: "", stderr: "" },
+      firstRunVerified: false,
+      firstRun: failedRun({ outcome: "timeout", exitCode: null }),
+    });
+    const { lines, ok } = formatEnableReport(r, reportInput);
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).not.toContain("✅ REM nightly scheduler enabled");
+    expect(text).toContain("did not complete within 12s");
+  });
+
+  it("#1231: service manager unreachable is its OWN state — remedy points at the manager, not the job", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 0, stdout: "", stderr: "" },
+      firstRunVerified: false,
+      firstRun: failedRun({ outcome: "manager-unavailable", exitCode: null, detail: "launchctl could not be run" }),
+    });
+    const { lines, ok } = formatEnableReport(r, reportInput);
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).toContain("service manager is unreachable");
+    expect(text).toContain("cannot verify the first run");
+    expect(text).toContain("Fix the service manager");
+    expect(text).not.toContain("first run FAILED");
+  });
+
+  it("#1231: enableScheduler with skipLoad reports firstRunVerified=false — never manufactured", () => {
+    const r = enableScheduler(baseOpts({ platformOverride: "linux" }));
+    expect(r.firstRunVerified).toBe(false);
+    expect(r.firstRun).toBeUndefined();
   });
 });
 

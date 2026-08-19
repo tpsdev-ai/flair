@@ -39,6 +39,7 @@ import {
   type SchedulerStatus,
   type DriverAssessmentInput,
 } from "../../src/federation/scheduler.ts";
+import { type FirstRunVerification } from "../../src/lib/scheduler-platform.ts";
 
 let testRoot: string;
 let home: string;
@@ -71,6 +72,9 @@ function baseOpts(overrides: Partial<EnableOpts> = {}): EnableOpts {
   return {
     intervalSeconds: 300,
     flairBin: "/usr/local/bin/flair",
+    // Pinned so shim-content assertions are hermetic — no dependency on what
+    // resolveNodeBin() finds on the machine running the tests.
+    nodeBin: "/usr/local/bin/node",
     shimPathOverride: shimPath,
     launchdPlistOverride: plistPath,
     systemdTimerOverride: timerPath,
@@ -84,6 +88,7 @@ function baseOpts(overrides: Partial<EnableOpts> = {}): EnableOpts {
 
 const sampleSubs: FederationSchedulerSubstitutions = {
   FLAIR_BIN: "/usr/local/bin/flair",
+  NODE_BIN: "/usr/local/bin/node",
   SHIM_PATH: "/Users/test/.flair/bin/flair-federation-sync",
   HOME: "/Users/test",
   INTERVAL_SECONDS: "300",
@@ -309,6 +314,39 @@ describe("enableScheduler validation", () => {
   });
 });
 
+// ─── the log directory (#1231 mechanism 1) ──────────────────────────────────
+// The unit files point stdout/stderr INTO ~/.flair/logs, and the service
+// manager does not create that directory — launchd kills the job with spawn
+// error 209. enable must create it.
+
+describe("enableScheduler — log directory (#1231)", () => {
+  for (const platformOverride of ["darwin", "linux"] as const) {
+    it(`${platformOverride}: creates HOME/.flair/logs with mode 0700`, () => {
+      const logsDir = join(home, ".flair", "logs");
+      expect(existsSync(logsDir)).toBe(false);
+      enableScheduler(baseOpts({ platformOverride }));
+      expect(existsSync(logsDir)).toBe(true);
+      // 0700 is load-bearing: the directory also receives REM's nightly log,
+      // which carries distillation candidate CONTENT (memory text).
+      expect(statSync(logsDir).mode & 0o777).toBe(0o700);
+    });
+  }
+
+  it("reports a failed log-dir creation as its own failure, naming the directory", () => {
+    // A FILE squatting on the logs path makes mkdir fail.
+    mkdirSync(join(home, ".flair"), { recursive: true });
+    writeFileSync(join(home, ".flair", "logs"), "not a directory\n");
+    expect(() => enableScheduler(baseOpts({ platformOverride: "darwin" }))).toThrow(/log directory/);
+    expect(() => enableScheduler(baseOpts({ platformOverride: "darwin" }))).toThrow(/federation sync enable/);
+  });
+
+  it("is idempotent when the directory already exists", () => {
+    enableScheduler(baseOpts({ platformOverride: "linux" }));
+    expect(() => enableScheduler(baseOpts({ platformOverride: "linux" }))).not.toThrow();
+    expect(existsSync(join(home, ".flair", "logs"))).toBe(true);
+  });
+});
+
 // ─── the shim ───────────────────────────────────────────────────────────────
 
 describe("shim", () => {
@@ -316,11 +354,26 @@ describe("shim", () => {
     enableScheduler(baseOpts({ platformOverride: "darwin", adminPassFile: passFile }));
     const shim = readFileSync(shimPath, "utf-8");
     expect(shim).toStartWith("#!/bin/sh");
-    expect(shim).toContain(`exec "/usr/local/bin/flair" federation sync`);
+    // #1231: run the CLI UNDER NODE (read permission suffices — survives
+    // npm-pack tarball extraction stripping the exec bit), with the node
+    // binary resolved to an ABSOLUTE path at enable time. This assertion
+    // replaces the old deliberate pin on `exec "/usr/local/bin/flair"`.
+    expect(shim).toContain(`exec "/usr/local/bin/node" "/usr/local/bin/flair" federation sync`);
     expect(shim).toContain("--admin-pass-file");
     // Never the value.
     expect(shim).not.toContain("PLACEHOLDER-not-a-real-password");
     expect(shim).not.toContain("{{");
+  });
+
+  it("never direct-execs FLAIR_BIN and never resolves node from PATH at run time", () => {
+    enableScheduler(baseOpts({ platformOverride: "darwin" }));
+    const shim = directives(readFileSync(shimPath, "utf-8"));
+    // The exec-bit dependency (#1231): a direct exec of the script requires
+    // +x, which tarball extraction strips.
+    expect(shim).not.toContain(`exec "/usr/local/bin/flair"`);
+    // Sherlock's finding on the fix: a bare `node` would introduce a run-time
+    // PATH lookup the old absolute-path form never had.
+    expect(shim).not.toMatch(/exec\s+node\b/);
   });
 
   it("is syntactically valid /bin/sh", () => {
@@ -554,6 +607,22 @@ describe("assessDriver — driver present vs absent vs present-but-peer-unreacha
 // ─── report formatting ──────────────────────────────────────────────────────
 
 describe("formatEnableReport (flair#850 — no success headline before activation succeeded)", () => {
+  const LOG_PATH = "/home/test/.flair/logs/federation-sync.stderr.log";
+
+  function verifiedRun(over: Partial<FirstRunVerification> = {}): FirstRunVerification {
+    return {
+      verified: true,
+      outcome: "success",
+      exitCode: 0,
+      detail: "systemctl --user start flair-federation-sync.service → ok",
+      logPath: LOG_PATH,
+      stderrTail: "",
+      logEmpty: false,
+      budgetMs: 12_000,
+      ...over,
+    };
+  }
+
   function result(over: Partial<EnableResult> = {}): EnableResult {
     return {
       platform: "linux",
@@ -561,14 +630,17 @@ describe("formatEnableReport (flair#850 — no success headline before activatio
       schedulerPath: "/home/test/.config/systemd/user/flair-federation-sync.timer",
       intervalSeconds: 300,
       loadCommand: ["systemctl", "--user", "enable", "--now", "flair-federation-sync.timer"],
+      firstRunVerified: true,
+      firstRun: verifiedRun(),
       ...over,
     };
   }
 
-  it("reports success when the load succeeded", () => {
+  it("reports success when the load succeeded AND the first run was verified", () => {
     const { lines, ok } = formatEnableReport(result({ loadResult: { code: 0, stdout: "", stderr: "" } }), {});
     expect(ok).toBe(true);
     expect(lines.join("\n")).toContain("✅ Federation sync driver enabled");
+    expect(lines.join("\n")).toContain("First run:");
   });
 
   it("does NOT print a success headline when activation failed", () => {
@@ -597,6 +669,114 @@ describe("formatEnableReport (flair#850 — no success headline before activatio
     const text = lines.join("\n");
     expect(text).toContain("/home/test/.flair/admin-pass");
     expect(text).toContain("path only");
+  });
+});
+
+describe("formatEnableReport (flair#1231 — no success headline before the FIRST RUN is verified)", () => {
+  const LOG_PATH = "/home/test/.flair/logs/federation-sync.stderr.log";
+
+  function firstRun(over: Partial<FirstRunVerification> = {}): FirstRunVerification {
+    return {
+      verified: false,
+      outcome: "run-failed",
+      exitCode: 1,
+      detail: "launchctl print gui/501/dev.flair.federation.sync → last exit code = 1",
+      logPath: LOG_PATH,
+      stderrTail: "",
+      logEmpty: false,
+      budgetMs: 12_000,
+      ...over,
+    };
+  }
+
+  function result(over: Partial<EnableResult> = {}): EnableResult {
+    return {
+      platform: "darwin",
+      shimPath: "/home/test/.flair/bin/flair-federation-sync",
+      schedulerPath: "/home/test/Library/LaunchAgents/dev.flair.federation.sync.plist",
+      intervalSeconds: 300,
+      loadCommand: ["launchctl", "bootstrap", "gui/501", "/home/test/Library/LaunchAgents/dev.flair.federation.sync.plist"],
+      loadResult: { code: 0, stdout: "", stderr: "" },
+      firstRunVerified: false,
+      firstRun: firstRun(),
+      ...over,
+    };
+  }
+
+  it("load ok + first run FAILED: refuses the ✅ headline and reports actor+state+remedy", () => {
+    const { lines, ok } = formatEnableReport(
+      result({
+        firstRun: firstRun({
+          exitCode: 126,
+          detail: "launchctl print gui/501/dev.flair.federation.sync → last exit code = 126",
+          stderrTail: "sh: /home/test/.flair/bin/flair-federation-sync: Permission denied",
+        }),
+      }),
+      {},
+    );
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).not.toMatch(/^✅/m);
+    // Actor + state: the DRIVER install worked, the RUN failed, with status.
+    expect(text).toContain("first run FAILED");
+    expect(text).toContain("exit 126");
+    expect(text).toContain("Nothing has synced");
+    // Diagnostics: the stderr tail from the log file.
+    expect(text).toContain("Permission denied");
+    expect(text).toContain(LOG_PATH);
+    // Remedy: re-run THIS command after fixing.
+    expect(text).toContain("flair federation sync enable");
+  });
+
+  it("an EMPTY log file after a failed run is itself reported as diagnostic", () => {
+    const { lines } = formatEnableReport(
+      result({ firstRun: firstRun({ exitCode: 209, stderrTail: "", logEmpty: true }) }),
+      {},
+    );
+    const text = lines.join("\n");
+    expect(text).toContain("EMPTY");
+    expect(text).toContain("died before writing");
+  });
+
+  it("timeout: withholds the headline but says the run may still be going", () => {
+    const { lines, ok } = formatEnableReport(
+      result({ firstRun: firstRun({ outcome: "timeout", exitCode: null, detail: "no completed run visible within 12s" }) }),
+      {},
+    );
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).not.toMatch(/^✅/m);
+    expect(text).toContain("did not complete within 12s");
+    expect(text).toMatch(/still be going/);
+  });
+
+  it("service manager unreachable is its OWN state — remedy points at the manager, not the sync job", () => {
+    const { lines, ok } = formatEnableReport(
+      result({ firstRun: firstRun({ outcome: "manager-unavailable", exitCode: null, detail: "launchctl could not be run" }) }),
+      {},
+    );
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).not.toMatch(/^✅/m);
+    expect(text).toContain("service manager is unreachable");
+    expect(text).toContain("cannot verify the first run");
+    expect(text).toContain("Fix the service manager");
+    // NOT the run-failed wording — nothing is known to have failed.
+    expect(text).not.toContain("first run FAILED");
+  });
+
+  it("a result with NO firstRun at all (load skipped / never attempted) still refuses the headline", () => {
+    const { lines, ok } = formatEnableReport(result({ loadResult: undefined, firstRunVerified: false, firstRun: undefined }), {});
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).not.toMatch(/^✅/m);
+    expect(text).toContain("never verified");
+  });
+
+  it("enableScheduler with skipLoad reports firstRunVerified=false — the claim is never manufactured", () => {
+    const r = enableScheduler(baseOpts({ platformOverride: "darwin" }));
+    expect(r.firstRunVerified).toBe(false);
+    expect(r.firstRun).toBeUndefined();
   });
 });
 

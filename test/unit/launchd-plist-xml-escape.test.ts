@@ -308,6 +308,7 @@ describe("renderPlistTemplate — the rem nightly scheduler plist", () => {
   function subs(over: Record<string, string> = {}) {
     return {
       FLAIR_BIN: "/usr/local/bin/flair",
+      NODE_BIN: "/usr/local/bin/node",
       SHIM_PATH: "/Users/example/.flair/bin/flair-rem-nightly",
       HOME: "/Users/example",
       AGENT_ID: "test-agent",

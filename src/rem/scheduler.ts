@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { escapeXml } from "../lib/xml-escape.js";
 import {
   type SchedulerPlatform,
+  type FirstRunVerification,
   detectPlatform as detectPlatformFor,
   spawnReport,
   readTemplate as readTemplateFrom,
@@ -28,6 +29,9 @@ import {
   writeFileWithDir,
   interpretActiveResult,
   describeLoadFailure as describeLoadFailureFor,
+  describeExitCode,
+  resolveNodeBin,
+  verifyFirstRun,
   SPAWN_TIMEOUT_MS,
   STATUS_CHECK_TIMEOUT_MS,
 } from "../lib/scheduler-platform.js";
@@ -48,6 +52,11 @@ export const SYSTEMD_SERVICE_PATH = resolve(SYSTEMD_USER_DIR, "flair-rem-nightly
 export interface SchedulerSubstitutions {
   /** Absolute path to the flair binary the shim should invoke. */
   FLAIR_BIN: string;
+  /**
+   * Absolute path to the node binary that runs FLAIR_BIN, resolved at enable
+   * time (#1231). Baked in so the shim performs zero PATH lookups at run time.
+   */
+  NODE_BIN: string;
   /** Absolute path to the shim script the scheduler should call. */
   SHIM_PATH: string;
   /** Operator's home directory (HOME env var value). */
@@ -75,6 +84,12 @@ export interface EnableOpts {
   minute: number;
   /** Absolute path to the flair binary. Defaults to argv[0]'s nearest bin dir. */
   flairBin?: string;
+  /**
+   * Absolute path to the node binary baked into the shim. Defaults to
+   * resolveNodeBin() — the enabling runtime's own binary, or `command -v
+   * node` resolved once at enable time (#1231).
+   */
+  nodeBin?: string;
   /** Override platform for testing. */
   platformOverride?: SchedulerPlatform;
   /** Override target paths for testing. */
@@ -82,6 +97,8 @@ export interface EnableOpts {
   launchdPlistOverride?: string;
   systemdTimerOverride?: string;
   systemdServiceOverride?: string;
+  /** Override HOME written into the units (testing). */
+  homeOverride?: string;
   /** Override the template root for testing. */
   templateRootOverride?: string;
   /** Skip the launchctl/systemctl invocation (testing). */
@@ -94,6 +111,19 @@ export interface EnableResult {
   schedulerPath: string;
   loadCommand: string[];
   loadResult?: { code: number | null; stdout: string; stderr: string };
+  /**
+   * True ONLY when the service manager was observed to run the job once and
+   * it exited 0 (#1231). formatEnableReport() refuses the success headline
+   * without it — a load command exiting 0 proves the job was ACCEPTED, not
+   * that it can RUN.
+   */
+  firstRunVerified: boolean;
+  /**
+   * How verification concluded. Absent when it was never attempted: load
+   * skipped (tests) or load failed (a load failure is its own failure mode —
+   * verification is only attempted after the load exits 0).
+   */
+  firstRun?: FirstRunVerification;
 }
 
 export interface DisableOpts {
@@ -176,15 +206,16 @@ function validateSchedule(hour: number, minute: number): void {
   }
 }
 
-function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string): SchedulerSubstitutions {
+function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string, nodeBin: string): SchedulerSubstitutions {
   validateSchedule(opts.hour, opts.minute);
   if (!/^[a-zA-Z0-9_-]+$/.test(opts.agentId)) {
     throw new Error(`invalid agent id: ${opts.agentId}`);
   }
   return {
     FLAIR_BIN: flairBin,
+    NODE_BIN: nodeBin,
     SHIM_PATH: shimPath,
-    HOME: homedir(),
+    HOME: opts.homeOverride ?? homedir(),
     AGENT_ID: opts.agentId,
     FLAIR_URL: opts.flairUrl,
     HOUR: String(opts.hour),
@@ -285,10 +316,14 @@ export interface FormattedReport {
  * succeeded) is unit-testable without spawning a real launchctl/systemctl or
  * parsing CLI argv.
  *
- * `r.loadResult` is only set when the load command actually ran (the CLI
- * never sets `skipLoad`). A missing `loadResult` (test-only path) is treated
- * as success — matches the CLI's real-world behavior, which always runs the
- * load command and therefore always gets a `loadResult`.
+ * flair#1231 deepened the #850 rule by one layer: activation exiting 0 proves
+ * the service manager ACCEPTED the job, not that the job can run — a stripped
+ * exec bit and a missing log directory both passed activation and killed the
+ * first real run invisibly. So the ✅ headline is now additionally gated on
+ * `firstRunVerified`: success may not be claimed until the thing the operator
+ * asked for — a REM run through the service manager — has been observed to
+ * happen once. A missing `loadResult`/`firstRun` (test-only skipLoad shape)
+ * therefore withholds the headline too, instead of being treated as success.
  */
 export function formatEnableReport(r: EnableResult, input: EnableReportInput): FormattedReport {
   const { hour, minute, agentId, flairUrl } = input;
@@ -315,6 +350,53 @@ export function formatEnableReport(r: EnableResult, input: EnableReportInput): F
     return { lines, ok: false };
   }
 
+  if (!r.firstRunVerified) {
+    const fr = r.firstRun;
+    const headline =
+      fr?.outcome === "run-failed"
+        ? `⚠️  REM nightly scheduler installed but the first run FAILED (${describeExitCode(fr.exitCode)})`
+        : fr?.outcome === "timeout"
+          ? `⚠️  REM nightly scheduler installed but the first run did not complete within ${Math.round(fr.budgetMs / 1000)}s — cannot confirm it works`
+          : fr?.outcome === "manager-unavailable"
+            ? `⚠️  REM nightly scheduler installed but the service manager is unreachable — cannot verify the first run`
+            : fr?.outcome === "start-failed"
+              ? `⚠️  REM nightly scheduler installed but the first run could not be started`
+              : `⚠️  REM nightly scheduler installed but the first run was never verified`;
+    const lines = [
+      headline,
+      `   Schedule:    ${scheduleTime} local time`,
+      `   Scheduler:   ${r.schedulerPath}`,
+      `   Shim:        ${r.shimPath}`,
+      `   Agent:       ${agentId}`,
+      `   Flair URL:   ${flairUrl}`,
+    ];
+    if (r.loadResult) lines.push(`   Load:        ${r.loadCommand.join(" ")} → ok`);
+    if (fr) {
+      lines.push(`   First run:   ${fr.detail}`);
+      if (fr.stderrTail) {
+        lines.push(`   Log tail (${fr.logPath}):`);
+        for (const l of fr.stderrTail.split("\n")) lines.push(`     ${l}`);
+      } else if (fr.logEmpty) {
+        lines.push(`   Log file ${fr.logPath} exists but is EMPTY — the run died before writing anything.`);
+      } else {
+        lines.push(`   No log file at ${fr.logPath}.`);
+      }
+    }
+    lines.push("");
+    if (fr?.outcome === "timeout") {
+      lines.push(`   The run may legitimately still be going (a REM cycle can be slow). Check the log above and`);
+      lines.push(`   \`flair rem nightly status\`; no cycle has been CONFIRMED to work yet.`);
+    } else if (fr?.outcome === "manager-unavailable") {
+      lines.push(`   The scheduler files are installed, but launchctl/systemctl could not be consulted, so whether`);
+      lines.push(`   the nightly cycle runs is UNKNOWN. Fix the service manager for this session, then re-run \`flair rem nightly enable\`.`);
+    } else {
+      lines.push(`   No REM cycle has run. Fix the cause above, then re-run \`flair rem nightly enable\`.`);
+    }
+    lines.push("");
+    lines.push(`   Check anytime with: flair rem nightly status`);
+    return { lines, ok: false };
+  }
+
   const lines = [
     `✅ REM nightly scheduler enabled (${r.platform})`,
     `   Schedule:    ${scheduleTime} local time`,
@@ -326,9 +408,9 @@ export function formatEnableReport(r: EnableResult, input: EnableReportInput): F
   if (r.loadResult) {
     lines.push(`   Load:        ${r.loadCommand.join(" ")} → ok`);
   }
+  lines.push(`   First run:   completed through the service manager, exit 0`);
   lines.push("");
-  lines.push(`Tip: run \`flair rem nightly run-once --dry-run\` to verify the cycle works`);
-  lines.push(`     before the first scheduled fire. Disable with \`flair rem nightly disable\`.`);
+  lines.push(`Disable with \`flair rem nightly disable\`.`);
   return { lines, ok: true };
 }
 
@@ -372,9 +454,31 @@ export function formatStatusReport(s: SchedulerStatus): FormattedReport {
 export function enableScheduler(opts: EnableOpts): EnableResult {
   const plat = detectPlatform(opts.platformOverride);
   const flairBin = opts.flairBin ?? process.argv[1] ?? "flair";
+  const nodeBin = resolveNodeBin(opts.nodeBin);
   const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
   const templateRoot = opts.templateRootOverride ?? defaultTemplateRoot();
-  const subs = buildSubstitutions(opts, shimPath, flairBin);
+  const subs = buildSubstitutions(opts, shimPath, flairBin, nodeBin);
+
+  // 0. Create the log directory the unit files point stdout/stderr at.
+  // Nothing else ever creates it — launchd kills a job whose StandardOutPath
+  // directory is missing (spawn error 209) and systemd fails the unit (#1231).
+  //
+  // Mode 0700 is load-bearing, NOT cosmetic: REM's nightly log carries
+  // distillation CANDIDATE CONTENT — actual memory text, not just counts.
+  // Relaxing it to 0755 (e.g. "for shared debugging") would expose memory
+  // content to every local user.
+  const logsDir = resolve(subs.HOME, ".flair", "logs");
+  try {
+    mkdirSync(logsDir, { recursive: true, mode: 0o700 });
+  } catch (err: any) {
+    throw new Error(
+      `could not create the scheduler log directory ${logsDir}: ${err?.message ?? err}. ` +
+        `The service manager writes the job's stdout/stderr there; without it the first run dies ` +
+        `before producing any output. Fix whatever blocks creating that directory, then re-run ` +
+        `\`flair rem nightly enable\`.`,
+    );
+  }
+  const stderrLogPath = resolve(logsDir, "rem-nightly.stderr.log");
 
   // 1. Deploy the shim (always — both platforms invoke it).
   const shimContents = renderTemplate(readTemplate(templateRoot, "bin/flair-rem-nightly.sh.tmpl"), subs);
@@ -389,12 +493,26 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
 
     const loadCommand = ["launchctl", "bootstrap", `gui/${process.getuid?.() ?? ""}`, plistPath];
     let loadResult: EnableResult["loadResult"];
+    let firstRun: FirstRunVerification | undefined;
     if (!opts.skipLoad) {
       // Bootout first in case a prior install left the job loaded.
       spawnReport(["launchctl", "bootout", `gui/${process.getuid?.() ?? ""}`, plistPath]);
       loadResult = spawnReport(loadCommand);
+      if (loadResult.code === 0) {
+        // Ordering gate (#1231): verify the first run ONLY after the load
+        // exited 0. A load failure is its own failure mode with its own
+        // remedy — kickstarting on top of it would blur which actor failed.
+        firstRun = verifyFirstRun({
+          plat,
+          darwinTarget: `gui/${process.getuid?.() ?? ""}/dev.flair.rem.nightly`,
+          stderrLogPath,
+        });
+      }
     }
-    return { platform: plat, shimPath, schedulerPath: plistPath, loadCommand, loadResult };
+    return {
+      platform: plat, shimPath, schedulerPath: plistPath, loadCommand, loadResult,
+      firstRunVerified: firstRun?.verified === true, firstRun,
+    };
   }
 
   // Linux: systemd user units.
@@ -408,11 +526,21 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
 
   const loadCommand = ["systemctl", "--user", "enable", "--now", "flair-rem-nightly.timer"];
   let loadResult: EnableResult["loadResult"];
+  let firstRun: FirstRunVerification | undefined;
   if (!opts.skipLoad) {
     spawnReport(["systemctl", "--user", "daemon-reload"]);
     loadResult = spawnReport(loadCommand);
+    if (loadResult.code === 0) {
+      // Ordering gate (#1231): only after the load exited 0. Starts the
+      // SERVICE unit directly (oneshot ⇒ blocks until the run exits) rather
+      // than waiting for the nightly timer to fire.
+      firstRun = verifyFirstRun({ plat, linuxServiceUnit: "flair-rem-nightly.service", stderrLogPath });
+    }
   }
-  return { platform: plat, shimPath, schedulerPath: timerPath, loadCommand, loadResult };
+  return {
+    platform: plat, shimPath, schedulerPath: timerPath, loadCommand, loadResult,
+    firstRunVerified: firstRun?.verified === true, firstRun,
+  };
 }
 
 /**

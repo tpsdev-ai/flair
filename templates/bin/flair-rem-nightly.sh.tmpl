@@ -5,5 +5,12 @@
 #
 # Single line that invokes the CLI's run-once subcommand — the runner module
 # does all the work. Logs land in {{HOME}}/.flair/logs/.
+#
+# Run the CLI under node rather than exec-ing it directly: `node <script>`
+# needs READ permission only, so the shim keeps working when a deploy method
+# (npm-pack tarball extraction) strips the exec bit from the script (#1231).
+# NODE_BIN is an ABSOLUTE path resolved at enable time — the shim performs
+# zero PATH lookups at run time. Do not replace it with a bare `node`: that
+# would hand binary selection to whatever PATH the service manager carries.
 set -e
-exec {{FLAIR_BIN}} rem nightly run-once
+exec "{{NODE_BIN}}" "{{FLAIR_BIN}}" rem nightly run-once
