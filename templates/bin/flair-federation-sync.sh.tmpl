@@ -25,4 +25,11 @@ if [ -n "${FLAIR_ADMIN_PASS_FILE:-}" ] && [ -f "${FLAIR_ADMIN_PASS_FILE}" ]; the
   set -- "$@" --admin-pass-file "${FLAIR_ADMIN_PASS_FILE}"
 fi
 
-exec "{{FLAIR_BIN}}" federation sync "$@"
+# Run the CLI under node rather than exec-ing it directly: `node <script>`
+# needs READ permission only, so the shim keeps working when a deploy method
+# (npm-pack tarball extraction) strips the exec bit from the script (#1231).
+# NODE_BIN is an ABSOLUTE path resolved at enable time — the shim performs
+# zero PATH lookups at run time, exactly like the old absolute-FLAIR_BIN
+# form. Do not replace it with a bare `node`: that would hand binary
+# selection to whatever PATH the service manager happens to carry.
+exec "{{NODE_BIN}}" "{{FLAIR_BIN}}" federation sync "$@"
