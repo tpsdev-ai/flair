@@ -128,13 +128,14 @@ describe("flair#1265 mutation-check — durability filter stays in the delete pr
       join(import.meta.dir, "..", "..", "resources", "MemoryMaintenance.ts"),
       "utf8",
     );
-    const deleteBlock = src.match(/Delete expired[\s\S]*?continue;/);
-    expect(deleteBlock).not.toBeNull();
-    expect(deleteBlock![0]).toContain('durability === "ephemeral"');
-    expect(deleteBlock![0]).toContain("expiresAt");
-    // The pre-fix predicate (`expiresAt && new Date(expiresAt) < now` with
-    // no durability conjunct) must not reappear as the sole condition.
-    expect(deleteBlock![0]).not.toMatch(
+    // Pin the three conjuncts in one predicate. A looser "Delete expired"
+    // scan hits the file header first and is not a mutation-check.
+    expect(src).toMatch(
+      /record\.durability === "ephemeral"\s*&&\s*record\.expiresAt\s*&&\s*new Date\(record\.expiresAt\) < now/,
+    );
+    // The pre-#1265 predicate (`expiresAt && date < now` with no durability
+    // conjunct) must not reappear as the sole condition.
+    expect(src).not.toMatch(
       /if\s*\(\s*record\.expiresAt\s*&&\s*new Date\(record\.expiresAt\)\s*<\s*now\s*\)/,
     );
   });
