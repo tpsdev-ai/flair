@@ -8,13 +8,22 @@ import {
   uninstallHook,
   hookStatus,
   buildHookCommand,
+  buildContinuityHookCommand,
+  installContinuityHooks,
+  uninstallContinuityHooks,
+  continuityHookStatus,
   parseHookCommandEnv,
   hookSettingsPath,
   hookBackupPath,
   isSupportedHarness,
   SUPPORTED_HARNESSES,
 } from "../../src/hook-install.ts";
-import { SESSION_START_HOOK_MARKER, checkSessionStartHook } from "../../src/doctor-client.ts";
+import {
+  SESSION_START_HOOK_MARKER,
+  CONTINUITY_CAPTURE_HOOK_MARKER,
+  buildContinuityCaptureHookCommand,
+  checkSessionStartHook,
+} from "../../src/doctor-client.ts";
 // NOTE: the degradation-timeout test (Sherlock condition 5, "mock the
 // fetch") lives in packages/flair-mcp/test/session-start-hook.test.ts, NOT
 // here. That file already imports runHook (which transitively imports
@@ -408,4 +417,106 @@ describe("TLS-bypass-pattern scan (Sherlock condition 4)", () => {
       }
     });
   }
+});
+
+// ─── flair#1257 slice 2 — `flair hook install|uninstall --continuity` ────────
+// Same Sherlock conditions as the SessionStart family above: fail-closed on
+// malformed settings.json, backup before any real mutation, idempotent merge,
+// dry-run computes without writing, symmetric removal.
+
+describe("continuity hook install/uninstall/status wrappers", () => {
+  const settingsPath = () => hookSettingsPath(isoHome, "claude-code");
+
+  it("buildContinuityHookCommand delegates to the ONE doctor-client builder (no second literal)", () => {
+    expect(buildContinuityHookCommand(AGENT, URL)).toBe(buildContinuityCaptureHookCommand(AGENT, URL));
+    expect(buildContinuityHookCommand(AGENT, URL)).toContain(CONTINUITY_CAPTURE_HOOK_MARKER);
+  });
+
+  it("fresh install wires both events; status reads installed; re-run is a no-op", () => {
+    const first = installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    expect(first.ok).toBe(true);
+    expect(first.actions).toEqual({ PostToolUse: "add", Stop: "add" });
+    expect(first.backupPath).toBeNull(); // nothing existed to back up
+
+    expect(continuityHookStatus(isoHome, "claude-code").state).toBe("installed");
+
+    const again = installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    expect(again.ok).toBe(true);
+    expect(again.actions).toEqual({ PostToolUse: "noop", Stop: "noop" });
+  });
+
+  it("--dry-run computes the delta and writes NOTHING (no file, no backup)", () => {
+    const dry = installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL, dryRun: true });
+    expect(dry.ok).toBe(true);
+    expect(dry.actions).toEqual({ PostToolUse: "add", Stop: "add" });
+    expect(existsSync(settingsPath())).toBe(false);
+    expect(existsSync(hookBackupPath(settingsPath()))).toBe(false);
+  });
+
+  it("a real mutation of an existing file takes a backup FIRST", () => {
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    writeFileSync(settingsPath(), JSON.stringify({ model: "opus" }));
+    const res = installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    expect(res.ok).toBe(true);
+    expect(res.backupPath).toBe(hookBackupPath(settingsPath()));
+    expect(JSON.parse(readFileSync(res.backupPath!, "utf-8"))).toEqual({ model: "opus" });
+  });
+
+  it("malformed settings.json FAILS CLOSED — refuses to touch the file, backup already taken", () => {
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    writeFileSync(settingsPath(), "{ this is not json");
+    const res = installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    expect(res.ok).toBe(false);
+    expect(readFileSync(settingsPath(), "utf-8")).toBe("{ this is not json"); // untouched
+    expect(res.backupPath).toBe(hookBackupPath(settingsPath()));
+  });
+
+  it("unsafe agent id / URL is REFUSED before any write or backup", () => {
+    const res = installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: "bad agent", flairUrl: URL });
+    expect(res.ok).toBe(false);
+    expect(existsSync(settingsPath())).toBe(false);
+    const res2 = installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: "http://x/'$(boom)'" });
+    expect(res2.ok).toBe(false);
+  });
+
+  it("uninstall removes ONLY our entries and is symmetric with install; a second uninstall is a no-op", () => {
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    const foreign = {
+      hooks: { PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "my-linter" }] }] },
+    };
+    writeFileSync(settingsPath(), JSON.stringify(foreign, null, 2));
+
+    installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    expect(continuityHookStatus(isoHome, "claude-code").state).toBe("installed");
+
+    const removed = uninstallContinuityHooks({ homeDir: isoHome, harness: "claude-code" });
+    expect(removed.ok).toBe(true);
+    expect(removed.actions).toEqual({ PostToolUse: "remove", Stop: "remove" });
+    expect(JSON.parse(readFileSync(settingsPath(), "utf-8"))).toEqual(foreign);
+
+    const again = uninstallContinuityHooks({ homeDir: isoHome, harness: "claude-code" });
+    expect(again.ok).toBe(true);
+    expect(again.actions).toEqual({ PostToolUse: "noop", Stop: "noop" });
+    expect(continuityHookStatus(isoHome, "claude-code").state).toBe("absent");
+  });
+
+  it("uninstall --dry-run reports the removal without writing", () => {
+    installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    const before = readFileSync(settingsPath(), "utf-8");
+    const dry = uninstallContinuityHooks({ homeDir: isoHome, harness: "claude-code", dryRun: true });
+    expect(dry.ok).toBe(true);
+    expect(dry.actions).toEqual({ PostToolUse: "remove", Stop: "remove" });
+    expect(readFileSync(settingsPath(), "utf-8")).toBe(before);
+  });
+
+  it("continuity install never disturbs an existing SessionStart hook (and vice versa)", () => {
+    installHook({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    installContinuityHooks({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    expect(checkSessionStartHook(isoHome).present).toBe(true);
+    expect(continuityHookStatus(isoHome, "claude-code").state).toBe("installed");
+
+    uninstallContinuityHooks({ homeDir: isoHome, harness: "claude-code" });
+    expect(checkSessionStartHook(isoHome).present).toBe(true); // SessionStart untouched
+    expect(continuityHookStatus(isoHome, "claude-code").state).toBe("absent");
+  });
 });

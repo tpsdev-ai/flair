@@ -15,6 +15,13 @@ import {
   resolveCollisionSafeName,
   pruneDateStamp,
   PRUNED_DIR_NAME,
+  CONTINUITY_CAPTURE_HOOK_MARKER,
+  CONTINUITY_POST_TOOL_USE_MATCHER,
+  buildContinuityCaptureHookCommand,
+  checkContinuityCaptureHooks,
+  fixContinuityCaptureHooks,
+  removeContinuityCaptureHooks,
+  hookCommandIsSilenced,
 } from "../../src/doctor-client.ts";
 
 /**
@@ -454,5 +461,150 @@ describe("resolveCollisionSafeName", () => {
 
   it("PRUNED_DIR_NAME is the literal '.pruned' the scanner must skip", () => {
     expect(PRUNED_DIR_NAME).toBe(".pruned");
+  });
+});
+
+// ─── flair#1257 slice 2 — continuity capture hooks (check-5 twin) ───────────
+
+describe("buildContinuityCaptureHookCommand", () => {
+  it("carries the marker, both env vars when a URL is given, and the silenced wrapper", () => {
+    const cmd = buildContinuityCaptureHookCommand("flint", "http://harper.local:19926");
+    expect(cmd).toContain(CONTINUITY_CAPTURE_HOOK_MARKER);
+    expect(cmd).toContain("FLAIR_AGENT_ID=flint");
+    expect(cmd).toContain("FLAIR_URL=http://harper.local:19926");
+    expect(cmd).toContain("npx -y -p @tpsdev-ai/flair-mcp flair-continuity-capture");
+    // Same silence property doctor's SessionStart check recognizes: a broken
+    // npx resolution must never print an error on every tool call.
+    expect(hookCommandIsSilenced(cmd)).toBe(true);
+  });
+
+  it("omits FLAIR_URL when none is given", () => {
+    const cmd = buildContinuityCaptureHookCommand("flint");
+    expect(cmd).toContain("FLAIR_AGENT_ID=flint");
+    expect(cmd).not.toContain("FLAIR_URL=");
+  });
+
+  it("REFUSES values that cannot be represented safely in a shell command (never escapes)", () => {
+    expect(() => buildContinuityCaptureHookCommand("bad agent")).toThrow();
+    expect(() => buildContinuityCaptureHookCommand("a'; rm -rf ~;'")).toThrow();
+    expect(() => buildContinuityCaptureHookCommand("flint", "http://x/'$(boom)'")).toThrow();
+  });
+});
+
+describe("checkContinuityCaptureHooks / fixContinuityCaptureHooks / removeContinuityCaptureHooks", () => {
+  const settingsPath = () => join(isoHome, ".claude", "settings.json");
+
+  it("absent when settings.json does not exist — 'not enabled', which is neither a pass nor a failure", () => {
+    const report = checkContinuityCaptureHooks(isoHome);
+    expect(report.state).toBe("absent");
+    expect(report.postToolUse.present).toBe(false);
+    expect(report.stop.present).toBe(false);
+  });
+
+  it("registration round-trip: fix wires BOTH events (PostToolUse with the allowlist matcher), check reads installed", () => {
+    const fix = fixContinuityCaptureHooks(isoHome, "flint", "http://localhost:19926");
+    expect(fix.ok).toBe(true);
+    expect(fix.changed).toBe(true);
+
+    const report = checkContinuityCaptureHooks(isoHome);
+    expect(report.state).toBe("installed");
+    expect(report.postToolUse.currentForm).toBe(true);
+    expect(report.stop.currentForm).toBe(true);
+    expect(report.postToolUse.matcher).toBe(CONTINUITY_POST_TOOL_USE_MATCHER);
+
+    // Idempotent: a second run is a structural no-op.
+    const again = fixContinuityCaptureHooks(isoHome, "flint", "http://localhost:19926");
+    expect(again.ok).toBe(true);
+    expect(again.changed).toBe(false);
+  });
+
+  it("the PostToolUse matcher written is EXACTLY the capture binary's mutating allowlist", () => {
+    expect(CONTINUITY_POST_TOOL_USE_MATCHER).toBe("Write|Edit|NotebookEdit|Bash");
+    fixContinuityCaptureHooks(isoHome, "flint");
+    const config = JSON.parse(readFileSync(settingsPath(), "utf-8"));
+    expect(config.hooks.PostToolUse[0].matcher).toBe("Write|Edit|NotebookEdit|Bash");
+  });
+
+  it("merge-safe: unrelated hooks and keys survive install AND removal byte-identically", () => {
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    const existing = {
+      model: "opus",
+      hooks: {
+        PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "my-linter --fix" }] }],
+        SessionStart: [{ hooks: [{ type: "command", command: "echo hi" }] }],
+      },
+    };
+    writeFileSync(settingsPath(), JSON.stringify(existing, null, 2));
+
+    fixContinuityCaptureHooks(isoHome, "flint");
+    const afterInstall = JSON.parse(readFileSync(settingsPath(), "utf-8"));
+    expect(afterInstall.model).toBe("opus");
+    expect(afterInstall.hooks.PostToolUse[0]).toEqual(existing.hooks.PostToolUse[0]);
+    expect(afterInstall.hooks.SessionStart).toEqual(existing.hooks.SessionStart);
+    expect(checkContinuityCaptureHooks(isoHome).state).toBe("installed");
+
+    const removal = removeContinuityCaptureHooks(isoHome);
+    expect(removal.ok).toBe(true);
+    expect(removal.changed).toBe(true);
+    const afterRemoval = JSON.parse(readFileSync(settingsPath(), "utf-8"));
+    expect(afterRemoval).toEqual(existing); // ONLY our entries were removed
+    expect(checkContinuityCaptureHooks(isoHome).state).toBe("absent");
+  });
+
+  it("stale-form detection: an unsilenced command reads stale, and fix repairs it to current form", () => {
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    writeFileSync(
+      settingsPath(),
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [{ matcher: CONTINUITY_POST_TOOL_USE_MATCHER, hooks: [{ type: "command", command: "FLAIR_AGENT_ID=flint npx -y @tpsdev-ai/flair-mcp flair-continuity-capture" }] }],
+          Stop: [{ hooks: [{ type: "command", command: "FLAIR_AGENT_ID=flint npx -y @tpsdev-ai/flair-mcp flair-continuity-capture" }] }],
+        },
+      }),
+    );
+    expect(checkContinuityCaptureHooks(isoHome).state).toBe("stale");
+
+    const fix = fixContinuityCaptureHooks(isoHome, "flint");
+    expect(fix.ok).toBe(true);
+    expect(fix.changed).toBe(true);
+    expect(checkContinuityCaptureHooks(isoHome).state).toBe("installed");
+  });
+
+  it("stale-form detection: a drifted PostToolUse matcher reads stale (the allowlist mirror matters)", () => {
+    fixContinuityCaptureHooks(isoHome, "flint");
+    const config = JSON.parse(readFileSync(settingsPath(), "utf-8"));
+    config.hooks.PostToolUse[0].matcher = "Bash"; // hand-narrowed
+    writeFileSync(settingsPath(), JSON.stringify(config, null, 2));
+    expect(checkContinuityCaptureHooks(isoHome).state).toBe("stale");
+  });
+
+  it("partial detection: only one of the two events wired", () => {
+    fixContinuityCaptureHooks(isoHome, "flint");
+    const config = JSON.parse(readFileSync(settingsPath(), "utf-8"));
+    delete config.hooks.Stop;
+    writeFileSync(settingsPath(), JSON.stringify(config, null, 2));
+    const report = checkContinuityCaptureHooks(isoHome);
+    expect(report.state).toBe("partial");
+    expect(report.postToolUse.present).toBe(true);
+    expect(report.stop.present).toBe(false);
+
+    // fix completes the pair.
+    const fix = fixContinuityCaptureHooks(isoHome, "flint");
+    expect(fix.changed).toBe(true);
+    expect(checkContinuityCaptureHooks(isoHome).state).toBe("installed");
+  });
+
+  it("removal on a machine with nothing wired is a clean no-op that creates no file", () => {
+    const removal = removeContinuityCaptureHooks(isoHome);
+    expect(removal.ok).toBe(true);
+    expect(removal.changed).toBe(false);
+    expect(existsSync(settingsPath())).toBe(false);
+  });
+
+  it("fix refuses an unsafe agent id / URL instead of writing a mangled command", () => {
+    expect(fixContinuityCaptureHooks(isoHome, "bad agent").ok).toBe(false);
+    expect(fixContinuityCaptureHooks(isoHome, "flint", "http://x/'$(boom)'").ok).toBe(false);
+    expect(fixContinuityCaptureHooks(isoHome, undefined).ok).toBe(false);
+    expect(existsSync(settingsPath())).toBe(false); // nothing was half-written
   });
 });

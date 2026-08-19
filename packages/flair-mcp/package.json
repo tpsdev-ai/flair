@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "bin": {
     "flair-mcp": "dist/mcp-shim.cjs",
-    "flair-session-start": "dist/session-start-hook.js"
+    "flair-session-start": "dist/session-start-hook.js",
+    "flair-continuity-capture": "dist/continuity-capture-hook.js"
   },
   "files": [
     "dist/",
@@ -17,7 +18,7 @@
     "build": "tsc --noCheck",
     "test": "bun test",
     "prepublishOnly": "npm run build",
-    "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');for(const p of ['dist/mcp-shim.cjs','dist/index.js','dist/session-start-hook.js']){try{if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair-mcp: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}}}catch(e){console.error('postinstall warn:',e.message)}\""
+    "postinstall": "node -e \"try{const{chmodSync,statSync}=require('fs');for(const p of ['dist/mcp-shim.cjs','dist/index.js','dist/session-start-hook.js','dist/continuity-capture-hook.js']){try{if(statSync(p).isFile()){chmodSync(p,0o755);console.error('@tpsdev-ai/flair-mcp: chmod +x ' + p + ' OK')}}catch(e){if(e.code!=='ENOENT')console.error('postinstall warn:',e.message)}}}catch(e){console.error('postinstall warn:',e.message)}\""
   },
   "publishConfig": {
     "access": "public"

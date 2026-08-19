@@ -103,6 +103,8 @@ import {
   resolveCollisionSafeName,
   pruneDateStamp,
   PRUNED_DIR_NAME,
+  checkContinuityCaptureHooks,
+  fixContinuityCaptureHooks,
   type AgentGateState,
   type SemanticSkipReason,
   type KeyPruneClass,
@@ -111,6 +113,9 @@ import {
   installHook,
   uninstallHook,
   hookStatus,
+  installContinuityHooks,
+  uninstallContinuityHooks,
+  continuityHookStatus,
   isSupportedHarness,
   SUPPORTED_HARNESSES,
   type Harness,
@@ -5084,6 +5089,7 @@ hook
   .option("--agent <id>", "Agent ID to wire (else FLAIR_AGENT_ID, else the agent already wired for the claude-code MCP client)")
   .option("--agent-id <id>", "Alias for --agent")
   .option("--url <url>", "Flair URL to wire (else FLAIR_TARGET/FLAIR_URL, else the existing claude-code MCP wiring, else the local default)")
+  .option("--continuity", "Wire the continuity capture hooks instead (PostToolUse + Stop — flair#1257; installing them IS the opt-in)")
   .action((opts) => {
     const harness = requireSupportedHarness(opts.harness);
     const home = homedir();
@@ -5096,6 +5102,18 @@ hook
     }
     const flairUrl = resolveHookFlairUrl(opts, home);
     const dryRun = !!opts.dryRun;
+
+    if (opts.continuity) {
+      const result = installContinuityHooks({ homeDir: home, harness, agentId, flairUrl, dryRun });
+      console.log(`\n${render.wrap(render.c.bold, "🪝 flair hook install --continuity")}${dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
+      console.log(`  ${result.ok ? render.icons.ok : render.icons.error} ${result.message}`);
+      if (result.backupPath) {
+        console.log(`     ${render.wrap(render.c.dim, `backup: ${result.backupPath}`)}`);
+      }
+      console.log("");
+      if (!result.ok) process.exit(1);
+      return;
+    }
 
     const result = installHook({ homeDir: home, harness, agentId, flairUrl, dryRun });
 
@@ -5117,10 +5135,23 @@ hook
   .description("Remove the Flair SessionStart hook entry — only ours, everything else in the file is left untouched")
   .option("--harness <name>", `Target harness (${SUPPORTED_HARNESSES.join(", ")})`, "claude-code")
   .option("--dry-run", "Print the exact JSON delta without writing")
+  .option("--continuity", "Remove the continuity capture hooks instead (PostToolUse + Stop — flair#1257)")
   .action((opts) => {
     const harness = requireSupportedHarness(opts.harness);
     const home = homedir();
     const dryRun = !!opts.dryRun;
+
+    if (opts.continuity) {
+      const result = uninstallContinuityHooks({ homeDir: home, harness, dryRun });
+      console.log(`\n${render.wrap(render.c.bold, "🪝 flair hook uninstall --continuity")}${dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
+      console.log(`  ${result.ok ? render.icons.ok : render.icons.error} ${result.message}`);
+      if (result.backupPath) {
+        console.log(`     ${render.wrap(render.c.dim, `backup: ${result.backupPath}`)}`);
+      }
+      console.log("");
+      if (!result.ok) process.exit(1);
+      return;
+    }
 
     const result = uninstallHook({ homeDir: home, harness, dryRun });
 
@@ -5146,6 +5177,21 @@ hook
     const home = homedir();
     const status = hookStatus(home, harness);
 
+    // Continuity pair (flair#1257) — reported alongside the SessionStart
+    // status in every branch below. "absent" is NOT a failure: installing the
+    // pair is the opt-in, so absence renders as "not enabled".
+    const renderContinuity = (): void => {
+      const cont = continuityHookStatus(home, harness);
+      if (cont.state === "installed") {
+        console.log(`  ${render.icons.ok} continuity capture: PostToolUse + Stop wired`);
+      } else if (cont.state === "absent") {
+        console.log(`  ${render.icons.info} continuity capture: not enabled ${render.wrap(render.c.dim, "(opt-in: flair hook install --continuity)")}`);
+      } else {
+        const missing = !cont.postToolUse.present ? "PostToolUse missing" : !cont.stop.present ? "Stop missing" : "stale form";
+        console.log(`  ${render.icons.warn} continuity capture: ${cont.state} (${missing}) ${render.wrap(render.c.dim, "— re-run: flair hook install --continuity")}`);
+      }
+    };
+
     console.log(`\n${render.wrap(render.c.bold, "🪝 flair hook status")}\n`);
     console.log(`  ${render.wrap(render.c.dim, "Harness:")} ${status.harness}`);
     console.log(`  ${render.wrap(render.c.dim, "Config:")}  ${status.path}`);
@@ -5159,6 +5205,7 @@ hook
     if (!status.wired) {
       console.log(`  ${render.icons.error} not wired`);
       console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install`);
+      renderContinuity();
       console.log("");
       process.exit(1);
     }
@@ -5173,6 +5220,7 @@ hook
     } else {
       console.log(`     ${render.icons.warn} ${render.wrap(render.c.dim, "On failure:")} prints an error on every session — run \`flair hook install\` to adopt the silent form`);
     }
+    renderContinuity();
     console.log("");
   });
 
@@ -13972,6 +14020,65 @@ program
             }
           } else {
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(adds the flair-session-start SessionStart hook)")}`);
+          }
+          issues++;
+        }
+
+        // flair#1257 slice 2 — continuity capture pair (the check-5 twin of
+        // the SessionStart check above: installed / absent / stale-form).
+        // Continuity is OPT-IN — installing the PostToolUse+Stop pair IS the
+        // opt-in — so "absent" renders as informational "not enabled": NEVER
+        // a pass (an unrun check must not look green) and never counted as an
+        // issue. A partial/stale install IS an issue and is --fix-able;
+        // --fix also offers first-time enablement (the y/N prompt is the
+        // consent; non-TTY --fix is itself the consent signal, matching every
+        // other doctor fix).
+        const continuity = checkContinuityCaptureHooks(homedir());
+        if (continuity.state === "installed") {
+          console.log(`  ${render.icons.ok} Continuity capture hooks: PostToolUse + Stop wired in ${render.wrap(render.c.dim, continuity.path)}`);
+        } else if (continuity.state === "absent") {
+          console.log(`  ${render.icons.info} Continuity capture hooks: not enabled ${render.wrap(render.c.dim, "(opt-in — auto-journal working state into the ephemeral memory tier; enable: flair hook install --continuity)")}`);
+          if (autoFix) {
+            if (dryRun) {
+              console.log(`     ${render.wrap(render.c.dim, "Would wire the continuity capture hooks (PostToolUse + Stop) in")} ${continuity.path}`);
+            } else {
+              const proceed = await confirmFix(`  Enable continuity capture (PostToolUse + Stop hooks in ${continuity.path})? [y/N] `);
+              if (!proceed) {
+                console.log(`     Skipped.`);
+              } else {
+                const fixAgentId = claudeCodeAgentId || opts.agent || process.env.FLAIR_AGENT_ID;
+                const fixRes = fixContinuityCaptureHooks(homedir(), fixAgentId);
+                console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
+                if (fixRes.ok && fixRes.changed) fixed++;
+              }
+            }
+          }
+        } else {
+          const continuityDetail = continuity.state === "partial"
+            ? (!continuity.postToolUse.present ? "the PostToolUse entry is missing" : "the Stop entry is missing")
+            : "an entry is not the current form (unsilenced, hand-altered, or a drifted PostToolUse matcher)";
+          console.log(`  ${render.icons.warn} Continuity capture hooks: ${continuity.state} — ${continuityDetail}`);
+          if (autoFix) {
+            if (dryRun) {
+              console.log(`     ${render.wrap(render.c.dim, "Would rewrite the continuity capture hooks in")} ${continuity.path}`);
+            } else {
+              const proceed = await confirmFix(`  Rewrite the continuity capture hooks in ${continuity.path} to the current form? [y/N] `);
+              if (!proceed) {
+                console.log(`     Skipped.`);
+              } else {
+                const fixAgentId = claudeCodeAgentId || opts.agent || process.env.FLAIR_AGENT_ID;
+                // Preserve the FLAIR_URL an existing entry already carries —
+                // a repair must never silently re-point the hooks at a
+                // different instance.
+                const existingCommand = continuity.postToolUse.command || continuity.stop.command || "";
+                const existingUrl = existingCommand.match(/FLAIR_URL=(\S+)/)?.[1];
+                const fixRes = fixContinuityCaptureHooks(homedir(), fixAgentId, existingUrl);
+                console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
+                if (fixRes.ok && fixRes.changed) fixed++;
+              }
+            }
+          } else {
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites both entries to the current form — same agent, same instance)")}`);
           }
           issues++;
         }
