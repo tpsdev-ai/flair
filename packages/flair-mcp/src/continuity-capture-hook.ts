@@ -104,18 +104,35 @@ export interface CaptureOutcome {
     | "write-failed";
 }
 
+/** Local STRUCTURAL type for the one client surface this factory touches —
+ *  declared here, not imported, so the type never depends on flair-client's
+ *  emitted declarations existing. The real FlairClient satisfies it (its
+ *  constructor takes a config superset; its instances carry request()). */
+interface FlairClientConstructor {
+  new (config: { agentId: string; url?: string; keyPath?: string }): ContinuityClient;
+}
+
 /** LAZY on purpose: @tpsdev-ai/flair-client resolves via its BUILT dist/, and
- *  this module must stay importable in module graphs that load before that
- *  build exists (the root `bun test test/unit/` CI lane — see the ordering
- *  note in test/unit/hook-install.test.ts). Tests always inject makeClient,
- *  so only the real binary ever takes this path. */
+ *  this module must both LOAD and TYPECHECK without that dist present — the
+ *  root `bun test test/unit/` lane AND the strict test-suite typecheck lane
+ *  each run before the client is built (see the ordering note in
+ *  test/unit/hook-install.test.ts). Tests always inject makeClient, so only
+ *  the real binary ever takes this path; the real module boundary is
+ *  exercised by the package-lane tests, which build the client first.
+ *
+ *  `@ts-ignore`, deliberately NOT `@ts-expect-error`: with the dist built the
+ *  import DOES resolve, and an expect-error directive would then itself be
+ *  the error. ts-ignore is inert in that state — verified locally in BOTH
+ *  states (dist present and dist deleted). */
 async function defaultClientFactory(agentId: string): Promise<ContinuityClient> {
-  const { FlairClient } = await import("@tpsdev-ai/flair-client");
+  // @ts-ignore -- resolvable only once flair-client's dist is built; see doc above
+  const mod = await import("@tpsdev-ai/flair-client");
+  const FlairClient = mod.FlairClient as unknown as FlairClientConstructor;
   return new FlairClient({
     agentId,
     url: readEnvOrUnset("FLAIR_URL"),
     keyPath: readEnvOrUnset("FLAIR_KEY_PATH"),
-  }) as unknown as ContinuityClient;
+  });
 }
 
 /**
