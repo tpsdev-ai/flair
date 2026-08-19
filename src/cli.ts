@@ -1915,6 +1915,200 @@ export async function verifySemanticSearch(
   }
 }
 
+/**
+ * Result of a real write→read_audit_log round-trip (flair#970):
+ *   - ok:       the probe's writes came back as audit entries — the audit log
+ *               is RECORDING NOW. Deliberately not carrying any stronger
+ *               claim: this proves current recording, never historical
+ *               completeness (a node that joined or resynced via base copy has
+ *               a hard start boundary at copy time — harper#2212 — so "ok"
+ *               must never be rendered as "history complete/healthy").
+ *   - degraded: cause "not-recording" — read_audit_log answered cleanly but
+ *               the probe's writes are missing (audit enabled, pipeline not
+ *               recording: the exact silent state flair#970 observed);
+ *               cause "disabled" — read_audit_log 400s because
+ *               `logging.auditLog` is off in the ROOT harperdb-config.yaml.
+ *   - skipped:  could not run the check (no agent/key, no admin credentials
+ *               for the ops API, ops API unreachable, probe write failed).
+ *               Callers MUST render this as UNVERIFIED — an unrun check must
+ *               not look like a pass.
+ */
+export type AuditVerifyResult =
+  | { state: "ok" }
+  | { state: "degraded"; cause: "not-recording" | "disabled"; detail: string }
+  | { state: "skipped"; reason: AuditSkipReason; detail: string };
+
+export type AuditSkipReason =
+  | "no-agent"
+  | "no-key"
+  | "key-load"
+  | "no-admin-credentials"
+  | "probe-failed";
+
+/**
+ * Positive control for the Harper audit log (flair#970): verify that audit
+ * ACTUALLY records by writing and then reading the audit trail back — never by
+ * trusting the `audit: true` flag `describe_table` reports.
+ *
+ * Why a positive control: records applied via cluster base-copy/resync are
+ * committed with audit explicitly disabled (harper Table.ts isCopyApply, filed
+ * upstream as harper#2212), so a node can report audit enabled, answer
+ * read_audit_log with HTTP 200, and still hold zero entries. Before this
+ * check, nothing in flair declared, read, or verified audit — the canonical
+ * check that cannot fire.
+ *
+ * Probe (modeled on verifySemanticSearch above, same skipped/degraded/ok
+ * discipline):
+ *   1. PUT an ephemeral probe row (id `flair-doctor-audit-probe-<uuid>`,
+ *      short inert marker content — ephemeral durability so a failed cleanup
+ *      self-prunes; the DELETE in `finally` is best-effort).
+ *   2. PATCH it — verified live on harper@5.2.0: PATCH /Memory/<id> returns
+ *      204 and generates an audit entry with operation "patch" (PUT generates
+ *      "upsert", DELETE "delete").
+ *   3. `read_audit_log` (search_type hash_value, the probe id) over the ops
+ *      API with Basic admin auth — the operations API only exists on its own
+ *      port/socket, so the agent's Ed25519 header cannot authenticate it.
+ *   4. Assert BOTH write entries are present. The probe's own DELETE lands
+ *      AFTER the read, so it is never required (audit is append-only; the
+ *      probe's entries persisting after the row is gone is by design).
+ *
+ * All assertions are BOOLEAN (entry counts only). Audit entries carry full
+ * record images (`records: [value]`), so no entry content is ever copied into
+ * a result detail — the detail strings are fixed text plus counts/statuses.
+ */
+export async function verifyAuditLog(
+  baseUrl: string,
+  agentIdOpt: string | undefined,
+  keysDir: string,
+  opsUrl: string,
+  adminUser: string | undefined,
+  adminPass: string | undefined,
+): Promise<AuditVerifyResult> {
+  // Resolve an agent + key to sign the probe writes with — identical
+  // resolution to verifySemanticSearch so the two probes agree on identity.
+  let agentId = agentIdOpt || process.env.FLAIR_AGENT_ID || undefined;
+  if (!agentId) {
+    try {
+      const keyFiles = readdirSync(keysDir).filter((f) => f.endsWith(".key"));
+      const agentKeyFile = keyFiles.find((f) => !isNodeKeyId(f.replace(/\.key$/, ""), keysDir));
+      if (agentKeyFile) agentId = agentKeyFile.replace(/\.key$/, "");
+    } catch { /* keysDir missing */ }
+  }
+  if (!agentId) {
+    return { state: "skipped", reason: "no-agent", detail: "no agent id or key found" };
+  }
+  let keyPath = resolveKeyPath(agentId);
+  if (!keyPath) {
+    const candidate = join(keysDir, `${agentId}.key`);
+    if (existsSync(candidate)) keyPath = candidate;
+  }
+  if (!keyPath) {
+    return { state: "skipped", reason: "no-key", detail: `no private key for agent '${agentId}'` };
+  }
+  if (!adminUser || !adminPass) {
+    return {
+      state: "skipped",
+      reason: "no-admin-credentials",
+      detail: "no admin credentials for the ops API (read_audit_log requires them)",
+    };
+  }
+
+  const id = `flair-doctor-audit-probe-${randomUUID()}`;
+  const path = `/Memory/${id}`;
+  let stored = false;
+  try {
+    // Write 1: PUT the probe row. Ephemeral durability — TTL is the cleanup
+    // backstop if the finally-DELETE fails.
+    const putRes = await authFetch(baseUrl, agentId, keyPath, "PUT", path, {
+      id,
+      agentId,
+      content: `flair doctor audit probe (inert marker, safe to ignore) [${id}]`,
+      durability: "ephemeral",
+      createdAt: new Date().toISOString(),
+    });
+    if (!putRes.ok && putRes.status !== 204) {
+      return { state: "skipped", reason: "probe-failed", detail: `could not write probe row: HTTP ${putRes.status}` };
+    }
+    stored = true;
+
+    // Write 2: PATCH — a second, distinct audit-visible write (live-verified
+    // to produce its own entry on harper@5.2.0; see doc comment).
+    const patchRes = await authFetch(baseUrl, agentId, keyPath, "PATCH", path, {
+      content: `flair doctor audit probe (inert marker, second write) [${id}]`,
+    });
+    if (!patchRes.ok && patchRes.status !== 204) {
+      return { state: "skipped", reason: "probe-failed", detail: `could not apply second probe write: HTTP ${patchRes.status}` };
+    }
+
+    // Read the audit trail back over the ops API.
+    let auditRes: Response;
+    try {
+      auditRes = await fetch(`${opsUrl.replace(/\/+$/, "")}/`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`,
+        },
+        body: JSON.stringify({
+          operation: "read_audit_log",
+          database: "flair",
+          table: "Memory",
+          search_type: "hash_value",
+          search_values: [id],
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { state: "skipped", reason: "probe-failed", detail: `ops API unreachable at ${opsUrl} (${message.slice(0, 80)})` };
+    }
+    if (auditRes.status === 400) {
+      // harper rejects read_audit_log with HTTP 400 ("To use this operation
+      // audit log must be enabled in harperdb-config.yaml") when
+      // logging.auditLog is off — live-verified on harper@5.2.0.
+      return { state: "degraded", cause: "disabled", detail: "read_audit_log rejected the probe: audit logging is not enabled on this instance" };
+    }
+    if (!auditRes.ok) {
+      // 401/403/404/5xx tell us nothing about whether audit records — that is
+      // "could not verify", never "verified" and never "broken".
+      return { state: "skipped", reason: "probe-failed", detail: `read_audit_log failed: HTTP ${auditRes.status}` };
+    }
+    const body = (await auditRes.json().catch(() => null)) as
+      | Record<string, Array<{ operation?: string }>>
+      | null;
+    // BOOLEAN classification only: count the probe's write entries. Audit
+    // entries carry full record images — none of that content may reach the
+    // result (and via it, doctor/init output).
+    const entries = body && Array.isArray(body[id]) ? body[id] : [];
+    const writeEntries = entries.filter((e) => e && typeof e === "object" && e.operation !== "delete");
+    if (writeEntries.length >= 2) {
+      return { state: "ok" };
+    }
+    // Enabled-but-empty (or partial) is the critical row: we put data in and
+    // could not see it come back — the pipeline is broken, not "empty". The
+    // pre-fix world silently passed this as ok.
+    return {
+      state: "degraded",
+      cause: "not-recording",
+      detail: `probe made 2 writes; read_audit_log returned ${writeEntries.length} write ${writeEntries.length === 1 ? "entry" : "entries"}`,
+    };
+  } catch (err: unknown) {
+    if (err instanceof KeyLoadError) {
+      return { state: "skipped", reason: "key-load", detail: err.message };
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    return { state: "skipped", reason: "probe-failed", detail: `probe error: ${message.slice(0, 100)}` };
+  } finally {
+    // Best-effort cleanup — ephemeral TTL is the backstop if this fails. The
+    // DELETE itself appends one more audit entry AFTER the read, by design.
+    if (stored) {
+      try {
+        await authFetch(baseUrl, agentId, keyPath, "DELETE", path);
+      } catch { /* leave the ephemeral row; it'll age out */ }
+    }
+  }
+}
+
 // ─── Doctor: client-integration network checks (flair#588) ────────────────────
 //
 // The pure filesystem checks (MCP block parsing, CLAUDE.md, SessionStart hook)
@@ -3791,6 +3985,31 @@ program
         console.log(`   ${render.wrap(render.c.dim, "Fix: install without sudo (see README Quick Start), then:")} flair restart && flair doctor`);
       } else {
         console.log(`${render.icons.warn} Semantic search not verified ${render.wrap(render.c.dim, `(${embedCheck.detail})`)}`);
+      }
+
+      // Verify the audit log ACTUALLY records (flair#970) — a positive
+      // control, not a flag read: `describe_table` reports `audit: true` on
+      // nodes whose audit trail is empty (base-copy elision, harper#2212).
+      // Same surface as the semantic-search check above.
+      console.log("Verifying audit log...");
+      const auditCheck = await verifyAuditLog(httpUrl, agentId, keysDir, `http://127.0.0.1:${opsPort}`, adminUser, adminPass);
+      if (auditCheck.state === "ok") {
+        // Present tense ONLY: the probe proves current recording, never
+        // historical completeness — see AuditVerifyResult's doc comment.
+        console.log(`Audit log: recording (verified now) ✓ ${render.wrap(render.c.dim, "(verifies current recording, not history — a resynced node's audit has a hard start boundary at its copy time)")}`);
+      } else if (auditCheck.state === "degraded") {
+        if (auditCheck.cause === "disabled") {
+          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log DISABLED")} — ${auditCheck.detail}.`);
+          console.log(`   ${render.wrap(render.c.dim, "Fix: enable logging.auditLog in the ROOT harperdb-config.yaml (the Harper instance config, NOT flair's component config.yaml), then restart Harper.")}`);
+        } else {
+          console.log(`\n${render.icons.error} ${render.wrap(render.c.red, "Audit log NOT RECORDING")} — ${auditCheck.detail}.`);
+          console.log(`   ${render.wrap(render.c.red, "Audit reports as enabled, but fresh writes produced no audit entries — do not treat the audit log as a record of what happened.")}`);
+          console.log(`   ${render.wrap(render.c.dim, "On a node that joined or resynced via cluster base copy, audit history has a hard start boundary at copy time (harper#2212) — \"no history\" does not mean \"nothing happened\".")}`);
+          console.log(`   ${render.wrap(render.c.dim, "Check logging.auditLog in the ROOT harperdb-config.yaml (not flair's component config.yaml), then restart Harper.")}`);
+        }
+      } else {
+        // An unrun check must not look like a pass.
+        console.log(`${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditCheck.detail})`);
       }
 
       // Output — admin password printed once, never written to disk
@@ -13401,6 +13620,66 @@ program
           if (remedy) console.log(`     ${render.wrap(render.c.dim, remedy)}`);
           break;
         }
+      }
+    }
+
+    // 4b. Audit-log positive control (flair#970) — REAL write→read_audit_log
+    // round-trip, only if Harper is responding. `describe_table` reporting
+    // `audit: true` proves nothing: a node that joined or resynced via
+    // cluster base copy holds zero audit history while reporting audit
+    // enabled and answering read_audit_log with clean empty (harper#2212).
+    // So doctor writes probe rows and asserts their audit entries come back —
+    // never trusts the flag. Same ok/degraded/skipped discipline as the
+    // embeddings check above: skipped is rendered UNVERIFIED, never as a pass.
+    if (harperResponding) {
+      // read_audit_log only exists on the ops API (its own port), which the
+      // agent's Ed25519 header cannot authenticate — resolve the local admin
+      // credential (env or ~/.flair/admin-pass; never prompts). A file with
+      // unsafe permissions throws — that is "could not probe", not "broken".
+      let auditAdminPass: string | undefined;
+      let auditCredIssue: string | null = null;
+      try {
+        auditAdminPass = resolveLocalAdminPass(undefined);
+      } catch (err: unknown) {
+        auditCredIssue = err instanceof Error ? err.message : String(err);
+      }
+      const auditStatus = auditCredIssue
+        ? ({ state: "skipped", reason: "no-admin-credentials", detail: auditCredIssue } as const)
+        : await verifyAuditLog(
+            baseUrl,
+            opts.agent,
+            defaultKeysDir(),
+            `http://127.0.0.1:${resolveOpsPort(opts)}`,
+            DEFAULT_ADMIN_USER,
+            auditAdminPass,
+          );
+      switch (auditStatus.state) {
+        case "ok":
+          // Present-tense claim ONLY (see AuditVerifyResult): the probe
+          // proves the log records writes NOW — never that history is
+          // complete. Overclaiming here would rebuild the false trust
+          // anchor this check exists to kill, one layer up.
+          console.log(`  ${render.icons.ok} Audit log: recording (verified now) ${render.wrap(render.c.dim, "(verifies current recording, not history — a resynced node's audit has a hard start boundary at its copy time)")}`);
+          break;
+        case "degraded":
+          if (auditStatus.cause === "disabled") {
+            console.log(`  ${render.icons.error} Audit log DISABLED ${render.wrap(render.c.dim, `— ${auditStatus.detail}`)}`);
+            console.log(`     ${render.wrap(render.c.dim, "Fix: enable logging.auditLog in the ROOT harperdb-config.yaml (the Harper instance config, NOT flair's component config.yaml), then restart Harper.")}`);
+          } else {
+            console.log(`  ${render.icons.error} Audit log NOT RECORDING ${render.wrap(render.c.dim, `— ${auditStatus.detail}`)}`);
+            console.log(`     ${render.wrap(render.c.red, "Audit reports as enabled, but fresh writes produced no audit entries — do not treat the audit log as a record of what happened.")}`);
+            console.log(`     ${render.wrap(render.c.dim, "On a node that joined or resynced via cluster base copy, audit history has a hard start boundary at copy time (harper#2212) — \"no history\" does not mean \"nothing happened\".")}`);
+            console.log(`     ${render.wrap(render.c.dim, "Check logging.auditLog in the ROOT harperdb-config.yaml (not flair's component config.yaml), then restart Harper.")}`);
+          }
+          issues++;
+          break;
+        case "skipped":
+          // An unrun check must not look like a pass — UNVERIFIED, visually
+          // distinct from ok, but not a hard issue (mirrors the embeddings
+          // skip: the operator may simply have no agent or no local admin
+          // credential on this box).
+          console.log(`  ${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditStatus.detail})`);
+          break;
       }
     }
 
