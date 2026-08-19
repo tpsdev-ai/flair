@@ -80,6 +80,27 @@ flair agent add concierge-gcp \
 Expected: `Keypair written: ~/.flair/keys/concierge-gcp.key` and a
 registration confirmation. The hub stores only the public key.
 
+## 3b. Confirm the identity is non-admin (~30 s)
+
+The mint path is structurally non-admin: `flair agent add` seeds the Agent
+row with `admin: false` and never writes `role` — the command has no flag
+that could grant admin. This step is the positive control on that claim:
+read the row back and look, using the same ops API the teardown already
+uses (curl prompts for the admin password):
+
+```bash
+curl -u admin "$FLAIR_URL:9925/" \
+  -H "Content-Type: application/json" \
+  -d '{"operation":"search_by_id","database":"flair","table":"Agent","ids":["concierge-gcp"],"get_attributes":["id","role","admin"]}'
+```
+
+Expected: `[{"id":"concierge-gcp","role":null,"admin":false}]` — `role` is
+the field the admin gate actually reads, `admin` is its display mirror;
+both must be clean. If the row shows `role: "admin"` or `admin: true`,
+stop: the key you are about to put in Secret Manager would belong to an
+administrator, which no deployed workload should hold. Delete the row
+(teardown step 3) and work out how it got elevated before continuing.
+
 ## 4. Key → Secret Manager (~1 min)
 
 The keyfile is single-line base64 (PKCS8 Ed25519), so it survives
@@ -115,6 +136,21 @@ Defaults (override via env): `REGION=us-central1`,
 `GEMINI_MODEL=gemini-2.5-flash` (delivered to the agent as `ADK_MODEL` — the
 model knob the concierge already reads; any current Gemini id works, see
 [model + region constraints](#model--region-constraints)).
+
+**Pin the key's secret version.** `deploy.sh` defaults
+`FLAIR_KEY_SECRET_VERSION=latest`; prefer the explicit version — for the
+fresh secret from step 4 that is `1`:
+
+```bash
+PROJECT_ID="$PROJECT_ID" FLAIR_URL="$FLAIR_URL" FLAIR_KEY_SECRET_VERSION=1 ./deploy.sh
+```
+
+With `latest`, whichever version is enabled when Agent Engine next resolves
+the reference becomes the live key — any redeploy can silently pick up a
+version you did not mean to ship. Pinned, the live key is an explicit deploy
+input (the `version` in the rendered config's `FLAIR_ED25519_KEY` secret
+reference), and changing it is a deliberate act:
+[rotation](#rotate-the-key-every-90-days) bumps the pin.
 
 The script renders the Agent Engine config (`env_vars` including the
 Secret Manager reference), derives the `flair://<host>:443` memory URI from
@@ -172,6 +208,49 @@ Once verified, the Cloud Shell copy of the concierge key is redundant
 ```bash
 rm -f ~/.flair/keys/concierge-gcp.key
 ```
+
+## Rotate the key every 90 days
+
+Treat the concierge key like any production credential: rotate on a 90-day
+cadence, and immediately if Cloud Shell, the hub, or the secret's IAM is
+ever in doubt. The hub holds **one** public key per identity, so rotation
+has a short window — between revoke and redeploy, memory ops 401 while chat
+still answers — do the steps in one sitting, in Cloud Shell:
+
+```bash
+# 1. Revoke the old key: delete the Agent row via the ops API (same call as
+#    teardown step 3 — like `agent remove`, `flair agent rotate-key` only
+#    speaks to a LOCAL instance today, so it cannot rotate against Fabric):
+curl -u admin "$FLAIR_URL:9925/" \
+  -H "Content-Type: application/json" \
+  -d '{"operation":"delete","database":"flair","table":"Agent","ids":["concierge-gcp"]}'
+
+# 2. Re-mint: re-run step 3's `flair agent add concierge-gcp ...` exactly.
+#    Expect `Keypair written:` — `Reusing existing key` means a stale keyfile
+#    survived step 6's cleanup and you have NOT rotated; delete
+#    ~/.flair/keys/concierge-gcp.key and re-run. Deleting the row first is
+#    load-bearing: against an existing row the hub keeps the OLD public key
+#    and the re-mint reports success anyway. Then re-run the 3b check.
+
+# 3. New key -> new secret version (note the version number it prints):
+gcloud secrets versions add concierge-gcp-flair-key \
+  --data-file="$HOME/.flair/keys/concierge-gcp.key"
+
+# 4. Redeploy the instance with the pin bumped so the runtime picks it up:
+AGENT_ENGINE_ID=<id> FLAIR_KEY_SECRET_VERSION=<new-version> \
+  PROJECT_ID="$PROJECT_ID" FLAIR_URL="$FLAIR_URL" ./deploy.sh
+
+# 5. Once the redeploy verifies (step 6), disable the old version:
+gcloud secrets versions disable <old-version> --secret=concierge-gcp-flair-key
+
+# 6. The Cloud Shell copy is redundant again:
+rm -f ~/.flair/keys/concierge-gcp.key
+```
+
+Secret Manager rotation schedules (`--rotation-period` plus a Pub/Sub topic
+on the secret) can put the 90 days on a timer — the schedule publishes a
+reminder, it does not run the mint, so treat it as the trigger for the steps
+above, not as the rotation itself.
 
 ## Honest failure modes
 
