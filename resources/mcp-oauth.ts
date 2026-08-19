@@ -200,7 +200,12 @@ export async function registerMcpOAuthRoute(deps: RegisterDeps = {}): Promise<bo
     return decide({
       mounted: false,
       status: "Not enabled",
-      reason: "Set FLAIR_MCP_OAUTH=1 (and an issuer) to serve MCP over HTTP.",
+      // "true" not "1": flair's flag accepts either, but the component's
+      // config-side read of the same var (config.yaml `mcp.enabled:
+      // ${FLAIR_MCP_OAUTH}`, flair#1152) accepts ONLY "true"/"false" — with
+      // "1" the /mcp route registers and every request 401s against a
+      // component that never mounted its AS.
+      reason: "Set FLAIR_MCP_OAUTH=true (and an issuer) to serve MCP over HTTP.",
     });
   }
 

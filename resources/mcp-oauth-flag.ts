@@ -29,6 +29,26 @@
  *
  * Read from `FLAIR_MCP_OAUTH` — truthy values: "1", "true", "yes", "on"
  * (case-insensitive). Anything else (incl. unset / empty) → OFF.
+ *
+ * ASYMMETRY (load-bearing, flair#1152, measured on oauth 2.5.0): config.yaml's
+ * `mcp.enabled: ${FLAIR_MCP_OAUTH}` hands the SAME env var to
+ * @harperfast/oauth, but the two readers accept DIFFERENT vocabularies. The
+ * component's coerceConfigBoolean takes ONLY "true"/"false" and DELETES any
+ * other string (unresolved placeholder, "1", "yes", garbage) so its disabled
+ * default applies; this function takes 1/true/yes/on. Consequences:
+ *   - "true" is the ONE value that enables both sides (`flair mcp enable`
+ *     stages exactly that).
+ *   - "1"/"yes"/"on" turn flair's /mcp handler ON while the component AS
+ *     stays OFF — fail-closed broken-on (every request 401s, no AS
+ *     advertised).
+ *   - garbage (e.g. "maybe") disables BOTH: the component deletes it, this
+ *     stays false, no /mcp handler exists — no data path (flair's own
+ *     discovery documents still serve whenever this flag is off, by design).
+ * If the component's vocabulary ever widens back to truthy-string, a garbage
+ * value would mount a live AS next to an unregistered /mcp — re-derive the
+ * garbage case (test/integration/mcp-oauth-boot-safety.test.ts) before
+ * relying on it, and NEVER let component `enabled` drive flair's handler
+ * registration directly without re-deriving that table.
  */
 export function mcpOAuthEnabled(): boolean {
   const raw = (process.env.FLAIR_MCP_OAUTH ?? "").trim().toLowerCase();

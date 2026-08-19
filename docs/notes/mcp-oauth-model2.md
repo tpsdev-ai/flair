@@ -59,9 +59,12 @@ never from the tool arguments (no forging of agentId / authorId).
          clientId: ${OAUTH_GITHUB_CLIENT_ID}
          clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
      mcp:
-       enabled: true
+       enabled: ${FLAIR_MCP_OAUTH}          # whole-token env reference (flair#1152) — the choice lives in the ENVIRONMENT, so a re-packed deploy can't revert it
        issuer: ${FLAIR_MCP_ISSUER}          # pin to your public origin — REQUIRED
-       resource: ${FLAIR_MCP_ISSUER}/mcp     # RFC-8707 audience the /mcp token binds to
+       # NO resource key (flair#1180): the plugin derives <issuer>/mcp when it is
+       # absent. A composite like ${FLAIR_MCP_ISSUER}/mcp never interpolates
+       # (whole-token-only expansion) and fails every connect with
+       # invalid_target. Non-standard resource: set an explicit LITERAL URL.
        accessTokenTtl: 900                    # 5–15 min (Sherlock req 1) — short-lived
        dynamicClientRegistration:
          enabled: false                       # DCR is NOT SUPPORTED (flair#756) — explicit, not omitted (an absent block leaves DCR OPEN by the plugin's own default)
@@ -82,7 +85,11 @@ never from the tool arguments (no forging of agentId / authorId).
    turning the surface on.
 
 2. **Set the env:**
-   - `FLAIR_MCP_OAUTH=1` — turns on the `/mcp` route registration.
+   - `FLAIR_MCP_OAUTH=true` — turns on the `/mcp` route registration AND the
+     component AS (flair#1152: `true` is the ONE value both readers accept —
+     flair's flag takes 1/true/yes/on, but the component's config read of the
+     same var accepts only "true"/"false" and deletes anything else, so `1`
+     gives you a guarded `/mcp` with no authorization server behind it).
    - `FLAIR_MCP_ISSUER=https://your-public-origin` (or `FLAIR_PUBLIC_URL`).
    - `FLAIR_MCP_JIT_PROVISION=1` — ONLY if you want unknown subjects
      auto-provisioned (default OFF; pre-provision Agent+Credential otherwise).
