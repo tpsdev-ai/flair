@@ -180,11 +180,28 @@ describe("buildMcpOAuthConfigBlock", () => {
     expect(oauth.package).toBe("@harperfast/oauth");
     expect(oauth.providers.github.clientId).toBe("${OAUTH_GITHUB_CLIENT_ID}");
     expect(oauth.providers.github.clientSecret).toBe("${OAUTH_GITHUB_CLIENT_SECRET}");
-    expect(oauth.mcp.enabled).toBe(true);
+    // flair#1152: mcp.enabled is the WHOLE-TOKEN env reference — never a
+    // literal boolean. The on/off choice lives in the environment, so a
+    // re-packed deploy cannot revert it.
+    expect(oauth.mcp.enabled).toBe("${FLAIR_MCP_OAUTH}");
     expect(oauth.mcp.accessTokenTtl).toBe(REQUIRED_ACCESS_TOKEN_TTL);
     expect(oauth.mcp.accessTokenTtl).toBe(900);
     expect(oauth.mcp.clientIdMetadataDocuments.allowedHosts).toEqual(DEFAULT_CIMD_ALLOWED_HOSTS);
     expect(oauth.mcp.signingKeyPem).toBe("${FLAIR_MCP_SIGNING_KEY_PEM}");
+  });
+
+  test("flair#1180: NO resource key is emitted — the component derives <issuer>/mcp", () => {
+    // The old composite `resource: "${FLAIR_MCP_ISSUER}/mcp"` NEVER
+    // interpolated (env expansion is whole-token-only) and failed every
+    // connect with invalid_target. Absent, the component's resolveResource()
+    // derives `<issuer>/mcp` at request time — identical to flair's
+    // in-process derivation. An operator needing a non-standard resource
+    // sets an explicit LITERAL absolute URL in config.yaml by hand.
+    const block = buildMcpOAuthConfigBlock({ idpProvider: "github" });
+    const mcp = (block["@harperfast/oauth"] as any).mcp;
+    expect("resource" in mcp).toBe(false);
+    // And nothing else in the block smuggles the composite back in.
+    expect(JSON.stringify(block)).not.toContain("${FLAIR_MCP_ISSUER}/mcp");
   });
 
   test("flair#756: dynamicClientRegistration is ALWAYS explicitly disabled — never omitted", () => {
@@ -245,7 +262,11 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
       idpClientId: "client-id-value",
       idpClientSecret: "client-secret-value",
     });
-    expect(bundle.FLAIR_MCP_OAUTH).toBe("1");
+    // "true" EXACTLY (flair#1152): the component's coerceConfigBoolean
+    // accepts only "true"/"false" and DELETES anything else — staging "1"
+    // (flair-truthy, component-deleted) yields a guarded /mcp with NO
+    // authorization server behind it.
+    expect(bundle.FLAIR_MCP_OAUTH).toBe("true");
     expect(bundle.FLAIR_MCP_ISSUER).toBe(ISSUER);
     expect(bundle.FLAIR_MCP_SIGNING_KEY_PEM).toContain("BEGIN PRIVATE KEY");
     expect(bundle.OAUTH_GITHUB_CLIENT_ID).toBe("client-id-value");
@@ -1086,6 +1107,10 @@ describe("updateLocalConfigMcpEnabled (flair#1136)", () => {
     expect(readFileSync(REPO_CONFIG, "utf-8")).toBe(repoConfigBefore);
   });
 
+  // The flair#1152 shape: no `resource` key (flair#1180 — derived by the
+  // component), and mcp.enabled carrying either literal `false` (decisively
+  // off) or the whole-token env reference (the shipped/enabled shape).
+  const ENV_REF = "${FLAIR_MCP_OAUTH}";
   const CONFIG_WITH_MCP_DISABLED = `name: flair
 rest: true
 "@harperfast/oauth":
@@ -1097,7 +1122,6 @@ rest: true
   mcp:
     enabled: false
     issuer: "\${FLAIR_MCP_ISSUER}"
-    resource: "\${FLAIR_MCP_ISSUER}/mcp"
     accessTokenTtl: 900
     dynamicClientRegistration:
       enabled: false
@@ -1107,23 +1131,39 @@ rest: true
         - "claude.com"
     signingKeyPem: "\${FLAIR_MCP_SIGNING_KEY_PEM}"
 `;
+  const CONFIG_WITH_ENV_REF = CONFIG_WITH_MCP_DISABLED.replace(
+    "enabled: false",
+    `enabled: "\${FLAIR_MCP_OAUTH}"`,
+  );
 
-  test("flips enabled: false → true", () => {
+  test("enable writes the WHOLE-TOKEN env reference — never literal true (flair#1152)", () => {
     writeFileSync(configPath, CONFIG_WITH_MCP_DISABLED, "utf-8");
     const result = updateLocalConfigMcpEnabled(true, configPath);
     expect(result.ok).toBe(true);
-    expect(result.detail).toContain("mcp.enabled set to true");
+    expect(result.detail).toContain(`mcp.enabled set to ${ENV_REF}`);
     // Re-parse to verify the mutation is structural, not string-level.
     const updated = readFileSync(configPath, "utf-8");
     const doc = yaml.load(updated) as any;
-    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(true);
+    // The env reference — the on/off choice lives in the environment
+    // (FLAIR_MCP_OAUTH, staged to "true" by the secrets bundle), so a re-packed
+    // deploy can no longer revert it. A literal true here is the regression.
+    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(ENV_REF);
+    expect(doc["@harperfast/oauth"].mcp.enabled).not.toBe(true);
     // dynamicClientRegistration.enabled is a separate key and stays false.
     expect(doc["@harperfast/oauth"].mcp.dynamicClientRegistration.enabled).toBe(false);
   });
 
-  test("flips enabled: true → false", () => {
-    const enabledConfig = CONFIG_WITH_MCP_DISABLED.replace("enabled: false", "enabled: true");
-    writeFileSync(configPath, enabledConfig, "utf-8");
+  test("legacy literal true is normalized to the env reference on enable", () => {
+    const legacyEnabled = CONFIG_WITH_MCP_DISABLED.replace("enabled: false", "enabled: true");
+    writeFileSync(configPath, legacyEnabled, "utf-8");
+    const result = updateLocalConfigMcpEnabled(true, configPath);
+    expect(result.ok).toBe(true);
+    const doc = yaml.load(readFileSync(configPath, "utf-8")) as any;
+    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(ENV_REF);
+  });
+
+  test("disable writes literal false — decisively off regardless of environment", () => {
+    writeFileSync(configPath, CONFIG_WITH_ENV_REF, "utf-8");
     const result = updateLocalConfigMcpEnabled(false, configPath);
     expect(result.ok).toBe(true);
     expect(result.detail).toContain("mcp.enabled set to false");
@@ -1131,13 +1171,22 @@ rest: true
     expect(doc["@harperfast/oauth"].mcp.enabled).toBe(false);
   });
 
-  test("already at target value: no-op", () => {
+  test("already at target value: no-op (disabled)", () => {
     writeFileSync(configPath, CONFIG_WITH_MCP_DISABLED, "utf-8");
     const result = updateLocalConfigMcpEnabled(false, configPath);
     expect(result.ok).toBe(true);
     expect(result.detail).toContain("already false");
     // File unchanged.
     expect(readFileSync(configPath, "utf-8")).toBe(CONFIG_WITH_MCP_DISABLED);
+  });
+
+  test("already at target value: no-op (env reference present, enable)", () => {
+    writeFileSync(configPath, CONFIG_WITH_ENV_REF, "utf-8");
+    const result = updateLocalConfigMcpEnabled(true, configPath);
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain(`already ${ENV_REF}`);
+    // File unchanged.
+    expect(readFileSync(configPath, "utf-8")).toBe(CONFIG_WITH_ENV_REF);
   });
 
   test("file not found at explicit path", () => {
@@ -1181,7 +1230,7 @@ rest: true
     expect(result.detail).toContain("mcp key not found");
   });
 
-  test("flips ONLY mcp.enabled when both enabled keys are present (flair#1136 safety)", () => {
+  test("updates ONLY mcp.enabled when both enabled keys are present (flair#1136 safety)", () => {
     // This is the critical safety test: the config has TWO `enabled: false`
     // keys (mcp.enabled and dynamicClientRegistration.enabled). The YAML-based
     // implementation navigates to the exact key, so it can never flip the
@@ -1190,8 +1239,8 @@ rest: true
     const result = updateLocalConfigMcpEnabled(true, configPath);
     expect(result.ok).toBe(true);
     const doc = yaml.load(readFileSync(configPath, "utf-8")) as any;
-    // Only mcp.enabled flipped.
-    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(true);
+    // Only mcp.enabled updated — to the env reference (flair#1152).
+    expect(doc["@harperfast/oauth"].mcp.enabled).toBe(ENV_REF);
     // dynamicClientRegistration.enabled is untouched.
     expect(doc["@harperfast/oauth"].mcp.dynamicClientRegistration.enabled).toBe(false);
   });
@@ -1255,8 +1304,12 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
     expect(fabricStep).toBeDefined();
     expect(fabricStep!.ok).toBe(false);
     expect(fabricStep!.detail).toContain("harperfabric.com");
-    expect(fabricStep!.detail).toContain("mcp.enabled: true");
-    expect(fabricStep!.detail).toContain("redeploy");
+    // flair#1152: the guidance is env-first — set FLAIR_MCP_OAUTH in the
+    // instance environment; NEVER "edit the deployed config.yaml" (a
+    // re-packed deploy reverts that edit, which was the whole bug).
+    expect(fabricStep!.detail).toContain("FLAIR_MCP_OAUTH");
+    expect(fabricStep!.detail).toContain("environment");
+    expect(fabricStep!.detail).not.toContain("mcp.enabled: true");
     // Earlier steps (secrets, identity) still succeeded.
     const byStep = Object.fromEntries(result.steps.map((s) => [s.step, s.ok]));
     expect(byStep["secrets-provisioning"]).toBe(true);

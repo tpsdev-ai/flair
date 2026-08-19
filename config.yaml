@@ -16,9 +16,42 @@ authentication:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
       clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
   mcp:
-    enabled: false
+    # WHOLE-TOKEN env reference — the same FLAIR_MCP_OAUTH flag flair's
+    # in-process /mcp route gates on (resources/mcp-oauth-flag.ts). The on/off
+    # choice lives in the instance ENVIRONMENT, not in this packed file, so a
+    # re-packed deploy can no longer revert an operator's enablement
+    # (flair#1152). Requires @harperfast/oauth >= 2.5.0 (resolved-version
+    # assertion + behavioral gate: test/integration/mcp-oauth-boot-safety.test.ts).
+    #
+    # ASYMMETRY (load-bearing, measured on oauth 2.5.0): the two readers of
+    # this flag accept DIFFERENT vocabularies. The component's
+    # coerceConfigBoolean accepts ONLY "true"/"false" and DELETES any other
+    # string (unresolved placeholder, "1", "yes", garbage) so its disabled
+    # default applies. flair's mcpOAuthEnabled() accepts 1/true/yes/on.
+    #
+    # Failure modes (oauth 2.5.0):
+    #   unset             -> placeholder deleted -> both sides OFF, clean boot
+    #   true              -> BOTH sides ON — the one working enable value
+    #                        (`flair mcp enable` stages exactly this)
+    #   false             -> both sides OFF
+    #   1 / yes / on      -> flair /mcp handler ON, component AS OFF ->
+    #                        fail-closed broken-on: every /mcp request 401s,
+    #                        no AS is advertised. Use "true" instead.
+    #   garbage (maybe)   -> deleted -> component OFF; flair strict -> OFF.
+    #                        Inert: no /mcp handler, no data path (flair's own
+    #                        discovery documents still serve, by design).
+    # On oauth <2.5.0 there is NO normalization: an unresolved placeholder is
+    # a truthy string (fail-open) — the version assertion exists for that.
+    # If the component's `enabled` vocabulary changes, or it ever drives
+    # flair's handler registration directly, re-derive this table first.
+    enabled: ${FLAIR_MCP_OAUTH}
     issuer: ${FLAIR_MCP_ISSUER}
-    resource: ${FLAIR_MCP_ISSUER}/mcp
+    # No `resource:` key ON PURPOSE (flair#1180): when absent, the component
+    # derives `<issuer>/mcp` at request time (resolveResource) — identical to
+    # flair's in-process derivation. A composite like ${FLAIR_MCP_ISSUER}/mcp
+    # NEVER interpolates (env expansion is whole-token-only) and fails every
+    # connect with invalid_target. Escape hatch: an operator needing a
+    # non-standard resource sets an explicit LITERAL absolute URL here.
     accessTokenTtl: 900
     dynamicClientRegistration:
       enabled: false

@@ -66,8 +66,10 @@
 // ── The oauth plugin as a live component (validated mechanism) ────────────
 // `@harperfast/oauth` is a real `dependencies` entry (package.json) and is
 // now declared as a Harper component in this repo's shipped `config.yaml`
-// (flair#1136) — but with `mcp.enabled: false` so the plugin is inert by
-// default. `resources/mcp-oauth.ts` does a bare `import("@harperfast/oauth")`
+// (flair#1136) — with `mcp.enabled: ${FLAIR_MCP_OAUTH}` (env-referenced,
+// flair#1152) so the plugin is inert by default (unset env → the unresolved
+// placeholder is dropped to the plugin's disabled default on oauth 2.5.0+).
+// `resources/mcp-oauth.ts` does a bare `import("@harperfast/oauth")`
 // for its `withMCPAuth` named export, wrapping flair's OWN `/mcp` handler.
 // The full plugin (its `/oauth/mcp/token` route, `.well-known/*` discovery,
 // `harper_oauth_mcp_*` tables) only activates when `mcp.enabled: true`.
@@ -162,10 +164,10 @@ describe("MCP client_credentials agent-auth vs. a live @harperfast/oauth@2.2.0 c
     execSync(`cp -al "${REPO_ROOT}"/. "${tempDir}"/`, { stdio: "pipe" });
     // Remove the hard-linked config.yaml and write our augmented copy.
     execSync(`rm -f "${tempDir}/config.yaml"`);
-    // Replace the shipped @harperfast/oauth block (mcp.enabled: false) with
-    // the test's version (mcp.enabled: true + test issuer/keys).  Appending
-    // would create a duplicate key now that config.yaml ships the block
-    // (flair#1136).
+    // Replace the shipped @harperfast/oauth block (mcp.enabled env-referenced,
+    // flair#1152) with the test's version (mcp.enabled: true + test
+    // issuer/keys).  Appending would create a duplicate key now that
+    // config.yaml ships the block (flair#1136).
     const configContent = readFileSync(CONFIG_PATH, "utf8");
     const replaced = configContent.replace(
       /["']@harperfast\/oauth["']:[\s\S]*?(?=\n\S|\n*$)/,

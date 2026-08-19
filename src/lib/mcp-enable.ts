@@ -303,9 +303,10 @@ export interface McpOAuthConfigBlockParams {
   /** `clientIdMetadataDocuments.allowedHosts` override — defaults to
    *  `DEFAULT_CIMD_ALLOWED_HOSTS`. */
   cimdAllowedHosts?: string[];
-  /** mcp.enabled — defaults to true (the enable command flips it on).
-   *  The shipped config.yaml uses false (inert default). */
-  enabled?: boolean;
+  // flair#1152: no `enabled` param. mcp.enabled is ALWAYS emitted as the
+  // whole-token env reference ${FLAIR_MCP_OAUTH} — the on/off choice lives in
+  // the instance environment, never in the generated file, so a re-packed
+  // deploy cannot revert it. A param here would reintroduce the literal.
 }
 
 /**
@@ -331,7 +332,6 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
   const provider = params.idpProvider;
   const envPrefix = `OAUTH_${provider.toUpperCase()}`;
   const cimdAllowedHosts = params.cimdAllowedHosts ?? DEFAULT_CIMD_ALLOWED_HOSTS;
-  const enabled = params.enabled ?? true;
   return {
     "@harperfast/oauth": {
       package: "@harperfast/oauth",
@@ -342,9 +342,29 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
         },
       },
       mcp: {
-        enabled,
+        // flair#1152: whole-token env reference — same flag flair's in-process
+        // route gates on. ASYMMETRY (load-bearing, measured on oauth 2.5.0):
+        // the component's coerceConfigBoolean accepts ONLY "true"/"false" and
+        // DELETES any other string (unresolved placeholder, "1", "yes",
+        // garbage) so its disabled default applies; flair's mcpOAuthEnabled()
+        // (resources/mcp-oauth-flag.ts) accepts 1/true/yes/on. So "true" is
+        // the one value that enables BOTH; "1"/"yes"/"on" flip flair's /mcp
+        // handler on while the component AS stays off (fail-closed broken-on:
+        // all 401, no AS advertised); garbage/unset disable both. On oauth
+        // <2.5.0 there is NO normalization and an unresolved placeholder is a
+        // truthy string (fail-open) — which is why the resolved-version
+        // assertion in mcp-oauth-boot-safety.test.ts exists. If component
+        // `enabled` semantics ever change, or it ever drives flair handler
+        // registration directly, re-derive this table before shipping.
+        enabled: "${FLAIR_MCP_OAUTH}",
         issuer: "${FLAIR_MCP_ISSUER}",
-        resource: "${FLAIR_MCP_ISSUER}/mcp",
+        // flair#1180: NO `resource` key — the component's resolveResource()
+        // derives `<issuer>/mcp` at request time when it is absent, identical
+        // to flair's in-process derivation. The old composite
+        // "${FLAIR_MCP_ISSUER}/mcp" never interpolated (whole-token-only
+        // expansion) and failed every connect with invalid_target. Escape
+        // hatch: an operator needing a non-standard resource sets an explicit
+        // LITERAL absolute URL in config.yaml (never a composite).
         accessTokenTtl: REQUIRED_ACCESS_TOKEN_TTL,
         // Explicit fail-closed disable — see the doc comment above and the
         // module header for why an omitted block is NOT equivalent to this.
@@ -363,14 +383,25 @@ export function buildMcpOAuthConfigBlock(params: McpOAuthConfigBlockParams): Rec
 
 // ─── Local config.yaml update (flair#1136) ──────────────────────────────────
 
+/** The whole-token env reference `flair mcp enable` writes as mcp.enabled
+ *  (flair#1152). The on/off choice lives in the environment (the secrets
+ *  bundle stages FLAIR_MCP_OAUTH=true — see buildSecretsBundle for why it
+ *  must be "true"), never as a literal in the config file. */
+export const MCP_ENABLED_ENV_REFERENCE = "${FLAIR_MCP_OAUTH}";
+
 /**
- * Flip mcp.enabled in a local component config.yaml. Best-effort: returns
- * `{ ok: false }` with a reason when the file can't be found or parsed.
+ * Set mcp.enabled in a local component config.yaml to the flair#1152 shape.
+ * Best-effort: returns `{ ok: false }` with a reason when the file can't be
+ * found or parsed.
+ *
+ * `enabled: true` writes the WHOLE-TOKEN env reference ${FLAIR_MCP_OAUTH}
+ * (never a literal `true` — the env var, staged to `true` by the secrets bundle,
+ * carries the choice; a legacy literal `true` found in the file is normalized
+ * to the reference). `enabled: false` writes literal `false` — decisively off
+ * regardless of environment.
  *
  * Looks for config.yaml at `explicitPath`, then `./config.yaml`, then
- * `~/.flair/config.yaml`. When found, replaces `mcp:\n    enabled: false`
- * with `mcp:\n    enabled: true` (exact string match — avoids a YAML parser
- * dependency for a single boolean flip).
+ * `~/.flair/config.yaml`.
  */
 export function updateLocalConfigMcpEnabled(
   enabled: boolean,
@@ -388,11 +419,16 @@ export function updateLocalConfigMcpEnabled(
     }
   }
 
+  // The value the file should carry for this call (flair#1152): the env
+  // reference when enabling, literal false when disabling.
+  const target: string | boolean = enabled ? MCP_ENABLED_ENV_REFERENCE : false;
+  const targetLabel = enabled ? `${MCP_ENABLED_ENV_REFERENCE} (env-referenced)` : "false";
+
   if (!configPath) {
     return {
       ok: false,
       detail: `local config.yaml not found (tried: ${candidates.join(", ")}). ` +
-        `Set mcp.enabled: ${enabled} in your component config.yaml manually, then restart.`,
+        `Set mcp.enabled: ${targetLabel} in your component config.yaml manually, then restart.`,
     };
   }
 
@@ -422,7 +458,7 @@ export function updateLocalConfigMcpEnabled(
     return {
       ok: false,
       detail: `@harperfast/oauth block not found in ${configPath}. ` +
-        `Ensure the component block is present with mcp.enabled: ${enabled}.`,
+        `Ensure the component block is present with mcp.enabled: ${targetLabel}.`,
     };
   }
 
@@ -431,17 +467,17 @@ export function updateLocalConfigMcpEnabled(
     return {
       ok: false,
       detail: `mcp key not found under @harperfast/oauth in ${configPath}. ` +
-        `Ensure the mcp block is present with enabled: ${enabled}.`,
+        `Ensure the mcp block is present with enabled: ${targetLabel}.`,
     };
   }
 
   const current = mcp.enabled;
-  if (current === enabled) {
-    return { ok: true, detail: `mcp.enabled already ${enabled} in ${configPath}` };
+  if (current === target) {
+    return { ok: true, detail: `mcp.enabled already ${targetLabel} in ${configPath}` };
   }
 
   // Mutate the parsed document and re-emit.
-  mcp.enabled = enabled;
+  mcp.enabled = target;
 
   const updated = yaml.dump(doc, { lineWidth: -1, noCompatMode: true });
   try {
@@ -450,7 +486,7 @@ export function updateLocalConfigMcpEnabled(
     return { ok: false, detail: `cannot write ${configPath}: ${err.message}` };
   }
 
-  return { ok: true, detail: `mcp.enabled set to ${enabled} in ${configPath}` };
+  return { ok: true, detail: `mcp.enabled set to ${targetLabel} in ${configPath}` };
 }
 
 /** The exact callback URL to hand the operator when they create the IdP
@@ -475,7 +511,14 @@ export interface SecretsBundleParams {
 export function buildSecretsBundle(params: SecretsBundleParams): Record<string, string> {
   const envPrefix = `OAUTH_${params.idpProvider.toUpperCase()}`;
   return {
-    FLAIR_MCP_OAUTH: "1",
+    // "true" is the ONLY value both readers of this flag accept (flair#1152,
+    // measured against oauth 2.5.0): flair's strict mcpOAuthEnabled() takes
+    // 1/true/yes/on, but the component's coerceConfigBoolean takes ONLY
+    // "true"/"false" and DELETES anything else (disabled default applies).
+    // Staging "1" here would flip flair's /mcp handler ON while the
+    // component's AS stays OFF — fail-closed but broken-on (every request
+    // 401s, no AS is advertised). Keep this "true".
+    FLAIR_MCP_OAUTH: "true",
     FLAIR_MCP_ISSUER: params.issuer.replace(/\/+$/, ""),
     FLAIR_MCP_SIGNING_KEY_PEM: params.signingKeyPem,
     [`${envPrefix}_CLIENT_ID`]: params.idpClientId,
@@ -1334,9 +1377,9 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       currentStep = "fabric-operator-deploy";
       const msg = [
         `Fabric deployment detected (${new URL(params.instance).hostname}).`,
-        `The @harperfast/oauth block ships in config.yaml with mcp.enabled: false.`,
-        `To activate: set mcp.enabled: true (literal boolean) in your deployed component config.yaml,`,
-        `ensure the staged secrets are live in the instance's process environment, and redeploy.`,
+        `The @harperfast/oauth block ships in config.yaml with mcp.enabled: \${FLAIR_MCP_OAUTH} (env-referenced, flair#1152) — no config edit is needed.`,
+        `To activate: apply the staged secrets (FLAIR_MCP_OAUTH=true among them) to the instance's environment (Fabric env), then restart the instance.`,
+        `Deploys can no longer revert the choice — it lives in the environment, not the packed file.`,
         `Then re-run \`flair mcp enable\` — earlier steps are idempotent and will be reused.`,
       ].join(" ");
       push(false, msg);
