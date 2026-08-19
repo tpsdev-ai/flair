@@ -1,1 +1,0 @@
-- **Fabric quickstart: "Wire a Grok Bot agent" walkthrough** — field-verified sequence in `docs/quickstart-fabric.md` covering per-agent identity, the expected first-bootstrap 401, one-time admin registration, MCP restart, and the `FLAIR_KEY_PATH` papercut (#1271).

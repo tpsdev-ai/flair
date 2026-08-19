@@ -18,6 +18,142 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.45.0] - 2026-08-19
+
+### Added
+
+- **Fabric quickstart: "Wire a Grok Bot agent" walkthrough** — field-verified sequence in `docs/quickstart-fabric.md` covering per-agent identity, the expected first-bootstrap 401, one-time admin registration, MCP restart, and the `FLAIR_KEY_PATH` papercut (#1271).
+
+- Team Concierge example (`examples/team-concierge/`): a runnable ADK agent on
+  adk-flair that commits team knowledge to Flair through two shape-enforced
+  write helpers (`record_decision` → persistent+shared, `record_personal` →
+  standard+private — fixed classes, never model-selected), scopes users by the
+  connector's `adk:concierge:<user>` tag, and ships `scripts/verify.sh`
+  executing the scenario's isolation and distillation claims (with inline
+  mutation checks) against a live instance (#1229, epic #1228)
+
+- Team Concierge GCP deploy package (`examples/team-concierge/deploy/gcp/`):
+  a 10-minute operator runbook + deploy script putting the example on Vertex
+  AI Agent Engine with Gemini and memory on a self-hosted Flair Fabric hub —
+  the Ed25519 identity is minted in Cloud Shell, delivered to the runtime via
+  a Secret Manager env reference, and materialized into adk-flair's keyfile
+  by a boot shim registered through ADK's services.py channel; includes a
+  verify chat helper, honest failure modes, and a full teardown path
+  (#1228, #1229)
+
+### Changed
+
+- **cursor-flair pre-publish: plugin re-pinned to `flair-mcp@0.44.13` + doc
+  fixes.** `packages/cursor-flair/mcp.json` now pins `@tpsdev-ai/flair-mcp@0.44.13`,
+  picking up the interpolation-literal guard (#1253) so an unsubstituted
+  `${FLAIR_URL}` cannot break the default install. `docs/quickstart-fabric.md`
+  step 3 gains the step-0 secret-hygiene note for remote `agent add` (#1255),
+  and the plugin README adds a factual "Flair vs Cursor's built-in Memories"
+  contrast.
+
+- **Cursor marketplace entry: optional `category` and `version` fields added** to the plugin entry in `.cursor-plugin/marketplace.json`, per Cursor's marketplace submission checklist. No functional change.
+
+### Fixed
+
+- **Bootstrap's teammate/task-relevant pass now ranks on the SAME hybrid
+  (BM25 + union-RRF) retrieval as `memory_search` — and the inert
+  `_score > 0.3` task-relevance floor is removed** (flair#1246). Bootstrap's
+  task-relevant candidate pass invoked the shared retrieval core in HNSW-only
+  mode (an accident of early code) while search ran hybrid, so the two
+  surfaces ranked the same store+query on different signals: a record whose
+  task-relevance is lexical (exact task terms inside semantically-atypical
+  prose) fused to rank 1 in search but ranked below bland-generic noise on
+  pure cosine in bootstrap (measured: cosine 0.5656 vs noise 0.6086 at N=21 —
+  HNSW rank 6, fused rank 1), and at field scale (corpus larger than the
+  bounded candidate pool) was excluded from bootstrap's pool entirely. The
+  pass now resolves its mode from the same `hybridEnabled()` selector search
+  uses and passes `currentTask` as the lexical leg, so bootstrap's teammate
+  picks and `memory_search` agree — one ranker, one scale — and the
+  `FLAIR_HYBRID_RETRIEVAL` kill-switch moves both surfaces together.
+
+  The historical `TASK_RELEVANCE_FLOOR` (0.3, carried verbatim from the
+  original raw JS dot-product scan) is removed rather than recalibrated: a
+  6-variant measurement on the shipped embedding model proved it inert
+  (nothing in 126 records scored under ~0.44 — it cut zero records and never
+  delivered "show nothing when nothing's relevant" either, since
+  fully-unrelated bland noise scores 0.44–0.63). Task-relevant selection is
+  fused retrieval rank plus the existing token budget. Count semantics are
+  unchanged in shape (`teammateFindingsIncluded + teammateFindingsTruncated
+  == teammateFindingsMatched`); "matched" now means "entered the scored
+  retrieval pool". A ranking-parity integration case (the measured
+  max-dilution fixture) pins bootstrap's top teammate pick to search's top
+  result so any future divergence of the two retrieval paths fails CI.
+
+- **Hybrid search no longer reports the RRF rank-normalized value as `_score`
+  under `scoring:"raw"` — `_score` is an absolute similarity again**
+  (flair#985). The hybrid path pinned the top result of ANY query at exactly
+  1.0 by construction, so every consumer thresholding `_score` as a
+  similarity failed open at maximal confidence: the pre-0.18 flair-client
+  dedup gate (still live in stale installs and in openclaw-flair's committed
+  dist through 0.21) saw a ≥0.95 "similarity" on EVERY `memory_store` probe
+  and silently suppressed the write into whatever memory ranked first —
+  however unrelated — producing `written:false` cross-topic data loss, and
+  turning the delete+store update pattern into a destroy-both-copies path.
+  `minScore` and `flair doctor`'s embed-verify probe carried the same broken
+  scale. Hybrid results are still ORDERED by RRF fusion (the recall win is
+  untouched; a BM25 rescue can outrank a weak semantic hit), but each
+  result's `_score` now reports its true cosine (+ the legacy keyword bump),
+  `minScore` filters on that honest scale, BM25-only candidates get a real
+  point-lookup cosine instead of a fabricated rank value, and composite
+  mode's `_rawScore` reports the absolute value while composite ordering is
+  unchanged. Server-side dedup (the #526/#548 never-suppress gate) was never
+  the loss vector and is untouched; the #985 report's five cross-topic pair
+  shapes are pinned as regression fixtures against its cosine+Jaccard
+  co-gate.
+
+### Security
+
+- **Ephemeral memories are now private-only, enforced server-side on every
+  caller-facing write path.** `ephemeral` is the continuity-journal tier
+  (auto-captured working state, self-pruning); its durability-keyed default
+  visibility was already `private`, but a default is not a constraint — an
+  explicit `visibility:"shared"` on an ephemeral write was accepted, which
+  would have made journal entries org-readable and federation-pushed.
+  `Memory.post()` and `Memory.put()` now refuse the combination with 400
+  (`invalid_visibility_for_durability`), including a PUT that flips a stored
+  ephemeral row to `shared` without naming a durability of its own.
+  `POST /FeedMemories`, which writes through the raw table and so had inherited
+  none of the Memory write guards, now applies the same validation set
+  (durability enum, visibility enum, and the ephemeral-private rule) and stamps
+  `private` on an ephemeral feed write that omits visibility — previously such
+  a row landed with no visibility field at all, which reads as non-private.
+  Promoting a row out of `ephemeral` (e.g. distillation lifting it to
+  `persistent`) while sharing it in the same write remains allowed. (flair#1257)
+
+- **Hardening batch: anti-enumeration alignment, `agent add --admin-pass-file`,
+  interpolation-literal env guard in flair-client, fail-closed snapshot tar
+  handling.** Four small security/correctness fixes. (1) A cross-agent by-id
+  `GET /Memory/<id>` of a private memory used to 403 from the auth middleware
+  with an error naming the owning agent, while `Memory.get()` behind it
+  deliberately answers a generic 404 so a denied caller can't enumerate ids —
+  the middleware now returns the identical `not found` 404, so a denied private
+  read is indistinguishable from a missing id at both layers and never
+  discloses the owner (flair#1264). (2) `flair agent add` gains a real
+  `--admin-pass-file <path>` read in-process via the same owner-only-mode
+  reader `flair init` uses, so the admin password never appears in `ps` or
+  shell history; as an explicit flag it works for remote targets too, without
+  weakening the guard that keeps the ambient `FLAIR_ADMIN_PASS`/local-file
+  fallbacks from ever traveling to a remote host, and the Fabric quickstart now
+  leads with it (flair#1259). (3) `FlairClient`'s own env fallbacks
+  (`FLAIR_URL`, `FLAIR_AGENT_ID`, `FLAIR_CLIENT`, `FLAIR_ADMIN_USER`,
+  `FLAIR_ADMIN_PASSWORD`, `FLAIR_KEY_DIR`) now treat a wholesale unsubstituted
+  `${...}` interpolation literal as unset so the existing defaults apply,
+  covering every flair-client consumer at once; flair-mcp's process-boundary
+  strip stays as defense-in-depth (flair#1254). (4) Snapshot tar handling is
+  fail-closed: the containment check types its entry callback against
+  node-tar's own `ReadEntry` contract and refuses an entry whose path or link
+  target it cannot read (previously a missing property silently PASSED
+  containment), and the two restore paths that extracted with node-tar's
+  defaults — REM snapshot restore and `flair session snapshot restore`, which
+  silently dropped tampered entries and reported success — now validate the
+  whole archive first and abort a tampered restore before writing anything,
+  naming the offending entry (flair#901, flair#903).
+
 ## [0.44.13] - 2026-08-18
 
 ### Added
