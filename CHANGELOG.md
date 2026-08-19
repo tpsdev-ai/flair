@@ -18,6 +18,114 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.46.0] - 2026-08-19
+
+### Added
+
+- **Continuity slice 2: Claude Code hook adapter — ephemeral session journal
+  with agent-pull resume.** New `flair-continuity-capture` binary
+  (@tpsdev-ai/flair-mcp) journals working state on PostToolUse/Stop as
+  ephemeral+private memories tagged `adk:continuity:<sessionId>`, under a
+  strict capture discipline: mutating tools only (Write/Edit/NotebookEdit/
+  Bash), Bash description-only (never the command string), file paths only
+  (never content/diffs), Stop as a hard 400-char excerpt of assistant-chosen
+  prose, malformed hook JSON journals nothing. `flair-session-start` grows the
+  resume path: pointer-file fast path with an agentId-wide fallback
+  disambiguated by processUUID, expired rows excluded, at most one boot hint
+  line and never journal content. Fail-open throughout — Flair down or a
+  guard refusal never blocks the turn or boot; compaction never rotates the
+  session. Opt-in by installation: `flair hook install --continuity` /
+  `flair doctor --fix`; doctor reports installed / not-enabled / stale-form,
+  with a symmetric removal path. (flair#1257)
+
+### Changed
+
+- Team Concierge GCP runbook: pre-deploy hardening — 90-day key rotation
+  procedure, a non-admin positive control after the identity mint (step 3b),
+  and Secret Manager secret-version pinning at deploy.
+
+### Fixed
+
+- **MCP OAuth config: derive `resource` from the issuer, env-reference
+  `enabled` — deploys stop reverting the operator's choice** (#1152, #1180).
+  The shipped `config.yaml` (and the block `flair mcp enable` writes) no
+  longer sets `mcp.resource`: the old composite `${FLAIR_MCP_ISSUER}/mcp`
+  never interpolated (component env expansion is whole-token-only), so every
+  claude.ai connect bounced with `invalid_target`; absent, the component
+  derives `<issuer>/mcp` at request time — identical to flair's in-process
+  derivation. An operator needing a non-standard resource sets an explicit
+  literal absolute URL. `mcp.enabled` is now the whole-token env reference
+  `${FLAIR_MCP_OAUTH}` — the same flag flair's in-process `/mcp` route gates
+  on — so enablement lives in the instance environment, not the packed file,
+  and a re-packed deploy can no longer revert it. Requires
+  `@harperfast/oauth` >= 2.5.0, enforced by a resolved-version assertion
+  co-located with the behavioral boot-safety gate (below 2.5.0 an unresolved
+  placeholder is a truthy string — fail-open; from 2.5.0 the component
+  coerces only `"true"`/`"false"` and deletes anything else so the disabled
+  default applies). The two readers accept different vocabularies — flair's
+  strict flag takes 1/true/yes/on, the component only true/false — so
+  `FLAIR_MCP_OAUTH=true` is the one end-to-end enable value and is what
+  `flair mcp enable` now stages (previously `1`, which since the reshape
+  would yield a guarded `/mcp` with no authorization server behind it);
+  garbage values disable both sides. The asymmetry is documented at the
+  config and flag sites and pinned by boot tests.
+
+- **`flair federation sync enable` and `flair rem nightly enable` now verify
+  the job's FIRST RUN through the service manager before claiming success**
+  (flair#1231). Previously the ✅ headline only required launchd/systemd to
+  *accept* the job; two shipped defects (a scheduler shim whose exec bit is
+  stripped by tarball extraction, and a log directory nothing ever created)
+  both passed that check and silently killed every real run. Now: both shims
+  run the CLI under `node <script>` (read permission suffices — no exec-bit
+  dependency), with the node binary resolved to an absolute path at enable
+  time so the shim performs zero PATH lookups at run time; enable creates
+  `~/.flair/logs` (mode 0700 — the REM log carries memory content); and after
+  a successful load, enable triggers the first run via the service manager
+  (`launchctl kickstart` + exit-status poll on macOS, blocking
+  `systemctl --user start` + status read on Linux) and refuses the success
+  headline unless that run exited 0 — failures report the exit status, a
+  stderr tail from the job's log, and the fix to apply. "Service manager
+  unreachable" and "run still going after 12s" are reported as their own
+  distinct states, never as success.
+
+- **`flair federation sync` now says when the quiet path is private rows
+  being withheld, not "no changes"** (flair#1232). Private Memory still
+  never leaves the instance. When the spoke found rows since the cursor
+  and the push filter held every one back, the printed line is `No
+  federable changes since last sync (N rows held back: private
+  visibility)` — count and reason only, no content. A genuine empty run
+  (nothing since the cursor, nothing withheld) still prints `No changes
+  since last sync.` Pairing, hub merge, lastSyncAt advance, and the
+  liveness ping are unchanged.
+
+- **MemoryMaintenance expires only ephemeral rows.** The nightly / REM
+  maintenance pass previously deleted any memory whose `expiresAt` was in
+  the past, including persistent and other non-ephemeral rows that had
+  acquired an expiry (bug, import, API misuse). The docstring already
+  scoped expiry to the ephemeral tier; the delete predicate now matches.
+  Missing or unexpected durability is treated as non-ephemeral, so durable
+  rows are not silently reaped. (flair#1265)
+
+- **`flair doctor` and `flair init` now verify the Harper audit log actually
+  records — silent non-recording can no longer look like a pass.** Both
+  commands run a positive control: write two ephemeral probe rows'-worth of
+  changes (PUT + PATCH), read the audit trail back via `read_audit_log`, and
+  assert both write entries are present. A node whose audit log is enabled but
+  empty — the state a cluster base-copy/resync produces, where `describe_table`
+  still reports `audit: true` and `read_audit_log` answers clean empty —
+  previously went entirely unchecked. Classification: entries present reports
+  "recording (verified now)" (a present-tense claim only — the probe proves
+  current recording, never historical completeness); enabled-but-missing
+  entries reports NOT RECORDING with the base-copy caveat (audit history has a
+  hard start boundary at copy time on a resynced node); `read_audit_log`
+  rejecting with HTTP 400 reports DISABLED with the remedy (`logging.auditLog`
+  in the root `harperdb-config.yaml`, not flair's component `config.yaml`);
+  and an unprobeable instance (unreachable ops API, no agent key, no admin
+  credential) renders UNVERIFIED — an unrun check must not look like a pass.
+  The probe row is ephemeral (TTL backstop), deleted best-effort after the
+  read, and all assertions are boolean — audit-entry content is never echoed
+  into command output. (flair#970)
+
 ## [0.45.0] - 2026-08-19
 
 ### Added
