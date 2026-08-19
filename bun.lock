@@ -71,6 +71,7 @@
       "bin": {
         "flair-mcp": "dist/mcp-shim.cjs",
         "flair-session-start": "dist/session-start-hook.js",
+        "flair-continuity-capture": "dist/continuity-capture-hook.js",
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.27.1",
