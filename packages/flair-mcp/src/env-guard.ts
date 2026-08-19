@@ -77,3 +77,25 @@ export function stripInterpolationLiteralsFromEnv(
     }
   }
 }
+
+/**
+ * Hook probe mode (flair#1007) — shared by every hook binary this package
+ * ships (session-start-hook.ts, continuity-capture-hook.ts). `flair doctor`
+ * sets FLAIR_HOOK_PROBE to ask "does this command still resolve and execute?"
+ * and a probed binary answers by exiting immediately, before stdin, clients,
+ * network or any side effect — being reached at all IS the answer.
+ *
+ * Lives here (this module has no @tpsdev-ai/flair-client import) so the
+ * capture binary can share the ONE definition without pulling the client's
+ * built dist into module graphs that must load before it is built (see
+ * test/unit's CI-ordering note in test/unit/hook-install.test.ts).
+ * session-start-hook.ts re-exports it unchanged.
+ *
+ * Any non-empty value other than "0" enables it, so `FLAIR_HOOK_PROBE=1` and
+ * `FLAIR_HOOK_PROBE=true` both work and an accidentally-empty variable does
+ * not.
+ */
+export function isProbeMode(env: Record<string, string | undefined> = process.env): boolean {
+  const raw = env.FLAIR_HOOK_PROBE;
+  return typeof raw === "string" && raw !== "" && raw !== "0";
+}

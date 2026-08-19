@@ -58,8 +58,15 @@ import { dirname, join } from "node:path";
 import {
   SESSION_START_HOOK_MARKER,
   buildSessionStartHookCommand,
+  buildContinuityCaptureHookCommand,
+  checkContinuityCaptureHooks,
+  computeContinuityHookInstall,
+  computeContinuityHookRemoval,
   hookCommandIsSilenced,
   isHookCommandValueSafe,
+  type ContinuityCaptureHookReport,
+  type ContinuityHookEvent,
+  type ContinuityMutationAction,
 } from "./doctor-client.js";
 
 // ── harness registry ────────────────────────────────────────────────────────
@@ -469,4 +476,178 @@ export function hookStatus(homeDir: string, harness: Harness): HookStatusResult 
     silenced: hookCommandIsSilenced(command),
     agentId: env.agentId, flairUrl: env.flairUrl, command, parseError: null,
   };
+}
+
+// ── continuity capture hooks (flair#1257 slice 2) ──────────────────────────
+//
+// The PostToolUse + Stop pair that auto-journals working state into the
+// ephemeral Memory tier (see packages/flair-mcp/src/continuity.ts for the
+// capture discipline). INSTALLING THIS PAIR IS THE OPT-IN — there is no env
+// flag — so it gets the same standalone, symmetric, dry-run-able command
+// surface as the SessionStart hook (`flair hook install|uninstall
+// --continuity`, wired in src/cli.ts), sharing this module's Sherlock
+// conditions: fail-closed on malformed settings.json, backup before any real
+// mutation, idempotent merge that never touches unrelated hooks/keys,
+// --dry-run computes the delta without writing (no backup either). The pure
+// mutation cores (computeContinuityHookInstall / computeContinuityHookRemoval)
+// live in src/doctor-client.ts next to the ONE command builder so `flair
+// doctor --fix` and this family cannot drift apart.
+
+/** Mirror of buildHookCommand for the continuity pair — delegates to the ONE
+ *  builder in doctor-client.ts. Throws on unrepresentable values;
+ *  installContinuityHooks() checks first and reports instead. */
+export function buildContinuityHookCommand(agentId: string, flairUrl: string): string {
+  return buildContinuityCaptureHookCommand(agentId, flairUrl);
+}
+
+export interface ContinuityMutationResult {
+  ok: boolean;
+  path: string;
+  harness: Harness;
+  dryRun: boolean;
+  message: string;
+  backupPath: string | null;
+  /** Per-event outcome ("add"/"update"/"remove"/"noop"), null on refusal. */
+  actions: Record<ContinuityHookEvent, ContinuityMutationAction | "remove"> | null;
+}
+
+/** Install (or repair to current form) the continuity capture pair. */
+export function installContinuityHooks(opts: InstallHookOptions): ContinuityMutationResult {
+  const { homeDir, harness, agentId, flairUrl } = opts;
+  const dryRun = !!opts.dryRun;
+  const path = hookSettingsPath(homeDir, harness);
+
+  for (const [label, value] of [["agent id", agentId], ["Flair URL", flairUrl]] as const) {
+    if (!isHookCommandValueSafe(value)) {
+      return {
+        ok: false, path, harness, dryRun,
+        message: `${label} '${value}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -) — refusing to write it`,
+        backupPath: null, actions: null,
+      };
+    }
+  }
+
+  if (dryRun) {
+    const read = readSettingsFile(path);
+    if (read.parseError) {
+      return {
+        ok: false, path, harness, dryRun,
+        message: `${read.parseError} — dry run: nothing would be written until this is fixed`,
+        backupPath: null, actions: null,
+      };
+    }
+    const { changed, actions } = computeContinuityHookInstall(read.parsed ?? {}, agentId, flairUrl);
+    const message = changed
+      ? `would wire the continuity capture hooks (PostToolUse: ${actions.PostToolUse}, Stop: ${actions.Stop}) in ${path} (dry run — nothing written)`
+      : `continuity capture hooks already current in ${path} — no changes`;
+    return { ok: true, path, harness, dryRun, message, backupPath: null, actions };
+  }
+
+  let backupPath: string | null = null;
+  if (existsSync(path)) {
+    try {
+      backupPath = takeBackup(path);
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false, path, harness, dryRun,
+        message: `could not back up ${path} before mutating it: ${reason} — refusing to touch it`,
+        backupPath: null, actions: null,
+      };
+    }
+  }
+
+  const read = readSettingsFile(path);
+  if (read.parseError) {
+    return {
+      ok: false, path, harness, dryRun,
+      message: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}` +
+        (backupPath ? `; backup copy at ${backupPath}.` : "."),
+      backupPath, actions: null,
+    };
+  }
+
+  const { changed, actions, newConfig } = computeContinuityHookInstall(read.parsed ?? {}, agentId, flairUrl);
+  if (!changed) {
+    return { ok: true, path, harness, dryRun, message: `continuity capture hooks already current in ${path}`, backupPath, actions };
+  }
+
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
+  return {
+    ok: true, path, harness, dryRun,
+    message: `wired the continuity capture hooks (PostToolUse: ${actions.PostToolUse}, Stop: ${actions.Stop}) in ${path}`,
+    backupPath, actions,
+  };
+}
+
+/** Symmetric removal of the continuity pair — only ours, everything else in
+ *  the file left untouched. A no-op when nothing is installed. */
+export function uninstallContinuityHooks(opts: UninstallHookOptions): ContinuityMutationResult {
+  const { homeDir, harness } = opts;
+  const dryRun = !!opts.dryRun;
+  const path = hookSettingsPath(homeDir, harness);
+
+  if (dryRun) {
+    const read = readSettingsFile(path);
+    if (read.parseError) {
+      return {
+        ok: false, path, harness, dryRun,
+        message: `${read.parseError} — dry run: nothing would be removed until this is fixed`,
+        backupPath: null, actions: null,
+      };
+    }
+    const { changed, actions } = computeContinuityHookRemoval(read.parsed ?? {});
+    const message = changed
+      ? `would remove the continuity capture hooks (PostToolUse: ${actions.PostToolUse}, Stop: ${actions.Stop}) from ${path} (dry run — nothing written)`
+      : `no continuity capture hooks found in ${path} — nothing to remove`;
+    return { ok: true, path, harness, dryRun, message, backupPath: null, actions };
+  }
+
+  let backupPath: string | null = null;
+  if (existsSync(path)) {
+    try {
+      backupPath = takeBackup(path);
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false, path, harness, dryRun,
+        message: `could not back up ${path} before mutating it: ${reason} — refusing to touch it`,
+        backupPath: null, actions: null,
+      };
+    }
+  }
+
+  const read = readSettingsFile(path);
+  if (read.parseError) {
+    return {
+      ok: false, path, harness, dryRun,
+      message: `${read.parseError} — refusing to modify a file we can't safely parse. Original left untouched at ${path}` +
+        (backupPath ? `; backup copy at ${backupPath}.` : "."),
+      backupPath, actions: null,
+    };
+  }
+
+  const { changed, actions, newConfig } = computeContinuityHookRemoval(read.parsed ?? {});
+  if (!changed) {
+    return { ok: true, path, harness, dryRun, message: `no continuity capture hooks found in ${path} — nothing to remove`, backupPath, actions };
+  }
+
+  writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
+  return {
+    ok: true, path, harness, dryRun,
+    message: `removed the continuity capture hooks (PostToolUse + Stop) from ${path}`,
+    backupPath, actions,
+  };
+}
+
+/** Read-only continuity status for `flair hook status` — the same report
+ *  doctor's check consumes, resolved through the harness's settings path. */
+export function continuityHookStatus(homeDir: string, harness: Harness): ContinuityCaptureHookReport {
+  // hookSettingsPath and checkContinuityCaptureHooks both resolve
+  // ~/.claude/settings.json from homeDir; asserting through the harness
+  // registry keeps a future second harness from silently reading the wrong
+  // file.
+  void hookSettingsPath(homeDir, harness);
+  return checkContinuityCaptureHooks(homeDir);
 }

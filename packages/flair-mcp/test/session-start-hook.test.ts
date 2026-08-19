@@ -1,4 +1,7 @@
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, afterEach, beforeEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runHook } from "../src/session-start-hook.ts";
 
 /**
@@ -15,10 +18,24 @@ const MAX_CHARS = 10_000;
 const NOOP = "{}";
 
 const ORIGINAL_AGENT_ID = process.env.FLAIR_AGENT_ID;
+const ORIGINAL_SESSION_DIR = process.env.FLAIR_SESSION_DIR;
+
+// The continuity resume path (flair#1257) writes pointer/state files under
+// FLAIR_SESSION_DIR (default ~/.flair/session). Point it at a per-test temp
+// dir so no test ever touches the real ~/.flair (homeOverride discipline).
+let sessionDir: string;
+
+beforeEach(() => {
+  sessionDir = mkdtempSync(join(tmpdir(), "flair-session-start-test-"));
+  process.env.FLAIR_SESSION_DIR = sessionDir;
+});
 
 afterEach(() => {
   if (ORIGINAL_AGENT_ID === undefined) delete process.env.FLAIR_AGENT_ID;
   else process.env.FLAIR_AGENT_ID = ORIGINAL_AGENT_ID;
+  if (ORIGINAL_SESSION_DIR === undefined) delete process.env.FLAIR_SESSION_DIR;
+  else process.env.FLAIR_SESSION_DIR = ORIGINAL_SESSION_DIR;
+  rmSync(sessionDir, { recursive: true, force: true });
 });
 
 const SAMPLE_INPUT = JSON.stringify({
@@ -186,10 +203,13 @@ describe("session-start hook", () => {
         },
       }));
 
-      expect(presenceCalls).toHaveLength(1);
-      expect(presenceCalls[0].method).toBe("POST");
-      expect(presenceCalls[0].path).toBe("/Presence");
-      expect(presenceCalls[0].body).toEqual({ activity: "coding" }); // no currentTask in the hook payload
+      // The stub's request() also serves the continuity resume search
+      // (flair#1257: POST /Memory/search_by_conditions) — filter to the
+      // presence surface this test is about.
+      const presenceOnly = presenceCalls.filter((c) => c.path === "/Presence");
+      expect(presenceOnly).toHaveLength(1);
+      expect(presenceOnly[0].method).toBe("POST");
+      expect(presenceOnly[0].body).toEqual({ activity: "coding" }); // no currentTask in the hook payload
       // The presence side effect never changes the hook's own output contract.
       const parsed = JSON.parse(out);
       expect(parsed.hookSpecificOutput.additionalContext).toBe("## Identity\nrole: test");

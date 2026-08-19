@@ -78,7 +78,14 @@
 import { FlairClient } from "@tpsdev-ai/flair-client";
 import { basename } from "node:path";
 import { deriveActivity, postPresenceSafe, resolvePresenceTimeoutMs, type PresencePoster } from "./presence.js";
-import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
+import { isProbeMode, readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
+import {
+  buildResumeHint,
+  discoverResume,
+  prepareContinuityBoot,
+  resolveContinuityTimeoutMs,
+  type ContinuityClient,
+} from "./continuity.js";
 
 /** Claude Code SessionStart additionalContext hard limit (chars). */
 const MAX_CHARS = 10_000;
@@ -94,13 +101,36 @@ const TIMEOUT_CEILING_MS = 30_000;
 /** Empty, inert hook output. Printing this is always a safe no-op. */
 const NOOP_OUTPUT = "{}";
 
-/** Shape of the SessionStart payload Claude Code writes to stdin (subset). */
+/** Shape of the SessionStart payload Claude Code writes to stdin (subset).
+ *  The "how did this session start" discriminator has appeared as both
+ *  `source` and `how_started` across harness doc generations — read either. */
 interface SessionStartInput {
   cwd?: string;
   source?: string;
+  how_started?: string;
   session_id?: string;
   [key: string]: unknown;
 }
+
+// ── continuity resume path (flair#1257 slice 2) ─────────────────────────────
+//
+// This hook is the SessionStart half of the continuity adapter (the capture
+// half is ./continuity-capture-hook.ts; the shared core, the boot plumbing
+// (prepareContinuityBoot) and the full design record are in ./continuity.ts).
+// On boot it:
+//   (a) reads the pointer file ~/.flair/session/<agentId>.current — the
+//       prior session, if any (fast path); a missing/unreadable pointer falls
+//       back to an agentId-wide ephemeral search inside discoverResume();
+//   (b) mints a fresh sessionId + processUUID, seeds the per-harness-session
+//       state file the capture hook increments, and rotates the pointer;
+//   (c) emits AT MOST one hint line ("N entries from your previous session —
+//       search tag …") appended to the bootstrap context. Journal CONTENT is
+//       never emitted (agent-pull, scenario S10); zero prior entries ⇒ zero
+//       hint. Flair down ⇒ zero hint, boot proceeds (fail-open).
+//
+// Compaction is NOT a restart: prepareContinuityBoot stays fully inert on a
+// compaction-sourced SessionStart — no rotation, no state-file touch, no
+// hint (scenario S7 holds by construction).
 
 /** Minimal surface of FlairClient this hook depends on (eases testing).
  *  `request` is optional and structurally matches PresencePoster (presence.ts)
@@ -117,14 +147,11 @@ interface BootstrapClient extends Partial<PresencePoster> {
 }
 
 /**
- * Probe mode (flair#1007) — see the module doc. Any non-empty value other
- * than "0" enables it, so `FLAIR_HOOK_PROBE=1` and `FLAIR_HOOK_PROBE=true`
- * both work and an accidentally-empty variable does not.
+ * Probe mode (flair#1007) — see the module doc. The predicate itself moved to
+ * ./env-guard.ts when the continuity capture binary (flair#1257) started
+ * sharing it; re-exported here unchanged so existing importers keep working.
  */
-export function isProbeMode(env: Record<string, string | undefined> = process.env): boolean {
-  const raw = env.FLAIR_HOOK_PROBE;
-  return typeof raw === "string" && raw !== "" && raw !== "0";
-}
+export { isProbeMode };
 
 /** Resolve the bootstrap timeout from env, clamped to a sane range. */
 function resolveTimeoutMs(): number {
@@ -232,6 +259,23 @@ export async function runHook(
         )
       : Promise.resolve();
 
+  // Continuity resume (flair#1257 slice 2) — the local half (pointer read →
+  // mint → rotate → seed capture state) runs unconditionally when applicable;
+  // the search half runs CONCURRENTLY with bootstrap below, bounded by its own
+  // short timeout, and resolves to null (no hint) on any failure. It needs the
+  // signed request() surface; a lightweight bootstrap-only client (tests)
+  // skips it entirely.
+  const continuity = prepareContinuityBoot(input, agentId);
+  const resumeHintDone: Promise<string | null> =
+    continuity.active && typeof client.request === "function"
+      ? withTimeout(
+          discoverResume(client as unknown as ContinuityClient, agentId, continuity.priorPointer).then((result) =>
+            buildResumeHint(result),
+          ),
+          resolveContinuityTimeoutMs(),
+        ).catch(() => null)
+      : Promise.resolve(null);
+
   let context = "";
   try {
     const res = await withTimeout(
@@ -246,16 +290,23 @@ export async function runHook(
     );
     context = res && res.context ? String(res.context) : "";
   } catch {
-    await presenceDone;
-    return NOOP_OUTPUT; // flair unreachable / auth error / timeout → no-op
+    context = ""; // flair unreachable / auth error / timeout → no bootstrap context
   }
 
+  const resumeHint = await resumeHintDone;
   await presenceDone;
 
-  if (!context.trim()) return NOOP_OUTPUT;
-  if (context.length > MAX_CHARS) context = context.slice(0, MAX_CHARS);
+  // Combine: bootstrap context first, then AT MOST one continuity hint line.
+  // Either piece may be absent; both absent ⇒ the inert no-op output.
+  const pieces: string[] = [];
+  if (context.trim()) pieces.push(context);
+  if (resumeHint) pieces.push(resumeHint);
+  if (pieces.length === 0) return NOOP_OUTPUT;
 
-  return hookOutput(context);
+  let combined = pieces.join("\n\n");
+  if (combined.length > MAX_CHARS) combined = combined.slice(0, MAX_CHARS);
+
+  return hookOutput(combined);
 }
 
 /** Default client factory — constructs a real FlairClient from FLAIR_* env,

@@ -168,6 +168,328 @@ export function isFlairHookCommand(command: string): boolean {
   return typeof command === "string" && command.includes("@tpsdev-ai/flair-mcp") && command.includes(SESSION_START_HOOK_MARKER);
 }
 
+// ── the continuity capture hooks (flair#1257 slice 2) ──────────────────────
+//
+// Continuity's write side is a pair of Claude Code hook entries — PostToolUse
+// (mutating tools only, via the matcher below) and Stop — both running the
+// SAME `flair-continuity-capture` binary shipped by @tpsdev-ai/flair-mcp.
+// Same ONE-builder discipline as the SessionStart command above (#1007):
+// every path that writes these entries (`flair doctor --fix`, `flair hook
+// install --continuity` in src/hook-install.ts) goes through
+// buildContinuityCaptureHookCommand, so the invocation's failure behaviour is
+// defined and tested in one place.
+//
+// Unlike the SessionStart command, this one captures NOTHING to re-emit: a
+// PostToolUse/Stop hook's stdout is harness-interpreted surface and the
+// capture binary never has anything to say to it, so the wrapper discards
+// BOTH streams and absorbs failure (`>/dev/null 2>/dev/null || true`). The
+// same #1007 reasoning applies: if the npx resolution breaks, the silence has
+// to be a property of the command string, because the binary's own fail-open
+// guarantee is behind the door that stopped opening. hookCommandIsSilenced()
+// recognizes this shape unchanged.
+//
+// INSTALLING THESE HOOKS IS THE OPT-IN. There is no env flag: an agent whose
+// settings.json carries the pair journals; one that doesn't, doesn't. Doctor
+// therefore reports "absent" as "not enabled" — informational, never a pass,
+// never a failure (see checkContinuityCaptureHooks / cli.ts's rendering).
+
+/** The exact substring identifying a Flair continuity-capture hook command. */
+export const CONTINUITY_CAPTURE_HOOK_MARKER = "flair-continuity-capture";
+
+/**
+ * The PostToolUse matcher written alongside our hook entry — the EXACT
+ * mutating-tool allowlist the capture binary enforces internally
+ * (packages/flair-mcp/src/continuity.ts's MUTATING_TOOLS: Write/Edit/
+ * NotebookEdit mutate file/cell state, Bash can mutate anything; read-only
+ * tools are world-recoverable and journal nothing). The matcher is an
+ * EFFICIENCY (no process spawn for a Read), not the control — the binary's
+ * own allowlist is the control and fires regardless of who spawns it.
+ */
+export const CONTINUITY_POST_TOOL_USE_MATCHER = "Write|Edit|NotebookEdit|Bash";
+
+/**
+ * Build the exact `command` string registered for BOTH continuity hook events
+ * (PostToolUse and Stop run the same binary; the payload's hook_event_name
+ * tells it which fired). Same strict value allow-list as the SessionStart
+ * builder — throws rather than emitting a quoted approximation.
+ */
+export function buildContinuityCaptureHookCommand(agentId: string, flairUrl?: string): string {
+  if (!isHookCommandValueSafe(agentId)) {
+    throw new Error(
+      `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+    );
+  }
+  if (flairUrl != null && flairUrl !== "" && !isHookCommandValueSafe(flairUrl)) {
+    throw new Error(
+      `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+    );
+  }
+  const env = flairUrl ? `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl}` : `FLAIR_AGENT_ID=${agentId}`;
+  const invocation = `${env} npx -y -p @tpsdev-ai/flair-mcp ${CONTINUITY_CAPTURE_HOOK_MARKER}`;
+  return `sh -c '${invocation} >/dev/null 2>/dev/null || true'`;
+}
+
+/** Does this command invoke the Flair continuity-capture binary at all? */
+export function isFlairContinuityCommand(command: string): boolean {
+  return (
+    typeof command === "string" &&
+    command.includes("@tpsdev-ai/flair-mcp") &&
+    command.includes(CONTINUITY_CAPTURE_HOOK_MARKER)
+  );
+}
+
+/** The two hook events continuity registers under. */
+export const CONTINUITY_HOOK_EVENTS = ["PostToolUse", "Stop"] as const;
+export type ContinuityHookEvent = (typeof CONTINUITY_HOOK_EVENTS)[number];
+
+/**
+ * installed  — both entries present, both in the current (silenced) form,
+ *              PostToolUse carrying the expected matcher.
+ * absent     — neither entry present. This is "not enabled": the feature is
+ *              opt-in, so absence is informational — NEVER rendered as a pass
+ *              (that would be an unrun check dressed as a green one) and never
+ *              as a failure.
+ * partial    — exactly one of the two entries present (a half-install: capture
+ *              without Stop journals actions but never intent, and vice
+ *              versa). A stale-form face; fixable.
+ * stale      — both present but at least one is not the current form (unsilenced,
+ *              hand-altered invocation, or a drifted PostToolUse matcher).
+ */
+export type ContinuityHookState = "installed" | "absent" | "partial" | "stale";
+
+export interface ContinuityHookEventReport {
+  present: boolean;
+  command?: string;
+  /** PostToolUse only — the matcher on the group carrying our entry. */
+  matcher?: string;
+  /** Present AND the exact shape we write today (silenced wrapper, unpinned
+   *  npx invocation, and — for PostToolUse — the expected matcher). */
+  currentForm: boolean;
+}
+
+export interface ContinuityCaptureHookReport {
+  path: string;
+  postToolUse: ContinuityHookEventReport;
+  stop: ContinuityHookEventReport;
+  state: ContinuityHookState;
+}
+
+function findContinuityEntry(config: any, event: ContinuityHookEvent): { group: any; hookIndex: number; groupIndex: number } | null {
+  const groups = config?.hooks?.[event];
+  if (!Array.isArray(groups)) return null;
+  for (let gi = 0; gi < groups.length; gi++) {
+    const hooks = groups[gi]?.hooks;
+    if (!Array.isArray(hooks)) continue;
+    for (let hi = 0; hi < hooks.length; hi++) {
+      if (typeof hooks[hi]?.command === "string" && hooks[hi].command.includes(CONTINUITY_CAPTURE_HOOK_MARKER)) {
+        return { group: groups[gi], hookIndex: hi, groupIndex: gi };
+      }
+    }
+  }
+  return null;
+}
+
+function continuityEventReport(config: any, event: ContinuityHookEvent): ContinuityHookEventReport {
+  const found = findContinuityEntry(config, event);
+  if (!found) return { present: false, currentForm: false };
+  const hook = found.group.hooks[found.hookIndex];
+  const command: string = typeof hook?.command === "string" ? hook.command : "";
+  const matcher: string | undefined = typeof found.group?.matcher === "string" ? found.group.matcher : undefined;
+  const shapeOk =
+    hook?.type === "command" &&
+    command.includes(`npx -y -p @tpsdev-ai/flair-mcp ${CONTINUITY_CAPTURE_HOOK_MARKER}`) &&
+    hookCommandIsSilenced(command);
+  const matcherOk = event !== "PostToolUse" || matcher === CONTINUITY_POST_TOOL_USE_MATCHER;
+  return { present: true, command, matcher, currentForm: shapeOk && matcherOk };
+}
+
+/**
+ * Doctor's check-5 twin of checkSessionStartHook for the continuity pair —
+ * pure fs read, no probe. A missing or unparseable settings.json reads as
+ * "absent" (not enabled), matching checkSessionStartHook's tolerance.
+ */
+export function checkContinuityCaptureHooks(homeDir: string): ContinuityCaptureHookReport {
+  const path = join(homeDir, ".claude", "settings.json");
+  let config: any = {};
+  const raw = readTextFile(path);
+  if (raw && raw.trim()) {
+    try {
+      config = JSON.parse(raw);
+    } catch {
+      config = {};
+    }
+  }
+  const postToolUse = continuityEventReport(config, "PostToolUse");
+  const stop = continuityEventReport(config, "Stop");
+  let state: ContinuityHookState;
+  if (!postToolUse.present && !stop.present) state = "absent";
+  else if (!postToolUse.present || !stop.present) state = "partial";
+  else if (postToolUse.currentForm && stop.currentForm) state = "installed";
+  else state = "stale";
+  return { path, postToolUse, stop, state };
+}
+
+export type ContinuityMutationAction = "add" | "update" | "noop";
+
+/**
+ * Pure merge of the continuity pair into a parsed settings object — the ONE
+ * mutation core both write paths (`flair doctor --fix` via
+ * fixContinuityCaptureHooks below, `flair hook install --continuity` via
+ * src/hook-install.ts) share. Idempotent: re-running with unchanged inputs is
+ * a structural no-op. Only OUR entries are ever touched — sibling hooks,
+ * groups and keys are preserved byte-identical; a group we don't own keeps
+ * its matcher (our binary's internal allowlist still filters — the matcher is
+ * an efficiency, not the control).
+ */
+export function computeContinuityHookInstall(
+  config: any,
+  agentId: string,
+  flairUrl?: string,
+): { changed: boolean; actions: Record<ContinuityHookEvent, ContinuityMutationAction>; newConfig: any } {
+  const command = buildContinuityCaptureHookCommand(agentId, flairUrl);
+  const newConfig = JSON.parse(JSON.stringify(config ?? {}));
+  const actions = { PostToolUse: "noop", Stop: "noop" } as Record<ContinuityHookEvent, ContinuityMutationAction>;
+  let changed = false;
+
+  newConfig.hooks = newConfig.hooks && typeof newConfig.hooks === "object" && !Array.isArray(newConfig.hooks) ? newConfig.hooks : {};
+
+  for (const event of CONTINUITY_HOOK_EVENTS) {
+    const existing = findContinuityEntry(newConfig, event);
+    if (existing) {
+      const hook = existing.group.hooks[existing.hookIndex];
+      const soleOwner = existing.group.hooks.length === 1;
+      const wantMatcher = event === "PostToolUse" && soleOwner;
+      const matcherCurrent = !wantMatcher || existing.group.matcher === CONTINUITY_POST_TOOL_USE_MATCHER;
+      if (hook.command === command && hook.type === "command" && matcherCurrent) continue;
+      existing.group.hooks[existing.hookIndex] = { type: "command", command };
+      if (wantMatcher) existing.group.matcher = CONTINUITY_POST_TOOL_USE_MATCHER;
+      actions[event] = "update";
+      changed = true;
+      continue;
+    }
+    newConfig.hooks[event] = Array.isArray(newConfig.hooks[event]) ? newConfig.hooks[event] : [];
+    const group: any = { hooks: [{ type: "command", command }] };
+    if (event === "PostToolUse") group.matcher = CONTINUITY_POST_TOOL_USE_MATCHER;
+    newConfig.hooks[event].push(group);
+    actions[event] = "add";
+    changed = true;
+  }
+
+  return { changed, actions, newConfig };
+}
+
+/**
+ * Pure removal of the continuity pair — deletes ONLY our entries (marker
+ * substring match, exactly how install finds them), then prunes any group /
+ * event array / `hooks` key left empty by that removal. Never touches
+ * anything else.
+ */
+export function computeContinuityHookRemoval(config: any): {
+  changed: boolean;
+  actions: Record<ContinuityHookEvent, "remove" | "noop">;
+  newConfig: any;
+} {
+  const newConfig = JSON.parse(JSON.stringify(config ?? {}));
+  const actions = { PostToolUse: "noop", Stop: "noop" } as Record<ContinuityHookEvent, "remove" | "noop">;
+  let changed = false;
+
+  for (const event of CONTINUITY_HOOK_EVENTS) {
+    const existing = findContinuityEntry(newConfig, event);
+    if (!existing) continue;
+    existing.group.hooks.splice(existing.hookIndex, 1);
+    if (existing.group.hooks.length === 0) {
+      newConfig.hooks[event].splice(existing.groupIndex, 1);
+    }
+    if (newConfig.hooks[event].length === 0) {
+      delete newConfig.hooks[event];
+    }
+    actions[event] = "remove";
+    changed = true;
+  }
+  if (changed && newConfig.hooks && typeof newConfig.hooks === "object" && Object.keys(newConfig.hooks).length === 0) {
+    delete newConfig.hooks;
+  }
+  return { changed, actions, newConfig };
+}
+
+/**
+ * `flair doctor --fix` write path: register (or repair to current form) the
+ * continuity pair in ~/.claude/settings.json. Merge-safe read-parse-write,
+ * mirroring fixSessionStartHook — creates the file if absent, refuses on a
+ * file it cannot parse.
+ */
+export function fixContinuityCaptureHooks(
+  homeDir: string,
+  agentId: string | undefined,
+  flairUrl?: string,
+): { ok: boolean; path: string; message: string; changed: boolean } {
+  const path = join(homeDir, ".claude", "settings.json");
+  if (!agentId) {
+    return {
+      ok: false,
+      path,
+      changed: false,
+      message: "no agent id known — pass --agent <id> (or set FLAIR_AGENT_ID) so doctor knows which agent to wire the continuity hooks to",
+    };
+  }
+  if (!isHookCommandValueSafe(agentId)) {
+    return {
+      ok: false,
+      path,
+      changed: false,
+      message: `agent id '${agentId}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+    };
+  }
+  if (flairUrl != null && flairUrl !== "" && !isHookCommandValueSafe(flairUrl)) {
+    return {
+      ok: false,
+      path,
+      changed: false,
+      message: `Flair URL '${flairUrl}' contains characters that cannot be safely written into a shell hook command (allowed: letters, digits, . _ : / -)`,
+    };
+  }
+  try {
+    let config: any = {};
+    const raw = readTextFile(path);
+    if (raw && raw.trim()) config = JSON.parse(raw);
+    const { changed, newConfig } = computeContinuityHookInstall(config, agentId, flairUrl);
+    if (!changed) {
+      return { ok: true, path, changed: false, message: `continuity capture hooks already current in ${path}` };
+    }
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
+    return { ok: true, path, changed: true, message: `wired the continuity capture hooks (PostToolUse + Stop) in ${path} (agent '${agentId}')` };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false, path, changed: false, message: `could not write ${path}: ${reason}` };
+  }
+}
+
+/**
+ * Symmetric removal path (`flair doctor --fix` when disabling / `flair hook
+ * uninstall --continuity`). A no-op when nothing is wired — never creates a
+ * file that didn't exist, refuses on a file it cannot parse.
+ */
+export function removeContinuityCaptureHooks(homeDir: string): { ok: boolean; path: string; message: string; changed: boolean } {
+  const path = join(homeDir, ".claude", "settings.json");
+  const raw = readTextFile(path);
+  if (!raw || !raw.trim()) {
+    return { ok: true, path, changed: false, message: `no ${path} — continuity capture hooks are not enabled` };
+  }
+  try {
+    const config = JSON.parse(raw);
+    const { changed, newConfig } = computeContinuityHookRemoval(config);
+    if (!changed) {
+      return { ok: true, path, changed: false, message: `no continuity capture hooks found in ${path} — nothing to remove` };
+    }
+    writeFileSync(path, JSON.stringify(newConfig, null, 2) + "\n");
+    return { ok: true, path, changed: true, message: `removed the continuity capture hooks (PostToolUse + Stop) from ${path}` };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false, path, changed: false, message: `could not update ${path}: ${reason}` };
+  }
+}
+
 // ── shared helpers ──────────────────────────────────────────────────────────
 
 /**
