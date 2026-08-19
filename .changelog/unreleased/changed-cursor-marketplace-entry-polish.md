@@ -1,1 +1,0 @@
-- **Cursor marketplace entry: optional `category` and `version` fields added** to the plugin entry in `.cursor-plugin/marketplace.json`, per Cursor's marketplace submission checklist. No functional change.
