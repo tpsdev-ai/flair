@@ -316,10 +316,9 @@ describe("flair#1152 garbage value: FLAIR_MCP_OAUTH=maybe", () => {
 
       // The AS-metadata path answers 200 — but it is FLAIR'S OWN discovery
       // document (oauth-discovery.ts serves it whenever the strict flag is
-      // off), NOT the component's AS. Flair's document names the in-process
-      // /OAuthToken endpoint; the component's names its own /oauth/mcp path.
-      // If the component's AS ever mounts for a garbage value again
-      // (vocabulary widened back to truthy-string), this discriminator flips.
+      // off — it SHADOWS the component's well-known handlers in that state,
+      // so this document alone cannot reveal whether the component mounted).
+      // Flair's document names the in-process /OAuthToken endpoint.
       const metaRes = await fetch(
         `${harper.httpURL}/.well-known/oauth-authorization-server`,
         { signal: AbortSignal.timeout(10_000) },
@@ -327,6 +326,19 @@ describe("flair#1152 garbage value: FLAIR_MCP_OAUTH=maybe", () => {
       expect(metaRes.status).toBe(200);
       const meta = await metaRes.json();
       expect(String(meta.token_endpoint)).toContain("/OAuthToken");
+
+      // THE component-mount tripwire: /oauth/mcp/* is dispatched by the
+      // component itself (never shadowed by flair) and its dispatcher
+      // answers 404 whenever mcp.enabled is falsy (existence-hiding,
+      // dist/lib/mcp/index.js handleMCPGet). Garbage was DELETED by
+      // normalizeBooleanField -> disabled -> 404 here. If the component's
+      // vocabulary ever widens back to truthy-string, this becomes a live
+      // authorize endpoint (non-404) and THIS assertion fires.
+      const authorizeRes = await fetch(
+        `${harper.httpURL}/oauth/mcp/authorize`,
+        { signal: AbortSignal.timeout(10_000) },
+      );
+      expect(authorizeRes.status).toBe(404);
 
       // flair side: mcpOAuthEnabled() is strict — no /mcp handler was
       // registered. 404, not 401 (mounted+guarded) and not 500 (degraded).
