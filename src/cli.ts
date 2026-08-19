@@ -7222,6 +7222,11 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     }
 
     let totalBatches = 0;
+    // Memory rows that passed the since-cursor filter but were excluded as
+    // private. Used only so the quiet path can distinguish "nothing since
+    // the cursor" from "found rows, all withheld" (flair#1232). Does not
+    // change what gets pushed — private still never leaves the instance.
+    let privateHeldBack = 0;
 
     for (const table of tables) {
       let rows: any[] = [];
@@ -7255,11 +7260,10 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         // filter only applies there; on the other 3 tables `row.visibility`
         // is always undefined, which isFederationPrivateVisibility() treats
         // as non-private (included) — a no-op for them.
-        rows = rows.concat(
-          batch
-            .filter((r: any) => r.updatedAt !== null || r.createdAt > since)
-            .filter((r: any) => table !== "Memory" || !isFederationPrivateVisibility(r.visibility)),
-        );
+        const sinceCursor = batch.filter((r: any) => r.updatedAt !== null || r.createdAt > since);
+        const federable = sinceCursor.filter((r: any) => table !== "Memory" || !isFederationPrivateVisibility(r.visibility));
+        if (table === "Memory") privateHeldBack += sinceCursor.length - federable.length;
+        rows = rows.concat(federable);
       }
       if (rows.length === 0) continue;
 
@@ -7384,7 +7388,15 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         console.warn(`⚠️  Liveness ping error: ${pingErr?.message ?? pingErr}. Hub won't update spoke liveness.`);
       }
 
-      console.log("No changes since last sync.");
+      // flair#1232: "No changes" is true only when nothing was found since
+      // the cursor. If rows were found and every one was withheld as private,
+      // say so — count and reason only, never content. A zero withheld count
+      // must not invent a private-withheld story.
+      console.log(
+        privateHeldBack > 0
+          ? `No federable changes since last sync (${privateHeldBack} row${privateHeldBack === 1 ? "" : "s"} held back: private visibility).`
+          : "No changes since last sync.",
+      );
       return { pushed: 0, skipped: 0 };
     }
 
