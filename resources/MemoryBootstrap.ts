@@ -85,7 +85,19 @@ import { estimateTokens } from "./token-estimate.js";
  *   { context, sections, tokenEstimate, maxTokens, memoriesIncluded, memoriesAvailable,
  *     memoriesTruncated, teammateFindingsIncluded, teammateFindingsTruncated,
  *     teammateFindingsMatched, agentId, scope, soul, memories, predicted,
- *     teammateFindings, events[, currentTaskHint][, predictedHint] }
+ *     teammateFindings, events, soulTokens, memoryTokens, trustTokens,
+ *     eventsTokens, scaffoldTokens[, currentTaskHint][, predictedHint] }
+ *
+ *   TOKEN LEDGER (flair#1270): the counters decompose `tokenEstimate` from the
+ *   payload alone —
+ *     tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens + trustTokens
+ *                     + eventsTokens
+ *   Each figure is measured from what SHIPS (never derived as a residual), so
+ *   a section that ships uncounted content breaks the identity visibly instead
+ *   of hiding in an unexplained gap. See the ledger block in the response tail
+ *   for each counter's definition and the documented ≈ tolerance (the #1207
+ *   prose-vs-structured measurement decoupling on the connector path; the
+ *   structured mirror on the prose path).
  *   The self-describing keys (flair#1182 part 1) — `agentId` (resolved caller),
  *   `scope` (read model applied to the caller), `soul`/`memories`/`predicted`
  *   (the caller's OWN records as structured containers), and `currentTaskHint`
@@ -1438,6 +1450,34 @@ export class BootstrapMemories extends Resource {
           : `Structured payload in soul/memories/predicted/teammateFindings `
             + `(${memoriesIncluded} own + ${teammateFindingsIncluded} teammate memories, `
             + `${sections.soul.length} soul entries). Pass includeContext:true for the assembled prose context.`);
+    // ── The payload token LEDGER (flair#1270) ────────────────────────────────
+    //
+    // IDENTITY (documented here because the counters are declared here; the
+    // identity lives in the RESPONSE SCHEMA, not tests-only — a test-only
+    // counter doesn't prevent silent regression, per Kern's #1270 ruling):
+    //
+    //   tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens
+    //                   + trustTokens + eventsTokens
+    //
+    // Every token-charged content class has a named counter, so a consumer can
+    // decompose `tokenEstimate` FROM THE PAYLOAD ALONE and any future section
+    // that ships uncounted content shows up as a residual the reported figures
+    // don't explain — the ~1178-token "uncounted" gap the nairmy field rounds
+    // decomposed on 0.44.11/0.44.13 (trust blocks charged at admission since
+    // #1240, but absent from the reported counters) is structurally impossible
+    // to reintroduce silently.
+    //
+    // The ≈ gap on the connector path (includeContext=false) is the documented
+    // measurement/budgeting decoupling (#1207): soulTokens/memoryTokens count
+    // the rendered PROSE lines while the containers ship the heavier
+    // STRUCTURED objects (per-item id/timestamps/keys + JSON string escaping),
+    // so the sum runs BELOW tokenEstimate by that bounded per-item overhead —
+    // never above it (beyond per-line ceil rounding). On the prose path
+    // (includeContext=true) the payload additionally carries the full prose
+    // `context` beside the structured mirror, so the gap legitimately widens by
+    // that mirror — the same documented overage as the CAP CONTRACT above.
+    // None of these counters is a residual: each is measured from what ships,
+    // so the identity CAN fail — that is the point.
     const soulTokens = sections.soul.reduce((sum, line) => sum + estimateTokens(line), 0);
     // #1199 — memory-line token spend (informational breakdown), independent of
     // the reserve/soul now sharing the budget. Sum of the rendered memory lines.
@@ -1445,6 +1485,20 @@ export class BootstrapMemories extends Resource {
       ...sections.permanent, ...sections.recent, ...sections.predicted,
       ...sections.relevant, ...sections.teammate,
     ].reduce((sum, line) => sum + estimateTokens(line), 0);
+    // flair#1270 — the trust array's token spend: Σ estimateTokens(JSON) over
+    // the SHIPPED trust entries. Same builder (buildTrustEntry) and same
+    // formula as the per-entry `trustCost` the five admission sites charged
+    // (#1240), so the reported figure and the admission charge cannot drift.
+    // Always present; 0 when includeTrust is off (the counter convention:
+    // "empty" is reported, never absent).
+    const trustTokens = includedTrustMemories.reduce(
+      (sum, entry) => sum + estimateTokens(JSON.stringify(entry)), 0);
+    // flair#1270 — the events container's token spend: Σ estimateTokens(JSON)
+    // over the SHIPPED structured events — exactly the per-event cost the
+    // events admission loop charged (#1199). Same reporting hole-class as
+    // trust: charged content with no counter would be invisible in the ledger.
+    const eventsTokens = includedEvents.reduce(
+      (sum, evt) => sum + estimateTokens(JSON.stringify(evt)), 0);
 
     // flair#744 slice 1 — opt-in per-memory trust block. Bootstrap renders
     // memories as text lines rather than result objects, so the block is
@@ -1588,6 +1642,11 @@ export class BootstrapMemories extends Resource {
       },
       soulTokens,
       memoryTokens,
+      // flair#1270 — the remaining ledger terms (see the IDENTITY block above,
+      // where these counters are computed): trust and events content, so every
+      // token-charged content class is decomposable from the payload alone.
+      trustTokens,
+      eventsTokens,
       // flair#1199 — the content-selection budget this response was built
       // against (echoed so a connector can relate tokenEstimate to the budget it
       // asked for — and so the conformance tokenEstimate<=maxTokens invariant is
@@ -1638,6 +1697,29 @@ export class BootstrapMemories extends Resource {
     // regression (it dropped relevant findings, charging a flat per-item overhead
     // against the content budget). If the real payload consistently overruns for
     // a use case, raise `maxTokens`.
+    // flair#1270 — scaffoldTokens: the fixed structural frame, measured
+    // DIRECTLY (never derived as tokenEstimate-minus-the-other-counters — a
+    // residual would silently absorb any future uncounted content, defeating
+    // the ledger's whole purpose). Measured as the serialized body with every
+    // CONTENT container emptied: what remains is exactly the module-doc's
+    // "fixed JSON scaffolding" — container keys/braces, the counters, the
+    // sections map, scope, hints. Cheap: one JSON.stringify of a small object.
+    // The spread-then-override keeps key order identical to the delivered
+    // body, so a consumer can reconstruct this figure exactly from the
+    // payload: empty the same content fields, drop scaffoldTokens /
+    // tokenEstimate / the wrapper-injected flairVersion (all appended AFTER
+    // this measurement), and re-run the same estimator.
+    const scaffoldSkeleton: Record<string, unknown> = {
+      ...responseBody,
+      context: "",
+      soul: {},
+      memories: [],
+      predicted: [],
+      teammateFindings: [],
+      events: [],
+      ...(trust ? { trust: [] } : {}),
+    };
+    responseBody.scaffoldTokens = estimateTokens(JSON.stringify(scaffoldSkeleton));
     const tokenEstimate = estimateTokens(JSON.stringify(responseBody));
     return { ...responseBody, tokenEstimate };
   }
