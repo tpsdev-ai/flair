@@ -14324,6 +14324,79 @@ program
       }
     }
 
+    // 10. Scheduled drivers (flair#1278) — launchd/systemd liveness for the
+    // background schedulers (federation sync, REM nightly), read from the
+    // LOCAL service manager (no Harper dependency, so no harperResponding
+    // gate). Neither #1231 fleet incident (launchd spawn error 209 from a
+    // missing log dir, exit 126 from a stripped exec bit) was visible in
+    // doctor: driver health only surfaced in `flair federation sync status`
+    // / `flair rem nightly status` — commands an operator has to think to
+    // run, while doctor is the tool they actually run when something feels
+    // off. Reuses each scheduler's own status read (installed + genuinely
+    // loaded, flair#850) plus the #1282 last-exit plumbing
+    // (queryLastExitStatus); the verdict is describeScheduledDriverFinding
+    // (src/lib/scheduler-platform.ts) — pure decision logic, unit-tested
+    // without spawning launchctl/systemctl. Not-enabled renders as
+    // informational: an unenabled scheduler is a choice — never the pass
+    // marker, never the fail marker, never an issue.
+    console.log(`\n  ${render.wrap(render.c.bold, "Scheduled drivers")}`);
+    try {
+      const { queryLastExitStatus, describeScheduledDriverFinding } = await import("./lib/scheduler-platform.js");
+      const fedSched = await import("./federation/scheduler.js");
+      const remSched = await import("./rem/scheduler.js");
+      const guiDomain = `gui/${process.getuid?.() ?? ""}`;
+      const drivers = [
+        {
+          status: fedSched.schedulerStatus(),
+          label: "Federation sync driver",
+          enableCommand: "flair federation sync enable",
+          statusCommand: "flair federation sync status",
+          darwinTarget: `${guiDomain}/${fedSched.LAUNCHD_LABEL}`,
+          linuxServiceUnit: fedSched.SYSTEMD_SERVICE_UNIT,
+          stderrLogPath: join(homedir(), ".flair", "logs", "federation-sync.stderr.log"),
+        },
+        {
+          status: remSched.schedulerStatus(),
+          label: "REM nightly driver",
+          enableCommand: "flair rem nightly enable",
+          statusCommand: "flair rem nightly status",
+          darwinTarget: `${guiDomain}/${remSched.LAUNCHD_LABEL}`,
+          linuxServiceUnit: remSched.SYSTEMD_SERVICE_UNIT,
+          stderrLogPath: join(homedir(), ".flair", "logs", "rem-nightly.stderr.log"),
+        },
+      ];
+      for (const d of drivers) {
+        // Read the last run only when the service manager actually has the
+        // job — "not installed" and "not loaded" carry their own findings,
+        // and layering a last-exit read on top would blur which actor failed.
+        const lastExit = d.status.installed && d.status.active === true
+          ? queryLastExitStatus({ plat: d.status.platform, darwinTarget: d.darwinTarget, linuxServiceUnit: d.linuxServiceUnit })
+          : null;
+        const finding = describeScheduledDriverFinding({
+          label: d.label,
+          enableCommand: d.enableCommand,
+          statusCommand: d.statusCommand,
+          installed: d.status.installed,
+          active: d.status.active,
+          lastExit,
+          stderrLogPath: d.stderrLogPath,
+        });
+        console.log(`  ${render.icons[finding.icon]} ${finding.message}`);
+        finding.detail.forEach((line, i) => {
+          // Embed-verify degraded style: the actor+state line loud (red),
+          // the remedy dim.
+          const color = finding.state === "degraded" && i === 0 ? render.c.red : render.c.dim;
+          console.log(`     ${render.wrap(color, line)}`);
+        });
+        if (finding.isIssue) issues++;
+      }
+    } catch (err: any) {
+      // An unsupported platform (neither darwin nor linux) or a broken unit
+      // read must not take down doctor — report the section as unchecked
+      // (UNVERIFIED, not a pass), same as the other probes' skip discipline.
+      console.log(`  ${render.icons.warn} Scheduled drivers: could not check ${render.wrap(render.c.dim, `(${err?.message ?? err})`)}`);
+    }
+
     // Summary — see summarizeDoctorRun above (flair#721): distinguishes
     // issues --fix actually resolved this run from ones still outstanding.
     console.log("");
