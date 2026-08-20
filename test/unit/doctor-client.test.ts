@@ -71,16 +71,35 @@ describe("readClientMcpBlock", () => {
     expect(res.flairUrl).toBe("http://127.0.0.1:9926");
   });
 
-  it("claude-code: not present when the block exists but is missing FLAIR_URL", () => {
+  it("claude-code: PRESENT (URL defaulted) when the block has FLAIR_AGENT_ID but no FLAIR_URL (flair#1287)", () => {
+    // This test used to assert present:false — encoding the flair#1287
+    // false-negative: flair-client treats FLAIR_URL as optional (falls back
+    // to its DEFAULT_URL), so a URL-less block is a working setup and doctor
+    // must not demand a var the client doesn't need.
     writeFileSync(
       join(isoHome, ".claude.json"),
       JSON.stringify({ mcpServers: { flair: { command: "npx", env: { FLAIR_AGENT_ID: "me" } } } }),
     );
     const res = readClientMcpBlock("claude-code", isoHome);
-    expect(res.present).toBe(false);
-    // Partial info still surfaced.
+    expect(res.present).toBe(true);
+    expect(res.urlDefaulted).toBe(true);
     expect(res.agentId).toBe("me");
     expect(res.flairUrl).toBeUndefined();
+  });
+
+  it("claude-code: NOT present when the block is missing FLAIR_AGENT_ID (URL alone is not a working setup)", () => {
+    // Positive control for the flair#1287 relaxation: only FLAIR_URL became
+    // optional. FLAIR_AGENT_ID is genuinely required (flair-mcp refuses to
+    // start without one), so a block carrying only a URL stays not-present.
+    writeFileSync(
+      join(isoHome, ".claude.json"),
+      JSON.stringify({ mcpServers: { flair: { command: "npx", env: { FLAIR_URL: "http://127.0.0.1:9926" } } } }),
+    );
+    const res = readClientMcpBlock("claude-code", isoHome);
+    expect(res.present).toBe(false);
+    expect(res.urlDefaulted).toBeFalsy();
+    // Partial info still surfaced.
+    expect(res.flairUrl).toBe("http://127.0.0.1:9926");
   });
 
   it("claude-code: not present (never throws) on malformed JSON", () => {
