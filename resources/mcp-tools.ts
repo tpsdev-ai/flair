@@ -679,6 +679,58 @@ export interface ToolInvariants {
    */
   countCoherence?: Array<{ included: string; truncated: string; available: string }>;
   /**
+   * flair#1290 — the 0.44.11 "populated-or-hint" property (flair#1182's
+   * empty-container generalization), previously asserted nowhere. Each entry
+   * names a hint field and the EXACT condition under which the handler emits
+   * it; the hint must be PRESENT (a non-empty string) exactly when that
+   * condition holds and ABSENT otherwise — a hint beside a populated container
+   * is as wrong as a missing hint beside an empty one.
+   *
+   * The emission conditions are NOT uniformly "container is empty" (see the
+   * hint block in resources/MemoryBootstrap.ts, just before the response
+   * tail), so the entry shape encodes the real contract:
+   *   - eventsHint / teammateFindingsHint — present exactly when their
+   *     container array ships empty (`container` alone).
+   *   - predictedHint — present exactly when `predicted` ships empty AND the
+   *     caller actually requested subjects (`requiresNonEmptyArrayArg:
+   *     "subjects"`): an empty `predicted` with no subjects asked for needs
+   *     no explanation, so no hint ships.
+   *   - currentTaskHint — keyed to the REQUEST, not a container
+   *     (`presentWhenStringArgBlank: "currentTask"`): present exactly when no
+   *     usable currentTask was provided (absent, non-string, or blank after
+   *     trim) — the hint teaches the caller the knob exists.
+   * Entries that reference request args require the conformance suite to hand
+   * conform() the args the tool was driven with; conform() fails LOUDLY when
+   * they are missing rather than skipping the entry — an unrun check must not
+   * look like a pass.
+   */
+  hintWhenEmpty?: Array<{
+    /** Hint field name on the result object (e.g. "eventsHint"). */
+    hint: string;
+    /** Result-array path whose emptiness gates the hint. */
+    container?: string;
+    /** The hint additionally requires this request arg to be a non-empty array. */
+    requiresNonEmptyArrayArg?: string;
+    /** Request-keyed hint: present exactly when this string arg is absent/blank. */
+    presentWhenStringArgBlank?: string;
+  }>;
+  /**
+   * flair#1290 — the #1200 render filter as a SEMANTIC invariant: no event the
+   * wrapper's OWN zero-row no-op classifier (isZeroRowNoOpEvent,
+   * resources/memory-bootstrap-lib.ts) flags may appear in `container`.
+   * Previously the suite pinned this to hardcoded fixture strings
+   * ("graph-heal", "0 rows processed"), which tracked the fixture rather than
+   * the classification. The suite asserts it two ways, because delivered
+   * events are LEAN at the /mcp default (no `detail`, which the classifier
+   * needs): (a) the classifier over each DELIVERED element — bites on the
+   * includeEventDetail path; (b) the classifier over the suite's RAW seeded
+   * rows — none of the ids IT classifies as no-ops may have shipped — which
+   * bites on the lean path too. The call site keeps a positive control (the
+   * fixture must contain rows the classifier actually flags), so the check
+   * can never go vacuously green.
+   */
+  noOpEventsSuppressed?: { container: string };
+  /**
    * At the /mcp default the prose `field` (context) must be a compact POINTER,
    * never a second copy of the structured bodies — the structured containers
    * are canonical; prose is opt-in via includeContext (flair#1199). The suite
@@ -1050,12 +1102,40 @@ export const TOOLS: Record<string, ToolEntry> = {
         // tolerance covers the fixed JSON scaffolding + the #1207 prose-vs-
         // structured charge gap; uncounted content does not fit under it.
         budgetCap: { estimate: "tokenEstimate", budget: "maxTokens", tolerance: 0.25 },
-        // #1207 — count arithmetic: included + truncated <= available, for own
-        // memories AND teammate findings (each a disjoint split of its pool).
+        // #1207 — count arithmetic: included + truncated <= available. The
+        // own-memory triple CAN fail: memoriesAvailable comes from an
+        // independent count query, so a double-counted memory breaks it.
         countCoherence: [
           { included: "memoriesIncluded", truncated: "memoriesTruncated", available: "memoriesAvailable" },
-          { included: "teammateFindingsIncluded", truncated: "teammateFindingsTruncated", available: "teammateFindingsMatched" },
+          // flair#1290 — the teammate triple ({ teammateFindingsIncluded,
+          // teammateFindingsTruncated, teammateFindingsMatched }) is
+          // deliberately NOT here. teammateFindingsMatched is DEFINED as
+          // included + truncated (informational-derived — see the note at its
+          // definition in resources/MemoryBootstrap.ts), so the entry asserted
+          // X <= X: permanently green by construction. An invariant that
+          // cannot fail is decorative, and a decorative entry in this array
+          // misrepresents the coverage the suite provides. K&S ruling on
+          // #1290: drop it rather than adding an independently-measured pool
+          // tally (a new counter that would itself need an invariant); the
+          // trust path's real protections are budgetCap plus the own-memory
+          // triple above, now exercised under includeTrust:true.
         ],
+        // flair#1290 — populated-or-hint (#1182's 0.44.11 rule, previously
+        // asserted nowhere): every structured container that ships empty
+        // carries its "why" hint, and no hint ships beside a populated
+        // container. Conditions per the hintWhenEmpty type doc — predictedHint
+        // additionally requires subjects to have been requested;
+        // currentTaskHint keys off the request, not a container.
+        hintWhenEmpty: [
+          { hint: "eventsHint", container: "events" },
+          { hint: "teammateFindingsHint", container: "teammateFindings" },
+          { hint: "predictedHint", container: "predicted", requiresNonEmptyArrayArg: "subjects" },
+          { hint: "currentTaskHint", presentWhenStringArgBlank: "currentTask" },
+        ],
+        // flair#1290 — nothing the wrapper's own classifier calls a zero-row
+        // no-op ships as an event (#1200 render filter as a semantic class,
+        // not hardcoded fixture strings).
+        noOpEventsSuppressed: { container: "events" },
         // #1199 — prose is a pointer at the default, not a second copy.
         proseContextIsPointerAtDefault: { field: "context" },
         // shape of the structured containers a connector reads; #1188 leak bites on memories.

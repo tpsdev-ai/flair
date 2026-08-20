@@ -50,11 +50,17 @@ import {
   checkContractCompleteness,
   type ToolContract,
 } from "../../resources/mcp-tools";
-// The wrapper's OWN token estimator (harper-free single source) — the
-// tokenEstimate invariant reconstructs the estimate with the SAME function the
-// handler used, so it catches the #1199 double-serialization class without
-// being brittle to a future estimator change (Kern #1 / Sherlock #2).
-import { estimateTokens } from "../../resources/token-estimate";
+// The contract-driven assertion engine — extracted to a shared helper
+// (flair#1290) so the large-store workout (bootstrap-large-store-conformance
+// .test.ts) runs the SAME full contract instead of a drift-prone subset.
+import { conform, has } from "../helpers/mcp-conformance";
+// flair#1290 — the wrapper's OWN zero-row no-op classifier: the
+// noOpEventsSuppressed invariant asserts against ITS classification of the
+// seeded/delivered rows, not against hardcoded fixture strings (which tracked
+// the fixture, not the semantic class the #1200 filter suppresses). Imported
+// here for the POSITIVE CONTROL (the fixture must seed rows it actually
+// flags); the invariant itself runs inside conform().
+import { isZeroRowNoOpEvent } from "../../resources/memory-bootstrap-lib";
 
 const REPO_ROOT = process.cwd();
 const FIXTURE = join(REPO_ROOT, "test", "fixtures", "inproc-app");
@@ -78,6 +84,12 @@ const AGENT_BUDGET = `mcpconf-budget-${sfx}`;
 // counters are unique-id sets (included:1, truncated:0); reverting it double-
 // counts (included:1 + truncated:1 = 2 > available:1).
 const AGENT_COUNT = `mcpconf-count-${sfx}`;
+// flair#1290 hintWhenEmpty subject: a fresh agent with NO memories at all, so
+// `predicted` (with subjects requested) and `teammateFindings` are GENUINELY
+// empty and their hints must ship; org-scoped events still reach it, so the
+// absent direction of eventsHint is exercised on the same payload (and a
+// maxEvents:0 call genuinely empties `events` for the present direction).
+const AGENT_HINT = `mcpconf-hint-${sfx}`;
 const COUNT_MEMORY =
   `saga ledger federation trust boundary decision ${sfx} — ` +
   ("the recall budget accounting must charge and count every admitted record exactly once across sections, " +
@@ -138,6 +150,16 @@ async function ops(operation: Record<string, unknown>): Promise<any> {
 async function seedInsert(table: string, record: Record<string, unknown>): Promise<void> {
   const { status } = await ops({ operation: "insert", database: "flair", table, records: [record] });
   expect(status, `${table} insert → ${status}`).toBe(200);
+}
+
+// flair#1290 — every OrgEvent row this suite seeds, kept as the raw objects so
+// the noOpEventsSuppressed invariant can classify them with isZeroRowNoOpEvent
+// ITSELF (delivered events are lean at the /mcp default — no `detail`, which
+// the classifier needs — so conform()'s seeded-row leg is what bites there).
+const SEEDED_ORG_EVENTS: Array<Record<string, unknown>> = [];
+async function seedOrgEvent(record: Record<string, unknown>): Promise<void> {
+  SEEDED_ORG_EVENTS.push(record);
+  await seedInsert("OrgEvent", record);
 }
 
 async function opsSearchEquals(table: string, attribute: string, value: string): Promise<any[]> {
@@ -216,22 +238,22 @@ beforeAll(async () => {
   //  • one targeted at someone else → the relevance filter excludes it.
   const author = `conf-author-${EV}`;
   for (let i = 0; i < 2; i++) {
-    await seedInsert("OrgEvent", {
+    await seedOrgEvent({
       id: `conf-dup-${i}-${EV}`, authorId: author, kind: "status",
       summary: DUP_SUMMARY, detail: "same content twice", scope: "org",
       createdAt: new Date(Date.now() - i * 1000).toISOString(),
     });
   }
-  await seedInsert("OrgEvent", {
+  await seedOrgEvent({
     id: `conf-org-${EV}`, authorId: author, kind: "status", summary: ORG_SUMMARY,
     scope: "org", createdAt: new Date().toISOString(),
   });
-  await seedInsert("OrgEvent", {
+  await seedOrgEvent({
     id: `conf-mine-${EV}`, authorId: author, kind: "handoff", summary: MINE_SUMMARY,
     scope: "direct", targetIds: [AGENT], detail: "please pick this up",
     createdAt: new Date().toISOString(),
   });
-  await seedInsert("OrgEvent", {
+  await seedOrgEvent({
     id: `conf-other-${EV}`, authorId: author, kind: "handoff", summary: OTHER_SUMMARY,
     scope: "direct", targetIds: [`someone-else-${EV}`], createdAt: new Date().toISOString(),
   });
@@ -256,7 +278,7 @@ beforeAll(async () => {
     runningVersion: "0.44.10", verifiedAt: new Date().toISOString(), notes: "x".repeat(600),
   });
   for (let i = 0; i < 12; i++) {
-    await seedInsert("OrgEvent", {
+    await seedOrgEvent({
       id: `conf-heavy-${i}-${EV}`, authorId: author, kind: "status",
       summary: `conf-1199 heavy event ${i} ${EV} — recall verified healthy (549 embedded vectors)`,
       detail: HEAVY_DETAIL, scope: "direct", targetIds: [AGENT_BUDGET],
@@ -265,13 +287,13 @@ beforeAll(async () => {
   }
   // Zero-row no-op auto-heal PAIR (#1200) targeted at AGENT_BUDGET — must be
   // suppressed at render (the ledger still records them; this is a display filter).
-  await seedInsert("OrgEvent", {
+  await seedOrgEvent({
     id: `conf-heal-ledger-${EV}`, authorId: "flair-migrations", kind: "migration", scope: "full",
     summary: `conf-1200 migration graph-heal success (0 rows processed) ${EV}`,
     detail: JSON.stringify({ migrationId: "graph-heal", outcome: "success", rowsProcessed: 0, rowsRemaining: 0 }),
     targetIds: [AGENT_BUDGET], createdAt: new Date().toISOString(),
   });
-  await seedInsert("OrgEvent", {
+  await seedOrgEvent({
     id: `conf-heal-verify-${EV}`, authorId: "flair-migrations", kind: "migration", scope: "full",
     summary: `conf-1200 HNSW graph-heal recall verified healthy ${EV}`,
     detail: JSON.stringify({ migrationId: "graph-heal", verified: true, canaryRank1: true, embeddedVectorCount: 549 }),
@@ -288,6 +310,10 @@ beforeAll(async () => {
   // loop (included) — the same memory in two sections.
   await fleet("register", { id: AGENT_COUNT });
   await tool("memory_store", { content: COUNT_MEMORY, durability: "standard" }, { agentId: AGENT_COUNT });
+
+  // ── flair#1290 hintWhenEmpty fixture ───────────────────────────────────────
+  // AGENT_HINT owns nothing at all — registration only.
+  await fleet("register", { id: AGENT_HINT });
 }, 300_000);
 
 afterAll(async () => {
@@ -298,170 +324,10 @@ afterAll(async () => {
 });
 
 // ── contract-driven assertion engine ────────────────────────────────────────
-
-type FieldType = "string" | "number" | "boolean" | "object" | "array";
-function jsTypeOf(v: any): string {
-  if (Array.isArray(v)) return "array";
-  if (v === null) return "null";
-  return typeof v;
-}
-function getPath(obj: any, path: string): any {
-  return path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
-}
-function has(obj: any, key: string): boolean {
-  return obj != null && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, key);
-}
-
-/**
- * UNIVERSAL structural check (runs on every tool result): the payload is fully
- * resolved and structured — never a double-serialized JSON string, never a
- * pending Promise, never a stringified object (flair#1199/#1182).
- */
-function assertFullyResolved(toolName: string, result: any): void {
-  if (typeof result === "string") {
-    let parsed: any;
-    try { parsed = JSON.parse(result); } catch { parsed = undefined; }
-    expect(
-      parsed !== null && typeof parsed === "object",
-      `${toolName}: result is a JSON string that parses to an object — double-serialized payload`,
-    ).toBe(false);
-  }
-  const seen = new WeakSet<object>();
-  (function walk(v: any, path: string): void {
-    if (v == null) return;
-    if (typeof v === "object") {
-      expect(typeof (v as any).then, `${toolName}: ${path} is a thenable/pending Promise in the payload`).not.toBe("function");
-      if (seen.has(v)) return;
-      seen.add(v);
-      for (const k of Object.keys(v)) walk(v[k], `${path}.${k}`);
-      return;
-    }
-    if (typeof v === "string") {
-      expect(v.includes("[object Object]"), `${toolName}: ${path} contains "[object Object]" (a stringified object)`).toBe(false);
-      expect(v.includes("[object Promise]"), `${toolName}: ${path} contains "[object Promise]" (a stringified Promise)`).toBe(false);
-    }
-  })(result, "result");
-}
-
-/** Apply a tool's full declarative contract to a driven result. */
-function conform(toolName: string, result: any, contract: ToolContract): void {
-  assertFullyResolved(toolName, result);
-
-  for (const f of contract.requiredFields ?? []) {
-    expect(result?.[f], `${toolName}: required field '${f}' missing (got ${JSON.stringify(result).slice(0, 220)})`).not.toBeUndefined();
-  }
-  for (const [f, t] of Object.entries(contract.fieldTypes ?? {})) {
-    if (result?.[f] === undefined) continue; // presence is requiredFields' job
-    expect(jsTypeOf(result[f]), `${toolName}: field '${f}' should be ${t}`).toBe(t as FieldType);
-  }
-  for (const f of contract.forbiddenFields ?? []) {
-    expect(has(result, f), `${toolName}: forbidden internal field '${f}' leaked over the /mcp surface`).toBe(false);
-  }
-
-  const inv = contract.invariants ?? {};
-
-  for (const { count, containers } of inv.countEqualsDelivered ?? []) {
-    let total = 0;
-    for (const c of containers) {
-      const arr = getPath(result, c);
-      expect(Array.isArray(arr), `${toolName}: container '${c}' must be an array for count==delivered`).toBe(true);
-      total += arr.length;
-    }
-    const reported = getPath(result, count);
-    expect(reported, `${toolName}: ${count} (=${reported}) must equal Σ[${containers.join(", ")}] lengths (=${total})`).toBe(total);
-  }
-
-  for (const { path, type } of inv.selfDescribingEmpty ?? []) {
-    const v = getPath(result, path);
-    expect(v, `${toolName}: ${path} must be present (self-describing empty, never missing/undefined)`).not.toBeUndefined();
-    expect(v, `${toolName}: ${path} must not be null`).not.toBeNull();
-    expect(jsTypeOf(v), `${toolName}: ${path} must be ${type}`).toBe(type);
-  }
-
-  if (inv.dedupSignature) {
-    const { container, signatureFields } = inv.dedupSignature;
-    const arr = getPath(result, container) ?? [];
-    const seen = new Set<string>();
-    for (const item of arr) {
-      const sig = JSON.stringify(signatureFields.map((f) => {
-        const v = item?.[f];
-        return Array.isArray(v) ? [...v].sort() : (v ?? null);
-      }));
-      expect(seen.has(sig), `${toolName}: duplicate '${container}' entry by content-signature ${sig}`).toBe(false);
-      seen.add(sig);
-    }
-  }
-
-  if (inv.tokenEstimate) {
-    const { field, excludeKeys } = inv.tokenEstimate;
-    const reported = result?.[field];
-    expect(typeof reported, `${toolName}: ${field} must be a number`).toBe("number");
-    const rest: any = { ...result };
-    for (const k of excludeKeys) delete rest[k];
-    const expected = estimateTokens(JSON.stringify(rest));
-    expect(
-      reported,
-      `${toolName}: ${field} (=${reported}) must equal the wrapper's OWN estimator over the delivered payload (=${expected}) — same-estimator invariant (#1199)`,
-    ).toBe(expected);
-  }
-
-  if (inv.budgetCap) {
-    const { estimate, budget, tolerance } = inv.budgetCap;
-    const est = result?.[estimate];
-    const bud = result?.[budget];
-    expect(typeof est, `${toolName}: ${estimate} must be a number for budgetCap`).toBe("number");
-    expect(typeof bud, `${toolName}: ${budget} must be a number for budgetCap`).toBe("number");
-    // Ceiling = requested budget + tolerance for fixed JSON scaffolding and the
-    // #1207 prose-vs-structured charge gap. Uncounted CONTENT (the #1199 events
-    // regression) overshoots this; a healthy connector payload does not.
-    const ceiling = Math.ceil(bud * (1 + tolerance));
-    expect(
-      est <= ceiling,
-      `${toolName}: ${estimate} (=${est}) must be <= ${budget} (=${bud}) + ${Math.round(tolerance * 100)}% scaffolding tolerance (=${ceiling}) — payload must respect the requested budget (#1199 events blowout)`,
-    ).toBe(true);
-  }
-
-  for (const { included, truncated, available } of inv.countCoherence ?? []) {
-    const inc = result?.[included];
-    const tru = result?.[truncated];
-    const avail = result?.[available];
-    expect(typeof inc, `${toolName}: ${included} must be a number`).toBe("number");
-    expect(typeof tru, `${toolName}: ${truncated} must be a number`).toBe("number");
-    expect(typeof avail, `${toolName}: ${available} must be a number`).toBe("number");
-    expect(
-      inc + tru <= avail,
-      `${toolName}: ${included}(=${inc}) + ${truncated}(=${tru}) must be <= ${available}(=${avail}) — included and truncated are disjoint subsets of the pool (#1207 over-count)`,
-    ).toBe(true);
-  }
-
-  if (inv.proseContextIsPointerAtDefault) {
-    const ctx = result?.[inv.proseContextIsPointerAtDefault.field] ?? "";
-    expect(typeof ctx, `${toolName}: prose context must be a string`).toBe("string");
-    for (const ev of result?.events ?? []) {
-      if (ev?.summary) {
-        expect(ctx.includes(ev.summary), `${toolName}: prose context must not re-carry an event body at the /mcp default (#1199)`).toBe(false);
-      }
-    }
-    for (const m of result?.memories ?? []) {
-      if (m?.content) {
-        expect(ctx.includes(m.content), `${toolName}: prose context must not re-carry a memory body at the /mcp default (#1199)`).toBe(false);
-      }
-    }
-  }
-
-  for (const rule of inv.containerRules ?? []) {
-    const arr = getPath(result, rule.container);
-    if (!Array.isArray(arr)) continue;
-    for (const el of arr) {
-      for (const f of rule.requiredFields ?? []) {
-        expect(el?.[f], `${toolName}: ${rule.container}[].${f} required`).not.toBeUndefined();
-      }
-      for (const f of rule.forbiddenFields ?? []) {
-        expect(has(el, f), `${toolName}: ${rule.container}[] leaked internal field '${f}'`).toBe(false);
-      }
-    }
-  }
-}
+// `conform()` (and its helpers) live in test/helpers/mcp-conformance.ts —
+// extracted there by flair#1290 so bootstrap-large-store-conformance.test.ts
+// applies the identical full contract. Behavior unchanged; only the module
+// boundary moved.
 
 /** Assert a refused tool call returns a parseable error shape with no stack/path leak. */
 function assertErrorShape(toolName: string, resp: any, contract: ToolContract): void {
@@ -498,8 +364,9 @@ describe("conformance completeness gate (fail-closed)", () => {
 describe("/mcp connector conformance — each tool honors its declared contract", () => {
   test("bootstrap: full structured payload; counts, dedup, tokenEstimate, prose-pointer all hold at the /mcp default", async () => {
     // Default call: includeContext NOT passed → the connector path.
-    const body = await tool("bootstrap", { currentTask: "conformance sweep", maxTokens: 8000 });
-    conform("bootstrap", body, C("bootstrap"));
+    const bootArgs = { currentTask: "conformance sweep", maxTokens: 8000 };
+    const body = await tool("bootstrap", bootArgs);
+    conform("bootstrap", body, C("bootstrap"), { args: bootArgs, seededEvents: SEEDED_ORG_EVENTS });
 
     // Relevance + delivery spot-checks (the #1206 structured-events move).
     const summaries = (body.events ?? []).map((e: any) => e.summary);
@@ -518,8 +385,9 @@ describe("/mcp connector conformance — each tool honors its declared contract"
     // contract's budgetCap invariant runs inside conform(); it PASSES here (lean
     // events, budget-charged) and FAILS if the events-budget fix is reverted
     // (uncounted, detail-bearing events overshoot maxTokens*(1+tolerance)).
-    const body = await tool("bootstrap", { currentTask: "budget sweep", maxTokens: 2000 }, { agentId: AGENT_BUDGET });
-    conform("bootstrap", body, C("bootstrap"));
+    const budgetArgs = { currentTask: "budget sweep", maxTokens: 2000 };
+    const body = await tool("bootstrap", budgetArgs, { agentId: AGENT_BUDGET });
+    conform("bootstrap", body, C("bootstrap"), { args: budgetArgs, seededEvents: SEEDED_ORG_EVENTS });
     expect(body.maxTokens, "maxTokens echoed").toBe(2000);
     // Load-bearing #1199 proof: the serialized payload stays within the budget
     // (plus the scaffolding tolerance) even with a dozen heavy events available.
@@ -528,12 +396,23 @@ describe("/mcp connector conformance — each tool honors its declared contract"
     expect(body.events.length, "heavy events delivered").toBeGreaterThan(0);
     // …lean by default (no verbose detail on the connector path)…
     expect(body.events.some((e: any) => e.detail != null), "events are lean by default (no detail)").toBe(false);
-    // …and #1200 zero-row auto-heal events are suppressed at render.
-    const evText = body.events.map((e: any) => e.summary).join(" | ");
-    expect(evText.includes("graph-heal"), "graph-heal verify event suppressed (#1200)").toBe(false);
-    expect(evText.includes("0 rows processed"), "zero-row ledger heal event suppressed (#1200)").toBe(false);
+    // …and #1200 zero-row auto-heal events are suppressed at render. flair#1290:
+    // asserted INSIDE conform() by the noOpEventsSuppressed invariant against
+    // isZeroRowNoOpEvent's own classification of the seeded rows — not against
+    // hardcoded fixture strings. POSITIVE CONTROL here: the classifier must
+    // actually flag the seeded heal pair, or the invariant has nothing it
+    // could ever catch and its green is vacuous.
+    const classifiedNoOps = SEEDED_ORG_EVENTS.filter((e) => isZeroRowNoOpEvent(e as any));
+    expect(
+      classifiedNoOps.length,
+      "positive control: the fixture must seed rows isZeroRowNoOpEvent actually flags (the ledger + verify heal pair)",
+    ).toBe(2);
     // includeEventDetail:true opts the verbose detail back in (still budget-capped).
-    const withDetail = await tool("bootstrap", { currentTask: "budget sweep", maxTokens: 6000, includeEventDetail: true }, { agentId: AGENT_BUDGET });
+    // conform() runs here too: with `detail` present on every delivered event,
+    // the noOpEventsSuppressed per-element leg is live on this payload.
+    const detailArgs = { currentTask: "budget sweep", maxTokens: 6000, includeEventDetail: true };
+    const withDetail = await tool("bootstrap", detailArgs, { agentId: AGENT_BUDGET });
+    conform("bootstrap", withDetail, C("bootstrap"), { args: detailArgs, seededEvents: SEEDED_ORG_EVENTS });
     expect(withDetail.events.some((e: any) => e.detail != null), "includeEventDetail:true returns detail").toBe(true);
     expect(withDetail.tokenEstimate, "detail path still respects the (larger) budget").toBeLessThanOrEqual(Math.ceil(6000 * 1.25));
   }, 120_000);
@@ -543,12 +422,9 @@ describe("/mcp connector conformance — each tool honors its declared contract"
     // recent loop truncates it) but fits the full remaining budget in the
     // task-relevant loop (→ it's admitted there). Reverting the count fix counts
     // it in BOTH denominators (included:1 + truncated:1 = 2 > available:1).
-    const body = await tool(
-      "bootstrap",
-      { currentTask: COUNT_MEMORY, maxTokens: 3000 },
-      { agentId: AGENT_COUNT },
-    );
-    conform("bootstrap", body, C("bootstrap")); // countCoherence runs here
+    const countArgs = { currentTask: COUNT_MEMORY, maxTokens: 3000 };
+    const body = await tool("bootstrap", countArgs, { agentId: AGENT_COUNT });
+    conform("bootstrap", body, C("bootstrap"), { args: countArgs, seededEvents: SEEDED_ORG_EVENTS }); // countCoherence runs here
     // The single own memory exists and is available.
     expect(body.memoriesAvailable, "exactly one own memory available").toBe(1);
     // It is delivered (admitted via the task-relevant loop after the recent skip).
@@ -559,6 +435,65 @@ describe("/mcp connector conformance — each tool honors its declared contract"
       body.memoriesIncluded + body.memoriesTruncated,
       `included(${body.memoriesIncluded}) + truncated(${body.memoriesTruncated}) must not exceed available(${body.memoriesAvailable}) (#1207)`,
     ).toBeLessThanOrEqual(body.memoriesAvailable);
+
+    // ── flair#1290 — the SAME fixture under includeTrust:true ────────────────
+    // countCoherence had NEVER run on the trust path: this suite never passed
+    // includeTrust, and the trust-budget test never ran conform() — the
+    // intersection was empty across every bootstrap integration test, so a
+    // trust-admission counter desync could not have failed CI. The full
+    // contract (countCoherence, countEqualsDelivered, tokenEstimate,
+    // budgetCap, hints) now runs against a trust-path payload of the exact
+    // over-count fixture. Mutation-validated: a trust-conditional counter
+    // desync in MemoryBootstrap goes red HERE and only here (see the PR's
+    // powered-check log).
+    const trustArgs = { currentTask: COUNT_MEMORY, maxTokens: 3000, includeTrust: true };
+    const trustBody = await tool("bootstrap", trustArgs, { agentId: AGENT_COUNT });
+    conform("bootstrap", trustBody, C("bootstrap"), { args: trustArgs, seededEvents: SEEDED_ORG_EVENTS });
+    // The trust block actually shipped (this really is the trust path), one
+    // self-contained entry per included memory, correlated by id.
+    expect(Array.isArray(trustBody.trust), "includeTrust:true ships the trust array").toBe(true);
+    expect(trustBody.trust.length, "one trust entry per included memory").toBe(trustBody.memoriesIncluded + trustBody.teammateFindingsIncluded);
+    const deliveredIds = new Set([...trustBody.memories, ...trustBody.predicted, ...trustBody.teammateFindings].map((m: any) => m.id));
+    for (const t of trustBody.trust) {
+      expect(deliveredIds.has(t.id), `trust entry ${t.id} must correlate to a delivered memory`).toBe(true);
+    }
+    // Same count arithmetic holds under trust admission.
+    expect(
+      trustBody.memoriesIncluded + trustBody.memoriesTruncated,
+      `trust path: included(${trustBody.memoriesIncluded}) + truncated(${trustBody.memoriesTruncated}) must not exceed available(${trustBody.memoriesAvailable}) (#1207 under includeTrust)`,
+    ).toBeLessThanOrEqual(trustBody.memoriesAvailable);
+  }, 120_000);
+
+  test("bootstrap: empty containers carry their hints, populated ones carry none (#1182 populated-or-hint — hintWhenEmpty bites on a dropped hint)", async () => {
+    // AGENT_HINT owns NOTHING: with subjects requested and no currentTask,
+    // `predicted` and `teammateFindings` are genuinely empty (their hints must
+    // ship, as must currentTaskHint), while org-scoped events still reach the
+    // agent (events populated → eventsHint must be ABSENT). All four
+    // presence/absence rules run inside conform(); the spot-pins below prove
+    // this fixture really put each container in the state the invariant
+    // claims to be checking (a hint test on a never-empty container would be
+    // the same cannot-fire defect this PR exists to remove).
+    const emptyArgs = { subjects: [`no-such-subject-${sfx}`], maxTokens: 4000 };
+    const body = await tool("bootstrap", emptyArgs, { agentId: AGENT_HINT });
+    conform("bootstrap", body, C("bootstrap"), { args: emptyArgs, seededEvents: SEEDED_ORG_EVENTS });
+    expect(body.predicted.length, "predicted is genuinely empty for the memory-less agent").toBe(0);
+    expect(body.teammateFindings.length, "teammateFindings is genuinely empty without a currentTask").toBe(0);
+    expect(body.events.length, "org-scoped events still reach the fresh agent (populated direction)").toBeGreaterThan(0);
+    expect(typeof body.predictedHint, "subjects requested + empty predicted → predictedHint").toBe("string");
+    expect(typeof body.teammateFindingsHint, "empty teammateFindings → teammateFindingsHint").toBe("string");
+    expect(typeof body.currentTaskHint, "no currentTask → currentTaskHint").toBe("string");
+    expect(has(body, "eventsHint"), "populated events → NO eventsHint").toBe(false);
+
+    // maxEvents:0 genuinely EMPTIES the events container (the cap is honored
+    // at 0, not treated as falsy-default) → eventsHint must ship; a provided
+    // currentTask means currentTaskHint must NOT.
+    const noEventsArgs = { currentTask: "hint-fixture sweep", maxEvents: 0, maxTokens: 4000 };
+    const body2 = await tool("bootstrap", noEventsArgs, { agentId: AGENT_HINT });
+    conform("bootstrap", body2, C("bootstrap"), { args: noEventsArgs, seededEvents: SEEDED_ORG_EVENTS });
+    expect(body2.events.length, "maxEvents:0 empties the events container").toBe(0);
+    expect(typeof body2.eventsHint, "empty events → eventsHint").toBe("string");
+    expect(has(body2, "currentTaskHint"), "currentTask provided → NO currentTaskHint").toBe(false);
+    expect(has(body2, "predictedHint"), "no subjects requested → NO predictedHint even though predicted is empty").toBe(false);
   }, 120_000);
 
   test("memory_search: { results } with content-bearing hits and no embedding fields on any hit", async () => {

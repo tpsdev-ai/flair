@@ -1377,6 +1377,17 @@ export class BootstrapMemories extends Resource {
     // teammate finding is EITHER included OR budget-truncated, so this equals their sum.
     // Reporting it anchors `teammateFindingsTruncated` as "relevant-but-no-budget"
     // rather than an unexplained large number beside a small `included`.
+    //
+    // flair#1290 — INFORMATIONAL-DERIVED, not an independent measurement: this
+    // is computed FROM the two counters it anchors, so `included + truncated
+    // == matched` holds by construction and can never fail. It stays on the
+    // response as a legibility anchor, but it must never serve as the
+    // `available` side of a countCoherence-style invariant — that entry
+    // asserted X <= X, permanently green, and was removed from the bootstrap
+    // contract's invariant array (see resources/mcp-tools.ts; an invariant
+    // that cannot fail is decorative). An independently-measured pre-admission
+    // pool tally was considered and ruled out (K&S on #1290): a new counter
+    // that would itself need an invariant, for marginal gain.
     const teammateFindingsMatched = teammateFindingsIncluded + teammateFindingsTruncated;
 
     // --- Build context string ---
