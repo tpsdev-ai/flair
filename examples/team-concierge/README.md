@@ -44,8 +44,8 @@ scope) remain the real boundary; the allowlist narrows the LLM surface on top.
 > write, missing tag on a search) could expose one user's context to another.
 > This is acceptable for a single-trust-domain internal team tool because the
 > application code is under team control. For true per-user cryptographic
-> isolation, use per-user agent identities (the epic's "Keep Your Memory
-> Yours" scenario — out of scope here).
+> isolation, use per-user agent identities — out of scope for this example
+> (see "Not this example" below).
 
 ## 5-minute quickstart
 
@@ -55,10 +55,7 @@ init` gives you one at `http://localhost:19926`), Python ≥ 3.10.
 ```bash
 cd examples/team-concierge
 
-# 1. Install (adk-flair >= 0.44.13 is required for the explicit
-#    durability/visibility write knobs; until that version is on PyPI,
-#    install the connector from this repo checkout):
-pip install -e ../../packages/adk-flair
+# 1. Install (pulls adk-flair and google-adk from PyPI):
 pip install -e .
 
 # 2. Provision the concierge's own agent identity (never a shared/admin key):
@@ -109,7 +106,7 @@ scripts/verify.sh
 
 # Or with pre-provisioned keys (e.g. the real concierge + a teammate's identity):
 FLAIR_URL=... CONCIERGE_AGENT_ID=concierge CONCIERGE_KEYFILE=~/.flair/keys/concierge.key \
-READER_AGENT_ID=flint READER_KEYFILE=~/.flair/keys/flint.key \
+READER_AGENT_ID=alice READER_KEYFILE=~/.flair/keys/alice.key \
 scripts/verify.sh
 ```
 
@@ -124,12 +121,12 @@ from the repo root after `npm run build`) — it prints a JSON line with
 `httpURL`/`opsURL`/admin credentials to feed the variables above, and tears
 down when its stdin closes.
 
-## Session distillation (the #1205 pipeline)
+## Session distillation
 
 Raw session episodes land `standard`+`private` under the user's tag, which
 makes them distillation input: a nightly REM run with `scope:"tagged"` per
 `adk:concierge:<user>` stages `MemoryCandidate` rows for review. Two
-operational rules from the spec:
+operational rules:
 
 - **The runner must execute as the concierge identity** (or admin). Episodes
   are private to the concierge key — a runner under any other identity reads

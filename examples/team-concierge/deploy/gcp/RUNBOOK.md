@@ -5,7 +5,7 @@ running on **Vertex AI Agent Engine** (Google's managed ADK runtime — the
 current docs call it *Agent Runtime* on the *Gemini Enterprise Agent
 Platform*; the API resource is still `reasoningEngines`), with **Gemini** as
 the model and **memory on your self-hosted Flair Fabric hub** via
-[adk-flair](https://pypi.org/project/adk-flair/) ≥ 0.44.13.
+[adk-flair](https://pypi.org/project/adk-flair/).
 
 The shape, in one paragraph: `deploy.sh` wraps `adk deploy agent_engine`
 around the unchanged [`../../concierge`](../../concierge) agent folder.
@@ -258,8 +258,10 @@ above, not as the rotation itself.
 against a different hub than `FLAIR_URL`, or the secret holds a stale key
 (e.g. re-minted after upload), every memory op gets 401. Symptoms: chat
 works but recording fails; the instance's Cloud Logging shows adk-flair
-request errors. Fix: re-run step 3 against the right hub (`flair agent add`
-refuses an existing id — remove it first or pick a new id + secret), push
+request errors. Fix: re-run step 3 against the right hub (against an
+existing Agent row the hub keeps the OLD public key while the command
+reports success — delete the row first, as in teardown step 3, or pick a
+new id + secret), push
 the current keyfile as a **new secret version**
 (`gcloud secrets versions add concierge-gcp-flair-key --data-file=...`), and
 redeploy with `AGENT_ENGINE_ID=<id>` so the runtime picks it up.
