@@ -437,6 +437,67 @@ jobs:
           FLAIR_URL: http://localhost:9926
           FLAIR_ADMIN_PASS: admin123
 
+  test-integration-heavy:
+    name: Integration Tests (heavy)
+    runs-on: ubuntu-latest
+    # flair#1290 — bulk-embedding integration files live in their OWN job.
+    # The large-store conformance suite's dominant cost is CPU embedding
+    # generation for a 251-record corpus: measured 253.4s on this runner
+    # class (vs ~6s on an M-series dev machine, ~44x). Riding inside
+    # `test-integration` pushed that already-long lane to 30m21s — past its
+    # 30-minute ceiling — so the whole lane was cancelled and results that
+    # had ALREADY passed were discarded (the first two Integration runs on
+    # flair#1299). Isolating the cost makes it visible as its own check and
+    # keeps the main lane's ceiling honest. 20 minutes is generous for one
+    # file measured at ~5 min end-to-end; if this job starts crowding its
+    # ceiling, the heavy suite itself is what to look at — raising the
+    # timeout would just hide the trend (the #948 lesson).
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      # Node 22 pin for the same reason as `test-integration` (the
+      # HarperFast/harper#386 native-spawn mitigation — this job spawns
+      # Harper natively too; see that job's comment for the full history).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      - run: sfw bun install --frozen-lockfile
+      - name: Install linux-x64 native binary for embeddings
+        run: bun add --no-save @node-llama-cpp/linux-x64@3
+      - name: Build Flair resources and CLI
+        run: bun run build && bun run build:cli
+      - name: Verify critical exports in dist
+        run: |
+          echo "Checking embeddings-provider exports..."
+          grep -q "export.*function getEmbedding" dist/resources/embeddings-provider.js || { echo "FATAL: getEmbedding missing"; exit 1; }
+          grep -q "export.*function getMode" dist/resources/embeddings-provider.js || { echo "FATAL: getMode missing"; exit 1; }
+          echo "All critical exports present ✅"
+      - name: Pre-download embedding model
+        # Same cache → first-party release mirror → HuggingFace resolution
+        # (sha256-verified regardless of source) as `test-integration` — see
+        # that job's step for the flair#715 history.
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
+      - name: Run heavy integration tests (native Harper spawn)
+        # test/integration-heavy/ holds integration files whose dominant cost
+        # is bulk CPU embedding work. Structurally excluded from the main
+        # Integration job: its `find test/integration -name '*.test.ts'`
+        # does not descend into this SIBLING directory (the same mechanism
+        # that keeps test/integration-isolated/ out of it).
+        run: bun test $(find test/integration-heavy -name '*.test.ts' | sort)
+
   adk-flair-python:
     # The Python adk-flair package (packages/adk-flair) had NO pytest step
     # anywhere in CI — test.yml ran only the JS twin (adk-flair-js) — so its

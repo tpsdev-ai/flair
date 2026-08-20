@@ -13,5 +13,8 @@
   conformance test seeds the 251-record synthetic corpus-v2 across 8 agents in
   the live profile's ownership skew through the real embedding-generating
   write path and runs the full contract at a tight budget — the first CI run
-  where bootstrap's admission/truncation accounting works at scale. Test- and
-  contract-layer only; no runtime behavior changes.
+  where bootstrap's admission/truncation accounting works at scale. The
+  large-store suite runs in its own CI lane (`test/integration-heavy/`,
+  "Integration Tests (heavy)") — its bulk CPU embedding cost (measured 253s on
+  a CI runner) is isolated there instead of pressuring the main Integration
+  lane's ceiling. Test- and contract-layer only; no runtime behavior changes.

@@ -38,7 +38,20 @@
 //
 // MODEL-GATED like bootstrap-search-parity-1246.test.ts: skips VISIBLY when
 // the embedding model isn't present rather than triggering a HuggingFace pull
-// mid-suite. The integration lane pre-downloads the model, so this runs in CI.
+// mid-suite. Its CI lane pre-downloads the model, so the gate opens there.
+//
+// PLACEMENT — test/integration-heavy/, its own CI job ("Integration Tests
+// (heavy)" in .github/workflows/test.yml), NOT the main Integration job.
+// Measured, not vibes: on a GitHub ubuntu-latest runner the 251-record seed
+// took 253.4s of CPU embedding generation (vs 5.8s on an M-series dev
+// machine, ~44x), and riding in the main Integration job pushed that lane to
+// 30m21s — past its 30-minute ceiling — so the whole lane was cancelled with
+// every already-passed result discarded (first two Integration runs on PR
+// #1299). The main job's file glob (`find test/integration -name
+// '*.test.ts'`) does not descend into this SIBLING directory (same structural
+// exclusion test/integration-isolated/ relies on), so the seed cost stays
+// isolated in a lane sized for it, and its runtime is visible as its own
+// check instead of invisible pressure on someone else's ceiling.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
