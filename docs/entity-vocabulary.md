@@ -89,6 +89,21 @@ Per the attention-plane spec's K&S-approved refinements, `entities: [String] @in
 Existing rows on all three tables simply carry no `entities` — readers must tolerate absence,
 the same pattern already used for `Presence.activityUpdatedAt`. No migration, no backfill.
 
+All three fields are reachable from the CLI (flair#1288): `flair memory add`,
+`flair workspace set`, and `flair orgevent` take `--entities <csv>`, a comma-separated list of
+vocabulary strings:
+
+```bash
+flair memory add --agent flint --entities "repo:tpsdev-ai/flair,issue:tpsdev-ai/flair#1288" "shipped the entities CLI surface"
+```
+
+The CLI validates each value before writing (a malformed value is rejected with the
+`type:value` format and the valid type list); the server re-validates on every write path
+regardless. The CLI's validator is an inlined copy of this module
+(`src/lib/entity-vocab-cli.ts` — `src/` can't import across the packaging boundary into
+`resources/`), pinned to it by `test/unit/cli-entities-option.test.ts`; the server-side gate
+remains this module alone.
+
 `Relationship` gets **no** `entities` field: its `subject`/`object` columns already carry
 free-form entity-reference strings and are already indexed — they're the vocabulary carrier
 for that table. They are lowercased on write today but not yet validated against this
