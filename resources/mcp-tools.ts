@@ -1016,6 +1016,11 @@ export const TOOLS: Record<string, ToolEntry> = {
         "sections", "tokenEstimate", "maxTokens", "memoriesIncluded", "memoriesAvailable",
         "memoriesTruncated", "teammateFindingsIncluded", "teammateFindingsTruncated",
         "teammateFindingsMatched", "context", "flairVersion",
+        // flair#1270 — the payload token LEDGER: every token-charged content
+        // class has a counter, so tokenEstimate ≈ scaffoldTokens + soulTokens +
+        // memoryTokens + trustTokens + eventsTokens decomposes from the payload
+        // alone (see the identity block in MemoryBootstrap's response tail).
+        "soulTokens", "memoryTokens", "trustTokens", "eventsTokens", "scaffoldTokens",
       ],
       fieldTypes: {
         agentId: "string", soul: "object", memories: "array", predicted: "array",
@@ -1024,6 +1029,8 @@ export const TOOLS: Record<string, ToolEntry> = {
         memoriesAvailable: "number", memoriesTruncated: "number",
         teammateFindingsIncluded: "number", teammateFindingsTruncated: "number",
         teammateFindingsMatched: "number", context: "string", flairVersion: "string",
+        soulTokens: "number", memoryTokens: "number", trustTokens: "number",
+        eventsTokens: "number", scaffoldTokens: "number",
       },
       invariants: {
         // count == delivered — the historical count/charge/deliver drift.
