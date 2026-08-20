@@ -524,19 +524,53 @@ function readTextFile(path: string): string | null {
 
 // ── check 1: MCP server block present + configured ─────────────────────────
 
+/**
+ * flair-client's own DEFAULT_URL (packages/flair-client/src/client.ts:
+ * `this.url = config.url ?? readEnvOrUnset("FLAIR_URL") ?? DEFAULT_URL`).
+ * Duplicated here as a value rather than imported — flair-client does not
+ * export it, and this module stays dependency-light by the same convention as
+ * the AgentGateState type duplication below. A unit test
+ * (doctor-client-native-shapes.test.ts) asserts this literal matches
+ * flair-client's source, so the two cannot drift silently.
+ */
+export const FLAIR_CLIENT_DEFAULT_URL = "http://localhost:19926";
+
 export interface ClientMcpBlockResult {
   present: boolean;
   configPath: string;
   agentId?: string;
   flairUrl?: string;
+  /** True when the block is present and working but carries no FLAIR_URL —
+   *  flair-client falls back to FLAIR_CLIENT_DEFAULT_URL internally, so this
+   *  is a WORKING configuration, never a missing one (flair#1287). Callers
+   *  must render it as "present (URL defaulted)", not as unconfigured. */
+  urlDefaulted?: boolean;
+}
+
+/**
+ * The URL the wired flair-mcp process will actually connect to: the block's
+ * FLAIR_URL when set, else flair-client's built-in default. `defaulted` tells
+ * the caller which of the two it got, so doctor's output can say so
+ * (flair#1287 — a defaulted URL is still a probe-able, working URL).
+ */
+export function effectiveFlairUrl(block: Pick<ClientMcpBlockResult, "flairUrl">): { url: string; defaulted: boolean } {
+  return block.flairUrl ? { url: block.flairUrl, defaulted: false } : { url: FLAIR_CLIENT_DEFAULT_URL, defaulted: true };
 }
 
 /**
  * Read the Flair MCP server block from `clientId`'s config file. `present`
- * is true only when the block exists AND both FLAIR_AGENT_ID and FLAIR_URL
- * are set (non-empty) — a half-wired block (e.g. block present, env missing)
- * counts as absent for the pass/fail check, but agentId/flairUrl are still
- * returned when partially found so callers can use whatever is known.
+ * is true when the block exists AND FLAIR_AGENT_ID is set (non-empty).
+ *
+ * FLAIR_URL is deliberately NOT required (flair#1287): flair-client treats it
+ * as optional and falls back to FLAIR_CLIENT_DEFAULT_URL, and the documented
+ * `claude mcp add` command (docs/mcp-clients.md) sets only FLAIR_AGENT_ID —
+ * so a URL-less block is a WORKING setup that doctor used to false-negative
+ * as "no Flair MCP server configured". Doctor's requirement now matches
+ * flair-client's actual contract: agent id required (flair-mcp refuses to
+ * start without one — "(none — required)" in docs), URL optional
+ * (`urlDefaulted` reports the fallback so the output can distinguish it).
+ * agentId/flairUrl are still returned when partially found so callers can use
+ * whatever is known.
  */
 export function readClientMcpBlock(clientId: ClientId, homeDir: string): ClientMcpBlockResult {
   const configPath = withHome(homeDir, () => clientConfigPath(clientId));
@@ -552,7 +586,11 @@ function readJsonFlairBlock(configPath: string): ClientMcpBlockResult {
     if (!flair || typeof flair !== "object") return { present: false, configPath };
     const agentId: string | undefined = typeof flair.env?.FLAIR_AGENT_ID === "string" && flair.env.FLAIR_AGENT_ID ? flair.env.FLAIR_AGENT_ID : undefined;
     const flairUrl: string | undefined = typeof flair.env?.FLAIR_URL === "string" && flair.env.FLAIR_URL ? flair.env.FLAIR_URL : undefined;
-    return { present: !!agentId && !!flairUrl, configPath, agentId, flairUrl };
+    // FLAIR_URL optional — see readClientMcpBlock's doc (flair#1287). Any
+    // extra fields the client's own tooling writes (e.g. `claude mcp add`'s
+    // `type: "stdio"`) are irrelevant to presence and deliberately ignored.
+    const present = !!agentId;
+    return { present, configPath, agentId, flairUrl, urlDefaulted: present && !flairUrl };
   } catch {
     // Malformed JSON — treat as "not present", never throw.
     return { present: false, configPath };
@@ -582,10 +620,36 @@ function readCodexFlairBlock(configPath: string): ClientMcpBlockResult {
   const raw = readTextFile(configPath);
   if (!raw) return { present: false, configPath };
   const scanned = scanCodexFlairBlock(raw);
-  return { present: scanned.present, configPath, agentId: scanned.agentId, flairUrl: scanned.flairUrl };
+  return { present: scanned.present, configPath, agentId: scanned.agentId, flairUrl: scanned.flairUrl, urlDefaulted: scanned.urlDefaulted };
 }
 
-function scanCodexFlairBlock(raw: string): { present: boolean; agentId?: string; flairUrl?: string } {
+/**
+ * Pull one env value out of the `[mcp_servers.flair]` block text, accepting
+ * BOTH TOML shapes a real Codex config carries for env:
+ *
+ *   1. the `[mcp_servers.flair.env]` sub-table (`FLAIR_AGENT_ID = "..."` on
+ *      its own line) — what `codex mcp add` serializes (toml_edit Table via
+ *      table_from_pairs, openai/codex codex-rs config/edit/document_helpers.rs),
+ *      what Codex's own config docs show, and what our tomlSnippet() writes;
+ *   2. the inline table (`env = { "FLAIR_AGENT_ID" = "..." }`, bare or quoted
+ *      keys) — valid Codex TOML that `codex mcp add` itself PRESERVES when
+ *      merging into a hand-written inline entry (merge_inline_table, same
+ *      file). The old line-anchored regex silently missed this shape — the
+ *      flair#1287 defect class (a client-accepted config our detector
+ *      rejects) in TOML form.
+ */
+function scanCodexEnvValue(block: string, key: string): string | undefined {
+  const lineMatch = block.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, "m"));
+  if (lineMatch?.[1]) return lineMatch[1];
+  const inlineEnv = block.match(/^\s*env\s*=\s*\{([^}]*)\}/m);
+  if (inlineEnv) {
+    const inlineMatch = inlineEnv[1].match(new RegExp(`"?${key}"?\\s*=\\s*"([^"]*)"`));
+    if (inlineMatch?.[1]) return inlineMatch[1];
+  }
+  return undefined;
+}
+
+function scanCodexFlairBlock(raw: string): { present: boolean; agentId?: string; flairUrl?: string; urlDefaulted?: boolean } {
   const startMatch = raw.match(/^\[mcp_servers\.flair\]\s*$/m);
   if (!startMatch || startMatch.index === undefined) return { present: false };
 
@@ -599,11 +663,12 @@ function scanCodexFlairBlock(raw: string): { present: boolean; agentId?: string;
   }
   const block = blockLines.join("\n");
 
-  const agentMatch = block.match(/^\s*FLAIR_AGENT_ID\s*=\s*"([^"]*)"/m);
-  const urlMatch = block.match(/^\s*FLAIR_URL\s*=\s*"([^"]*)"/m);
-  const agentId = agentMatch?.[1] || undefined;
-  const flairUrl = urlMatch?.[1] || undefined;
-  return { present: !!agentId && !!flairUrl, agentId, flairUrl };
+  const agentId = scanCodexEnvValue(block, "FLAIR_AGENT_ID");
+  const flairUrl = scanCodexEnvValue(block, "FLAIR_URL");
+  // FLAIR_URL optional — same contract as readJsonFlairBlock (flair#1287);
+  // docs/mcp-clients.md's own Codex snippet sets only FLAIR_AGENT_ID.
+  const present = !!agentId;
+  return { present, agentId, flairUrl, urlDefaulted: present && !flairUrl };
 }
 
 // ── check 2: FLAIR_URL to use when (re-)wiring a client (flair#727) ────────

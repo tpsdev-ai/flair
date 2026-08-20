@@ -83,6 +83,7 @@ import {
 } from "./lib/mcp-enable.js";
 import {
   readClientMcpBlock,
+  effectiveFlairUrl,
   checkClaudeMdBootstrap,
   detectWiredFlairMcp,
   inspectSessionStartHook,
@@ -13879,14 +13880,24 @@ program
 
         console.log(`  ${render.icons.ok} ${client.label}: MCP server configured (${render.wrap(render.c.dim, block.configPath)})`);
 
-        const reachable = await probeFlairReachable(block.flairUrl!);
+        // flair#1287: a block with FLAIR_AGENT_ID but no FLAIR_URL is a
+        // WORKING setup — flair-client falls back to its built-in default —
+        // and must never be reported as unconfigured. Say which URL applies
+        // and keep verifying against it, exactly as for an explicit one.
+        const eff = effectiveFlairUrl(block);
+        const urlLabel = eff.defaulted ? `${eff.url} (client default)` : eff.url;
+        if (eff.defaulted) {
+          console.log(`     ${render.icons.info} FLAIR_URL not set — flair-mcp defaults to ${render.wrap(render.c.dim, eff.url)}`);
+        }
+
+        const reachable = await probeFlairReachable(eff.url);
         if (!reachable) {
-          console.log(`     ${render.icons.warn} FLAIR_URL ${render.wrap(render.c.dim, block.flairUrl!)} not reachable — cannot verify agent registration`);
+          console.log(`     ${render.icons.warn} FLAIR_URL ${render.wrap(render.c.dim, urlLabel)} not reachable — cannot verify agent registration`);
           continue;
         }
-        console.log(`     ${render.icons.ok} FLAIR_URL ${render.wrap(render.c.dim, block.flairUrl!)} reachable`);
+        console.log(`     ${render.icons.ok} FLAIR_URL ${render.wrap(render.c.dim, urlLabel)} reachable`);
 
-        const reg = await checkAgentRegistered(block.flairUrl!, block.agentId!, defaultKeysDir());
+        const reg = await checkAgentRegistered(eff.url, block.agentId!, defaultKeysDir());
         if (reg.state === "registered") {
           console.log(`     ${render.icons.ok} agent '${block.agentId}' registered`);
         } else if (reg.state === "not-registered") {
