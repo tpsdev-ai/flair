@@ -94,8 +94,8 @@ async function packedEntries(dir: string): Promise<string[]> {
   return names.filter((n) => n !== "." && n !== "").sort();
 }
 
-/** The `.env` content of a packed payload, or null when the payload has none. */
-async function packedEnvText(dir: string): Promise<string | null> {
+/** The text of one top-level entry of a packed payload, or null when absent. */
+async function packedFileText(dir: string, entryName: string): Promise<string | null> {
   const b64 = await packageDirectory(dir, HARPER_DEPLOY_PACK_OPTS);
   const out = tempDir();
   const tarPath = join(out, "payload.tar.gz");
@@ -104,8 +104,13 @@ async function packedEnvText(dir: string): Promise<string | null> {
   const dest = join(out, "x");
   mkdirSync(dest, { recursive: true });
   await extract({ file: tarPath, cwd: dest });
-  const p = join(dest, COMPONENT_ENV_FILENAME);
+  const p = join(dest, entryName);
   return existsSync(p) ? readFileSync(p, "utf8") : null;
+}
+
+/** The `.env` content of a packed payload, or null when the payload has none. */
+async function packedEnvText(dir: string): Promise<string | null> {
+  return packedFileText(dir, COMPONENT_ENV_FILENAME);
 }
 
 describe("resolveDeployPublicUrl", () => {
@@ -431,5 +436,56 @@ describe("stageDeployRoot — the payload equals the published file set", () => 
     expect(names.has("schemas")).toBe(true);
     expect(names.has("package.json")).toBe(true);
     expect(names.has("models")).toBe(false);
+  });
+});
+
+// ─── flair#1285: the re-pack revert mechanism ────────────────────────────────
+//
+// An operator edit to a DEPLOYED component's config.yaml does not survive the
+// next deploy. The payload derives strictly from the package root —
+// publishedEntryNames() reads package.json's `files`, stageDeployRoot copies
+// from the root, harper packs the staged copy — and nothing in that pipeline
+// reads deployed state back. So a hand-edit made on the instance (the
+// flair#1152 investigation's `mcp.enabled: true` flip, most notably) is
+// silently reverted by whatever the source tree carries, on every subsequent
+// deploy.
+//
+// That mechanism is WHY the on/off choice had to move to the environment
+// (`mcp.enabled: ${FLAIR_MCP_OAUTH}`, flair#1152): with the choice env-carried,
+// a re-pack reverts nothing that matters. This test pins the revert mechanism
+// itself — defense-in-depth now, but if it ever silently changed (a deploy
+// path that merges deployed state, say), config-file hand-edits would start
+// surviving and the #1152 threat model would need re-deriving.
+describe("stageDeployRoot — an operator edit to a deployed config.yaml does not survive a re-pack", () => {
+  test("the re-packed payload's config.yaml is the package root's, not the edited copy", async () => {
+    const root = makePackageRoot();
+    const pristine = readFileSync(join(root, "config.yaml"), "utf8");
+
+    // Deploy #1: stage the payload. The staged dir is what harper packs and
+    // the target unpacks — a faithful stand-in for the deployed component tree.
+    const staged1 = stageDeployRoot(root, "https://flair.example.com");
+    cleanups.push(staged1.cleanup);
+
+    // The operator hand-edits the deployed component's config.yaml.
+    const EDIT_MARKER = "# operator-live-edit";
+    writeFileSync(join(staged1.dir, "config.yaml"), pristine + `${EDIT_MARKER}\n`);
+
+    // POSITIVE CONTROL: packing the EDITED tree does carry the edit — the
+    // extraction can see an edit when one is present, so the absence asserted
+    // below is the mechanism speaking, not a probe that reads nothing.
+    const editedPacked = await packedFileText(staged1.dir, "config.yaml");
+    expect(editedPacked).toContain(EDIT_MARKER);
+
+    // Deploy #2: re-run the staging/pack path from the package root — the only
+    // input the mechanism reads. (The mutation this test exists to catch:
+    // skip this re-stage and pack staged1 instead, and the edit survives.)
+    const staged2 = stageDeployRoot(root, "https://flair.example.com");
+    cleanups.push(staged2.cleanup);
+
+    const repacked = await packedFileText(staged2.dir, "config.yaml");
+    expect(repacked).not.toBeNull();
+    expect(repacked).not.toContain(EDIT_MARKER);
+    // Strictly the root's bytes — not merely missing the marker.
+    expect(repacked).toBe(pristine);
   });
 });
