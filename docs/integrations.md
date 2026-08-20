@@ -17,6 +17,7 @@ Where Flair already runs. Each integration shown here is a working surface — t
 | **Gemini CLI** | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | Standard MCP server |
 | **Antigravity CLI** (`agy`) | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | `~/.gemini/config/mcp_config.json`; pickup by a live `agy` pending verification |
 | **Goose** (block/goose) | [`flair-mcp`](#claude-code-cursor-codex-gemini-cli-continuedev-via-flair-mcp) | MCP config | Goose ships native MCP support |
+| **DeepSeek Harness** (`dsh`) | [`flair-mcp`](deepseek-harness.md) | Cordis overlay | First-party MCP bridge; tools-only, reactive recall — [dedicated page](deepseek-harness.md) |
 | **LangGraph (TS)** | [`langgraph-flair`](#langgraph-typescript) | FlairClient | Drop-in `BaseStore` |
 | **OpenClaw** | [`openclaw-flair`](#openclaw) | Ed25519 | Native plugin + context engine |
 | **n8n** | [`n8n-nodes-flair`](#n8n) | FlairApi credential | Three nodes (chat memory, search, store) |
