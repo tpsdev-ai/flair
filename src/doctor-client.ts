@@ -624,26 +624,48 @@ function readCodexFlairBlock(configPath: string): ClientMcpBlockResult {
 }
 
 /**
- * Pull one env value out of the `[mcp_servers.flair]` block text, accepting
- * BOTH TOML shapes a real Codex config carries for env:
+ * The two env keys the codex scanner ever looks for, each with LITERAL
+ * regexes for both TOML shapes a real Codex config carries:
  *
- *   1. the `[mcp_servers.flair.env]` sub-table (`FLAIR_AGENT_ID = "..."` on
- *      its own line) — what `codex mcp add` serializes (toml_edit Table via
- *      table_from_pairs, openai/codex codex-rs config/edit/document_helpers.rs),
- *      what Codex's own config docs show, and what our tomlSnippet() writes;
- *   2. the inline table (`env = { "FLAIR_AGENT_ID" = "..." }`, bare or quoted
- *      keys) — valid Codex TOML that `codex mcp add` itself PRESERVES when
- *      merging into a hand-written inline entry (merge_inline_table, same
- *      file). The old line-anchored regex silently missed this shape — the
- *      flair#1287 defect class (a client-accepted config our detector
- *      rejects) in TOML form.
+ *   `line`   — the `[mcp_servers.flair.env]` sub-table form (`FLAIR_AGENT_ID
+ *              = "..."` on its own line): what `codex mcp add` serializes
+ *              (toml_edit Table via table_from_pairs, openai/codex
+ *              codex-rs config/edit/document_helpers.rs), what Codex's own
+ *              config docs show, and what our tomlSnippet() writes;
+ *   `inline` — the inline table (`env = { "FLAIR_AGENT_ID" = "..." }`, bare
+ *              or quoted keys): valid Codex TOML that `codex mcp add` itself
+ *              PRESERVES when merging into a hand-written inline entry
+ *              (merge_inline_table, same file). The old line-anchored regex
+ *              silently missed this shape — the flair#1287 defect class (a
+ *              client-accepted config our detector rejects) in TOML form.
+ *
+ * Spelled out as regex LITERALS per key rather than built via `new RegExp`
+ * with the key interpolated: the key set is closed (these two), and literal
+ * patterns keep the scanner off the non-literal-regexp SAST surface entirely
+ * — there is nothing dynamic for an injected pattern to ride in on. The
+ * `keyof` parameter type makes a third key a compile error here, not a
+ * silently unmatched scan.
  */
-function scanCodexEnvValue(block: string, key: string): string | undefined {
-  const lineMatch = block.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, "m"));
+const CODEX_ENV_PATTERNS = {
+  FLAIR_AGENT_ID: {
+    line: /^\s*FLAIR_AGENT_ID\s*=\s*"([^"]*)"/m,
+    inline: /"?FLAIR_AGENT_ID"?\s*=\s*"([^"]*)"/,
+  },
+  FLAIR_URL: {
+    line: /^\s*FLAIR_URL\s*=\s*"([^"]*)"/m,
+    inline: /"?FLAIR_URL"?\s*=\s*"([^"]*)"/,
+  },
+} as const;
+
+/** Pull one env value out of the `[mcp_servers.flair]` block text — see
+ *  CODEX_ENV_PATTERNS for the two shapes each key is matched against. */
+function scanCodexEnvValue(block: string, key: keyof typeof CODEX_ENV_PATTERNS): string | undefined {
+  const patterns = CODEX_ENV_PATTERNS[key];
+  const lineMatch = block.match(patterns.line);
   if (lineMatch?.[1]) return lineMatch[1];
   const inlineEnv = block.match(/^\s*env\s*=\s*\{([^}]*)\}/m);
   if (inlineEnv) {
-    const inlineMatch = inlineEnv[1].match(new RegExp(`"?${key}"?\\s*=\\s*"([^"]*)"`));
+    const inlineMatch = inlineEnv[1].match(patterns.inline);
     if (inlineMatch?.[1]) return inlineMatch[1];
   }
   return undefined;
