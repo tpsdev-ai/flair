@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify.sh — the Team Concierge scenario's claims, executed (spec §6).
+# verify.sh — the Team Concierge scenario's claims, executed.
 # The demo IS the test: run it against a LIVE Flair instance.
 #
 # Environment:
@@ -38,7 +38,6 @@ PYTHON="${PYTHON:-python3}"
 if ! "$PYTHON" -c "import adk_flair, httpx, cryptography" 2>/dev/null; then
   echo "verify.sh: missing Python deps — install the example first:" >&2
   echo "  pip install -e ." >&2
-  echo "  (and, until adk-flair>=0.44.13 is on PyPI: pip install -e ../../packages/adk-flair)" >&2
   exit 2
 fi
 

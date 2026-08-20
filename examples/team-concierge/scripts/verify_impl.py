@@ -2,7 +2,7 @@
 
 Run through scripts/verify.sh (which documents the environment contract).
 
-What is asserted (spec flair#1229 §6), each against a LIVE Flair instance:
+What is asserted, each against a LIVE Flair instance:
 
   S1  Cross-harness, org-open: a decision recorded through the Concierge's
       record_decision helper is retrievable by a DIFFERENT agent identity via
@@ -313,8 +313,8 @@ async def main() -> int:
     # ═════ S2 — personal: private wall against the other identity ═══════════
     # Mutation check: flip _PERSONAL_CLASS["visibility"] to "shared" →
     # the helper-report, search-absence, by-id-denied, and stored-flags
-    # assertions below ALL fail. Restore → passes. (The #1222-class
-    # regression detector.)
+    # assertions below ALL fail. Restore → passes. (The detector for a
+    # write-site drifting back onto a default visibility.)
     out = await record_personal(personal_a_text, ctx_a)
     ensure(
         out.get("durability") == "standard" and out.get("visibility") == "private",
@@ -434,7 +434,7 @@ async def main() -> int:
         f"visibility={row.get('visibility')!r}, durability={row.get('durability')!r}",
     )
 
-    # 4a — tagged gather is per-user (the #1205b cross-user-bleed boundary).
+    # 4a — tagged gather is per-user (the cross-user-bleed boundary).
     def _gather() -> dict | None:
         resp = concierge_rest.request(
             "POST", "/ReflectMemories",

@@ -23,7 +23,7 @@ Write surface (the whole point of this file):
   Session episodes (raw turns) are persisted by the after-agent callback as
   durability="standard", visibility="private" — explicitly, not via the
   server's durability-keyed default (every write-site sets visibility
-  explicitly; a shipped default is a trust anchor, flair#1222).
+  explicitly; a shipped default is a trust anchor).
 """
 
 from __future__ import annotations
@@ -42,27 +42,27 @@ from adk_flair import FlairMemoryService
 
 APP_NAME = "concierge"
 
-# Model is not load-bearing for this example (spec §5) — any ADK-supported
-# model string works. Default: native Gemini; override with ADK_MODEL.
+# Model is not load-bearing for this example — any ADK-supported model
+# string works. Default: native Gemini; override with ADK_MODEL.
 MODEL = os.environ.get("ADK_MODEL", "gemini-2.5-flash")
 
 
 # ─── Connector capability gate ───────────────────────────────────────────────
 # record_decision needs adk-flair's explicit durability/visibility knobs on
-# add_memory (shipped in 0.44.13, flair#1234/#1237). The stock 0.44.12
-# add_memory hardcodes durability="standard" and has no visibility support at
-# all — silently downgrading a "team decision" to a private row would be the
-# exact failure this example exists to demonstrate against. Fail at import,
-# loudly, with the remedy — never at first use inside a chat session.
+# add_memory. An older connector without them hardcodes durability="standard"
+# and has no visibility support at all — silently downgrading a "team
+# decision" to a private row would be the exact failure this example exists
+# to demonstrate against. Gate on the CAPABILITY (the signature), not a
+# version string, and fail at import, loudly, with the remedy — never at
+# first use inside a chat session.
 def _assert_connector_supports_write_knobs() -> None:
     params = inspect.signature(FlairMemoryService.add_memory).parameters
     if "durability" not in params or "visibility" not in params:
         raise RuntimeError(
-            "adk-flair >= 0.44.13 is required: this installed version's "
-            "add_memory() has no durability/visibility parameters, so "
-            "record_decision cannot produce a persistent+shared row. "
-            "Upgrade with `pip install -U adk-flair` (or, from a flair repo "
-            "checkout, `pip install -e packages/adk-flair`)."
+            "The installed adk-flair's add_memory() has no "
+            "durability/visibility parameters, so record_decision cannot "
+            "produce a persistent+shared row. Upgrade with "
+            "`pip install -U adk-flair`."
         )
 
 
@@ -104,9 +104,9 @@ def _entry(text: str, author: str, entry_id: str | None = None) -> MemoryEntry:
 # Each write CLASS is a frozen module-level constant — the single source for
 # both the add_memory call and the confirmation returned to the model, so the
 # report can never claim a class the write didn't use. These are never
-# parameters and never model-selected (Sherlock hard requirement, flair#1229
-# review): a helper that took visibility as an argument would collapse the
-# visibility discipline.
+# parameters and never model-selected: tool arguments are model-controlled
+# input, so a helper that took visibility as an argument would hand the write
+# policy to the model and collapse the visibility discipline.
 
 _DECISION_CLASS = {
     "durability": "persistent",  # team knowledge survives curation cycles
@@ -117,7 +117,7 @@ _PERSONAL_CLASS = {
     "visibility": "private",     # concierge-identity-only, tag-scoped per user
 }
 _EPISODE_CLASS = {
-    "durability": "standard",    # raw turns: distillation input (#1205)
+    "durability": "standard",    # raw turns: distillation input
     "visibility": "private",     # explicit — never the durability-keyed default
 }
 
@@ -183,7 +183,7 @@ async def record_personal(note: str, tool_context: ToolContext) -> dict:
     }
 
 
-# ─── Session episode persistence (raw turns → distillation input, #1205) ─────
+# ─── Session episode persistence (raw turns → distillation input) ────────────
 
 
 def _event_text(event: Any) -> str | None:
@@ -214,7 +214,7 @@ async def persist_session_episodes(
     Rides add_memory (the only connector write surface with the explicit
     knobs) rather than add_events_to_memory, so the visibility of the episode
     lane is set at the write-site instead of inherited from the server's
-    durability-keyed default (spec §3: no write relies on the default).
+    durability-keyed default (no write in this example relies on a default).
 
     Deterministic per-event ids make re-ingestion idempotent, mirroring the
     connector's own session-write scheme.
@@ -237,7 +237,7 @@ async def persist_session_episodes(
             app_name=app_name,
             user_id=user_id,
             memories=entries,
-            **_EPISODE_CLASS,  # FIXED episode class (spec §3 table)
+            **_EPISODE_CLASS,  # FIXED episode class — see the constant above
         )
     return len(entries)
 
@@ -259,7 +259,7 @@ async def _after_agent_callback(callback_context) -> None:
 
 
 # ─── The agent ───────────────────────────────────────────────────────────────
-# The tools list IS the write-surface allowlist (Sherlock hard requirement):
+# The tools list IS the write-surface allowlist:
 # two fixed-class write helpers plus read-only memory tools. Nothing here can
 # write a soul record, workspace state, an org event, or a raw memory row
 # with caller-chosen flags.
