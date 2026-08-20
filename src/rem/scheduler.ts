@@ -44,10 +44,16 @@ export { interpretActiveResult };
 export type { SchedulerPlatform };
 
 export const SHIM_PATH_DEFAULT = resolve(homedir(), ".flair", "bin", "flair-rem-nightly");
-export const LAUNCHD_PLIST_PATH = resolve(homedir(), "Library", "LaunchAgents", "dev.flair.rem.nightly.plist");
+// Unit names, exported (flair#1278) so `flair doctor`'s scheduled-drivers
+// section addresses the same job this module installs — same single-source
+// rule as the federation scheduler's LAUNCHD_LABEL/SYSTEMD_*_UNIT constants.
+export const LAUNCHD_LABEL = "dev.flair.rem.nightly";
+export const SYSTEMD_TIMER_UNIT = "flair-rem-nightly.timer";
+export const SYSTEMD_SERVICE_UNIT = "flair-rem-nightly.service";
+export const LAUNCHD_PLIST_PATH = resolve(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
 export const SYSTEMD_USER_DIR = resolve(homedir(), ".config", "systemd", "user");
-export const SYSTEMD_TIMER_PATH = resolve(SYSTEMD_USER_DIR, "flair-rem-nightly.timer");
-export const SYSTEMD_SERVICE_PATH = resolve(SYSTEMD_USER_DIR, "flair-rem-nightly.service");
+export const SYSTEMD_TIMER_PATH = resolve(SYSTEMD_USER_DIR, SYSTEMD_TIMER_UNIT);
+export const SYSTEMD_SERVICE_PATH = resolve(SYSTEMD_USER_DIR, SYSTEMD_SERVICE_UNIT);
 
 export interface SchedulerSubstitutions {
   /** Absolute path to the flair binary the shim should invoke. */
@@ -233,9 +239,9 @@ function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string
  */
 function activeCheckCommand(plat: SchedulerPlatform): string[] {
   if (plat === "darwin") {
-    return ["launchctl", "print", `gui/${process.getuid?.() ?? ""}/dev.flair.rem.nightly`];
+    return ["launchctl", "print", `gui/${process.getuid?.() ?? ""}/${LAUNCHD_LABEL}`];
   }
-  return ["systemctl", "--user", "is-active", "flair-rem-nightly.timer"];
+  return ["systemctl", "--user", "is-active", SYSTEMD_TIMER_UNIT];
 }
 
 /**
@@ -504,7 +510,7 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
         // remedy — kickstarting on top of it would blur which actor failed.
         firstRun = verifyFirstRun({
           plat,
-          darwinTarget: `gui/${process.getuid?.() ?? ""}/dev.flair.rem.nightly`,
+          darwinTarget: `gui/${process.getuid?.() ?? ""}/${LAUNCHD_LABEL}`,
           stderrLogPath,
         });
       }
@@ -524,7 +530,7 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
   writeFileWithDir(servicePath, serviceContents, 0o600);
   writeFileWithDir(timerPath, timerContents, 0o600);
 
-  const loadCommand = ["systemctl", "--user", "enable", "--now", "flair-rem-nightly.timer"];
+  const loadCommand = ["systemctl", "--user", "enable", "--now", SYSTEMD_TIMER_UNIT];
   let loadResult: EnableResult["loadResult"];
   let firstRun: FirstRunVerification | undefined;
   if (!opts.skipLoad) {
@@ -534,7 +540,7 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
       // Ordering gate (#1231): only after the load exited 0. Starts the
       // SERVICE unit directly (oneshot ⇒ blocks until the run exits) rather
       // than waiting for the nightly timer to fire.
-      firstRun = verifyFirstRun({ plat, linuxServiceUnit: "flair-rem-nightly.service", stderrLogPath });
+      firstRun = verifyFirstRun({ plat, linuxServiceUnit: SYSTEMD_SERVICE_UNIT, stderrLogPath });
     }
   }
   return {
@@ -573,7 +579,7 @@ export function disableScheduler(opts: DisableOpts = {}): DisableResult {
 
   const timerPath = opts.systemdTimerOverride ?? SYSTEMD_TIMER_PATH;
   const servicePath = opts.systemdServiceOverride ?? SYSTEMD_SERVICE_PATH;
-  const unloadCommand = ["systemctl", "--user", "disable", "--now", "flair-rem-nightly.timer"];
+  const unloadCommand = ["systemctl", "--user", "disable", "--now", SYSTEMD_TIMER_UNIT];
   let unloadResult: DisableResult["unloadResult"];
   if (existsSync(timerPath) || existsSync(servicePath)) {
     if (!opts.skipUnload) {

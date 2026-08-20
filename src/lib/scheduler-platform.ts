@@ -296,6 +296,235 @@ export function describeExitCode(code: number | null): string {
   return `exit ${code}`;
 }
 
+// ─── last-run exit-status query (flair#1278) ────────────────────────────────
+// `verifyFirstRun` above answers "did the first run work?" at ENABLE time;
+// this answers "how did the most recent run end?" at DIAGNOSIS time (`flair
+// doctor`), reusing the same #1282 parsers so the two can never drift on how
+// a service manager's answer is read. Neither #1231 fleet incident (launchd
+// spawn error 209 from a missing log dir, exit 126 from a stripped exec bit)
+// was visible in doctor — driver health only surfaced in `flair federation
+// sync status` / `flair rem nightly status`, commands an operator has to
+// think to run.
+
+export type LastExitState =
+  /** A completed run's exit status was read back (see `exitCode`). */
+  | "recorded"
+  /** A run is in flight right now — no completed status to read yet. */
+  | "running"
+  /** The service manager answered, but has no completed run on record. */
+  | "never-ran"
+  /** The service manager could not be consulted, or its answer was unreadable. */
+  | "unavailable";
+
+export interface LastExitStatus {
+  state: LastExitState;
+  /** The recorded exit code. Non-null exactly when `state` is "recorded". */
+  exitCode: number | null;
+  /** Mechanical detail: which command said what. */
+  detail: string;
+}
+
+export interface QueryLastExitOpts {
+  plat: SchedulerPlatform;
+  /** darwin: the `<domain>/<label>` target for `launchctl print`. */
+  darwinTarget?: string;
+  /** linux: the SERVICE unit (not the timer) whose last run is read. */
+  linuxServiceUnit?: string;
+  /** Injectable process hook so unit tests never touch a real service manager. */
+  run?: (cmd: string[], timeoutMs: number) => SpawnReport;
+}
+
+/**
+ * Reads how the job's most recent run ended, from the only vantage that
+ * knows: the service manager itself.
+ *
+ * darwin: `launchctl print` carries `last exit code = N` once a run has
+ * completed (parseLaunchdPrintExit). linux: `systemctl --user show` on the
+ * service unit — with one trap encoded here rather than in every caller: a
+ * unit that has NEVER completed a run still reports `ExecMainStatus=0,
+ * Result=success` (systemd property defaults), so the exit properties are
+ * only believed when `ExecMainExitTimestampMonotonic` proves a run actually
+ * finished. Without that check, "never ran" renders as "last run succeeded"
+ * — the exact skipped-check-looks-like-a-pass shape this feature exists to
+ * kill.
+ */
+export function queryLastExitStatus(opts: QueryLastExitOpts): LastExitStatus {
+  const run = opts.run ?? ((cmd: string[], timeoutMs: number) => spawnReport(cmd, timeoutMs));
+
+  if (opts.plat === "darwin") {
+    const target = opts.darwinTarget;
+    if (!target) throw new Error("queryLastExitStatus: darwinTarget is required on darwin");
+    const printCmd = ["launchctl", "print", target];
+    const r = run(printCmd, STATUS_CHECK_TIMEOUT_MS);
+    if (spawnedNothing(r)) {
+      return { state: "unavailable", exitCode: null, detail: `launchctl could not be run (${printCmd.join(" ")})` };
+    }
+    if (r.code !== 0) {
+      return { state: "unavailable", exitCode: null, detail: `${printCmd.join(" ")} → code ${r.code} (job not loaded — no run record to read)` };
+    }
+    const { running, lastExitCode } = parseLaunchdPrintExit(r.stdout);
+    if (running) {
+      return { state: "running", exitCode: null, detail: `${printCmd.join(" ")} → a run is in flight` };
+    }
+    if (lastExitCode === null) {
+      return { state: "never-ran", exitCode: null, detail: `${printCmd.join(" ")} → no completed run recorded` };
+    }
+    return { state: "recorded", exitCode: lastExitCode, detail: `${printCmd.join(" ")} → last exit code = ${lastExitCode}` };
+  }
+
+  const unit = opts.linuxServiceUnit;
+  if (!unit) throw new Error("queryLastExitStatus: linuxServiceUnit is required on linux");
+  const showCmd = ["systemctl", "--user", "show", unit, "--property=ExecMainStatus,Result,ExecMainExitTimestampMonotonic"];
+  const r = run(showCmd, STATUS_CHECK_TIMEOUT_MS);
+  if (spawnedNothing(r)) {
+    return { state: "unavailable", exitCode: null, detail: `systemctl could not be run (${showCmd.join(" ")})` };
+  }
+  if (/failed to connect to bus/i.test(r.stderr)) {
+    return { state: "unavailable", exitCode: null, detail: `${showCmd.join(" ")} → ${r.stderr.trim()}` };
+  }
+  if (r.code !== 0) {
+    return { state: "unavailable", exitCode: null, detail: `${showCmd.join(" ")} → code ${r.code}${r.stderr.trim() ? `: ${r.stderr.trim()}` : ""}` };
+  }
+  // Believe the exit properties only when a run has actually finished — see
+  // the doc comment above for why this must be checked FIRST.
+  const ts = /^ExecMainExitTimestampMonotonic=(\d+)\s*$/m.exec(r.stdout);
+  if (ts && Number(ts[1]) === 0) {
+    return { state: "never-ran", exitCode: null, detail: `${showCmd.join(" ")} → no completed run recorded` };
+  }
+  const parsed = parseSystemdShowExit(r.stdout);
+  if (parsed.execMainStatus === null) {
+    return { state: "unavailable", exitCode: null, detail: `${showCmd.join(" ")} → no ExecMainStatus in the reply` };
+  }
+  const resultTxt = parsed.result ? `, Result=${parsed.result}` : "";
+  return {
+    state: "recorded",
+    exitCode: parsed.execMainStatus,
+    detail: `${showCmd.join(" ")} → ExecMainStatus=${parsed.execMainStatus}${resultTxt}`,
+  };
+}
+
+// ─── doctor finding for one scheduled driver (flair#1278) ───────────────────
+
+export interface ScheduledDriverFacts {
+  /** Human name, e.g. "Federation sync driver". */
+  label: string;
+  /** The command that enables this scheduler — named in remedies. */
+  enableCommand: string;
+  /** The scheduler's own status command — named in remedies. */
+  statusCommand: string;
+  /** Unit files present on disk (schedulerStatus().installed). */
+  installed: boolean;
+  /** Genuinely loaded per the service manager; null = query inconclusive. */
+  active: boolean | null;
+  /** Last-run read — null when it was not queried (nothing installed/loaded). */
+  lastExit: LastExitStatus | null;
+  /** The job's stderr log, named in the degraded remedy. */
+  stderrLogPath: string;
+}
+
+export type ScheduledDriverFindingState = "healthy" | "degraded" | "not-enabled" | "unverified";
+
+export interface ScheduledDriverFinding {
+  state: ScheduledDriverFindingState;
+  /**
+   * Which doctor marker to render: "ok" is the pass marker, "error" the fail
+   * marker. "info"/"warn" are NEITHER — the not-enabled and unverified states
+   * must be visually distinct from both a pass and a failure.
+   */
+  icon: "ok" | "warn" | "error" | "info";
+  /** true → doctor counts an issue and exits nonzero. */
+  isIssue: boolean;
+  message: string;
+  /** Indented continuation lines (actor+state+remedy when degraded). */
+  detail: string[];
+}
+
+/**
+ * Pure decision logic for `flair doctor`'s "Scheduled drivers" section
+ * (flair#1278) — extracted so it is unit-testable without spawning
+ * launchctl/systemctl, same idiom as formatEnableReport/assessDriver in the
+ * scheduler modules and summarizeDoctorRun in the CLI.
+ *
+ * The three load-bearing rules:
+ *   - not-enabled is a CHOICE, not a defect: informational marker, never the
+ *     pass marker, never the fail marker, never an issue (a skipped check
+ *     must not look like a pass — flair#970's rule applied to schedulers).
+ *   - a last-run failure IS a defect, reported loud with actor+state+remedy
+ *     (embed-verify style): the service manager is firing the job, the runs
+ *     themselves are dying, so the schedule looks alive while nothing is
+ *     delivered — the #1231 incident shape.
+ *   - "could not read" is UNVERIFIED, never a pass and never a hard failure
+ *     — the same discipline as doctor's audit-log and embeddings probes.
+ */
+export function describeScheduledDriverFinding(f: ScheduledDriverFacts): ScheduledDriverFinding {
+  if (!f.installed) {
+    return {
+      state: "not-enabled",
+      icon: "info",
+      isIssue: false,
+      message: `${f.label}: not enabled`,
+      detail: [`Opt-in — enable: ${f.enableCommand}`],
+    };
+  }
+  if (f.active === false) {
+    return {
+      state: "degraded",
+      icon: "error",
+      isIssue: true,
+      message: `${f.label}: INSTALLED BUT NOT LOADED — nothing will run it`,
+      detail: [
+        `The unit files are on disk, but the service manager does not have the job loaded, so it never fires.`,
+        `Fix: ${f.enableCommand}   # then check: ${f.statusCommand}`,
+      ],
+    };
+  }
+  if (f.active === null) {
+    return {
+      state: "unverified",
+      icon: "warn",
+      isIssue: false,
+      message: `${f.label}: UNVERIFIED — installed, but whether it is loaded could not be read`,
+      detail: [`Querying the service manager was inconclusive. Check: ${f.statusCommand}`],
+    };
+  }
+  // Loaded from here down.
+  const le = f.lastExit;
+  if (!le || le.state === "unavailable") {
+    return {
+      state: "unverified",
+      icon: "warn",
+      isIssue: false,
+      message: `${f.label}: loaded, but its last-run status could not be read`,
+      detail: [...(le ? [le.detail] : []), `Check: ${f.statusCommand}`],
+    };
+  }
+  if (le.state === "recorded" && le.exitCode !== 0) {
+    return {
+      state: "degraded",
+      icon: "error",
+      isIssue: true,
+      message: `${f.label} DEGRADED — loaded, but its last run failed (${describeExitCode(le.exitCode)})`,
+      detail: [
+        `The service manager has the job loaded and is firing it; the runs themselves are failing, so the schedule looks alive while nothing is delivered.`,
+        `Check ${f.stderrLogPath}, then: ${f.statusCommand}`,
+      ],
+    };
+  }
+  if (le.state === "running") {
+    return { state: "healthy", icon: "ok", isIssue: false, message: `${f.label}: loaded (a run is in flight now)`, detail: [] };
+  }
+  if (le.state === "never-ran") {
+    return {
+      state: "healthy",
+      icon: "ok",
+      isIssue: false,
+      message: `${f.label}: loaded (no completed run on record yet)`,
+      detail: [`Installed and loaded; the service manager has not recorded a completed run since it last (re)loaded the job.`],
+    };
+  }
+  return { state: "healthy", icon: "ok", isIssue: false, message: `${f.label}: loaded (last run: exit 0)`, detail: [] };
+}
+
 export interface VerifyFirstRunOpts {
   plat: SchedulerPlatform;
   /** darwin: the `<domain>/<label>` target for kickstart/print. */
