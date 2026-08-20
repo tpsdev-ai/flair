@@ -172,6 +172,23 @@ describe("AttentionQuery.post() — input validation", () => {
     expect((res as Response).status).toBe(400);
   });
 
+  it("every invalid_entity rejection names the type:value format and enumerates the valid types (flair#1288, canary finding 5)", async () => {
+    reset();
+    const q = makeQuery(agentCtx("agent-1"));
+    // Missing, malformed-grammar, and unknown-type — all three rejections
+    // must say what well-formed looks like, or the error doesn't enable a
+    // response (the canary hit exactly this: a 400 with no path to success).
+    for (const payload of [{}, { entity: "not-a-vocab-string" }, { entity: "project:foo" }]) {
+      const res = await q.post(payload);
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(400);
+      const body = await (res as Response).json();
+      expect(body.error).toBe("invalid_entity");
+      expect(body.detail).toContain("type:value");
+      expect(body.detail).toContain("valid types: repo, issue, customer, subsystem, agent, person");
+    }
+  });
+
   it("non-integer / non-positive days is a 400", async () => {
     reset();
     const q = makeQuery(agentCtx("agent-1"));

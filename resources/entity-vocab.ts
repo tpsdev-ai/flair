@@ -112,6 +112,24 @@ export function isValidEntity(entity: unknown): entity is string {
   return VALUE_VALIDATORS[parsed.type](parsed.value);
 }
 
+/**
+ * Canonical "what does well-formed look like" hint for invalid_entity /
+ * invalid_entities rejections (flair#1288, nightly-canary finding 5): every
+ * rejection of an entity string must name the `type:value` format AND
+ * enumerate the closed type set — errors must enable a response. Built from
+ * ENTITY_TYPES so the enumeration can never drift from the vocabulary it
+ * describes.
+ *
+ * The CLI ships an inlined copy of this module for its client-side pre-check
+ * (src/lib/entity-vocab-cli.ts — cross-boundary imports from src/ into
+ * resources/ don't survive npm packaging; same reason src/cli.ts inlines the
+ * federation crypto helpers). test/unit/cli-entities-option.test.ts pins the
+ * two implementations together, this hint string included.
+ */
+export function entityFormatHint(): string {
+  return `entities are 'type:value' vocabulary strings (e.g. 'repo:owner/name'); valid types: ${ENTITY_TYPES.join(", ")}`;
+}
+
 export interface EntityValidationResult {
   valid: boolean;
   /** The subset of the input that failed validation (as their original string form). */
@@ -144,8 +162,15 @@ export function validateEntities(entities: unknown): EntityValidationResult {
 export function invalidEntitiesResponse(entities: unknown): Response | null {
   const result = validateEntities(entities);
   if (result.valid) return null;
+  // `message` is additive (flair#1288) — `error` and `invalid` keep their
+  // exact shapes for existing consumers; the new field makes the rejection
+  // actionable on its own (names the format, enumerates the valid types).
   return new Response(
-    JSON.stringify({ error: "invalid_entities", invalid: result.invalid }),
+    JSON.stringify({
+      error: "invalid_entities",
+      invalid: result.invalid,
+      message: `invalid entities: ${result.invalid.join(", ")} — ${entityFormatHint()}`,
+    }),
     { status: 400, headers: { "Content-Type": "application/json" } },
   );
 }

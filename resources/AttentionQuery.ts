@@ -78,7 +78,7 @@
 
 import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified, type AgentAuthVerdict } from "./agent-auth.js";
-import { isValidEntity } from "./entity-vocab.js";
+import { entityFormatHint, isValidEntity } from "./entity-vocab.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -118,7 +118,7 @@ interface ParsedQuery {
 function parseQueryInput(data: any): ParsedQuery | Response {
   const entity = data?.entity;
   if (typeof entity !== "string" || entity.length === 0) {
-    return badRequest("invalid_entity", "entity is required (a vocabulary string, e.g. 'repo:owner/name')");
+    return badRequest("invalid_entity", `entity is required — ${entityFormatHint()}`);
   }
   // Exact match on the full type:value string — the SAME validator every
   // write path (Memory/WorkspaceState/OrgEvent) gates `entities` writes
@@ -126,7 +126,9 @@ function parseQueryInput(data: any): ParsedQuery | Response {
   // closed, documented type set / grammar — never a prefix/regex match, so
   // this stays a plain indexed equality lookup, never a scan.
   if (!isValidEntity(entity)) {
-    return badRequest("invalid_entity", `'${entity}' is not a well-formed vocabulary string (type:value, closed type set)`);
+    // flair#1288 (canary finding 5): the rejection must say what well-formed
+    // looks like — name the type:value format and enumerate the valid types.
+    return badRequest("invalid_entity", `'${entity}' is not a well-formed vocabulary string — ${entityFormatHint()}`);
   }
 
   let days = DEFAULT_WINDOW_DAYS;

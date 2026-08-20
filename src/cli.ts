@@ -140,6 +140,7 @@ import {
   type ResolvedSigningIdentity,
 } from "./lib/signing-identity.js";
 import { validateSnapshotArchive, extractSnapshotSafely } from "./lib/safe-snapshot-extract.js";
+import { entityFormatHint, parseEntitiesCsv } from "./lib/entity-vocab-cli.js";
 import { escapeXml, unescapeXml } from "./lib/xml-escape.js";
 import {
   assessLaunchdManagement,
@@ -15617,6 +15618,32 @@ sessionSnapshot
 
 // ─── Memory and Soul commands ────────────────────────────────────────────────
 
+// ─── --entities <csv> (flair#1288) ──────────────────────────────────────────
+//
+// Shared parse+validate for the `--entities <csv>` option on `memory add`,
+// `workspace set`, and `orgevent`. Comma-delimited to match the existing CLI
+// list-option convention (`--tags <csv>`, `--derived-from <csv>`); safe
+// because no entity grammar admits a comma. Invalid input exits 1 with the
+// canonical message — it names the offending values, the `type:value`
+// format, and the closed type set (errors must enable a response; same hint
+// the attention path's server-side invalid_entity 400 carries). The server
+// still re-validates on every write path (resources/entity-vocab.ts via
+// Memory/WorkspaceState/OrgEvent) — this client-side gate exists so a typo
+// is caught before any signing/network work, with a message a raw 400 body
+// never matched.
+function parseEntitiesOptionOrExit(csv: string): string[] {
+  const { entities, invalid } = parseEntitiesCsv(csv);
+  if (invalid.length > 0) {
+    console.error(`error: invalid --entities value${invalid.length === 1 ? "" : "s"}: ${invalid.join(", ")}`);
+    console.error(`  ${entityFormatHint()}`);
+    process.exit(1);
+  }
+  return entities;
+}
+
+const ENTITIES_OPTION_DESCRIPTION =
+  "Comma-separated entity vocabulary strings this record touches (type:value from the closed type set, e.g. repo:tpsdev-ai/flair — see docs/entity-vocabulary.md; feeds `flair attention`)";
+
 const memory = program.command("memory").description("Manage agent memories");
 memory.command("add [content]")
   .description("Write a new memory row for an agent (content via positional arg or --content)")
@@ -15627,6 +15654,7 @@ memory.command("add [content]")
   .option("--subject <text>", "one-line title / entity this memory is about")
   .option("--derived-from <csv>", "Comma-separated source Memory IDs this memory was distilled/reflected from (sets Memory.derivedFrom; used by the `rem rapid` reflection loop)")
   .option("--visibility <value>", "Writer-controlled sharing intent (sets Memory.visibility): 'private' (owner-only, never visible to any other agent) or 'shared' (visible to owner + every other agent on this instance — open within the org, not gated by a MemoryGrant). Omit to use the server's durability-keyed default: permanent/persistent -> shared, standard/ephemeral -> private (flair#509)")
+  .option("--entities <csv>", ENTITIES_OPTION_DESCRIPTION)
   .action(async (contentArg, opts) => {
     const content = contentArg ?? opts.content;
     if (!content) { console.error("error: content required (positional arg or --content)"); process.exit(1); }
@@ -15656,6 +15684,12 @@ memory.command("add [content]")
     }
     if (opts.derivedFrom) {
       body.derivedFrom = String(opts.derivedFrom).split(",").map((x: string) => x.trim()).filter(Boolean);
+    }
+    // flair#1288: validated client-side; exits 1 with the canonical
+    // format-and-type-set message on any malformed value.
+    if (opts.entities) {
+      const entities = parseEntitiesOptionOrExit(String(opts.entities));
+      if (entities.length > 0) body.entities = entities;
     }
     const out = await api("PUT", `/Memory/${memId}`, body, { agentId });
     console.log(JSON.stringify(out, null, 2));
@@ -18045,6 +18079,7 @@ workspace
   .option("--task <id>", "Task/issue id this workspace is attached to")
   .option("--phase <phase>", "Current phase (e.g. design, implement, review)")
   .option("--summary <text>", "Short summary of current workspace state")
+  .option("--entities <csv>", ENTITIES_OPTION_DESCRIPTION)
   .option("--agent <id>", "Agent ID (env: FLAIR_AGENT_ID)")
   .option("--port <port>", "Harper HTTP port")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
@@ -18062,6 +18097,10 @@ workspace
         process.exit(1);
       }
     }
+
+    // flair#1288: validate --entities before any key/network work; exits 1
+    // with the canonical format-and-type-set message on any malformed value.
+    const entities = opts.entities ? parseEntitiesOptionOrExit(String(opts.entities)) : undefined;
 
     const keyPath = resolveKeyPath(agentId);
     if (!keyPath) {
@@ -18093,6 +18132,7 @@ workspace
     if (opts.task) body.taskId = opts.task;
     if (opts.phase) body.phase = opts.phase;
     if (opts.summary) body.summary = opts.summary;
+    if (entities && entities.length > 0) body.entities = entities;
 
     const res = await fetch(`${baseUrl}/WorkspaceState/${id}`, {
       method: "PUT",
@@ -18141,6 +18181,8 @@ interface PublishOrgEventParams {
   detail?: string;
   scope?: string;
   targetIds?: string[];
+  /** Validated entity vocabulary strings (flair#1288) — callers validate before passing. */
+  entities?: string[];
 }
 // Flat `{ ok: boolean; ...optional }` shape — same convention
 // RecallSpotCheckFetchResult uses above, deliberately NOT a `{ok:true}|
@@ -18197,6 +18239,7 @@ async function publishOrgEvent(params: PublishOrgEventParams): Promise<PublishOr
   if (params.detail) body.detail = params.detail;
   if (params.scope) body.scope = params.scope;
   if (params.targetIds && params.targetIds.length > 0) body.targetIds = params.targetIds;
+  if (params.entities && params.entities.length > 0) body.entities = params.entities;
 
   const res = await fetch(`${params.baseUrl}/OrgEvent/${id}`, {
     method: "PUT",
@@ -18221,6 +18264,7 @@ program
   .option("--detail <text>", "Longer detail payload")
   .option("--scope <scope>", "Scope of the event (e.g. an agent id, repo, or 'org')")
   .option("--target <agentId>", "Recipient agent id (repeatable)", (val: string, acc: string[]) => { acc.push(val); return acc; }, [] as string[])
+  .option("--entities <csv>", ENTITIES_OPTION_DESCRIPTION)
   .option("--agent <id>", "Agent ID (env: FLAIR_AGENT_ID)")
   .option("--port <port>", "Harper HTTP port")
   .option("--target-url <url>", "Remote Flair URL (env: FLAIR_TARGET)")
@@ -18236,6 +18280,10 @@ program
     const baseUrl = resolveBaseUrl({ target: opts.targetUrl, port: opts.port }).replace(/\/$/, "");
     const targetIds = Array.isArray(opts.target) && opts.target.length > 0 ? (opts.target as string[]) : undefined;
 
+    // flair#1288: validate --entities before any key/network work; exits 1
+    // with the canonical format-and-type-set message on any malformed value.
+    const entities = opts.entities ? parseEntitiesOptionOrExit(String(opts.entities)) : undefined;
+
     const result = await publishOrgEvent({
       agentId,
       baseUrl,
@@ -18244,6 +18292,7 @@ program
       detail: opts.detail,
       scope: opts.scope,
       targetIds,
+      entities,
     });
 
     if (!result.ok) {
