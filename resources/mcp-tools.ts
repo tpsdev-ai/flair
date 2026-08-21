@@ -669,6 +669,67 @@ export interface ToolInvariants {
    */
   budgetCap?: { estimate: string; budget: string; tolerance: number };
   /**
+   * flair#1290 (step 4) — the flair#1270 payload token LEDGER, enforced:
+   *
+   *   result[total] ≈ Σ result[terms]
+   *
+   * (for bootstrap: tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens
+   * + trustTokens + eventsTokens — the identity documented at the counters'
+   * definition in resources/MemoryBootstrap.ts's response tail). Every term
+   * must be a NUMBER (the counter convention reports 0, never omits), and the
+   * gap `total - Σ terms` is bounded on BOTH sides:
+   *
+   *   -roundingSlack <= gap <= perItemGap * shippedItems + fixedSlack
+   *
+   * UPPER bound — the ≈ gap on the connector path is the documented #1207
+   * measurement/budgeting decoupling: soulTokens/memoryTokens count rendered
+   * PROSE lines while the containers ship heavier STRUCTURED objects (id, two
+   * ISO timestamps, field keys, JSON escaping). That overhead is per-shipped-
+   * item and bounded, so the tolerance scales with the shipped item count
+   * (`shippedItems` = Σ lengths of `perItemContainers`) instead of pretending
+   * to be a constant. An uncounted content class (the #1270 field gap: trust
+   * blocks charged at admission but absent from the counters) overshoots it.
+   * LOWER bound — Σ-of-ceil per counted line can exceed ceil-of-Σ by at most
+   * one token per line; anything past `roundingSlack` means a counter is
+   * over-reporting (counting content that never shipped) — the same defect
+   * mirrored.
+   *
+   * `proseMirrorArg` names the request arg (bootstrap: includeContext) that
+   * legitimately adds the full prose mirror to the payload BESIDE the
+   * structured containers; when the driven args set it truthy only the lower
+   * bound is asserted (the upper gap widens by the mirror, by design — see
+   * the prose-path test in test/integration/bootstrap-token-ledger-1270
+   * .test.ts). When it is declared, conform() requires the request args —
+   * an unevaluated bound must not look like a pass.
+   *
+   * ONE tolerance definition: these constants were sized empirically in
+   * test/integration/bootstrap-token-ledger-1270.test.ts (measured 2026-08-20,
+   * gap 1144–1199 over 24 shipped items ≈ 48–50 tokens/item → perItemGap 60
+   * leaves ~10/item headroom), and that suite now reads them FROM THIS
+   * declaration rather than re-declaring them. POWER constraint: the
+   * tolerance must stay well below a trust-carrying fixture's trust spend
+   * (≈3400 tokens there) so zeroing one term out of the response tail
+   * overshoots it and goes red — if a payload change moves the gap, re-derive
+   * both numbers from that suite's printed ledger line; don't widen the slack
+   * until the mutation can't bite.
+   */
+  tokenDecomposition?: {
+    /** The reconciling total (bootstrap: "tokenEstimate"). */
+    total: string;
+    /** The ledger counters that must sum to it (each a number on the result). */
+    terms: string[];
+    /** Containers whose SHIPPED item count scales the structured-overhead tolerance. */
+    perItemContainers: string[];
+    /** Bounded per-shipped-item structured-overhead allowance (tokens). */
+    perItemGap: number;
+    /** Fixed allowance for the scaffold-adjacent remainder (tokens). */
+    fixedSlack: number;
+    /** Per-line ceil-rounding allowance below zero (tokens). */
+    roundingSlack: number;
+    /** Request arg that legitimately widens the gap (prose mirror): when truthy, only the lower bound runs. */
+    proseMirrorArg?: string;
+  };
+  /**
    * Count coherence (flair#1207): for each triple, `included + truncated <=
    * available`. 0.44.9 reported available:3 included:2 truncated:2 (2+2 > 3)
    * because a memory budget-skipped in one section was re-counted in the
@@ -1109,6 +1170,21 @@ export const TOOLS: Record<string, ToolEntry> = {
         // tolerance covers the fixed JSON scaffolding + the #1207 prose-vs-
         // structured charge gap; uncounted content does not fit under it.
         budgetCap: { estimate: "tokenEstimate", budget: "maxTokens", tolerance: 0.25 },
+        // flair#1290 step 4 — the #1270 token-ledger identity, enforced:
+        // tokenEstimate ≈ scaffold + soul + memory + trust + events, two-sided
+        // (constants sized in bootstrap-token-ledger-1270.test.ts, which reads
+        // them from HERE — one identity, one tolerance definition). The upper
+        // bound is waived when the request opted into the prose mirror
+        // (includeContext), which legitimately widens the gap by design.
+        tokenDecomposition: {
+          total: "tokenEstimate",
+          terms: ["scaffoldTokens", "soulTokens", "memoryTokens", "trustTokens", "eventsTokens"],
+          perItemContainers: ["memories", "predicted", "teammateFindings"],
+          perItemGap: 60,
+          fixedSlack: 150,
+          roundingSlack: 48,
+          proseMirrorArg: "includeContext",
+        },
         // #1207 — count arithmetic: included + truncated <= available. The
         // own-memory triple CAN fail: memoriesAvailable comes from an
         // independent count query, so a double-counted memory breaks it.

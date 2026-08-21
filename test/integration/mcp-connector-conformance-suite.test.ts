@@ -35,6 +35,14 @@
 //   #1207  memoriesIncluded + memoriesTruncated exceeded memoriesAvailable
 //          (a memory counted in two sections; a predicted memory re-admitted)
 //          → the countCoherence invariant goes red once the count fix is reverted.
+//   #1270  trust blocks were charged at admission but ABSENT from the reported
+//          counters — a ~1178-token gap the payload's figures couldn't explain
+//          → the tokenDecomposition invariant (tokenEstimate ≈ scaffoldTokens +
+//            soulTokens + memoryTokens + trustTokens + eventsTokens, bounded on
+//            both sides) goes red at every bootstrap conform() site whose payload
+//            carries the zeroed/uncounted class (flair#1290 step 4; the terms and
+//            tolerance constants live in the contract declaration, shared with
+//            bootstrap-token-ledger-1270.test.ts — one identity, one definition).
 //
 // The completeness check (checkContractCompleteness) is CI-gated in THIS lane:
 // a new /mcp tool shipped without a contract fails the build, fail-closed.
@@ -378,6 +386,12 @@ describe("/mcp connector conformance — each tool honors its declared contract"
     expect(summaries.filter((s: string) => s === DUP_SUMMARY).length, "the byte-identical duplicate pair must collapse to ONE (#1200)").toBe(1);
     // memoriesIncluded spans memories+predicted, and there IS own content.
     expect(body.memories.length, "own memories delivered").toBeGreaterThan(0);
+    // flair#1290 step 4 — positive controls for the tokenDecomposition
+    // invariant (it ran inside conform() above): the events and memory terms
+    // genuinely participate on this payload, so a zeroed or uncounted term has
+    // something to lose HERE — the identity check is not vacuously green.
+    expect(body.eventsTokens, "eventsTokens term participates (events shipped)").toBeGreaterThan(0);
+    expect(body.memoryTokens, "memoryTokens term participates (memories shipped)").toBeGreaterThan(0);
   }, 120_000);
 
   test("bootstrap: events respect maxTokens and zero-row heals are suppressed (#1199/#1200 — budgetCap bites on revert)", async () => {
@@ -457,6 +471,11 @@ describe("/mcp connector conformance — each tool honors its declared contract"
     for (const t of trustBody.trust) {
       expect(deliveredIds.has(t.id), `trust entry ${t.id} must correlate to a delivered memory`).toBe(true);
     }
+    // flair#1290 step 4 — the trust TERM of the token-ledger identity genuinely
+    // participates at this conform() site (the invariant ran above with
+    // trustTokens in the sum): a trust-term desync can bite here, not only in
+    // the dedicated ledger suite.
+    expect(trustBody.trustTokens, "trustTokens term participates on the trust path").toBeGreaterThan(0);
     // Same count arithmetic holds under trust admission.
     expect(
       trustBody.memoriesIncluded + trustBody.memoriesTruncated,
