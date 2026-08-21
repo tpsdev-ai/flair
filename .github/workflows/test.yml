@@ -213,11 +213,14 @@ jobs:
     # 30, not 20 (#948). This is headroom, NOT the fix — the fix is dropping
     # `--with-deps` from the Playwright step below, which removed this job's
     # dependency on the Ubuntu apt mirror. Kept deliberately generous because
-    # the dominant cost here is `Run integration tests` at ~12 min (measured
-    # over four runs on 2026-07-28: 11m39s / 11m46s / 12m08s / 12m19s), which
-    # left only ~6 min of slack against the old ceiling. If total job time
-    # starts creeping toward this number, the integration suite is what to
-    # look at — raising this again would just hide the trend.
+    # the dominant cost here is `Run integration tests`: ~12 min when this
+    # comment was first written (2026-07-28), grown to 26m49s by 2026-08-21 —
+    # the whole job hit 29m58s and sibling runs were timeout-cancelled at
+    # 30m10s (#1320). The fix was the #1290/#1299/#1320 pattern: move the
+    # heaviest real-Harper-boot suites into test/integration-heavy/ (own job
+    # below), which put the projected job back at ~17m30s. If total job time
+    # starts creeping toward this number again, the integration suite is what
+    # to look at — raising this would just hide the trend.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -453,11 +456,18 @@ jobs:
     # 30-minute ceiling — so the whole lane was cancelled and results that
     # had ALREADY passed were discarded (the first two Integration runs on
     # flair#1299). Isolating the cost makes it visible as its own check and
-    # keeps the main lane's ceiling honest. 20 minutes is generous for one
-    # file measured at ~5 min end-to-end; if this job starts crowding its
-    # ceiling, the heavy suite itself is what to look at — raising the
-    # timeout would just hide the trend (the #948 lesson).
-    timeout-minutes: 20
+    # keeps the main lane's ceiling honest.
+    #
+    # 30, not 20 (#1320): this lane was sized at 20 when it held ONE ~5-min
+    # file. #1320 moved the 14 heaviest main-lane suites here (measured
+    # 746s of CI content, per-file timings in that PR), putting this job's
+    # projected wall time at ~17m30s — 87% of the old cap, i.e. the exact
+    # coin-flip shape #1320 exists to kill. This bump is initial sizing for
+    # deliberately-added content, not headroom for unexamined growth: the
+    # main lane's no-raise doctrine still stands, and if THIS job creeps
+    # toward ~25 min the heavy suites themselves are what to look at —
+    # split or slim them rather than raising this again (the #948 lesson).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -496,11 +506,13 @@ jobs:
         # that job's step for the flair#715 history.
         run: bash "$GITHUB_WORKSPACE/scripts/ci/fetch-model.sh" nomic-embed-text-v1.5.Q4_K_M.gguf "$GITHUB_WORKSPACE/models"
       - name: Run heavy integration tests (native Harper spawn)
-        # test/integration-heavy/ holds integration files whose dominant cost
-        # is bulk CPU embedding work. Structurally excluded from the main
-        # Integration job: its `find test/integration -name '*.test.ts'`
-        # does not descend into this SIBLING directory (the same mechanism
-        # that keeps test/integration-isolated/ out of it).
+        # test/integration-heavy/ holds the integration files that are too
+        # slow for the main Integration lane's ceiling — bulk CPU embedding
+        # work (#1290) and the heaviest real-Harper-boot suites (#1320).
+        # Structurally excluded from the main Integration job: its
+        # `find test/integration -name '*.test.ts'` does not descend into
+        # this SIBLING directory (the same mechanism that keeps
+        # test/integration-isolated/ out of it).
         run: bun test $(find test/integration-heavy -name '*.test.ts' | sort)
 
   adk-flair-python:
