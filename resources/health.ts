@@ -4,6 +4,7 @@ import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
+import { resolveBuildInfo } from "./build-info.js";
 import { getMigrationStatusSnapshot } from "./migrations/status.js";
 import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
 import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
@@ -82,7 +83,21 @@ export class Health extends Resource {
     // PUBLICLY over Fabric, the public surface must omit this field (the
     // richer, auth-gated /HealthDetail already carried version pre-existing —
     // this only adds it to the anonymous endpoint too).
-    return { ok: true, version: resolveVersion() };
+    //
+    // flair#1076: both values come from dist/build-info.json — the stamp the
+    // build wrote next to the modules Harper actually loaded — so /Health
+    // reports the identity of the SERVED code, not of whatever package.json
+    // sits on disk (the 0.25.0 stale-dist incident class; Kern's ruling).
+    // `version` falls back to the package.json resolver only when no stamp
+    // exists (source runs, pre-#1076 dists). `buildCommit` is ALWAYS present:
+    // a 40-hex sha when the build ran in a git work tree, an honest null
+    // otherwise (tarball builds) — never omitted, never fabricated (Sherlock).
+    const build = resolveBuildInfo();
+    return {
+      ok: true,
+      version: build?.version ?? resolveVersion(),
+      buildCommit: build?.commit ?? null,
+    };
   }
 }
 
@@ -614,10 +629,15 @@ export class HealthDetail extends Resource {
     stats.warnings = warnings;
 
     // ── Process info ──
-    // version: the RUNNING process's own package.json — used by `flair
-    // upgrade`'s post-restart verification (flair#635) to prove the new
-    // code is actually serving, not just installed on disk.
-    stats.version = resolveVersion();
+    // version: the RUNNING process's own build stamp (dist/build-info.json,
+    // flair#1076) — used by `flair upgrade`'s post-restart verification
+    // (flair#635) to prove the new code is actually serving, not just
+    // installed on disk. Falls back to the package.json resolver when no
+    // stamp exists; buildCommit mirrors /Health's field (always present,
+    // null when built outside a git work tree).
+    const build = resolveBuildInfo();
+    stats.version = build?.version ?? resolveVersion();
+    stats.buildCommit = build?.commit ?? null;
     stats.pid = process.pid;
     stats.uptimeSeconds = Math.floor(process.uptime());
 

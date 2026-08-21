@@ -47,8 +47,8 @@
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "prebuild": "npm run clean",
-    "build": "tsc -p tsconfig.json --noCheck",
-    "build:cli": "tsc -p tsconfig.cli.json --noCheck",
+    "build": "tsc -p tsconfig.json --noCheck && node scripts/write-build-info.mjs",
+    "build:cli": "tsc -p tsconfig.cli.json --noCheck && node scripts/write-build-info.mjs",
     "prepublishOnly": "npm run build && npm run build:cli",
     "test": "bun test",
     "test:e2e": "playwright test",
