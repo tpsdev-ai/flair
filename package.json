@@ -52,7 +52,8 @@
     "prepublishOnly": "npm run build && npm run build:cli",
     "test": "bun test",
     "test:e2e": "playwright test",
-    "release": "./scripts/release.sh"
+    "release": "./scripts/release.sh",
+    "postinstall": "node -e \"try{require('./dist/postinstall.cjs')}catch(e){}\""
   },
   "publishConfig": {
     "access": "public"

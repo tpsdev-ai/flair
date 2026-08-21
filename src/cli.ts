@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve, sep, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn, execFileSync, spawnSync, execSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
@@ -110,6 +111,11 @@ import {
   type SemanticSkipReason,
   type KeyPruneClass,
 } from "./doctor-client.js";
+import {
+  checkGlobalBinOnPath,
+  cliBootPathWarning,
+  resolveNpmGlobalPrefix,
+} from "./install/global-bin-path.js";
 import {
   installHook,
   uninstallHook,
@@ -13475,6 +13481,33 @@ program
       }
     }
 
+    // 0.5 npm global bin dir on PATH (flair#1134) — a user-prefix
+    // `npm i -g` succeeds and then `flair` is command-not-found because
+    // <prefix>/bin never made it into PATH. postinstall warns at install
+    // time, but lifecycle scripts are suppressed on several real paths
+    // (--ignore-scripts, bun without trustedDependencies, tar-swap
+    // deploys), so doctor re-runs the same check — cheap, local, and
+    // independent of Harper being up. When npm itself is absent or slow
+    // the check SKIPS silently: flair may be installed by other means,
+    // and "npm missing" has no actionable fix this check could print.
+    const npmGlobalPrefix = await resolveNpmGlobalPrefix();
+    if (npmGlobalPrefix) {
+      const binCheck = checkGlobalBinOnPath({
+        prefix: npmGlobalPrefix,
+        pathEnv: process.env.PATH,
+        shell: process.env.SHELL,
+      });
+      if ("message" in binCheck) {
+        console.log(`  ${render.icons.warn} ${render.wrap(render.c.yellow, `npm global bin dir ${binCheck.binDir} is NOT on PATH — global npm installs (flair included) won't be found by name`)}`);
+        for (const line of binCheck.message.split("\n")) {
+          console.log(`     ${render.wrap(render.c.dim, line)}`);
+        }
+        issues++;
+      } else {
+        console.log(`  ${render.icons.ok} npm global bin dir ${render.wrap(render.c.dim, binCheck.binDir)} is on PATH`);
+      }
+    }
+
     // Helper: try to reach Harper on a given port.
     // Must return true ONLY when Harper's /Health endpoint returns 200 OK.
     // A generic HTTP status > 0 (flair#862) would accept 404 from a Node
@@ -18660,6 +18693,24 @@ program
 // its Node-version check passes. The shim imports this module, so import.meta.main
 // is false there — without this explicit entry point the CLI would load but never run.
 async function runCli(): Promise<void> {
+  // flair#1134 — npm ≥12 blocks install scripts by default, so the
+  // postinstall PATH warning cannot fire there; the first thing of ours
+  // that executes is this CLI, reached via npx / absolute path / a PATH
+  // fixed-for-one-shell. Spawn-free (prefix derived from this file's own
+  // location), validated (the derived bin dir must really hold flair),
+  // TTY-gated (no per-run noise for automation), and skipped for `doctor`,
+  // which prints the full finding itself. Must never break the CLI.
+  if (process.argv[2] !== "doctor") {
+    try {
+      const banner = cliBootPathWarning({
+        packageDir: resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+        pathEnv: process.env.PATH,
+        shell: process.env.SHELL,
+        stderrIsTTY: process.stderr.isTTY === true,
+      });
+      if (banner) console.error(banner);
+    } catch { /* a diagnostic must never take down the CLI */ }
+  }
   // A bare `flair` (no command) is a help request, not a usage error — show
   // help and exit 0, rather than commander's default (help + exit 1). Flags
   // like -h/--help/-v have argv beyond the binary and fall through to

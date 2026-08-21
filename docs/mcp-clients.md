@@ -30,6 +30,8 @@ flair agent add my-project
 flair status
 ```
 
+> **`flair: command not found` right after installing?** Your npm global prefix's bin dir isn't on PATH (common with a user prefix like `~/.npm-global`) — run `export PATH="$(npm prefix -g)/bin:$PATH"`, persist that line in your shell profile, and `flair doctor` will print the exact line for your shell any time.
+
 Flair runs as a local server at `http://127.0.0.1:19926` by default. The MCP server connects to it on demand via Ed25519-signed requests; nothing leaves your machine unless you explicitly route to a remote Flair instance.
 
 ---
