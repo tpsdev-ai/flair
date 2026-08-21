@@ -1,0 +1,81 @@
+[03:52:59.781] Using @harperfast/harper-pro 5.2.2 at <HARPER_PRO_DIR>/node_modules/@harperfast/harper-pro
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:59.782] LANE BASECOPY — retention 1m, reconnect PAST retention (forced base copy expected)
+══════════════════════════════════════════════════════════════════════════════
+[03:52:59.788] [node-a] install → /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-a-ov3UU2 (ops:59539 http:59540 repl:59541)
+[03:53:02.958] [node-b] install → /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-b-WIywfi (ops:59546 http:59547 repl:59548)
+[03:53:07.777] [node-a] up (pid 14266)
+[03:53:09.786] [node-b] up (pid 14308)
+[03:53:09.786] add_node: registering node-b from node-a (basic-auth bootstrap, plain ws for a local repro)
+[03:53:09.810] add_node → {"message":"Successfully added 'ws://127.0.0.1:59548' to cluster"}
+[03:53:09.810] add_node: registering node-a from node-b (basic-auth bootstrap, plain ws for a local repro)
+[03:53:09.830] add_node → {"message":"Successfully added 'ws://127.0.0.1:59541' to cluster"}
+[03:53:09.830] restarting node-b so its replication dialer picks up the header-form auth record
+[03:53:09.956] [node-b] stopped
+[03:53:10.963] [node-b] up (pid 14349)
+[03:53:12.977] both replication directions authenticated and connected
+[03:53:12.977] creating audited table repro.doc on node-a
+[03:53:15.278] PASS  replication live: both nodes hold 25 rows — actual: a=25 b=25
+
+══════════════════════════════════════════════════════════════════════════════
+[03:53:15.278] STEP: instrument positive control — a NORMAL delete must appear in read_transaction_log
+══════════════════════════════════════════════════════════════════════════════
+[03:53:15.296] PASS  node-a txn log shows the canary 'delete' entry — actual: [{"operation":"delete","user_name":"admin","timestamp":1787284395281.9048,"ids":["canary"],"records":[null]}]
+[03:53:15.296] PASS  node-b txn log shows the canary 'delete' entry (receiver-side deletes ARE audited) — actual: [{"operation":"delete","user_name":"admin","timestamp":1787284395281.9048,"ids":["canary"],"records":[null]}]
+
+══════════════════════════════════════════════════════════════════════════════
+[03:53:15.296] STEP: partition — stopping node-b
+══════════════════════════════════════════════════════════════════════════════
+[03:53:15.482] [node-b] stopped
+[03:53:15.486] aging: waiting 45s before writing partition-era rows
+[03:54:00.487] writing 10 rows on node-a only (node-b is down): part-001..part-010
+[03:54:00.632] PASS  node-a now holds 34 rows (only-copy of the 10) — actual: 34
+[03:54:00.635] aging: waiting until partition age 75s > retention 60s
+
+══════════════════════════════════════════════════════════════════════════════
+[03:54:30.298] STEP: reconnect — restarting node-b after 75s of partition
+══════════════════════════════════════════════════════════════════════════════
+[03:54:31.306] [node-b] up (pid 15426)
+[03:54:31.314] counts a/b: 34/24
+[03:54:35.331] counts a/b: 34/34
+[03:54:39.339] counts a/b: 34/34
+[03:54:43.348] counts a/b: 34/34
+[03:54:47.360] counts a/b: 34/34
+[03:54:47.362] settle: 20s after the hypothesis-direction base copy
+
+══════════════════════════════════════════════════════════════════════════════
+[03:55:07.364] ASSERTIONS
+══════════════════════════════════════════════════════════════════════════════
+[03:55:07.369] [node-a] base-copy log lines since partition:
+    2026-08-21T03:54:31.435Z [http/1] [warn] [replication]: Peer node-b requested replication of database repro from 2026-08-21T03:53:15.281Z, which predates retained transaction-log history (oldest retained 2026-08-21T03:53:14.241Z, retention 60000ms); forcing a bounded base-copy resync.
+    2026-08-21T03:54:31.435Z [http/1] [info] [replication]: Replicating all tables to node-b
+    2026-08-21T03:54:31.435Z [http/1] [warn] [replication]: Peer node-b requested replication of database system from 2026-08-21T03:53:11.699Z, which predates retained transaction-log history (oldest retained 2026-08-21T03:53:01.975Z, retention 60000ms); forcing a bounded base-copy resync.
+    2026-08-21T03:54:31.435Z [http/1] [info] [replication]: Replicating all tables to node-b
+[03:55:07.370] [node-b] base-copy log lines since partition:
+    2026-08-21T03:53:11.524Z [http/1] [info] [replication]: Replicating all tables to node-a
+    2026-08-21T03:53:13.382Z [http/1] [info] [replication]: Replicating all tables to node-a
+    2026-08-21T03:54:47.000Z [http/1] [warn] [replication]: Peer node-a requested replication of database repro from 2026-08-21T03:53:13.382Z, which predates retained transaction-log history (oldest retained 2026-08-21T03:54:31.753Z, retention 60000ms); forcing a bounded base-copy resync.
+    2026-08-21T03:54:47.000Z [http/1] [info] [replication]: Replicating all tables to node-a
+    2026-08-21T03:54:47.001Z [http/1] [warn] [replication]: Peer node-a requested replication of database system from 2026-08-21T03:53:11.524Z, which predates retained transaction-log history (oldest retained 2026-08-21T03:54:30.816Z, retention 60000ms); forcing a bounded base-copy resync.
+    2026-08-21T03:54:47.001Z [http/1] [info] [replication]: Replicating all tables to node-a
+[03:55:07.370] PASS  forced base-copy path ENGAGED (incident signature present in logs) — actual: node-a:true node-b:true
+[03:55:07.370] PASS  hypothesis direction ran: node-b base-copied database repro TOWARD node-a
+[03:55:07.403] record_count: node-a=34 node-b=34 (expected 34 if nothing is discarded)
+[03:55:07.404] partition-era rows on node-a: 10/10 present
+[03:55:07.404] partition-era rows on node-b: 10/10 present
+[03:55:07.415] 'delete' txn-log entries naming partition-era ids: node-a=0 node-b=0
+[03:55:07.415] txn-log entries mentioning 'reload': node-a=1 node-b=1
+[03:55:07.416] hdb.log lines mentioning 'reload' since partition: node-a=[] node-b=[]
+
+══════════════════════════════════════════════════════════════════════════════
+[03:55:07.416] VERDICT — lane basecopy
+══════════════════════════════════════════════════════════════════════════════
+[03:55:07.416] NOT REPRODUCED under this trigger shape: node-a received a forced base copy of repro that did not mention its receiver-only rows, and those rows SURVIVED on both nodes (per-row copy-apply is additive; nothing was discarded).
+[03:55:07.416] node dirs (removed on exit): /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-a-ov3UU2 /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-b-WIywfi
+[03:55:07.544] [node-a] stopped
+[03:55:07.645] [node-b] stopped
+
+══════════════════════════════════════════════════════════════════════════════
+[03:55:07.653] DONE — all checks passed
+══════════════════════════════════════════════════════════════════════════════

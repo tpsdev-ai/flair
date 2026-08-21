@@ -1,0 +1,100 @@
+[03:52:23.654] Using @harperfast/harper-pro 5.2.2 at <HARPER_PRO_DIR>/node_modules/@harperfast/harper-pro
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:23.655] LANE RESIDENCY (variant: byid) — residency-omission on ordinary writes (suspect 1 of the #1244 remaining-suspects derivation)
+══════════════════════════════════════════════════════════════════════════════
+[03:52:23.661] [node-a] install → /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-a-8FPWdH (ops:59456 http:59457 repl:59458)
+[03:52:26.546] [node-b] install → /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-b-Tc2Phi (ops:59463 http:59464 repl:59465)
+[03:52:30.527] [node-a] up (pid 13961)
+[03:52:32.548] [node-b] up (pid 13964)
+[03:52:32.550] add_node: registering node-b from node-a (basic-auth bootstrap, plain ws for a local repro)
+[03:52:32.592] add_node → {"message":"Successfully added 'ws://127.0.0.1:59465' to cluster"}
+[03:52:32.592] add_node: registering node-a from node-b (basic-auth bootstrap, plain ws for a local repro)
+[03:52:32.615] add_node → {"message":"Successfully added 'ws://127.0.0.1:59458' to cluster"}
+[03:52:32.615] restarting node-b so its replication dialer picks up the header-form auth record
+[03:52:32.731] [node-b] stopped
+[03:52:33.745] [node-b] up (pid 13970)
+[03:52:35.779] both replication directions authenticated and connected
+[03:52:35.779] creating audited table repro.doc on node-a
+[03:52:38.054] PASS  replication live: both nodes hold 25 rows — actual: a=25 b=25
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:38.054] STEP: instrument positive control — a NORMAL delete must appear in read_transaction_log
+══════════════════════════════════════════════════════════════════════════════
+[03:52:38.080] PASS  node-a txn log shows the canary 'delete' entry — actual: [{"operation":"delete","user_name":"admin","timestamp":1787284358058.2988,"ids":["canary"],"records":[null]}]
+[03:52:38.081] PASS  node-b txn log shows the canary 'delete' entry (receiver-side deletes ARE audited) — actual: [{"operation":"delete","user_name":"admin","timestamp":1787284358058.2988,"ids":["canary"],"records":[null]}]
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:38.081] STEP: pre-phase — write hub-only stand-ins BEFORE any residency exists (they must be ordinarily stored)
+══════════════════════════════════════════════════════════════════════════════
+[03:52:39.206] PASS  pre-phase: both nodes hold 34 rows — actual: a=34 b=34
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:39.206] STEP: install residency on node-a — deploy the probe component and restart (table-registration-time install)
+══════════════════════════════════════════════════════════════════════════════
+[03:52:39.374] [node-a] stopped
+[03:52:40.387] [node-a] up (pid 14009)
+[03:52:42.410] [node-a] residency-probe log lines: ["[residency-probe] residency function INSTALLED on repro.doc (variant: byid)"]
+[03:52:42.410] PASS  residency function INSTALLED on node-a (component log line present)
+[03:52:42.419] PASS  registration alone destroys nothing: hubonly-pre rows still present on node-a after the residency install — actual: present=5/5
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:42.422] STEP: trigger — ordinary writes through the component worker (fresh writes + the self-resave _writeUpdate re-entry)
+══════════════════════════════════════════════════════════════════════════════
+[03:52:42.437] driver fresh-write response: {"ok":true,"written":["hubonly-fresh-001","hubonly-fresh-002","hubonly-fresh-003"],"pid":14009}
+[03:52:42.445] driver self-resave response: {"ok":true,"written":["hubonly-pre-001","hubonly-pre-002","hubonly-pre-003","hubonly-pre-004","hubonly-pre-005","plain-201","plain-101"],"pid":14009}
+[03:52:42.447] PASS  driver wrote all marked + control records — actual: fresh=["hubonly-fresh-001","hubonly-fresh-002","hubonly-fresh-003"] resave=["hubonly-pre-001","hubonly-pre-002","hubonly-pre-003","hubonly-pre-004","hubonly-pre-005","plain-201","plain-101"]
+[03:52:42.447] settle: 10s for replication of the audited writes to node-b (and for the worker stdout pipe to flush)
+[03:52:52.447] [node-a] residency function invocation lines captured (informational): 0
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:52.447] OBSERVATION (not a gate): reads with the peer UP — the residency read path may transparently remote-fetch
+══════════════════════════════════════════════════════════════════════════════
+[03:52:52.450] node-a search with node-b up: 5/8 resolve by id (3ms) — resolving here does NOT prove local storage
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:52.451] ASSERT: node-b (the residency list member) received the ordinary audited writes in full
+══════════════════════════════════════════════════════════════════════════════
+[03:52:52.457] PASS  node-b holds ALL hubonly rows (pre + fresh) — they replicated as ordinary writes — actual: pre=5/5 fresh=3/3
+[03:52:52.457] PASS  node-b sees the resave content (resaved flag) — the re-entry write was an ordinary replicated put — actual: {"id":"hubonly-pre-001","__createdtime__":1787284358163.6182,"__updatedtime__":1787284362439.505,"v":2,"wave":"pre-residency","resaved":true}
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:52.457] STEP: stop node-b, then probe node-a LOCAL state (defeats the transparent remote fetch)
+══════════════════════════════════════════════════════════════════════════════
+[03:52:52.606] [node-b] stopped
+[03:52:52.613] local probes took 7ms
+[03:52:52.613] node-a local state, pre-residency hubonly rows: {"hubonly-pre-001":"full","hubonly-pre-002":"full","hubonly-pre-003":"full","hubonly-pre-004":"full","hubonly-pre-005":"full"}
+[03:52:52.613]   sample stored value for hubonly-pre-001: {"id":"hubonly-pre-001","__createdtime__":1787284358163.6182,"__updatedtime__":1787284358163.6182,"resaved":false,"v":1,"wave":"pre-residency"}
+[03:52:52.613] node-a local state, post-install hubonly rows: {"hubonly-fresh-001":"absent","hubonly-fresh-002":"absent","hubonly-fresh-003":"absent"}
+[03:52:52.613] node-a local state, unmarked rows: {"plain-101":"full","plain-102":"full","plain-103":"full","plain-104":"full","plain-105":"full","plain-201":"full"}
+[03:52:52.618] node-a record_count=35 (a destroyed-but-stubbed row still counts; the incident's counts were index/vector-based)
+[03:52:52.618] PASS  (a/byid) the byid variant left pre-existing local values in place (recordUpdater never touches the store for record===undefined) — expected: NO destruction — actual: {"hubonly-pre-001":"full","hubonly-pre-002":"full","hubonly-pre-003":"full","hubonly-pre-004":"full","hubonly-pre-005":"full"}
+[03:52:52.618] PASS  (a2/byid) ...and the surviving local value is the STALE pre-resave one (v=1, resaved=false) — the resave was audit-only locally — actual: {"id":"hubonly-pre-001","__createdtime__":1787284358163.6182,"__updatedtime__":1787284358163.6182,"resaved":false,"v":1,"wave":"pre-residency"}
+[03:52:52.619] PASS  (a3) hubonly rows first written AFTER the install were never fully stored on node-a (no store write at all) — actual: {"hubonly-fresh-001":"absent","hubonly-fresh-002":"absent","hubonly-fresh-003":"absent"}
+[03:52:52.619] PASS  (c) unmarked rows untouched on node-a (incl. the driver-written one and the resaved control, which carries its update) — actual: full=6/6 plain-101={"id":"plain-101","__createdtime__":1787284358163.6182,"__updatedtime__":1787284362439.505,"resaved":true,"v":2,"wave":"pre-residency"}
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:52.619] ASSERT: transaction log — ordinary puts, ZERO deletes (the instrument positive-control above proves deletes DO log)
+══════════════════════════════════════════════════════════════════════════════
+[03:52:52.625] txn-log entries naming hubonly ids: non-delete=3 delete=0; operations=["upsert"]
+[03:52:52.625] PASS  (b) ZERO delete transactions name any hubonly id — actual: 0
+[03:52:52.625] PASS  (b2) the destruction-triggering re-save is an ORDINARY audited entry carrying the full record payload — actual: {"id":"hubonly-pre-001","wave":"pre-residency","v":2,"resaved":true,"__updatedtime__":1787284362439.505,"__createdtime__":1787284358163.6182}
+[03:52:52.625] restore payload captured from the txn log: {"id":"hubonly-pre-001","wave":"pre-residency","v":2,"resaved":true,"__updatedtime__":1787284362439.505,"__createdtime__":1787284358163.6182}
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:52.625] STEP: restore — remove the residency component, restart node-a, re-upsert the audit payload (node-b still down: reads are provably local)
+══════════════════════════════════════════════════════════════════════════════
+[03:52:52.717] [node-a] stopped
+[03:52:53.724] [node-a] up (pid 14049)
+[03:52:53.731] PASS  (d) restore from the transaction-log payload recovers the FULL row locally — actual: {"id":"hubonly-pre-001","__createdtime__":1787284358163.6182,"__updatedtime__":1787284373727.98,"resaved":true,"v":2,"wave":"pre-residency"}
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:53.731] VERDICT — lane residency, variant byid
+══════════════════════════════════════════════════════════════════════════════
+[03:52:53.731] BYID VARIANT BOUND CONFIRMED: setResidencyById omission cannot destroy an already-stored local row (the record===undefined write never touches the primary store — it only prevents NEW local storage and writes the audit entry). If the incident mechanism is residency omission, it must be the record-based setResidency variant (or the rows must have been first written AFTER the residency install).
+[03:52:53.731] node dirs (removed on exit): /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-a-8FPWdH /var/folders/59/t9shx29n79jf6n97k8lj98q40000gn/T/hdb-1244-node-b-Tc2Phi
+[03:52:53.824] [node-a] stopped
+
+══════════════════════════════════════════════════════════════════════════════
+[03:52:53.834] DONE — all checks passed
+══════════════════════════════════════════════════════════════════════════════
