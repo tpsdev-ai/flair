@@ -35,6 +35,7 @@ COPY src/ ./src/
 COPY resources/ ./resources/
 COPY schemas/ ./schemas/
 COPY packages/ ./packages/
+COPY scripts/write-build-info.mjs ./scripts/
 
 RUN bun install --frozen-lockfile
 RUN bun run build && bun run build:cli
