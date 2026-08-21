@@ -95,7 +95,7 @@ describe("session-start resume path (runHook end-to-end)", () => {
     ];
     const out = await runHook(startInput(), () => ({
       bootstrap: async () => ({ context: "## Identity" }),
-      request: async (_m: string, p: string) => (p === "/Memory/search_by_conditions" ? priorRows : {}),
+      request: async (_m: string, p: string) => (p.startsWith("/Memory?agentId=") ? priorRows : {}),
     }));
     const context: string = JSON.parse(out).hookSpecificOutput.additionalContext;
     const hintLines = context.split("\n").filter((l) => l.includes("Continuity:"));
@@ -122,7 +122,7 @@ describe("session-start resume path (runHook end-to-end)", () => {
           },
         }),
       );
-      expect(searches.filter((p) => p === "/Memory/search_by_conditions")).toHaveLength(0);
+      expect(searches.filter((p) => p.startsWith("/Memory?agentId="))).toHaveLength(0);
       expect(JSON.parse(out).hookSpecificOutput.additionalContext).not.toContain("Continuity:");
     }
     expect(readPointer(dir, AGENT)?.sessionId).toBe(seeded.sessionId); // never rotated
@@ -159,7 +159,7 @@ describe("session-start resume path (runHook end-to-end)", () => {
     const out = await runHook(startInput(), () => ({
       bootstrap: async () => ({ context: "" }),
       request: async (_m: string, p: string) =>
-        p === "/Memory/search_by_conditions"
+        p.startsWith("/Memory?agentId=")
           ? [journalRow({ seq: 1, sessionId: prior.sessionId, processUUID: prior.processUUID })]
           : {},
     }));
@@ -193,7 +193,7 @@ describe("session-start resume path (runHook end-to-end)", () => {
       const out = await runHook(startInput(), () => ({
         bootstrap: async () => ({ context: "ctx" }),
         request: (_m: string, p: string) =>
-          p === "/Memory/search_by_conditions" ? new Promise(() => {}) : Promise.resolve({}),
+          p.startsWith("/Memory?agentId=") ? new Promise(() => {}) : Promise.resolve({}),
       }));
       const elapsed = Date.now() - start;
       const context: string = JSON.parse(out).hookSpecificOutput.additionalContext;

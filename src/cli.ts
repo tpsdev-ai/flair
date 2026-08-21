@@ -8716,6 +8716,48 @@ export function derivePromotedTags(
   return { ok: true, tags: [scopeTag, ...provenance], adkSourced: true };
 }
 
+// ─── Promoted-row visibility (flair#1257 slice 3 — default-private-unless) ────
+// Continuity-journal scope tag prefix. Canonical string duplicated in
+// resources/memory-reflect-lib.ts / resources/auto-promote-lib.ts and
+// packages/flair-mcp/src/continuity.ts — this file sits on the CLI side of the
+// npm-packaging boundary (see this file's header) and cannot import them; kept
+// in sync by the shared canonical string, same discipline as
+// MACHINE_REVIEWER_* below.
+export const CONTINUITY_SCOPE_TAG_PREFIX = "adk:continuity:";
+
+/**
+ * Decide a promoted Memory row's visibility for the HUMAN `rem promote` path
+ * (flair#1257 slice 3). Mirror of resources/auto-promote-lib.ts
+ * decidePromotedVisibility (the server-side auto-promote half) — Sherlock's
+ * default-private-unless ruling covers BOTH promotion paths: the sources of a
+ * continuity candidate are the most sensitive tier (ephemeral+private journal
+ * rows), so leaving visibility unset here would let Memory's durability-keyed
+ * default widen it to shared ("persistent" defaults shared) — a silent
+ * visibility escalation. "shared" only when the candidate is continuity-scoped
+ * AND carries the distiller's affirmative ruling WITH its recorded
+ * team-relevance justification; every other case — including every
+ * uncertainty — is "private".
+ *
+ * Returns undefined for NON-continuity candidates: their visibility behavior
+ * (durability-keyed default) is byte-for-byte the pre-slice-3 contract and is
+ * deliberately not changed here.
+ */
+export function derivePromotedVisibility(candidate: {
+  scopeTag?: string | null;
+  visibilityRuling?: string | null;
+  visibilityRationale?: string | null;
+}): "private" | "shared" | undefined {
+  const scopeTag = candidate.scopeTag;
+  const isContinuity =
+    typeof scopeTag === "string" &&
+    scopeTag.length > CONTINUITY_SCOPE_TAG_PREFIX.length &&
+    scopeTag.startsWith(CONTINUITY_SCOPE_TAG_PREFIX);
+  if (!isContinuity) return undefined;
+  if (candidate.visibilityRuling !== "shared") return "private";
+  const rationale = typeof candidate.visibilityRationale === "string" ? candidate.visibilityRationale.trim() : "";
+  return rationale.length > 0 ? "shared" : "private";
+}
+
 // ─── Machine reviewer namespace (#1205 slice 1205a — Sherlock security req 4) ─
 // A promotion records a reviewerId that feeds audit/attribution
 // (schemas/memory.graphql:209). An automated (machine-driven) promotion path
@@ -8842,11 +8884,19 @@ rem
       // Write the resulting Soul or Memory entry
       if (opts.to === "memory") {
         const memId = `${candidate.agentId}-promoted-${Date.now()}`;
+        // flair#1257 slice 3: for a CONTINUITY-scoped candidate, visibility is
+        // decided default-private-unless (derivePromotedVisibility) — the
+        // sources are ephemeral+private journal rows, and an unset visibility
+        // would silently widen to shared via the persistent durability
+        // default. Non-continuity candidates return undefined here and keep
+        // the pre-slice-3 durability-keyed default, unchanged.
+        const promotedVisibility = derivePromotedVisibility(candidate);
         const memWrite = await api("PUT", `/Memory/${encodeURIComponent(memId)}`, {
           id: memId,
           agentId: candidate.agentId,
           content: candidate.claim,
           durability: "persistent",
+          ...(promotedVisibility ? { visibility: promotedVisibility } : {}),
           tags: promotedTags,
           derivedFrom: candidate.sourceMemoryIds ?? [],
           promotionStatus: "approved",

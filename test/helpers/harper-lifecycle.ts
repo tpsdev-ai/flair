@@ -2,7 +2,7 @@ import { spawn, execFileSync, ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import type { AddressInfo, Server } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync, rmSync, readdirSync } from "node:fs";
+import { existsSync, rmSync, readdirSync, readFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -334,6 +334,19 @@ export interface StartHarperOptions {
    */
   harperBinDir?: string;
   /**
+   * Raw YAML appended to the instance's `harperdb-config.yaml` AFTER `harper
+   * install` writes it and BEFORE `harper dev` boots (flair#1257 slice 3).
+   * Lets a test declare TOP-LEVEL config blocks the installer doesn't write —
+   * e.g. a `models.generative` entry pointing `backend:` at a stub module
+   * (test/fixtures/stub-generative-backend.mjs) so execute-mode distillation
+   * runs end-to-end against a deterministic in-process backend instead of
+   * 503ing on "no backend configured". Caller supplies complete top-level
+   * YAML; this helper only appends (it never merges), so the appended keys
+   * must not already exist in the installer's file — the append fails loudly
+   * if one does, rather than shipping a silently duplicated key.
+   */
+  appendRootConfigYaml?: string;
+  /**
    * Reuse this existing directory as ROOTPATH/HOME instead of `mkdtemp`-ing a
    * fresh one. Used by the downgrade-compat test (flair#637) to boot a
    * DIFFERENT Harper build against data a PRIOR `startHarper()` call already
@@ -426,6 +439,29 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     install.on("error", reject);
     setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
   });
+
+  // Append caller-supplied top-level config blocks (see StartHarperOptions.
+  // appendRootConfigYaml). Fail loudly on a top-level key collision — a
+  // duplicated YAML key is resolved silently (last wins) by most parsers,
+  // which is exactly the quiet misconfiguration this guard exists to prevent.
+  if (opts.appendRootConfigYaml) {
+    // harper 5.2's installer writes `harper-config.yaml` at ROOTPATH (older
+    // versions used `harperdb-config.yaml` — probe both, fail loudly on
+    // neither rather than appending to a file the boot won't read).
+    const configPath = [join(installDir, "harper-config.yaml"), join(installDir, "harperdb-config.yaml")]
+      .find((p) => existsSync(p));
+    if (!configPath) {
+      throw new Error(`appendRootConfigYaml: no harper-config.yaml/harperdb-config.yaml under ${installDir} after install`);
+    }
+    const existing = readFileSync(configPath, "utf-8");
+    const topLevelKeys = [...opts.appendRootConfigYaml.matchAll(/^([A-Za-z][A-Za-z0-9_]*):/gm)].map((m) => m[1]);
+    for (const key of topLevelKeys) {
+      if (new RegExp(`^${key}:`, "m").test(existing)) {
+        throw new Error(`appendRootConfigYaml: top-level key '${key}' already exists in ${configPath}; appending would silently duplicate it`);
+      }
+    }
+    appendFileSync(configPath, `\n${opts.appendRootConfigYaml.trimEnd()}\n`);
+  }
 
   // Spawn `harper dev` with a fresh pair of OS-assigned free ports. A port can
   // still collide between allocation and bind (TOCTOU, or a lingering instance),

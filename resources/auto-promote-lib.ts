@@ -155,6 +155,59 @@ export function isMachineReviewerId(id: string | undefined | null): boolean {
   return typeof id === "string" && id.startsWith(MACHINE_REVIEWER_PREFIX);
 }
 
+// ─── Promoted-row visibility (flair#1257 slice 3 — default-private-unless) ────
+// Continuity-journal scope tag prefix. Canonical string duplicated in
+// resources/memory-reflect-lib.ts (CONTINUITY_SCOPE_TAG_PREFIX), packages/
+// flair-mcp/src/continuity.ts (the writer) and src/rem/runner.ts — kept in
+// sync by the shared canonical string across the npm-packaging boundaries
+// (same discipline as MACHINE_REVIEWER_* above).
+export const CONTINUITY_SCOPE_TAG_PREFIX = "adk:continuity:";
+
+/** True iff `tag` is a continuity-journal scope tag (non-empty sessionId
+ *  component — the bare prefix is not a session). */
+export function isContinuityScopeTag(tag: string | null | undefined): boolean {
+  return typeof tag === "string" && tag.length > CONTINUITY_SCOPE_TAG_PREFIX.length && tag.startsWith(CONTINUITY_SCOPE_TAG_PREFIX);
+}
+
+/** The candidate fields the visibility decision inspects (flair#1257 slice 3). */
+export interface PromotedVisibilityCandidateInput {
+  scopeTag?: string | null;
+  visibilityRuling?: string | null;
+  visibilityRationale?: string | null;
+}
+
+/**
+ * Decide a promoted Memory row's visibility (Sherlock's ruling, flair#1257
+ * slice 3): **default-private-unless**. Promotion is a visibility ESCALATION
+ * from the most sensitive tier (the sources are ephemeral+private journal
+ * rows, or standard+private session episodes), so the DEFAULT — including
+ * every uncertainty fallback — is "private". "shared" is returned ONLY when
+ * ALL of:
+ *
+ *   1. the candidate is CONTINUITY-scoped (scopeTag `adk:continuity:*`).
+ *      ADK per-user candidates (`adk:<app>:<user>`) are ALWAYS private —
+ *      their per-user isolation is client-side tag re-verification that
+ *      other agents don't run, so a shared ADK promotion leaks a user's
+ *      distilled private data org-wide (the #1205b-2 safety argument). No
+ *      ruling can override that; and
+ *   2. the distiller AFFIRMATIVELY ruled "shared" (visibilityRuling —
+ *      stamped at staging only when the model emitted an explicit shared
+ *      ruling, resources/memory-reflect-lib.ts); and
+ *   3. a non-empty team-relevance justification is recorded on the candidate
+ *      (visibilityRationale). A shared ruling without its justification is
+ *      not affirmative — it decays to private, fail-closed.
+ *
+ * So a shared promoted row always traces to a recorded justification on its
+ * candidate — never to a default, never silently.
+ */
+export function decidePromotedVisibility(candidate: PromotedVisibilityCandidateInput): "private" | "shared" {
+  if (!isContinuityScopeTag(candidate.scopeTag)) return "private";
+  if (candidate.visibilityRuling !== "shared") return "private";
+  const rationale = typeof candidate.visibilityRationale === "string" ? candidate.visibilityRationale.trim() : "";
+  if (rationale.length === 0) return "private";
+  return "shared";
+}
+
 /**
  * The tag set for an auto-promoted Memory. The per-user `scopeTag` MUST come
  * first and is load-bearing — it is the access-control boundary that keeps the

@@ -219,4 +219,16 @@ type MemoryCandidate @table(database: "flair") @export {
                                    # evidence and would promote tagless (a cross-user leak). Nullable/additive —
                                    # pre-#1205b candidates and non-tagged (scope:"recent"/"all") distillations
                                    # read null, unchanged behavior (clean-upgrade-path gate).
+  visibilityRuling: String         # flair#1257 slice 3: the distiller's AFFIRMATIVE visibility ruling for the
+                                   # promoted row — only ever "shared", and only stamped (resources/memory-
+                                   # reflect-lib.ts buildStagedCandidateRow) when the ruling arrived WITH a
+                                   # non-empty team-relevance justification. Promotion (resources/auto-promote-
+                                   # lib.ts decidePromotedVisibility) re-verifies all three conditions
+                                   # (continuity scopeTag + this ruling + visibilityRationale) and defaults
+                                   # "private" otherwise — default-private-unless (Sherlock): a shared promoted
+                                   # row must always trace to a recorded justification, never to a default.
+                                   # Nullable/additive — pre-slice-3 candidates read null ⇒ private, unchanged.
+  visibilityRationale: String      # flair#1257 slice 3: the team-relevance justification paired with
+                                   # visibilityRuling — the auditable "why shared" recorded on the candidate.
+                                   # Nullable/additive, same clean-upgrade contract as scopeTag above.
 }

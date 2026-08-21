@@ -46,6 +46,7 @@ import { agentContext } from "./in-process.js";
 import {
   decideAutoPromote,
   buildAutoPromotedTags,
+  decidePromotedVisibility,
   DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE,
 } from "./auto-promote-lib.js";
 
@@ -147,20 +148,26 @@ export class AutoPromoteCandidates extends Resource {
         agentId,
         content: c.claim,
         durability: "persistent",
-        // ── visibility: PRIVATE, explicit (Sherlock cross-agent leak fix) ──────
+        // ── visibility: DEFAULT-PRIVATE-UNLESS, explicit (Sherlock) ───────────
         // MUST be set. Memory.put() defaults an unset visibility from durability
         // (Memory.ts) and "persistent" defaults to "shared" — and "shared" is
         // ORG-OPEN (memory-read-scope.ts): readable by EVERY verified agent on
-        // the instance. The source episodes are the user's PRIVATE session data
-        // (durability:"standard" → default private), and the per-user boundary
-        // is adk-flair's CLIENT-SIDE tag re-verification, which OTHER agents do
-        // NOT run. So a shared auto-promoted claim would leak a user's distilled
-        // private data to every agent on the box — unattended. "private" is
-        // owner-only, so the claim is reachable ONLY through the app agent's own
-        // tag-filtered search (which re-verifies the tag) and is invisible to
-        // every other agent. This keeps the blast radius inside the one agentId,
-        // which is the entire #1205 safety argument.
-        visibility: "private",
+        // the instance. The sources are the most sensitive tiers (a user's
+        // PRIVATE session episodes, or an agent's ephemeral+private continuity
+        // journal), so promotion is a visibility ESCALATION and the default —
+        // including every uncertainty fallback — is "private".
+        //
+        // decidePromotedVisibility (auto-promote-lib.ts) returns "shared" ONLY
+        // for a CONTINUITY-scoped candidate carrying an AFFIRMATIVE distiller
+        // ruling with a recorded team-relevance justification (flair#1257
+        // slice 3 — a shared row always traces to a justification on its
+        // candidate, never to a default). ADK per-user candidates remain
+        // ALWAYS private regardless of any ruling: their per-user boundary is
+        // adk-flair's CLIENT-SIDE tag re-verification, which OTHER agents do
+        // NOT run — a shared ADK promotion would leak a user's distilled
+        // private data to every agent on the box, unattended. That is the
+        // entire #1205 safety argument, unchanged.
+        visibility: decidePromotedVisibility(c),
         // scopeTag FIRST — the per-user access-control boundary (Req 2).
         tags: buildAutoPromotedTags(c.id, decision.scopeTag),
         derivedFrom: Array.isArray(c.sourceMemoryIds) ? c.sourceMemoryIds : [],
