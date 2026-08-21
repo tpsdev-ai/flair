@@ -79,6 +79,11 @@ jobs:
         # while the author still has the context — rather than at a release
         # weeks later, after the release branch and PR already exist.
         run: node scripts/check-version-sync.mjs
+      - name: "Check public plugin mcp.json does not pin flair-mcp"
+        # Directory listings scrape packages/*/mcp.json. A version or
+        # dist-tag pin here rots the listing (flair#1307: 0.44.13 while
+        # npm latest was 0.46.0). Unpinning is the policy.
+        run: node scripts/check-plugin-mcp-unpinned.mjs
       - name: "Check production dep bake time (≥7 days)"
         # Supply-chain bake-time guard. Fails if any external pinned production
         # dep was published <7 days ago — catches the "compromise published,
