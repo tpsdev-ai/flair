@@ -50,6 +50,15 @@ import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifec
 // The same estimator the handler budgets and reports with (single source,
 // harper-free) — reconstruction must be same-estimator or it proves nothing.
 import { estimateTokens } from "../../resources/token-estimate";
+// flair#1290 step 4 — the reconciliation identity is now a conform()-enforced
+// contract invariant, and ITS declaration (the bootstrap contract's
+// `invariants.tokenDecomposition`, resources/mcp-tools.ts) is the single home
+// of the identity's terms and tolerance constants. This suite reads them from
+// there: one identity, one tolerance definition — a re-declared copy here
+// would be exactly the two-definitions drift the invariant exists to prevent.
+import { TOOLS } from "../../resources/mcp-tools";
+
+const LEDGER = TOOLS.bootstrap.contract.invariants!.tokenDecomposition!;
 
 const REPO_ROOT = process.cwd();
 const FIXTURE = join(REPO_ROOT, "test", "fixtures", "inproc-app");
@@ -133,10 +142,11 @@ function reconstructScaffold(body: Record<string, any>): number {
   return estimateTokens(JSON.stringify(skeleton));
 }
 
-/** The reconciliation gap: tokenEstimate minus the five-term ledger sum. */
+/** The reconciliation gap: the contract's total minus its declared term sum
+ *  (tokenEstimate minus the five ledger counters — read from the SAME
+ *  tokenDecomposition declaration conform() enforces). */
 function ledgerGap(body: Record<string, any>): number {
-  return body.tokenEstimate
-    - (body.scaffoldTokens + body.soulTokens + body.memoryTokens + body.trustTokens + body.eventsTokens);
+  return body[LEDGER.total] - LEDGER.terms.reduce((sum, t) => sum + body[t], 0);
 }
 
 // ~40-day backdate for the ops-seeded own permanents: keeps them out of the
@@ -195,7 +205,7 @@ const BUDGET_TOLERANCE = 0.25;
 // Sizing (measured 2026-08-20, three consecutive runs of this fixture — the
 // [1270-ledger] line below prints the live figures: est 6064–6240, memory
 // 1222, trust 3336–3457, events 186, scaffold 156 → gap 1144–1199 over a
-// stable 24 shipped items ≈ 48–50 tokens/item): STRUCT_ITEM_GAP=60 leaves
+// stable 24 shipped items ≈ 48–50 tokens/item): perItemGap=60 leaves
 // ~10 tokens/item headroom. POWER constraint: the tolerance (1590 on the
 // measured payloads) must stay well below the fixture's trust spend
 // (trustTokens ≈ 3400) so the mutation check — zero trustTokens out of the
@@ -203,17 +213,20 @@ const BUDGET_TOLERANCE = 0.25;
 // fails. If a payload change moves the gap, re-derive both numbers from the
 // printed ledger line; don't just widen the slack until the mutation can't
 // bite.
-const STRUCT_ITEM_GAP = 60;
-const FIXED_SLACK = 150;
-// Σ-of-ceil per counted line can exceed ceil-of-Σ by at most one token per
-// line; the sum may therefore sit a hair ABOVE tokenEstimate. Anything past
-// this slack means a counter is over-reporting (counting content that never
-// shipped) — the opposite defect, equally a red.
-const ROUNDING_SLACK = 48;
+//
+// flair#1290 step 4: the constants LIVE in the bootstrap contract's
+// tokenDecomposition declaration (resources/mcp-tools.ts) — the invariant
+// conform() now enforces at every conformance site — and are read from there
+// (LEDGER above). perItemGap/fixedSlack bound the gap above; roundingSlack
+// bounds it below (Σ-of-ceil per counted line can exceed ceil-of-Σ by at most
+// one token per line — anything past it means a counter is over-reporting
+// content that never shipped, the opposite defect, equally a red).
+const STRUCT_ITEM_GAP = LEDGER.perItemGap;
+const ROUNDING_SLACK = LEDGER.roundingSlack;
 
 function ledgerTolerance(body: Record<string, any>): number {
-  const shippedItems = body.memories.length + body.predicted.length + body.teammateFindings.length;
-  return STRUCT_ITEM_GAP * shippedItems + FIXED_SLACK;
+  const shippedItems = LEDGER.perItemContainers.reduce((sum, c) => sum + body[c].length, 0);
+  return LEDGER.perItemGap * shippedItems + LEDGER.fixedSlack;
 }
 
 describe("flair#1270 — bootstrap payload token ledger (trustTokens/eventsTokens/scaffoldTokens reconcile tokenEstimate)", () => {

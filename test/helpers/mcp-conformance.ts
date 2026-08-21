@@ -162,6 +162,58 @@ export function conform(toolName: string, result: any, contract: ToolContract, o
     ).toBe(true);
   }
 
+  // flair#1290 step 4 — the #1270 token-ledger identity, enforced at every
+  // conform() site: total ≈ Σ terms, bounded on both sides. Constants and
+  // reasoning live in the contract declaration (ToolInvariants.tokenDecomposition,
+  // resources/mcp-tools.ts) — one identity, one tolerance definition; the
+  // ledger suite (bootstrap-token-ledger-1270.test.ts) reads the same ones.
+  if (inv.tokenDecomposition) {
+    const d = inv.tokenDecomposition;
+    const total = result?.[d.total];
+    expect(typeof total, `${toolName}: ${d.total} must be a number for tokenDecomposition`).toBe("number");
+    let termSum = 0;
+    for (const term of d.terms) {
+      const v = result?.[term];
+      expect(
+        typeof v,
+        `${toolName}: ledger term '${term}' must be a number — the counter convention reports 0, never omits (#1270)`,
+      ).toBe("number");
+      termSum += v;
+    }
+    const gap = total - termSum;
+    const decomposed = d.terms.map((t) => `${t}=${result?.[t]}`).join(" + ");
+    // Lower bound always: a counter reporting content that never shipped runs
+    // the sum ABOVE the total past per-line ceil rounding.
+    expect(
+      gap >= -d.roundingSlack,
+      `${toolName}: ledger sum exceeds ${d.total} beyond rounding — ${d.total}(${total}) - (${decomposed}) = ${gap} must be >= -${d.roundingSlack}; a counter is over-reporting (#1270 mirrored)`,
+    ).toBe(true);
+    // Upper bound: waived only when the request opted into the prose mirror,
+    // which legitimately widens the gap by the full prose context. When the
+    // contract declares that arg, the driven args are REQUIRED — an
+    // unevaluated bound must not look like a pass.
+    if (d.proseMirrorArg !== undefined) {
+      expect(
+        opts.args !== undefined,
+        `${toolName}: tokenDecomposition declares proseMirrorArg '${d.proseMirrorArg}' — pass the request args to conform() (an unevaluated check must not look like a pass)`,
+      ).toBe(true);
+    }
+    const proseMirrorOn = d.proseMirrorArg !== undefined && Boolean(opts.args![d.proseMirrorArg]);
+    if (!proseMirrorOn) {
+      let shippedItems = 0;
+      for (const c of d.perItemContainers) {
+        const arr = getPath(result, c);
+        expect(Array.isArray(arr), `${toolName}: tokenDecomposition per-item container '${c}' must be an array`).toBe(true);
+        shippedItems += arr.length;
+      }
+      const tolerance = d.perItemGap * shippedItems + d.fixedSlack;
+      expect(
+        gap <= tolerance,
+        `${toolName}: token-ledger identity broke — ${d.total}(${total}) - (${decomposed}) = ${gap} must be <= ${tolerance} (${d.perItemGap}/item × ${shippedItems} shipped items + ${d.fixedSlack} fixed): an uncounted content class reopens exactly the #1270 field gap`,
+      ).toBe(true);
+    }
+  }
+
   for (const { included, truncated, available } of inv.countCoherence ?? []) {
     const inc = result?.[included];
     const tru = result?.[truncated];
