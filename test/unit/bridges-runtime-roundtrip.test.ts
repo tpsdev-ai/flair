@@ -1,6 +1,6 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { runRoundTrip } from "../../src/bridges/runtime/roundtrip";
 import type { YamlBridgeDescriptor } from "../../src/bridges/types";
@@ -11,6 +11,21 @@ function sandbox(): string {
   mkdirSync(d, { recursive: true });
   return d;
 }
+
+// #1293: runRoundTrip mkdtemps a flair-bridge-test-* tree per call and leaves
+// it behind (tmpExportPath is part of its result, for debugging), so this
+// suite leaked one tree per result-producing call on every unit-lane run.
+// Track each tree via the returned tmpExportPath and sweep them in afterAll —
+// after, not per-test, because one test reads tmpExportPath back.
+const bridgeTestTrees: string[] = [];
+async function roundTrip(opts: Parameters<typeof runRoundTrip>[0]) {
+  const result = await runRoundTrip(opts);
+  bridgeTestTrees.push(dirname(result.tmpExportPath));
+  return result;
+}
+afterAll(() => {
+  for (const tree of bridgeTestTrees) rmSync(tree, { recursive: true, force: true });
+});
 
 // Agentic-stack-like descriptor with matching import/export, for round-trip.
 const descriptor: YamlBridgeDescriptor = {
@@ -56,7 +71,7 @@ describe("runRoundTrip: passing paths", () => {
       JSON.stringify({ id: "l1", claim: "Always test before merging.", topic: "ci", tags: ["ci"] }),
       JSON.stringify({ id: "l2", claim: "Stack PRs carefully.", topic: "git", tags: ["git", "ops"] }),
     ].join("\n") + "\n");
-    const result = await runRoundTrip({ descriptor, cwd: dir });
+    const result = await roundTrip({ descriptor, cwd: dir });
     expect(result.passed).toBe(true);
     expect(result.expectedCount).toBe(2);
     expect(result.actualCount).toBe(2);
@@ -67,7 +82,7 @@ describe("runRoundTrip: passing paths", () => {
 
   test("empty fixture round-trips trivially", async () => {
     writeFileSync(join(dir, "fixture.jsonl"), "");
-    const result = await runRoundTrip({ descriptor, cwd: dir });
+    const result = await roundTrip({ descriptor, cwd: dir });
     expect(result.passed).toBe(true);
     expect(result.expectedCount).toBe(0);
     expect(result.actualCount).toBe(0);
@@ -87,7 +102,7 @@ describe("runRoundTrip: failing paths", () => {
       export: { targets: [{ path: "out.jsonl", format: "jsonl", map: { content: "$.c" } }] },
     };
     let thrown: any = null;
-    try { await runRoundTrip({ descriptor: d, cwd: dir }); } catch (e) { thrown = e; }
+    try { await roundTrip({ descriptor: d, cwd: dir }); } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
     expect(thrown.detail.field).toBe("import");
   });
@@ -100,7 +115,7 @@ describe("runRoundTrip: failing paths", () => {
       import: { sources: [{ path: "x.jsonl", format: "jsonl", map: { content: "$.c" } }] },
     };
     let thrown: any = null;
-    try { await runRoundTrip({ descriptor: d, cwd: dir }); } catch (e) { thrown = e; }
+    try { await roundTrip({ descriptor: d, cwd: dir }); } catch (e) { thrown = e; }
     expect(thrown).toBeInstanceOf(BridgeRuntimeError);
     expect(thrown.detail.field).toBe("export");
   });
@@ -122,7 +137,7 @@ describe("runRoundTrip: failing paths", () => {
         }],
       },
     };
-    const result = await runRoundTrip({ descriptor: buggy, cwd: dir });
+    const result = await roundTrip({ descriptor: buggy, cwd: dir });
     expect(result.passed).toBe(false);
     expect(result.mismatches.length).toBeGreaterThan(0);
     // The dropped field shows up in mismatches
@@ -142,7 +157,7 @@ describe("runRoundTrip: failing paths", () => {
         }],
       },
     };
-    const result = await runRoundTrip({ descriptor: ephDesc, cwd: dir });
+    const result = await roundTrip({ descriptor: ephDesc, cwd: dir });
     expect(result.passed).toBe(true);
     expect(result.expectedCount).toBe(0);
     expect(result.actualCount).toBe(0);
@@ -152,7 +167,7 @@ describe("runRoundTrip: failing paths", () => {
     const altPath = join(dir, "alt.jsonl");
     writeFileSync(altPath,
       JSON.stringify({ id: "alt-1", claim: "from alt fixture", topic: "misc" }) + "\n");
-    const result = await runRoundTrip({ descriptor, cwd: dir, fixturePath: altPath });
+    const result = await roundTrip({ descriptor, cwd: dir, fixturePath: altPath });
     expect(result.passed).toBe(true);
     expect(result.expectedCount).toBe(1);
   });
@@ -160,7 +175,7 @@ describe("runRoundTrip: failing paths", () => {
   test("tmpExportPath is a readable jsonl of the exported records", async () => {
     writeFileSync(join(dir, "fixture.jsonl"),
       JSON.stringify({ id: "l1", claim: "hi", topic: "t", tags: ["a"] }) + "\n");
-    const result = await runRoundTrip({ descriptor, cwd: dir });
+    const result = await roundTrip({ descriptor, cwd: dir });
     const written = readFileSync(result.tmpExportPath, "utf-8");
     expect(written.trim().split("\n").length).toBe(1);
     const parsed = JSON.parse(written.trim());
