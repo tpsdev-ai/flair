@@ -18,6 +18,227 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.47.0] - 2026-08-21
+
+### Added
+
+- **The build stamps its own identity, and the running server reports it
+  (#1076).** Both build scripts now write `dist/build-info.json` —
+  `{ version, commit, builtAt, builder }` — and `/Health` (plus the
+  authenticated `/HealthDetail`) gains an additive `buildCommit` field, with
+  `version` now served from that stamp rather than `package.json`. The served
+  code identifies itself: deploy verification asserts identity directly
+  (`grep` the stamp server-side, or `/Health` remotely) instead of hunting a
+  fresh dist-grep discriminator every release, and a stale `dist/` can no
+  longer masquerade as the version `package.json` claims. Builds outside a
+  git work tree (npm tarballs) stamp an honest `"commit": null` — the field
+  is never omitted and never fabricated.
+
+- **Continuity slice 3: REM promotion — journals distill to durable memory, default-private, stale intent never promotes** (flair#1257, closes the arc; K&S-ruled). The nightly REM cycle now selects SETTLED continuity sessions (distinct `adk:continuity:*` tags whose newest journal entry is older than the settle window — default 2h, `FLAIR_REM_SETTLE_HOURS`; measured on the newest entry so a long session quiet for 30min is still live) and distills each via the existing #1205 `scope:"tagged"` engine under a new `continuity` focus. Guards, all mutation-tested red-then-green: **stale-intent** is two-layer (the distiller prompt rule, plus a testable text-shape post-filter that drops in-flight-shaped candidates — "about to"/"waiting on"/"going to"/"planning to" — when the session is past the staleness horizon, default 72h, `FLAIR_REM_STALE_INTENT_HOURS`; stale decision-class content still promotes). **Visibility is default-private-unless** on BOTH promotion paths (auto-promote and `flair rem promote`): promotion escalates out of the most sensitive tier, so the promoted row is private unless the distiller affirmatively ruled `shared` WITH a team-relevance justification, recorded on the candidate (`MemoryCandidate.visibilityRuling`/`visibilityRationale`, additive). Promotion writes a NEW persistent row with `derivedFrom` + the preserved session scopeTag and never mutates the ephemeral original; a teammate's by-id GET on a `derivedFrom` id stays 404 (#1264 posture). Journal containment both ways: journal rows never feed `scope:"recent"/"all"` gathers, and a continuity gather reads the ephemeral journal only (never its own promoted outputs). Fixes surfaced en route: `PUT /Memory` (the capture hook's verb) now stamps the ephemeral TTL exactly like POST — hook-written journal rows previously carried no `expiresAt` and never expired; the session-start resume read now uses `GET /Memory?agentId=` (the old `POST /Memory/search_by_conditions` 405s on real Harper, so fail-open resume silently returned an empty journal); and an explicit `durability` on a promotion write is no longer silently coerced to `permanent` by the legacy in-place-approval upgrade. The `meta {seq, processUUID, sessionId}` round-trip question is settled by integration test against real Harper: undeclared meta persists through the real capture path, no schema change needed.
+
+- **bootstrap: `trustTokens` / `eventsTokens` / `scaffoldTokens` complete the payload token ledger** (flair#1270). Every token-charged content class now carries a counter, and `tokenEstimate ≈ scaffoldTokens + soulTokens + memoryTokens + trustTokens + eventsTokens` reconciles structurally in every payload — the ~1178-token gap the nairmy field rounds decomposed (trust blocks charged at admission since #1240 but absent from the reported counters) can no longer be reintroduced silently. Each figure is measured from what ships (`scaffoldTokens` is the emptied-container skeleton, measured, never a residual), so an uncounted content class breaks the identity visibly. Reporting-only: admission and selection are unchanged.
+
+- **`flair doctor` now reports scheduled-driver liveness** (flair#1278). A new
+  "Scheduled drivers" section reports, for each background scheduler
+  (federation sync, REM nightly): installed, genuinely loaded per the service
+  manager, and how the last run ended — read through `launchctl print` /
+  `systemctl --user show`, reusing the flair#1231/#1282 exit-status parsers.
+  Neither of #1231's fleet incidents (launchd spawn error 209 from a missing
+  log directory, exit 126 from a stripped exec bit) was visible in doctor —
+  driver health only surfaced in `flair federation sync status` /
+  `flair rem nightly status`, commands an operator has to think to run. A
+  last-run failure renders loud with the named failure class, what is
+  happening (the schedule fires; the runs die), and the remedy (the job's
+  stderr log + the scheduler's status command), and counts as a doctor issue.
+  A scheduler that is not enabled renders as informational "not enabled" —
+  never the pass marker, never the fail marker, never an issue. One trap
+  encoded on the way: a systemd unit that has never completed a run reports
+  `ExecMainStatus=0, Result=success` (property defaults), so the exit
+  properties are only believed once `ExecMainExitTimestampMonotonic` proves a
+  run actually finished — "never ran" must not render as "last run
+  succeeded".
+
+- **Connector principal mapping: distinct identities formalized, with the
+  two-identity integration test (flair#1280).** An OAuth `/mcp` connector's
+  token subject resolves to whatever Agent its `Credential(kind:"idp")`
+  mapping names — deliberately NOT constrained to be your CLI agent
+  (per-purpose connector identities are the product pattern; same-identity is
+  an explicit opt-in). What changed is legibility, not the model: `flair mcp
+  enable`'s identity-mapping step now states the resulting `sub → Agent`
+  mapping in as many words (plus the link remedy and the
+  `bootstrap.agentId`/`scope` diagnostic), `flair agent add` notes that a
+  connector is a distinct identity and prints the exact link command, and
+  `docs/notes/mcp-oauth-model2.md` documents the linking flow — re-running
+  `flair mcp enable --principal <agent> --idp-subject <sub>` re-points the
+  existing `(provider, subject)` Credential — including the JIT
+  `idpProvider: "mcp-oauth"` caveat. The contract is pinned end-to-end by
+  `test/integration/mcp-connector-principal-mapping.test.ts`, which drives the
+  real `mcpHandler`/`resolveAgentFromSub` (no hand-built principal contexts)
+  against a real store with two registered identities: cross-principal reads
+  see org-non-private rows and never private ones (404-never-403 by id),
+  bootstrap self-describes the resolved agent, and linking makes the connector
+  see exactly what the linked agent sees.
+
+- Regression tests pinning two mechanisms from the #1284 review (#1285): a
+  boot-level test for the `FLAIR_MCP_OAUTH` vocabulary asymmetry (`1` yields a
+  guarded `/mcp` with NO authorization server mounted — the broken-on state a
+  regression re-staging `'1'` in the secrets bundle would ship), and a deploy
+  re-pack test codifying that an operator edit to a deployed component
+  `config.yaml` does not survive a re-packed deploy (the payload derives
+  strictly from the package root's published file set).
+
+- **DeepSeek Harness wiring doc + example overlay** (`docs/deepseek-harness.md`,
+  `examples/deepseek-harness/flair.cordis.yml`). Zero-code path wiring
+  `@tpsdev-ai/flair-mcp` into DeepSeek Harness through their first-party MCP
+  bridge, with the two caveats that path carries documented prominently: the
+  bridge scrubs credential-shaped and `DSH_*` env vars before spawning (Flair
+  env must live in the overlay's `config.env`), and recall is reactive — the
+  documented persona nudge is included, and true session-start auto-inject is
+  the phase-2 native plugin tracked in flair#1289.
+
+- **Conformance: token-decomposition invariant — the #1270 ledger identity is
+  now enforced** (flair#1290, final step). A new `tokenDecomposition` invariant
+  type in the `/mcp` tool contracts asserts `tokenEstimate ≈ scaffoldTokens +
+  soulTokens + memoryTokens + trustTokens + eventsTokens` on every bootstrap
+  payload the conformance engine checks, bounded on both sides: the gap may not
+  exceed a per-shipped-item structured-overhead tolerance (an uncounted content
+  class — the exact #1270 field gap — overshoots it), and the ledger sum may
+  not exceed `tokenEstimate` beyond per-line rounding (a counter reporting
+  content that never shipped is the same defect mirrored). The identity's terms
+  and tolerance constants live in one place — the bootstrap contract
+  declaration — and the #1270 ledger suite now reads them from there instead of
+  re-declaring its own copy. Runs automatically at every `conform()` site: the
+  connector-conformance suite (default, tight-budget, event-detail, count,
+  trust, and hint fixtures) and the large-store heavy-lane workout. Test- and
+  contract-layer only; no runtime behavior changes.
+
+- **Conformance invariants powered (flair#1290).** The `/mcp` bootstrap
+  contract's `countCoherence` now also runs under `includeTrust:true` (it had
+  never executed on the trust path — the suite never enabled trust, and the
+  trust tests never ran the contract). The tautological teammate entry
+  (`teammateFindingsMatched` is *defined* as included + truncated, so the entry
+  asserted X ≤ X) is dropped from the invariant array and the field documented
+  as informational-derived. Two new invariant types: `hintWhenEmpty` asserts
+  each empty-container hint (`predictedHint`/`eventsHint`/
+  `teammateFindingsHint`/`currentTaskHint`) is present exactly when its real
+  emission condition holds and absent otherwise, and `noOpEventsSuppressed`
+  asserts zero-row no-op event suppression against `isZeroRowNoOpEvent`'s own
+  classification instead of hardcoded fixture strings. A new large-store
+  conformance test seeds the 251-record synthetic corpus-v2 across 8 agents in
+  the live profile's ownership skew through the real embedding-generating
+  write path and runs the full contract at a tight budget — the first CI run
+  where bootstrap's admission/truncation accounting works at scale. The
+  large-store suite runs in its own CI lane (`test/integration-heavy/`,
+  "Integration Tests (heavy)") — its bulk CPU embedding cost (measured 253s on
+  a CI runner) is isolated there instead of pressuring the main Integration
+  lane's ceiling. Test- and contract-layer only; no runtime behavior changes.
+
+- **`--entities <csv>` on `flair memory add`, `flair workspace set`, and `flair orgevent`.**
+  The `entities` fields documented in `docs/entity-vocabulary.md` are now reachable from the
+  CLI: pass a comma-separated list of `type:value` vocabulary strings (e.g.
+  `--entities "repo:tpsdev-ai/flair,issue:tpsdev-ai/flair#1288"`) and they land on the written
+  record, feeding `flair attention`. Values are validated client-side against the closed type
+  set before any signing or network work; a malformed value is rejected with an error that
+  names the `type:value` format and lists the valid types. The `invalid_entity` rejections on
+  `flair attention` and the server's `invalid_entities` write rejection now carry the same
+  actionable hint (the server response gains an additive `message` field — `error` and
+  `invalid` are unchanged). (#1288)
+
+### Changed
+
+- **Public plugin `mcp.json` no longer pins `@tpsdev-ai/flair-mcp`.**
+  `packages/cursor-flair/mcp.json` now uses unpinned `npx -y @tpsdev-ai/flair-mcp`,
+  so directory listings resolve latest instead of rotting at a stale version
+  (the listing had 0.44.13 while npm latest was 0.46.0). CI fails if a public
+  plugin `mcp.json` re-pins a version or dist-tag. (#1307)
+
+- team-concierge example: every comment now teaches the pattern — internal
+  issue numbers, reviewer names, and version-publishing history removed from
+  the README, agent, verify scripts, and GCP runbook. Dependencies pin the
+  published release (`adk-flair>=0.46.0`) and the quickstart installs from
+  PyPI; the runbook's operational caveats were re-verified against the
+  published 0.46.0 CLI (one corrected: re-running `flair agent add` on an
+  existing id reports success but keeps the old public key — it does not
+  refuse).
+
+### Fixed
+
+- **install: off-PATH npm prefix is detected and the exact fix printed**
+  (flair#1134). `npm i -g` on a user-prefix setup (prefix = `~/.npm-global`)
+  succeeds, puts the `flair` bin in `<prefix>/bin`, and then `flair` is
+  command-not-found while the docs claim one-command readiness. Three
+  surfaces now detect that state, and every message names the actual bin
+  directory plus the exact `export PATH="<dir>:$PATH"` line for your shell
+  (zsh/bash rc file, `fish_add_path` for fish) — never "check your PATH":
+  a `postinstall` warning at install time (delivered via `/dev/tty`, since
+  npm ≥ 8 hides lifecycle output on success; measured working on npm 11
+  defaults), a TTY-gated one-shot banner when the CLI itself runs (npm ≥ 12
+  blocks install scripts by default, so on current npm the CLI is the first
+  thing of ours that executes — reached via npx or an absolute path), and a
+  `flair doctor` check. The postinstall is read-only, spawn-free, and can
+  never fail an install; the boot banner is silent for non-TTY automation
+  and skips dev checkouts, npx cache copies, and tar-swap deploys by
+  validating that the derived bin dir really holds the flair bin.
+
+- `GET /FederationInstance` no longer 500s with "Keystore unavailable" when the
+  server's HOME-relative keystore is unwritable (the Fabric-managed hub shape) —
+  reads never require identity-creation capability (#1233). The identity row is
+  still created; a keystore write failure is logged server-side with the real
+  remedy and surfaced as a runtime-only `signingKeyAvailable: false` field on
+  the GET response. `flair federation status` now fetches instance and peers
+  independently — one failing read marks that section unverifiable instead of
+  aborting the whole render — and shows a degraded marker (keystore path +
+  permission fix) when the signing key is unavailable. Signing (pair/sync)
+  remains fail-closed; `loadInstanceSecretKey`'s error text names the real
+  recovery instead of the impossible "re-run flair federation status to
+  regenerate" advice.
+
+- `flair doctor` no longer false-negatives a working MCP setup written by a
+  client's own tooling (#1287). Root cause: doctor demanded `FLAIR_URL` in the
+  wired block, while flair-client treats it as optional (falling back to its
+  built-in default) and the documented `claude mcp add` command sets only
+  `FLAIR_AGENT_ID` — so a stock setup that followed our own docs was reported
+  as "no Flair MCP server configured" and told to run a fix it didn't need.
+  Doctor's requirement now matches flair-client's actual contract: agent id
+  required, URL optional. A URL-less block reports as configured with an
+  explicit "FLAIR_URL not set — flair-mcp defaults to <url>" note, and
+  reachability/registration are verified against that default. The Codex TOML
+  scanner gets the same contract plus support for the inline `env = { ... }`
+  table form Codex itself preserves. Detection is now pinned by literal
+  client-native fixtures for all five registry clients (captured from
+  `claude mcp add` / `gemini mcp add`, codex source, Cursor and Antigravity
+  docs), each with a drift-detection assertion that the fixture is not
+  byte-identical to our own wire output — a fixture regenerated from our
+  generator can no longer masquerade as client coverage.
+
+- The unit lane no longer leaks `flair-bridge-test-*` temp trees into TMPDIR
+  on every run (#1293). `runRoundTrip` mkdtemps one tree per call and leaves
+  it behind by design (its `tmpExportPath` is a debugging affordance); the
+  round-trip unit suite now tracks each tree it causes and sweeps them in
+  `afterAll`. Leaked trees have previously filled a builder host's disk and
+  taken an agent offline. Test-lane hygiene only — no runtime behavior
+  changes.
+
+- **bootstrap: `eventsHint` distinguishes budget-truncated from genuinely-empty**
+  (flair#1298). When org events cleared the lookback window and every relevance
+  filter but none fit the remaining token budget, the empty `events` container
+  claimed "present-but-empty by design, not dropped" — exactly the false
+  reassurance the flair#1182 empty-container hints exist to prevent (the events
+  were dropped; the payload said they weren't). `eventsHint` now mirrors
+  `teammateFindingsHint`'s branches: the budget-truncated case says how many
+  relevant events were admitted-then-skipped and that raising `maxTokens`
+  includes them; the by-design wording is reserved for a genuinely event-less
+  window. The count is of admitted-then-skipped events only — never derived
+  from a gap that could imply withheld rows. Hint emission conditions are
+  unchanged (present exactly when `events` ships empty), so the flair#1290
+  `hintWhenEmpty` conformance invariant holds as declared.
+
+- The orgevent CLI unit suite no longer dice-rolls a hook timeout under CI
+  runner load (#1300). Its `beforeAll` execSyncs a full CLI build, which has
+  exceeded bun's default 5s hook budget on a PR that never touched the file
+  (observed 5005ms on #1299's run); the hook now carries an explicit 120s
+  timeout. Test-lane hygiene only — no runtime behavior changes.
+
 ## [0.46.0] - 2026-08-19
 
 ### Added
