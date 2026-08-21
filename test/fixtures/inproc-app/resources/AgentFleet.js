@@ -254,6 +254,29 @@ async function mcpToolViaImpl(agentId, tool, args, isAdmin) {
   return entry.impl({ agentId, isAdmin: isAdmin === true, clientId: undefined }, args ?? {});
 }
 
+// ─── flair#1280 — the REAL /mcp handler, driven with a verified-token shape ───
+//
+// Every other op above hands the tools a HAND-BUILT `{ agentId, isAdmin }` —
+// which bypasses `resolveAgentFromSub` entirely, the exact fixture gap the
+// #1181 investigation documented. This op instead drives the SHIPPED
+// `resources/mcp-handler.ts` `mcpHandler` with `request.mcp = { sub }` — the
+// same post-`withMCPAuth` shape production hands it — so the REAL
+// `Credential(kind:"idp", idpSubject=sub)` lookup runs against the REAL store
+// and the resolved principal (not the caller's claim) scopes the tool call.
+// The only production layer not in the loop is `withMCPAuth`'s RS256 JWT
+// verification itself (an @harperfast/oauth concern with its own coverage);
+// everything from `request.mcp.sub` down is the shipped code path.
+async function mcpRpc(sub, rpc, clientId) {
+  const { mcpHandler } = await import("../node_modules/@tpsdev-ai/flair/dist/resources/mcp-handler.js");
+  const mcp = {};
+  if (sub != null) mcp.sub = sub;
+  if (clientId != null) mcp.client_id = clientId;
+  const res = await mcpHandler({ method: "POST", mcp, body: JSON.stringify(rpc) });
+  let parsed = null;
+  try { parsed = res?.body ? JSON.parse(res.body) : null; } catch { parsed = { unparseable: String(res?.body).slice(0, 400) }; }
+  return { status: res?.status, rpc: parsed };
+}
+
 /**
  * The DELIBERATELY unfiltered read — every agent's private records, by name.
  * `internalContext()` is what an infrastructure sweep asks for on purpose; an
@@ -354,6 +377,8 @@ export class AgentFleet extends Resource {
         return run(() => bootstrapViaMcp(body.agentId, body.args));
       case "mcpTool":
         return run(() => mcpToolViaImpl(body.agentId, body.tool, body.args, body.isAdmin));
+      case "mcpRpc":
+        return run(() => mcpRpc(body.sub, body.rpc, body.clientId));
       case "buildContextWith":
         return run(() => buildContextWith(body.agentId));
       case "createWithNoContext":

@@ -1340,9 +1340,19 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
       },
       { fetchImpl: deps.fetchImpl, now: deps.now },
     );
+    // flair#1280 — provisioning legibility: distinct identities are the
+    // DEFAULT (a connector sub is not your CLI agent unless you link them),
+    // and the one silent failure mode this surface has is discovering that
+    // via an empty bootstrap. So the step that creates the mapping states it
+    // plainly, names the link remedy, and points at the runtime diagnostic.
     push(true,
-      `principal '${principal}' ${mapping.principalCreated ? "created" : "already existed"}; ` +
-        `Credential(kind:idp) ${mapping.credentialReused ? "reused" : "created"} (${mapping.credentialId})`,
+      `connector identity: sub '${params.idpSubject}' (provider '${idpProvider}') resolves to Agent '${principal}' — ` +
+        `every /mcp call reads and writes AS '${principal}'. ` +
+        `principal ${mapping.principalCreated ? "created" : "already existed"}; ` +
+        `Credential(kind:idp) ${mapping.credentialReused ? "re-pointed" : "created"} (${mapping.credentialId}). ` +
+        `If your CLI signs as a DIFFERENT agent id, the connector sees that agent's DISTINCT memory scope (by design) — ` +
+        `re-run with --principal <your-agent-id> to link them. ` +
+        `Diagnostic: the bootstrap tool's agentId/scope fields always say who the server resolved you to.`,
     );
 
     // ── Gate: confirm the staged secrets are actually live before restarting ─
