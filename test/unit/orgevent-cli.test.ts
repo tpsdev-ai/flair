@@ -85,9 +85,13 @@ describe("flair orgevent", () => {
   let tmpDir: string;
   let keysDir: string;
 
+  // #1300: this hook execSyncs a full CLI build, which under parallel CI
+  // runner load has blown bun's default 5s hook budget (observed 5005ms on a
+  // PR that never touched this file). Explicit generous timeout removes the
+  // dice-roll; bun applies it per-hook (HookOptions = number | { timeout }).
   beforeAll(() => {
     execSync("bun run build:cli", { stdio: "ignore" });
-  });
+  }, 120_000);
 
   beforeEach(() => {
     tmpDir = makeTmpDir();
