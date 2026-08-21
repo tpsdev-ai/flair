@@ -529,21 +529,28 @@ describe("session files: 0600 files in a 0700 dir, IDs only — never journal co
 describe("resume: pointer fast path", () => {
   const PRIOR: SessionPointer = { sessionId: "cs-prior", processUUID: "proc-prior", updatedAt: "2026-08-19T09:00:00.000Z" };
 
-  test("searches exactly the prior session's tag and returns entries in seq order", async () => {
+  test("reads through the SUPPORTED verb, selects exactly the prior session's tag, returns entries in seq order", async () => {
+    // flair#1257 slice 3: the read is `GET /Memory?agentId=<id>` + client-side
+    // filtering — the original POST /Memory/search_by_conditions 405s on a
+    // real Harper (no REST handler for the ops-API operation), and the
+    // fail-open resume masked it as an eternally-empty journal. The selection
+    // the old server conditions expressed (own agentId, durability ephemeral,
+    // the prior session's tag) is asserted BEHAVIORALLY below: rows violating
+    // each condition are present in the response and must not surface.
     const rows = [
       row({ seq: 3, sessionId: "cs-prior", createdAt: "2026-08-19T10:02:00.000Z" }),
       row({ seq: 1, sessionId: "cs-prior", createdAt: "2026-08-19T10:00:00.000Z" }),
       row({ seq: 2, sessionId: "cs-prior", createdAt: "2026-08-19T10:01:00.000Z" }),
+      row({ seq: 7, sessionId: "cs-other" }),                                        // different session → excluded
+      { ...row({ seq: 8, sessionId: "cs-prior" }), agentId: "someone-else" },        // not ours → excluded
+      { ...row({ seq: 9, sessionId: "cs-prior" }), durability: "standard" },         // not the journal tier → excluded
     ];
     const { calls, client } = recordingClient(() => rows);
     const result = await discoverResume(client, AGENT, PRIOR);
 
     expect(calls).toHaveLength(1);
-    expect(calls[0].path).toBe("/Memory/search_by_conditions");
-    const conditions = calls[0].body.conditions as Array<{ search_attribute: string; search_value: unknown }>;
-    expect(conditions.some((c) => c.search_attribute === "tags" && c.search_value === continuityTag("cs-prior"))).toBe(true);
-    expect(conditions.some((c) => c.search_attribute === "durability" && c.search_value === "ephemeral")).toBe(true);
-    expect(conditions.some((c) => c.search_attribute === "agentId" && c.search_value === AGENT)).toBe(true);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].path).toBe(`/Memory?agentId=${encodeURIComponent(AGENT)}`);
 
     expect(result.sessionId).toBe("cs-prior");
     expect(result.entries.map((e) => e.seq)).toEqual([1, 2, 3]);
@@ -590,9 +597,12 @@ describe("resume: agentId-wide fallback disambiguated by processUUID (S8)", () =
     const { calls, client } = recordingClient(() => rows);
     const result = await discoverResume(client, AGENT, null);
 
-    // agentId-wide: no tag condition on the fallback search.
-    const conditions = calls[0].body.conditions as Array<{ search_attribute: string }>;
-    expect(conditions.some((c) => c.search_attribute === "tags")).toBe(false);
+    // agentId-wide: the fallback reads the same GET (no per-session tag
+    // narrowing) and considered BOTH sessions' rows — proof: it picked
+    // cs-new by processUUID recency, which requires having seen cs-old too.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("GET");
+    expect(calls[0].path).toBe(`/Memory?agentId=${encodeURIComponent(AGENT)}`);
 
     expect(result.sessionId).toBe("cs-new");
     expect(result.entries.map((e) => e.processUUID)).toEqual(["proc-new", "proc-new"]);

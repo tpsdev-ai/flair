@@ -412,6 +412,7 @@ interface RawJournalRow {
   agentId?: string;
   tags?: unknown;
   sessionId?: unknown;
+  durability?: unknown;
   expiresAt?: unknown;
   createdAt?: unknown;
   meta?: unknown;
@@ -434,17 +435,29 @@ export interface ResumeResult {
   sessionId: string | null;
 }
 
-function searchConditions(agentId: string, extra: Array<{ search_attribute: string; search_type: string; search_value: unknown }>, limit: number) {
-  return {
-    operator: "and",
-    conditions: [
-      { search_attribute: "agentId", search_type: "equals", search_value: agentId },
-      { search_attribute: "durability", search_type: "equals", search_value: "ephemeral" },
-      ...extra,
-    ],
-    get_attributes: ["*"],
-    limit,
-  };
+/**
+ * Fetch this agent's own ephemeral rows through the SUPPORTED read surface —
+ * `GET /Memory?agentId=<id>` (the same verb the REM nightly runner's snapshot
+ * step uses) — then filter client-side.
+ *
+ * This replaces the original `POST /Memory/search_by_conditions` read
+ * (flair#1257 slice 3 fix): search_by_conditions is an ops-API operation, and
+ * the Memory resource exposes no REST handler for that path — the POST 405s
+ * ("does not have a post method... /Memory/search_by_conditions"), verified
+ * against a real Harper in test/integration/continuity-rem-promotion-1257.
+ * Because discoverResume fails open by design, that 405 didn't error — it
+ * silently made EVERY resume come back empty (no hint, ever): the fail-open
+ * masked a dead read path, exactly the "unrun check looks like a pass" shape.
+ *
+ * The client-side filters mirror what the old conditions asked the server
+ * for: own agentId (the GET's query param is NOT an owner filter — the read
+ * scope returns other agents' non-private rows too; journal rows are private
+ * so only our own arrive, but the filter must not lean on that) and
+ * durability "ephemeral".
+ */
+async function fetchOwnEphemeralRows(client: ContinuityClient, agentId: string): Promise<RawJournalRow[]> {
+  const raw = await client.request("GET", `/Memory?agentId=${encodeURIComponent(agentId)}`);
+  return rowsFrom(raw).filter((r) => r.agentId === agentId && r.durability === "ephemeral");
 }
 
 function rowsFrom(result: unknown): RawJournalRow[] {
@@ -520,20 +533,18 @@ export async function discoverResume(
 ): Promise<ResumeResult> {
   try {
     if (pointer) {
-      const body = searchConditions(
-        agentId,
-        [{ search_attribute: "tags", search_type: "contains", search_value: continuityTag(pointer.sessionId) }],
-        RESUME_SEARCH_LIMIT,
-      );
-      const rows = rowsFrom(await client.request("POST", "/Memory/search_by_conditions", body)).filter((r) => isLive(r, now));
+      const priorTag = continuityTag(pointer.sessionId);
+      const rows = (await fetchOwnEphemeralRows(client, agentId))
+        .filter((r) => Array.isArray(r.tags) && (r.tags as unknown[]).includes(priorTag))
+        .filter((r) => isLive(r, now));
       const entries = rows.map(toEntry).sort(seqOrder).slice(0, RESUME_SEARCH_LIMIT);
       return { entries, sessionId: entries.length > 0 ? pointer.sessionId : null };
     }
 
-    const body = searchConditions(agentId, [], FALLBACK_SEARCH_LIMIT);
-    const rows = rowsFrom(await client.request("POST", "/Memory/search_by_conditions", body))
+    const rows = (await fetchOwnEphemeralRows(client, agentId))
       .filter((r) => isLive(r, now))
-      .filter((r) => continuitySessionOf(r) !== null);
+      .filter((r) => continuitySessionOf(r) !== null)
+      .slice(0, FALLBACK_SEARCH_LIMIT);
     const groups = new Map<string, ResumeEntry[]>();
     for (const row of rows) {
       const entry = toEntry(row);

@@ -18,8 +18,12 @@ import { tmpdir } from "node:os";
 import {
   runNightlyCycle,
   deriveActiveAdkTags,
+  deriveSettledContinuityTags,
+  resolveSettleMs,
   ADK_TAG_PREFIX,
+  CONTINUITY_TAG_PREFIX,
   DEFAULT_MAX_TAGS_PER_CYCLE,
+  DEFAULT_REM_SETTLE_MS,
   type ApiCall,
   type RunnerOpts,
 } from "../src/rem/runner.ts";
@@ -593,11 +597,15 @@ function makeTagAwareApi(opts: {
   // tag-aware tests, which now trigger the post-distillation auto-promote step,
   // stay green.
   autoPromote?: (body: any) => any;
+  // flair#1257 slice 3: full memory-row override for tests that need custom
+  // createdAt/expiresAt/durability shapes (continuity settle-window cases).
+  // When set, `activeTags` is ignored for memory synthesis.
+  memories?: any[];
 }): { api: ApiCall; reflectCalls: any[]; autoPromoteCalls: any[] } {
   const reflectCalls: any[] = [];
   const autoPromoteCalls: any[] = [];
   const createdAt = new Date().toISOString(); // within the default 48h window
-  const memories = opts.activeTags.map((t, i) => ({
+  const memories = opts.memories ?? opts.activeTags.map((t, i) => ({
     id: `m-${i}`, agentId: "test-agent", content: "session", tags: [t], durability: "standard", createdAt,
   }));
   const api: ApiCall = async (method, path, body) => {
@@ -794,5 +802,218 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     });
     await runNightlyCycle(baseOpts({ apiCall: api, maxAutoPromotePerCycle: 7 }));
     expect(autoPromoteCalls[0].limit).toBe(7);
+  });
+});
+
+// ─── flair#1257 slice 3: continuity-session selection + cycle wiring ─────────
+// Selection: deriveSettledContinuityTags — a session distills only once
+// SETTLED (newest entry older than the settle window; Kern: measured on the
+// NEWEST entry) and only while un-expired entries remain. Wiring: settled
+// sessions distill scope:"tagged" + focus:"continuity"; the auto-promote
+// sweep fires for continuity-only agents; live sessions are never distilled.
+describe("deriveSettledContinuityTags (flair#1257 slice 3)", () => {
+  const AGENT = "flint";
+  const NOW = new Date("2026-08-20T12:00:00.000Z");
+  const SETTLE = DEFAULT_REM_SETTLE_MS; // 2h
+  const future = "2026-08-21T00:00:00.000Z";
+  const settled3h = "2026-08-20T09:00:00.000Z"; // 3h old → settled
+  const live30m = "2026-08-20T11:30:00.000Z";   // 30min old → live
+  const T = (s: string) => `${CONTINUITY_TAG_PREFIX}${s}`;
+
+  const row = (tag: string, createdAt: string, extra: Record<string, unknown> = {}) => ({
+    agentId: AGENT, tags: [tag], durability: "ephemeral", createdAt, expiresAt: future, ...extra,
+  });
+
+  it("a session whose NEWEST entry is older than the settle window is selected", () => {
+    const mems = [row(T("s1"), "2026-08-20T08:00:00.000Z"), row(T("s1"), settled3h)];
+    expect(deriveSettledContinuityTags(mems, { agentId: AGENT, now: NOW, settleMs: SETTLE })).toEqual([T("s1")]);
+  });
+
+  it("KERN'S LOAD-BEARING CASE: a 6h-long session quiet only 30min is still LIVE — not selected", () => {
+    // Oldest entry is 6h old (well past the window); the NEWEST is 30min old.
+    // Measuring on the oldest would select it — the window is on the NEWEST.
+    const mems = [row(T("s1"), "2026-08-20T06:00:00.000Z"), row(T("s1"), live30m)];
+    expect(deriveSettledContinuityTags(mems, { agentId: AGENT, now: NOW, settleMs: SETTLE })).toEqual([]);
+  });
+
+  it("TTL: a fully-expired session is not selected (nothing left to distill)", () => {
+    const past = "2026-08-19T00:00:00.000Z";
+    const mems = [row(T("s1"), settled3h, { expiresAt: past })];
+    expect(deriveSettledContinuityTags(mems, { agentId: AGENT, now: NOW, settleMs: SETTLE })).toEqual([]);
+  });
+
+  it("TTL edge: a partially-expired session is still selected off its LIVE rows", () => {
+    const past = "2026-08-19T00:00:00.000Z";
+    const mems = [
+      row(T("s1"), "2026-08-20T08:00:00.000Z", { expiresAt: past }), // expired
+      row(T("s1"), settled3h),                                       // live + settled
+    ];
+    expect(deriveSettledContinuityTags(mems, { agentId: AGENT, now: NOW, settleMs: SETTLE })).toEqual([T("s1")]);
+  });
+
+  it("TTL edge: an expired row never marks a session LIVE either (only live rows count for the newest)", () => {
+    const past = "2026-08-19T00:00:00.000Z";
+    const mems = [
+      row(T("s1"), settled3h),                          // live, settled
+      row(T("s1"), live30m, { expiresAt: past }),        // 30min old but EXPIRED → ignored
+    ];
+    expect(deriveSettledContinuityTags(mems, { agentId: AGENT, now: NOW, settleMs: SETTLE })).toEqual([T("s1")]);
+  });
+
+  it("rows without expiresAt count as live rows (no TTL stamped — not expired)", () => {
+    const mems = [{ agentId: AGENT, tags: [T("s1")], durability: "ephemeral", createdAt: settled3h }];
+    expect(deriveSettledContinuityTags(mems, { agentId: AGENT, now: NOW, settleMs: SETTLE })).toEqual([T("s1")]);
+  });
+
+  it("PROMOTED rows (persistent, preserved scopeTag) never keep a session selectable — journal tier only", () => {
+    // After the journal expires, only the promoted persistent row still
+    // carries the tag; counting it would re-distill the session forever.
+    const mems = [{ agentId: AGENT, tags: [T("s1"), "auto-promoted"], durability: "persistent", createdAt: settled3h }];
+    expect(deriveSettledContinuityTags(mems, { agentId: AGENT, now: NOW, settleMs: SETTLE })).toEqual([]);
+  });
+
+  it("OWNER-SCOPED: another agent's sessions are never enumerated", () => {
+    const mems = [
+      row(T("mine"), settled3h),
+      { ...row(T("theirs"), settled3h), agentId: "other-agent" },
+    ];
+    expect(deriveSettledContinuityTags(mems, { agentId: AGENT, now: NOW, settleMs: SETTLE })).toEqual([T("mine")]);
+  });
+
+  it("distinct + sorted; bare prefix and non-continuity tags dropped", () => {
+    const mems = [
+      row(T("s2"), settled3h),
+      row(T("s1"), settled3h),
+      row(T("s1"), "2026-08-20T08:00:00.000Z"), // dupe tag
+      row("adk:continuity:", settled3h),         // bare prefix → not a session
+      row("adk:app:alice", settled3h),           // ADK user tag → not continuity
+    ];
+    expect(deriveSettledContinuityTags(mems, { agentId: AGENT, now: NOW, settleMs: SETTLE })).toEqual([T("s1"), T("s2")]);
+  });
+
+  it("deriveActiveAdkTags EXCLUDES continuity tags (they must never ride the recency path)", () => {
+    // Mutation check (run red during development): remove the continuity-skip
+    // in deriveActiveAdkTags → this fails — and a LIVE session would distill.
+    const since = new Date("2026-08-19T12:00:00.000Z");
+    const mems = [
+      { agentId: AGENT, tags: [T("s1")], createdAt: live30m },
+      { agentId: AGENT, tags: ["adk:app:alice"], createdAt: live30m },
+    ];
+    expect(deriveActiveAdkTags(mems, since, AGENT)).toEqual(["adk:app:alice"]);
+  });
+
+  it("resolveSettleMs: override > FLAIR_REM_SETTLE_HOURS > 2h default", () => {
+    expect(resolveSettleMs(undefined, {})).toBe(DEFAULT_REM_SETTLE_MS);
+    expect(DEFAULT_REM_SETTLE_MS).toBe(2 * 3600_000);
+    expect(resolveSettleMs(undefined, { FLAIR_REM_SETTLE_HOURS: "6" })).toBe(6 * 3600_000);
+    expect(resolveSettleMs(1234, { FLAIR_REM_SETTLE_HOURS: "6" })).toBe(1234);
+    // garbage env falls back to the default, never NaN
+    expect(resolveSettleMs(undefined, { FLAIR_REM_SETTLE_HOURS: "soon" })).toBe(DEFAULT_REM_SETTLE_MS);
+    expect(resolveSettleMs(undefined, { FLAIR_REM_SETTLE_HOURS: "-2" })).toBe(DEFAULT_REM_SETTLE_MS);
+  });
+});
+
+describe("continuity distillation cycle wiring (flair#1257 slice 3)", () => {
+  const T = (s: string) => `${CONTINUITY_TAG_PREFIX}${s}`;
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3600_000).toISOString();
+  const future = () => new Date(Date.now() + 20 * 3600_000).toISOString();
+  const journalRow = (tag: string, createdAt: string) => ({
+    id: `j-${tag}-${createdAt}`, agentId: "test-agent", content: "stop: doing things",
+    tags: [tag], durability: "ephemeral", visibility: "private", createdAt, expiresAt: future(),
+  });
+
+  it("a SETTLED session distills scope:'tagged' + focus:'continuity'; a LIVE one does not; sweep fires; row records the count", async () => {
+    const { api, reflectCalls, autoPromoteCalls } = makeTagAwareApi({
+      activeTags: [],
+      memories: [
+        journalRow(T("settled"), hoursAgo(3)),
+        journalRow(T("livesess"), hoursAgo(0.2)),
+      ],
+      reflect: (body) => body.scope === "tagged"
+        ? { candidates: [{ id: "cand_cont" }], count: 1, model: "default" }
+        : { candidates: [], count: 0, model: "default" },
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+
+    expect(r.status).toBe("completed");
+    // The agentId-only distill still ran (non-ADK agent), PLUS one continuity
+    // tagged distill for the settled session — and NONE for the live one.
+    const tagged = reflectCalls.filter((c) => c.scope === "tagged");
+    expect(tagged.length).toBe(1);
+    expect(tagged[0]).toEqual({ agentId: "test-agent", execute: true, scope: "tagged", tag: T("settled"), focus: "continuity" });
+    expect(reflectCalls.some((c) => c.tag === T("livesess"))).toBe(false);
+    expect(reflectCalls.filter((c) => c.scope === undefined).length).toBe(1); // agentId-only path intact
+    // Candidates aggregated; auto-promote sweep triggered by continuity alone.
+    expect(r.logRow.candidates).toContain("cand_cont");
+    expect(autoPromoteCalls.length).toBe(1);
+    expect(r.logRow.continuitySessions).toBe(1);
+  });
+
+  it("no settled sessions → no tagged calls, no sweep, continuitySessions absent (unchanged non-ADK cycle)", async () => {
+    const { api, reflectCalls, autoPromoteCalls } = makeTagAwareApi({
+      activeTags: [],
+      memories: [journalRow(T("livesess"), hoursAgo(0.5))],
+      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+    expect(reflectCalls.filter((c) => c.scope === "tagged").length).toBe(0);
+    expect(autoPromoteCalls.length).toBe(0);
+    expect(r.logRow.continuitySessions).toBeUndefined();
+  });
+
+  it("settleMs override is honored (a 3h-old session stays LIVE under a 4h window)", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: [],
+      memories: [journalRow(T("s3h"), hoursAgo(3))],
+      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+    });
+    await runNightlyCycle(baseOpts({ apiCall: api, settleMs: 4 * 3600_000 }));
+    expect(reflectCalls.filter((c) => c.scope === "tagged").length).toBe(0);
+  });
+
+  it("a continuity distill failure is NON-FATAL and recorded per-tag", async () => {
+    const { api } = makeTagAwareApi({
+      activeTags: [],
+      memories: [journalRow(T("boom"), hoursAgo(3))],
+      reflect: (body) => {
+        if (body.scope === "tagged") throw new Error("fetch failed: connection reset");
+        return { candidates: [], count: 0, model: "default" };
+      },
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.errors.some((e) => e.includes(`distillation[${T("boom")}]:`))).toBe(true);
+    expect(r.logRow.continuitySessions).toBe(0); // attempted, none succeeded
+  });
+
+  it("continuity sessions share the per-cycle tag cap with ADK tags; overflow deferred + recorded", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: [],
+      memories: [
+        { id: "m-adk", agentId: "test-agent", content: "x", tags: ["adk:app:alice"], durability: "standard", createdAt: new Date().toISOString() },
+        journalRow(T("s1"), hoursAgo(3)),
+        journalRow(T("s2"), hoursAgo(4)),
+      ],
+      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api, maxTagsPerCycle: 2 }));
+    // 1 ADK tag + budget 1 → only one continuity session runs this cycle.
+    const tagged = reflectCalls.filter((c) => c.scope === "tagged");
+    expect(tagged.length).toBe(2);
+    expect(tagged.map((c) => c.tag)).toContain("adk:app:alice");
+    expect(tagged.filter((c) => c.focus === "continuity").length).toBe(1);
+    expect(r.logRow.errors.some((e) => e.includes("deferred by the per-cycle tag cap"))).toBe(true);
+  });
+
+  it("dry-run skips continuity distillation entirely (side effects, like every distill)", async () => {
+    const { api, reflectCalls } = makeTagAwareApi({
+      activeTags: [],
+      memories: [journalRow(T("settled"), hoursAgo(3))],
+      reflect: () => ({ candidates: [], count: 0, model: "default" }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api, dryRun: true }));
+    expect(r.status).toBe("dry-run");
+    expect(reflectCalls.length).toBe(0);
+    expect(r.logRow.continuitySessions).toBeUndefined();
   });
 });

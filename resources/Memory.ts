@@ -964,6 +964,30 @@ export class Memory extends (databases as any).flair.Memory {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }
 
+    // ── flair#1257 slice 3: stamp the ephemeral TTL on the PUT path too ──────
+    // post() has stamped expiresAt for ephemeral rows since the tier shipped,
+    // but put() — the verb the continuity capture hook actually writes with
+    // (`PUT /Memory/<id>`, packages/flair-mcp/src/continuity-capture-hook.ts)
+    // — never did. MemoryMaintenance's reap keys on expiresAt (expired =
+    // expiresAt < now), so hook-written journal rows carried NO expiry and
+    // the tier's load-bearing 24h containment bound (the exposure window the
+    // #1257 rulings cite) silently never engaged on the real write path.
+    // Effective durability = the write's, else the pre-existing row's (same
+    // resolution the visibility guard above uses). A pre-existing expiry is
+    // carried forward, never re-stamped — an update must not extend the
+    // exposure window; an explicit caller-provided expiresAt always wins.
+    {
+      const effectiveDurability = content.durability ?? preExisting?.durability;
+      if (effectiveDurability === "ephemeral" && !content.expiresAt) {
+        if (preExisting?.expiresAt) {
+          content.expiresAt = preExisting.expiresAt;
+        } else {
+          const ttlHours = Number(process.env.FLAIR_EPHEMERAL_TTL_HOURS || 24);
+          content.expiresAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
+        }
+      }
+    }
+
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
@@ -1042,8 +1066,18 @@ export class Memory extends (databases as any).flair.Memory {
       content.promotedAt = now;
     }
 
-    // Upgrade to permanent when approved
-    if (content.promotionStatus === "approved") {
+    // Upgrade to permanent when approved — the LEGACY in-place approval flow
+    // (an admin marks an EXISTING row approved without naming a tier; the
+    // auth-middleware admin-gates setting promotionStatus over HTTP). An
+    // explicit durability on the SAME write now wins (flair#1257 slice 3):
+    // the candidate-promotion paths (#1205b-2 /AutoPromoteCandidates and the
+    // human `flair rem promote`) write NEW rows carrying promotionStatus:
+    // "approved" purely as an audit stamp ALONGSIDE an explicit durability:
+    // "persistent" — the unconditional coercion here silently lifted every
+    // promoted claim into the never-reaped permanent tier while every audit
+    // surface (CLI output, specs, review rulings) said persistent. A write
+    // that names its tier keeps it; only a tier-less approval still upgrades.
+    if (content.promotionStatus === "approved" && (content.durability === undefined || content.durability === null)) {
       content.durability = "permanent";
     }
 

@@ -70,6 +70,44 @@ export const REM_NIGHTLY_LOG = resolve(homedir(), ".flair", "logs", "rem-nightly
 // user's sessions.
 export const ADK_TAG_PREFIX = "adk:";
 
+// ─── Continuity-journal distillation (flair#1257 slice 3) ────────────────────
+// The session-continuity journal (slice 2, #1283) writes ephemeral+private
+// rows tagged `adk:continuity:<sessionId>`. Those tags share the `adk:` prefix
+// but are NOT per-user ADK tags — they are per-SESSION journals with their own
+// selection rule: a session is distilled only once it has SETTLED (its newest
+// entry older than the settle window — never distill a live session) and only
+// while it still has un-expired entries (the journal rows carry the ephemeral
+// TTL; a fully-expired session has nothing left to distill). deriveActiveAdkTags
+// EXCLUDES continuity tags for the same reason: the recency-based "active"
+// rule would distill a session that is still live.
+//
+// Canonical prefix string duplicated in packages/flair-mcp/src/continuity.ts
+// (CONTINUITY_TAG_PREFIX — the writer) and resources/memory-reflect-lib.ts /
+// resources/auto-promote-lib.ts (CONTINUITY_SCOPE_TAG_PREFIX) — src/,
+// packages/ and resources/ sit on opposite sides of npm-packaging boundaries
+// (imports across them don't survive packaging; see src/cli.ts's header), so
+// they are kept in sync by the shared canonical string.
+export const CONTINUITY_TAG_PREFIX = "adk:continuity:";
+
+/**
+ * Settle window (ms) for continuity-session selection — a session is
+ * distillable only when its NEWEST entry is older than this (Kern's ruling:
+ * the window is measured on the newest entry's createdAt, which is
+ * load-bearing — a 6h-long session whose last entry is 30min old is still
+ * LIVE and must not be distilled; measuring on the oldest entry would
+ * distill it). Default 2h, configurable via FLAIR_REM_SETTLE_HOURS.
+ */
+export const DEFAULT_REM_SETTLE_MS = 2 * 3600_000;
+
+/** Resolve the settle window: explicit override > FLAIR_REM_SETTLE_HOURS env
+ *  (positive, finite) > DEFAULT_REM_SETTLE_MS. Exported for tests. */
+export function resolveSettleMs(override?: number, env: Record<string, string | undefined> = process.env): number {
+  if (typeof override === "number" && Number.isFinite(override) && override >= 0) return override;
+  const hours = Number(env.FLAIR_REM_SETTLE_HOURS);
+  if (Number.isFinite(hours) && hours > 0) return hours * 3600_000;
+  return DEFAULT_REM_SETTLE_MS;
+}
+
 /**
  * Recency window (ms) used to decide which adk: tags are ACTIVE — a tag is
  * enumerated (and distilled) only if it has memory records created within this
@@ -138,6 +176,13 @@ export interface RunnerOpts {
    * Override in tests.
    */
   maxAutoPromotePerCycle?: number;
+  /**
+   * flair#1257 slice 3: settle window (ms) for continuity-session selection —
+   * a session distills only once its NEWEST entry is at least this old.
+   * Defaults through resolveSettleMs (FLAIR_REM_SETTLE_HOURS, else 2h).
+   * Override in tests.
+   */
+  settleMs?: number;
 }
 
 export type RunnerStatus = "paused" | "completed" | "dry-run" | "failed";
@@ -185,6 +230,12 @@ export interface RunnerLogRow {
     promoted: number;
     skipped: number;
   };
+  /**
+   * flair#1257 slice 3: count of SETTLED continuity sessions distilled this
+   * cycle (scope:"tagged" with the session's adk:continuity: tag, focus
+   * "continuity"). Absent for dry-run cycles or when no session had settled.
+   */
+  continuitySessions?: number;
   /**
    * flair-quality Slice 1c: instance-wide near-duplicate CLUSTER count,
    * populated when the POST /MemoryDedupStats step (below) succeeds this
@@ -333,10 +384,70 @@ export function deriveActiveAdkTags(memories: any[], sinceDate: Date, agentId: s
     const mt = m.tags;
     if (!Array.isArray(mt)) continue;
     for (const t of mt) {
+      // flair#1257 slice 3: continuity tags share the adk: prefix but are
+      // per-SESSION journals, not per-user ADK tags — they get their own
+      // settle-window selection (deriveSettledContinuityTags). Admitting
+      // them here would distill a session that is still LIVE (the recency
+      // rule treats "written recently" as a reason TO distill; for a
+      // journal it is the reason NOT to).
+      if (typeof t === "string" && t.startsWith(CONTINUITY_TAG_PREFIX)) continue;
       if (typeof t === "string" && t.startsWith(ADK_TAG_PREFIX)) tags.add(t);
     }
   }
   return [...tags].sort();
+}
+
+/**
+ * Derive the DISTINCT continuity-session tags that are SETTLED and still
+ * distillable (flair#1257 slice 3 — the session-selection step). A tag is
+ * returned iff, over this agent's OWN un-expired journal rows carrying it:
+ *
+ *   - the NEWEST entry's createdAt is at least `settleMs` old (the settle
+ *     window, Kern's ruling — measured on the newest entry so a long-running
+ *     session that wrote 30min ago is still live and excluded), and
+ *   - at least one entry is un-expired (`expiresAt` absent or in the future)
+ *     — "younger than TTL expiry": a fully-expired session has nothing left
+ *     to distill (its rows are reaped, or excluded from the gather either
+ *     way; see resources/MemoryReflect.ts's expired-row skip).
+ *
+ * Same owner-scoping discipline as deriveActiveAdkTags above (the snapshot
+ * fetch is org-wide; the per-record agentId check is load-bearing — no
+ * cross-agent session enumeration), and the same no-extra-query property:
+ * this reduces over the memories the cycle already fetched.
+ */
+export function deriveSettledContinuityTags(
+  memories: any[],
+  params: { agentId: string; now: Date; settleMs: number },
+): string[] {
+  const { agentId, now, settleMs } = params;
+  const newestByTag = new Map<string, number>();
+  for (const m of memories) {
+    if (!m || typeof m !== "object") continue;
+    if (m.agentId !== agentId) continue; // owner scope (fetch is org-wide)
+    // The JOURNAL is the ephemeral tier. Promoted rows PRESERVE the session
+    // scopeTag but are persistent — counting them would keep a session
+    // selectable (and re-distilled) forever after its journal expired.
+    if (m.durability !== "ephemeral") continue;
+    // TTL: only un-expired rows count — an expired row neither keeps a
+    // session selectable nor (below) marks it live.
+    if (typeof m.expiresAt === "string" && m.expiresAt !== "" && new Date(m.expiresAt) <= now) continue;
+    const createdAt = m.createdAt ? new Date(m.createdAt).getTime() : NaN;
+    if (!Number.isFinite(createdAt)) continue;
+    const mt = m.tags;
+    if (!Array.isArray(mt)) continue;
+    for (const t of mt) {
+      if (typeof t !== "string" || !t.startsWith(CONTINUITY_TAG_PREFIX)) continue;
+      if (t.length <= CONTINUITY_TAG_PREFIX.length) continue; // bare prefix is not a session
+      const prev = newestByTag.get(t);
+      if (prev === undefined || createdAt > prev) newestByTag.set(t, createdAt);
+    }
+  }
+  const settled: string[] = [];
+  const cutoff = now.getTime() - settleMs;
+  for (const [tag, newest] of newestByTag) {
+    if (newest <= cutoff) settled.push(tag);
+  }
+  return settled.sort();
 }
 
 /**
@@ -481,8 +592,11 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   // this all runs inside the one cycle on the one node.
   let candidates: string[] | undefined;
   // #1205b-2: outcome of the post-distillation auto-promote step, assigned
-  // inside the !dryRun block below (only when this is an ADK agentId).
+  // inside the !dryRun block below (only when this is an ADK agentId or a
+  // cycle that distilled settled continuity sessions — flair#1257 slice 3).
   let autoPromoted: RunnerLogRow["autoPromoted"];
+  // flair#1257 slice 3: settled continuity sessions distilled this cycle.
+  let continuitySessions: RunnerLogRow["continuitySessions"];
 
   const collectStagedIds = (obj: Record<string, unknown>): string[] =>
     asArray(obj.candidates)
@@ -559,16 +673,76 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
       }
     }
 
+    // ── Step 5a (flair#1257 slice 3): continuity-session distillation ─────────
+    // Runs IN ADDITION to whichever path above ran — continuity journals are
+    // per-session, not per-user, and a non-ADK agent (the primary continuity
+    // consumer) still gets its regular agentId-only distill above. Selection:
+    // deriveSettledContinuityTags — only SETTLED (newest entry older than the
+    // settle window; never a live session) and un-expired sessions. Each runs
+    // scope:"tagged" with focus:"continuity" (the server enforces the
+    // continuity guard set for continuity tags regardless — the focus here is
+    // explicitness, not the enforcement point). Shares the per-cycle tag cap
+    // with the ADK path (Kern 1b); a deferred SETTLED session stays settled
+    // and is re-selected next cycle while its rows are un-expired (with the
+    // default 24h TTL and a nightly cadence a deferral can age a session out
+    // — acceptable at the 200-tag cap, recorded in `errors` when it happens).
+    // Same non-fatal per-tag failure discipline as the ADK path.
+    const settleMs = resolveSettleMs(opts.settleMs);
+    const settledContinuityTags = deriveSettledContinuityTags(fetchedMemories, {
+      agentId: opts.agentId,
+      now: startedAt,
+      settleMs,
+    });
+    const continuityBudget = Math.max(0, maxTags - Math.min(activeAdkTags.length, maxTags));
+    const continuityToRun = settledContinuityTags.slice(0, continuityBudget);
+    if (settledContinuityTags.length > continuityToRun.length) {
+      errors.push(
+        `distillation: ${settledContinuityTags.length - continuityToRun.length} settled continuity session(s) deferred by the per-cycle tag cap (${maxTags}); re-selected next cycle while un-expired`,
+      );
+    }
+    if (continuityToRun.length > 0) {
+      // `candidates` is defined whenever distillation was ATTEMPTED (same
+      // contract as both paths above).
+      candidates = candidates ?? [];
+      let distilled = 0;
+      for (const tag of continuityToRun) {
+        try {
+          const reflectRaw = await opts.apiCall("POST", "/ReflectMemories", {
+            agentId: opts.agentId,
+            execute: true,
+            scope: "tagged",
+            tag,
+            focus: "continuity",
+          });
+          const obj = (reflectRaw && typeof reflectRaw === "object") ? (reflectRaw as Record<string, unknown>) : {};
+          if (obj.error) {
+            errors.push(`distillation[${tag}]: ${describeApiError(obj.error)}`);
+          } else {
+            candidates.push(...collectStagedIds(obj));
+            distilled++;
+          }
+        } catch (err: any) {
+          errors.push(`distillation[${tag}]: ${describeApiError(err?.message ?? err)}`);
+        }
+      }
+      continuitySessions = distilled;
+    }
+
     // ── Step 5b (#1205b-2): server-side ADK auto-promote ───────────────────────
-    // Only for an ADK agentId (active adk: tags this cycle) — a non-ADK agent
-    // has no scopeTag-bearing candidates, so there is nothing to auto-promote
-    // and no call is made. The SERVER enforces every security invariant
-    // (memory-only target, fail-closed tag lineage, content-safety, machine
-    // reviewerId) — the runner only TRIGGERS the sweep; it never itself decides
-    // where a claim lands. Non-fatal like distillation: a failure is recorded
-    // and the candidates stay pending (re-swept next cycle, or promotable by the
-    // human `rem promote` path). Bounded by the per-cycle cap.
-    if (activeAdkTags.length > 0) {
+    // For an ADK agentId (active adk: tags this cycle) OR a cycle that
+    // distilled settled continuity sessions (flair#1257 slice 3 — continuity
+    // candidates carry the session's adk:continuity: scopeTag and ride the
+    // same server-side sweep, promoted default-private-unless per Sherlock's
+    // ruling). An agent with neither has no scopeTag-bearing candidates, so
+    // there is nothing to auto-promote and no call is made. The SERVER
+    // enforces every security invariant (memory-only target, fail-closed tag
+    // lineage, content-safety, machine reviewerId, default-private
+    // visibility) — the runner only TRIGGERS the sweep; it never itself
+    // decides where a claim lands or who can read it. Non-fatal like
+    // distillation: a failure is recorded and the candidates stay pending
+    // (re-swept next cycle, or promotable by the human `rem promote` path).
+    // Bounded by the per-cycle cap.
+    if (activeAdkTags.length > 0 || continuityToRun.length > 0) {
       try {
         const apRaw = await opts.apiCall("POST", "/AutoPromoteCandidates", {
           agentId: opts.agentId,
@@ -646,6 +820,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     expired,
     candidates,
     autoPromoted,
+    continuitySessions,
     dedup,
     durationMs: Date.now() - startedMs,
     errors,

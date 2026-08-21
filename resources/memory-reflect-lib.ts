@@ -45,8 +45,132 @@ export const DEFAULT_MAX_TOKENS = 2000;
  */
 export const GENERATE_TEMPERATURE = 0.2;
 
+// ─── Continuity-journal distillation (flair#1257 slice 3) ────────────────────
+// The session-continuity journal (slice 2, #1283) writes ephemeral+private
+// rows tagged `adk:continuity:<sessionId>`. REM distills those journals with
+// the SAME scope:"tagged" machinery ADK per-user tags use (#1205b) — slice 3
+// is wiring and guards, not a new engine. The constants/predicates here are
+// the continuity-specific guards:
+//
+//   - stale-intent (two layers, Kern-ruled): the distiller prompt carries the
+//     rule (primary), AND a text-shape post-filter drops in-flight-intent-
+//     shaped candidates when the source session is stale (testable
+//     defense-in-depth — see filterStaleSessionIntentCandidates).
+//   - visibility (Sherlock-ruled, default-private-unless): promotion out of
+//     ephemeral+private is a visibility ESCALATION from the most sensitive
+//     tier. The distiller may rule "shared" only AFFIRMATIVELY, with a
+//     team-relevance justification recorded on the candidate — never by
+//     default, never silently (see resolveCandidateVisibilityRuling).
+
+/** Tag prefix for continuity-journal rows (`adk:continuity:<sessionId>`).
+ *  Canonical string duplicated in packages/flair-mcp/src/continuity.ts
+ *  (CONTINUITY_TAG_PREFIX — the writer) and src/rem/runner.ts — the three
+ *  live on opposite sides of npm-packaging boundaries (resources/ ships as
+ *  the Harper component; src/ and packages/ ship separately; imports across
+ *  them don't survive packaging — see src/cli.ts's header). Kept in sync by
+ *  the shared canonical string. */
+export const CONTINUITY_SCOPE_TAG_PREFIX = "adk:continuity:";
+
+/** True iff `tag` is a continuity-journal scope tag (has a non-empty
+ *  sessionId component — the bare prefix is not a session). */
+export function isContinuityScopeTag(tag: string | null | undefined): boolean {
+  return typeof tag === "string" && tag.length > CONTINUITY_SCOPE_TAG_PREFIX.length && tag.startsWith(CONTINUITY_SCOPE_TAG_PREFIX);
+}
+
+/**
+ * Staleness horizon for the stale-intent guard (spec item 3, default 72h,
+ * FLAIR_REM_STALE_INTENT_HOURS). A journal entry like "about to merge X" is
+ * useful context shortly after the session died (the intent may still be
+ * live); past this horizon the intent has resolved or died, and promoting it
+ * manufactures a false present. Distinct from the SETTLE window (2h,
+ * src/rem/runner.ts) — settle decides when a session may be distilled at
+ * all; this horizon decides whether in-flight-intent content from it may
+ * still promote.
+ */
+export const DEFAULT_STALE_INTENT_HORIZON_MS = 72 * 3600_000;
+
+/**
+ * Text shapes that mark a candidate as IN-FLIGHT INTENT — an action described
+ * as pending/current rather than decided/done. Deliberately the obvious
+ * shapes only (Kern's ruling: the prompt rule is the primary layer; this
+ * post-filter is testable defense-in-depth and need not be exhaustive).
+ * Case-insensitive; word-bounded so e.g. "roundabout to" doesn't match.
+ */
+export const IN_FLIGHT_INTENT_PATTERNS: readonly RegExp[] = [
+  /\babout to\b/i,
+  /\bwaiting (?:on|for)\b/i,
+  /\bgoing to\b/i,
+  /\bplanning to\b/i,
+];
+
+/** True iff `text` matches an in-flight-intent shape. */
+export function isInFlightIntentShaped(text: string): boolean {
+  return IN_FLIGHT_INTENT_PATTERNS.some((p) => p.test(text));
+}
+
+export interface StaleIntentFilterResult {
+  kept: RawCandidate[];
+  /** Candidates dropped because the source session is stale AND the claim is
+   *  in-flight-intent-shaped. Surfaced for observability (response count). */
+  droppedStaleIntent: RawCandidate[];
+}
+
+/**
+ * The stale-intent POST-FILTER (spec item 3, the testable layer). When the
+ * source session is STALE — its newest entry older than `horizonMs` — drop
+ * every candidate whose claim is in-flight-intent-shaped. Runs AFTER
+ * parseAndValidateCandidates (a drop here is a policy skip, never a batch
+ * failure) and BEFORE dedup/staging.
+ *
+ * Fresh sessions pass everything through (an "about to merge X" from two
+ * hours ago is genuinely useful resume context). Stale sessions still
+ * promote DECISION-class content — the filter drops only the in-flight
+ * shapes, which is the positive control the acceptance set demands.
+ *
+ * An UNDATEABLE session (no newest-entry timestamp) is treated as STALE:
+ * this guard exists to stop manufactured false-presents, and "can't tell how
+ * old" must fail toward filtering, not toward promoting (fail-closed).
+ */
+export function filterStaleSessionIntentCandidates(
+  candidates: RawCandidate[],
+  params: { sessionNewestCreatedAt: string | undefined; now: Date; horizonMs?: number },
+): StaleIntentFilterResult {
+  const horizonMs = params.horizonMs ?? DEFAULT_STALE_INTENT_HORIZON_MS;
+  const newestMs = params.sessionNewestCreatedAt ? new Date(params.sessionNewestCreatedAt).getTime() : NaN;
+  const sessionStale = !Number.isFinite(newestMs) || params.now.getTime() - newestMs > horizonMs;
+  if (!sessionStale) return { kept: candidates, droppedStaleIntent: [] };
+  const kept: RawCandidate[] = [];
+  const droppedStaleIntent: RawCandidate[] = [];
+  for (const c of candidates) {
+    (isInFlightIntentShaped(c.claim) ? droppedStaleIntent : kept).push(c);
+  }
+  return { kept, droppedStaleIntent };
+}
+
+/**
+ * Resolve a distilled candidate's visibility ruling (Sherlock's
+ * default-private-unless, flair#1257 slice 3). Returns a ruling ONLY when the
+ * distiller AFFIRMATIVELY ruled "shared" AND recorded a non-empty
+ * team-relevance justification — anything less (absent, "private", "shared"
+ * with no justification, whitespace justification) returns null, which
+ * downstream reads as the private default. The uncertainty fallback is
+ * private, fail-closed; a shared promoted row must always trace to a
+ * recorded justification on its candidate, never to a default.
+ */
+export function resolveCandidateVisibilityRuling(candidate: {
+  visibility?: string;
+  teamRelevance?: string;
+}): { ruling: "shared"; rationale: string } | null {
+  if (candidate.visibility !== "shared") return null;
+  const rationale = typeof candidate.teamRelevance === "string" ? candidate.teamRelevance.trim() : "";
+  if (rationale.length === 0) return null;
+  return { ruling: "shared", rationale };
+}
+
 // ─── Candidate shape (spec §3A) ───────────────────────────────────────────────
 // { candidates: [ { claim: string, sourceMemoryIds: string[], tags?: string[] } ] }
+// Continuity runs (flair#1257 slice 3) may additionally carry per-candidate
+// `visibility` + `teamRelevance` — see resolveCandidateVisibilityRuling.
 //
 // Passed as `responseFormat: { schema: CANDIDATES_SCHEMA }` to models.generate()
 // so backends that honor structured output (Ollama, OpenAI — verified against
@@ -70,6 +194,11 @@ export const CANDIDATES_SCHEMA = {
           claim: { type: "string" },
           sourceMemoryIds: { type: "array", items: { type: "string" } },
           tags: { type: "array", items: { type: "string" } },
+          // flair#1257 slice 3 (continuity runs only — see the module note
+          // above CONTINUITY_SCOPE_TAG_PREFIX): an AFFIRMATIVE visibility
+          // ruling. Optional for every run; validated when present.
+          visibility: { type: "string", enum: ["private", "shared"] },
+          teamRelevance: { type: "string" },
         },
         required: ["claim", "sourceMemoryIds"],
       },
@@ -89,7 +218,43 @@ export const FOCUS_PROMPTS: Record<string, string> = {
     "Catalog the key decisions made and their outcomes. For each: what was decided, why, and what resulted. Promote important decisions to persistent.",
   errors:
     "Extract errors, bugs, and failures. For each: what failed, root cause, and fix applied. These are high-value persistent memories.",
+  // flair#1257 slice 3 — continuity-journal distillation. The source rows are
+  // an agent's auto-captured working-state journal (ephemeral, private,
+  // intent-class), not curated knowledge — distill what deserves to OUTLIVE
+  // the session. The stale-intent prompt rule here is the PRIMARY layer of
+  // the two-layer guard (Kern's ruling); filterStaleSessionIntentCandidates
+  // is the testable second layer.
+  continuity:
+    "These memories are an agent's short-term session journal: auto-captured working-state deltas (what it was doing, deciding, and why). Distill the DURABLE takeaways — decisions made and their reasons, outcomes, lessons — into atomic persistent memories. Do NOT promote in-flight intent (e.g. \"about to merge X\", \"waiting on Y\", \"going to\", \"planning to\") from a session that is no longer live: the action has since resolved or died, and restating it as current manufactures a false present. Do not promote world-recoverable facts (PR status, CI state) — they are re-observable and go stale.",
 };
+
+/**
+ * Extra execute-mode instruction block for continuity runs (flair#1257 slice
+ * 3). Two parts:
+ *   - the VISIBILITY ruling contract (Sherlock, default-private-unless): the
+ *     source journal is the most sensitive tier (ephemeral+private), so the
+ *     promoted claim defaults private; the distiller may rule "shared" only
+ *     affirmatively, and then MUST justify team-relevance (the justification
+ *     is recorded on the candidate — resolveCandidateVisibilityRuling drops
+ *     any shared ruling that arrives without one).
+ *   - when the session is STALE, an explicit restatement of the stale-intent
+ *     rule with the session's age class named (the prompt-layer half of the
+ *     two-layer guard; the post-filter backstops it either way).
+ */
+export function buildContinuityExecuteAddendum(params: { sessionStale: boolean }): string {
+  const lines = [
+    `Continuity visibility rules:`,
+    `- Every candidate's visibility defaults to "private". Omit the visibility field unless you are AFFIRMATIVELY ruling a candidate team-relevant.`,
+    `- To rule a candidate shared, set visibility: "shared" AND teamRelevance: one sentence stating why teammates need this. A shared ruling without a teamRelevance justification is discarded and the candidate stays private.`,
+    `- If uncertain, stay private.`,
+  ];
+  if (params.sessionStale) {
+    lines.push(
+      `This session is STALE (its newest journal entry is beyond the staleness horizon): do NOT emit candidates describing in-flight actions ("about to", "waiting on", "going to", "planning to") — those intents have resolved or died. Distill only decisions, outcomes, and lessons.`,
+    );
+  }
+  return lines.join("\n");
+}
 
 export interface ReflectMemoryInput {
   id: string;
@@ -156,10 +321,21 @@ For each insight:
  * since the model here is producing MemoryCandidate rows directly, not
  * handing a prompt to a human/agent.
  */
-export function buildExecutePrompt(params: PromptHeaderParams): string {
-  const { agentId, focus, scope, sinceISO, memories } = params;
+export function buildExecutePrompt(
+  params: PromptHeaderParams & {
+    /** flair#1257 slice 3: present iff this is a continuity-journal run —
+     *  appends the visibility-ruling contract + (when stale) the prompt-layer
+     *  stale-intent rule, and widens the output shape to allow the optional
+     *  visibility/teamRelevance fields. */
+    continuity?: { sessionStale: boolean };
+  },
+): string {
+  const { agentId, focus, scope, sinceISO, memories, continuity } = params;
   const focusText = FOCUS_PROMPTS[focus] ?? FOCUS_PROMPTS.lessons_learned;
   const validIds = memories.map((m) => `"${m.id}"`).join(", ");
+  const candidateShape = continuity
+    ? `{"candidates": [{"claim": string, "sourceMemoryIds": string[], "tags"?: string[], "visibility"?: "shared", "teamRelevance"?: string}]}`
+    : `{"candidates": [{"claim": string, "sourceMemoryIds": string[], "tags"?: string[]}]}`;
 
   return `# Memory Reflection — ${agentId}
 Focus: ${focus}
@@ -168,13 +344,13 @@ Memories: ${memories.length}
 
 ## Task
 ${focusText}
-
+${continuity ? `\n${buildContinuityExecuteAddendum(continuity)}\n` : ""}
 ## Source Memories
 ${buildSourceMemoriesBlock(memories)}
 
 ## Output
 Respond with ONLY a JSON object of this shape (no prose, no markdown fences):
-{"candidates": [{"claim": string, "sourceMemoryIds": string[], "tags"?: string[]}]}
+${candidateShape}
 Rules:
 - Every sourceMemoryIds entry must be one of: ${validIds || "(none available)"}
 - claim must be a single atomic insight, at most ${MAX_CLAIM_LENGTH} characters
@@ -220,6 +396,13 @@ export interface RawCandidate {
   claim: string;
   sourceMemoryIds: string[];
   tags?: string[];
+  /** flair#1257 slice 3 (continuity runs): the distiller's visibility ruling.
+   *  Only "shared" (paired with a non-empty teamRelevance) ever has an
+   *  effect — see resolveCandidateVisibilityRuling. */
+  visibility?: "private" | "shared";
+  /** flair#1257 slice 3: team-relevance justification required for a
+   *  "shared" ruling to be affirmative. */
+  teamRelevance?: string;
 }
 
 export type CandidateValidationResult =
@@ -287,7 +470,28 @@ export function parseAndValidateCandidates(raw: string, gatheredMemoryIds: Set<s
       tags = candidate.tags as string[];
     }
 
-    candidates.push({ claim: candidate.claim, sourceMemoryIds, tags });
+    // flair#1257 slice 3: optional visibility ruling fields (continuity runs).
+    // Validated for every run — an unknown visibility value must fail closed
+    // exactly like any other malformed field, never pass through to a place
+    // where "not private" could later read as readable (the free-form-string
+    // exact-match lesson). Whether a valid ruling has any EFFECT is decided
+    // downstream (resolveCandidateVisibilityRuling, continuity staging only).
+    let visibility: "private" | "shared" | undefined;
+    if (candidate.visibility !== undefined) {
+      if (candidate.visibility !== "private" && candidate.visibility !== "shared") {
+        return { ok: false, reason: "shape_mismatch" };
+      }
+      visibility = candidate.visibility;
+    }
+    let teamRelevance: string | undefined;
+    if (candidate.teamRelevance !== undefined) {
+      if (typeof candidate.teamRelevance !== "string") {
+        return { ok: false, reason: "shape_mismatch" };
+      }
+      teamRelevance = candidate.teamRelevance;
+    }
+
+    candidates.push({ claim: candidate.claim, sourceMemoryIds, tags, visibility, teamRelevance });
   }
 
   return { ok: true, candidates };
@@ -414,10 +618,37 @@ export function dedupeCandidates(candidates: RawCandidate[], existingPendingClai
 // Archived/permanent filtering stays in the resource — those are eligibility
 // rules, not scope selection.
 export function memoryMatchesReflectScope(
-  record: { tags?: string[] | null; createdAt?: string | null },
+  record: { tags?: string[] | null; createdAt?: string | null; durability?: string | null },
   params: { scope: string; tag?: string; sinceDate: Date },
 ): boolean {
   const { scope, tag, sinceDate } = params;
+  // ── flair#1257 slice 3: continuity-journal containment (both directions) ───
+  // The JOURNAL is the ephemeral rows carrying a continuity session tag.
+  // Two rules keep it contained:
+  //
+  //   1. A continuity-tag tagged run gathers THE JOURNAL ONLY — ephemeral
+  //      rows carrying that session's tag. Promoted rows PRESERVE the
+  //      session scopeTag (spec item 2), so without the durability bound a
+  //      re-distill of the same tag would gather its own previous OUTPUTS as
+  //      input — a distill-of-distilled feedback loop.
+  //   2. A journal row is distillable ONLY through its own session's
+  //      continuity run — the path that carries every slice-3 guard (settle
+  //      window, continuity focus prompt, stale-intent post-filter, the
+  //      visibility ruling contract). Without this, the agentId-wide
+  //      scope:"recent"/"all" gather would sweep a LIVE session's journal
+  //      into a generic distill, bypassing all of those guards at once (the
+  //      settle window would be a check that cannot fire).
+  //
+  // Non-journal rows that carry a continuity tag (the promoted persistent
+  // rows) follow the NORMAL scope rules below — they stay re-reflectable
+  // like any other durable memory.
+  if (scope === "tagged" && isContinuityScopeTag(tag)) {
+    return record.durability === "ephemeral" && (record.tags ?? []).includes(tag!);
+  }
+  const rowIsJournal = record.durability === "ephemeral" && (record.tags ?? []).some(isContinuityScopeTag);
+  if (rowIsJournal) {
+    return false;
+  }
   if (scope === "tagged") {
     // No tag ⇒ admit nothing. A tagged reflection with no tag must gather an
     // EMPTY set (fail-closed), never fall through to admitting everything —
@@ -458,6 +689,11 @@ export function buildStagedCandidateRow(params: {
   generatedAt: string;
   scope: string;
   tag?: string;
+  /** flair#1257 slice 3: an AFFIRMATIVE visibility ruling (already resolved
+   *  through resolveCandidateVisibilityRuling — never the raw model fields).
+   *  Recorded on the candidate so a later shared promotion always traces to
+   *  a justification (Sherlock: never silent). Absent ⇒ private default. */
+  visibilityRuling?: { ruling: "shared"; rationale: string } | null;
 }): Record<string, unknown> {
   const row: Record<string, unknown> = {
     id: params.id,
@@ -471,6 +707,10 @@ export function buildStagedCandidateRow(params: {
   };
   if (params.scope === "tagged" && typeof params.tag === "string" && params.tag.length > 0) {
     row.scopeTag = params.tag;
+  }
+  if (params.visibilityRuling) {
+    row.visibilityRuling = params.visibilityRuling.ruling;
+    row.visibilityRationale = params.visibilityRuling.rationale;
   }
   return row;
 }
