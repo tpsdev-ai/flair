@@ -46,6 +46,48 @@ context, so the wrapped handler scopes to the verified agent exactly as an
 Ed25519-signed REST call would. Identity always comes from the resolved agent,
 never from the tool arguments (no forging of agentId / authorId).
 
+### Which Agent is my connector? (distinct-by-default — flair#1280)
+
+**The connector's Agent is whatever the `Credential(kind:"idp")` mapping says
+— and that is NOT constrained to be your CLI agent.** Distinct identities are
+the ruled default (flair#1280): per-purpose connector identities are the
+product pattern for org/service installs, and same-identity is a deliberate
+opt-in, never something the server infers. The practical consequences:
+
+- **Where the mapping is decided.** `flair mcp enable --principal <agent-id>
+  --idp-subject <sub>` (the identity-mapping step, backed by
+  `provisionIdpIdentityMapping`) writes the mapping. The `--principal` you pass
+  is the Agent every `/mcp` call will read and write as. Pass an EXISTING
+  agent id to attach the sub to it; the step's output states the resulting
+  `sub → Agent` mapping in as many words.
+- **Linking a sub to an existing Agent (the same-identity opt-in).** Re-run
+  `flair mcp enable` with the SAME `--idp-provider`/`--idp-subject` and
+  `--principal <your-cli-agent-id>`. The existing `(provider, subject)`
+  Credential is RE-POINTED to that principal — one Credential row per subject,
+  so resolution stays deterministic. The link *replaces* the mapping; it does
+  not merge the two agents' memories.
+- **First diagnostic: ask the server who you are.** The `bootstrap` tool's
+  response always carries the resolved `agentId` and a `scope` descriptor
+  (`scope.agentId` / `scope.isAdmin` / `scope.reads`, flair#1182). "My memory
+  is empty over the connector" + a `bootstrap.agentId` you don't recognize =
+  the sub resolved to a different (often JIT-provisioned) Agent — link it as
+  above.
+- **JIT caveat.** A JIT-provisioned mapping (`FLAIR_MCP_JIT_PROVISION=1`)
+  stamps `idpProvider: "mcp-oauth"`. Runtime resolution matches on
+  `(kind, idpSubject)` only, but the *linking* upsert matches on
+  `(kind, idpProvider, idpSubject)` — so when re-linking a JIT-provisioned
+  sub, pass `--idp-provider mcp-oauth` (matching the JIT stamp), or first
+  revoke the JIT credential (`status: "revoked"`). Linking under a different
+  provider name creates a SECOND active credential for the same subject, and
+  which one wins resolution is unspecified.
+
+The two-identity contract (a distinct connector agent sees other agents'
+org-non-private rows, never their private rows, 404-never-403 by id; a linked
+connector sees exactly what the linked agent sees) is pinned end-to-end by
+`test/integration/mcp-connector-principal-mapping.test.ts`, which drives the
+real `mcpHandler`/`resolveAgentFromSub` against a real store with two
+registered identities.
+
 ## Enabling (operator checklist)
 
 1. **Install the AS plugin** — add `@harperfast/oauth` (already an exact-pinned

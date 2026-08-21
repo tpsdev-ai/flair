@@ -4483,6 +4483,15 @@ agent
     );
     console.log(`   Private key: ${privPath}`);
     console.log(`   Public key:  ${pubKeyB64url}`);
+    // flair#1280 — connector legibility at provisioning time: an OAuth /mcp
+    // connector resolves its own token subject to an Agent via
+    // Credential(kind:idp), NOT via this key, and the two identities are
+    // DISTINCT unless linked. One line here saves the "my connector memory is
+    // empty" discovery later.
+    console.log(
+      `   Note: an OAuth /mcp connector maps its own IdP subject to an Agent (distinct from '${id}' by default).\n` +
+        `   To point a connector at '${id}': flair mcp enable --principal ${id} --idp-subject <your-idp-login>`,
+    );
   });
 
 agent
