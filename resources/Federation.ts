@@ -145,7 +145,26 @@ export class FederationInstance extends Resource {
         instance = i;
         break;
       }
-    } catch { /* table may not exist */ }
+    } catch (err: any) {
+      // Expected on genuine first boot: the Instance table doesn't exist yet,
+      // and the create branch below handles that. But a bare swallow here also
+      // hid every OTHER read failure (storage, permissions), making a
+      // persistently failing read indistinguishable from first boot
+      // (flair#1233). Log the error class so the two are tellable apart in
+      // server logs; behavior is unchanged — fall through to create.
+      console.warn(
+        "[federation] Instance read failed — proceeding as first boot (create branch will run). " +
+          "If this instance already has an identity, this is a real read error, not an absent table. " +
+          `${err?.constructor?.name ?? "Error"}: ${err?.message ?? err}`,
+      );
+    }
+
+    // Runtime-only signal (flair#1233): whether this instance's private key
+    // seed is present in the keystore, i.e. whether it can SIGN (pair/sync).
+    // Deliberately NOT persisted — the Instance.status enum is
+    // schema-constrained and this is transient machine state; recomputed on
+    // every GET.
+    let signingKeyAvailable = false;
 
     if (!instance) {
       // First boot — generate instance identity
@@ -164,15 +183,41 @@ export class FederationInstance extends Resource {
 
       await (databases as any).flair.Instance.put(instance);
 
-      // Store private key seed in encrypted keystore (not in DB)
+      // Store private key seed in encrypted keystore (not in DB).
+      //
+      // flair#1233: a keystore failure no longer aborts the GET. This is a
+      // READ path — the response never uses the private key, and the old
+      // throw here left federation state entirely unobservable on hosts
+      // whose HOME isn't writable (the #812 ENOTDIR class; keysDir() is
+      // homedir()-relative). Fail-closed stays where the key is USED:
+      // signing, in pair/sync, still throws when the key is absent. Here the
+      // failure is logged server-side and surfaced to the caller as
+      // signingKeyAvailable:false. Plaintext keys still never touch the DB.
       try {
         const { keystore } = await import("../src/keystore.js");
         const seed = kp.secretKey.slice(0, 32);
         keystore.setPrivateKeySeed(id, seed);
-      } catch (err) {
-        // Fail closed — never store plaintext keys in the database
-        console.error("[federation] FATAL: Could not store key seed in keystore. Federation identity not created.", err);
-        throw new Error("Keystore unavailable — cannot create federation identity without secure key storage");
+        signingKeyAvailable = true;
+      } catch (err: any) {
+        console.error(
+          "[federation] Could not store the federation signing key seed in the keystore " +
+            "($HOME/.flair/keys, relative to the Harper process's HOME). The identity row was created and " +
+            "reads work, but this instance cannot sign — pair/sync will fail until the keystore is fixed. " +
+            "Remedy: make $HOME/.flair/keys a directory writable by the Harper process (mode 0700). " +
+            "The seed for THIS identity was never stored, so after fixing the keystore, re-key: delete the " +
+            "Instance row and re-pair to mint a fresh identity. " +
+            `${err?.constructor?.name ?? "Error"}: ${err?.message ?? err}`,
+        );
+      }
+    } else {
+      // Existing identity: report whether its signing key is present and
+      // decryptable. getPrivateKeySeed is a read-only probe that returns null
+      // (never throws) when the key file is missing or unreadable.
+      try {
+        const { keystore } = await import("../src/keystore.js");
+        signingKeyAvailable = keystore.getPrivateKeySeed(instance.id) !== null;
+      } catch {
+        signingKeyAvailable = false;
       }
     }
 
@@ -181,6 +226,8 @@ export class FederationInstance extends Resource {
       publicKey: instance.publicKey,
       role: instance.role,
       status: instance.status,
+      // Runtime-only — see above; never persisted.
+      signingKeyAvailable,
     };
   }
 }

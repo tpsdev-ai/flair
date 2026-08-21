@@ -29,7 +29,7 @@ import { create as tarCreate, extract as tarExtract, list as tarList } from "tar
 // flair#901 — tar listings/extracts type their entry callbacks against
 // node-tar's own export so an upstream property rename fails compilation.
 import type { ReadEntry as TarReadEntry } from "tar";
-import { keystore } from "./keystore.js";
+import { keystore, keyPath as keystoreKeyPath } from "./keystore.js";
 import { deploy as deployToFabric, validateOptions as validateDeployOptions, buildTargetUrl as buildDeployUrl, resolveDeployPublicUrl } from "./deploy.js";
 import {
   COMPONENT_ENV_FILENAME,
@@ -6764,7 +6764,16 @@ async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: str
     }
   }
 
-  throw new Error(`No private key found for instance ${instanceId}. Re-run 'flair federation status' to regenerate.`);
+  // flair#1233: the old advice here — "Re-run 'flair federation status' to
+  // regenerate" — was impossible: the server's create branch only fires when
+  // NO Instance row exists, so a re-run can never regenerate a key for an
+  // existing identity. Name the real remedy instead.
+  throw new Error(
+    `No usable private key for instance ${instanceId}. Expected keystore file: ${keystoreKeyPath(instanceId)} ` +
+    `(no legacy _keySeed in the Instance table either). Restore that key file from a backup of ~/.flair/keys ` +
+    `(and FLAIR_KEY_PASSPHRASE, if one was set when it was written), or re-key this instance: delete its ` +
+    `Instance row and re-pair to mint a fresh identity.`,
+  );
 }
 
 /**
@@ -6843,163 +6852,48 @@ federation
     const target = resolveTarget(opts);
     const baseUrl = target ? target.replace(/\/$/, "") : undefined;
     const mode = render.resolveOutputMode(opts);
+
+    // flair#1233: fetch instance and peers INDEPENDENTLY. One read failing
+    // must never take down the whole render — the principle latestPeerContact
+    // already documents for the driver verdict ("must never be the reason
+    // `federation status` fails"), extended to the two primary reads. Print
+    // what's available; mark the rest unverifiable.
+    let instance: any = null;
+    let instanceErr: any = null;
     try {
-      const instance = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
-      const { peers } = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+      instance = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
+    } catch (err) {
+      instanceErr = err;
+    }
 
-      // Driver state (flair#922). Computed from the LOCAL service manager, so
-      // it is only meaningful when the CLI is pointed at the local instance.
-      let driver: import("./federation/scheduler.js").SchedulerStatus | null = null;
-      let assessment: import("./federation/scheduler.js").DriverAssessment | null = null;
-      if (driverCheckAppliesTo(opts)) {
-        try {
-          const { schedulerStatus, assessDriver } = await import("./federation/scheduler.js");
-          driver = schedulerStatus();
-          let lastSyncAt: string | null = null;
-          for (const p of peers ?? []) {
-            if (!p?.lastSyncAt) continue;
-            const t = Date.parse(p.lastSyncAt);
-            if (Number.isFinite(t) && (lastSyncAt === null || t > Date.parse(lastSyncAt))) {
-              lastSyncAt = new Date(t).toISOString();
-            }
-          }
-          assessment = assessDriver({
-            installed: driver.installed,
-            active: driver.active,
-            intervalSeconds: driver.intervalSeconds,
-            lastSyncAt,
-            now: Date.now(),
-          });
-        } catch {
-          // An unsupported platform (neither darwin nor linux) or an
-          // unreadable unit must not take down `federation status` — the peer
-          // table is still the primary output.
-          driver = null;
-          assessment = null;
-        }
-      }
+    // peers: null = unverifiable (the read failed), [] = verified empty.
+    let peers: any[] | null = null;
+    let peersErr: any = null;
+    try {
+      const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+      peers = r.peers ?? [];
+    } catch (err) {
+      peersErr = err;
+    }
 
-      if (mode === "json") {
-        console.log(render.asJSON({ instance, peers, driver, driverAssessment: assessment }));
-        return;
-      }
+    // Auth-shaped failures stay FATAL even when the other read succeeded:
+    // both endpoints sit behind the same allowAdmin gate, so a 401/403 is a
+    // property of the session's credentials, not of one endpoint — and
+    // degrading it to "unverifiable" would swallow the actionable remedy
+    // (flair#634's UX, kept). Only non-auth failures degrade independently.
+    const authShaped = (err: any): boolean => {
+      if (!err) return false;
+      if (err.status === 401 || err.status === 403) return true;
+      const m = String(err.message ?? err);
+      return m.includes("missing_or_invalid_authorization") || m.includes("401");
+    };
 
-      const statusColor = instance.status === "active" ? render.c.green : render.c.yellow;
-      console.log(render.wrap(render.c.bold, "Federation"));
-      console.log(render.kv("Instance", `${instance.id}  ${render.wrap(render.c.dim, `(${instance.role})`)}`));
-      console.log(render.kv("Public key", render.wrap(render.c.dim, instance.publicKey)));
-      console.log(render.kv("Status", render.wrap(statusColor, instance.status)));
-
-      if (peers.length === 0) {
-        console.log(`\n${render.icons.info} ${render.wrap(render.c.dim, "No peers configured. Use 'flair federation pair' to connect to a hub.")}`);
-        return;
-      }
-
-      // Print the driver line BEFORE the per-peer table: "is anything running
-      // sync at all" is the question that decides how to read everything
-      // below it.
-      if (assessment) {
-        const icon = assessment.verdict === "driving" || assessment.verdict === "external-driver"
-          ? render.icons.ok
-          : assessment.verdict === "unknown"
-            ? render.icons.info
-            : render.icons.warn;
-        const color = assessment.verdict === "driving" || assessment.verdict === "external-driver"
-          ? render.c.green
-          : assessment.verdict === "unknown"
-            ? render.c.dim
-            : render.c.yellow;
-        console.log();
-        console.log(`${icon} ${render.wrap(color, assessment.headline)}`);
-        console.log(`  ${render.wrap(render.c.dim, assessment.detail)}`);
-        if (assessment.remedy) console.log(`  ${render.wrap(render.c.cyan, assessment.remedy)}`);
-      }
-
-      const now = Date.now();
-      const formatPeerAge = (iso: string | null, refNow: number, staleAfterMs: number): string => {
-        if (!iso) return render.wrap(render.c.red, "never");
-        const t = Date.parse(iso);
-        if (!Number.isFinite(t)) return render.wrap(render.c.red, "never");
-        const ageMs = refNow - t;
-        const ageStr = ageMs < 60_000 ? "<1m ago"
-          : ageMs < 3_600_000 ? `${Math.floor(ageMs / 60_000)}m ago`
-          : ageMs < 86_400_000 ? `${Math.floor(ageMs / 3_600_000)}h ago`
-          : `${Math.floor(ageMs / 86_400_000)}d ago`;
-        const stale = ageMs > staleAfterMs;
-        return render.wrap(stale ? render.c.yellow : render.c.dim, ageStr);
-      };
-      console.log();
-      const cols: render.TableColumn[] = [
-        { label: "peer", key: "id" },
-        { label: "role", key: "role", format: (v) => String(v ?? "—") },
-        {
-          label: "status",
-          key: "status",
-          format: (v) => {
-            const s = String(v ?? "—");
-            const color = s === "paired" || s === "connected" || s === "active" ? render.c.green : s === "revoked" ? render.c.red : render.c.yellow;
-            return render.wrap(color, s);
-          },
-        },
-        {
-          // Liveness: "did we hear from this peer recently?" Updates on every
-          // contact, even when 100% of records were skipped. See flair#444.
-          label: "last_sync",
-          key: "lastSyncAt",
-          format: (v) => formatPeerAge(v as string | null, now, 86_400_000),
-        },
-        {
-          // Progress: "did data actually flow in?" Updates only when merged>0.
-          // Diverging from last_sync means contact-yes but data-no — investigate.
-          label: "last_merge",
-          key: "lastMergeAt",
-          format: (v) => formatPeerAge(v as string | null, now, 86_400_000),
-        },
-        {
-          label: "relay",
-          key: "relayOnly",
-          format: (v) => (v ? render.wrap(render.c.cyan, "yes") : render.wrap(render.c.dim, "no")),
-        },
-      ];
-      console.log(render.table(cols, peers as Array<Record<string, unknown>>));
-
-      // Stale warning is gated on lastMergeAt (real progress), not lastSyncAt.
-      // A peer that "syncs" every 5min but hasn't merged a record in 24h is
-      // exactly the failure mode we want surfaced.
-      const haveStale = peers.some((p: any) => {
-        const cursor = p.lastMergeAt ?? p.lastSyncAt;
-        if (!cursor) return true;
-        const t = Date.parse(cursor);
-        return !Number.isFinite(t) || (now - t) > 86_400_000;
-      });
-      if (haveStale) {
-        console.log();
-        // The staleness warning used to fire identically whether sync was
-        // running and the peer was unreachable, or nothing had run sync since
-        // the day the spoke was paired (flair#922). Those need opposite
-        // actions, so the remedy is now chosen by the driver verdict instead
-        // of always pointing at SyncLog.
-        const noDriver = assessment?.verdict === "no-driver" || assessment?.verdict === "driver-inactive";
-        const remedy = noDriver
-          ? "Nothing is driving sync — see the driver line above. Run 'flair federation sync enable'."
-          : "Check skippedReasons in SyncLog or run 'flair federation sync'.";
-        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "One or more peers haven't merged a record in >24h.")} ${render.wrap(render.c.dim, remedy)}`);
-      }
-
-      const haveContactButNoMerge = peers.some((p: any) => {
-        if (!p.lastSyncAt || !Number.isFinite(Date.parse(p.lastSyncAt))) return false;
-        if ((now - Date.parse(p.lastSyncAt)) > 3_600_000) return false; // only recent contact
-        // Contact within the last hour, but no merge ever (or stale by >1h)
-        if (!p.lastMergeAt) return true;
-        const tm = Date.parse(p.lastMergeAt);
-        return !Number.isFinite(tm) || (now - tm) > 3_600_000;
-      });
-      if (haveContactButNoMerge && !haveStale) {
-        console.log();
-        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Peer contact is fresh but no records merged in the last hour.")} ${render.wrap(render.c.dim, "Possible silent-skip scenario — check SyncLog.skippedReasons.")}`);
-      }
-    } catch (err: any) {
-      const msg = String(err.message ?? err);
+    // Both reads failed → nothing to render at all. Either way keep the
+    // classic failure UX (auth remedy when it's an auth problem), exit
+    // non-zero.
+    if ((instanceErr && peersErr) || authShaped(instanceErr) || authShaped(peersErr)) {
+      const primaryErr = instanceErr ?? peersErr;
+      const msg = String(primaryErr.message ?? primaryErr);
       if (msg.includes("missing_or_invalid_authorization") || msg.includes("401")) {
         console.error(`${render.icons.error} federation status requires auth.`);
         console.error(`  ${render.wrap(render.c.dim, "Set one of:")}`);
@@ -7010,6 +6904,203 @@ federation
       }
       console.error(`${render.icons.error} ${msg}`);
       process.exit(1);
+    }
+
+    // Driver state (flair#922). Computed from the LOCAL service manager, so
+    // it is only meaningful when the CLI is pointed at the local instance —
+    // and only when the peer read succeeded: the verdict is derived from
+    // peer contact, so with peers unverifiable it would be a confident claim
+    // built on no data.
+    let driver: import("./federation/scheduler.js").SchedulerStatus | null = null;
+    let assessment: import("./federation/scheduler.js").DriverAssessment | null = null;
+    if (peers !== null && driverCheckAppliesTo(opts)) {
+      try {
+        const { schedulerStatus, assessDriver } = await import("./federation/scheduler.js");
+        driver = schedulerStatus();
+        let lastSyncAt: string | null = null;
+        for (const p of peers) {
+          if (!p?.lastSyncAt) continue;
+          const t = Date.parse(p.lastSyncAt);
+          if (Number.isFinite(t) && (lastSyncAt === null || t > Date.parse(lastSyncAt))) {
+            lastSyncAt = new Date(t).toISOString();
+          }
+        }
+        assessment = assessDriver({
+          installed: driver.installed,
+          active: driver.active,
+          intervalSeconds: driver.intervalSeconds,
+          lastSyncAt,
+          now: Date.now(),
+        });
+      } catch {
+        // An unsupported platform (neither darwin nor linux) or an
+        // unreadable unit must not take down `federation status` — the peer
+        // table is still the primary output.
+        driver = null;
+        assessment = null;
+      }
+    }
+
+    if (mode === "json") {
+      console.log(render.asJSON({
+        instance,
+        peers,
+        driver,
+        driverAssessment: assessment,
+        // flair#1233: name what could not be read, so a partial result is
+        // distinguishable from "verified absent" (instance/peers stay null
+        // when their read failed).
+        ...(instanceErr || peersErr
+          ? {
+              unverifiable: {
+                ...(instanceErr ? { instance: String(instanceErr.message ?? instanceErr) } : {}),
+                ...(peersErr ? { peers: String(peersErr.message ?? peersErr) } : {}),
+              },
+            }
+          : {}),
+      }));
+      return;
+    }
+
+    console.log(render.wrap(render.c.bold, "Federation"));
+    if (instance) {
+      const statusColor = instance.status === "active" ? render.c.green : render.c.yellow;
+      console.log(render.kv("Instance", `${instance.id}  ${render.wrap(render.c.dim, `(${instance.role})`)}`));
+      console.log(render.kv("Public key", render.wrap(render.c.dim, instance.publicKey)));
+      console.log(render.kv("Status", render.wrap(statusColor, instance.status)));
+
+      // flair#1233 degraded marker — actor + state + remedy. The server sets
+      // signingKeyAvailable (runtime-only) on GET /FederationInstance; only
+      // an explicit false fires this. Older servers omit the field, which
+      // proves nothing either way, so no marker.
+      if (instance.signingKeyAvailable === false) {
+        console.log();
+        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Signing key unavailable — the server could not store or read this instance's private key.")}`);
+        console.log(`  ${render.wrap(render.c.dim, "Reads (this status) still work; pair/sync signing on that instance will fail until the keystore is fixed.")}`);
+        console.log(`  ${render.wrap(render.c.cyan, "Fix on the server: make $HOME/.flair/keys (under the Harper process's HOME) a directory writable by the Harper process, mode 0700. If the key was never stored, re-key: delete the Instance row and re-pair.")}`);
+      }
+    } else {
+      // Instance read failed but peers succeeded — render what we have.
+      console.log(render.kv("Instance", `${render.icons.warn} unverifiable — ${render.wrap(render.c.dim, String(instanceErr?.message ?? instanceErr))}`));
+    }
+
+    if (peers === null) {
+      // Peer read failed but the instance rendered — say so explicitly
+      // instead of aborting: "unverifiable" is a different claim from "no
+      // peers", and conflating them is how hub state became unobservable.
+      console.log();
+      console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Peers unverifiable — the peer read failed. This says nothing about whether peers exist or sync runs.")}`);
+      console.log(`  ${render.wrap(render.c.dim, String(peersErr?.message ?? peersErr))}`);
+      return;
+    }
+
+    if (peers.length === 0) {
+      console.log(`\n${render.icons.info} ${render.wrap(render.c.dim, "No peers configured. Use 'flair federation pair' to connect to a hub.")}`);
+      return;
+    }
+
+    // Print the driver line BEFORE the per-peer table: "is anything running
+    // sync at all" is the question that decides how to read everything
+    // below it.
+    if (assessment) {
+      const icon = assessment.verdict === "driving" || assessment.verdict === "external-driver"
+        ? render.icons.ok
+        : assessment.verdict === "unknown"
+          ? render.icons.info
+          : render.icons.warn;
+      const color = assessment.verdict === "driving" || assessment.verdict === "external-driver"
+        ? render.c.green
+        : assessment.verdict === "unknown"
+          ? render.c.dim
+          : render.c.yellow;
+      console.log();
+      console.log(`${icon} ${render.wrap(color, assessment.headline)}`);
+      console.log(`  ${render.wrap(render.c.dim, assessment.detail)}`);
+      if (assessment.remedy) console.log(`  ${render.wrap(render.c.cyan, assessment.remedy)}`);
+    }
+
+    const now = Date.now();
+    const formatPeerAge = (iso: string | null, refNow: number, staleAfterMs: number): string => {
+      if (!iso) return render.wrap(render.c.red, "never");
+      const t = Date.parse(iso);
+      if (!Number.isFinite(t)) return render.wrap(render.c.red, "never");
+      const ageMs = refNow - t;
+      const ageStr = ageMs < 60_000 ? "<1m ago"
+        : ageMs < 3_600_000 ? `${Math.floor(ageMs / 60_000)}m ago`
+        : ageMs < 86_400_000 ? `${Math.floor(ageMs / 3_600_000)}h ago`
+        : `${Math.floor(ageMs / 86_400_000)}d ago`;
+      const stale = ageMs > staleAfterMs;
+      return render.wrap(stale ? render.c.yellow : render.c.dim, ageStr);
+    };
+    console.log();
+    const cols: render.TableColumn[] = [
+      { label: "peer", key: "id" },
+      { label: "role", key: "role", format: (v) => String(v ?? "—") },
+      {
+        label: "status",
+        key: "status",
+        format: (v) => {
+          const s = String(v ?? "—");
+          const color = s === "paired" || s === "connected" || s === "active" ? render.c.green : s === "revoked" ? render.c.red : render.c.yellow;
+          return render.wrap(color, s);
+        },
+      },
+      {
+        // Liveness: "did we hear from this peer recently?" Updates on every
+        // contact, even when 100% of records were skipped. See flair#444.
+        label: "last_sync",
+        key: "lastSyncAt",
+        format: (v) => formatPeerAge(v as string | null, now, 86_400_000),
+      },
+      {
+        // Progress: "did data actually flow in?" Updates only when merged>0.
+        // Diverging from last_sync means contact-yes but data-no — investigate.
+        label: "last_merge",
+        key: "lastMergeAt",
+        format: (v) => formatPeerAge(v as string | null, now, 86_400_000),
+      },
+      {
+        label: "relay",
+        key: "relayOnly",
+        format: (v) => (v ? render.wrap(render.c.cyan, "yes") : render.wrap(render.c.dim, "no")),
+      },
+    ];
+    console.log(render.table(cols, peers as Array<Record<string, unknown>>));
+
+    // Stale warning is gated on lastMergeAt (real progress), not lastSyncAt.
+    // A peer that "syncs" every 5min but hasn't merged a record in 24h is
+    // exactly the failure mode we want surfaced.
+    const haveStale = peers.some((p: any) => {
+      const cursor = p.lastMergeAt ?? p.lastSyncAt;
+      if (!cursor) return true;
+      const t = Date.parse(cursor);
+      return !Number.isFinite(t) || (now - t) > 86_400_000;
+    });
+    if (haveStale) {
+      console.log();
+      // The staleness warning used to fire identically whether sync was
+      // running and the peer was unreachable, or nothing had run sync since
+      // the day the spoke was paired (flair#922). Those need opposite
+      // actions, so the remedy is now chosen by the driver verdict instead
+      // of always pointing at SyncLog.
+      const noDriver = assessment?.verdict === "no-driver" || assessment?.verdict === "driver-inactive";
+      const remedy = noDriver
+        ? "Nothing is driving sync — see the driver line above. Run 'flair federation sync enable'."
+        : "Check skippedReasons in SyncLog or run 'flair federation sync'.";
+      console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "One or more peers haven't merged a record in >24h.")} ${render.wrap(render.c.dim, remedy)}`);
+    }
+
+    const haveContactButNoMerge = peers.some((p: any) => {
+      if (!p.lastSyncAt || !Number.isFinite(Date.parse(p.lastSyncAt))) return false;
+      if ((now - Date.parse(p.lastSyncAt)) > 3_600_000) return false; // only recent contact
+      // Contact within the last hour, but no merge ever (or stale by >1h)
+      if (!p.lastMergeAt) return true;
+      const tm = Date.parse(p.lastMergeAt);
+      return !Number.isFinite(tm) || (now - tm) > 3_600_000;
+    });
+    if (haveContactButNoMerge && !haveStale) {
+      console.log();
+      console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Peer contact is fresh but no records merged in the last hour.")} ${render.wrap(render.c.dim, "Possible silent-skip scenario — check SyncLog.skippedReasons.")}`);
     }
   });
 
