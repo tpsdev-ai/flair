@@ -465,6 +465,14 @@ export class BootstrapMemories extends Resource {
     // read below). Declared out here so it is in scope for the response body even
     // if the events read (in a try/catch) yields nothing.
     const includedEvents: any[] = [];
+    // flair#1298 — count of events that ENTERED the admission loop (relevant to
+    // the caller, inside the lookback window, survived dedup + the no-op
+    // filter) but were skipped by the budget gate (`cost > tokenBudget`).
+    // Feeds the budget-truncated branch of eventsHint, mirroring
+    // teammateFindingsTruncated. Deliberately counts ONLY admitted-then-
+    // skipped events — never a gap derived from some larger tally, which
+    // could imply the existence of rows the caller was not allowed to see.
+    let eventsBudgetTruncated = 0;
     const leanMemory = (m: any, section: string) => ({
       id: m.id,
       content: m.content,
@@ -1358,7 +1366,10 @@ export class BootstrapMemories extends Resource {
         // /mcp path; the prose line is a subset of it). This is the #1199 fix:
         // events are content and must be budgeted like content.
         const cost = estimateTokens(JSON.stringify(structured));
-        if (cost > tokenBudget) continue;
+        // flair#1298 — an event that reached admission but does not fit the
+        // remaining budget is TRUNCATED, not irrelevant; count it so eventsHint
+        // can say so instead of claiming "empty by design" (#1182 contract).
+        if (cost > tokenBudget) { eventsBudgetTruncated++; continue; }
         const elapsed = Date.now() - new Date(evt.createdAt).getTime();
         const mins = Math.floor(elapsed / 60_000);
         const relTime = mins < 60 ? `${mins}min ago` : `${Math.floor(mins / 60)}h ago`;
@@ -1583,12 +1594,19 @@ export class BootstrapMemories extends Resource {
     // dropped". Present ONLY when the container is empty (a populated container
     // needs no hint), so a healthy payload is unchanged.
 
-    // events: [] — no org event in the lookback window was relevant to the
-    // caller after zero-row no-op auto-heal filtering (#1200). Present-but-empty
-    // by design, not a drop.
+    // events: [] — name WHICH empty this is (flair#1298, mirroring the
+    // teammateFindingsHint branches below): relevant-but-budget-truncated
+    // (events cleared the lookback window and every relevance filter but none
+    // fit the remaining token budget — saying "by design" there is exactly the
+    // false reassurance the #1182 hint contract forbids), or genuinely no
+    // relevant event in the window after zero-row no-op auto-heal filtering
+    // (#1200) — present-but-empty by design, not a drop.
     const eventsHint = includedEvents.length === 0
-      ? "No org events in the lookback window were relevant to you (org-wide, or targeted at you) "
-        + "after zero-row no-op auto-heal filtering. This container is present-but-empty by design, not dropped."
+      ? (eventsBudgetTruncated > 0
+          ? `No org events fit the token budget: ${eventsBudgetTruncated} relevant event(s) cleared the `
+            + "lookback window but were budget-truncated. Raise maxTokens to include them."
+          : "No org events in the lookback window were relevant to you (org-wide, or targeted at you) "
+            + "after zero-row no-op auto-heal filtering. This container is present-but-empty by design, not dropped.")
       : undefined;
 
     // teammateFindings: [] — name WHICH legitimate empty this is (no task → no
