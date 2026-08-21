@@ -19,6 +19,41 @@
  *              as UNPROVEN (the path under test never engaged).
  *   control  — identical flow but reconnect WITHIN retention: incremental catch-up, no forced
  *              base copy expected; distinguishes the base-copy path from normal replication.
+ *   residency — the remaining code-anchored suspect after the base-copy disproof (see the
+ *              #1244 thread): core Table.ts evaluates TableResource.getResidency on every
+ *              write where options.residencyId is undefined (i.e. essentially every ordinary
+ *              local write); if the returned list excludes this node's hostname, the LOCAL
+ *              record is omitted while writeCommit still writes a NORMAL audited put — no
+ *              delete transaction. This lane installs a residency function on node-a via a
+ *              tiny component (standing in for the unconfirmed Fabric-side call — no config
+ *              surface installs one) that excludes node-a for ids prefixed 'hubonly-'. Rows
+ *              written BEFORE the install stand in for the incident's hub-only rows; an
+ *              ordinary re-save then triggers the _writeUpdate re-entry.
+ *
+ *              --residency=record (default) | byid — the two API variants destroy differently,
+ *              and the difference is decisive (RecordEncoder.ts recordUpdater: a
+ *              record===undefined call never touches the primary store):
+ *                record — setResidency(fn(record)): a non-resident write stores a PARTIAL
+ *                         record (indexed fields only; even the primary-key field is dropped
+ *                         from the value) + INVALIDATED. For an EXISTING row this OVERWRITES
+ *                         the full local value — real local destruction via an ordinary
+ *                         audited put. The read path then treats the row as remote: with the
+ *                         peer up, reads transparently remote-fetch; with the residency
+ *                         nodes lacking the row (the incident's hub-only shape), every read
+ *                         returns nothing. The #1244-signature candidate.
+ *                byid   — setResidencyById(fn(id)): non-resident recordToStore is undefined,
+ *                         so a NEW row is simply never stored locally, but an EXISTING row's
+ *                         value is left untouched (stale, still readable). This variant
+ *                         CANNOT destroy already-stored rows — a useful negative bound.
+ *
+ *              Thread note (matters for fidelity): the residency function is a per-thread
+ *              static; only writes handled by a worker that ran the component see it. The
+ *              lane drives the marked writes through a REST resource exported by the same
+ *              component, which guarantees the write runs where the function is installed —
+ *              the same shape as a component's own writes (flair's Memory writes are
+ *              component writes). Ops-API writes served by another thread do NOT engage it
+ *              (verified empirically); assertion probes defeat the read path's transparent
+ *              remote fetch by probing local state with the peer stopped.
  *
  * INSTRUMENT POSITIVE CONTROL
  * Before partitioning, one canary row is deleted normally and the script asserts the 'delete'
@@ -32,7 +67,8 @@
  * - Teardown kills ONLY child PIDs this script spawned (never pkill/pattern kill).
  *
  * USAGE
- *   node test/repro/basecopy-retention-repro.mjs [--lane=basecopy|control|both] [--keep]
+ *   node test/repro/basecopy-retention-repro.mjs [--lane=basecopy|control|residency|both] [--keep]
+ *   (--lane=both runs basecopy + control; residency is run explicitly, with --residency=record|byid)
  *
  *   HARPER_PRO_DIR      dir whose node_modules contains @harperfast/harper-pro (optional; if
  *                       unset the script npm-installs HARPER_PRO_VERSION into a temp sandbox)
@@ -47,7 +83,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -69,6 +105,8 @@ const KEEP = args.includes('--keep');
 //           wedges and dies by ping timeout, and the resume looks like the incident's
 //           ECONNRESET-storm reconnect (no reboot, same connection objects recover)
 const PARTITION = (args.find((a) => a.startsWith('--partition=')) ?? '--partition=stop').slice(12);
+// record — setResidency(fn(record)); byid — setResidencyById(fn(id)). See the lane doc above.
+const RESIDENCY_VARIANT = (args.find((a) => a.startsWith('--residency=')) ?? '--residency=record').slice(12);
 
 // ─── tiny utils ───────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -278,6 +316,39 @@ async function ops(node, body) {
 
 const recordCount = async (node) => (await ops(node, { operation: 'describe_table', database: 'repro', table: 'doc' })).record_count;
 
+// POST to a REST resource served on the component/HTTP port (NOT the ops port). REST requests
+// are handled by a worker that loaded the components, which is what makes this the right
+// vehicle for writes that must engage a component-installed residency function.
+async function rest(node, path, body) {
+	const res = await fetch(`http://127.0.0.1:${node.httpPort}${path}`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: 'Basic ' + Buffer.from(`${ADMIN.username}:${ADMIN.password}`).toString('base64'),
+		},
+		body: JSON.stringify(body),
+		signal: AbortSignal.timeout(30_000),
+	});
+	const text = await res.text();
+	let json;
+	try {
+		json = JSON.parse(text);
+	} catch {
+		json = text;
+	}
+	if (!res.ok) throw new Error(`POST ${path} on ${node.name} → HTTP ${res.status}: ${text.slice(0, 300)}`);
+	return json;
+}
+
+// Both outbound legs must authenticate before the cluster is usable — a half-connected pair
+// (one side looping on 1008 rejects) still replicates everything written on the accepted side
+// and looks healthy to a data-only probe.
+async function peerConnected(node, peerName) {
+	const st = await ops(node, { operation: 'cluster_status' });
+	const peer = (st.connections ?? []).find((c) => c.name === peerName);
+	return Boolean(peer?.database_sockets?.some((s) => s.database === 'system' && s.connected === true));
+}
+
 async function idsPresent(node, ids) {
 	const rows = await ops(node, {
 		operation: 'search_by_id',
@@ -350,14 +421,6 @@ async function formCluster(harper, nodes) {
 	await stopNode(b);
 	await startNode(b);
 	await waitForTcp(b.repPort);
-	// BOTH outbound legs must authenticate before the cluster is usable — a half-connected pair
-	// (one side looping on 1008 rejects) still replicates everything written on the accepted side
-	// and looks healthy to a data-only probe.
-	const peerConnected = async (node, peerName) => {
-		const st = await ops(node, { operation: 'cluster_status' });
-		const peer = (st.connections ?? []).find((c) => c.name === peerName);
-		return Boolean(peer?.database_sockets?.some((s) => s.database === 'system' && s.connected === true));
-	};
 	await waitFor('node-a outbound leg to node-b connected (system)', () => peerConnected(a, b.name), 90_000, 2000);
 	await waitFor('node-b outbound leg to node-a connected (system)', () => peerConnected(b, a.name), 90_000, 2000);
 	say('both replication directions authenticated and connected');
@@ -546,12 +609,256 @@ async function runLane(lane, harper) {
 	}
 }
 
+// ─── residency lane ───────────────────────────────────────────────────────────
+// The residency-probe component installed on node-a only. It (1) installs the residency
+// function at table-registration time — the stand-in for the unconfirmed Fabric-side
+// setResidency call — and (2) exports a REST driver so the harness can issue writes that run
+// in the component-loaded worker (where the per-thread residency static is actually set).
+// Ids prefixed 'hubonly-' reside only on node-b: the list EXCLUDES this node (node-a).
+// Everything else returns undefined = default residency (replicate everywhere).
+function residencyComponent(variant) {
+	const install =
+		variant === 'byid'
+			? `table.setResidencyById((id) => {
+		const list = String(id).startsWith('hubonly-') ? ['node-b'] : undefined;
+		console.log('[' + probe + '] getResidencyById(' + JSON.stringify(id) + ') -> ' + JSON.stringify(list));
+		return list;
+	});`
+			: `table.setResidency((record, context) => {
+		const id = record ? record.id : undefined;
+		const list = String(id).startsWith('hubonly-') ? ['node-b'] : undefined;
+		console.log('[' + probe + '] getResidency(id=' + JSON.stringify(id) + ') -> ' + JSON.stringify(list));
+		return list;
+	});`;
+	return `// flair#1244 residency-omission probe (ephemeral repro component; see test/repro/)
+const probe = 'residency-probe';
+const table = databases && databases.repro && databases.repro.doc;
+try {
+	if (!table) {
+		console.error('[' + probe + '] repro.doc NOT FOUND at load - residency NOT installed');
+	} else {
+		${install}
+		console.log('[' + probe + '] residency function INSTALLED on repro.doc (variant: ${variant})');
+	}
+} catch (e) {
+	console.error('[' + probe + '] install error: ' + e.message);
+}
+
+export class ResidencyDriver extends Resource {
+	static path = '/residency-driver';
+	async post(data) {
+		const written = [];
+		for (const record of data.records ?? []) {
+			await table.put(record);
+			written.push(record.id);
+		}
+		return { ok: true, written, pid: process.pid };
+	}
+}
+`;
+}
+
+async function restartNode(node) {
+	await stopNode(node);
+	await startNode(node);
+	await waitForTcp(node.repPort);
+}
+
+// Classify what node-a's store actually holds for each id: 'full' (value intact),
+// 'partial' (a value came back but its primary-key field is gone — the residency partial
+// preserves only indexed fields, and the pk is not among them), 'absent' (no value at all).
+// Run with the peer STOPPED, otherwise the read path transparently remote-fetches.
+async function classifyRows(node, ids) {
+	const rows = await ops(node, { operation: 'search_by_id', database: 'repro', table: 'doc', ids, get_attributes: ['*'] });
+	const byId = new Map();
+	const unmatched = [];
+	for (const r of rows.filter(Boolean)) {
+		if (r.id != null) byId.set(r.id, r);
+		else unmatched.push(r);
+	}
+	// search_by_id returns rows positionally for dynamic tables only when found; a partial row
+	// (id stripped from the value) cannot be matched back by content, so count them in order.
+	const out = {};
+	for (const id of ids) {
+		if (byId.has(id)) out[id] = { outcome: 'full', row: byId.get(id) };
+		else if (unmatched.length) out[id] = { outcome: 'partial', row: unmatched.shift() };
+		else out[id] = { outcome: 'absent', row: null };
+	}
+	return out;
+}
+const outcomes = (cls) => Object.fromEntries(Object.entries(cls).map(([id, v]) => [id, v.outcome]));
+
+async function runResidencyLane(harper) {
+	const variant = RESIDENCY_VARIANT;
+	if (!['record', 'byid'].includes(variant)) throw new Error(`unknown --residency variant: ${variant}`);
+	head(`LANE RESIDENCY (variant: ${variant}) — residency-omission on ordinary writes (suspect 1 of the #1244 remaining-suspects derivation)`);
+	const nodes = [];
+	const PRE = ['hubonly-pre-001', 'hubonly-pre-002', 'hubonly-pre-003', 'hubonly-pre-004', 'hubonly-pre-005'];
+	const FRESH = ['hubonly-fresh-001', 'hubonly-fresh-002', 'hubonly-fresh-003'];
+	const PLAIN = ['plain-101', 'plain-102', 'plain-103', 'plain-104', 'plain-105'];
+	const PLAIN_DRIVER = 'plain-201'; // unmarked row written via the SAME driver path (positive control for the vehicle)
+	try {
+		const { a, b } = await formCluster(harper, nodes);
+		await instrumentPositiveControl(a, b);
+		const tLane = Date.now();
+
+		head('STEP: pre-phase — write hub-only stand-ins BEFORE any residency exists (they must be ordinarily stored)');
+		// resaved:false pre-declares the attribute: on a dynamic table the resource-path write
+		// does not add attributes, and an undeclared field would be silently dropped from the
+		// stored record (the audit payload keeps it either way).
+		await ops(a, {
+			operation: 'upsert',
+			database: 'repro',
+			table: 'doc',
+			records: [
+				...PRE.map((id) => ({ id, wave: 'pre-residency', v: 1, resaved: false })),
+				...PLAIN.map((id) => ({ id, wave: 'pre-residency', v: 1, resaved: false })),
+			],
+		});
+		const afterPre = N_BASE - 1 + PRE.length + PLAIN.length;
+		await waitFor(`node-b replicated the pre-phase rows (${afterPre})`, async () => (await recordCount(b)) === afterPre, 60_000);
+		check(`pre-phase: both nodes hold ${afterPre} rows`, (await recordCount(a)) === afterPre && (await recordCount(b)) === afterPre, `a=${await recordCount(a)} b=${await recordCount(b)}`);
+
+		head('STEP: install residency on node-a — deploy the probe component and restart (table-registration-time install)');
+		const compDir = join(a.dir, 'components', 'residency-probe');
+		await mkdir(compDir, { recursive: true });
+		await writeFile(join(compDir, 'resources.js'), residencyComponent(variant));
+		await restartNode(a);
+		await waitFor('replication re-established after node-a restart (a→b)', () => peerConnected(a, b.name), 90_000, 2000);
+		await waitFor('replication re-established after node-a restart (b→a)', () => peerConnected(b, a.name), 90_000, 2000);
+		const aLogMark = nodeLogs(a).length;
+		const installLines = nodeLogs(a)
+			.split('\n')
+			.filter((l) => l.includes('residency-probe'));
+		say(`[node-a] residency-probe log lines: ${JSON.stringify(installLines)}`);
+		const installed = installLines.some((l) => l.includes('INSTALLED'));
+		check('residency function INSTALLED on node-a (component log line present)', installed);
+
+		let p = await idsPresent(a, PRE);
+		check('registration alone destroys nothing: hubonly-pre rows still present on node-a after the residency install', p.missing.length === 0, `present=${p.found.length}/${PRE.length}${p.missing.length ? ` missing=${p.missing.join(',')}` : ''}`);
+
+		head('STEP: trigger — ordinary writes through the component worker (fresh writes + the self-resave _writeUpdate re-entry)');
+		const fresh = await rest(a, '/residency-driver', { records: FRESH.map((id) => ({ id, wave: 'post-residency', v: 1, resaved: false })) });
+		say(`driver fresh-write response: ${JSON.stringify(fresh)}`);
+		const resave = await rest(a, '/residency-driver', {
+			records: [
+				...PRE.map((id) => ({ id, wave: 'pre-residency', v: 2, resaved: true })),
+				{ id: PLAIN_DRIVER, wave: 'post-residency', v: 1, resaved: false },
+				{ id: 'plain-101', wave: 'pre-residency', v: 2, resaved: true },
+			],
+		});
+		say(`driver self-resave response: ${JSON.stringify(resave)}`);
+		check('driver wrote all marked + control records', fresh.written?.length === FRESH.length && resave.written?.length === PRE.length + 2, `fresh=${JSON.stringify(fresh.written)} resave=${JSON.stringify(resave.written)}`);
+		say('settle: 10s for replication of the audited writes to node-b (and for the worker stdout pipe to flush)');
+		await sleep(10_000);
+		const residencyCalls = nodeLogs(a)
+			.slice(aLogMark)
+			.split('\n')
+			.filter((l) => l.includes('getResidency'));
+		// Observation only: console output from inside the write-commit path does not reliably
+		// surface in the captured logs. That the function evaluated the marked ids — and returned
+		// the node-a-excluding list — is proven by the OUTCOME split instead: hubonly-* and
+		// plain-* rows written in the SAME driver call diverge (see the assertions below).
+		say(`[node-a] residency function invocation lines captured (informational): ${residencyCalls.length}`);
+
+		head('OBSERVATION (not a gate): reads with the peer UP — the residency read path may transparently remote-fetch');
+		let t0 = Date.now();
+		const obsA = await idsPresent(a, [...PRE, ...FRESH]);
+		say(`node-a search with node-b up: ${obsA.found.length}/${PRE.length + FRESH.length} resolve by id (${Date.now() - t0}ms) — resolving here does NOT prove local storage`);
+
+		head('ASSERT: node-b (the residency list member) received the ordinary audited writes in full');
+		const pbPre = await idsPresent(b, PRE);
+		const pbFresh = await idsPresent(b, FRESH);
+		const bResaved = await ops(b, { operation: 'search_by_id', database: 'repro', table: 'doc', ids: [PRE[0]], get_attributes: ['*'] });
+		check('node-b holds ALL hubonly rows (pre + fresh) — they replicated as ordinary writes', pbPre.missing.length === 0 && pbFresh.missing.length === 0, `pre=${pbPre.found.length}/${PRE.length} fresh=${pbFresh.found.length}/${FRESH.length}`);
+		check('node-b sees the resave content (resaved flag) — the re-entry write was an ordinary replicated put', bResaved[0]?.resaved === true, JSON.stringify(bResaved[0]));
+
+		head('STEP: stop node-b, then probe node-a LOCAL state (defeats the transparent remote fetch)');
+		await stopNode(b);
+		t0 = Date.now();
+		const clsPre = await classifyRows(a, PRE);
+		const clsFresh = await classifyRows(a, FRESH);
+		const clsPlain = await classifyRows(a, [...PLAIN, PLAIN_DRIVER]);
+		say(`local probes took ${Date.now() - t0}ms`);
+		say(`node-a local state, pre-residency hubonly rows: ${JSON.stringify(outcomes(clsPre))}`);
+		say(`  sample stored value for ${PRE[0]}: ${JSON.stringify(clsPre[PRE[0]].row)}`);
+		say(`node-a local state, post-install hubonly rows: ${JSON.stringify(outcomes(clsFresh))}`);
+		say(`node-a local state, unmarked rows: ${JSON.stringify(outcomes(clsPlain))}`);
+		const caFinal = await recordCount(a);
+		say(`node-a record_count=${caFinal} (a destroyed-but-stubbed row still counts; the incident's counts were index/vector-based)`);
+		const preDestroyed = PRE.filter((id) => clsPre[id].outcome !== 'full');
+		const freshNotStored = FRESH.filter((id) => clsFresh[id].outcome !== 'full');
+		const plainIntact = [...PLAIN, PLAIN_DRIVER].filter((id) => clsPlain[id].outcome === 'full');
+		if (variant === 'record') {
+			check('(a) INCIDENT SIGNATURE: the ordinary re-save DESTROYED the pre-existing local values on node-a (partial/absent, not full)', preDestroyed.length === PRE.length, JSON.stringify(outcomes(clsPre)));
+		} else {
+			check('(a/byid) the byid variant left pre-existing local values in place (recordUpdater never touches the store for record===undefined) — expected: NO destruction', preDestroyed.length === 0, JSON.stringify(outcomes(clsPre)));
+			const stale = clsPre[PRE[0]].row;
+			check('(a2/byid) ...and the surviving local value is the STALE pre-resave one (v=1, resaved=false) — the resave was audit-only locally', stale?.v === 1 && stale?.resaved === false, JSON.stringify(stale));
+		}
+		check(`(a3) hubonly rows first written AFTER the install were never fully stored on node-a (${variant === 'record' ? 'partial stub only' : 'no store write at all'})`, freshNotStored.length === FRESH.length, JSON.stringify(outcomes(clsFresh)));
+		const plainResavedRow = clsPlain['plain-101'].row;
+		check('(c) unmarked rows untouched on node-a (incl. the driver-written one and the resaved control, which carries its update)', plainIntact.length === PLAIN.length + 1 && plainResavedRow?.resaved === true && plainResavedRow?.v === 2, `full=${plainIntact.length}/${PLAIN.length + 1} plain-101=${JSON.stringify(plainResavedRow)}`);
+
+		head('ASSERT: transaction log — ordinary puts, ZERO deletes (the instrument positive-control above proves deletes DO log)');
+		const la = await txnLog(a, tLane - 120_000);
+		const hubIds = [...PRE, ...FRESH];
+		const delEntries = deletesIn(la, hubIds);
+		const putEntries = la.filter((e) => e.operation !== 'delete' && (e.ids ?? []).some((i) => hubIds.includes(i)));
+		const resaveEntries = putEntries.filter((e) => (e.records ?? []).some((r) => r && r.resaved === true));
+		say(`txn-log entries naming hubonly ids: non-delete=${putEntries.length} delete=${delEntries.length}; operations=${JSON.stringify([...new Set(putEntries.map((e) => e.operation))])}`);
+		if (delEntries.length) say(`delete entries: ${JSON.stringify(delEntries)}`);
+		check('(b) ZERO delete transactions name any hubonly id', delEntries.length === 0, String(delEntries.length));
+		check('(b2) the destruction-triggering re-save is an ORDINARY audited entry carrying the full record payload', resaveEntries.length >= 1 && resaveEntries.some((e) => (e.records ?? []).some((r) => r && r.id === PRE[0] && r.resaved === true)), JSON.stringify(resaveEntries.at(-1)?.records?.find((r) => r?.id === PRE[0]) ?? null));
+		const restorePayload = putEntries
+			.flatMap((e) => e.records ?? [])
+			.filter((r) => r && r.id === PRE[0])
+			.at(-1);
+		say(`restore payload captured from the txn log: ${JSON.stringify(restorePayload)}`);
+
+		head('STEP: restore — remove the residency component, restart node-a, re-upsert the audit payload (node-b still down: reads are provably local)');
+		await rm(compDir, { recursive: true, force: true });
+		await restartNode(a);
+		await ops(a, { operation: 'upsert', database: 'repro', table: 'doc', records: [restorePayload] });
+		const restored = await ops(a, { operation: 'search_by_id', database: 'repro', table: 'doc', ids: [PRE[0]], get_attributes: ['*'] });
+		check('(d) restore from the transaction-log payload recovers the FULL row locally', restored[0]?.id === PRE[0] && restored[0]?.resaved === true && restored[0]?.v === 2, JSON.stringify(restored[0]));
+
+		head(`VERDICT — lane residency, variant ${variant}`);
+		const common =
+			installed &&
+			p.missing.length === 0 && // present after registration
+			freshNotStored.length === FRESH.length &&
+			delEntries.length === 0 &&
+			resaveEntries.length >= 1 &&
+			plainIntact.length === PLAIN.length + 1 &&
+			restored[0]?.id === PRE[0];
+		if (variant === 'record') {
+			if (common && preDestroyed.length === PRE.length) {
+				say('INCIDENT SIGNATURE REPRODUCED (record variant): with a setResidency function installed whose list excludes this node, an ORDINARY write (a self-resave) destroyed the pre-existing local values (partial/invalidated stub; reads return nothing once the residency peers cannot serve the row) with ZERO delete transactions; the destroying write is itself a normal audited put; unmarked rows are untouched; and the row is fully recoverable from its transaction-log payload. This demonstrates mechanism SUFFICIENCY for the #1244 observables. Whether anything installs such a residency function on the incident hub (the Fabric-side trigger question) remains open and is not answerable from this harness.');
+			} else {
+				say('NOT REPRODUCED (record variant): one or more signature components did not fire — see the failed checks above.');
+			}
+		} else {
+			if (common && preDestroyed.length === 0) {
+				say('BYID VARIANT BOUND CONFIRMED: setResidencyById omission cannot destroy an already-stored local row (the record===undefined write never touches the primary store — it only prevents NEW local storage and writes the audit entry). If the incident mechanism is residency omission, it must be the record-based setResidency variant (or the rows must have been first written AFTER the residency install).');
+			} else {
+				say('UNEXPECTED byid outcome — see the failed checks above.');
+			}
+		}
+		say(`node dirs (${KEEP ? 'kept' : 'removed on exit'}): ${a.dir} ${b.dir}`);
+	} finally {
+		for (const n of nodes) await stopNode(n).catch(() => {});
+		if (!KEEP) for (const n of nodes) await rm(n.dir, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 const harper = await resolveHarperPro();
 const lanes = laneArg === 'both' ? ['basecopy', 'control'] : [laneArg];
 for (const lane of lanes) {
-	if (!['basecopy', 'control'].includes(lane)) throw new Error(`unknown lane: ${lane}`);
-	await runLane(lane, harper);
+	if (!['basecopy', 'control', 'residency'].includes(lane)) throw new Error(`unknown lane: ${lane}`);
+	if (lane === 'residency') await runResidencyLane(harper);
+	else await runLane(lane, harper);
 }
 head(`DONE — ${failures === 0 ? 'all checks passed' : failures + ' check(s) FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);
