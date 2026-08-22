@@ -9646,8 +9646,10 @@ const statusCmd = program
     }
 
     // Version-behind check (flair#587) — offline-tolerant + cached, so this
-    // never adds meaningful latency or fails `status` when the registry is
-    // unreachable. Independent of Harper health; runs either way.
+    // never fails `status` when the registry is unreachable, and costs no
+    // network round trip on the common up-to-date path. When a cached answer
+    // would print a nudge it spends one short-timeout refetch so the printed
+    // fact is current (flair#1341). Independent of Harper health; runs either way.
     const versionCheckResult = await checkVersion(__pkgVersion);
     const versionNudge = formatVersionNudge(versionCheckResult);
 
