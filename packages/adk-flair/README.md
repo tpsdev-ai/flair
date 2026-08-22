@@ -342,6 +342,34 @@ entries = await memory_service.list_memories(
   `list_memories` **raises** on transport/server failure — a browsing UI must
   be able to tell "no memories" from "Flair is down".
 
+## Agent tools
+
+Pre-built tool functions so the model itself can store and recall memories —
+no boilerplate tool authoring:
+
+```python
+from adk_flair import FlairMemoryService, create_flair_tools
+
+memory_service = FlairMemoryService()
+agent = LlmAgent(
+    model="gemini-2.5-flash",
+    name="assistant",
+    tools=create_flair_tools(memory_service, app_name="my-app", user_id="user-123"),
+)
+```
+
+`create_flair_tools()` returns three plain async functions —
+`store_memory(subject, description, tags=None, custom_metadata=None)`,
+`search_memory(query, limit=5)` and `list_memories(limit=20, offset=0)` —
+which ADK wraps in `FunctionTool` automatically and turns into Gemini function
+declarations from their signatures and docstrings. Everything is explicit
+injection: the service and the `app_name`/`user_id` scope are arguments you
+pass at creation time, so the wiring stays auditable and the model can never
+pick its own memory scope (no ambient identity, no env-var or registry
+discovery). Create one tool set per user/session. `tags` are stored inside
+the memory's `custom_metadata` under `"tags"` — descriptive labels that
+round-trip on search and list, never part of the record's scope-tag array.
+
 ## What this adapter deliberately doesn't do
 
 - **No consolidation logic.** Flair's REM (nightly) owns consolidation — the

@@ -1,7 +1,9 @@
 """adk-flair — Flair as the memory backend for Google ADK.
 
 Provides FlairMemoryService, a BaseMemoryService implementation that persists
-ADK agent memory into a Flair instance.
+ADK agent memory into a Flair instance, and create_flair_tools, a factory for
+pre-built agent tools (store_memory / search_memory / list_memories) bound to
+an explicit service + app/user scope.
 
 Quickstart:
     from adk_flair import FlairMemoryService
@@ -25,8 +27,9 @@ agent's services.py, or use services.yaml:
 """
 
 from adk_flair.memory_service import FlairMemoryService
+from adk_flair.tools import create_flair_tools
 
-__all__ = ["FlairMemoryService", "register"]
+__all__ = ["FlairMemoryService", "create_flair_tools", "register"]
 
 
 def register():
