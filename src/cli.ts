@@ -2999,11 +2999,13 @@ export function upgradeStatusSuffix(name: string, status: UpgradeStatus): string
       : " (run: npm install -g)";
   }
   if (status === "optional") return " (install via: openclaw plugins install @tpsdev-ai/openclaw-flair)";
-  // flair-mcp is refreshed by re-pinning its wiring (`flair doctor --fix` /
-  // the post-upgrade pin refresh), never `npm install -g` — a global bin does
-  // nothing for an `npx -y -p @tpsdev-ai/flair-mcp` invocation (flair#1208).
+  // flair-mcp is refreshed by re-pinning its wiring, never `npm install -g` —
+  // a global bin does nothing for an `npx -y -p @tpsdev-ai/flair-mcp`
+  // invocation (flair#1208). The re-pin is `flair upgrade`'s own job (the
+  // #1135/#1167 pin refresh) — never advise `doctor --fix` for it
+  // (flair#1324).
   if (status === "outdated" && name === FLAIR_MCP_PACKAGE) {
-    return " (npx-wired — run: flair doctor --fix to re-pin)";
+    return " (npx-wired — flair upgrade refreshes the pin)";
   }
   return "";
 }
@@ -11293,11 +11295,62 @@ program
       return;
     }
 
-    // Nothing to install via npm/openclaw. What is left is advisory: packages
-    // not detected (missing) and/or a flair-mcp whose wired pin is behind latest
-    // — both fixed by re-wiring (`flair doctor --fix`), never by the
-    // npm-install + restart transaction below (#1168/#1208). Print the remedies
-    // and stop.
+    // ONE pin-refresh implementation, two callers (flair#1324): the post-
+    // install refresh below (#1135/#1167), and the stale-pin-only path — when
+    // flair-mcp's wired pin is behind latest but no package needs installing,
+    // `flair upgrade` refreshes the pin itself instead of advising a
+    // `doctor --fix` round-trip. Only refreshes clients that are ALREADY
+    // wired — never wires new ones. Best-effort: failures warn but never fail
+    // the upgrade.
+    async function refreshWiredMcpClientPins(targetPort: number): Promise<void> {
+      const agentId = resolveAgentIdOrEnv({}) ?? (() => {
+        try {
+          const kd = defaultKeysDir();
+          const keyFiles = readdirSync(kd).filter((f) => f.endsWith(".key"));
+          // Node-scoped federation keys aren't agents (flair#1193) — never
+          // pin-refresh a connector as one.
+          const agentKeyFile = keyFiles.find((f) => !isNodeKeyId(f.replace(/\.key$/, ""), kd));
+          return agentKeyFile ? agentKeyFile.replace(/\.key$/, "") : null;
+        } catch { return null; }
+      })();
+      if (!agentId) {
+        console.log("\n   (no agent id known — skip MCP client pin refresh; run `flair init` to refresh manually)");
+        return;
+      }
+      const httpUrl = `http://127.0.0.1:${targetPort}`;
+      const mcpEnv = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
+      const detected = detectClients().filter(c => c.detected);
+      if (detected.length === 0) return;
+      console.log("\n   Refreshing MCP client pins...");
+      for (const client of detected) {
+        const configPath = clientConfigPath(client.id);
+        if (!existsSync(configPath)) continue;
+        // Only refresh clients that are already wired — don't wire new ones.
+        let hasFlair = false;
+        try {
+          const raw = readFileSync(configPath, "utf-8");
+          if (client.id === "codex") {
+            hasFlair = codexConfigHasFlairSection(raw);
+          } else {
+            const cfg = JSON.parse(raw);
+            hasFlair = !!cfg.mcpServers?.flair;
+          }
+        } catch { /* unreadable/malformed — skip */ }
+        if (!hasFlair) continue;
+        const env = { ...mcpEnv, FLAIR_CLIENT: client.id } as { FLAIR_AGENT_ID: string; FLAIR_URL: string; FLAIR_CLIENT?: string };
+        const result = client.wire(env);
+        console.log(`   ${result.ok ? "✓" : "•"} ${result.message}`);
+      }
+    }
+
+    // Nothing to install via npm/openclaw. What is left is advisory (packages
+    // not detected) and/or a flair-mcp whose wired pin is behind latest. The
+    // stale pin is `flair upgrade`'s OWN job (flair#1324): refresh it right
+    // here rather than bouncing the user to `flair doctor --fix` — advice
+    // that was both roundabout and, until #1324, routed every upgrading user
+    // through doctor's consent hazard. Under --check, only say what a real
+    // run will do. `npm install -g` remains wrong for flair-mcp either way
+    // (#1168/#1208).
     if (totalUpgrades === 0) {
       if (missing.length > 0) {
         const npmMissing = missing.filter((f) => f.name !== FLAIR_MCP_PACKAGE);
@@ -11312,7 +11365,11 @@ program
       }
       if (flairMcpOutdated) {
         console.log(`\n⬆️  flair-mcp is wired via npx (pinned ${flairMcpOutdated.installed} → latest ${flairMcpOutdated.latest}).`);
-        console.log(`   Re-pin it: flair doctor --fix`);
+        if (checkOnly) {
+          console.log("   Run: flair upgrade (refreshes the pin)");
+        } else {
+          await refreshWiredMcpClientPins(resolveHttpPort({}));
+        }
       }
       return;
     }
@@ -11540,46 +11597,7 @@ program
     // version. Runs BEFORE the restart so --no-restart and --no-verify paths
     // also get the refresh (flair#1167). Best-effort: failures warn but never
     // fail the upgrade.
-    await (async () => {
-      const agentId = resolveAgentIdOrEnv({}) ?? (() => {
-        try {
-          const kd = defaultKeysDir();
-          const keyFiles = readdirSync(kd).filter((f) => f.endsWith(".key"));
-          // Node-scoped federation keys aren't agents (flair#1193) — never
-          // pin-refresh a connector as one.
-          const agentKeyFile = keyFiles.find((f) => !isNodeKeyId(f.replace(/\.key$/, ""), kd));
-          return agentKeyFile ? agentKeyFile.replace(/\.key$/, "") : null;
-        } catch { return null; }
-      })();
-      if (!agentId) {
-        console.log("\n   (no agent id known — skip MCP client pin refresh; run `flair init` to refresh manually)");
-        return;
-      }
-      const httpUrl = `http://127.0.0.1:${upgradePort}`;
-      const mcpEnv = { FLAIR_AGENT_ID: agentId, FLAIR_URL: httpUrl };
-      const detected = detectClients().filter(c => c.detected);
-      if (detected.length === 0) return;
-      console.log("\n   Refreshing MCP client pins...");
-      for (const client of detected) {
-        const configPath = clientConfigPath(client.id);
-        if (!existsSync(configPath)) continue;
-        // Only refresh clients that are already wired — don't wire new ones.
-        let hasFlair = false;
-        try {
-          const raw = readFileSync(configPath, "utf-8");
-          if (client.id === "codex") {
-            hasFlair = codexConfigHasFlairSection(raw);
-          } else {
-            const cfg = JSON.parse(raw);
-            hasFlair = !!cfg.mcpServers?.flair;
-          }
-        } catch { /* unreadable/malformed — skip */ }
-        if (!hasFlair) continue;
-        const env = { ...mcpEnv, FLAIR_CLIENT: client.id } as { FLAIR_AGENT_ID: string; FLAIR_URL: string; FLAIR_CLIENT?: string };
-        const result = client.wire(env);
-        console.log(`   ${result.ok ? "✓" : "•"} ${result.message}`);
-      }
-    })();
+    await refreshWiredMcpClientPins(upgradePort);
 
     // ── Restart + verify + rollback (flair#635) ─────────────────────────────
     // Decision (2026-07-08): restart is now the default post-upgrade step —
@@ -14223,31 +14241,19 @@ program
         // the SessionStart check above: installed / absent / stale-form).
         // Continuity is OPT-IN — installing the PostToolUse+Stop pair IS the
         // opt-in — so "absent" renders as informational "not enabled": NEVER
-        // a pass (an unrun check must not look green) and never counted as an
-        // issue. A partial/stale install IS an issue and is --fix-able;
-        // --fix also offers first-time enablement (the y/N prompt is the
-        // consent; non-TTY --fix is itself the consent signal, matching every
-        // other doctor fix).
+        // a pass (an unrun check must not look green), never counted as an
+        // issue, and NEVER wired by --fix (flair#1324: doctor's fixable set
+        // is broken state; initiating an opt-in the user hasn't made is not a
+        // fix — a y/N prompt auto-answers yes in every non-TTY run, so it was
+        // no consent gate at all; enablement is `flair hook install
+        // --continuity` only). A partial or stale pair IS evidence of a prior
+        // opt-in, so repairing it to the complete current form remains a
+        // legitimate --fix.
         const continuity = checkContinuityCaptureHooks(homedir());
         if (continuity.state === "installed") {
           console.log(`  ${render.icons.ok} Continuity capture hooks: PostToolUse + Stop wired in ${render.wrap(render.c.dim, continuity.path)}`);
         } else if (continuity.state === "absent") {
           console.log(`  ${render.icons.info} Continuity capture hooks: not enabled ${render.wrap(render.c.dim, "(opt-in — auto-journal working state into the ephemeral memory tier; enable: flair hook install --continuity)")}`);
-          if (autoFix) {
-            if (dryRun) {
-              console.log(`     ${render.wrap(render.c.dim, "Would wire the continuity capture hooks (PostToolUse + Stop) in")} ${continuity.path}`);
-            } else {
-              const proceed = await confirmFix(`  Enable continuity capture (PostToolUse + Stop hooks in ${continuity.path})? [y/N] `);
-              if (!proceed) {
-                console.log(`     Skipped.`);
-              } else {
-                const fixAgentId = claudeCodeAgentId || opts.agent || process.env.FLAIR_AGENT_ID;
-                const fixRes = fixContinuityCaptureHooks(homedir(), fixAgentId);
-                console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
-                if (fixRes.ok && fixRes.changed) fixed++;
-              }
-            }
-          }
         } else {
           const continuityDetail = continuity.state === "partial"
             ? (!continuity.postToolUse.present ? "the PostToolUse entry is missing" : "the Stop entry is missing")
