@@ -43,14 +43,29 @@ pi install -l npm:@tpsdev-ai/pi-flair
 
 ### Configure
 
-Add to `~/.pi/agent/settings.json` or `.pi/settings.json`:
+`pi install` writes the package into settings for you. To configure manually,
+add to `~/.pi/agent/settings.json` or `.pi/settings.json`:
 
 ```json
 {
-  "extensions": ["npm:@tpsdev-ai/pi-flair"],
   "packages": ["npm:@tpsdev-ai/pi-flair"]
 }
 ```
+
+Package sources (`npm:`, `git:`) belong in `packages`. The `extensions` settings
+key takes local file paths only — an `npm:` spec there is silently ignored by pi.
+
+> **Versions <= 0.48.0:** older published builds did not declare pi's package
+> manifest (`pi.extensions` in package.json), so the `npm:` spec installs but
+> registers no tools — silently ([#1346](https://github.com/tpsdev-ai/flair/issues/1346)).
+> Upgrade pi-flair, or as a workaround point `extensions` at the installed file
+> directly:
+>
+> ```json
+> {
+>   "extensions": ["~/.pi/agent/npm/node_modules/@tpsdev-ai/pi-flair/dist/index.js"]
+> }
+> ```
 
 Or use environment variables:
 

@@ -16,11 +16,11 @@
  *
  * Usage:
  *   1. Install: pi install npm:@tpsdev-ai/pi-flair
- *   2. Configure in ~/.pi/agent/settings.json or .pi/settings.json:
+ *      (writes "npm:@tpsdev-ai/pi-flair" into the "packages" settings key; pi
+ *      discovers the extension via the "pi" manifest in package.json — #1346)
+ *   2. Or configure manually in ~/.pi/agent/settings.json or .pi/settings.json:
  *      {
- *        "extensions": ["npm:@tpsdev-ai/pi-flair"],
- *        "flair_url": "http://127.0.0.1:19926",
- *        "agentId": "my-project"
+ *        "packages": ["npm:@tpsdev-ai/pi-flair"]
  *      }
  *   3. Or use environment variables:
  *      export FLAIR_AGENT_ID=my-agent
@@ -28,7 +28,7 @@
  *   4. Restart pi
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { FlairClient, FlairError, type FlairClientConfig, type BootstrapResult } from "@tpsdev-ai/flair-client";
 
