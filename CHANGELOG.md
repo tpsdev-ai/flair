@@ -18,6 +18,78 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.48.0] - 2026-08-22
+
+### Added
+
+- **adk-flair: pre-built ADK agent tools — `create_flair_tools()`**
+  (flair#1331). One factory call returns three ready-to-use async tool
+  functions — `store_memory(subject, description, tags, custom_metadata)`,
+  `search_memory(query, limit)` and `list_memories(limit, offset)` — bound to
+  one `FlairMemoryService` and one `app_name`/`user_id` scope, ready to pass
+  straight to `LlmAgent(tools=...)` (ADK wraps bare async callables in
+  `FunctionTool` and generates the Gemini declarations from the signatures
+  and docstrings). Explicit injection only: no env-var discovery, no service
+  registry, no ambient identity — the scope binds at factory time so the
+  model can never choose whose memory it touches, and scope parameters never
+  appear in any tool declaration. `subject` flows through the first-class
+  subject column; `tags` are stored inside `custom_metadata["tags"]`
+  (round-trip labels, deliberately never written to the record's scope-tag
+  array); results come back as plain JSON-serializable dicts with `subject`
+  hoisted alongside `content`, `author`, `timestamp` and `custom_metadata`;
+  failures the model can act on return as `{"error": ...}` instead of
+  raising. +32 hermetic tests (134 vs 102 baseline, incl. a
+  declaration-generation smoke test against the installed google-adk) and
+  +2 live (tool-level store→search→list round-trip, cross-user scope
+  isolation).
+
+- **adk-flair: `custom_metadata` is now stored and returned, `subject` becomes
+  a first-class column, and `list_memories()` lands** (flair#1332, flair#1333;
+  design flair#1202). `add_memory()`/`add_events_to_memory()` serialize
+  `custom_metadata` into a new client-writable `Memory.metadata` JSON field —
+  store-and-return only, exactly ADK's contract: the blob is opaque to the
+  server and no key in it has any server-side effect (contract-tested:
+  `{"visibility":"shared"}` in the blob leaves the record private). Caps
+  reject with `ValueError`, never truncate: 64KB serialized, nesting ≤ 16,
+  ≤ 512 keys; non-serializable values skip that key with a WARNING.
+  `subject` (≤ 512 chars, explicit param authoritative over
+  `custom_metadata["subject"]`, never auto-extracted) is promoted to the
+  record's existing indexed `subject` column. `search_memory()` returns both
+  on `MemoryEntry.custom_metadata` (top-level subject surfaced as
+  `custom_metadata["subject"]`; malformed blobs fail soft to `{}` with a
+  WARNING) via a new opt-in `includeMetadata` flag on `/SemanticSearch` —
+  the default projection (and every other consumer's response) is
+  byte-unchanged. `MemoryEntry.author` now carries the writing agent id
+  (was always `None` — read a field Flair never projected). New
+  `list_memories(app_name, user_id, limit≤200, offset)` — a Flair-specific
+  extension beyond `BaseMemoryService` — pages memories newest-first with
+  the full projection, scoped by compound tag + agent identity, both pushed
+  down and re-verified client-side.
+
+### Fixed
+
+- **adk-flair: creates now use `POST /Memory/` (the create verb) instead of
+  `PUT /Memory/{id}`, with a 409 → PUT fallback for re-ingestion; `Memory`
+  `post()` gains createdAt parity with `put()`** (flair#1336). All three write
+  entrypoints (`add_session_to_memory`, `add_events_to_memory`, `add_memory`)
+  previously created records via `PUT /Memory/{id}` — update-only on some
+  hosted Harper Fabric deployments, where a PUT-shaped create 404s and every
+  adk-flair write fails (not reproducible on stock Harper 5.2.0/5.2.2/5.2.4,
+  where PUT upserts). Creates go through `POST /Memory/` with the id in the
+  body; a 409 (record already exists — deterministic-id re-ingestion of a
+  growing session) falls back to `PUT /Memory/{id}`, preserving the old
+  replace/refresh semantics. HTTP failures now raise `FlairRequestError`
+  (a `RuntimeError` subclass, message unchanged) carrying `.status_code` —
+  the write-path warning logs that used to print the undiagnosable
+  `status=?` now show the real status. Server side: `Memory.post()` honors a
+  caller-supplied `createdAt` exactly as `put()` always has (`?? now`) —
+  moving creates onto POST would otherwise silently re-stamp historical
+  timestamps (`MemoryEntry.timestamp`) with server-now; `validFrom` follows
+  `createdAt`, `updatedAt` stays the true write moment, and the ephemeral
+  `expiresAt` stamp remains anchored to write time, so a caller `createdAt`
+  cannot move the flair#1257 exposure window. Grants no new capability: PUT
+  already accepted arbitrary `createdAt` from the same principals.
+
 ## [0.47.1] - 2026-08-22
 
 ### Fixed
