@@ -124,39 +124,6 @@
       "removeWhen": "Both lodash edges (harper and n8n-workflow) resolve >=4.18.1 \u2014 the same move that retires GHSA-r5fr-rjxr-66jc."
     },
     {
-      "ghsa": "GHSA-jfgx-wxx8-mp94",
-      "package": "@mariozechner/pi-coding-agent",
-      "severity": "high",
-      "class": "no-patch-published",
-      "introducedBy": "workspace @tpsdev-ai/pi-flair -> @mariozechner/pi-coding-agent",
-      "reason": "No fixed release exists: the latest published version is itself inside the vulnerable range, so there is nothing to upgrade to. The advisory describes local privilege escalation via predictable temp paths on SHARED Linux hosts, which is not how pi-flair is deployed. The gate re-checks the registry on every run and will fail this entry the moment a fixed version ships.",
-      "added": "2026-07-27",
-      "expires": "2026-09-25",
-      "removeWhen": "@mariozechner/pi-coding-agent publishes a release outside the vulnerable range, or the pi-flair workspace package is dropped. The gate detects the former automatically."
-    },
-    {
-      "ghsa": "GHSA-r95r-rj6r-c39x",
-      "package": "@mariozechner/pi-coding-agent",
-      "severity": "low",
-      "class": "no-patch-published",
-      "introducedBy": "workspace @tpsdev-ai/pi-flair -> @mariozechner/pi-coding-agent",
-      "reason": "No fixed release exists; latest published is still in range. Same upstream package as GHSA-jfgx-wxx8-mp94 and clears with the same release.",
-      "added": "2026-07-27",
-      "expires": "2026-10-25",
-      "removeWhen": "@mariozechner/pi-coding-agent publishes a release outside the vulnerable range, or the pi-flair workspace package is dropped."
-    },
-    {
-      "ghsa": "GHSA-7v5m-pr3q-6453",
-      "package": "@mariozechner/pi-coding-agent",
-      "severity": "low",
-      "class": "no-patch-published",
-      "introducedBy": "workspace @tpsdev-ai/pi-flair -> @mariozechner/pi-coding-agent",
-      "reason": "No fixed release exists; latest published is still in range. Affects HTML session exports, which flair does not generate. Clears with the same upstream release as the other two pi-coding-agent entries.",
-      "added": "2026-07-27",
-      "expires": "2026-10-25",
-      "removeWhen": "@mariozechner/pi-coding-agent publishes a release outside the vulnerable range, or the pi-flair workspace package is dropped."
-    },
-    {
       "ghsa": "GHSA-rv73-9c8w-jp4c",
       "package": "validate.js",
       "severity": "moderate",
@@ -166,17 +133,6 @@
       "added": "2026-07-27",
       "expires": "2026-10-25",
       "removeWhen": "validate.js publishes a fixed release AND harper picks it up, or flair stops depending on harper. The gate flags the first half automatically."
-    },
-    {
-      "ghsa": "GHSA-jmr9-qjv8-65gv",
-      "package": "extract-zip",
-      "severity": "high",
-      "class": "no-patch-published",
-      "introducedBy": "workspace @tpsdev-ai/pi-flair -> @mariozechner/pi-coding-agent -> extract-zip",
-      "reason": "No fixed release exists: extract-zips latest published version (2.0.1) is itself the vulnerable version (advisory affects <=2.0.1, patched: None). CVE-2026-56876 is path traversal via unvalidated symlink targets when extracting a ZIP (CWE-22), requiring an attacker-supplied malicious archive. Reached only via pi-flairs @mariozechner/pi-coding-agent; flair does not extract untrusted/attacker-supplied zip archives through that path. The gate re-checks the registry every run and fails this entry the moment a fixed extract-zip ships.",
-      "added": "2026-08-12",
-      "expires": "2026-10-10",
-      "removeWhen": "extract-zip publishes a release outside the vulnerable range (a fixed >2.0.1), or @mariozechner/pi-coding-agent stops depending on it, or the pi-flair workspace package is dropped. The gate detects a registry fix automatically."
     }
   ]
 }
