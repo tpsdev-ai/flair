@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import math
 import os
 import time
 import uuid
@@ -239,8 +240,13 @@ def _positive_seconds_from_env(env_var: str) -> Optional[float]:
         raise ValueError(
             f"{env_var} must be a number of seconds (got: {raw!r})"
         ) from None
-    if value <= 0:
-        raise ValueError(f"{env_var} must be > 0 seconds (got: {raw!r})")
+    # Non-finite values slip a bare `<= 0` guard (nan compares False to
+    # everything; inf <= 0 is False) and would yield a NO-timeout client —
+    # and "inf"/"Infinity"/"nan" all parse successfully via float().
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"{env_var} must be a finite number > 0 seconds (got: {raw!r})"
+        )
     return value
 
 
@@ -265,8 +271,11 @@ def _resolve_timeout(
 
     if timeout is not None:
         timeout = float(timeout)
-        if timeout <= 0:
-            raise ValueError(f"timeout must be > 0 seconds (got: {timeout!r})")
+        # Same non-finite guard as the env path: nan/inf pass a bare `<= 0`.
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError(
+                f"timeout must be a finite number > 0 seconds (got: {timeout!r})"
+            )
 
     read_override = timeout if timeout is not None else _positive_seconds_from_env(_TIMEOUT_ENV)
     connect_override = _positive_seconds_from_env(_CONNECT_TIMEOUT_ENV)

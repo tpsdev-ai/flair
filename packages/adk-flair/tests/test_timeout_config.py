@@ -124,6 +124,32 @@ class TestTimeoutResolution:
         with pytest.raises(ValueError, match="timeout"):
             _make_service({}, timeout=0)
 
+    # Non-finite values slip a bare `<= 0` guard (nan compares False to
+    # everything; inf <= 0 is False) and would create a NO-timeout client —
+    # each must be rejected at construction (Sherlock, PR #1327 review).
+
+    def test_infinite_env_raises_in_constructor(self):
+        with pytest.raises(ValueError, match="FLAIR_HTTP_TIMEOUT.*finite"):
+            _make_service({"FLAIR_HTTP_TIMEOUT": "inf"})
+
+    def test_infinity_string_env_raises_in_constructor(self):
+        # float("Infinity") parses to inf — env values are strings, so the
+        # spelled-out form must hit the same rejection as "inf".
+        with pytest.raises(ValueError, match="FLAIR_HTTP_TIMEOUT.*finite"):
+            _make_service({"FLAIR_HTTP_TIMEOUT": "Infinity"})
+
+    def test_nan_env_raises_in_constructor(self):
+        with pytest.raises(ValueError, match="FLAIR_HTTP_CONNECT_TIMEOUT.*finite"):
+            _make_service({"FLAIR_HTTP_CONNECT_TIMEOUT": "nan"})
+
+    def test_infinite_param_raises(self):
+        with pytest.raises(ValueError, match="timeout.*finite"):
+            _make_service({}, timeout=float("inf"))
+
+    def test_nan_param_raises(self):
+        with pytest.raises(ValueError, match="timeout.*finite"):
+            _make_service({}, timeout=float("nan"))
+
     async def test_effective_timeouts_logged_with_first_request_line(self, caplog):
         """The first-request WARNING line carries the effective timeouts, so a
         false-fail is diagnosable from the agent's own output."""
