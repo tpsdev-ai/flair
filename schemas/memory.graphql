@@ -85,6 +85,19 @@ type Memory @table(database: "flair") {
                                # stamped by the ORIGINATING instance itself and preserved (never re-stamped) as the record flows through
                                # sync merges. @indexed for the later sync push-query filter (per-record signature verification and the
                                # classifier org-gate are separate, later slices — not built here).
+  metadata: String             # JSON blob (flair#1332/#1202): ADK custom_metadata, store-and-return. CLIENT-WRITABLE
+                               # (unlike provenance above, which is server-stamped) and OPAQUE TO THE SERVER by
+                               # contract: stored verbatim, returned verbatim, never parsed server-side, never
+                               # queryable (Harper cannot query into a JSON blob), and NO key inside this blob
+                               # ever influences any server decision — visibility, read-scope, durability,
+                               # expiry, federation, ranking, nothing. A blob carrying {"visibility":"shared"}
+                               # leaves the record's ACTUAL visibility at its default (contract-tested in
+                               # packages/adk-flair/tests/test_metadata_and_list.py). If a specific key ever
+                               # needs to be filterable, promote THAT key to its own @indexed scalar column
+                               # (the #1202-documented add-on pattern; `subject` below is the first example) —
+                               # never parse this blob. Size/shape caps are enforced at the writing client
+                               # (adk-flair: 64KB serialized, depth ≤ 16, ≤ 512 keys). Nullable/additive —
+                               # existing rows read null, unchanged behavior (clean-upgrade-path gate).
   entities: [String] @indexed  # attention-plane vocabulary strings (flair#675). Added in v1 (not v2) per K&S
                                # verdict on FLAIR-ATTENTION-PLANE.md — gives the future attention query
                                # uniform index pushdown across Memory/WorkspaceState/OrgEvent instead of a

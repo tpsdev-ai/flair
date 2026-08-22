@@ -223,10 +223,17 @@ Search hits are mapped to ADK's `MemoryEntry` type:
 MemoryEntry(
     id=record["id"],
     content=types.Content(role="model", parts=[types.Part(text=record["content"])]),
-    author=record.get("author"),
+    author=record.get("agentId"),       # the writing Flair agent
     timestamp=record.get("createdAt"),  # ISO 8601
+    custom_metadata={...},              # parsed metadata blob; see below
 )
 ```
+
+`author` is the Flair agent id that wrote the record. `custom_metadata` is the
+stored metadata blob parsed back to a dict (see the custom_metadata section);
+when the record carries a top-level `subject`, it is surfaced as
+`custom_metadata["subject"]` — `MemoryEntry` has no subject attribute, so the
+dict is its return channel.
 
 ## Idempotent writes
 
@@ -236,9 +243,104 @@ content; it never sees duplicates.
 
 ## custom_metadata
 
-`custom_metadata` keys are not supported by `adk-flair`. Passing unsupported
-keys logs a warning once per session — a user setting TTL must not believe it
-worked.
+`custom_metadata` is **stored and returned** (flair#1332): the dict you pass to
+`add_memory()` / `add_events_to_memory()` is serialized to JSON, stored on the
+Flair record's `metadata` field, and round-trips back on
+`MemoryEntry.custom_metadata` from `search_memory()` and `list_memories()` —
+nesting and typing preserved.
+
+```python
+await memory_service.add_memory(
+    app_name="my-app",
+    user_id="user-123",
+    memories=[...],
+    custom_metadata={
+        "merchant": "acme",
+        "price": {"amount": 12.5, "currency": "EUR"},
+        "media_url": "s3://receipts/2026-08/acme.jpg",
+    },
+)
+```
+
+**Store-and-return only.** That is ADK's own contract for the field (no ADK
+implementation filters searches by `custom_metadata`), and Flair honors it
+strictly: the blob is opaque to the server — never parsed, never queried, and
+**no key in it has any server-side effect**. `{"visibility": "shared"}` inside
+`custom_metadata` does not share the memory; use the explicit `visibility`
+parameter for that. You also cannot filter searches by a metadata key; if a
+key needs filtering, that's a schema promotion (like `subject` below), not a
+blob read.
+
+Caps — violations **reject with `ValueError` before anything is written**
+(never truncated: a silently truncated blob would corrupt the round-trip
+guarantee):
+
+- 64KB serialized JSON
+- nesting depth ≤ 16
+- ≤ 512 total keys
+
+A value that isn't JSON-serializable skips **that key** with a WARNING naming
+the session — the rest of the blob is stored. Malformed JSON encountered on
+read fails soft: that entry's `custom_metadata` is `{}` and a WARNING names
+the record id.
+
+### subject
+
+A short human-readable title (≤ 512 chars), promoted to the Flair record's
+top-level indexed `subject` column — cleanly queryable and usable by UIs,
+unlike a blob key. Two ways to set it; the explicit parameter wins when both
+are present. It is **never** auto-extracted from content.
+
+```python
+await memory_service.add_memory(
+    app_name="my-app", user_id="user-123", memories=[...],
+    subject="Receipt: Acme Groceries",          # explicit param (authoritative)
+    # or: custom_metadata={"subject": "..."}    # promoted from the blob
+)
+```
+
+On read, the stored column value is surfaced as `custom_metadata["subject"]`
+(the column is authoritative over a divergent blob key).
+
+### Security caveat
+
+Memory content **and metadata** are untrusted input to the consuming agent's
+context — treat every retrieved value like any retrieved document: render,
+don't execute; quote, don't trust. The adapter deliberately does **no**
+sanitization of metadata values: sanitization of free-form JSON is lossy (it
+corrupts the round-trip the field exists for) and gives false safety (no
+blocklist anticipates the consuming context). The boundary that matters is
+yours: whatever reads these values back must treat them as data.
+
+## list_memories
+
+`list_memories()` is a **Flair-specific extension** — it is *not* part of
+ADK's `BaseMemoryService` (which specifies only `search_memory`). Use it for
+memory review UIs, dashboards, or agent browsing where there's no query to
+search with:
+
+```python
+entries = await memory_service.list_memories(
+    app_name="my-app",
+    user_id="user-123",
+    limit=50,    # 1..200 — over the cap raises ValueError (never clamps)
+    offset=0,    # positional skip from the newest record
+)
+```
+
+- Returns `List[MemoryEntry]`, newest first (`createdAt` descending), with the
+  full projection: content, `author`, `timestamp`, `custom_metadata`
+  (including `subject`).
+- Scoped exactly like `search_memory`: the `adk:<app>:<user>` compound tag AND
+  the service's own agent identity, both pushed down server-side and
+  re-verified client-side on every row.
+- **Pagination is a point-in-time snapshot** — `offset` is positional, not a
+  live cursor. Writes between two page fetches shift positions, so a record
+  can appear twice or be skipped across page boundaries; dedupe by `id` if you
+  page a moving corpus.
+- Unlike `search_memory` (whose swallow-to-empty posture is ADK's contract),
+  `list_memories` **raises** on transport/server failure — a browsing UI must
+  be able to tell "no memories" from "Flair is down".
 
 ## What this adapter deliberately doesn't do
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import math
 import os
@@ -30,7 +31,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from cryptography.hazmat.primitives import serialization
@@ -74,6 +75,29 @@ _CONNECT_TIMEOUT_CAP = 5.0
 # level from inside add_memory; Sherlock's cosmetic note on #1237).
 _VALID_DURABILITIES = frozenset(["permanent", "persistent", "standard", "ephemeral"])
 _VALID_VISIBILITIES = frozenset(["private", "shared"])
+
+# custom_metadata caps (flair#1332, Sherlock hard requirements). REJECT, never
+# truncate — a truncated blob silently corrupts the store-and-return round-trip
+# guarantee, which is the entire contract of the field.
+#   - _METADATA_MAX_BYTES: serialized JSON size cap. 64KB is generous for
+#     structured attributes (merchant/price/category/media refs) while keeping
+#     a single memory record from becoming a blob store.
+#   - _METADATA_MAX_DEPTH / _METADATA_MAX_KEYS: cheap structural caps checked
+#     BEFORE serialization (billion-laughs-adjacent guard — a pathologically
+#     nested/wide dict is refused without ever attempting to serialize it).
+_METADATA_MAX_BYTES = 64 * 1024
+_METADATA_MAX_DEPTH = 16
+_METADATA_MAX_KEYS = 512
+
+# subject cap (flair#1332): subject is a short human-readable title promoted to
+# the record's top-level indexed `subject` column — never a content field.
+_SUBJECT_MAX_CHARS = 512
+
+# list_memories page-size hard cap (flair#1333). Reject-with-error (never
+# clamp) — consistent with every other adk-flair validation: a silently
+# clamped limit would make "I asked for 500, why did I get 200" a debugging
+# session instead of an immediate, actionable ValueError.
+_LIST_MEMORIES_MAX_LIMIT = 200
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -303,6 +327,142 @@ def _resolve_timeout(
     return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
 
 
+# ─── custom_metadata / subject (flair#1332) ─────────────────────────────────
+
+
+def _validate_metadata_shape(custom_metadata: Mapping[str, object]) -> None:
+    """Structural caps on custom_metadata, checked BEFORE serialization.
+
+    Rejects nesting deeper than _METADATA_MAX_DEPTH levels or more than
+    _METADATA_MAX_KEYS total dict keys (counted across every level) with a
+    ValueError. Iterative traversal — no recursion, so adversarial nesting
+    can't blow the Python stack; a self-referencing structure terminates via
+    the depth cap (each revisit is pushed one level deeper).
+    """
+    stack: List[tuple] = [(custom_metadata, 1)]
+    key_count = 0
+    while stack:
+        node, depth = stack.pop()
+        if depth > _METADATA_MAX_DEPTH:
+            raise ValueError(
+                f"custom_metadata nesting exceeds {_METADATA_MAX_DEPTH} levels — "
+                "flatten the structure, or store a reference to the data instead "
+                "of embedding it"
+            )
+        if isinstance(node, Mapping):
+            key_count += len(node)
+            if key_count > _METADATA_MAX_KEYS:
+                raise ValueError(
+                    f"custom_metadata carries more than {_METADATA_MAX_KEYS} keys "
+                    "in total — split the data across memories, or store a "
+                    "reference to it instead"
+                )
+            children = node.values()
+        elif isinstance(node, (list, tuple)):
+            children = node
+        else:
+            continue
+        for child in children:
+            if isinstance(child, (Mapping, list, tuple)):
+                stack.append((child, depth + 1))
+
+
+def _serialize_custom_metadata(
+    custom_metadata: Optional[Mapping[str, object]],
+    context_key: str,
+) -> Optional[str]:
+    """Serialize custom_metadata to the JSON string stored in Memory.metadata.
+
+    Store-and-return contract (#1202): the blob is opaque to the server —
+    stored verbatim, returned verbatim, no key in it influences any server
+    decision.
+
+    - Structural caps (depth/key-count) and the serialized 64KB cap REJECT
+      with ValueError — never truncate (truncation corrupts the round-trip
+      guarantee; Sherlock hard requirement).
+    - A non-serializable VALUE skips that key with a WARNING naming the
+      session key — one bad value must not discard the caller's whole blob.
+
+    Returns None when there is nothing to store (no metadata, or every key
+    was skipped).
+    """
+    if not custom_metadata:
+        return None
+
+    _validate_metadata_shape(custom_metadata)
+
+    clean: Dict[str, Any] = {}
+    for key, value in custom_metadata.items():
+        if not isinstance(key, str):
+            logger.warning(
+                "adk-flair: custom_metadata key %r skipped — keys must be "
+                "strings (session=%s)", key, context_key,
+            )
+            continue
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "adk-flair: custom_metadata key %r skipped — value is not "
+                "JSON-serializable (session=%s)", key, context_key,
+            )
+            continue
+        clean[key] = value
+
+    if not clean:
+        return None
+
+    serialized = json.dumps(clean)
+    size = len(serialized.encode("utf-8"))
+    if size > _METADATA_MAX_BYTES:
+        raise ValueError(
+            f"custom_metadata serializes to {size} bytes, over the "
+            f"{_METADATA_MAX_BYTES}-byte cap — store large payloads elsewhere "
+            "and keep a reference here. Rejected rather than truncated: a "
+            "truncated blob would silently corrupt the store-and-return "
+            "round-trip guarantee."
+        )
+    return serialized
+
+
+def _resolve_subject(
+    explicit_subject: Optional[str],
+    custom_metadata: Optional[Mapping[str, object]],
+) -> Optional[str]:
+    """Resolve the top-level `subject` column value (flair#1332).
+
+    Precedence: an explicit subject param is authoritative over
+    custom_metadata["subject"] when both are supplied. NEVER auto-extracted
+    from content. Rejects non-string or over-cap (512 chars) values with a
+    ValueError — subject is a short human-readable title promoted to an
+    indexed column, not a content field. Returns None when neither source
+    supplies one (empty strings resolve to None — nothing to promote).
+    """
+    subject: Any = explicit_subject
+    source = "subject param"
+    if subject is None and custom_metadata is not None:
+        try:
+            subject = custom_metadata.get("subject")
+        except AttributeError:
+            subject = None
+        source = 'custom_metadata["subject"]'
+    if subject is None:
+        return None
+    if not isinstance(subject, str):
+        raise ValueError(
+            f"{source} must be a string (got: {type(subject).__name__}) — "
+            "subject is promoted to the record's top-level subject column"
+        )
+    if len(subject) > _SUBJECT_MAX_CHARS:
+        raise ValueError(
+            f"{source} is {len(subject)} characters, over the "
+            f"{_SUBJECT_MAX_CHARS}-char cap — subject is a short "
+            "human-readable title; put longer text in content or "
+            "custom_metadata"
+        )
+    return subject or None
+
+
 # ─── FlairMemoryService ─────────────────────────────────────────────────────
 
 
@@ -361,9 +521,6 @@ class FlairMemoryService(BaseMemoryService):
 
         # httpx client — created lazily on first request
         self._client: Optional[httpx.AsyncClient] = None
-
-        # Per-session state for custom_metadata warn-once
-        self._warned_sessions: set[str] = set()
 
         # First-request URL logging gate
         self._url_logged = False
@@ -495,19 +652,27 @@ class FlairMemoryService(BaseMemoryService):
         session_id: Optional[str] = None,
         custom_metadata: Optional[Mapping[str, object]] = None,
     ) -> None:
-        """Incremental per-turn event writes (the quickstart's after_agent_callback path)."""
+        """Incremental per-turn event writes (the quickstart's after_agent_callback path).
+
+        custom_metadata (flair#1332) is stored on every record this call
+        writes, as an opaque JSON blob on the Memory record's `metadata`
+        field, and round-trips back on `MemoryEntry.custom_metadata` from
+        search_memory / list_memories. Store-and-return only — no key in it
+        has any server-side effect. Caps (ValueError before any write):
+        64KB serialized, nesting depth <= 16, <= 512 total keys.
+        custom_metadata["subject"] (a string) is additionally promoted to the
+        record's top-level `subject` column (<= 512 chars).
+        """
         tag = _compound_tag(app_name, user_id)
         sid = session_id or ""
 
-        # custom_metadata warn-once per session
-        if custom_metadata:
-            session_key = f"{app_name}:{user_id}:{sid}"
-            if session_key not in self._warned_sessions:
-                self._warned_sessions.add(session_key)
-                logger.warning(
-                    "adk-flair: custom_metadata ignored — adk-flair does not "
-                    "support custom_metadata keys (session=%s)", session_key
-                )
+        # custom_metadata → opaque JSON blob + optional promoted subject
+        # (flair#1332). Validated/serialized ONCE, before any write — a cap
+        # violation raises here and zero events are written, never a partial
+        # batch with silently-dropped metadata.
+        session_key = f"{app_name}:{user_id}:{sid}"
+        metadata_json = _serialize_custom_metadata(custom_metadata, session_key)
+        subject_value = _resolve_subject(None, custom_metadata)
 
         written = 0
         for event in events:
@@ -526,6 +691,10 @@ class FlairMemoryService(BaseMemoryService):
                 "tags": [tag],
                 "createdAt": _iso_now(),
             }
+            if metadata_json is not None:
+                body["metadata"] = metadata_json
+            if subject_value is not None:
+                body["subject"] = subject_value
             try:
                 await self._request("PUT", f"/Memory/{record_id}", json_body=body)
                 written += 1
@@ -552,8 +721,26 @@ class FlairMemoryService(BaseMemoryService):
         custom_metadata: Optional[Mapping[str, object]] = None,
         durability: Optional[str] = None,
         visibility: Optional[str] = None,
+        subject: Optional[str] = None,
     ) -> None:
         """Direct memory writes — each MemoryEntry becomes a Flair record.
+
+        custom_metadata (flair#1332) is stored on every record this call
+        writes, as an opaque JSON blob on the Memory record's `metadata`
+        field, and round-trips back on `MemoryEntry.custom_metadata` from
+        search_memory / list_memories. Store-and-return only (the ADK
+        contract, #1202): no key inside the blob has ANY server-side effect —
+        {"visibility": "shared"} in here does not share the memory (use the
+        explicit `visibility` param for that). Caps (ValueError before any
+        write; reject, never truncate): 64KB serialized, nesting depth <= 16,
+        <= 512 total keys. Non-JSON-serializable values skip that key with a
+        WARNING.
+
+        subject (flair#1332, Flair-specific extension): short human-readable
+        title promoted to the record's top-level indexed `subject` column.
+        Sourced from this param or custom_metadata["subject"]; the explicit
+        param is authoritative when both are present. <= 512 chars (ValueError
+        beyond). Never auto-extracted from content.
 
         Optional knobs (trust-anchor opt-in, never model-selected):
             durability: one of permanent, persistent, standard, ephemeral.
@@ -578,15 +765,13 @@ class FlairMemoryService(BaseMemoryService):
                 f"(got: {visibility!r})"
             )
 
-        # custom_metadata warn-once
-        if custom_metadata:
-            session_key = f"{app_name}:{user_id}:direct"
-            if session_key not in self._warned_sessions:
-                self._warned_sessions.add(session_key)
-                logger.warning(
-                    "adk-flair: custom_metadata ignored — adk-flair does not "
-                    "support custom_metadata keys"
-                )
+        # custom_metadata → opaque JSON blob + optional promoted subject
+        # (flair#1332). Validated/serialized ONCE, before any write — a cap
+        # violation raises here and zero records are written.
+        metadata_json = _serialize_custom_metadata(
+            custom_metadata, f"{app_name}:{user_id}:direct"
+        )
+        subject_value = _resolve_subject(subject, custom_metadata)
 
         written = 0
         for mem in memories:
@@ -606,6 +791,10 @@ class FlairMemoryService(BaseMemoryService):
             }
             if visibility is not None:
                 body["visibility"] = visibility
+            if metadata_json is not None:
+                body["metadata"] = metadata_json
+            if subject_value is not None:
+                body["subject"] = subject_value
             if mem.author:
                 body["author"] = mem.author
             try:
@@ -635,6 +824,14 @@ class FlairMemoryService(BaseMemoryService):
         """Semantic search over Flair memories scoped to this app+user.
 
         user_id is mandatory — missing/empty returns empty, never searches unscoped.
+
+        Each returned MemoryEntry carries (flair#1332):
+          - custom_metadata: the stored metadata blob, parsed back to a dict
+            (fail-soft {} + WARNING on malformed JSON — a corrupt blob must
+            never take recall down). When the record has a top-level subject,
+            it is surfaced as custom_metadata["subject"], the top-level column
+            being authoritative over any divergent blob key.
+          - author: the writing Flair agent id (the record's agentId).
         """
         # Mandatory user_id gate
         if not user_id:
@@ -648,6 +845,12 @@ class FlairMemoryService(BaseMemoryService):
                 "q": query,
                 "limit": 20,
                 "tag": tag,
+                # flair#1332: opt into the `metadata` blob in each hit.
+                # /SemanticSearch's default projection deliberately omits it
+                # (other consumers must not pay result-size for a blob they
+                # never read); this flag widens the projection for THIS
+                # request only. `subject` is in the default projection.
+                "includeMetadata": True,
             }
             result = await self._request("POST", "/SemanticSearch", json_body=body)
         except Exception:
@@ -673,20 +876,164 @@ class FlairMemoryService(BaseMemoryService):
             if tag not in hit_tags:
                 continue
 
-            content_text = hit.get("content") or ""
-            memories.append(
-                MemoryEntry(
-                    id=hit.get("id"),
-                    content=types.Content(
-                        role="model",
-                        parts=[types.Part(text=content_text)],
-                    ),
-                    author=hit.get("author"),
-                    timestamp=hit.get("createdAt"),
-                )
-            )
+            memories.append(self._hit_to_memory_entry(hit))
 
         return SearchMemoryResponse(memories=memories)
+
+    # ── list_memories (flair#1333 — Flair-specific extension) ───────────────
+
+    async def list_memories(
+        self,
+        *,
+        app_name: str,
+        user_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[MemoryEntry]:
+        """List recent memories for an app+user, newest first.
+
+        Flair-specific extension — NOT part of ADK's BaseMemoryService (which
+        specifies only search_memory). Useful for memory review UIs,
+        dashboards, and agent contextual browsing where there is no query to
+        search with.
+
+        Scope: the same compound tag (adk:<app>:<user>) search_memory uses,
+        AND agentId == this service's agent identity — both pushed down as
+        server-side query conditions and re-verified client-side on every
+        returned row (defense in depth).
+
+        Pagination: `offset` is POSITIONAL over a point-in-time snapshot
+        ordered by createdAt descending — not a live cursor. Memories written
+        between two pages shift positions, so a record can appear twice or be
+        skipped across page boundaries. For a consistent view, take one page,
+        or dedupe by id across pages.
+
+        Args:
+            app_name: ADK app name (required).
+            user_id: ADK user id (required — never lists unscoped).
+            limit: page size, 1..200. Over-cap REJECTS with ValueError
+                (never silently clamps).
+            offset: number of newest records to skip (>= 0).
+
+        Returns:
+            List[MemoryEntry] with the full projection — content, author
+            (the writing agent id), timestamp, and custom_metadata (parsed
+            blob; top-level subject surfaced as custom_metadata["subject"]).
+
+        Raises:
+            ValueError: invalid app_name/user_id/limit/offset.
+            httpx.HTTPError / RuntimeError: transport or server failure.
+                Unlike search_memory (whose empty-on-error contract is ADK's),
+                this method PROPAGATES failures — a browsing UI must be able
+                to tell "no memories" from "Flair is down".
+        """
+        if not app_name:
+            raise ValueError("app_name is required")
+        if not user_id:
+            raise ValueError("user_id is required — list_memories never lists unscoped")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError(f"limit must be a positive integer (got: {limit!r})")
+        if limit > _LIST_MEMORIES_MAX_LIMIT:
+            raise ValueError(
+                f"limit {limit} exceeds the hard cap of {_LIST_MEMORIES_MAX_LIMIT} "
+                "— page with offset instead"
+            )
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError(f"offset must be a non-negative integer (got: {offset!r})")
+
+        tag = _compound_tag(app_name, user_id)
+
+        # Harper REST collection query (signed like every other request —
+        # the signature covers path+query). The tag value is percent-encoded
+        # WHOLESALE: compound tags legitimately contain literal %XX escapes
+        # from _sanitize_tag_segment, which must survive the server's URL
+        # decode. limit(start,end) is Harper's offset window: start=offset,
+        # end=offset+limit.
+        path = (
+            f"/Memory/?tags={quote(tag, safe='')}"
+            f"&agentId={quote(self._agent_id, safe='')}"
+            f"&select(id,agentId,content,metadata,subject,tags,createdAt)"
+            f"&sort(-createdAt)"
+            f"&limit({offset},{offset + limit})"
+        )
+        rows = await self._request("GET", path)
+
+        if not isinstance(rows, list):
+            return []
+
+        entries: List[MemoryEntry] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            # Defense in depth: re-verify both scope conditions client-side,
+            # mirroring search_memory's tag re-verification.
+            if tag not in (row.get("tags") or []):
+                continue
+            if row.get("agentId") != self._agent_id:
+                continue
+            entries.append(self._hit_to_memory_entry(row))
+        return entries
+
+    # ── Hit → MemoryEntry mapping ────────────────────────────────────────────
+
+    def _hit_to_memory_entry(self, hit: Dict[str, Any]) -> MemoryEntry:
+        """Map a Flair Memory record/hit onto an ADK MemoryEntry.
+
+        author derives from the record's agentId — the writing Flair agent
+        (flair#1332 incidental fix: the old code read hit["author"], a field
+        Flair neither declares nor projects, so author was always None).
+        """
+        content_text = hit.get("content") or ""
+        return MemoryEntry(
+            id=hit.get("id"),
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text=content_text)],
+            ),
+            author=hit.get("agentId"),
+            timestamp=hit.get("createdAt"),
+            custom_metadata=self._hit_custom_metadata(hit),
+        )
+
+    @staticmethod
+    def _hit_custom_metadata(hit: Dict[str, Any]) -> Dict[str, Any]:
+        """Rebuild MemoryEntry.custom_metadata from a record's stored fields.
+
+        - `metadata` (the opaque JSON blob) parses back to a dict. FAIL-SOFT:
+          malformed JSON (or JSON that isn't an object) yields {} plus a
+          WARNING naming the record id — a corrupt blob on one record must
+          never take the whole read path down.
+        - A top-level `subject` column is surfaced as
+          custom_metadata["subject"]. The COLUMN is authoritative (#1332
+          ruling): when the blob carries a divergent "subject" key, the
+          column value overwrites it in the returned dict. This also means a
+          subject written via the explicit param (never in the blob) still
+          round-trips on read — MemoryEntry has no subject attribute, so
+          custom_metadata is its only return channel.
+        """
+        parsed: Dict[str, Any] = {}
+        raw = hit.get("metadata")
+        if raw:
+            try:
+                loaded = json.loads(raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "adk-flair: malformed metadata JSON on record %s — "
+                    "returning empty custom_metadata for it", hit.get("id"),
+                )
+            else:
+                if isinstance(loaded, dict):
+                    parsed = loaded
+                else:
+                    logger.warning(
+                        "adk-flair: metadata on record %s is JSON but not an "
+                        "object — returning empty custom_metadata for it",
+                        hit.get("id"),
+                    )
+        subject = hit.get("subject")
+        if isinstance(subject, str) and subject:
+            parsed["subject"] = subject
+        return parsed
 
     # ── Event text extraction ────────────────────────────────────────────────
 

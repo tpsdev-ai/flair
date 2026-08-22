@@ -66,7 +66,7 @@ export class SemanticSearch extends Resource {
     // recall-harness (test/bench/recall-harness/run.ts) and `recall-eval.mjs`
     // before reconsidering this default if the compositeScore formula or
     // corpus changes.
-    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, abstain = false, explain = false } = data || {};
+    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, includeMetadata = false, abstain = false, explain = false } = data || {};
 
     // Authenticated identity lives on the Harper Resource context (getContext().request).
     // `this.request` is NOT populated on Harper v5 Resources — prior reads here
@@ -250,7 +250,20 @@ export class SemanticSearch extends Resource {
       // default projection omits. Widen the select ONLY when the caller opts
       // in — passing undefined otherwise keeps the default (no `provenance`)
       // so a non-trust recall response stays byte-identical.
-      select: includeTrust ? [...DEFAULT_SELECT, "provenance"] : undefined,
+      //
+      // flair#1332: same idiom for the client-writable `metadata` JSON blob
+      // (ADK custom_metadata store-and-return). DEFAULT_SELECT deliberately
+      // does NOT grow it (K&S projection ruling — the shared retrieval core
+      // serves every consumer, and none of the others should pay result-size
+      // for an opaque blob they never read); adk-flair opts in per-request
+      // with `includeMetadata: true`. `subject` needs no widening — it is
+      // already in DEFAULT_SELECT. Neither flag ⇒ select stays undefined ⇒
+      // response bytes unchanged.
+      select: (includeTrust || includeMetadata)
+        ? [...DEFAULT_SELECT,
+           ...(includeTrust ? ["provenance"] : []),
+           ...(includeMetadata ? ["metadata"] : [])]
+        : undefined,
       // flair#744 slice 2 + confidence-band refinement: attach the absolute
       // per-result cosine confidence when the caller opts into abstention OR
       // the trust block — abstention reads the best of it for its verdict, and
