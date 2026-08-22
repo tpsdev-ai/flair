@@ -99,6 +99,30 @@ _SUBJECT_MAX_CHARS = 512
 # session instead of an immediate, actionable ValueError.
 _LIST_MEMORIES_MAX_LIMIT = 200
 
+# ─── Errors ─────────────────────────────────────────────────────────────────
+
+
+class FlairRequestError(RuntimeError):
+    """An HTTP-level failure from Flair, carrying the status code.
+
+    Subclasses RuntimeError with an identical message to the bare
+    RuntimeError this replaced, so existing ``except RuntimeError`` /
+    ``str(exc)`` handling is unchanged. What it adds: ``status_code``
+    (plus ``method``/``path``/``reason``) as attributes — the write-path
+    warning logs probe ``exc.status_code`` and, before this class existed,
+    always fell through to ``status=?`` (the undiagnosable log line in
+    flair#1336's field report). It also lets callers branch on specific
+    statuses (the 409 create-fallback in ``_write_memory_record``).
+    """
+
+    def __init__(self, method: str, path: str, status_code: int, reason: str):
+        super().__init__(f"Flair {method} {path} → {status_code} {reason}")
+        self.method = method
+        self.path = path
+        self.status_code = status_code
+        self.reason = reason
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -585,14 +609,39 @@ class FlairMemoryService(BaseMemoryService):
             raise
 
         if resp.status_code >= 400:
-            raise RuntimeError(
-                f"Flair {method} {path} → {resp.status_code} {resp.reason_phrase}"
+            raise FlairRequestError(
+                method, path, resp.status_code, resp.reason_phrase
             )
 
         ctype = resp.headers.get("content-type", "")
         if "json" in ctype:
             return resp.json()
         return resp.text
+
+    async def _write_memory_record(
+        self, record_id: str, body: Dict[str, Any]
+    ) -> None:
+        """Create-or-replace one Memory record.
+
+        Creates via ``POST /Memory/`` — Harper's collection create verb —
+        with the id in the body. The previous shape, ``PUT /Memory/{id}``,
+        is update-only on some Harper deployments and 404s when the record
+        does not exist yet (flair#1336, observed on hosted Harper Fabric;
+        not reproducible on stock Harper 5.2.x, where PUT upserts).
+
+        A 409 from POST means the record already exists — re-ingestion of a
+        deterministic id (add_session_to_memory re-saves a growing session's
+        earlier events every time) or a caller-supplied id being rewritten.
+        Fall back to ``PUT /Memory/{id}`` for exactly that case, preserving
+        the pre-#1336 replace/refresh semantics for existing rows. Any other
+        error propagates unchanged.
+        """
+        try:
+            await self._request("POST", "/Memory/", json_body=body)
+        except FlairRequestError as exc:
+            if exc.status_code != 409:
+                raise
+            await self._request("PUT", f"/Memory/{record_id}", json_body=body)
 
     # ── BaseMemoryService implementation ─────────────────────────────────────
 
@@ -627,7 +676,7 @@ class FlairMemoryService(BaseMemoryService):
                 "createdAt": _iso_now(),
             }
             try:
-                await self._request("PUT", f"/Memory/{record_id}", json_body=body)
+                await self._write_memory_record(record_id, body)
                 written += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
@@ -696,7 +745,7 @@ class FlairMemoryService(BaseMemoryService):
             if subject_value is not None:
                 body["subject"] = subject_value
             try:
-                await self._request("PUT", f"/Memory/{record_id}", json_body=body)
+                await self._write_memory_record(record_id, body)
                 written += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"
@@ -798,7 +847,7 @@ class FlairMemoryService(BaseMemoryService):
             if mem.author:
                 body["author"] = mem.author
             try:
-                await self._request("PUT", f"/Memory/{record_id}", json_body=body)
+                await self._write_memory_record(record_id, body)
                 written += 1
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None) or "?"

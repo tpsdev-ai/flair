@@ -257,3 +257,65 @@ class TestPortability:
             f"Session memory content not in REST search results. "
             f"Results: {[r.get('content', '')[:80] for r in results]}"
         )
+
+    @pytest.mark.asyncio
+    async def test_reingest_same_id_replaces_without_error(self, live_flair, caplog):
+        """flair#1336 fallback, end-to-end against real Harper: create a
+        record via the POST path, then re-write the SAME id with new content.
+        Harper answers the second POST with 409; the adapter must fall back
+        to PUT and REPLACE the row — no exception, no 'write failed' warning,
+        and the stored content is the second version.
+
+        Fails on a naive POST-only client (warning + stale content) and on a
+        409-treated-as-skip client (stale content)."""
+        import logging as _logging
+
+        from adk_flair import FlairMemoryService
+        from adk_flair.memory_service import _compound_tag
+
+        app = "portability-test"
+        user = "reingest-user"
+        tag = _compound_tag(app, user)
+
+        service = FlairMemoryService(
+            url=live_flair.http_url,
+            agent_id=live_flair.agent_id,
+            keyfile=live_flair.keyfile_path,
+        )
+
+        rid = f"reingest-{uuid.uuid4().hex[:8]}"
+        marker_v2 = f"reingest-v2-{uuid.uuid4().hex[:8]}"
+
+        def entry(text: str) -> MemoryEntry:
+            return MemoryEntry(
+                id=rid,
+                content=types.Content(role="user", parts=[types.Part(text=text)]),
+            )
+
+        with caplog.at_level(_logging.WARNING, logger="adk_flair"):
+            await service.add_memory(
+                app_name=app, user_id=user,
+                memories=[entry(f"reingest-v1-{uuid.uuid4().hex[:8]}")],
+            )
+            await service.add_memory(
+                app_name=app, user_id=user, memories=[entry(marker_v2)],
+            )
+        await service.close()
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("write failed" in w.lower() for w in warnings), (
+            f"re-ingestion of an existing id must not fail: {warnings}"
+        )
+
+        # Replace semantics preserved: the row now holds the v2 content.
+        results = await _flair_search(
+            live_flair.http_url,
+            live_flair.agent_id,
+            live_flair.private_key,
+            marker_v2,
+            tag=tag,
+        )
+        assert any(marker_v2 in r.get("content", "") for r in results), (
+            f"re-ingested content not found — 409 fallback did not replace. "
+            f"Results: {[r.get('content', '')[:80] for r in results]}"
+        )

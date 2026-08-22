@@ -659,8 +659,22 @@ export class Memory extends (databases as any).flair.Memory {
     }
 
     content.durability ||= "standard";
-    content.createdAt = new Date().toISOString();
-    content.updatedAt = content.createdAt;
+    // ── flair#1336: honor a caller-supplied createdAt (parity with put()) ──
+    // put() — the other HTTP-reachable create path — has always preserved the
+    // caller's createdAt (`content.createdAt ?? now`), and adk-flair's
+    // add_memory forwards MemoryEntry.timestamp through it for historical
+    // imports. When #1336 moved client creates onto POST, this line's
+    // unconditional re-stamp silently discarded those timestamps (caught by
+    // the #1334 list-pagination live test: rows written with backdated
+    // timestamps came back stamped "now"). Honoring the caller grants no new
+    // capability — PUT already accepted arbitrary createdAt from the same
+    // principals. validFrom below keys off createdAt and follows it, exactly
+    // as on the put() path; updatedAt stays the true write moment; the
+    // ephemeral expiresAt stamp keys off Date.now(), so a backdated create
+    // cannot stretch the #1257 exposure window.
+    const nowIso = new Date().toISOString();
+    content.createdAt = content.createdAt ?? nowIso;
+    content.updatedAt = nowIso;
     content.archived = content.archived ?? false;
 
     // ─── Default visibility (durability-keyed) — Layer 1, part A ────────────
@@ -713,9 +727,13 @@ export class Memory extends (databases as any).flair.Memory {
       content.visibility = defaultVisibilityForDurability(content.durability);
     }
 
-    // Validate derivedFrom source IDs exist (best-effort, non-blocking)
+    // Validate derivedFrom source IDs exist (best-effort, non-blocking).
+    // lastReflected keys off updatedAt (the write moment), NOT createdAt —
+    // since #1336 a create may carry a backdated caller createdAt, and the
+    // reflection bookkeeping must record when the derivation actually ran.
+    // (Pre-#1336 the two were always identical here.)
     if (Array.isArray(content.derivedFrom) && content.derivedFrom.length > 0) {
-      const now = content.createdAt;
+      const now = content.updatedAt;
       for (const sourceId of content.derivedFrom) {
         try {
           const src = await (databases as any).flair.Memory.get(sourceId);
