@@ -134,6 +134,36 @@ export function defaultAdminPassPath(): string {
   return join(homedir(), ".flair", "admin-pass");
 }
 
+/** The admin username Harper's bootstrap creates and every Basic-auth path
+ * historically hardcoded. Kept as the default; overridable per call via
+ * `resolveAdminUser` (flair#1345). */
+export const DEFAULT_ADMIN_USER = "admin";
+
+/**
+ * Resolve the admin USERNAME for Basic auth against a Flair/Harper instance
+ * (flair#1345).
+ *
+ * Precedence: explicit value (an `--admin-user` flag) → `FLAIR_ADMIN_USER`
+ * env → `"admin"`. Always returns a usable name — unlike the password there
+ * is no "missing" state, because `admin` is the correct answer for every
+ * instance `flair init` ever bootstrapped.
+ *
+ * Why it exists: with `authorizeLocal: false` (the #604/#610 hardening) the
+ * CLI must send real Basic admin auth, and on an instance whose superuser is
+ * not named `admin` there was no way to say so — `--admin-pass` existed,
+ * the username didn't. A wrong username and a wrong password produce the
+ * SAME 401 "Login failed" from Harper, so this also feeds the 401 hint text
+ * (see opsAuth401Hint in src/cli.ts).
+ *
+ * Unlike the admin PASSWORD (see resolveLocalAdminPass's remote-target
+ * guard), the env leg is honored for remote targets too: a username is not a
+ * secret — sending the wrong one to a third-party host leaks nothing and
+ * fails closed with a 401.
+ */
+export function resolveAdminUser(explicit?: string): string {
+  return explicit || process.env.FLAIR_ADMIN_USER || DEFAULT_ADMIN_USER;
+}
+
 export function defaultKeysDir(): string {
   return join(homedir(), ".flair", "keys");
 }
@@ -473,6 +503,10 @@ export interface AuthedRequestOptions {
   agentId?: string;
   /** Directory scanned for tier 5, the floor. Default ~/.flair/keys. */
   keysDir?: string;
+  /** Admin USERNAME for the Basic-auth tiers (1, 2 and 4) — an already-
+   *  resolved `--admin-user` flag. Falls back to FLAIR_ADMIN_USER env, then
+   *  `"admin"`, via resolveAdminUser (flair#1345). */
+  adminUser?: string;
 }
 
 /**
@@ -489,11 +523,14 @@ export async function authedRequest(
 ): Promise<any> {
   const isLocal = opts.isLocal ?? isLocalBase(opts.baseUrl);
   const keysDir = opts.keysDir ?? defaultKeysDir();
+  // One username for every Basic tier: flag > FLAIR_ADMIN_USER env > "admin"
+  // (flair#1345 — these three sites used to hardcode the literal `admin`).
+  const adminUser = resolveAdminUser(opts.adminUser);
   let authHeader: string | undefined;
 
   // Tier 1: explicit — caller-resolved flag material always wins.
   if (opts.explicitAdminPass) {
-    authHeader = `Basic ${Buffer.from(`admin:${opts.explicitAdminPass}`).toString("base64")}`;
+    authHeader = `Basic ${Buffer.from(`${adminUser}:${opts.explicitAdminPass}`).toString("base64")}`;
   } else if (opts.explicitKeyPath && opts.agentId) {
     try {
       authHeader = buildEd25519Auth(opts.agentId, method, path, opts.explicitKeyPath);
@@ -509,7 +546,7 @@ export async function authedRequest(
       authHeader = `Bearer ${process.env.FLAIR_TOKEN}`;
     } else if (process.env.FLAIR_ADMIN_PASS || process.env.HDB_ADMIN_PASSWORD) {
       const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD!;
-      authHeader = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
+      authHeader = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
     }
   }
 
@@ -533,7 +570,7 @@ export async function authedRequest(
     try {
       const filePass = resolveLocalAdminPass(undefined, !isLocal);
       if (filePass) {
-        authHeader = `Basic ${Buffer.from(`admin:${filePass}`).toString("base64")}`;
+        authHeader = `Basic ${Buffer.from(`${adminUser}:${filePass}`).toString("base64")}`;
       }
     } catch (err: unknown) {
       // File exists but has unsafe permissions — warn (never the secret

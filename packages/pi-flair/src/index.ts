@@ -7,7 +7,7 @@
  *   - bootstrap(agentId, maxTokens) — cold-start context
  *
  * Configuration:
- *   - flair_url (default: http://127.0.0.1:9926)
+ *   - flair_url (default: http://127.0.0.1:19926)
  *   - agentId (required, via FLAIR_AGENT_ID env var)
  *   - max_recall_results (default: 5)
  *   - max_bootstrap_tokens (default: 4000)
@@ -19,12 +19,12 @@
  *   2. Configure in ~/.pi/agent/settings.json or .pi/settings.json:
  *      {
  *        "extensions": ["npm:@tpsdev-ai/pi-flair"],
- *        "flair_url": "http://127.0.0.1:9926",
+ *        "flair_url": "http://127.0.0.1:19926",
  *        "agentId": "my-project"
  *      }
  *   3. Or use environment variables:
  *      export FLAIR_AGENT_ID=my-agent
- *      export FLAIR_URL=http://127.0.0.1:9926
+ *      export FLAIR_URL=http://127.0.0.1:19926
  *   4. Restart pi
  */
 
@@ -74,12 +74,24 @@ function containsSecrets(text: string): boolean {
 
 // ─── Config Resolution ───────────────────────────────────────────────────────
 
+/**
+ * Default Flair base URL when FLAIR_URL is unset.
+ *
+ * 19926 is Flair's stock local HTTP port — `flair init` on a new instance
+ * serves REST there (DEFAULT_PORT in src/cli.ts), and the README documents
+ * exactly this value. 9926 is the ORIGINAL default that only long-running
+ * early installs still use. This constant shipped as 9926 for a while
+ * (flair#1347), so a default install got connection_error on every memory
+ * call; the code now matches the docs, not the other way around.
+ */
+export const DEFAULT_FLAIR_URL = "http://127.0.0.1:19926";
+
 function getConfig(pi: ExtensionAPI): PluginConfig {
   // Try to load from settings
   // Note: pi doesn't expose settings.json directly in extension API
   // We rely on environment variables and defaults
   const flConfig: FlairClientConfig = {
-    url: process.env.FLAIR_URL || "http://127.0.0.1:9926",
+    url: process.env.FLAIR_URL || DEFAULT_FLAIR_URL,
     agentId: process.env.FLAIR_AGENT_ID,
     keyPath: process.env.FLAIR_KEY_PATH,
   };
@@ -114,12 +126,26 @@ function createFlairClient(config: PluginConfig): FlairClient {
   }
   return new FlairClient({
     agentId: config.agentId,
-    url: config.url || "http://127.0.0.1:9926",
+    url: config.url || DEFAULT_FLAIR_URL,
     keyPath: config.keyPath,
   });
 }
 
 // ─── Error Classification ─────────────────────────────────────────────────────
+
+/**
+ * flair#1347 — a refused connection on one of the two common local ports
+ * should name the OTHER one: 19926 is the stock `flair init` port, 9926 the
+ * original default early installs still serve. The pre-fix error named only
+ * the dead port, so "is it running?" read as "Flair is down" when Flair was
+ * up one port over. Always name FLAIR_URL — it is the knob that fixes it.
+ */
+function connectionHint(flairUrl: string): string {
+  const other = flairUrl.includes(":19926") ? "9926" : flairUrl.includes(":9926") ? "19926" : undefined;
+  return other
+    ? ` If your instance serves on :${other} instead, set FLAIR_URL (e.g. export FLAIR_URL=http://127.0.0.1:${other}).`
+    : " Check FLAIR_URL — it should point at your Flair instance's HTTP port (stock local default: 19926).";
+}
 
 /**
  * Classify an error into a user-friendly message.
@@ -141,7 +167,7 @@ export function classifyError(err: unknown, flairUrl: string): string {
       return "timeout — the server took too long. Try shorter content or retry.";
     }
     if (err instanceof TypeError && err.message.includes("fetch")) {
-      return `connection_error (retriable): could not reach Flair at ${flairUrl}. Is it running?`;
+      return `connection_error (retriable): could not reach Flair at ${flairUrl}. Is it running?${connectionHint(flairUrl)}`;
     }
     return `unexpected_error: ${err.message}`;
   }
