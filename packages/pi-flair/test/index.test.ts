@@ -414,3 +414,44 @@ describe("Secret Filtering", () => {
     expect(hasSecret).toBe(false);
   });
 });
+
+// ─── Pi Package Manifest Tests ─────────────────────────────────────────────────
+//
+// flair#1346: pi resolves npm-installed packages EXCLUSIVELY through the `pi`
+// manifest key in package.json (or convention directories like extensions/ —
+// which this package does not use). It never consults `main`. Without the
+// manifest, `pi install npm:@tpsdev-ai/pi-flair` installs the package but
+// registers zero tools, silently. These tests fail if the manifest is dropped
+// or drifts from the build output.
+
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+describe("Pi Package Manifest (#1346)", () => {
+  const pkg = JSON.parse(
+    readFileSync(join(import.meta.dir, "..", "package.json"), "utf8"),
+  );
+
+  test("declares the pi manifest with at least one extension entry", () => {
+    expect(pkg.pi).toBeDefined();
+    expect(Array.isArray(pkg.pi.extensions)).toBe(true);
+    expect(pkg.pi.extensions.length).toBeGreaterThan(0);
+  });
+
+  test("pi extension entry matches the package main entry point", () => {
+    // pi loads pi.extensions; node tooling loads main. They must be the same
+    // file or the two load paths diverge (the exact defect in #1346).
+    const normalized = pkg.pi.extensions.map((p: string) => p.replace(/^\.\//u, ""));
+    expect(normalized).toContain(pkg.main);
+  });
+
+  test("every pi extension entry ships in the published tarball (files field)", () => {
+    for (const entry of pkg.pi.extensions as string[]) {
+      const normalized = entry.replace(/^\.\//u, "");
+      const shipped = (pkg.files as string[]).some((f) =>
+        normalized.startsWith(f.replace(/\/$/u, "") + "/"),
+      );
+      expect(shipped).toBe(true);
+    }
+  });
+});

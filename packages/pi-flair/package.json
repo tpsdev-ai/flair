@@ -5,6 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  },
   "files": [
     "dist/",
     "LICENSE",
@@ -34,6 +37,7 @@
   "keywords": [
     "pi",
     "pi-extension",
+    "pi-package",
     "flair",
     "memory",
     "semantic-search",
@@ -41,7 +45,7 @@
     "agent"
   ],
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "0.73.0",
+    "@earendil-works/pi-coding-agent": "0.84.2",
     "@types/node": "24.11.0",
     "typescript": "5.9.3"
   }
