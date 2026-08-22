@@ -18,6 +18,47 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.47.1] - 2026-08-22
+
+### Fixed
+
+- **CI: the Integration Tests lane no longer runs at its 30-minute ceiling.**
+  The lane had grown to 29m58s on a good run — sibling runs were being
+  timeout-cancelled at 30m10s and misread as runner flake (flair#1320). The 14
+  heaviest real-Harper-boot suites (746s of measured CI time, led by
+  `recall-eval-gate` at 244s) moved to `test/integration-heavy/`, the dedicated
+  heavy job from flair#1290/#1299, putting both lanes at ~17m30s projected.
+  The heavy job's timeout is resized 20 → 30 minutes to fit its
+  deliberately-added content with honest headroom. No test content changed —
+  moves only; nothing about what CI covers per push/PR changed.
+
+- **adk-flair: HTTP timeouts are now configurable — hosted Flair no longer
+  false-fails on the hardcoded 1.5s read timeout.** The shipped timeouts are
+  deliberate localhost fail-fast tuning (ADK's search path swallows exceptions,
+  so a down local Flair must fail instantly), but against a hosted Flair over
+  TLS + WAN they timed out ordinary searches with no override available
+  (flair#1323). New: `FlairMemoryService(timeout=...)` accepts float seconds
+  (read/write, connect derived as `min(timeout, 5.0)`) or a verbatim
+  `httpx.Timeout`, plus `FLAIR_HTTP_TIMEOUT` / `FLAIR_HTTP_CONNECT_TIMEOUT`
+  env vars (constructor wins). Defaults are unchanged when nothing is set —
+  local stays fail-fast. The effective timeouts now log once alongside the
+  first-request URL line, so a timeout misconfiguration is diagnosable from
+  the agent's own output.
+
+- **`flair doctor --fix` no longer enables the opt-in continuity capture
+  hooks.** On a clean install, `--fix` silently wired the PostToolUse + Stop
+  `flair-continuity-capture` pair into `~/.claude/settings.json` — journaling
+  every tool use and session stop without the opt-in doctor's own output says
+  the feature requires (flair#1324; the non-TTY consent prompt auto-answered
+  yes, so `--fix` alone was the trigger). Doctor's fixable set is broken
+  state: enabling continuity is `flair hook install --continuity` only.
+  `--fix` still repairs a partial or stale pair — evidence of a prior opt-in —
+  to the complete current form, and `--dry-run` matches the new behavior. In
+  the same consent family, `flair upgrade --check` no longer advises
+  `flair doctor --fix` to re-pin an npx-wired flair-mcp: the pin refresh is
+  `flair upgrade`'s own job, and it now also runs when a stale pin is the only
+  pending change instead of bouncing the user to doctor.
+
 ## [0.47.0] - 2026-08-21
 
 ### Added
