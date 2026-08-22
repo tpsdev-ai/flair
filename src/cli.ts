@@ -134,6 +134,8 @@ import {
   defaultAdminPassPath,
   defaultKeysDir,
   resolveLocalAdminPass,
+  DEFAULT_ADMIN_USER,
+  resolveAdminUser,
   resolveKeyPath,
   buildEd25519Auth,
   authFetch,
@@ -275,7 +277,8 @@ function shouldShowInlineSecretWarning(
 const DEFAULT_PORT = 19926;
 const DEFAULT_OPS_PORT = 19925;
 const FABRIC_OPS_PORT = 9925;
-const DEFAULT_ADMIN_USER = "admin";
+// DEFAULT_ADMIN_USER + resolveAdminUser (flag > FLAIR_ADMIN_USER env > "admin")
+// live in src/lib/auth-resolve.ts — imported above (flair#1345).
 const STARTUP_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 
@@ -2255,6 +2258,32 @@ function readHarperPid(dataDir: string): number | null {
 }
 
 /**
+ * flair#1345 — Harper returns the SAME 401 `{"error":"Login failed"}` for a
+ * wrong password and for a nonexistent username, and the CLI's errors used
+ * to hint only at the password. On an instance whose superuser is not named
+ * `admin` (now reachable in practice: the #604/#610 `authorizeLocal: false`
+ * hardening removed the credential-less loopback path, so these calls MUST
+ * send real Basic auth) that sent operators down the wrong trail entirely.
+ * Name both causes, each with the knob that fixes it.
+ */
+function opsAuth401Hint(adminUser: string | undefined): string {
+  if (adminUser === undefined) {
+    // No credentials were sent at all (local caller riding authorizeLocal) —
+    // "wrong password or username" would be asserting a cause that isn't
+    // established. The remedy is to send credentials.
+    return (
+      "\n  No admin credentials were sent and the instance rejected the request." +
+      "\n  Pass --admin-pass <pass> or --admin-pass-file <path> (and --admin-user <name> if the superuser is not 'admin')."
+    );
+  }
+  return (
+    `\n  The operations API rejected the admin credentials (tried username '${adminUser}'). Two possible causes:` +
+    "\n  - wrong password — check --admin-pass / --admin-pass-file / FLAIR_ADMIN_PASS" +
+    `\n  - wrong username — this instance's superuser may not be '${adminUser}'; pass --admin-user <name> or set FLAIR_ADMIN_USER`
+  );
+}
+
+/**
  * Seed an agent record via the Harper operations API.
  * Accepts either a port number (localhost) or a full URL string (--target).
  *
@@ -2312,6 +2341,11 @@ export async function seedAgentViaOpsApi(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
+    if (res.status === 401) {
+      throw new Error(
+        `Operations API insert failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`,
+      );
+    }
     throw new Error(`Operations API insert failed (${res.status}): ${text}`);
   }
 }
@@ -2372,6 +2406,11 @@ export async function seedFederationInstanceViaOpsApi(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 409 || text.includes("duplicate") || text.includes("already exists")) return;
+    if (res.status === 401) {
+      throw new Error(
+        `Federation Instance insert via ops API failed (401): ${text}${opsAuth401Hint(auth === undefined ? undefined : adminUser)}`,
+      );
+    }
     throw new Error(`Federation Instance insert via ops API failed (${res.status}): ${text}`);
   }
 }
@@ -3390,6 +3429,7 @@ program
   .option("--ops-bind <addr>", "Harper ops API bind address (env: FLAIR_OPS_BIND; default: 127.0.0.1 loopback-only for single-host — pass e.g. 0.0.0.0 for multi-host/Fabric remote admin)")
   .option("--admin-pass <pass>", "Admin password (generated if omitted)")
   .option("--admin-pass-file <path>", "Read admin password from file (chmod 600 recommended)")
+  .option("--admin-user <name>", "Admin username when authenticating to an already-running instance via --target/--ops-target (env: FLAIR_ADMIN_USER; default: admin — local bootstrap and Fabric provisioning always create 'admin')")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--data-dir <dir>", "Harper data directory")
   .option("--skip-start", "Skip Harper startup (assume already running)")
@@ -3486,7 +3526,10 @@ program
         flairAdminPass = opts.adminPass;
       }
 
-      const adminUser = DEFAULT_ADMIN_USER;
+      // flair#1345: only the already-running-instance leg honors --admin-user /
+      // FLAIR_ADMIN_USER — the provisioning leg just CREATED the superuser as
+      // DEFAULT_ADMIN_USER via provisionFabric, so that name is ground truth.
+      const adminUser = didProvision ? DEFAULT_ADMIN_USER : resolveAdminUser(opts.adminUser);
       const auth = `Basic ${Buffer.from(`${adminUser}:${flairAdminPass}`).toString("base64")}`;
       const role = opts.remote ? "hub" : undefined;
 
@@ -4402,6 +4445,7 @@ agent
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password for registration")
   .option("--admin-pass-file <path>", "Read the admin password from a file (chmod 600 enforced). Preferred over inline --admin-pass — keeps the secret out of ps and shell history; works for remote targets too (an explicit flag is operator intent).")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--target <url>", "Remote Flair REST URL; derives the ops API URL (port-1) to seed the Agent there (env: FLAIR_TARGET)")
@@ -4410,7 +4454,7 @@ agent
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
-    const adminUser = DEFAULT_ADMIN_USER;
+    const adminUser = resolveAdminUser(opts.adminUser);
     const name: string = opts.name ?? id;
     // Where to seed the Agent record. Default is localhost (opsPort). When
     // --ops-target or --target is given, seed on the remote instead of localhost
@@ -4506,6 +4550,7 @@ agent
   .command("list")
   .description("List all agents")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--agent <id>", "Agent ID to authenticate as via Ed25519 (or FLAIR_AGENT_ID env) when no admin pass")
   .option("--keys-dir <dir>", "Directory holding the agent's Ed25519 key")
   .option("--port <port>", "Harper HTTP port")
@@ -4525,7 +4570,7 @@ agent
     let agents: any[];
     if (adminPass) {
       const opsPort = resolveOpsPort(opts);
-      const auth = Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64");
+      const auth = Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64");
       // List every Agent without null-scanning the primary key. A
       // `starts_with ""` on `id` makes Harper search the index for nulls, which
       // the bundled Harper (5.0.21) rejects with "id is not indexed for nulls".
@@ -4638,6 +4683,7 @@ agent
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .action(async (id: string, opts) => {
     const httpPort = resolveHttpPort(opts);
@@ -4651,7 +4697,7 @@ agent
       );
     }
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-    const adminUser = DEFAULT_ADMIN_USER;
+    const adminUser = resolveAdminUser(opts.adminUser);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
 
     if (!adminPass) {
@@ -4734,12 +4780,13 @@ agent
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--force", "Skip interactive confirmation (required when stdin is not a TTY)")
   .action(async (id: string, opts) => {
     const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-    const adminUser = DEFAULT_ADMIN_USER;
+    const adminUser = resolveAdminUser(opts.adminUser);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
 
     if (!adminPass) {
@@ -5733,6 +5780,7 @@ mcp
   .option("--keys-dir <dir>", "Directory to write the new key pair into (else FLAIR_KEY_DIR, ~/.flair/keys)")
   .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--json", "Print machine-readable JSON instead of a human summary")
@@ -5776,7 +5824,7 @@ mcp
         manifestPath,
         issuer,
         opsPortOrUrl: opsPort,
-        adminUser: DEFAULT_ADMIN_USER,
+        adminUser: resolveAdminUser(opts.adminUser),
         adminPass,
       });
 
@@ -5803,6 +5851,7 @@ mcp
   .description("Server-side revoke a granted machine client (deletes its backing Agent record), then clean up locally.")
   .option("--manifest <path>", "Path to the local machine-client manifest (else ~/.flair/mcp-clients.json)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--issuer <url>", "Public origin of the /mcp OAuth surface — used only for the enable-gate probe (defaults to FLAIR_MCP_ISSUER/FLAIR_PUBLIC_URL)")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--port <port>", "Harper HTTP port")
@@ -5835,7 +5884,7 @@ mcp
         name,
         manifestPath,
         opsPortOrUrl: opsPort,
-        adminUser: DEFAULT_ADMIN_USER,
+        adminUser: resolveAdminUser(opts.adminUser),
         adminPass,
         keepKeys: !!opts.keepKeys,
       });
@@ -5937,6 +5986,7 @@ mcp
   .option("--cimd-allowed-hosts <hosts>", "Comma-separated clientIdMetadataDocuments.allowedHosts override (else claude.ai,claude.com)")
   .option("--signing-key-file <path>", "RS256 signing key PEM file (else ~/.flair/mcp-signing-key.pem)")
   .option("--admin-pass <pass>", "Admin password for the TARGET instance. Required explicitly for a remote target — FLAIR_ADMIN_PASS and ~/.flair/admin-pass are this machine's local credentials and are never sent to a remote instance")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
   .option("--dry-run", "Generate keys/tokens/config and validate inputs; skip every remote call")
   .option("--json", "Print machine-readable JSON instead of a human summary")
@@ -6002,7 +6052,7 @@ mcp
         idpSubject,
         principal: opts.principal,
         principalKind: opts.principalKind,
-        adminUser: DEFAULT_ADMIN_USER,
+        adminUser: resolveAdminUser(opts.adminUser),
         adminPass,
         signingKeyFilePath: opts.signingKeyFile,
         secretsMechanism,
@@ -6065,6 +6115,7 @@ mcp
   .description("Flag off + restart = byte-identical boot (Model-2 contract) — removes the /mcp OAuth surface.")
   .option("--instance <url>", "Remote flair instance to disable against (else FLAIR_URL)")
   .option("--admin-pass <pass>", "Admin password for the target instance (or FLAIR_ADMIN_PASS)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--confirm-flag-off", "Confirm FLAIR_MCP_OAUTH is already unset on the target instance's environment (skips the interactive confirm)")
   .option("--json", "Print machine-readable JSON instead of a human summary")
   .action(async (opts) => {
@@ -6082,7 +6133,7 @@ mcp
     }
 
     const result = await disableMcp(
-      { instance, adminUser: DEFAULT_ADMIN_USER, adminPass, confirmFlagOff: Boolean(opts.confirmFlagOff) },
+      { instance, adminUser: resolveAdminUser(opts.adminUser), adminPass, confirmFlagOff: Boolean(opts.confirmFlagOff) },
       { confirmPrompt: confirmYesNo },
     );
 
@@ -6165,12 +6216,13 @@ principal
   .option("--runtime <runtime>", "Runtime: openclaw, claude-code, headless, external")
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password for registration")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys")
   .option("--ops-port <port>", "Harper operations API port")
   .action(async (id: string, opts) => {
     const opsPort = resolveOpsPort(opts);
     const keysDir: string = opts.keysDir ?? defaultKeysDir();
-    const adminUser = DEFAULT_ADMIN_USER;
+    const adminUser = resolveAdminUser(opts.adminUser);
     const kind: string = opts.kind ?? "agent";
     const name: string = opts.name ?? id;
     const isAdmin: boolean = opts.admin ?? false;
@@ -6264,6 +6316,7 @@ principal
   .description("List all principals")
   .option("--kind <kind>", "Filter by kind: human or agent")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
@@ -6275,7 +6328,7 @@ principal
       process.exit(1);
     }
 
-    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     const conditions = opts.kind
       ? [{ search_attribute: "kind", search_type: "equals", search_value: opts.kind }]
       : [{ search_attribute: "id", search_type: "starts_with", search_value: "" }];
@@ -6392,6 +6445,7 @@ principal
   .command("disable <id>")
   .description("Deactivate a principal (revokes access, preserves data)")
   .option("--admin-pass <pass>", "Admin password")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--ops-port <port>", "Harper operations API port")
   .action(async (id: string, opts) => {
     const opsPort = resolveOpsPort(opts);
@@ -6401,7 +6455,7 @@ principal
       process.exit(1);
     }
 
-    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
@@ -6425,6 +6479,7 @@ principal
   .command("promote <id> <tier>")
   .description("Change a principal's trust tier (endorsed, corroborated, unverified)")
   .option("--admin-pass <pass>", "Admin password")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--ops-port <port>", "Harper operations API port")
   .action(async (id: string, tier: string, opts) => {
     const validTiers = ["endorsed", "corroborated", "unverified"];
@@ -6440,7 +6495,7 @@ principal
       process.exit(1);
     }
 
-    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
@@ -6476,6 +6531,7 @@ idp
   .option("--no-jit-provision", "Disable auto-creation of principals for new IdP users")
   .option("--default-trust <tier>", "Trust tier for JIT principals", "unverified")
   .option("--admin-pass <pass>", "Admin password")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--ops-port <port>", "Harper operations API port")
   .action(async (opts) => {
     const opsPort = resolveOpsPort(opts);
@@ -6486,7 +6542,7 @@ idp
     }
 
     const id = `idp_${randomUUID().slice(0, 8)}`;
-    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     const now = new Date().toISOString();
 
     const record = {
@@ -6526,6 +6582,7 @@ idp
   .command("list")
   .description("List configured IdPs")
   .option("--admin-pass <pass>", "Admin password")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--json", "Emit raw JSON array (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
@@ -6536,7 +6593,7 @@ idp
       process.exit(1);
     }
 
-    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
@@ -6582,6 +6639,7 @@ idp
   .command("remove <id>")
   .description("Remove an IdP configuration")
   .option("--admin-pass <pass>", "Admin password")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--ops-port <port>", "Harper operations API port")
   .action(async (id: string, opts) => {
     const opsPort = resolveOpsPort(opts);
@@ -6591,7 +6649,7 @@ idp
       process.exit(1);
     }
 
-    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
@@ -6654,12 +6712,13 @@ program
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Directory for Ed25519 keys (for from-agent Ed25519 auth)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-    const adminUser = DEFAULT_ADMIN_USER;
+    const adminUser = resolveAdminUser(opts.adminUser);
     const scope: string = opts.scope ?? "read";
 
     if (!adminPass) {
@@ -6709,11 +6768,12 @@ program
   .option("--port <port>", "Harper HTTP port")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .action(async (fromAgent: string, toAgent: string, opts) => {
     const httpPort = resolveHttpPort(opts);
     const opsPort = resolveOpsPort(opts);
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-    const adminUser = DEFAULT_ADMIN_USER;
+    const adminUser = resolveAdminUser(opts.adminUser);
 
     if (!adminPass) {
       console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required for revoke");
@@ -6755,7 +6815,7 @@ program
  * Load the Ed25519 secret key for the local federation instance.
  * Tries keystore first, then falls back to DB-stored seed (migration path).
  */
-async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: string; opsPort?: string | number; port?: string | number }): Promise<Uint8Array> {
+async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: string; adminUser?: string; opsPort?: string | number; port?: string | number }): Promise<Uint8Array> {
   // Try keystore first
   const seed = keystore.getPrivateKeySeed(instanceId);
   if (seed) {
@@ -6765,7 +6825,7 @@ async function loadInstanceSecretKey(instanceId: string, opts: { adminPass?: str
   // Fallback: check DB for legacy _keySeed
   const opsPort = resolveOpsPort(opts);
   const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-  const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+  const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
   const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: auth },
@@ -7276,6 +7336,7 @@ federation
   .description("Pair this spoke with a hub instance")
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--token <token>", "One-time pairing token from hub admin (env: FLAIR_PAIRING_TOKEN) [deprecated: use --token-from]")
   .option("--token-from <file>", "Read bootstrap triple from JSON file (use '-' for stdin)")
@@ -7365,7 +7426,7 @@ federation
         );
         process.exit(1);
       }
-      const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+      const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
       const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
       const peerRes = await fetch(`${opsEndpoint}/`, {
         method: "POST",
@@ -7404,6 +7465,7 @@ federation
   .description("Generate a one-time pairing token (run on the hub)")
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--ttl <minutes>", "Token TTL in minutes (default: 60)", "60")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
@@ -7419,7 +7481,7 @@ federation
 
       const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
       const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-      const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+      const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
 
       // 1. Persist the PairingToken record
       const opsRes = await fetch(`${opsEndpoint}/`, {
@@ -7528,7 +7590,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const syncStartedAt = new Date().toISOString();
     const opsEndpoint = resolveEffectiveOpsUrl(opts) ?? `http://127.0.0.1:${resolveOpsPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     const tables = ["Memory", "Soul", "Agent", "Relationship"];
     const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
     const hubUrl = hub.endpoint ?? hub.id;
@@ -7790,6 +7852,7 @@ const federationSync = federation
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password")
   .option("--admin-pass-file <path>", "Read the admin password from a file (e.g. ~/.flair/admin-pass). Preferred for launchd/cron — keeps the secret out of ps and shell history.")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
@@ -7986,6 +8049,7 @@ federation
   .option("--interval <seconds>", "Seconds between syncs", "30")
   .option("--port <port>", "Harper HTTP port")
   .option("--admin-pass <pass>", "Admin password")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--ops-port <port>", "Harper operations API port")
   .option("--target <url>", "Remote Flair URL")
   .option("--ops-target <url>", "Explicit ops API URL")
@@ -9591,7 +9655,7 @@ async function fetchHealthDetail(opts: { port?: string; url?: string; target?: s
       const adminPass = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
       if (adminPass) {
         res = await fetch(`${baseUrl}/Health`, {
-          headers: { Authorization: `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}` },
+          headers: { Authorization: `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}` },
           signal: AbortSignal.timeout(5000),
         });
       }
@@ -10136,7 +10200,7 @@ statusCmd
           console.log("⚠ --bootstrap requires HDB_ADMIN_PASSWORD or FLAIR_ADMIN_PASS env var");
         }
       } else {
-        const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+        const auth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
         const maxTokens = Number.parseInt(String(opts.maxTokens ?? "4000"), 10);
         for (const agentId of agentList) {
           try {
@@ -12904,7 +12968,7 @@ program
       // embedding with a freshly-computed one. Without this path, `flair
       // reembed` could not recover from the very condition it exists to fix.
       const opsPort = resolveOpsPort(opts);
-      const opsAuth = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
+      const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
       // Harper rejects empty-value conditions ("not indexed for nulls"). Use
       // `createdAt > 1970-01-01` as the "select all" pattern: every Memory row
       // has a createdAt, the index is built, and the comparison is total.
@@ -13001,7 +13065,7 @@ program
     let allMemories: any[] = [];
     if (adminPassSingle) {
       const opsPort = resolveOpsPort(opts);
-      const opsAuth = `Basic ${Buffer.from(`admin:${adminPassSingle}`).toString("base64")}`;
+      const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPassSingle}`).toString("base64")}`;
       const searchRes = await fetch(`http://127.0.0.1:${opsPort}/`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: opsAuth },
@@ -13903,7 +13967,7 @@ program
             opts.agent,
             defaultKeysDir(),
             `http://127.0.0.1:${resolveOpsPort(opts)}`,
-            DEFAULT_ADMIN_USER,
+            resolveAdminUser(undefined),
             auditAdminPass,
           );
       switch (auditStatus.state) {
@@ -16259,7 +16323,7 @@ memory.command("hygiene")
     const tinyThreshold = Math.max(0, Number(opts.tinyThreshold) || 25);
     const apply: boolean = !!opts.apply;
 
-    const opsAuth = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
+    const opsAuth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
     async function ops(body: unknown): Promise<unknown> {
       const res = await fetch(`http://127.0.0.1:${opsPort}/`, {
         method: "POST",
@@ -17492,6 +17556,7 @@ program
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)")
   .option("--admin-pass-file <path>", "Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .action(async (opts) => {
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
     let adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
@@ -17506,7 +17571,7 @@ program
         process.exit(1);
       }
     }
-    const adminUser = DEFAULT_ADMIN_USER;
+    const adminUser = resolveAdminUser(opts.adminUser);
 
     if (!adminPass) {
       console.error("Error: --admin-pass, --admin-pass-file, or FLAIR_ADMIN_PASS required for backup");
@@ -17604,11 +17669,12 @@ program
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--dry-run", "Show what would be imported without making changes")
   .action(async (backupPath: string, opts) => {
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-    const adminUser = DEFAULT_ADMIN_USER;
+    const adminUser = resolveAdminUser(opts.adminUser);
     const dryRun: boolean = Boolean(opts.dryRun);
     const mode: "merge" | "replace" = opts.replace ? "replace" : "merge";
 
@@ -17731,13 +17797,14 @@ program
   .option("--port <port>", "Harper HTTP port")
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
   .action(async (agentId, opts) => {
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
     const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     if (!adminPass) { console.error("Error: --admin-pass or FLAIR_ADMIN_PASS required"); process.exit(1); }
 
-    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     async function adminGet(path: string): Promise<any> {
       const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: auth }, signal: AbortSignal.timeout(10_000) });
       if (!res.ok) throw new Error(`GET ${path} failed (${res.status})`);
@@ -17823,6 +17890,7 @@ program
   .option("--url <url>", "Flair base URL (overrides --port)")
   .option("--ops-target <url>", "Explicit ops API URL for the Agent seed (env: FLAIR_OPS_TARGET; bypasses port derivation). Use when --url is remote and the ops port isn't HTTP-1.")
   .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env)")
+  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
   .option("--keys-dir <dir>", "Keys directory", defaultKeysDir())
   .action(async (importPath, opts) => {
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
@@ -17881,7 +17949,7 @@ program
     const pubKeyB64url = b64url(pubKey);
 
     // Register agent via ops API (remote when --url/--ops-target points off-box)
-    await seedAgentViaOpsApi(seedOpsTarget, agentId, pubKeyB64url, DEFAULT_ADMIN_USER, adminPass);
+    await seedAgentViaOpsApi(seedOpsTarget, agentId, pubKeyB64url, resolveAdminUser(opts.adminUser), adminPass);
     console.log(
       typeof seedOpsTarget === "string"
         ? `  Agent registered (ops: ${seedOpsTarget})`
@@ -17889,7 +17957,7 @@ program
     );
 
     // Restore memories
-    const auth = `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${adminPass}`).toString("base64")}`;
+    const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     let memCount = 0;
     for (const mem of data.memories ?? []) {
       try {
@@ -18201,7 +18269,7 @@ program
                 createdAt: new Date().toISOString(),
               };
               const memoryPath = `/Memory/${memoryId}`;
-              const auth = `Basic ${Buffer.from(`admin:${adminPass}`).toString("base64")}`;
+              const auth = `Basic ${Buffer.from(`${resolveAdminUser(undefined)}:${adminPass}`).toString("base64")}`;
               const res = await fetch(`${httpUrl}${memoryPath}`, {
                 method: "PUT",
                 headers: {
@@ -18778,6 +18846,8 @@ export {
   parseTokenFromFile,
   resolveLocalAdminPass,
   readAdminPassFileSecure,
+  DEFAULT_ADMIN_USER,
+  resolveAdminUser,
 
   // launchd label (flair#693)
   LEGACY_LAUNCHD_LABEL,

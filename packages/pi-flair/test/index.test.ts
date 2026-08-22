@@ -1,4 +1,6 @@
 import { describe, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 /**
  * pi-flair extension tests — validates tool registration and config resolution.
@@ -13,7 +15,7 @@ import { describe, test, expect } from "bun:test";
  */
 
 // Import the real classifyError function
-import { classifyError as classifyErrorReal } from "../src/index";
+import { classifyError as classifyErrorReal, DEFAULT_FLAIR_URL } from "../src/index";
 
 // ─── Config Tests ─────────────────────────────────────────────────────────────
 
@@ -112,6 +114,66 @@ describe("Error Classification", () => {
   test("unknown error falls back to unexpected_error", () => {
     const err = new Error("Something went wrong");
     const result = classifyError(err, "http://localhost:9926");
+    expect(result).toBe("unexpected_error: Something went wrong");
+  });
+});
+
+// ─── Default FLAIR_URL (flair#1347) ───────────────────────────────────────────
+//
+// pi-flair's compiled default resolved to :9926 while the README (and Flair's
+// stock `flair init`) say :19926 — so a default install got connection_error
+// on every memory call against a perfectly healthy instance. These tests pin
+// the constant AND sweep the source so a flipped-back default cannot land
+// silently.
+
+describe("DEFAULT_FLAIR_URL — pinned to Flair's stock port (flair#1347)", () => {
+  test("the default is exactly http://127.0.0.1:19926 (README parity)", () => {
+    expect(DEFAULT_FLAIR_URL).toBe("http://127.0.0.1:19926");
+  });
+
+  test("source sweep: no 127.0.0.1:9926 anywhere in src/index.ts (defaults OR comments)", () => {
+    const src = readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf-8");
+    // ":9926" is preceded by "1" in every legitimate mention (":19926"), so a
+    // bare 127.0.0.1:9926 can only be the flair#1347 regression coming back.
+    expect(src).not.toMatch(/127\.0\.0\.1:9926/);
+    expect(src).not.toMatch(/localhost:9926/);
+  });
+});
+
+// ─── Connection-error hint (flair#1347) ───────────────────────────────────────
+//
+// Exercises the REAL exported classifyError, not the local mock above: the
+// pre-fix error named only the dead port, which read as "Flair is down" when
+// Flair was up one port over.
+
+describe("classifyError connection hint — real function (flair#1347)", () => {
+  function fetchRefused(): TypeError {
+    return new TypeError("fetch failed — could not reach server");
+  }
+
+  test("keeps the existing wording, then hints the OTHER common port (9926 → 19926)", () => {
+    const result = classifyErrorReal(fetchRefused(), "http://127.0.0.1:9926");
+    expect(result).toContain("connection_error (retriable): could not reach Flair at http://127.0.0.1:9926. Is it running?");
+    expect(result).toContain(":19926");
+    expect(result).toContain("FLAIR_URL");
+  });
+
+  test("hints 9926 when the dead URL is the stock 19926", () => {
+    const result = classifyErrorReal(fetchRefused(), "http://127.0.0.1:19926");
+    expect(result).toContain("connection_error");
+    expect(result).toContain(":9926");
+    expect(result).toContain("FLAIR_URL");
+  });
+
+  test("non-standard port still points at FLAIR_URL and the stock default", () => {
+    const result = classifyErrorReal(fetchRefused(), "https://flair.example.com:8443");
+    expect(result).toContain("connection_error");
+    expect(result).toContain("FLAIR_URL");
+    expect(result).toContain("19926");
+  });
+
+  test("non-connection errors carry no port hint (positive control)", () => {
+    const result = classifyErrorReal(new Error("Something went wrong"), "http://127.0.0.1:9926");
     expect(result).toBe("unexpected_error: Something went wrong");
   });
 });
