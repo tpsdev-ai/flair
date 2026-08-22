@@ -18,6 +18,15 @@
  *   - No advisory data — we don't know which release fixed which CVE, so the
  *     severity heuristic is purely the version GAP (major/minor count), not
  *     "did this release carry a security fix". See classifyGap().
+ *
+ * Honest-numbers refinement (flair#1341): the TTL fast-path is only taken
+ * when the cached answer implies NOTHING will be printed. When a cached
+ * answer would produce a nudge, we spend one fresh fetch (same short timeout,
+ * same failure tolerance) so the printed fact is current whenever possible —
+ * nudges are rare, so the TTL still protects the common up-to-date path. If
+ * that fetch fails, the nudge falls back to the cached value but SAYS so
+ * ("latest known (checked 9h ago): …") instead of stating a stale number as
+ * current fact.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -112,12 +121,23 @@ export interface VersionCheckResult {
   /** Latest known published version, or null if we have neither a fresh fetch nor any cache. */
   latest: string | null;
   source: VersionCheckSource;
+  /**
+   * Age of the cached answer at the time of the check, in ms. Present exactly
+   * when source is "cache" — it lets the nudge say "checked 9h ago" instead
+   * of presenting a possibly-stale number as current fact (flair#1341).
+   */
+  checkedAgoMs?: number;
 }
 
 /**
  * Resolve the latest published @tpsdev-ai/flair version, preferring a fresh
  * cache hit over a network round trip, and falling back to a stale cache (or
  * giving up quietly) when the registry is unreachable. NEVER throws.
+ *
+ * flair#1341: the cache fast-path applies only when the cached answer implies
+ * no nudge. A cached answer that WOULD nudge triggers one fresh fetch (same
+ * timeout, same failure tolerance) so the printed fact is current whenever
+ * the network allows; on failure it falls back to the cache, age attached.
  */
 export async function checkVersion(
   installed: string,
@@ -128,7 +148,12 @@ export async function checkVersion(
 
   const cached = deps.readCache(deps.cachePath);
   if (cached && nowMs - cached.checkedAt < deps.ttlMs) {
-    return { installed, latest: cached.latest, source: "cache" };
+    if (classifyGap(installed, cached.latest).severity === "none") {
+      return { installed, latest: cached.latest, source: "cache", checkedAgoMs: nowMs - cached.checkedAt };
+    }
+    // The cached answer would print a nudge — fall through to one fresh
+    // fetch so we present a CURRENT fact when possible. The failure path
+    // below still falls back to this same cache (offline tolerance intact).
   }
 
   // Defense-in-depth: the default fetchLatest already catches everything
@@ -147,10 +172,10 @@ export async function checkVersion(
     return { installed, latest: fetched, source: "network" };
   }
 
-  // Registry unreachable/timed out — fall back to a stale cache rather than
+  // Registry unreachable/timed out — fall back to the cache rather than
   // reporting nothing, but never block or throw trying to get a fresh one.
   if (cached) {
-    return { installed, latest: cached.latest, source: "cache" };
+    return { installed, latest: cached.latest, source: "cache", checkedAgoMs: nowMs - cached.checkedAt };
   }
   return { installed, latest: null, source: "unavailable" };
 }
@@ -181,15 +206,23 @@ export interface VersionGap {
   /** True when `latest` is a newer MAJOR than `installed`. */
   majorBehind: boolean;
   /**
-   * Count of minor versions behind (when majorBehind is false and minors
-   * differ), or patch versions behind (when only the patch differs). Not
-   * meaningful when majorBehind is true (minor numbering resets across a
-   * major bump) or severity is "none".
+   * What `versionsBehind` counted: minor versions, or patch releases within
+   * the same minor. Null when majorBehind is true (minor numbering resets
+   * across a major bump, so no count is meaningful) or severity is "none".
+   * The nudge label MUST name this unit — "N releases behind" computed from
+   * a minor delta was the flair#1341 lie.
    */
-  releasesBehind: number;
+  unit: "minor" | "patch" | null;
+  /**
+   * Count of minor versions behind (unit "minor") or patch releases behind
+   * (unit "patch" — patch delta IS the release count within a minor: our
+   * release history publishes patches sequentially, e.g. v0.44.0…v0.44.13
+   * with no gaps). Not meaningful when unit is null.
+   */
+  versionsBehind: number;
 }
 
-const NO_GAP: VersionGap = { severity: "none", majorBehind: false, releasesBehind: 0 };
+const NO_GAP: VersionGap = { severity: "none", majorBehind: false, unit: null, versionsBehind: 0 };
 
 /**
  * Classify how far `installed` is behind `latest` using major.minor.patch
@@ -207,16 +240,18 @@ export function classifyGap(installed: string, latest: string): VersionGap {
   const [aMaj, aMin, aPatch] = a;
   const [bMaj, bMin, bPatch] = b;
 
-  if (bMaj > aMaj) return { severity: "red", majorBehind: true, releasesBehind: 0 };
+  if (bMaj > aMaj) return { severity: "red", majorBehind: true, unit: null, versionsBehind: 0 };
   if (bMaj < aMaj) return NO_GAP; // installed is ahead (e.g. local/pre-release build)
 
   if (bMin > aMin) {
-    const releasesBehind = bMin - aMin;
-    return { severity: releasesBehind >= 2 ? "red" : "yellow", majorBehind: false, releasesBehind };
+    const versionsBehind = bMin - aMin;
+    return { severity: versionsBehind >= 2 ? "red" : "yellow", majorBehind: false, unit: "minor", versionsBehind };
   }
   if (bMin < aMin) return NO_GAP; // ahead on minor
 
-  if (bPatch > aPatch) return { severity: "yellow", majorBehind: false, releasesBehind: bPatch - aPatch };
+  if (bPatch > aPatch) {
+    return { severity: "yellow", majorBehind: false, unit: "patch", versionsBehind: bPatch - aPatch };
+  }
   return NO_GAP; // equal, or ahead on patch
 }
 
@@ -225,23 +260,49 @@ export interface VersionNudge {
   message: string;
 }
 
+/** Compact human age for "checked … ago" — coarse on purpose (a nudge, not a log). */
+function formatCheckedAgo(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${Math.max(1, minutes)}m`;
+  const hours = Math.round(ms / 3_600_000);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.round(ms / 86_400_000)}d`;
+}
+
 /**
  * Build the human-readable nudge line for `flair status`/`flair doctor`, or
  * null when there's nothing worth printing — current, ahead (local/dev
  * build), or we couldn't determine latest at all (offline with no cache).
  * Callers own icon/color; this returns plain text plus a severity to color by.
+ *
+ * flair#1341 honest-numbers contract:
+ *   - A cache-sourced answer is labelled as such ("latest known (checked 9h
+ *     ago): X"), never stated as current fact.
+ *   - The count names its unit ("N minor versions behind" / "M patch
+ *     releases behind") — it must say what classifyGap actually counted.
+ *   - The suggested command is our paved path, `flair upgrade` (refreshes
+ *     MCP pins, verifies restart — see flair#1324), not a bare npm install.
  */
 export function formatVersionNudge(result: VersionCheckResult): VersionNudge | null {
   if (!result.latest) return null;
   const gap = classifyGap(result.installed, result.latest);
   if (gap.severity === "none") return null;
 
+  const latestClaim =
+    result.source === "cache"
+      ? result.checkedAgoMs != null
+        ? `latest known (checked ${formatCheckedAgo(result.checkedAgoMs)} ago): ${result.latest}`
+        : `latest known: ${result.latest}`
+      : `latest is ${result.latest}`;
+  const plural = gap.versionsBehind === 1 ? "" : "s";
   const countHint = gap.majorBehind
-    ? "major version"
-    : `${gap.releasesBehind} release${gap.releasesBehind === 1 ? "" : "s"}`;
+    ? "major version behind"
+    : gap.unit === "patch"
+      ? `${gap.versionsBehind} patch release${plural} behind`
+      : `${gap.versionsBehind} minor version${plural} behind`;
   const message =
-    `flair ${result.installed} is behind — latest is ${result.latest} (${countHint} behind). ` +
-    `Upgrade: npm i -g ${FLAIR_PKG_NAME}@latest`;
+    `flair ${result.installed} is behind — ${latestClaim} (${countHint}). ` +
+    `Run: flair upgrade`;
   return { severity: gap.severity, message };
 }
 
