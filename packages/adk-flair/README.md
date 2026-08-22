@@ -73,6 +73,8 @@ asks for it back in a fresh session 2 and prints whether the fact was recalled.
 | Agent ID         | `FLAIR_AGENT_ID`   | (required)                    | Must match `flair agent add <id>`        |
 | Private key path | `FLAIR_KEYFILE`    | (required)                    | Keyfile from `flair agent add` (raw seed; base64/PEM also accepted). A leading `~` is expanded. |
 | Allow remote URL | `FLAIR_ALLOW_REMOTE_URL` | (unset)                 | Set to `1` to allow non-localhost URLs   |
+| HTTP timeout     | `FLAIR_HTTP_TIMEOUT` | (unset — fail-fast defaults, read 1.5s) | Read/write timeout in seconds (float). Set for hosted Flair (below). |
+| Connect timeout  | `FLAIR_HTTP_CONNECT_TIMEOUT` | (unset — derived)     | Connect/pool timeout in seconds (float). Rarely needed on its own. |
 
 All settings can also be passed as constructor arguments:
 
@@ -141,14 +143,22 @@ By default, `adk-flair` only allows localhost URLs (`localhost`, `127.0.0.1`,
 `::1`, `[::1]`). This prevents a typo'd `FLAIR_URL` from silently shipping
 every user query to a stranger.
 
-To connect to a remote Flair instance, set `FLAIR_ALLOW_REMOTE_URL=1`:
+To connect to a remote Flair instance, set `FLAIR_ALLOW_REMOTE_URL=1` — and
+raise the HTTP timeout, because the defaults are tuned for localhost fail-fast
+(read 1.5s) and will time out ordinary searches over TLS/WAN latency:
 
 ```bash
 export FLAIR_ALLOW_REMOTE_URL=1
 export FLAIR_URL=https://flair.example.com:19926
+export FLAIR_HTTP_TIMEOUT=30
 ```
 
-The resolved URL is logged once at WARNING on the first request.
+Equivalently in code: `FlairMemoryService(timeout=30.0)` (float seconds), or
+pass a full `httpx.Timeout` for per-phase control. The constructor argument
+wins over the env var.
+
+The resolved URL and the effective timeouts are logged once at WARNING on the
+first request.
 
 ## Security
 

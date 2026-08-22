@@ -23,12 +23,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import math
 import os
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 from urllib.parse import urlparse
 
 import httpx
@@ -48,6 +49,26 @@ logger = logging.getLogger("adk_flair")
 _LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
 _ALLOW_REMOTE_ENV = "FLAIR_ALLOW_REMOTE_URL"
 _TAG_PREFIX = "adk"
+
+# HTTP timeout configuration (flair#1323).
+#
+# The defaults are deliberate LOCALHOST FAIL-FAST tuning, not an accident:
+# ADK's search path swallows exceptions, so a down local Flair must fail
+# instantly rather than hang the agent on every recall. Against a hosted
+# Flair over TLS + WAN these numbers false-fail (connect=0.5s barely covers
+# a cold TLS handshake; read=1.5s is under a legitimate server-side
+# embed + hybrid retrieval) — hosted deployments override via the
+# constructor `timeout` param or the env vars below.
+_TIMEOUT_ENV = "FLAIR_HTTP_TIMEOUT"          # read/write timeout, seconds (float)
+_CONNECT_TIMEOUT_ENV = "FLAIR_HTTP_CONNECT_TIMEOUT"  # connect/pool timeout, seconds (float)
+_DEFAULT_CONNECT_TIMEOUT = 0.5
+_DEFAULT_READ_TIMEOUT = 1.5
+_DEFAULT_WRITE_TIMEOUT = 1.0
+_DEFAULT_POOL_TIMEOUT = 0.5
+# When only a read timeout is given, connect is derived as
+# min(read, _CONNECT_TIMEOUT_CAP): connection setup should never need more
+# than a few seconds even over WAN, while read scales with server-side work.
+_CONNECT_TIMEOUT_CAP = 5.0
 
 # Valid enum values for the explicit write knobs (flair#1238 — moved to module
 # level from inside add_memory; Sherlock's cosmetic note on #1237).
@@ -203,6 +224,85 @@ def _is_localhost(host: str) -> bool:
     return host.lower() in _LOCALHOST_HOSTS
 
 
+def _positive_seconds_from_env(env_var: str) -> Optional[float]:
+    """Parse an env var as positive float seconds; None when unset/empty.
+
+    Raises ValueError naming the env var on garbage — the failure lands in the
+    constructor, never deferred to first use (where ADK's exception-swallowing
+    search path would turn a misconfigured timeout into silent empty recall).
+    """
+    raw = os.environ.get(env_var, "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"{env_var} must be a number of seconds (got: {raw!r})"
+        ) from None
+    # Non-finite values slip a bare `<= 0` guard (nan compares False to
+    # everything; inf <= 0 is False) and would yield a NO-timeout client —
+    # and "inf"/"Infinity"/"nan" all parse successfully via float().
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"{env_var} must be a finite number > 0 seconds (got: {raw!r})"
+        )
+    return value
+
+
+def _resolve_timeout(
+    timeout: Optional[Union[float, httpx.Timeout]],
+) -> httpx.Timeout:
+    """Resolve the effective httpx.Timeout for the Flair client (flair#1323).
+
+    Precedence, per knob (highest wins):
+      - An ``httpx.Timeout`` constructor param is used VERBATIM — fully
+        specified, so both env vars are ignored.
+      - read/write:  float constructor param > FLAIR_HTTP_TIMEOUT > defaults
+        (read=1.5, write=1.0 — localhost fail-fast, see comment at the
+        constants).
+      - connect/pool: FLAIR_HTTP_CONNECT_TIMEOUT > min(resolved read, 5.0)
+        when read was overridden > default (0.5).
+
+    With neither param nor env set the defaults are returned unchanged.
+    """
+    if isinstance(timeout, httpx.Timeout):
+        return timeout
+
+    if timeout is not None:
+        timeout = float(timeout)
+        # Same non-finite guard as the env path: nan/inf pass a bare `<= 0`.
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError(
+                f"timeout must be a finite number > 0 seconds (got: {timeout!r})"
+            )
+
+    read_override = timeout if timeout is not None else _positive_seconds_from_env(_TIMEOUT_ENV)
+    connect_override = _positive_seconds_from_env(_CONNECT_TIMEOUT_ENV)
+
+    if read_override is None and connect_override is None:
+        return httpx.Timeout(
+            connect=_DEFAULT_CONNECT_TIMEOUT,
+            read=_DEFAULT_READ_TIMEOUT,
+            write=_DEFAULT_WRITE_TIMEOUT,
+            pool=_DEFAULT_POOL_TIMEOUT,
+        )
+
+    if read_override is not None:
+        read = write = read_override
+        connect = pool = min(read_override, _CONNECT_TIMEOUT_CAP)
+    else:
+        read = _DEFAULT_READ_TIMEOUT
+        write = _DEFAULT_WRITE_TIMEOUT
+        connect = _DEFAULT_CONNECT_TIMEOUT
+        pool = _DEFAULT_POOL_TIMEOUT
+
+    if connect_override is not None:
+        connect = pool = connect_override
+
+    return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+
+
 # ─── FlairMemoryService ─────────────────────────────────────────────────────
 
 
@@ -217,6 +317,11 @@ class FlairMemoryService(BaseMemoryService):
         url: Flair server URL. Default: FLAIR_URL or http://localhost:19926
         agent_id: Flair agent identity. Default: FLAIR_AGENT_ID
         keyfile: Path to PKCS8 base64 Ed25519 key. Default: FLAIR_KEYFILE
+        timeout: HTTP timeout. A float sets the read/write timeout in seconds
+            (connect derived as min(timeout, 5.0)); an httpx.Timeout is used
+            verbatim. Default: FLAIR_HTTP_TIMEOUT / FLAIR_HTTP_CONNECT_TIMEOUT
+            env vars, else localhost fail-fast defaults (read=1.5s) — hosted
+            Flair over TLS/WAN needs an override (flair#1323).
     """
 
     def __init__(
@@ -224,6 +329,7 @@ class FlairMemoryService(BaseMemoryService):
         url: Optional[str] = None,
         agent_id: Optional[str] = None,
         keyfile: Optional[str] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ):
         # Resolve URL
         raw_url = (url or os.environ.get("FLAIR_URL", "http://localhost:19926")).rstrip("/")
@@ -249,6 +355,10 @@ class FlairMemoryService(BaseMemoryService):
             raise ValueError("FLAIR_KEYFILE is required (set env var or pass keyfile)")
         self._private_key = _load_ed25519_key(resolved_keyfile)
 
+        # Resolve HTTP timeouts in the constructor (param > env > fail-fast
+        # defaults) so a malformed FLAIR_HTTP_TIMEOUT fails here, loudly.
+        self._timeout = _resolve_timeout(timeout)
+
         # httpx client — created lazily on first request
         self._client: Optional[httpx.AsyncClient] = None
 
@@ -265,7 +375,7 @@ class FlairMemoryService(BaseMemoryService):
         if self._client is None:
             self._client = httpx.AsyncClient(
                 base_url=self._url,
-                timeout=httpx.Timeout(connect=0.5, read=1.5, write=1.0, pool=0.5),
+                timeout=self._timeout,
             )
         return self._client
 
@@ -274,7 +384,14 @@ class FlairMemoryService(BaseMemoryService):
     ) -> Any:
         """Make an authenticated request to Flair. One attempt, no retry."""
         if not self._url_logged:
-            logger.warning("adk-flair: using Flair at %s (agent=%s)", self._url, self._agent_id)
+            logger.warning(
+                "adk-flair: using Flair at %s (agent=%s, timeouts: connect=%ss "
+                "read=%ss write=%ss pool=%ss — override via FLAIR_HTTP_TIMEOUT "
+                "if hosted searches time out)",
+                self._url, self._agent_id,
+                self._timeout.connect, self._timeout.read,
+                self._timeout.write, self._timeout.pool,
+            )
             self._url_logged = True
 
         auth = _sign_request(self._private_key, self._agent_id, method, path)
