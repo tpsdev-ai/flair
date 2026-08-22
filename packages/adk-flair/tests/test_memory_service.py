@@ -294,7 +294,9 @@ class TestSearchMemory:
                 {
                     "id": "mem-1",
                     "content": "remember this fact",
-                    "author": "test-agent",
+                    # author derives from the record's agentId (flair#1332
+                    # incidental fix) — records carry no "author" field.
+                    "agentId": "test-agent",
                     "createdAt": "2026-08-05T12:00:00.000Z",
                     "tags": ["adk:app:user"],
                 },
@@ -504,7 +506,10 @@ class TestAddEventsToMemory:
         assert service._client.request.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_custom_metadata_warns_once(self, service, caplog):
+    async def test_custom_metadata_is_stored_not_warned(self, service, caplog):
+        """flair#1332: custom_metadata is no longer dropped with a warning —
+        it is serialized into body["metadata"] on every event record."""
+        import logging as _logging
         events = [_make_event("evt-1", "hello")]
 
         service._client.request.return_value = MagicMock(
@@ -513,22 +518,19 @@ class TestAddEventsToMemory:
             text="{}",
         )
 
-        # First call — should warn
-        await service.add_events_to_memory(
-            app_name="app", user_id="user", events=events,
-            session_id="sess-1", custom_metadata={"ttl": "7d"},
-        )
-        # Second call — should NOT warn again for same session
-        await service.add_events_to_memory(
-            app_name="app", user_id="user", events=events,
-            session_id="sess-1", custom_metadata={"ttl": "7d"},
-        )
+        with caplog.at_level(_logging.WARNING, logger="adk_flair"):
+            await service.add_events_to_memory(
+                app_name="app", user_id="user", events=events,
+                session_id="sess-1", custom_metadata={"ttl": "7d"},
+            )
 
+        body = service._client.request.call_args[1]["json"]
+        assert json.loads(body["metadata"]) == {"ttl": "7d"}
         custom_warnings = [
             r.message for r in caplog.records
-            if "custom_metadata" in r.message.lower()
+            if "custom_metadata" in str(r.message).lower()
         ]
-        assert len(custom_warnings) == 1  # warned once, not twice
+        assert custom_warnings == []  # supported now — nothing to warn about
 
 
 # ─── add_memory (explicit durability/visibility) ────────────────────────────
