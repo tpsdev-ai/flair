@@ -524,7 +524,11 @@ class TestAddEventsToMemory:
                 session_id="sess-1", custom_metadata={"ttl": "7d"},
             )
 
-        body = service._client.request.call_args[1]["json"]
+        # flair#1336 intersection pin: the metadata-carrying body rides the
+        # POST create verb — #1334's plumbing must survive the verb switch.
+        args = service._client.request.call_args
+        assert (args[0][0], args[0][1]) == ("POST", "/Memory/")
+        body = args[1]["json"]
         assert json.loads(body["metadata"]) == {"ttl": "7d"}
         custom_warnings = [
             r.message for r in caplog.records
@@ -748,6 +752,116 @@ class TestAddMemory:
             )
             body = service._client.request.call_args[1]["json"]
             assert body["durability"] == dur
+
+
+# ─── Create verb + conflict fallback (flair#1336) ───────────────────────────
+
+
+def _mock_response(status_code: int, reason: str = "") -> MagicMock:
+    return MagicMock(
+        status_code=status_code,
+        reason_phrase=reason,
+        headers={"content-type": "application/json"},
+        text="{}",
+    )
+
+
+class TestCreateVerbAndConflictFallback:
+    """flair#1336: creates must use POST /Memory/ (the create verb), never a
+    bare PUT /Memory/{id} — PUT-shaped creates 404 on Harper deployments
+    where PUT is update-only (observed on hosted Harper Fabric). A 409 from
+    POST (record already exists — deterministic-id re-ingestion) falls back
+    to PUT, preserving the old replace semantics."""
+
+    @pytest.mark.asyncio
+    async def test_all_write_entrypoints_create_via_post_collection(self, service):
+        """Every write entrypoint issues POST /Memory/ with the id in the
+        body — the direct regression assertion for flair#1336."""
+        service._client.request.return_value = _mock_response(201)
+
+        session = _make_session("app", "user", "sess-1", [_make_event("evt-1", "hello")])
+        await service.add_session_to_memory(session)
+
+        args = service._client.request.call_args
+        assert args[0][0] == "POST"
+        assert args[0][1] == "/Memory/"
+        assert args[1]["json"]["id"] == "app:user:sess-1:evt-1"
+
+        service._client.request.reset_mock()
+        await service.add_events_to_memory(
+            app_name="app", user_id="user",
+            events=[_make_event("evt-2", "turn")], session_id="sess-1",
+        )
+        args = service._client.request.call_args
+        assert (args[0][0], args[0][1]) == ("POST", "/Memory/")
+
+        service._client.request.reset_mock()
+        await service.add_memory(
+            app_name="app", user_id="user",
+            memories=[MemoryEntry(
+                id="mem-1",
+                content=types.Content(role="user", parts=[types.Part(text="fact")]),
+            )],
+        )
+        args = service._client.request.call_args
+        assert (args[0][0], args[0][1]) == ("POST", "/Memory/")
+        assert args[1]["json"]["id"] == "mem-1"
+
+    @pytest.mark.asyncio
+    async def test_conflict_falls_back_to_put_replace(self, service, caplog):
+        """POST → 409 (record exists) → PUT /Memory/{id} with the SAME body.
+        Idempotent re-ingestion must neither raise nor warn.
+
+        This is the trap a naive PUT→POST swap walks into: without the
+        fallback, every re-save of an already-ingested session event fails
+        with 409 on every deployment where the old PUT path worked."""
+        service._client.request.side_effect = [
+            _mock_response(409, "Conflict"),
+            _mock_response(200),
+        ]
+
+        session = _make_session("app", "user", "sess-1", [_make_event("evt-1", "hello")])
+        await service.add_session_to_memory(session)
+
+        assert service._client.request.call_count == 2
+        first, second = service._client.request.call_args_list
+        assert (first[0][0], first[0][1]) == ("POST", "/Memory/")
+        assert (second[0][0], second[0][1]) == ("PUT", "/Memory/app:user:sess-1:evt-1")
+        assert second[1]["json"] == first[1]["json"]
+
+        warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("write failed" in str(w).lower() for w in warnings)
+
+    @pytest.mark.asyncio
+    async def test_non_conflict_error_propagates_with_real_status(self, service, caplog):
+        """A non-409 failure does NOT fall back to PUT, and the warning log
+        carries the real status (status=404), not the pre-#1336 'status=?' —
+        FlairRequestError exposes .status_code and the log line reads it."""
+        service._client.request.return_value = _mock_response(404, "Not Found")
+
+        await service.add_memory(
+            app_name="app", user_id="user",
+            memories=[MemoryEntry(
+                id="mem-404",
+                content=types.Content(role="user", parts=[types.Part(text="fact")]),
+            )],
+        )
+
+        assert service._client.request.call_count == 1  # no PUT fallback on non-409
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("status=404" in w for w in warnings), warnings
+
+    def test_flair_request_error_is_runtime_error_with_same_message(self):
+        """Message stays byte-identical to the bare RuntimeError it replaced;
+        the status/method/path ride along as attributes."""
+        from adk_flair.memory_service import FlairRequestError
+
+        exc = FlairRequestError("POST", "/Memory/", 404, "Not Found")
+        assert isinstance(exc, RuntimeError)
+        assert str(exc) == "Flair POST /Memory/ → 404 Not Found"
+        assert exc.status_code == 404
+        assert exc.method == "POST"
+        assert exc.path == "/Memory/"
 
 
 # ─── Event text extraction ──────────────────────────────────────────────────

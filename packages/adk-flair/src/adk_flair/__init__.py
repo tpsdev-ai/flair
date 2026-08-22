@@ -26,10 +26,10 @@ agent's services.py, or use services.yaml:
         class: adk_flair.memory_service.FlairMemoryService
 """
 
-from adk_flair.memory_service import FlairMemoryService
+from adk_flair.memory_service import FlairMemoryService, FlairRequestError
 from adk_flair.tools import create_flair_tools
 
-__all__ = ["FlairMemoryService", "create_flair_tools", "register"]
+__all__ = ["FlairMemoryService", "FlairRequestError", "create_flair_tools", "register"]
 
 
 def register():
