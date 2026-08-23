@@ -15,7 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import { JUDGE_PROMPT_TEMPLATES } from "./judge";
-import { READER_SYSTEM, READER_PROMPT_VERSION, ALL_ARMS } from "./arms";
+import { READER_SYSTEM, READER_PROMPT_VERSION, READER_PAYLOAD_FORMAT, ALL_ARMS } from "./arms";
 import { EXTRACTION_METHOD } from "./extraction";
 
 // ── Dataset: LongMemEval_s, pinned to an immutable HF commit + file sha256 ────
@@ -117,6 +117,11 @@ export function configManifest(slice: { n: number; seed: number; questionIds: st
       judge: JUDGE_PROMPT_TEMPLATES,
       readerSystem: READER_SYSTEM,
       readerPromptVersion: READER_PROMPT_VERSION,
+      // The retrieved-memory payload format fed to the reader (arms.ts
+      // formatRetrieved). Hashed for the same reason the prompt strings are:
+      // a payload-format change is a MEASUREMENT VARIANT and must never hash
+      // identically to a run on the old format. v2-dated = dates on each line.
+      readerPayloadFormat: READER_PAYLOAD_FORMAT,
     },
     extraction: EXTRACTION_METHOD,
     slice: {

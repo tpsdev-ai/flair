@@ -59,6 +59,6 @@ export async function retrieveContext(
     throw new Error(`retrieveContext failed for "${query.slice(0, 60)}": HTTP ${res.status} ${JSON.stringify(res.body ?? null).slice(0, 300)}`);
   }
   const results: any[] = Array.isArray(res.body?.results) ? res.body.results : [];
-  const items: RetrievedItem[] = results.map((r) => ({ id: r.id, score: r._score ?? r.score ?? 0, content: r.content }));
+  const items: RetrievedItem[] = results.map((r) => ({ id: r.id, score: r._score ?? r.score ?? 0, content: r.content, createdAt: r.createdAt }));
   return { rankedIds: items.map((i) => i.id), items, latencyMs };
 }

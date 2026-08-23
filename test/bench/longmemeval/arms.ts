@@ -36,10 +36,22 @@ export const READER_SYSTEM =
   "reply that you do not know rather than guessing.";
 
 /** Format retrieved memories (flair / vector-only) as a compact context block.
- *  Items arrive rank-ordered (rank 0 = best). */
+ *  Items arrive rank-ordered (rank 0 = best).
+ *
+ *  v2-dated (READER_PAYLOAD_FORMAT): each memory line is prefixed with its
+ *  createdAt DATE (`- [YYYY-MM-DD] content`, date-only — matching the
+ *  full-context arm's `[Session X — date]` headers). The 2026-08 headline-run
+ *  journal analysis found temporal-reasoning at 37% with 33 cases where both
+ *  retrieval tells looked healthy — the reader had the right memories but no
+ *  dates to reason over, while the full-context arm always sees session dates.
+ *  A memory without a createdAt falls back to the undated v1 line. */
 export function formatRetrieved(items: RetrievedItem[]): string {
   if (items.length === 0) return "(no relevant memory found)";
-  return items.map((it, i) => `- ${(it.content ?? "").trim()}`).join("\n");
+  return items.map((it) => {
+    const content = (it.content ?? "").trim();
+    const date = typeof it.createdAt === "string" ? it.createdAt.slice(0, 10) : "";
+    return date ? `- [${date}] ${content}` : `- ${content}`;
+  }).join("\n");
 }
 
 /** Format the full haystack (full-context arm), in chronological session order
@@ -76,3 +88,11 @@ export function buildReaderPrompt(question: string, questionDate: string, contex
 }
 
 export const READER_PROMPT_VERSION = "1.0.0";
+
+/** Version stamp for the RETRIEVED-memory payload format (formatRetrieved's
+ *  output shape). Mirrors how the judge/reader prompts are versioned: it is
+ *  part of the hashed config manifest (config.ts prompts block), so a payload
+ *  format change can never hash identically to a run on the old format.
+ *    v1        — bare `- content` lines (implicit; runs before 2026-08-23)
+ *    v2-dated  — `- [YYYY-MM-DD] content` (createdAt date prefixed per memory) */
+export const READER_PAYLOAD_FORMAT = "v2-dated";
