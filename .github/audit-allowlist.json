@@ -36,28 +36,6 @@
   },
   "entries": [
     {
-      "ghsa": "GHSA-fjxv-7rqg-78g4",
-      "package": "form-data",
-      "severity": "critical",
-      "class": "remediation-available",
-      "introducedBy": "workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> form-data",
-      "reason": "Reached by a first-party workspace package, NOT a harper transitive \u2014 the exact case the old blanket warning wrongly claimed did not exist. form-data 4.0.6 fixes it. Held out of this PR only so the gate change stays reviewable on its own and does not carry a lockfile bump; taking the fix is the next action, not a someday.",
-      "added": "2026-07-27",
-      "expires": "2026-08-26",
-      "removeWhen": "The dependency PR raising the resolved form-data to >=4.0.6 merges. Delete this entry in that same PR; the gate fails on a stale entry, so it cannot be left behind."
-    },
-    {
-      "ghsa": "GHSA-hmw2-7cc7-3qxx",
-      "package": "form-data",
-      "severity": "high",
-      "class": "remediation-available",
-      "introducedBy": "workspace @tpsdev-ai/n8n-nodes-flair -> n8n-workflow -> form-data",
-      "reason": "Same dependency edge and same fix as GHSA-fjxv-7rqg-78g4; form-data 4.0.6 clears both advisories in one bump.",
-      "added": "2026-07-27",
-      "expires": "2026-08-26",
-      "removeWhen": "The dependency PR raising the resolved form-data to >=4.0.6 merges \u2014 the same bump that retires GHSA-fjxv-7rqg-78g4."
-    },
-    {
       "ghsa": "GHSA-86vw-mfpg-wwv9",
       "package": "jsonata",
       "severity": "high",
