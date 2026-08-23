@@ -408,9 +408,13 @@ describe("searchMemory", () => {
         JSON.stringify({
           results: [
             {
+              id: "mem-1",
               content: "remembered fact",
-              author: "model",
-              timestamp: "2024-01-15T10:30:00.000Z",
+              // author derives from the record's agentId, timestamp from
+              // createdAt (flair#1332 incidental fix, mirrored from Python:
+              // records carry no "author"/"timestamp" fields).
+              agentId: "test-agent",
+              createdAt: "2024-01-15T10:30:00.000Z",
               tags: ["adk:my-app:user-1"],
             },
           ],
@@ -427,8 +431,9 @@ describe("searchMemory", () => {
 
     expect(result.memories).toHaveLength(1);
     expect(result.memories[0].content?.parts?.[0]).toEqual({ text: "remembered fact" });
-    expect(result.memories[0].author).toBe("model");
+    expect(result.memories[0].author).toBe("test-agent");
     expect(result.memories[0].timestamp).toBe("2024-01-15T10:30:00.000Z");
+    expect(result.memories[0].id).toBe("mem-1");
   });
 
   it("re-verifies compound tag on every hit", async () => {
@@ -592,13 +597,14 @@ describe("addSessionToMemory", () => {
     await service.addSessionToMemory(session);
 
     expect(calls).toHaveLength(2);
-    // First call
-    expect(calls[0].method).toBe("PUT");
-    expect(calls[0].url).toContain("/Memory/my-app:user-1:sess-1:evt-1");
+    // First call — creates ride POST /Memory/ with the id in the body
+    // (flair#1336 parity; see the create-verb describe block below).
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("http://localhost:19926/Memory/");
     expect(calls[0].body).toMatchObject({ id: "my-app:user-1:sess-1:evt-1", tags: ["adk:my-app:user-1"], type: "session", durability: "standard" });
     // Second call
-    expect(calls[1].method).toBe("PUT");
-    expect(calls[1].url).toContain("/Memory/my-app:user-1:sess-1:evt-2");
+    expect(calls[1].method).toBe("POST");
+    expect((calls[1].body as Record<string, unknown>).id).toBe("my-app:user-1:sess-1:evt-2");
   });
 
   it("filters no-text events", async () => {
@@ -676,14 +682,17 @@ describe("addSessionToMemory", () => {
     }
   });
 
-  it("sends PUT with id-bearing path (wire-shape guard)", async () => {
-    const calls: Array<{ method: string; url: string }> = [];
+  it("creates via POST /Memory/ with the id in the body (wire-shape guard)", async () => {
+    // flair#1336 parity: a PUT-shaped create 404s on Harper deployments
+    // where PUT is update-only — creates must ride the collection POST.
+    const calls: Array<{ method: string; url: string; body: unknown }> = [];
     globalThis.fetch = mock(async (url, init) => {
       calls.push({
         method: (init as RequestInit).method ?? "GET",
         url: String(url),
+        body: JSON.parse((init as RequestInit).body as string),
       });
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
     });
 
     const session = makeSession({
@@ -696,8 +705,130 @@ describe("addSessionToMemory", () => {
     await service.addSessionToMemory(session);
 
     expect(calls).toHaveLength(1);
-    expect(calls[0].method).toBe("PUT");
-    expect(calls[0].url).toBe("http://localhost:19926/Memory/ws-app:ws-user:sess-ws:evt-ws");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("http://localhost:19926/Memory/");
+    expect((calls[0].body as Record<string, unknown>).id).toBe("ws-app:ws-user:sess-ws:evt-ws");
+  });
+});
+
+// ─── Create verb + conflict fallback (flair#1336 parity) ────────────────────
+
+describe("create verb and conflict fallback", () => {
+  let keyfilePath: string;
+  let service: FlairMemoryService;
+  let origFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    const { keyfilePath: kp } = generateTestKey();
+    keyfilePath = kp;
+    service = new FlairMemoryService({
+      url: "http://localhost:19926",
+      agentId: "test-agent",
+      keyfile: keyfilePath,
+    });
+    origFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    try { fs.unlinkSync(keyfilePath); } catch {}
+    globalThis.fetch = origFetch;
+  });
+
+  it("all write entrypoints create via POST /Memory/ with the id in the body", async () => {
+    const calls: Array<{ method: string; url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = mock(async (url, init) => {
+      calls.push({
+        method: (init as RequestInit).method ?? "GET",
+        url: String(url),
+        body: JSON.parse((init as RequestInit).body as string) as Record<string, unknown>,
+      });
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+
+    await service.addSessionToMemory(makeSession({
+      id: "sess-1", appName: "app", userId: "user",
+      events: [makeEvent({ id: "evt-1", text: "hello" })],
+    }));
+    await service.addEventsToMemory(
+      "app", "user", [makeEvent({ id: "evt-2", text: "turn" })], "sess-1",
+    );
+    await service.addMemory("app", "user", [
+      { ...makeMemoryEntry("fact"), id: "mem-1" },
+    ]);
+
+    expect(calls).toHaveLength(3);
+    for (const call of calls) {
+      expect(call.method).toBe("POST");
+      expect(call.url).toBe("http://localhost:19926/Memory/");
+    }
+    expect(calls[0].body.id).toBe("app:user:sess-1:evt-1");
+    expect(calls[1].body.id).toBe("app:user:sess-1:evt-2");
+    expect(calls[2].body.id).toBe("mem-1");
+  });
+
+  it("409 conflict falls back to PUT /Memory/{id} with the SAME body, no warning", async () => {
+    // The trap a naive PUT→POST swap walks into: without the fallback,
+    // every re-save of an already-ingested session event fails with 409 on
+    // every deployment where the old PUT path worked.
+    const calls: Array<{ method: string; url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = mock(async (url, init) => {
+      calls.push({
+        method: (init as RequestInit).method ?? "GET",
+        url: String(url),
+        body: JSON.parse((init as RequestInit).body as string) as Record<string, unknown>,
+      });
+      return calls.length === 1
+        ? new Response("Conflict", { status: 409 })
+        : new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+
+    try {
+      await service.addSessionToMemory(makeSession({
+        id: "sess-1", appName: "app", userId: "user",
+        events: [makeEvent({ id: "evt-1", text: "hello" })],
+      }));
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("http://localhost:19926/Memory/");
+    expect(calls[1].method).toBe("PUT");
+    expect(calls[1].url).toBe("http://localhost:19926/Memory/app:user:sess-1:evt-1");
+    expect(calls[1].body).toEqual(calls[0].body);
+    // Idempotent re-ingestion must neither throw nor warn.
+    expect(warnings.filter((w) => w.includes("write failed"))).toEqual([]);
+  });
+
+  it("non-409 error does NOT fall back to PUT and the warning carries the real status", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = mock(async (url, init) => {
+      calls.push((init as RequestInit).method ?? "GET");
+      return new Response("Not Found", { status: 404 });
+    });
+
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+
+    try {
+      await service.addMemory("app", "user", [
+        { ...makeMemoryEntry("fact"), id: "mem-404" },
+      ]);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(calls).toEqual(["POST"]); // no PUT fallback on non-409
+    const failWarnings = warnings.filter((w) => w.includes("write failed"));
+    expect(failWarnings).toHaveLength(1);
+    expect(failWarnings[0]).toContain("HTTP 404"); // the real status, never "?"
+    expect(failWarnings[0]).toContain("mem-404");
   });
 });
 
@@ -741,10 +872,15 @@ describe("addMemory", () => {
     ]);
 
     expect(calls).toHaveLength(2);
-    expect(calls[0].method).toBe("PUT");
-    expect(calls[0].url).toContain("/Memory/my-app:user-1:direct:");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("http://localhost:19926/Memory/");
     expect((calls[0].body as Record<string, unknown>).tags).toEqual(["adk:my-app:user-1"]);
     expect((calls[0].body as Record<string, unknown>).content).toBe("fact one");
+    // Record id mirrors the Python package: no caller-supplied id ⇒ the
+    // first 32 hex chars of the content's SHA-256 (deterministic re-add).
+    const expectedId = crypto
+      .createHash("sha256").update("fact one", "utf8").digest("hex").slice(0, 32);
+    expect((calls[0].body as Record<string, unknown>).id).toBe(expectedId);
   });
 
   it("no-ops on empty memories", async () => {
@@ -801,8 +937,8 @@ describe("addEventsToMemory", () => {
     );
 
     expect(calls).toHaveLength(1);
-    expect(calls[0].method).toBe("PUT");
-    expect(calls[0].url).toContain("/Memory/my-app:user-1:sess-2:evt-1");
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("http://localhost:19926/Memory/");
     expect((calls[0].body as Record<string, unknown>).id).toBe("my-app:user-1:sess-2:evt-1");
   });
 });
