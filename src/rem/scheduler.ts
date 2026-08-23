@@ -69,7 +69,7 @@ export interface SchedulerSubstitutions {
   HOME: string;
   /** Agent id passed via env. */
   AGENT_ID: string;
-  /** Flair HTTP URL passed via env (e.g. http://127.0.0.1:9926). */
+  /** Flair HTTP URL passed via env (e.g. http://127.0.0.1:19926). */
   FLAIR_URL: string;
   /** Hour (0-23). */
   HOUR: string;
