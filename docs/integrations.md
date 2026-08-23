@@ -22,7 +22,7 @@ Where Flair already runs. Each integration shown here is a working surface — t
 | **OpenClaw** | [`openclaw-flair`](#openclaw) | Ed25519 | Native plugin + context engine |
 | **n8n** | [`n8n-nodes-flair`](#n8n) | FlairApi credential | Three nodes (chat memory, search, store) |
 | **Hermes Agent** | [`hermes-flair`](#hermes-agent) | Ed25519 | Python `MemoryProvider` |
-| **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | TS plugin |
+| **Pi agent** | [`pi-flair`](#pi-agent) | Ed25519 | Native pi extension (pi has no MCP support); `flair init --client pi` wires it, `flair doctor` checks it |
 
 Don't see your harness? If it speaks **MCP** — Flair already works with `flair-mcp`. If it has a **custom memory protocol** like LangGraph's `BaseStore` or CrewAI's `RAGStorage`, an adapter is a ~200-line package; [open an issue](https://github.com/tpsdev-ai/flair/issues) or [send a PR](https://github.com/tpsdev-ai/flair).
 
@@ -168,13 +168,34 @@ Auth: TPS-Ed25519 (the same model the rest of Flair uses) — writes are isolate
 
 ## Pi agent
 
-[`@tpsdev-ai/pi-flair`](https://www.npmjs.com/package/@tpsdev-ai/pi-flair) is the TS plugin for the [Pi coding agent](https://github.com/mariozechner/pi-coding-agent). Memory + identity for the Pi runtime.
+[`@tpsdev-ai/pi-flair`](https://www.npmjs.com/package/@tpsdev-ai/pi-flair) is the **native pi extension** for the [Pi coding agent](https://github.com/mariozechner/pi-coding-agent) — pi has no MCP client support, so this is a first-party plugin, not an MCP bridge. Memory + identity (`memory_search`, `memory_store`, `bootstrap`) for the pi runtime.
+
+Wire it (either form is equivalent):
 
 ```bash
-npm install @tpsdev-ai/pi-flair
+flair init --client pi        # writes a pinned "packages" entry into ~/.pi/agent/settings.json
+# or
+pi install npm:@tpsdev-ai/pi-flair
 ```
 
-Pi resolves the plugin via its standard plugin config; pin `agentId` per host.
+Which produces:
+
+```json
+{
+  "packages": ["npm:@tpsdev-ai/pi-flair@<version>"]
+}
+```
+
+**Known trap:** the `extensions` settings key takes local file paths only — an `npm:` spec there is *silently ignored* by pi, so the tools never register ([#1346](https://github.com/tpsdev-ai/flair/issues/1346)). Package sources belong under `packages`. `flair doctor` detects pi, verifies the wiring, calls this exact misconfiguration out, and `flair doctor --fix` moves the entry.
+
+pi settings carry no per-package env, so identity comes from the environment that launches pi:
+
+```bash
+export FLAIR_AGENT_ID=my-agent   # per host/purpose
+pi
+```
+
+Full details (tools, env reference, auto-recall/auto-capture flags, security notes): [`packages/pi-flair/README.md`](../packages/pi-flair/README.md).
 
 ---
 

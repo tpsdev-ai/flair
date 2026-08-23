@@ -1,9 +1,12 @@
 // ─── Client Detection & Wiring ──────────────────────────────────────────────────────
 //
-// Detects locally installed MCP clients and wires them to Flair.
-// Each client has:
-//   - detect(): boolean - returns true if client is installed
-//   - wire(options: { agentId: string; flairUrl: string }): { ok: boolean; message: string }
+// Detects locally installed clients and wires them to Flair. Most are MCP
+// clients (kind: "mcp" — wired via an mcpServers block/TOML table running
+// @tpsdev-ai/flair-mcp); pi is a native-extension host (kind:
+// "native-extension" — wired via pi's own settings.json `packages` key,
+// flair#1342). Each client has:
+//   - detection: `bin` on PATH, optionally widened by a declared detect() override
+//   - wire(env): { ok: boolean; message: string }
 //
 // Wiring contract (FIX 4 — onboarding dogfood round 1):
 //   "wired" MUST mean a config file was actually written. A wire function returns
@@ -14,7 +17,7 @@
 //   All paths are resolved cross-platform (Linux included) via standard
 //   per-client locations under $HOME / $XDG_CONFIG_HOME.
 
-export type ClientId = "claude-code" | "codex" | "gemini" | "cursor" | "antigravity";
+export type ClientId = "claude-code" | "codex" | "gemini" | "cursor" | "antigravity" | "pi";
 
 /**
  * The env block every wire function writes into a client's MCP server config.
@@ -34,7 +37,28 @@ export interface Client {
   label: string;
   /** The executable that has to be on PATH for this client to be usable. */
   bin: string;
+  /**
+   * How this client consumes Flair (flair#1342):
+   *   "mcp"              — runs @tpsdev-ai/flair-mcp via an MCP server config
+   *                        (mcpServers block / TOML table). readClientMcpBlock
+   *                        and the MCP-pin machinery apply.
+   *   "native-extension" — loads a Flair-shipped extension through the client's
+   *                        own plugin mechanism (pi + @tpsdev-ai/pi-flair — pi
+   *                        has no MCP client support). The MCP-pin machinery
+   *                        does NOT apply; wiring/checking is client-specific.
+   * Callers that iterate ALL_CLIENTS for MCP-shaped work MUST filter on this
+   * rather than assuming every registry entry has an mcpServers block.
+   */
+  kind: "mcp" | "native-extension";
   detected: boolean;
+  /**
+   * Optional detection override. Default detection is `bin` on PATH (one rule,
+   * see detectClients); a client whose presence is ALSO evidenced by a config
+   * file (pi: ~/.pi/agent/settings.json survives PATH quirks like a version
+   * manager or launchd context) declares that here. Must stay a pure
+   * filesystem check — detection never spawns a subprocess (flair#946).
+   */
+  detect?: () => boolean;
   wire: (env: WireEnv) => { ok: boolean; message: string };
 }
 
@@ -43,7 +67,7 @@ export interface Client {
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { mcpServerSpec } from "../lib/mcp-spec.js";
+import { flairCliVersion, isResolvedVersion, mcpServerSpec } from "../lib/mcp-spec.js";
 
 /**
  * Resolve the user's home dir. Prefer the live HOME/USERPROFILE env over
@@ -296,6 +320,305 @@ function codexConfigPath(): string {
   return join(resolveHome(), ".codex", "config.toml");
 }
 
+// ---- pi (native extension — NOT an MCP client) ------------------------------------
+//
+// pi has no MCP client support (packages/pi-flair/README "Design Decision"), so
+// Flair ships @tpsdev-ai/pi-flair as a NATIVE pi extension. Wiring pi therefore
+// means editing pi's OWN settings, not writing an mcpServers block (flair#1342):
+//
+//   ~/.pi/agent/settings.json          (user scope; pi's getSettingsPath() —
+//                                       agent dir overridable via the
+//                                       PI_CODING_AGENT_DIR env var, honored here)
+//   <project>/.pi/settings.json        (project scope)
+//
+// Two settings keys matter, and confusing them is the flair#1346 field failure:
+//
+//   "packages"    — package SOURCES (`npm:`, `git:`, local paths, or
+//                   { source, ...filters } objects). pi parses these through
+//                   parseSource() and AUTO-INSTALLS a missing/mismatched npm
+//                   package at resource collection (package-manager.js
+//                   resolvePackageSources), honoring an exact `@<version>` pin.
+//                   This is where npm:@tpsdev-ai/pi-flair belongs.
+//   "extensions"  — local FILE PATHS only. An `npm:` spec here is treated as a
+//                   path, fails existsSync, and is dropped WITHOUT ERROR — the
+//                   user believes they are wired and pi registers zero tools.
+//                   (Verified against pi 0.84.2's package-manager.js: the
+//                   extensions override list feeds resolvePathFromBase/
+//                   collectFilesFromPaths, never parseSource.)
+//
+// pi-flair reads FLAIR_AGENT_ID / FLAIR_URL / FLAIR_KEY_PATH from the process
+// environment of the pi that loads it — pi settings carry NO per-package env
+// block, so wiring here cannot pin an agent identity the way the MCP clients'
+// env blocks do. Wire messages say so instead of pretending.
+
+/** The npm package pi loads as its Flair extension. */
+export const PI_FLAIR_PACKAGE = "@tpsdev-ai/pi-flair";
+
+/**
+ * pi-flair's own DEFAULT_FLAIR_URL (packages/pi-flair/src/index.ts). Duplicated
+ * as a value rather than imported — the CLI does not depend on the pi-flair
+ * workspace package — by the same convention as doctor-client's
+ * FLAIR_CLIENT_DEFAULT_URL; a unit test (pi-client.test.ts) asserts this
+ * literal matches pi-flair's source so the two cannot drift silently.
+ */
+export const PI_FLAIR_DEFAULT_URL = "http://127.0.0.1:19926";
+
+/**
+ * The `packages` entry a wired pi gets. PINNED for the same reason as
+ * mcpServerSpec (flair#907): pi re-resolves an unpinned npm source to latest
+ * when (re)installing, and pi-flair ships in version lockstep with the CLI.
+ * Falls back to the bare spec when the CLI cannot read its own version — the
+ * same condition and caller-owed warning as mcpServerSpec.
+ */
+export function piFlairSpec(version: string = flairCliVersion()): string {
+  return isResolvedVersion(version)
+    ? `npm:${PI_FLAIR_PACKAGE}@${version}`
+    : `npm:${PI_FLAIR_PACKAGE}`;
+}
+
+/** pi's agent config dir: $PI_CODING_AGENT_DIR, else ~/.pi/agent (pi config.js). */
+function piAgentDir(): string {
+  const envDir = process.env.PI_CODING_AGENT_DIR;
+  if (envDir) return envDir;
+  return join(resolveHome(), ".pi", "agent");
+}
+
+/** pi user-scope settings: <agent dir>/settings.json. */
+export function piSettingsPath(): string {
+  return join(piAgentDir(), "settings.json");
+}
+
+/** A pi `packages` array entry is a source string or `{ source, ...filters }`. */
+export function piPackageEntrySource(entry: unknown): string | null {
+  if (typeof entry === "string") return entry;
+  if (entry && typeof entry === "object" && typeof (entry as { source?: unknown }).source === "string") {
+    return (entry as { source: string }).source;
+  }
+  return null;
+}
+
+/** Does this source string name the pi-flair package as an npm source
+ *  (bare `npm:@tpsdev-ai/pi-flair` or any `npm:@tpsdev-ai/pi-flair@<spec>`)? */
+export function isPiFlairNpmSource(source: string): boolean {
+  if (typeof source !== "string" || !source.startsWith("npm:")) return false;
+  const spec = source.slice("npm:".length).trim();
+  return spec === PI_FLAIR_PACKAGE || spec.startsWith(`${PI_FLAIR_PACKAGE}@`);
+}
+
+/** The version text of a pinned pi-flair npm source, or null when bare. */
+export function extractPiFlairPin(source: string): string | null {
+  if (!isPiFlairNpmSource(source)) return null;
+  const spec = source.slice("npm:".length).trim();
+  const version = spec.slice(`${PI_FLAIR_PACKAGE}@`.length);
+  return spec.startsWith(`${PI_FLAIR_PACKAGE}@`) && version ? version : null;
+}
+
+/**
+ * Does this `extensions` entry point at pi-flair BY PATH (the documented
+ * pre-0.49 workaround: a local path to the installed dist/index.js)? A
+ * substring heuristic on the package/directory name — the entry is user-
+ * written free text, so this is deliberately loose in the direction of
+ * REPORTING (doctor names the entry it matched); it never gates anything
+ * destructive.
+ */
+export function isPiFlairExtensionPath(entry: string): boolean {
+  if (typeof entry !== "string" || entry.startsWith("npm:") || entry.startsWith("git:")) return false;
+  return entry.includes("pi-flair");
+}
+
+/** What one pi settings file says about pi-flair. Pure — callers do the fs. */
+export interface PiSettingsScan {
+  /** File content parsed as a JSON object (false: missing/malformed/non-object). */
+  parsed: boolean;
+  /** The pi-flair source found under `packages`, verbatim. */
+  packagesSpec?: string;
+  /** Version from a pinned packages entry; null when bare or absent. */
+  pinnedVersion: string | null;
+  /** pi-flair FILE-PATH entries under `extensions` (the pre-0.49 workaround). */
+  extensionFilePaths: string[];
+  /** pi-flair `npm:` specs under `extensions` — pi silently ignores these
+   *  (flair#1346, the known field failure); doctor calls them out by name. */
+  misconfiguredNpmUnderExtensions: string[];
+}
+
+export function scanPiSettings(raw: string | null): PiSettingsScan {
+  const empty: PiSettingsScan = { parsed: false, pinnedVersion: null, extensionFilePaths: [], misconfiguredNpmUnderExtensions: [] };
+  if (!raw || !raw.trim()) return empty;
+  let config: unknown;
+  try {
+    config = JSON.parse(raw);
+  } catch {
+    return empty;
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) return empty;
+  const cfg = config as { packages?: unknown; extensions?: unknown };
+
+  let packagesSpec: string | undefined;
+  let pinnedVersion: string | null = null;
+  if (Array.isArray(cfg.packages)) {
+    for (const entry of cfg.packages) {
+      const source = piPackageEntrySource(entry);
+      if (source && isPiFlairNpmSource(source)) {
+        packagesSpec = source;
+        pinnedVersion = extractPiFlairPin(source);
+        break;
+      }
+    }
+  }
+
+  const extensionFilePaths: string[] = [];
+  const misconfiguredNpmUnderExtensions: string[] = [];
+  if (Array.isArray(cfg.extensions)) {
+    for (const entry of cfg.extensions) {
+      if (typeof entry !== "string") continue;
+      if (isPiFlairNpmSource(entry)) misconfiguredNpmUnderExtensions.push(entry);
+      else if (isPiFlairExtensionPath(entry)) extensionFilePaths.push(entry);
+    }
+  }
+
+  return { parsed: true, packagesSpec, pinnedVersion, extensionFilePaths, misconfiguredNpmUnderExtensions };
+}
+
+/**
+ * Resolve a pi `extensions` path entry the way pi's loader will: `~/` against
+ * the home dir, a relative path against the settings file's own base dir, an
+ * absolute path as-is. `baseDir` is the directory pi treats as the scope's
+ * base (user scope: the agent dir).
+ */
+export function resolvePiExtensionPath(entry: string, homeDir: string, baseDir: string): string {
+  if (entry.startsWith("~/") || entry === "~") return join(homeDir, entry.slice(1));
+  if (entry.startsWith("/")) return entry;
+  return join(baseDir, entry);
+}
+
+/** Pretty-printed minimal settings snippet for copy-paste fallbacks. */
+function piJsonSnippet(): string {
+  return JSON.stringify({ packages: [piFlairSpec()] }, null, 2);
+}
+
+/**
+ * Wire pi by editing ~/.pi/agent/settings.json `packages` (flair#1342) — the
+ * same merge/idempotence/preservation contract as wireJsonMcp: sibling keys
+ * and entries survive byte-identical, a current entry is a no-op, a stale pin
+ * is refreshed, and ok:true means the file was actually written (or already
+ * correct). Two pi-specific rules on top:
+ *
+ *   • an `npm:` pi-flair spec under `extensions` is MOVED to `packages` — that
+ *     misplacement is silently ignored by pi (flair#1346), so leaving it while
+ *     adding a packages entry would preserve a decoy;
+ *   • an existing FILE-PATH `extensions` entry that resolves to a real file is
+ *     honored as already-wired (the documented pre-0.49 workaround) — the user
+ *     may deliberately be running a local build, so it is reported, not
+ *     rewritten.
+ *
+ * `env` is used for the launch-environment hint only: pi settings have no
+ * per-package env block, so FLAIR_AGENT_ID/FLAIR_URL must be exported by
+ * whatever shell launches pi — the message says so rather than implying the
+ * wiring carried them.
+ */
+function _wirePi(env: WireEnv): { ok: boolean; message: string } {
+  const path = piSettingsPath();
+  const home = resolveHome();
+  const display = path.startsWith(home) ? "~" + path.slice(home.length) : path;
+  const spec = piFlairSpec();
+  const envHint = `pi settings carry no env — export FLAIR_AGENT_ID=${env.FLAIR_AGENT_ID} in the shell that launches pi`;
+  try {
+    let config: any = {};
+    if (existsSync(path)) {
+      const raw = readFileSync(path, "utf-8").trim();
+      if (raw) config = JSON.parse(raw);
+    }
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      throw new Error("settings.json is not a JSON object");
+    }
+    if (config.packages !== undefined && !Array.isArray(config.packages)) {
+      throw new Error(`"packages" exists but is not an array — not rewriting it`);
+    }
+    if (config.extensions !== undefined && !Array.isArray(config.extensions)) {
+      throw new Error(`"extensions" exists but is not an array — not rewriting it`);
+    }
+
+    // The #1346 trap: npm: pi-flair specs under `extensions`. Collect + drop.
+    let movedFromExtensions = false;
+    if (Array.isArray(config.extensions)) {
+      const kept = config.extensions.filter(
+        (e: unknown) => !(typeof e === "string" && isPiFlairNpmSource(e)),
+      );
+      movedFromExtensions = kept.length !== config.extensions.length;
+      if (movedFromExtensions) config.extensions = kept;
+    }
+
+    // Existing packages entry?
+    let entryIndex = -1;
+    let entrySource: string | null = null;
+    if (Array.isArray(config.packages)) {
+      for (let i = 0; i < config.packages.length; i++) {
+        const source = piPackageEntrySource(config.packages[i]);
+        if (source && isPiFlairNpmSource(source)) {
+          entryIndex = i;
+          entrySource = source;
+          break;
+        }
+      }
+    }
+
+    if (!movedFromExtensions && entrySource === spec) {
+      return { ok: true, message: `pi: already wired in ${display} (${spec})` };
+    }
+
+    if (!movedFromExtensions && entryIndex === -1) {
+      // No packages entry and nothing misplaced — honor a working file-path
+      // extensions entry (pre-0.49 workaround) instead of double-wiring.
+      const scan = scanPiSettings(JSON.stringify(config));
+      const workingPath = scan.extensionFilePaths.find((p) =>
+        existsSync(resolvePiExtensionPath(p, home, piAgentDir())),
+      );
+      if (workingPath) {
+        return {
+          ok: true,
+          message:
+            `pi: already wired via a file-path extension in ${display} (${workingPath}) — ` +
+            `the pre-0.49 workaround; the canonical form is a "packages" entry: ${spec}`,
+        };
+      }
+    }
+
+    config.packages = Array.isArray(config.packages) ? config.packages : [];
+    let action: string;
+    if (entryIndex >= 0) {
+      const entry = config.packages[entryIndex];
+      if (typeof entry === "string") config.packages[entryIndex] = spec;
+      else entry.source = spec; // object entry: refresh source, keep filters
+      action = movedFromExtensions
+        ? `moved ${PI_FLAIR_PACKAGE} out of "extensions" and refreshed the "packages" pin in`
+        : "refreshed pin in";
+    } else if (movedFromExtensions) {
+      config.packages.push(spec);
+      action = `moved ${PI_FLAIR_PACKAGE} from "extensions" to "packages" in`;
+    } else {
+      config.packages.push(spec);
+      action = "wired";
+    }
+
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
+    const trapNote = movedFromExtensions
+      ? ` — pi silently ignores npm: specs under "extensions" (flair#1346)`
+      : "";
+    return {
+      ok: true,
+      message: `pi: ${action} ${display} (${spec} — pi installs the package on next launch; ${envHint})${trapNote}`,
+    };
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      message: `pi: manual wiring needed (could not update ${display}: ${reason}).\n` +
+        `   Add this to ${display} (${envHint}):\n${indent(piJsonSnippet())}`,
+    };
+  }
+}
+
 /**
  * Antigravity CLI (`agy`) + Antigravity 2.0 IDE + SDK: they share ONE central
  * MCP config at ~/.gemini/config/mcp_config.json on every OS (flair#1209).
@@ -332,6 +655,11 @@ export function clientConfigPath(id: ClientId): string {
       return cursorConfigPath();
     case "antigravity":
       return antigravityConfigPath();
+    case "pi":
+      // NOT an MCP config: pi's own settings.json, where the pi-flair
+      // native-extension wiring lives (flair#1342). readClientMcpBlock over
+      // this file correctly reports "no MCP block" — pi never has one.
+      return piSettingsPath();
   }
 }
 
@@ -420,24 +748,28 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
     id: "claude-code",
     label: "Claude Code",
     bin: "claude",
+    kind: "mcp",
     wire: _wireClaudeCode,
   },
   {
     id: "codex",
     label: "Codex",
     bin: "codex",
+    kind: "mcp",
     wire: _wireCodex,
   },
   {
     id: "gemini",
     label: "Gemini",
     bin: "gemini",
+    kind: "mcp",
     wire: _wireGemini,
   },
   {
     id: "cursor",
     label: "Cursor",
     bin: "cursor",
+    kind: "mcp",
     wire: _wireCursor,
   },
   {
@@ -445,7 +777,22 @@ export const ALL_CLIENTS: Omit<Client, "detected">[] = [
     label: "Antigravity",
     // Google's Antigravity CLI — the executable is `agy` (flair#1209).
     bin: "agy",
+    kind: "mcp",
     wire: _wireAntigravity,
+  },
+  {
+    id: "pi",
+    label: "pi",
+    bin: "pi",
+    // NOT an MCP client — pi loads @tpsdev-ai/pi-flair as a native extension
+    // via its settings.json `packages` key (flair#1342). Consumers doing
+    // MCP-shaped work must filter on `kind`.
+    kind: "native-extension",
+    // pi is also detected by its settings file: a configured pi whose binary
+    // isn't on THIS shell's PATH (version manager, launchd context) is still
+    // a pi whose wiring is worth checking/fixing. Pure fs check, both legs.
+    detect: () => detectBin("pi") || existsSync(piSettingsPath()),
+    wire: _wirePi,
   },
 ];
 
@@ -531,14 +878,17 @@ export function renderWiringSummary(
 }
 
 /**
- * Detect every known client. One rule (`bin` on PATH) applied uniformly, so a
- * client added to ALL_CLIENTS is detected by declaring its executable — there is
- * no per-client branch here to forget to extend.
+ * Detect every known client. One rule (`bin` on PATH) applied uniformly — a
+ * client added to ALL_CLIENTS is detected by declaring its executable, with no
+ * per-client branch here to forget to extend. A client may widen that with a
+ * declared `detect` override (still a pure fs check — pi adds its settings
+ * file as a second signal, flair#1342); the override lives on the registry
+ * entry, so this function stays branch-free.
  */
 export function detectClients(): Client[] {
   return ALL_CLIENTS.map((client) => ({
     ...client,
-    detected: detectBin(client.bin),
+    detected: client.detect ? client.detect() : detectBin(client.bin),
   }));
 }
 
@@ -570,4 +920,10 @@ export function wireAntigravity(
   env: WireEnv
 ): { ok: boolean; message: string } {
   return _wireAntigravity(env);
+}
+
+export function wirePi(
+  env: WireEnv
+): { ok: boolean; message: string } {
+  return _wirePi(env);
 }

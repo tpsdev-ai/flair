@@ -107,8 +107,10 @@ function readCodexPin(): string | null {
 // ── JSON clients (Gemini, Cursor, Claude Code fallback) ────────────────────
 
 describe("flair#1135 — JSON client pin refresh (wireJsonMcp)", () => {
-  // Test every JSON-based client (all except Codex, which uses TOML).
-  const jsonClients = ALL_CLIENTS.filter(c => c.id !== "codex");
+  // Test every JSON-based MCP client (all except Codex, which uses TOML, and
+  // pi, which is a native-extension host with no mcpServers block — its pin
+  // refresh is covered in test/unit/pi-client.test.ts, flair#1342).
+  const jsonClients = ALL_CLIENTS.filter(c => c.id !== "codex" && c.kind === "mcp");
 
   for (const client of jsonClients) {
     describe(client.label, () => {

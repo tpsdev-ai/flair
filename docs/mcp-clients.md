@@ -266,6 +266,24 @@ The MCP server has no client-side flags beyond these env vars; everything else (
 
 ---
 
+## What about pi?
+
+pi has no MCP client support, so Flair ships a **native pi extension** instead: [`@tpsdev-ai/pi-flair`](../packages/pi-flair/README.md). Same backend, same agent isolation, zero MCP in the path.
+
+Wiring is a `packages` entry in pi's own settings (`~/.pi/agent/settings.json`), not an `mcpServers` block:
+
+```json
+{
+  "packages": ["npm:@tpsdev-ai/pi-flair@<version>"]
+}
+```
+
+`flair init --client pi` writes exactly that (pinned), or use pi's own installer: `pi install npm:@tpsdev-ai/pi-flair`. `flair doctor` detects pi and checks the wiring — including the one known trap: **an `npm:` spec under the `extensions` settings key is silently ignored by pi** (`extensions` takes local file paths only; package sources belong under `packages` — [#1346](https://github.com/tpsdev-ai/flair/issues/1346)). Doctor calls that misconfiguration out by name, and `flair doctor --fix` moves the entry.
+
+One difference from the MCP clients above: pi settings carry no per-package `env` block, so `FLAIR_AGENT_ID` (and `FLAIR_URL` when non-default) must be exported in the environment that launches pi. Doctor reports what it sees in its own shell and says so — it cannot observe the environment of every pi launch.
+
+---
+
 ## What about Hermes (Nous Research)?
 
 Hermes uses its own Python-native `MemoryProvider` ABC instead of MCP. It has its own Flair integration in [`packages/hermes-flair/`](../packages/hermes-flair). Same backend, same agent isolation, different plug shape.
