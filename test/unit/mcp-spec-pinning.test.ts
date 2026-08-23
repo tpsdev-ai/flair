@@ -54,10 +54,13 @@ afterEach(() => {
 });
 
 describe("every client writer pins the MCP spec (flair#907)", () => {
-  // Iterating ALL_CLIENTS rather than naming four clients is deliberate: a
-  // client added later is covered without anyone remembering to extend this
-  // test, which is the exact failure mode that produced the bug.
-  for (const client of ALL_CLIENTS) {
+  // Iterating the registry rather than naming clients is deliberate: a client
+  // added later is covered without anyone remembering to extend this test,
+  // which is the exact failure mode that produced the bug. Filtered on kind:
+  // pi (native-extension, flair#1342) never writes an MCP spec at all — its
+  // own pin discipline (npm:@tpsdev-ai/pi-flair@<version> in pi's `packages`)
+  // is asserted in test/unit/pi-client.test.ts.
+  for (const client of ALL_CLIENTS.filter((c) => c.kind === "mcp")) {
     it(`${client.label}: writes a pinned spec into its real config file`, () => {
       const res = client.wire({ ...ENV, FLAIR_CLIENT: client.id });
       expect(res.ok).toBe(true);

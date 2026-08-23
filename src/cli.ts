@@ -58,7 +58,7 @@ import {
   type FleetSweepResult,
 } from "./fleet-verify.js";
 import { markStale, sortOldestVersionFirst, type FleetPresenceRow } from "./fleet-presence.js";
-import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, wireAntigravity, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
+import { detectClients, renderWiringSummary, wireClaudeCode, wireCodex, wireGemini, wireCursor, wireAntigravity, wirePi, piFlairSpec, PI_FLAIR_PACKAGE, PI_FLAIR_DEFAULT_URL, clientConfigPath, codexConfigHasFlairSection, type ClientId } from "./install/clients.js";
 import { flairCliVersion, clearFlairCliVersionCache, mcpServerSpec, unpinnedSpecWarning, FLAIR_MCP_PACKAGE } from "./lib/mcp-spec.js";
 import {
   resolveAgentKeyPath,
@@ -85,6 +85,7 @@ import {
 import {
   readClientMcpBlock,
   effectiveFlairUrl,
+  checkPiFlairWiring,
   checkClaudeMdBootstrap,
   detectWiredFlairMcp,
   inspectSessionStartHook,
@@ -3434,7 +3435,7 @@ program
   .option("--data-dir <dir>", "Harper data directory")
   .option("--skip-start", "Skip Harper startup (assume already running)")
   .option("--skip-soul", "Skip interactive personality setup")
-  .option("--client <client>", "MCP client(s) to wire: claude-code, codex, gemini, cursor, antigravity, all, or none")
+  .option("--client <client>", "Client(s) to wire: claude-code, codex, gemini, cursor, antigravity, pi (native extension), all, or none")
   .option("--no-mcp", "Skip MCP client wiring (instance + agent only)")
   .option("--skip-smoke", "Skip the MCP smoke test")
   .option("--skip-claude-md", "Skip appending the Flair bootstrap line to CLAUDE.md (claude-code only)")
@@ -3665,9 +3666,9 @@ program
     const noMcp = opts.mcp === false;
     const selectedClients: ClientId[] = [];
     if (clientOpt && clientOpt !== "all" && clientOpt !== "none" && !noMcp) {
-      const valid: ClientId[] = ["claude-code", "codex", "gemini", "cursor", "antigravity"];
+      const valid: ClientId[] = ["claude-code", "codex", "gemini", "cursor", "antigravity", "pi"];
       if (!valid.includes(clientOpt as ClientId)) {
-        console.error(`Unknown client: ${clientOpt}. Valid: claude-code, codex, gemini, cursor, antigravity, all, none`);
+        console.error(`Unknown client: ${clientOpt}. Valid: claude-code, codex, gemini, cursor, antigravity, pi, all, none`);
         process.exit(1);
       }
       selectedClients.push(clientOpt as ClientId);
@@ -4290,6 +4291,11 @@ program
               case "gemini": result = wireGemini({ ...mcpEnv, FLAIR_CLIENT: "gemini" }); break;
               case "cursor": result = wireCursor({ ...mcpEnv, FLAIR_CLIENT: "cursor" }); break;
               case "antigravity": result = wireAntigravity({ ...mcpEnv, FLAIR_CLIENT: "antigravity" }); break;
+              // pi is a NATIVE EXTENSION, not an MCP client (flair#1342):
+              // wirePi edits ~/.pi/agent/settings.json `packages`, and pi
+              // settings carry no env block — no FLAIR_CLIENT to stamp; the
+              // wire message tells the user what to export at pi launch.
+              case "pi": result = wirePi(mcpEnv); break;
               default: result = { ok: false, message: `Unknown client: ${clientId}` };
             }
             wiringResults.push({ client: clientId, message: result.message, wired: result.ok });
@@ -4302,7 +4308,12 @@ program
       // Launch flair-mcp and confirm it answers a JSON-RPC initialize over
       // stdio. Best-effort: failures warn but never fail the command. Skipped
       // with --skip-smoke, --no-mcp, --client none, or when nothing was wired.
-      if (!opts.skipSmoke && !noMcp && clientOpt !== "none" && wiringResults.length > 0) {
+      // pi doesn't run flair-mcp (native extension, flair#1342), so a pi-only
+      // wiring has nothing this smoke test exercises — spawning it anyway
+      // would render a green "MCP server responded" for a setup that never
+      // starts an MCP server.
+      const wiredAnyMcpClient = wiringResults.some((r) => r.client !== "pi");
+      if (!opts.skipSmoke && !noMcp && clientOpt !== "none" && wiringResults.length > 0 && wiredAnyMcpClient) {
         console.log("\n   Smoke-testing MCP server...");
         try {
           // Same spec that gets WIRED above — the smoke test must exercise the
@@ -14045,11 +14056,13 @@ program
 
     // 7. Client integration (flair#588) — the first 6 checks diagnose the
     // SERVER side. This diagnoses whether Flair is actually wired to a real
-    // MCP client (Claude Code, Codex, Gemini, Cursor): the MCP block present
-    // + reachable + the configured agent genuinely registered (every detected
-    // client), plus CLAUDE.md + the SessionStart hook (Claude Code only,
-    // since only Claude Code has those mechanisms). Reuses detectClients()
-    // rather than reimplementing client detection.
+    // client: for MCP clients (Claude Code, Codex, Gemini, Cursor,
+    // Antigravity) the MCP block present + reachable + the configured agent
+    // genuinely registered; for pi (a NATIVE EXTENSION host — flair#1342) the
+    // pi-flair reference in pi's own settings, including the flair#1346
+    // npm:-under-"extensions" trap; plus CLAUDE.md + the SessionStart hook
+    // (Claude Code only, since only Claude Code has those mechanisms). Reuses
+    // detectClients() rather than reimplementing client detection.
     console.log(`\n  ${render.wrap(render.c.bold, "Client integration")}`);
 
     // Prompt y/N before a content-editing fix, but only when interactive —
@@ -14084,6 +14097,163 @@ program
       }
 
       for (const client of detectedClients) {
+        // ── pi (flair#1342): NATIVE EXTENSION, not an MCP client ───────────
+        // There is no mcpServers block to read — pi loads @tpsdev-ai/pi-flair
+        // through its own settings.json (`packages`). Every check below is a
+        // filesystem fact except agent registration, which is only checkable
+        // when this shell exposes the env pi would launch with — and the
+        // output says which of the two it verified.
+        if (client.kind === "native-extension") {
+          let pi = checkPiFlairWiring(homedir(), process.cwd());
+
+          // --fix for pi needs no agent id (pi settings carry no env block);
+          // a resolvable id only improves the export hint in the message.
+          const wirePiFix = async (prompt: string): Promise<void> => {
+            if (dryRun) {
+              console.log(`     ${render.wrap(render.c.dim, "Would update")} ${pi.settingsPath}`);
+              return;
+            }
+            const proceed = await confirmFix(prompt);
+            if (!proceed) {
+              console.log(`     Skipped.`);
+              return;
+            }
+            const hintAgentId = resolveFixAgentId({
+              optsAgent: opts.agent,
+              envAgentId: process.env.FLAIR_AGENT_ID,
+              anyKnownAgentId,
+              keyAgentIds,
+              keysDir: defaultKeysDir(),
+            }) ?? "<your-agent-id>";
+            const wireResult = wirePi({ FLAIR_AGENT_ID: hintAgentId, FLAIR_URL: baseUrl });
+            console.log(`     ${wireResult.ok ? render.icons.ok : render.icons.warn} ${wireResult.message}`);
+            if (wireResult.ok) fixed++;
+          };
+
+          // (a) The flair#1346 trap FIRST, and by NAME: an npm: spec under
+          // "extensions" is silently ignored by pi — the user believes they
+          // are wired while pi registers zero tools. This is the documented
+          // field failure mode and must never fold into a generic "not
+          // wired": the fix is a MOVE to "packages", not an add.
+          const userTraps = pi.misconfigured.filter((m) => m.path === pi.settingsPath);
+          const projectTraps = pi.misconfigured.filter((m) => m.path !== pi.settingsPath);
+          for (const bad of pi.misconfigured) {
+            console.log(`  ${render.icons.error} pi: ${PI_FLAIR_PACKAGE} is listed under "extensions" as an npm: spec (${bad.entry}) in ${render.wrap(render.c.dim, bad.path)}`);
+            console.log(`     pi silently ignores npm: specs under "extensions", so the Flair tools never register (flair#1346). Package sources belong under "packages".`);
+            issues++;
+          }
+          if (userTraps.length > 0) {
+            if (autoFix) {
+              await wirePiFix(`  Move the npm: spec to "packages" in ${pi.settingsPath} now? [y/N] `);
+              // Re-derive the wiring from disk so the sections below reason
+              // about the POST-fix state — otherwise a move that just
+              // succeeded would still read as "not wired" and prompt again.
+              pi = checkPiFlairWiring(homedir(), process.cwd());
+            } else {
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, `(moves it to "packages")`)}`);
+            }
+          }
+          if (projectTraps.length > 0) {
+            // wirePi edits the USER-scope settings only — a project-scope
+            // trap gets the exact manual fix, never a --fix that claims a
+            // file it does not touch.
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} move the entry from "extensions" to "packages" in ${projectTraps[0]!.path}`);
+          }
+
+          if (!pi.wired) {
+            console.log(`  ${render.icons.error} pi: ${PI_FLAIR_PACKAGE} not wired in ${render.wrap(render.c.dim, pi.settingsPath)}`);
+            if (autoFix) {
+              await wirePiFix(`  Wire pi now (adds ${piFlairSpec()} to "packages" in ${pi.settingsPath})? [y/N] `);
+            } else {
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, `(adds ${piFlairSpec()} to "packages")`)} — or: pi install npm:${PI_FLAIR_PACKAGE}`);
+            }
+            issues++;
+            continue;
+          }
+
+          if (pi.wiredVia === "packages") {
+            console.log(`  ${render.icons.ok} pi: ${PI_FLAIR_PACKAGE} wired via "packages" (${pi.spec}) in ${render.wrap(render.c.dim, pi.wiredIn!)}`);
+            if (!pi.pinnedVersion) {
+              console.log(`     ${render.icons.info} unpinned — pi re-resolves latest on (re)install; pin with ${piFlairSpec()}`);
+            }
+          } else {
+            // extension-path: the documented pre-0.49 workaround (a local
+            // path to the installed dist/index.js). Works, but the canonical
+            // form is a "packages" entry — and a DANGLING path is a broken
+            // wiring pi skips silently, so check the one thing checkable.
+            if (pi.extensionPathExists) {
+              console.log(`  ${render.icons.ok} pi: ${PI_FLAIR_PACKAGE} wired via a file-path "extensions" entry (${pi.spec}) in ${render.wrap(render.c.dim, pi.wiredIn!)}`);
+              console.log(`     ${render.wrap(render.c.dim, `pre-0.49 workaround — the canonical form is a "packages" entry: ${piFlairSpec()}`)}`);
+            } else {
+              console.log(`  ${render.icons.error} pi: the "extensions" entry ${pi.spec} in ${render.wrap(render.c.dim, pi.wiredIn!)} points at a file that does not exist — pi silently skips missing extension paths`);
+              if (autoFix) {
+                await wirePiFix(`  Wire pi via "packages" instead (adds ${piFlairSpec()})? [y/N] `);
+              } else {
+                console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, `(adds ${piFlairSpec()} to "packages"; remove the dangling entry yourself)`)}`);
+              }
+              issues++;
+              continue;
+            }
+          }
+
+          // Env sanity (flair#1342 scope 3). pi settings carry no env block:
+          // pi-flair reads FLAIR_* from the environment of whatever shell/IDE
+          // launches pi. Doctor can only see ITS OWN environment — these
+          // lines verify this shell, and say so, rather than pretending to
+          // verify every pi launch. None of them counts as an issue: a clean
+          // pi launched elsewhere can be fine while this shell is bare, and
+          // vice versa.
+          console.log(`     ${render.wrap(render.c.dim, "pi-flair reads FLAIR_AGENT_ID / FLAIR_URL / FLAIR_KEY_PATH from the shell that launches pi — doctor sees only its own environment (this shell):")}`);
+          const piEnvAgent = process.env.FLAIR_AGENT_ID;
+          const piEnvUrl = process.env.FLAIR_URL;
+          const piEnvKey = process.env.FLAIR_KEY_PATH;
+          if (piEnvAgent) {
+            console.log(`     ${render.icons.ok} FLAIR_AGENT_ID set ('${piEnvAgent}')`);
+          } else {
+            console.log(`     ${render.icons.warn} FLAIR_AGENT_ID not set in this shell — pi-flair falls back to the cwd directory name as its agent id (identity varies by project); export FLAIR_AGENT_ID=<id> where pi is launched`);
+          }
+          if (piEnvUrl) {
+            console.log(`     ${render.icons.ok} FLAIR_URL set (${piEnvUrl})`);
+          } else {
+            console.log(`     ${render.icons.info} FLAIR_URL not set — pi-flair defaults to ${render.wrap(render.c.dim, PI_FLAIR_DEFAULT_URL)}`);
+          }
+          if (piEnvKey) {
+            if (existsSync(piEnvKey)) {
+              console.log(`     ${render.icons.ok} FLAIR_KEY_PATH set (${piEnvKey})`);
+            } else {
+              console.log(`     ${render.icons.warn} FLAIR_KEY_PATH points at a missing file (${piEnvKey})`);
+            }
+          } else {
+            console.log(`     ${render.icons.info} FLAIR_KEY_PATH not set — auto-resolved from ~/.flair/keys`);
+          }
+
+          // Agent registration — checkable only when this shell exposes an
+          // agent id at all; otherwise say what was NOT verified instead of
+          // skipping silently.
+          if (piEnvAgent) {
+            const piUrl = piEnvUrl || PI_FLAIR_DEFAULT_URL;
+            const piReachable = await probeFlairReachable(piUrl);
+            if (!piReachable) {
+              console.log(`     ${render.icons.warn} FLAIR_URL ${render.wrap(render.c.dim, piUrl)} not reachable — cannot verify agent registration`);
+            } else {
+              const piReg = await checkAgentRegistered(piUrl, piEnvAgent, defaultKeysDir());
+              if (piReg.state === "registered") {
+                console.log(`     ${render.icons.ok} agent '${piEnvAgent}' registered`);
+              } else if (piReg.state === "not-registered") {
+                console.log(`     ${render.icons.error} agent '${piEnvAgent}' is NOT registered on this Flair instance`);
+                console.log(`        ${render.wrap(render.c.dim, "Fix:")} flair agent add ${piEnvAgent}`);
+                issues++;
+              } else {
+                const piFinding = describeAgentGateFinding(piEnvAgent, piReg.state, piReg.detail, { instanceReachable: piReachable });
+                console.log(`     ${render.icons.warn} ${piFinding?.message ?? `could not verify agent registration (${piReg.detail})`}`);
+              }
+            }
+          } else {
+            console.log(`     ${render.wrap(render.c.dim, "agent registration not verified — no FLAIR_AGENT_ID visible to doctor")}`);
+          }
+          continue;
+        }
+
         const block = readClientMcpBlock(client.id, homedir());
         if (client.id === "claude-code" && block.agentId) claudeCodeAgentId = block.agentId;
         if (block.agentId) anyKnownAgentId = anyKnownAgentId ?? block.agentId;

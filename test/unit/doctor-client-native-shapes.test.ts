@@ -145,7 +145,15 @@ const ANTIGRAVITY_NATIVE = `{
   }
 }`;
 
-const NATIVE_FIXTURES: Record<ClientId, string> = {
+// pi is in the registry but is NOT an MCP client (kind: "native-extension",
+// flair#1342) — it has no mcpServers block for readClientMcpBlock to accept,
+// so it has no fixture here BY DESIGN. Its native-shape coverage (settings.json
+// `packages`/`extensions`, including the flair#1346 npm:-under-extensions trap)
+// lives in test/unit/pi-client.test.ts.
+type McpClientId = Exclude<ClientId, "pi">;
+const MCP_CLIENTS = ALL_CLIENTS.filter((c) => c.kind === "mcp");
+
+const NATIVE_FIXTURES: Record<McpClientId, string> = {
   "claude-code": CLAUDE_CODE_NATIVE,
   codex: CODEX_NATIVE,
   gemini: GEMINI_NATIVE,
@@ -153,7 +161,7 @@ const NATIVE_FIXTURES: Record<ClientId, string> = {
   antigravity: ANTIGRAVITY_NATIVE,
 };
 
-const WIRE_FNS: Record<ClientId, (env: WireEnv) => { ok: boolean; message: string }> = {
+const WIRE_FNS: Record<McpClientId, (env: WireEnv) => { ok: boolean; message: string }> = {
   "claude-code": wireClaudeCode,
   codex: wireCodex,
   gemini: wireGemini,
@@ -192,7 +200,7 @@ function withHomeEnv<T>(home: string, fn: () => T): T {
   }
 }
 
-function writeNativeFixture(home: string, clientId: ClientId): string {
+function writeNativeFixture(home: string, clientId: McpClientId): string {
   const path = withHomeEnv(home, () => clientConfigPath(clientId));
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, NATIVE_FIXTURES[clientId]);
@@ -202,7 +210,7 @@ function writeNativeFixture(home: string, clientId: ClientId): string {
 /** Run OUR wire function for `clientId` against a fresh HOME and return the
  *  exact file bytes it wrote — the "our generator" side of every drift
  *  assertion. */
-function ourWireOutput(clientId: ClientId): string {
+function ourWireOutput(clientId: McpClientId): string {
   const wireHome = mkdtempSync(join(tmpdir(), "flair-wire-out-"));
   try {
     return withHomeEnv(wireHome, () => {
@@ -220,12 +228,16 @@ function ourWireOutput(clientId: ClientId): string {
 // ── the per-client suites ───────────────────────────────────────────────────
 
 describe("doctor recognizes client-NATIVE MCP config shapes (flair#1287)", () => {
-  it("carries a client-native fixture for EVERY registry client — a new ALL_CLIENTS entry must add one", () => {
-    expect(Object.keys(NATIVE_FIXTURES).sort()).toEqual(ALL_CLIENTS.map((c) => c.id).sort());
+  it("carries a client-native fixture for EVERY MCP registry client — a new mcp-kind ALL_CLIENTS entry must add one", () => {
+    // Filtered on kind, not on a hardcoded id list: a future MCP client is
+    // still forced to add a fixture, while a native-extension client (pi —
+    // no mcpServers block exists for it, flair#1342) is excluded by its
+    // declared kind rather than by someone remembering to exempt it here.
+    expect(Object.keys(NATIVE_FIXTURES).sort()).toEqual(MCP_CLIENTS.map((c) => c.id).sort());
   });
 
-  for (const client of ALL_CLIENTS) {
-    const id = client.id;
+  for (const client of MCP_CLIENTS) {
+    const id = client.id as McpClientId;
 
     it(`${id}: accepts the client-native shape — present, agent read, URL defaulted`, () => {
       writeNativeFixture(isoHome, id);

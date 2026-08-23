@@ -23,7 +23,15 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { ALL_CLIENTS, clientConfigPath, type ClientId } from "./install/clients.js";
+import {
+  ALL_CLIENTS,
+  clientConfigPath,
+  piSettingsPath,
+  resolvePiExtensionPath,
+  scanPiSettings,
+  type ClientId,
+  type PiSettingsScan,
+} from "./install/clients.js";
 import { FLAIR_MCP_PACKAGE } from "./lib/mcp-spec.js";
 
 // The exact substring `flair init` writes into CLAUDE.md (src/cli.ts, the
@@ -691,6 +699,102 @@ function scanCodexFlairBlock(raw: string): { present: boolean; agentId?: string;
   // docs/mcp-clients.md's own Codex snippet sets only FLAIR_AGENT_ID.
   const present = !!agentId;
   return { present, agentId, flairUrl, urlDefaulted: present && !flairUrl };
+}
+
+// ── check 1b: pi native-extension wiring (flair#1342) ───────────────────────
+//
+// pi is in the client registry but is NOT an MCP client (kind:
+// "native-extension") — it loads @tpsdev-ai/pi-flair through its own
+// settings.json, so the mcpServers machinery above cannot see its wiring.
+// This is the pi twin of readClientMcpBlock: pure fs, never throws, malformed
+// input reads as "not present".
+//
+// WHAT DOCTOR CAN AND CANNOT CHECK FOR PI — stated here once, because the
+// rendering in cli.ts leans on it:
+//
+//   CAN  — pi presence (registry detection: `pi` on PATH or the settings file);
+//          whether pi-flair is referenced, WHERE (packages vs extensions), and
+//          the pinned version when the packages source carries one;
+//          the flair#1346 trap: an `npm:` spec under `extensions`, which pi
+//          silently ignores — reported as its own finding with the exact fix
+//          (move to `packages`), never folded into a generic "not wired";
+//          whether a file-path extensions entry resolves to a real file.
+//   CANNOT — the environment pi actually launches with. pi settings carry no
+//          per-package env, so FLAIR_AGENT_ID/FLAIR_URL/FLAIR_KEY_PATH come
+//          from whatever shell/IDE starts pi. Doctor sees only ITS OWN env and
+//          must say so when reporting env sanity — a green "FLAIR_AGENT_ID
+//          set" line proves this shell, not pi's.
+
+export interface PiFlairWiringReport {
+  /** User-scope settings path (~/.pi/agent/settings.json or the
+   *  PI_CODING_AGENT_DIR override) — reported even when absent. */
+  settingsPath: string;
+  /** Every settings file consulted, with existence — user scope always,
+   *  project scope (<cwd>/.pi/settings.json) when a cwd was given. */
+  checked: Array<{ path: string; exists: boolean }>;
+  wired: boolean;
+  /** How it is wired: a `packages` npm source (canonical) or a file-path
+   *  `extensions` entry (the documented pre-0.49 workaround). */
+  wiredVia: "packages" | "extension-path" | null;
+  /** The settings file the wiring was found in. */
+  wiredIn?: string;
+  /** The verbatim source/path entry that wires it. */
+  spec?: string;
+  pinnedVersion: string | null;
+  /** extension-path wiring only: does the resolved file exist? A dangling
+   *  path is a broken wiring pi skips silently. */
+  extensionPathExists?: boolean;
+  /** flair#1346 trap instances: npm: pi-flair specs under `extensions`,
+   *  by file. Reported independently of `wired` — a correct packages entry
+   *  does not launder a decoy that will mislead the next editor. */
+  misconfigured: Array<{ path: string; entry: string }>;
+}
+
+export function checkPiFlairWiring(homeDir: string, cwd?: string): PiFlairWiringReport {
+  const userPath = withHome(homeDir, () => piSettingsPath());
+  const files: Array<{ path: string; baseDir: string }> = [
+    // pi resolves user-scope relative paths against the agent dir (the
+    // settings file's own directory), project-scope against the project dir.
+    { path: userPath, baseDir: dirname(userPath) },
+  ];
+  if (cwd) files.push({ path: join(cwd, ".pi", "settings.json"), baseDir: cwd });
+
+  const report: PiFlairWiringReport = {
+    settingsPath: userPath,
+    checked: [],
+    wired: false,
+    wiredVia: null,
+    pinnedVersion: null,
+    misconfigured: [],
+  };
+
+  for (const file of files) {
+    const raw = readTextFile(file.path);
+    report.checked.push({ path: file.path, exists: raw !== null });
+    const scan: PiSettingsScan = scanPiSettings(raw);
+    for (const entry of scan.misconfiguredNpmUnderExtensions) {
+      report.misconfigured.push({ path: file.path, entry });
+    }
+    if (report.wired) continue; // first wiring found wins; keep collecting traps
+    if (scan.packagesSpec) {
+      report.wired = true;
+      report.wiredVia = "packages";
+      report.wiredIn = file.path;
+      report.spec = scan.packagesSpec;
+      report.pinnedVersion = scan.pinnedVersion;
+      continue;
+    }
+    if (scan.extensionFilePaths.length > 0) {
+      const entry = scan.extensionFilePaths[0]!;
+      report.wired = true;
+      report.wiredVia = "extension-path";
+      report.wiredIn = file.path;
+      report.spec = entry;
+      report.extensionPathExists = existsSync(resolvePiExtensionPath(entry, homeDir, file.baseDir));
+    }
+  }
+
+  return report;
 }
 
 // ── check 2: FLAIR_URL to use when (re-)wiring a client (flair#727) ────────
