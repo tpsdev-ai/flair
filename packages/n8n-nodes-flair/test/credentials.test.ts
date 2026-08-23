@@ -16,10 +16,21 @@ describe("FlairApi credential", () => {
     expect(names).toContain("adminPassword");
   });
 
-  test("baseUrl defaults to localhost:9926", () => {
+  test("baseUrl defaults to localhost:19926 — stock `flair init` port (#1352 pin)", () => {
     const baseUrl = cred.properties.find((p) => p.name === "baseUrl")!;
-    expect(baseUrl.default).toBe("http://localhost:9926");
+    expect(baseUrl.default).toBe("http://localhost:19926");
     expect(baseUrl.required).toBe(true);
+    // Colon-anchored regression pin (#1347 family, bob#91 pattern):
+    // ":19926" contains the substring "9926", so a bare contains-check
+    // could never catch a flip back to the fossilized spoke port. The
+    // leading colon makes ":9926" match ONLY the old literal.
+    expect(String(baseUrl.default)).toContain(":19926");
+    expect(String(baseUrl.default)).not.toContain(":9926");
+    // The description names the default too — pin it the same way so the
+    // UI hint can't silently drift back either. (It may legitimately
+    // MENTION :9926 as the spoke port; it must lead with :19926 and the
+    // default itself must not regress.)
+    expect(String(baseUrl.description)).toContain(":19926");
   });
 
   test("adminPassword is masked (password type)", () => {

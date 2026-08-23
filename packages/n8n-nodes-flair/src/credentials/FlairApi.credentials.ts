@@ -38,9 +38,10 @@ export class FlairApi implements ICredentialType {
       displayName: 'Base URL',
       name: 'baseUrl',
       type: 'string',
-      default: 'http://localhost:9926',
+      default: 'http://localhost:19926',
       required: true,
-      description: 'The Flair instance URL. Use http://localhost:9926 for local installs.',
+      description:
+        'The Flair instance URL. Use http://localhost:19926 for local installs (the port a stock `flair init` serves). Spoke deployments commonly use :9926.',
     },
     {
       displayName: 'Agent ID',
