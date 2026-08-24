@@ -610,13 +610,13 @@ describe("computeQualityReport", () => {
  * flair-quality Slice 2 (quality OrgEvents): unit tests for the pure
  * snapshot/diff/threshold core behind `flair quality --emit` —
  * buildQualitySnapshot, diffQualitySnapshots, qualitySnapshotSubject. The
- * I/O halves (fetchPreviousQualitySnapshot, storeQualitySnapshot,
- * publishOrgEvent, and the `--emit` action wiring itself) are exercised the
- * same way the report's own I/O boundary (fetchHealthDetail /
- * fetchRecallSpotCheckData) is — not directly unit tested, same rationale as
- * this file's header doc: network + console.log plumbing is high-effort,
- * low-value to test directly; the decision logic underneath is what must be
- * airtight, and that's what's covered here.
+ * I/O halves (storeQualitySnapshot, publishOrgEvent, and the `--emit`
+ * action wiring itself) stay out of this file — network + console.log
+ * plumbing is high-effort, low-value to test directly; the decision logic
+ * underneath is what must be airtight, and that's what's covered here.
+ * The Memory listing URL itself is locked by
+ * test/unit/quality-recall-fetch-1360.test.ts (flair#1360: no embeddings,
+ * no whole-table fetch for a 10-row sample).
  */
 describe("flair-quality Slice 2 — snapshot + diff + OrgEvent thresholds", () => {
   function snap(overrides: Partial<QualitySnapshotCore> = {}): QualitySnapshotCore {
