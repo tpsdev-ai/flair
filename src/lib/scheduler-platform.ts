@@ -22,7 +22,7 @@
  */
 import { existsSync, mkdirSync, writeFileSync, readFileSync, realpathSync } from "node:fs";
 import { resolve, dirname, isAbsolute, basename } from "node:path";
-import { platform } from "node:os";
+import { platform, userInfo } from "node:os";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
 export type SchedulerPlatform = "darwin" | "linux";
@@ -102,12 +102,66 @@ export function interpretActiveResult(
 }
 
 /**
- * Human remedy text for a failed scheduler-load attempt (flair#850). Covers
- * the one root cause traced so far: a missing systemd user session bus,
- * which blocks `systemctl --user` entirely in ssh-without-lingering,
- * container, and CI contexts. Returns null when the failure doesn't match a
- * known pattern — the caller already prints the raw stderr, so the operator
- * still has something to go on.
+ * Session facts used to pick the right "no user bus" remedy (flair#1107).
+ * Passing them keeps `describeLoadFailure` a pure function of its inputs —
+ * formatEnableReport / tests inject linger state so they never spawn
+ * loginctl, and the CLI probes once on the real failure path.
+ */
+export interface UserBusSessionFacts {
+  /**
+   * Whether lingering is already on for this user.
+   * true  — do not print `loginctl enable-linger` (the operator already ran it).
+   * false — lingering is off; the linger remedy is still the right first step.
+   * omitted/null — unknown; keep the linger remedy (do not invent linger-on).
+   */
+  lingerEnabled?: boolean | null;
+  /** Session environment used to detect a missing user-bus env. */
+  env?: NodeJS.Dict<string>;
+}
+
+/** True when this session already has the env `systemctl --user` needs. */
+export function sessionHasUserBusEnv(env: NodeJS.Dict<string> = process.env): boolean {
+  return Boolean(env.XDG_RUNTIME_DIR?.trim() && env.DBUS_SESSION_BUS_ADDRESS?.trim());
+}
+
+/**
+ * Reads whether lingering is already enabled for the current user.
+ * `loginctl show-user … Linger=yes` is the official answer; the stamp file
+ * `loginctl enable-linger` creates is the fallback when loginctl is missing
+ * or inconclusive. A failed probe is `null`, never linger-off — inventing
+ * linger-off would repeat the linger remedy after it already ran (#1107).
+ */
+export function probeUserLingerEnabled(opts: {
+  run?: (cmd: string[], timeoutMs: number) => SpawnReport;
+  lingerStampExists?: (user: string) => boolean;
+} = {}): boolean | null {
+  const run = opts.run ?? spawnReport;
+  const lingerStampExists = opts.lingerStampExists ?? ((u) => existsSync(`/var/lib/systemd/linger/${u}`));
+  let user = "";
+  try {
+    user = userInfo().username;
+  } catch {
+    user = process.env.USER || process.env.LOGNAME || "";
+  }
+  if (!user) return null;
+  const r = run(["loginctl", "show-user", user, "--property=Linger"], STATUS_CHECK_TIMEOUT_MS);
+  const m = /^Linger=(yes|no)\s*$/m.exec(r.stdout ?? "");
+  if (m) return m[1] === "yes";
+  if (lingerStampExists(user)) return true;
+  return null;
+}
+
+/**
+ * Human remedy text for a failed scheduler-load attempt (flair#850, #1107).
+ * Covers the traced "no systemd user session bus" failure, which blocks
+ * `systemctl --user` entirely in ssh-without-lingering, container, and CI
+ * contexts. Two cases that used to share one remedy:
+ *   (a) lingering genuinely off — print `loginctl enable-linger`
+ *   (b) linger already on, this session has no user-bus env — print the
+ *       `XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` export lines
+ * Repeating (a) after the operator has applied it is the #1107 lie.
+ * Returns null when the failure doesn't match a known pattern — the caller
+ * already prints the raw stderr, so the operator still has something to go on.
  *
  * `enableCommand` is the caller's own enable invocation, named in the remedy
  * so the operator is told to re-run the command they actually ran.
@@ -116,9 +170,30 @@ export function describeLoadFailure(
   plat: SchedulerPlatform,
   loadResult: { code: number | null; stderr: string },
   enableCommand: string,
+  session?: UserBusSessionFacts,
 ): string | null {
   const stderr = loadResult.stderr || "";
   if (plat === "linux" && /failed to connect to bus/i.test(stderr)) {
+    if (session?.lingerEnabled === true) {
+      const env = session.env ?? process.env;
+      if (!sessionHasUserBusEnv(env)) {
+        return (
+          "No systemd user session bus is available in this session. Lingering is already enabled — " +
+          "do not re-run `loginctl enable-linger`. The remaining gap is this session's user-bus environment. " +
+          "Export:\n" +
+          "     export XDG_RUNTIME_DIR=/run/user/$(id -u)\n" +
+          "     export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus\n" +
+          `   then re-run \`${enableCommand}\`.`
+        );
+      }
+      return (
+        "No systemd user session bus is available in this session. Lingering is already enabled and " +
+        "this session already has XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS — " +
+        "do not re-run `loginctl enable-linger` or re-export those variables. " +
+        "Check that `$XDG_RUNTIME_DIR/bus` exists (the systemd --user instance may not be running), " +
+        `then re-run \`${enableCommand}\`.`
+      );
+    }
     return (
       "No systemd user session bus is available in this session (common over ssh without lingering, " +
       "in containers, or under CI). Fix: enable lingering for this user — `loginctl enable-linger <user>` " +

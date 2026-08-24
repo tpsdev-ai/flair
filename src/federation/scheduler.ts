@@ -77,7 +77,9 @@ import {
   resolveFlairBin,
   formatFlairBinWarning,
   verifyFirstRun,
+  probeUserLingerEnabled,
   STATUS_CHECK_TIMEOUT_MS,
+  type UserBusSessionFacts,
 } from "../lib/scheduler-platform.js";
 
 export type { SchedulerPlatform };
@@ -765,7 +767,10 @@ function appendFlairBinWarning(lines: string[], r: EnableResult): void {
   lines.push(...warning);
 }
 
-export function formatEnableReport(r: EnableResult, input: { adminPassFile?: string; target?: string }): FormattedReport {
+export function formatEnableReport(
+  r: EnableResult,
+  input: { adminPassFile?: string; target?: string } & UserBusSessionFacts,
+): FormattedReport {
   const activationFailed = !!r.loadResult && r.loadResult.code !== 0;
   const credLine = input.adminPassFile
     ? `   Credential:  ${input.adminPassFile} ${"(path only — the password is never written into the unit)"}`
@@ -783,7 +788,13 @@ export function formatEnableReport(r: EnableResult, input: { adminPassFile?: str
     if (input.target) lines.push(`   Target:      ${input.target}`);
     lines.push(`   Activation:  ${r.loadCommand.join(" ")} → code ${lr.code}`);
     if (lr.stderr) lines.push(`     stderr: ${lr.stderr.trim()}`);
-    const remedy = describeLoadFailureFor(r.platform, lr, "flair federation sync enable");
+    const lingerEnabled = input.lingerEnabled !== undefined
+      ? input.lingerEnabled
+      : (r.platform === "linux" ? probeUserLingerEnabled() : undefined);
+    const remedy = describeLoadFailureFor(r.platform, lr, "flair federation sync enable", {
+      lingerEnabled,
+      env: input.env,
+    });
     lines.push("");
     lines.push(remedy ? `   ${remedy}` : `   Re-run the activation command above manually to see the full diagnostic.`);
     lines.push("");

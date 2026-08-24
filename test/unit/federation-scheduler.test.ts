@@ -646,7 +646,7 @@ describe("formatEnableReport (flair#850 — no success headline before activatio
   it("does NOT print a success headline when activation failed", () => {
     const { lines, ok } = formatEnableReport(
       result({ loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" } }),
-      {},
+      { lingerEnabled: false },
     );
     const text = lines.join("\n");
     expect(ok).toBe(false);
@@ -656,6 +656,20 @@ describe("formatEnableReport (flair#850 — no success headline before activatio
     expect(text).toContain("loginctl enable-linger");
     expect(text).toContain("flair federation sync enable");
     expect(text).not.toContain("rem nightly");
+  });
+
+  it("does not repeat the linger remedy after lingering is already on (flair#1107)", () => {
+    const { lines, ok } = formatEnableReport(
+      result({ loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" } }),
+      { lingerEnabled: true, env: {} },
+    );
+    const text = lines.join("\n");
+    expect(ok).toBe(false);
+    expect(text).not.toContain("loginctl enable-linger <user>");
+    expect(text).not.toMatch(/Fix: enable lingering/);
+    expect(text).toContain("XDG_RUNTIME_DIR");
+    expect(text).toContain("DBUS_SESSION_BUS_ADDRESS");
+    expect(text).toContain("flair federation sync enable");
   });
 
   it("treats a null exit code (timeout/killed) as failure", () => {
