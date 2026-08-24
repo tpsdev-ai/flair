@@ -71,10 +71,19 @@ export interface ArmRunMetrics {
 export function mean(xs: number[]): number {
   return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
 }
-/** Sample std (n-1). 0 for n<2. */
-export function std(xs: number[]): number {
+/**
+ * Sample std (n-1). **null for n<2 — the spread was never measured** (#1376).
+ *
+ * The obvious sentinel here is `0`, and it is wrong: a single run has no
+ * spread to report, but `0` is the value that reads as the STRONGEST possible
+ * claim — "we ran it repeatedly and it agreed perfectly". An unknown must never
+ * resolve to the most confident-looking number. `null` forces every consumer to
+ * decide what to do about the absence instead of inheriting a fabricated zero,
+ * and the type says so.
+ */
+export function std(xs: number[]): number | null {
   const n = xs.length;
-  if (n < 2) return 0;
+  if (n < 2) return null;
   const m = mean(xs);
   return Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / (n - 1));
 }
@@ -158,12 +167,20 @@ export function aggregateArmRun(arm: Arm, results: QuestionArmResult[]): ArmRunM
   };
 }
 
-export interface MeanStd { mean: number; std: number; runs: number[] }
+/** `std: null` means the variance was NOT measured (fewer than 2 runs) — it does
+ *  NOT mean the variance was zero. Consumers must render the two differently
+ *  (#1376). `runs` carries the underlying values either way. */
+export interface MeanStd { mean: number; std: number | null; runs: number[] }
 function ms(runs: number[]): MeanStd { return { mean: mean(runs), std: std(runs), runs }; }
 
 export interface ArmAggregate {
   arm: Arm;
   runs: number;
+  /** False when this aggregate came from a single run: every `std` below is
+   *  `null` because nothing was measured twice. Carried as its own boolean so a
+   *  downstream consumer reading the artifact cannot mistake an absent spread
+   *  for a measured one, without having to reason about null-vs-zero (#1376). */
+  varianceMeasured: boolean;
   overallAccuracy: MeanStd;
   /** Answerable-only accuracy across runs — the contamination-probe number. */
   overallAccuracyAnswerable: MeanStd;
@@ -190,6 +207,7 @@ export function aggregateArmAcrossRuns(arm: Arm, perRun: ArmRunMetrics[]): ArmAg
   return {
     arm,
     runs: perRun.length,
+    varianceMeasured: perRun.length >= 2,
     overallAccuracy: ms(perRun.map((r) => r.overallAccuracy)),
     overallAccuracyAnswerable: ms(perRun.map((r) => r.overallAccuracyAnswerable)),
     perAbility,

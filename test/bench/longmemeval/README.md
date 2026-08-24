@@ -273,6 +273,13 @@ differ. A published cloud number is a *statistical* result to be re-run and
 compared within variance, not a hash anyone can re-derive — which is why the
 run count and the reported std matter.
 
+At `--runs 1` there is **no** std to report, and the harness says so rather than
+printing one. `std` is `null` (never `0`), the arm aggregate carries
+`varianceMeasured: false`, and the headline renders
+`66.0% (single run — variance unmeasured)` instead of `66.0% ± 0.0%` (flair#1376).
+A zero would be indistinguishable from "we ran it repeatedly and it agreed
+perfectly", which is the opposite of what a single run establishes.
+
 The `local` profile runs single-stream against a pinned local digest and is
 expected to be closer to bitwise-stable, but that has **not** been measured;
 do not claim it without a measurement. (The cloud *judge* returned an identical

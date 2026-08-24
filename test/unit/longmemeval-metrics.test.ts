@@ -15,10 +15,25 @@ function r(over: Partial<QuestionArmResult>): QuestionArmResult {
 describe("stats helpers", () => {
   test("mean / sample-std / percentile", () => {
     expect(mean([1, 2, 3])).toBe(2);
-    expect(std([2, 2, 2])).toBe(0);
-    expect(std([1])).toBe(0);            // n<2 → 0, never NaN
     expect(percentile([1, 2, 3, 4], 50)).toBe(2);
     expect(percentile([], 95)).toBe(0);
+  });
+
+  test("a MEASURED zero spread is 0 — three identical runs really did agree", () => {
+    expect(std([2, 2, 2])).toBe(0);
+  });
+
+  test("an UNMEASURED spread is null, not 0 (#1376)", () => {
+    // This assertion used to read `expect(std([1])).toBe(0)  // never NaN`, and
+    // that comment named the goal it achieved while missing the cost: it pinned
+    // the defect. Avoiding NaN was right; choosing 0 as the sentinel was not.
+    // One run has NO spread to report, and 0 is the value that reads as the
+    // strongest possible claim — a headline of "66.0% ± 0.0%" tells a reader we
+    // measured perfect agreement when we measured nothing at all.
+    expect(std([1])).toBeNull();
+    expect(std([])).toBeNull();
+    // The original goal still holds: null, and never NaN.
+    expect(std([1])).not.toBeNaN();
   });
 });
 
@@ -93,8 +108,34 @@ describe("aggregateArmAcrossRuns — mean±std (pass^k)", () => {
     const run2 = aggregateArmRun("flair", [r({ verdict: "CORRECT" }), r({ verdict: "CORRECT" })]);
     const agg = aggregateArmAcrossRuns("flair", [run1, run2]);
     expect(agg.runs).toBe(2);
+    expect(agg.varianceMeasured).toBe(true);
     expect(agg.overallAccuracy.mean).toBeCloseTo((0.5 + 1) / 2, 10);
     expect(agg.overallAccuracy.std).toBeGreaterThan(0);
     expect(agg.overallAccuracy.runs).toEqual([0.5, 1]);
+  });
+
+  test("a ONE-run aggregate reports varianceMeasured: false and a null std (#1376)", () => {
+    // The artifact is read by consumers that never see the console report, so
+    // the absence has to be a fact IN THE DATA — not something recoverable by
+    // noticing that `runs` has length 1. `std: null` and `varianceMeasured:
+    // false` say it twice, in the two shapes a consumer might look at.
+    const agg = aggregateArmAcrossRuns("flair", [
+      aggregateArmRun("flair", [r({ verdict: "CORRECT" }), r({ verdict: "INCORRECT" })]),
+    ]);
+    expect(agg.runs).toBe(1);
+    expect(agg.varianceMeasured).toBe(false);
+    expect(agg.overallAccuracy.mean).toBeCloseTo(0.5, 10);
+    expect(agg.overallAccuracy.std).toBeNull();
+    expect(agg.overallAccuracy.runs).toEqual([0.5]);
+    // Every other MeanStd in the aggregate carries the same absence — a
+    // consumer must not find one field honest and another fabricated.
+    for (const field of [
+      agg.overallAccuracyAnswerable, agg.abstentionAccuracy, agg.notAttemptedRateAnswerable,
+      agg.factualF1, agg.factualContainmentEM, agg.tokensPerQueryMean,
+      agg.latencyP50Ms, agg.latencyP95Ms,
+    ]) {
+      expect(field.std).toBeNull();
+    }
+    for (const msd of Object.values(agg.perAbility)) expect(msd!.std).toBeNull();
   });
 });
