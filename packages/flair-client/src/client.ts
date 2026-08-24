@@ -90,6 +90,7 @@ export class FlairClient {
         candidates: [],
         resolvedPath: "(in-memory)",
         signed: true,
+        authMethod: "ed25519",
       };
       return this.privateKey;
     }
@@ -101,7 +102,11 @@ export class FlairClient {
       // Silent fallback to unauthenticated would be a security risk.
       this.privateKey = loadPrivateKey(lookup.resolvedPath);
     }
-    this.lastKeyLookup = { ...lookup, signed: this.privateKey != null };
+    this.lastKeyLookup = {
+      ...lookup,
+      signed: this.privateKey != null,
+      authMethod: this.privateKey ? "ed25519" : "none",
+    };
     return this.privateKey;
   }
 
@@ -113,6 +118,17 @@ export class FlairClient {
       headers["Authorization"] = signRequest(this.agentId, key, method, path);
     } else if (this.basicAuth) {
       headers["Authorization"] = this.basicAuth;
+      this.lastKeyLookup = {
+        ...(this.lastKeyLookup ?? {
+          agentId: this.agentId,
+          home: "",
+          candidates: [],
+          resolvedPath: null,
+          signed: false,
+        }),
+        signed: false,
+        authMethod: "basic",
+      };
     }
     const res = await fetch(`${this.url}${path}`, {
       method,

@@ -24,6 +24,13 @@ export function loadPrivateKey(path: string): KeyObject {
   return createPrivateKey({ key: der, format: "der", type: "pkcs8" });
 }
 
+/** Injectable homes so tests can diverge `$HOME` / `os.homedir()` / passwd home. */
+export interface HomeSources {
+  homedir: string;
+  envHome?: string;
+  userHomedir?: string;
+}
+
 /**
  * Homes to probe, computed at CALL TIME (flair#1271).
  *
@@ -35,12 +42,22 @@ export function loadPrivateKey(path: string): KeyObject {
  *
  * Empty / relative values are dropped: `path.resolve("")` is cwd, which is
  * exactly the footgun this function exists to refuse.
+ *
+ * `sources` is for tests: a fixture that puts the key only on `userHomedir`
+ * while `homedir`/`envHome` point at a sandbox must FAIL if the passwd-home
+ * probe is dropped.
  */
-export function callTimeHomes(): string[] {
+export function callTimeHomes(sources?: HomeSources): string[] {
   const homes: string[] = [];
   const push = (h: string | undefined) => {
     if (h && isAbsolute(h) && !homes.includes(h)) homes.push(h);
   };
+  if (sources) {
+    push(sources.homedir);
+    push(sources.envHome);
+    push(sources.userHomedir);
+    return homes;
+  }
   push(homedir());
   push(process.env.HOME);
   try {
@@ -72,8 +89,7 @@ function toAbsoluteKeyPath(p: string): string | null {
 }
 
 /** Candidate key files for `agentId`, in probe order. Deduplicated. */
-export function keyPathCandidates(agentId: string, keyPath?: string): string[] {
-  const homes = callTimeHomes();
+export function keyPathCandidates(agentId: string, keyPath?: string, homes: string[] = callTimeHomes()): string[] {
   const primaryHome = homes[0] ?? "";
 
   if (keyPath) {
@@ -97,6 +113,9 @@ export function keyPathCandidates(agentId: string, keyPath?: string): string[] {
   return [...new Set(out)];
 }
 
+/** How the request that failed was authenticated. */
+export type KeyAuthMethod = "ed25519" | "basic" | "none";
+
 /** Snapshot of a key-file lookup — attached to 401/403 so the error can name paths. */
 export interface KeyLookupState {
   agentId: string;
@@ -106,25 +125,33 @@ export interface KeyLookupState {
   resolvedPath: string | null;
   /** True when this request carried an Ed25519 Authorization header. */
   signed: boolean;
+  /** What was actually sent. Basic-auth 401s must not push FLAIR_KEY_PATH. */
+  authMethod?: KeyAuthMethod;
+}
+
+function authMethodOf(state: KeyLookupState): KeyAuthMethod {
+  if (state.authMethod) return state.authMethod;
+  return state.signed ? "ed25519" : "none";
 }
 
 /** Inspect standard key locations. Does not cache — call at request time (flair#1271). */
-export function inspectKeyLookup(agentId: string, keyPath?: string): Omit<KeyLookupState, "signed"> {
-  const candidates = keyPathCandidates(agentId, keyPath).map((path) => ({
+export function inspectKeyLookup(agentId: string, keyPath?: string, homes?: string[]): Omit<KeyLookupState, "signed" | "authMethod"> {
+  const resolvedHomes = homes ?? callTimeHomes();
+  const candidates = keyPathCandidates(agentId, keyPath, resolvedHomes).map((path) => ({
     path,
     exists: existsSync(path),
   }));
   return {
     agentId,
-    home: callTimeHomes()[0] ?? "",
+    home: resolvedHomes[0] ?? "",
     candidates,
     resolvedPath: candidates.find((c) => c.exists)?.path ?? null,
   };
 }
 
 /** Find the agent's private key file from standard locations. */
-export function resolveKeyPath(agentId: string, keyPath?: string): string | null {
-  return inspectKeyLookup(agentId, keyPath).resolvedPath;
+export function resolveKeyPath(agentId: string, keyPath?: string, homes?: string[]): string | null {
+  return inspectKeyLookup(agentId, keyPath, homes).resolvedPath;
 }
 
 /** Actor + state + remedy for a 401/403 (flair#1271). */
@@ -132,9 +159,12 @@ export function formatKeyLookup(state: KeyLookupState): string {
   const actor = state.agentId
     ? `agent '${state.agentId}'`
     : "this agent (FLAIR_AGENT_ID unset)";
-  const stateLine = state.signed
+  const method = authMethodOf(state);
+  const stateLine = method === "ed25519"
     ? `${actor} signed with ${state.resolvedPath}.`
-    : `${actor} sent this request without a signing key.`;
+    : method === "basic"
+      ? `${actor} sent this request with Basic admin credentials (FLAIR_ADMIN_USER / FLAIR_ADMIN_PASSWORD), not an Ed25519 key.`
+      : `${actor} sent this request without a signing key.`;
   const homeLine = `os.homedir() at lookup: ${state.home || "(empty — refused to fall back to cwd)"}`;
   const looked = state.candidates.length === 0
     ? "Looked for a key at: (no candidate paths — home could not be resolved)."
@@ -142,9 +172,11 @@ export function formatKeyLookup(state: KeyLookupState): string {
         "Looked for a key at:",
         ...state.candidates.map((c) => `  ${c.path} (${c.exists ? "found" : "missing"})`),
       ].join("\n");
-  const remedy = state.signed
+  const remedy = method === "ed25519"
     ? "The server rejected the signature. Confirm the agent is registered (`flair agent add <id>`) and this key matches the Agent record. A daemon restart can also produce this — check `flair status`."
-    : "If `flair agent add` wrote the key, this process's home may differ from that shell, or the file appeared after an earlier lookup. Retry the tool (misses are no longer cached). Still missing? Set FLAIR_KEY_PATH to the absolute path of the .key file.";
+    : method === "basic"
+      ? "The server rejected those admin credentials. Check FLAIR_ADMIN_USER and FLAIR_ADMIN_PASSWORD — this 401 is not a missing agent key."
+      : "If `flair agent add` wrote the key, this process's home may differ from that shell, or the file appeared after an earlier lookup. Retry the tool (misses are no longer cached). Still missing? Set FLAIR_KEY_PATH to the absolute path of the .key file.";
   return `${stateLine}\n${homeLine}\n${looked}\n${remedy}`;
 }
 

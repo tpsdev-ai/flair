@@ -70,6 +70,7 @@ export function classifyError(err: unknown, flairUrl: string): string {
           readEnvOrUnset("FLAIR_KEY_PATH"),
         ),
         signed: false,
+        authMethod: "none" as const,
       };
       return `auth_error: ${body}\n${formatKeyLookup(lookup)}`;
     }

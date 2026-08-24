@@ -9,7 +9,7 @@ export {
   callTimeHomes,
   expandHomePrefix,
 } from "./auth.js";
-export type { KeyLookupState } from "./auth.js";
+export type { KeyLookupState, KeyAuthMethod, HomeSources } from "./auth.js";
 export type {
   FlairClientConfig,
   Memory,

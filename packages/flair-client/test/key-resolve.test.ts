@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 const { FlairClient, FlairError } = await import("../src/client.js");
 const {
+  callTimeHomes,
   expandHomePrefix,
   formatKeyLookup,
   inspectKeyLookup,
@@ -82,6 +83,49 @@ describe("key path resolution (flair#1271)", () => {
     expect(candidates.some((p) => p.endsWith(`/.flair/keys/${agentId}.key`))).toBe(true);
   });
 
+  test("callTimeHomes merges passwd home when it diverges from os.homedir / $HOME", () => {
+    // Sanitized-MCP-HOME fixture: sandbox is what os.homedir()/$HOME would
+    // report; the key lives on the account home. Dropping the userHomedir
+    // probe makes before/after this fix look the same — so this must fail
+    // if that probe is removed.
+    expect(callTimeHomes({
+      homedir: "/var/mcp/sandbox",
+      envHome: "/var/mcp/sandbox",
+      userHomedir: "/home/agent",
+    })).toEqual(["/var/mcp/sandbox", "/home/agent"]);
+  });
+
+  test("resolveKeyPath finds a key only on the passwd home, not the MCP sandbox home", () => {
+    const agentId = uniqueId("althome");
+    const sandbox = mkdtempSync(join(tmpdir(), "flair-1271-sandbox-"));
+    const account = mkdtempSync(join(tmpdir(), "flair-1271-account-"));
+    trash.push(sandbox, account);
+    mkdirSync(join(account, ".flair", "keys"), { recursive: true });
+    const accountKey = join(account, ".flair", "keys", `${agentId}.key`);
+    writeFileSync(accountKey, randomBytes(32));
+    const found = resolveKeyPath(agentId, undefined, [sandbox, account]);
+    expect(found).toBe(accountKey);
+    expect(resolveKeyPath(agentId, undefined, [sandbox])).toBeNull();
+  });
+
+  test("$HOME is probed even when os.homedir() is a different path (Bun caches homedir)", () => {
+    const agentId = uniqueId("envhome");
+    const envHome = mkdtempSync(join(tmpdir(), "flair-1271-envhome-"));
+    trash.push(envHome);
+    mkdirSync(join(envHome, ".flair", "keys"), { recursive: true });
+    const envKey = join(envHome, ".flair", "keys", `${agentId}.key`);
+    writeFileSync(envKey, randomBytes(32));
+    const savedHome = process.env.HOME;
+    try {
+      process.env.HOME = envHome;
+      expect(callTimeHomes()).toContain(envHome);
+      expect(resolveKeyPath(agentId)).toBe(envKey);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+    }
+  });
+
   test("inspectKeyLookup names every candidate and whether it exists", () => {
     const agentId = uniqueId("inspect");
     const dir = mkdtempSync(join(tmpdir(), "flair-1271-inspect-"));
@@ -149,7 +193,34 @@ describe("missed freshly-created key (flair#1271)", () => {
     expect(err.keyLookup).toBeDefined();
     expect(err.keyLookup!.agentId).toBe(agentId);
     expect(err.keyLookup!.signed).toBe(false);
+    expect(err.keyLookup!.authMethod).toBe("none");
     expect(err.keyLookup!.candidates.some((c) => c.path.endsWith(`${agentId}.key`))).toBe(true);
+  });
+
+  test("401 after Basic auth does not push FLAIR_KEY_PATH", async () => {
+    const agentId = uniqueId("basic");
+    mockFetch = mock(() => Promise.resolve(new Response("unauthorized", { status: 401 })));
+    globalThis.fetch = mockFetch as typeof fetch;
+
+    const client = new FlairClient({
+      agentId,
+      adminUser: "admin",
+      adminPassword: "s3cret",
+    });
+    let caught: unknown;
+    try {
+      await client.health();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(FlairError);
+    const err = caught as InstanceType<typeof FlairError>;
+    expect(err.keyLookup!.authMethod).toBe("basic");
+    expect(err.keyLookup!.signed).toBe(false);
+    const text = formatKeyLookup(err.keyLookup!);
+    expect(text).toContain("Basic admin credentials");
+    expect(text).toContain("FLAIR_ADMIN_PASSWORD");
+    expect(text).not.toContain("FLAIR_KEY_PATH");
   });
 });
 
@@ -170,6 +241,22 @@ describe("formatKeyLookup (flair#1271)", () => {
     expect(text).toContain("/home/agent/.flair/keys/grok-cos.key (missing)");
     expect(text).toContain("os.homedir() at lookup: /home/agent");
     expect(text).toContain("FLAIR_KEY_PATH");
+  });
+
+  test("basic-auth 401 names admin credentials, not FLAIR_KEY_PATH", () => {
+    const text = formatKeyLookup({
+      agentId: "grok-cos",
+      home: "/home/agent",
+      candidates: [{ path: "/home/agent/.flair/keys/grok-cos.key", exists: false }],
+      resolvedPath: null,
+      signed: false,
+      authMethod: "basic",
+    });
+    expect(text).toContain("Basic admin credentials");
+    expect(text).toContain("FLAIR_ADMIN_USER");
+    expect(text).toContain("FLAIR_ADMIN_PASSWORD");
+    expect(text).not.toContain("FLAIR_KEY_PATH");
+    expect(text).not.toContain("without a signing key");
   });
 
   test("signed 401 names the path that was used", () => {
