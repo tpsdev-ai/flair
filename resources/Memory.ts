@@ -32,6 +32,7 @@ import {
 import { RECORD_TYPES } from "./record-types.js";
 import { attachTrust } from "./trust-block.js";
 import { recordCitations } from "./usage-recording.js";
+import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 
 /**
  * flair#744 slice 1 — read the opt-in `includeTrust` flag for a by-id get.
@@ -338,7 +339,11 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
   if (!existing) {
     throw new Error(`supersede-close: record ${oldId} not found`);
   }
-  await withDetachedTxn(ctx, () => (databases as any).flair.Memory.put({ ...existing, ...patch }));
+  const closed = { ...existing, ...patch };
+  await withDetachedTxn(ctx, () => (databases as any).flair.Memory.put(closed));
+  // flair#1357 — a supersede-close sets `validTo`, which the retrieval filters
+  // read, so the lexical index has to see it as eagerly as a content write.
+  noteMemoryUpsert(closed);
 }
 
 /** Does an agent hold a "write" grant from `ownerId`? Same MemoryGrant lookup
@@ -824,6 +829,11 @@ export class Memory extends (databases as any).flair.Memory {
 
     // ── Write the new record FIRST ──────────────────────────────────────────
     const result = await super.post(content);
+    // flair#1357 — read-your-write for the lexical leg. The table change feed
+    // (resources/bm25-index-service.ts) is the CORRECTNESS mechanism; this
+    // synchronous hook is what makes a store immediately searchable rather
+    // than searchable-after-the-feed-turns.
+    noteMemoryUpsert(content);
 
     // ── THEN close the superseded record ────────────────────────────────────
     // Write-new-BEFORE-close-old: the previous order (close-old via a fire-
@@ -868,7 +878,9 @@ export class Memory extends (databases as any).flair.Memory {
         });
       }
       delete content._reindex;
-      return super.put(content);
+      const reindexed = await super.put(content);
+      noteMemoryUpsert(content);
+      return reindexed;
     }
 
     // Create/update ownership (same rule as post): a non-admin agent may only
@@ -1121,6 +1133,8 @@ export class Memory extends (databases as any).flair.Memory {
 
     // ── Write the new/updated record FIRST ──────────────────────────────────
     const result = await super.put(content);
+    // flair#1357 — read-your-write for the lexical leg (see post()).
+    noteMemoryUpsert(content);
 
     // ── THEN close the superseded record (see post()) ───────────────────────
     await closeSupersededIfNeeded(ctx, content, "put");
@@ -1148,7 +1162,11 @@ export class Memory extends (databases as any).flair.Memory {
     // before the read-gate fix — the read-scoping override must not leak
     // into delete()'s internal record lookup.
     const record = await super.get(id);
-    if (!record) return super.delete(id);
+    if (!record) {
+      const gone = await super.delete(id);
+      noteMemoryDelete(id);
+      return gone;
+    }
 
     if (record.durability === "permanent") {
       // Middleware already guards this for non-admins, but belt-and-suspenders
@@ -1163,6 +1181,8 @@ export class Memory extends (databases as any).flair.Memory {
       }
     }
 
-    return super.delete(id);
+    const deleted = await super.delete(id);
+    noteMemoryDelete(id);
+    return deleted;
   }
 }

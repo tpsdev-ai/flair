@@ -4,6 +4,7 @@ import { computeContentHash, findExistingMemoryByContentHash } from "./memory-fe
 import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability } from "./memory-durability.js";
+import { noteMemoryUpsert } from "./bm25-index-service.js";
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -135,6 +136,8 @@ export class FeedMemories extends Resource {
     }
 
     await (databases as any).flair.Memory.put(record);
+    // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
+    noteMemoryUpsert(record);
     return record;
   }
 

@@ -104,8 +104,18 @@ export interface ReadScope {
    * that either can't push the condition down into a Harper query (e.g.
    * MemoryBootstrap's in-memory candidate lists) or want a second check after
    * the fact (BM25's pre-fusion filter). Always agrees with `condition`.
+   *
+   * `scopableOnly` is a machine-readable restatement of the `ScopableRecord`
+   * parameter type: this predicate reads NOTHING but `agentId` and
+   * `visibility`. The BM25 index (resources/bm25-index.ts) needs that promise
+   * in a form it can TEST, not just read — it evaluates the predicate once per
+   * (agentId, visibility, archived) partition when deriving a query's corpus
+   * statistics, which is only sound for a predicate with no other inputs. An
+   * UNMARKED predicate is evaluated per record instead (correct, linear), so
+   * an unmarked one costs speed and never correctness. Do not set this flag on
+   * a predicate that reads any other field.
    */
-  isAllowed: (record: ScopableRecord | null | undefined) => boolean;
+  isAllowed: ((record: ScopableRecord | null | undefined) => boolean) & { scopableOnly?: boolean };
 }
 
 /**
@@ -135,6 +145,8 @@ export async function resolveReadScope(authAgentId: string): Promise<ReadScope> 
     if (!record) return false;
     return record.agentId === authAgentId || !isPrivateVisibility(record.visibility);
   };
+  // See ReadScope.isAllowed's doc: agentId + visibility, nothing else.
+  isAllowed.scopableOnly = true as const;
 
   return { allowedOwners: [authAgentId], condition, isAllowed };
 }
