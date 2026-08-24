@@ -53,6 +53,7 @@ import {
   type PresenceActivity,
 } from "./presence.js";
 import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
+import { serverInfo } from "./version.js";
 
 // ─── Error helpers ──────────────────────────────────────────────────────────
 
@@ -231,10 +232,7 @@ export async function runMcp(): Promise<void> {
 
   // ─── MCP Server ──────────────────────────────────────────────────────────────
 
-  const server = new McpServer({
-    name: "flair",
-    version: "0.1.0",
-  });
+  const server = new McpServer(serverInfo());
 
   // ─── Tools ───────────────────────────────────────────────────────────────────
 
