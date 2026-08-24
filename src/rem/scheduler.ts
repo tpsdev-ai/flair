@@ -31,6 +31,8 @@ import {
   describeLoadFailure as describeLoadFailureFor,
   describeExitCode,
   resolveNodeBin,
+  resolveFlairBin,
+  formatFlairBinWarning,
   verifyFirstRun,
   SPAWN_TIMEOUT_MS,
   STATUS_CHECK_TIMEOUT_MS,
@@ -88,7 +90,11 @@ export interface EnableOpts {
   hour: number;
   /** Minute (0-59). */
   minute: number;
-  /** Absolute path to the flair binary. Defaults to argv[0]'s nearest bin dir. */
+  /**
+   * Absolute path to the flair binary. Defaults to argv[1], resolved to an
+   * absolute path. A warning is attached when that path is not the public
+   * `flair` entry (flair#1279).
+   */
   flairBin?: string;
   /**
    * Absolute path to the node binary baked into the shim. Defaults to
@@ -130,6 +136,21 @@ export interface EnableResult {
    * verification is only attempted after the load exits 0).
    */
   firstRun?: FirstRunVerification;
+  /**
+   * Path baked into the shim as FLAIR_BIN. Always set by enableScheduler;
+   * optional on hand-built fixtures so existing formatEnableReport tests
+   * keep compiling.
+   */
+  flairBin?: string;
+  /**
+   * False when the baked path is not the stable public `flair` entry
+   * (flair#1279). formatEnableReport prints a warning even on a verified
+   * success — a working first run does not mean the unit will survive a
+   * tree swap. Absent/`true` on hand-built fixtures means no warning.
+   */
+  flairBinCanonical?: boolean;
+  /** Absolute `command -v flair` when one was found at enable time. */
+  flairBinPublic?: string | null;
 }
 
 export interface DisableOpts {
@@ -331,6 +352,14 @@ export interface FormattedReport {
  * happen once. A missing `loadResult`/`firstRun` (test-only skipLoad shape)
  * therefore withholds the headline too, instead of being treated as success.
  */
+function appendFlairBinWarning(lines: string[], r: EnableResult): void {
+  if (r.flairBinCanonical !== false || !r.flairBin) return;
+  const warning = formatFlairBinWarning(r.flairBin, r.flairBinPublic ?? null, "flair rem nightly enable");
+  if (warning.length === 0) return;
+  lines.push("");
+  lines.push(...warning);
+}
+
 export function formatEnableReport(r: EnableResult, input: EnableReportInput): FormattedReport {
   const { hour, minute, agentId, flairUrl } = input;
   const scheduleTime = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
@@ -353,6 +382,7 @@ export function formatEnableReport(r: EnableResult, input: EnableReportInput): F
     lines.push(remedy ? `   ${remedy}` : `   Re-run the activation command above manually to see the full diagnostic.`);
     lines.push("");
     lines.push(`   Nothing is scheduled until activation succeeds. Check anytime with: flair rem nightly status`);
+    appendFlairBinWarning(lines, r);
     return { lines, ok: false };
   }
 
@@ -400,6 +430,7 @@ export function formatEnableReport(r: EnableResult, input: EnableReportInput): F
     }
     lines.push("");
     lines.push(`   Check anytime with: flair rem nightly status`);
+    appendFlairBinWarning(lines, r);
     return { lines, ok: false };
   }
 
@@ -417,6 +448,7 @@ export function formatEnableReport(r: EnableResult, input: EnableReportInput): F
   lines.push(`   First run:   completed through the service manager, exit 0`);
   lines.push("");
   lines.push(`Disable with \`flair rem nightly disable\`.`);
+  appendFlairBinWarning(lines, r);
   return { lines, ok: true };
 }
 
@@ -459,7 +491,8 @@ export function formatStatusReport(s: SchedulerStatus): FormattedReport {
  */
 export function enableScheduler(opts: EnableOpts): EnableResult {
   const plat = detectPlatform(opts.platformOverride);
-  const flairBin = opts.flairBin ?? process.argv[1] ?? "flair";
+  const resolvedFlair = resolveFlairBin(opts.flairBin);
+  const flairBin = resolvedFlair.path;
   const nodeBin = resolveNodeBin(opts.nodeBin);
   const shimPath = opts.shimPathOverride ?? SHIM_PATH_DEFAULT;
   const templateRoot = opts.templateRootOverride ?? defaultTemplateRoot();
@@ -518,6 +551,7 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
     return {
       platform: plat, shimPath, schedulerPath: plistPath, loadCommand, loadResult,
       firstRunVerified: firstRun?.verified === true, firstRun,
+      flairBin, flairBinCanonical: resolvedFlair.canonical, flairBinPublic: resolvedFlair.publicBin,
     };
   }
 
@@ -546,6 +580,7 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
   return {
     platform: plat, shimPath, schedulerPath: timerPath, loadCommand, loadResult,
     firstRunVerified: firstRun?.verified === true, firstRun,
+    flairBin, flairBinCanonical: resolvedFlair.canonical, flairBinPublic: resolvedFlair.publicBin,
   };
 }
 

@@ -577,6 +577,57 @@ describe("formatEnableReport (flair#850 — the core honesty fix)", () => {
     expect(r.firstRunVerified).toBe(false);
     expect(r.firstRun).toBeUndefined();
   });
+
+  it("#1279: a working-tree FLAIR_BIN does not flip ok, but the warning is on the success report", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 0, stdout: "", stderr: "" },
+      firstRunVerified: true,
+      firstRun: verifiedRun(),
+      flairBin: "/home/me/flair/dist/cli.js",
+      flairBinCanonical: false,
+      flairBinPublic: "/usr/local/bin/flair",
+    });
+    const { lines, ok } = formatEnableReport(r, reportInput);
+    const text = lines.join("\n");
+    expect(ok).toBe(true);
+    expect(text).toContain("✅ REM nightly scheduler enabled");
+    expect(text).toContain("FLAIR_BIN is /home/me/flair/dist/cli.js");
+    expect(text).toContain("not a stable public entry");
+    expect(text).toContain("flair rem nightly enable");
+    expect(text).not.toContain("federation sync enable");
+  });
+
+  it("#1279: a canonical FLAIR_BIN produces no warning", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 0, stdout: "", stderr: "" },
+      firstRunVerified: true,
+      firstRun: verifiedRun(),
+      flairBin: "/usr/local/bin/flair",
+      flairBinCanonical: true,
+    });
+    expect(formatEnableReport(r, reportInput).lines.join("\n")).not.toContain("FLAIR_BIN is");
+  });
+});
+
+describe("enableScheduler — FLAIR_BIN capture (flair#1279)", () => {
+  it("a public `flair` path is canonical and is what the shim execs under node", () => {
+    const r = enableScheduler(baseOpts({ platformOverride: "linux", flairBin: "/usr/local/bin/flair" }));
+    expect(r.flairBin).toBe("/usr/local/bin/flair");
+    expect(r.flairBinCanonical).toBe(true);
+    const shim = readFileSync(shimPath, "utf-8");
+    expect(shim).toContain(`exec "/usr/local/bin/node" "/usr/local/bin/flair" rem nightly run-once`);
+    expect(shim).not.toMatch(/exec\s+node\b/);
+  });
+
+  it("a working-tree dist/cli.js is baked as-is (not substituted) and marked not canonical", () => {
+    const tree = join(testRoot, "checkout", "dist", "cli.js");
+    const r = enableScheduler(baseOpts({ platformOverride: "linux", flairBin: tree }));
+    expect(r.flairBin).toBe(tree);
+    expect(r.flairBinCanonical).toBe(false);
+    const shim = readFileSync(shimPath, "utf-8");
+    expect(shim).toContain(`exec "/usr/local/bin/node" "${tree}" rem nightly run-once`);
+    expect(shim).not.toMatch(/command -v flair/);
+  });
 });
 
 describe("formatStatusReport (flair#850 — status reflects genuine active state)", () => {
