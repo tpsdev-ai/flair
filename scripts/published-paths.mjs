@@ -8,10 +8,12 @@
 // repo so a change to one without the other is a failure, not a comment.
 //
 // Source trees are not in `files[]`. `src/` and `resources/` compile into the
-// published `dist/` entry. Workspace packages (`workspaces` in package.json)
-// ship as their own npm packages. A top-level-name-only check would treat both
-// as unpublished and silently stop requiring fragments on real shipping
-// changes — the failure direction flair#1098 calls the worst one.
+// published `dist/` entry (mapped only when `dist` itself ships). `packages/`
+// and `examples/` ship independently of that entry — workspace packages are
+// separately published, and examples already appear in CHANGELOG.md. A
+// top-level-name-only check would treat them as unpublished and silently stop
+// requiring fragments on real shipping changes — the failure direction
+// flair#1098 calls the worst one.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -21,11 +23,20 @@ import { join } from "node:path";
 // lock; do not edit one list without the other.
 const ALWAYS = ["package.json", "README.md", "LICENSE", "LICENCE", ".env"];
 
-// Trees that compile into a published `dist/` entry.
+// Trees that compile into a published `dist/` entry. Mapped only when `dist`
+// is in the published set — without that gate, a src/ change would look like
+// it ships even if the package no longer publishes dist/.
 //   tsconfig.json            resources/** → dist/resources/**  (rootDir: ".")
 //   tsconfig.cli.json        src/cli.ts   → dist/cli.js        (rootDir: "src")
 //   tsconfig.check.src.json  src/**       → dist/src/**        (rootDir: ".")
 const DIST_SOURCE_ROOTS = new Set(["src", "resources"]);
+
+// Trees that ship even when `dist` is absent from `files[]`. Same class of
+// mapping as src/resources, but not conditional on dist: they are not compiled
+// into the root tarball. `packages/` is the workspace of separately published
+// npm packages (flair-client, flair-mcp, …). `examples/` already appears in
+// release notes; omitting it would be the same silent-skip.
+const INDEPENDENT_SHIPPING_ROOTS = new Set(["packages", "examples"]);
 
 export function publishedEntryNames(packageRoot) {
   let declared = [];
@@ -73,8 +84,10 @@ export function workspaceTopLevels(packageRoot) {
 /**
  * Top-level names that count as shipping for the changelog gate: `files[]` plus
  * npm always-includes, plus source trees that compile into `dist/`, plus
- * workspace package roots. `publishedEntryNames()` stays the deploy-filter
- * set — this is that set plus the mappings the changelog rule has to get right.
+ * independently published trees (`packages/`, `examples/`), plus any extra
+ * workspace roots declared in package.json. `publishedEntryNames()` stays the
+ * deploy-filter set — this is that set plus the mappings the changelog rule
+ * has to get right.
  */
 export function shippingTopLevels(packageRoot) {
   const published = publishedEntryNames(packageRoot);
@@ -82,6 +95,9 @@ export function shippingTopLevels(packageRoot) {
   if (published.has("dist")) {
     for (const root of DIST_SOURCE_ROOTS) tops.add(root);
   }
+  // Not gated on dist. A files[] that omitted dist/ must not excuse a
+  // packages/flair-client fix from carrying a fragment.
+  for (const root of INDEPENDENT_SHIPPING_ROOTS) tops.add(root);
   for (const root of workspaceTopLevels(packageRoot)) tops.add(root);
   return tops;
 }

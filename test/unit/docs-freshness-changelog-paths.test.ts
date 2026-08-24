@@ -60,6 +60,8 @@ function makePathAwareRepo(opts: {
   commitBody?: string;
   commitMsg: string;
   files?: unknown;
+  /** Set false to omit `workspaces` — packages/ must still ship. */
+  workspaces?: string[] | false;
 }): string {
   const dir = track(mkdtempSync(join(tmpdir(), "flair-docs-freshness-paths-")));
   const origin = track(mkdtempSync(join(tmpdir(), "flair-docs-freshness-origin-")));
@@ -73,8 +75,10 @@ function makePathAwareRepo(opts: {
     name: "@tpsdev-ai/flair",
     version: "0.1.0",
     private: true,
-    workspaces: ["packages/*"],
   };
+  if (opts.workspaces !== false) {
+    pkg.workspaces = opts.workspaces ?? ["packages/*"];
+  }
   if (opts.files !== undefined) pkg.files = opts.files;
   else {
     pkg.files = [
@@ -158,22 +162,28 @@ describe("pathTouchesPublished mapping", () => {
     expect(pathTouchesPublished("docs/quickstart.md", shipping)).toBe(true);
   });
 
-  test("workspace packages ship — they are separately published", () => {
+  test("packages/ ships even though it is not in files[] and is not via dist", () => {
     expect(published.has("packages")).toBe(false);
     expect(pathTouchesPublished("packages/flair-client/src/index.ts", shipping)).toBe(true);
+    expect(pathTouchesPublished("packages/flair-mcp/src/index.ts", shipping)).toBe(true);
   });
 
-  test("workspace trees are derived from workspaces, not a hardcoded packages/", () => {
-    const dir = track(mkdtempSync(join(tmpdir(), "flair-published-workspaces-")));
+  test("packages/ is not conditional on dist or workspaces", () => {
+    const dir = track(mkdtempSync(join(tmpdir(), "flair-published-nodist-")));
     writeFileSync(join(dir, "package.json"), JSON.stringify({
       name: "x",
       version: "0.0.0",
-      files: ["dist/"],
-      workspaces: ["libs/*"],
+      files: ["docs/"],
     }));
-    const other = shippingTopLevels(dir);
-    expect(pathTouchesPublished("libs/foo/index.ts", other)).toBe(true);
-    expect(pathTouchesPublished("packages/foo/index.ts", other)).toBe(false);
+    const noDist = shippingTopLevels(dir);
+    expect(pathTouchesPublished("packages/flair-client/src/index.ts", noDist)).toBe(true);
+    expect(pathTouchesPublished("examples/quickstart.ts", noDist)).toBe(true);
+    // src/ still requires dist to be published
+    expect(pathTouchesPublished("src/cli.ts", noDist)).toBe(false);
+  });
+
+  test("examples/ ships — already covered in release notes", () => {
+    expect(pathTouchesPublished("examples/team-concierge/index.ts", shipping)).toBe(true);
   });
 
   test("scripts/, tests, and CI do not ship", () => {
@@ -216,11 +226,14 @@ describe("changelog-unreleased per-change rule, path-aware", () => {
     expect(res.out).toMatch(/feat\/fix commit/);
   });
 
-  test("a feat/fix that touches packages/ still requires a fragment", () => {
+  test("a fix: under packages/flair-client/ with no fragment fails the real gate", () => {
+    // No workspaces field: packages/ must still trip the gate on its own,
+    // not because package.json happened to declare workspaces.
     const dir = makePathAwareRepo({
       commitRel: join("packages", "flair-client", "src", "index.ts"),
       commitBody: "export const n = 1;\n",
-      commitMsg: "fix: shipping workspace package change",
+      commitMsg: "fix: shipping flair-client change",
+      workspaces: false,
     });
     const res = runGate(dir);
     expect(res.status).not.toBe(0);
