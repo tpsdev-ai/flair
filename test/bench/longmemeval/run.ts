@@ -20,13 +20,13 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import {
-  OLLAMA_HOST, JUDGE, READER, DATASET, RETRIEVAL, FULL_CONTEXT,
+  OLLAMA_HOST, JUDGE, READER, DATASET, RETRIEVAL, FULL_CONTEXT, INGESTION,
   assertCrossFamily, configManifest, hashConfig,
 } from "./config";
 import { assertModelPinned, pingOllama, generate, OllamaError } from "./ollama";
 import { buildJudgePrompt, parseVerdict, type LmeTask, type Verdict } from "./judge";
 import { loadDataset, selectSlice, abilityOf, isAbstention } from "./dataset";
-import { runOnce } from "./eval";
+import { runOnce, SELECTED_ARMS, writeProgress, setJournalContext } from "./eval";
 import { aggregateArmAcrossRuns, type ArmRunMetrics } from "./metrics";
 import { buildArtifact, writeArtifact, verifyArtifactHash } from "./artifact";
 import { ALL_ARMS, type Arm } from "./arms";
@@ -45,8 +45,19 @@ function gitCommit(): string | null {
   try { return execSync("git rev-parse HEAD", { cwd: REPO_ROOT }).toString().trim(); } catch { return null; }
 }
 
+// LME_FLAIR_PKG_DIR / LME_HARPER_BIN_DIR (ported from tps-bench): point the
+// harness at an npm-installed published @tpsdev-ai/flair instead of the
+// worktree, so the bench can run on a VM that has the package but not the repo.
+//
+// OPERATIONAL-ONLY, with a caveat worth stating: these do not change the
+// harness's behavior at all — they only say WHERE the system under test lives.
+// But they do mean the system under test may not be a git checkout, in which
+// case gitCommit() below returns null and the artifact records no build
+// identity for Flair itself. That is a pre-existing provenance gap in the
+// artifact schema (the headline artifact has gitCommit: null), not something
+// these variables introduce; it is called out on #1366 for a follow-up.
 function assertBuilt(): void {
-  const marker = path.join(REPO_ROOT, "dist", "resources", "SemanticSearch.js");
+  const marker = path.join(process.env.LME_FLAIR_PKG_DIR ?? REPO_ROOT, "dist", "resources", "SemanticSearch.js");
   if (!existsSync(marker)) {
     console.error(`FATAL: ${marker} not found — Harper serves resources from dist/. Run \`bun run build\` first.`);
     process.exit(2);
@@ -124,10 +135,38 @@ async function runSlice(): Promise<void> {
   console.log(`slice: ${slice.length} questions across abilities: ${JSON.stringify(abilityCounts)}`);
 
   const manifest = configManifest({ n, seed, runs, questionIds: slice.map((e) => e.question_id) });
+  // ── The two ARTIFACT-AFFECTING overrides (flair#1366) ─────────────────────
+  // Both of these are settings that can change what is measured while the
+  // harness is working correctly, so both must enter the hashed config. See the
+  // classification header in eval.ts for the test being applied.
+
+  // (1) The arms ACTUALLY run (LME_ARMS subset). A 3-arm run must never hash
+  // identically to a 4-arm run: the aggregate contains different arms, and the
+  // contamination / ceiling reads that need the missing arms do not exist.
+  (manifest as { arms: Arm[] }).arms = SELECTED_ARMS;
+
+  // (2) The Harper-store topology. When both Harper arms run, one ingest per
+  // question serves both over a shared store with a per-question mode flip
+  // (take-2 ingest-reuse). This is a MEASUREMENT-VALIDITY difference, not a
+  // speed one: per-arm stores gave the vector-only arm a full-size HNSW graph
+  // while flair queried a growing one — a confound biased FOR flair. A
+  // shared-store run and a per-arm-store run therefore must never share a
+  // configHash even though models, dataset and prompts are identical.
+  const sharedStore = SELECTED_ARMS.includes("flair") && SELECTED_ARMS.includes("vector-only");
+  (manifest as { ingestion: unknown }).ingestion = {
+    ...INGESTION,
+    harperStoreSharing: sharedStore ? "ingest-once-shared-store-alternating-mode" : "per-arm-store",
+  };
   const configHash = hashConfig(manifest);
+  setJournalContext(configHash); // journal lines carry cfg identity from now on
+  if (process.env.LME_RESUME === "1") console.log(`resume: LME_RESUME=1 — banked (question,arm) pairs from ${process.env.LME_RECORDS_JSONL} will be skipped`);
+  console.log(`arms: ${SELECTED_ARMS.join(", ")}`);
+  if (sharedStore) {
+    console.log(`ingest-reuse (take-2): one ingest per question serves flair + vector-only over a shared store with per-question mode flip. configHash intentionally differs from per-arm-store runs (ingestion.harperStoreSharing is hashed).`);
+  }
   console.log(`configHash: ${configHash}\n`);
 
-  const perArmRuns = new Map<Arm, ArmRunMetrics[]>(ALL_ARMS.map((a) => [a, []]));
+  const perArmRuns = new Map<Arm, ArmRunMetrics[]>(SELECTED_ARMS.map((a) => [a, []]));
   const runHashes: string[] = [];
   for (let i = 1; i <= runs; i++) {
     const r = await runOnce(i, slice, { repoRoot: REPO_ROOT, host, log: (s) => console.log(s) });
@@ -135,10 +174,10 @@ async function runSlice(): Promise<void> {
     for (const m of r.armMetrics) perArmRuns.get(m.arm)!.push(m);
   }
 
-  const aggregate = ALL_ARMS.map((a) => aggregateArmAcrossRuns(a, perArmRuns.get(a)!));
+  const aggregate = SELECTED_ARMS.map((a) => aggregateArmAcrossRuns(a, perArmRuns.get(a)!));
   const artifact = buildArtifact({
     configHash, config: manifest, runHashes, aggregate,
-    gitCommit: gitCommit(), ollamaHost: host, benchHost: "rockit", validationSlice,
+    gitCommit: gitCommit(), ollamaHost: host, benchHost: process.env.LME_BENCH_HOST ?? "rockit", validationSlice,
   });
   const artifactPath = writeArtifact(artifact, outDir);
 
@@ -157,13 +196,21 @@ async function runSlice(): Promise<void> {
     console.log(`    ${"latency p50 / p95 (ms)".padEnd(28)} ${a.latencyP50Ms.mean.toFixed(0)} / ${a.latencyP95Ms.mean.toFixed(0)}`);
     if (a.judgeErrorsTotal > 0) console.log(`    !! judge errors: ${a.judgeErrorsTotal} (unparseable verdicts — NOT counted as pass)`);
   }
-  const nc = aggregate.find((a) => a.arm === "no-context")!;
-  const fl = aggregate.find((a) => a.arm === "flair")!;
-  const fc = aggregate.find((a) => a.arm === "full-context")!;
+  // Contamination / validity reads — each only when its arm(s) ran.
+  const nc = aggregate.find((a) => a.arm === "no-context");
+  const fl = aggregate.find((a) => a.arm === "flair");
+  const fc = aggregate.find((a) => a.arm === "full-context");
   console.log(`\n── contamination / validity reads (ANSWERABLE questions only) ──`);
-  console.log(`  no-context accuracy = ${pct(nc.overallAccuracyAnswerable.mean)}  (HIGH ⇒ reader prior knowledge / contamination — number suspect)`);
-  console.log(`    (measured on answerable questions — an abstention question is trivially correct with no context, so it is excluded here)`);
-  console.log(`  full-context − flair = ${pct(fc.overallAccuracyAnswerable.mean - fl.overallAccuracyAnswerable.mean)}  (≈0 ⇒ measuring long-context not memory; large ⇒ retrieval losing info)`);
+  if (nc) {
+    console.log(`  no-context accuracy = ${pct(nc.overallAccuracyAnswerable.mean)}  (HIGH ⇒ reader prior knowledge / contamination — number suspect)`);
+    console.log(`    (measured on answerable questions — an abstention question is trivially correct with no context, so it is excluded here)`);
+  }
+  if (fc && fl) {
+    console.log(`  full-context − flair = ${pct(fc.overallAccuracyAnswerable.mean - fl.overallAccuracyAnswerable.mean)}  (≈0 ⇒ measuring long-context not memory; large ⇒ retrieval losing info)`);
+  } else {
+    console.log(`  full-context − flair: NOT AVAILABLE (full-context arm not run — LME_ARMS=${SELECTED_ARMS.join(",")})`);
+  }
+  writeProgress({ done: true, artifactPath });
   console.log(`\nartifactHash: ${artifact.artifactHash}`);
   console.log(`artifact self-verifies: ${verifyArtifactHash(artifact)}`);
   console.log(`written: ${artifactPath}`);

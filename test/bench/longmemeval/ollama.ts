@@ -25,6 +25,23 @@
  * Pure transport + a pin check. No dataset, no prompts, no scoring.
  */
 
+// ── Cloud auth (ported from tps-bench, adopted 2026-08-20) ──────────────────
+// OPERATIONAL-ONLY: transport credentials, deliberately NOT in the hashed
+// config. Which endpoint served a pinned digest cannot change what is
+// measured — assertModelPinned() already fails loud unless the digest matches,
+// so authenticating to ollama.com and authenticating to Newton either serve
+// the SAME pinned weights or the run aborts.
+//
+// The key is referenced BY PATH and read IN-PROCESS: it never appears in argv
+// (so never in shell history, `ps`, or a transcript), never in the artifact,
+// and never in a log line. Unset => no header at all, i.e. byte-identical
+// behavior to a local/Newton run.
+import { readFileSync } from "node:fs";
+const _KEY_FILE = process.env.LME_OLLAMA_KEY_FILE;
+const AUTH_HEADERS: Record<string, string> = _KEY_FILE
+  ? { Authorization: "Bearer " + readFileSync(_KEY_FILE, "utf8").trim() }
+  : {};
+
 export interface OllamaModelSpec {
   model: string;
   /** The immutable manifest digest recorded at pin time (config.ts). */
@@ -74,19 +91,50 @@ export async function generate(
       num_predict: opts.numPredictOverride ?? spec.numPredict,
     },
   };
-  const t0 = performance.now();
-  let res: Response;
-  try {
-    res = await fetch(`${host}/api/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    throw new OllamaError(`generate(${spec.model}) transport failure to ${host}: ${err instanceof Error ? err.message : String(err)}`);
+  // ── Cloud-cap resilience (ported from tps-bench, headline run 2026-08-21) ─
+  // OPERATIONAL-ONLY: HTTP 429 backs off 60s → 300s → 300s before failing; a
+  // 5xx gets ONE 30s retry. Not in the hashed config, and the reasoning is
+  // checkable rather than a matter of taste: the request body is byte-for-byte
+  // identical on every attempt and the model is pinned with temperature 0 /
+  // seed 0 / fixed num_ctx+num_predict, so a retry can only turn "no answer"
+  // into "the same answer this call was always going to produce". It cannot
+  // select among answers — there is no resampling and no prompt mutation.
+  //
+  // Deliberately NARROW: only 429 and 5xx retry, and only for a bounded number
+  // of rounds. Any other status still fails loud. Retrying a 4xx (a malformed
+  // prompt, a wrong model name) would be masking a broken call, and retrying
+  // until success would let a flaky endpoint quietly shape the sample.
+  const RATE_WAITS = [60_000, 300_000, 300_000];
+  let rateAttempt = 0;
+  let serverRetried = false;
+  let t0: number, res: Response, latencyMs: number, text: string;
+  for (;;) {
+    t0 = performance.now();
+    try {
+      res = await fetch(`${host}/api/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...AUTH_HEADERS },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw new OllamaError(`generate(${spec.model}) transport failure to ${host}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    latencyMs = performance.now() - t0;
+    text = await res.text();
+    if (res.status === 429 && rateAttempt < RATE_WAITS.length) {
+      const wait = RATE_WAITS[rateAttempt++]!;
+      console.error(`[ollama] 429 from ${host} — backing off ${wait / 1000}s (round ${rateAttempt}/${RATE_WAITS.length})`);
+      await new Promise((r) => setTimeout(r, wait));
+      continue;
+    }
+    if (res.status >= 500 && !serverRetried) {
+      serverRetried = true;
+      console.error(`[ollama] HTTP ${res.status} from ${host} — one retry in 30s`);
+      await new Promise((r) => setTimeout(r, 30_000));
+      continue;
+    }
+    break;
   }
-  const latencyMs = performance.now() - t0;
-  const text = await res.text();
   if (!res.ok) {
     throw new OllamaError(`generate(${spec.model}) HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
@@ -116,7 +164,7 @@ export async function generate(
 export async function assertModelPinned(host: string, spec: OllamaModelSpec): Promise<{ actualDigest: string }> {
   let res: Response;
   try {
-    res = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(10_000) });
+    res = await fetch(`${host}/api/tags`, { headers: AUTH_HEADERS, signal: AbortSignal.timeout(10_000) });
   } catch (err) {
     throw new OllamaError(`assertModelPinned: cannot reach Ollama at ${host}: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -143,7 +191,7 @@ export async function assertModelPinned(host: string, spec: OllamaModelSpec): Pr
 /** Confirm the host answers at all (a decisive early failure vs a slow timeout
  *  mid-run). Returns the raw /api/tags model names. */
 export async function pingOllama(host: string): Promise<string[]> {
-  const res = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(8_000) });
+  const res = await fetch(`${host}/api/tags`, { headers: AUTH_HEADERS, signal: AbortSignal.timeout(8_000) });
   if (!res.ok) throw new OllamaError(`pingOllama: HTTP ${res.status} from ${host}`);
   const j: any = await res.json();
   return (j.models ?? []).map((m: any) => m.name);

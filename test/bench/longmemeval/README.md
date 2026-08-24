@@ -12,9 +12,13 @@ confound).
 **Reproducibility is the edge.** Everything that can move the number is pinned
 and committed: the dataset (by HF commit + sha256), the judge and reader (by
 Ollama manifest digest — tags are mutable, digests are not), num_ctx, the
-retrieval config, the ingestion granularity, and the exact judge/reader prompt
-strings (folded into the config hash). Anyone re-runs the exact number locally
-with `ollama pull` — no OpenAI key, no per-run spend.
+retrieval config, the ingestion granularity, the store topology, and the exact
+judge/reader prompt strings (all folded into the config hash). Anyone re-runs
+the exact configuration with `ollama pull` — no OpenAI key, no per-run spend.
+
+Read "What 'reproducible' does and does not mean here" below before quoting
+that sentence at anyone: the config reproduces exactly, the reader's *text*
+does not under the cloud profile.
 
 ## Arms
 
@@ -40,17 +44,44 @@ Reader and judge are the **same across all arms** — only the context differs.
   Judge prompts ported from `xiaowu0162/LongMemEval` @
   `9e0b455f4ef0e2ab8f2e582289761153549043fc`
   (`src/evaluation/evaluate_qa.py`).
-- **Judge:** `gemma4:31b-it-q8_0`, LOCAL on Newton via Ollama, manifest digest
-  `sha256:53dd8459790f8795177444daa9e33f417e03c0d1cdedb80b6c73898603d20aef`.
-  temp 0, fixed num_ctx, **plaintext** verdict (never Ollama's JSON/structured
-  mode — non-deterministic at fixed seed, Ollama #12559).
-- **Reader:** `qwen3.6:27b-coding-mxfp8` (Qwen family — a **different family**
-  than the Gemma judge, the self-preference control), digest
-  `sha256:a7185d39ff35a472a2721b87e1bbb90810bcd381d415666ce2137838e66f2780`.
+### Model profiles — `LME_MODEL_PROFILE=local|cloud`
+
+Two pinned model sets. `local` is the default, so an unset environment behaves
+exactly as it always has.
+
+| | `local` (default) — Newton | `cloud` — ollama.com |
+|---|---|---|
+| **Judge** | `gemma4:31b-it-q8_0`<br>`sha256:53dd8459790f8795177444daa9e33f417e03c0d1cdedb80b6c73898603d20aef`<br>weights `sha256:a0feadb7…` | `gemma4:31b`<br>`sha256:221b330d11a8`<br>weights `cloud-hosted:not-published` |
+| **Reader** | `qwen3.6:27b-coding-mxfp8`<br>`sha256:a7185d39ff35a472a2721b87e1bbb90810bcd381d415666ce2137838e66f2780` | `qwen3.5:397b`<br>`sha256:b909ca2f1b7f` |
+
+Both profiles keep judge family `gemma4` and reader family `qwen3_5`, so the
+cross-family self-preference control holds either way rather than depending on
+which profile you happened to run.
+
+Judge settings are identical across profiles: temp 0, fixed num_ctx, and a
+**plaintext** verdict (never Ollama's JSON/structured mode — non-deterministic
+at fixed seed, Ollama #12559).
+
+**The published headline run used `cloud`.** Those pins live here so a clean
+checkout can reproduce the published `configHash`; before flair#1366 they
+existed only as an in-place edit on the bench VM, which is what made the
+headline unreproducible from the repo.
+
+Selecting a profile is **artifact-affecting** and needs no extra hashed field:
+`configManifest()` has always folded the whole judge/reader objects into the
+hash, so the pins themselves carry the identity.
+
+`test/unit/longmemeval-repro.test.ts` holds both properties — that the `cloud`
+pins still reconstruct the published headline `configHash`, and that the `local`
+pins are byte-for-byte what they were before profiles existed. It asserts them
+on **pin values and a reconstructed historical manifest**, never on a pin of
+"whatever the current manifest hashes to"; see "Reproducing a past run" below
+for why that distinction is the whole design.
 
 The harness **fails loud** if a model's current digest on the host does not
-match the pinned digest, if the dataset sha256 does not match, or if the judge
-family equals the reader family.
+match the pinned digest, if the dataset sha256 does not match, if the judge
+family equals the reader family, or if `LME_MODEL_PROFILE` is set to anything
+other than a known profile name.
 
 ## Grading
 
@@ -95,15 +126,158 @@ bun run test/bench/longmemeval/run.ts run \
   --dataset ./longmemeval_s.json --n 24 --seed 0 --runs 5
 ```
 
-`LME_OLLAMA_HOST` overrides the Ollama endpoint (default Newton
-`http://192.168.2.64:11434`).
+### Running against ollama.com (how the headline was produced)
 
-`LME_FULL_CTX` overrides the full-context arm's window (default `131072`, the
-pinned publishable value). A ~100k-token prefill is minutes per call, so a
-validation slice may reduce it (e.g. `LME_FULL_CTX=16384`) — the value used is
-folded into the config hash and recorded in the artifact, so a reduced window is
-never silent. Reduce it ONLY for validation; the publishable run uses the pinned
-default.
+```bash
+LME_MODEL_PROFILE=cloud \
+LME_OLLAMA_HOST=https://ollama.com \
+LME_OLLAMA_KEY_FILE=$HOME/.config/ollama-api-key \
+LME_ARMS=flair,vector-only \
+bun run test/bench/longmemeval/run.ts run \
+  --dataset ./longmemeval_s.json --n 500 --seed 0 --runs 1 \
+  --records ./records.jsonl --progress ./progress.json
+```
+
+The API key is referenced **by path** and read in-process. It never appears in
+argv, so never in shell history, `ps` output, or a transcript — and never in a
+log line or the artifact. Unset ⇒ no auth header at all.
+
+### Environment reference, and what each knob can move
+
+Every variable is classified. The test being applied is *"can this change the
+measured quantity while the harness is working correctly?"* — not *"does it
+affect the run"*, which is true of all of them.
+
+**Artifact-affecting** — must enter the hashed config, or two genuinely
+different measurements collide on one `configHash`:
+
+| variable | effect | how it is hashed |
+|---|---|---|
+| `LME_MODEL_PROFILE` | selects the judge/reader pins | via `manifest.judge` / `manifest.reader` — the pins themselves |
+| `LME_ARMS` | which arms run | `manifest.arms` (`run.ts` records the SELECTED arms, not `ALL_ARMS`) |
+| `LME_FULL_CTX` | full-context arm window | `manifest.fullContext` |
+| *(implicit)* both Harper arms selected ⇒ shared-store ingest-reuse | store topology | `manifest.ingestion.harperStoreSharing` |
+
+`LME_FULL_CTX` defaults to `131072`, the pinned publishable value. A ~100k-token
+prefill is minutes per call, so a validation slice may reduce it (e.g. `16384`)
+— the value used is folded into the config hash, so a reduced window is never
+silent. Reduce it ONLY for validation.
+
+The store-topology entry is the subtle one and is a **measurement-validity**
+property, not an optimisation. See "Ingest-reuse" below.
+
+**Operational-only** — cannot change the measured quantity under correct
+operation; they govern whether the run completes, how fast, and what telemetry
+it emits. If one of these ever moves a number, that is a bug to fix, not a
+variant to hash — hashing it would content-address the breakage:
+
+| variable | purpose | why it cannot move a number |
+|---|---|---|
+| `LME_OLLAMA_HOST`, `LME_OLLAMA_KEY_FILE` | endpoint + credentials | `assertModelPinned()` aborts unless the served digest matches the pin, so any endpoint either serves the pinned weights or the run stops |
+| *(429/5xx backoff)* | cloud rate-limit resilience | the request body is byte-identical on every attempt at temp 0 / seed 0, so a retry turns "no answer" into the same answer; only 429 and 5xx retry, everything else still fails loud |
+| `LME_RECORDS_JSONL` | per-eval JSONL journal | pure write-side observer — nothing reads it during a normal run, so no field it records can feed back into a result |
+| `LME_RESUME=1` | resume from the journal | banked `(question, arm)` pairs are replayed, never re-evaluated, so the decision set is unchanged; `runHash` is resume-invariant (see caveat below) |
+| `LME_PROGRESS_FILE` | machine-readable progress | write-only telemetry, never read back |
+| `LME_INGEST_CONCURRENCY` | ingest parallelism (default 6) | memories are fully determined by the dataset, so the store end-state is identical at any concurrency |
+| `LME_FLAIR_PKG_DIR`, `LME_HARPER_BIN_DIR` | locate the system under test | say *where* Flair lives, not how it behaves |
+| `LME_BENCH_HOST` | provenance label | lands in the artifact's unhashed provenance partition |
+| `LME_SHARED_COUNT_PROBE=1` | row-count probe logging | logging only |
+
+### Ingest-reuse (shared store, alternating mode)
+
+When both Harper arms are selected, one ingest per question serves both. This
+exists for **validity**, not speed. Under the older whole-arm phasing the
+`flair` arm ran over a store that grew question by question while `vector-only`
+ran over an already-full-size store; filtered-ANN candidate recall degrades as
+the HNSW graph grows, so `vector-only` faced a systematically harder task — an
+asymmetry biased *toward* the result we would most like to be true. Alternating
+the mode per question over one shared store makes both arms query the
+byte-identical store state.
+
+A shared-store run and a per-arm-store run therefore must never share a
+`configHash`: one of them contains a confound, and hashing the topology is what
+stops them being compared as if interchangeable. (It is also ~2× faster — the
+reason it was reachable, not the reason it is correct.)
+
+### Resume, and what the hashes actually guarantee
+
+`runHash` content-addresses the run's **decisions** (answer / verdict /
+tokensFed / extraction) and is resume-invariant. `configHash` is deterministic
+from the config.
+
+`artifactHash` covers the whole aggregate, which includes latency percentiles —
+wall clock. **Artifact hashes are therefore not host- or wall-clock invariant**;
+`configHash` and `runHash` are the reproducible identities. Banked journal lines
+carry their original `latencyMs` so a resumed run replays latency faithfully,
+but a journal written before that field existed falls back to `0`.
+
+### What "reproducible" does and does not mean here
+
+Be precise about this, because the claim is the product.
+
+**Reproducible:** `configHash`. It is a pure function of the pinned config, so
+any checkout with the same profile and slice derives it exactly. The
+reproduction of the published headline `configHash` from repo code is asserted
+in `test/unit/longmemeval-repro.test.ts`.
+
+#### Reproducing a past run as the harness evolves
+
+The manifest **is expected to grow** — every new measurement variant adds a
+field, and #1364's `prompts.readerPayloadFormat` is the first example. That
+creates an obvious tension: an old artifact's `configHash` was computed over a
+manifest that did not have the new field, so current code cannot emit that hash
+directly.
+
+The resolution is that a historical run is reproduced by **reconstructing the
+manifest as that run recorded it** — projecting the current manifest onto
+exactly the key set the artifact carries — and checking the reconstruction
+hashes to the recorded `configHash`. `test/unit/longmemeval-repro.test.ts` does
+this for every artifact in `results/`, and the behavior is deliberately
+asymmetric:
+
+- **a field is added** — the projection drops it, the old hash still reproduces,
+  nothing needs rewriting. The new field still governs the identity of *new*
+  runs through the normal `configHash` path.
+- **a pinned value the old run depended on changes**, or **a field it had is
+  removed** — the reconstruction fails, because that genuinely means the repo
+  can no longer express the configuration behind a published number.
+
+So the rule when that test fails: **do not re-pin the expected hash and do not
+relax the projection.** Either the change was unintended, or the affected
+headline must be re-run and its artifact replaced — a real decision with a real
+cost, which is exactly what the test is there to force.
+
+Adding a new headline? Commit its artifact to `results/` and add a row to
+`HISTORICAL_VARIANTS`. Old rows stay; the repo accumulates the ability to
+reproduce every number it has published.
+
+**Reproducible in practice:** the assembled reader prompt. A clean-checkout
+`n=2` run reproduced the headline run's `tokensFed` exactly — 3174 / 3159 /
+4548 / 4722 across four `(question, arm)` pairs — i.e. retrieval and payload
+formatting are byte-faithful.
+
+**NOT reproducible under the `cloud` profile:** `runHash`, because it
+content-addresses the reader's answer text and **the cloud reader is not
+deterministic at temperature 0 / seed 0**. Measured directly on
+`qwen3.5:397b` via ollama.com: four calls with a byte-identical prompt
+(32 prompt tokens each) returned **three distinct completions**, diverging
+after a 68-character common prefix ("Two is unusual…" vs "The number 2 is
+unusual…"). This is a property of batched cloud inference — MoE routing and
+mixed-precision kernels are not bitwise-stable across batch composition — not
+of this harness.
+
+The practical consequence: under `cloud`, two faithful runs of the same config
+agree on what was measured and on the questions asked, and their **verdicts**
+agreed 4/4 in the sample above, but their `runHash` and `artifactHash` will
+differ. A published cloud number is a *statistical* result to be re-run and
+compared within variance, not a hash anyone can re-derive — which is why the
+run count and the reported std matter.
+
+The `local` profile runs single-stream against a pinned local digest and is
+expected to be closer to bitwise-stable, but that has **not** been measured;
+do not claim it without a measurement. (The cloud *judge* returned an identical
+verdict 4/4 in the same probe, but on a trivial 16-token prompt — that is not
+evidence of judge determinism on real rubric prompts.)
 
 ## The publish gate is structural
 
