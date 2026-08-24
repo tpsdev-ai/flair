@@ -1,5 +1,15 @@
 export { FlairClient, FlairError, canonicalRelationshipId } from "./client.js";
-export { loadPrivateKey, resolveKeyPath, signRequest } from "./auth.js";
+export {
+  loadPrivateKey,
+  resolveKeyPath,
+  signRequest,
+  inspectKeyLookup,
+  formatKeyLookup,
+  keyPathCandidates,
+  callTimeHomes,
+  expandHomePrefix,
+} from "./auth.js";
+export type { KeyLookupState } from "./auth.js";
 export type {
   FlairClientConfig,
   Memory,

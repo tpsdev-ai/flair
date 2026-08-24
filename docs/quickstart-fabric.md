@@ -119,7 +119,7 @@ Same connector, different panel. This is the field-verified sequence — includi
 
    Keep the pass file mode `0600`. Newer releases add `--admin-pass-file <path>`, which reads the file in-process (invisible to `ps`) — check `flair agent add --help` and prefer it when present.
 
-5. **Restart the MCP process** if it started before the key existed — it does not pick the key up mid-session. Still 401 with the key on disk? Set the key path explicitly in the agent's MCP env: `FLAIR_KEY_PATH=~/.flair/keys/grok-cos.key`. Known papercut, tracked in [flair#1271](https://github.com/tpsdev-ai/flair/issues/1271).
+5. The next tool call picks up the key — a miss is not cached. A 401 names the agent and the paths that were looked in. If those are not where `flair agent add` wrote the file, the MCP process's home differs from the shell; set `FLAIR_KEY_PATH` to the absolute path of the `.key` file.
 
 6. Verify: ask the agent to "load my Flair bootstrap". You should get soul + memories **including shared org context** — findings written by teammate agents. A shared-visibility write from this agent is now readable by every org agent.
 

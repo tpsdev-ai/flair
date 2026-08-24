@@ -42,7 +42,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { FlairClient, FlairError } from "@tpsdev-ai/flair-client";
+import { FlairClient, FlairError, formatKeyLookup, inspectKeyLookup } from "@tpsdev-ai/flair-client";
 import { z } from "zod";
 import {
   deriveActivity,
@@ -57,19 +57,21 @@ import { serverInfo } from "./version.js";
 
 // ─── Error helpers ──────────────────────────────────────────────────────────
 
-function classifyError(err: unknown, flairUrl: string): string {
+export function classifyError(err: unknown, flairUrl: string): string {
   if (err instanceof FlairError) {
     const { status, body } = err;
     if (status === 400) return `validation_error: ${body}`;
     if (status === 401 || status === 403) {
-      // Auth failure on a previously-working session usually means the daemon
-      // restarted (config reload, Harper alter_user, port change). Tell the
-      // operator how to recover instead of just surfacing the raw 401 body.
-      return `auth_error: ${body}\n` +
-        `(Hint: this often follows a Flair daemon restart. Try:\n` +
-        `  1. Restart your MCP host (Claude Code, Cursor, etc) to spawn a fresh flair-mcp.\n` +
-        `  2. Check daemon: 'flair status' or 'curl ${flairUrl}/Health'.\n` +
-        `  3. Verify your agent key still matches the registered Agent record.)`;
+      // flair#1271: name the agent, the paths that were looked in, and the
+      // remedy. A cached-miss / wrong-HOME 401 is not a daemon-restart hint.
+      const lookup = err.keyLookup ?? {
+        ...inspectKeyLookup(
+          readEnvOrUnset("FLAIR_AGENT_ID") ?? "",
+          readEnvOrUnset("FLAIR_KEY_PATH"),
+        ),
+        signed: false,
+      };
+      return `auth_error: ${body}\n${formatKeyLookup(lookup)}`;
     }
     if (status === 413) return `payload_too_large: ${body}`;
     if (status === 429) return "rate_limited — retry after a moment";
