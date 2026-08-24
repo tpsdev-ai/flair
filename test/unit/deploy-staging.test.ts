@@ -475,6 +475,27 @@ describe("stageDeployRoot — the payload equals the published file set", () => 
     );
   });
 
+  test("a brace-expansion files entry is a named refusal, not a silent omit (flair#1083)", () => {
+    // The concrete bypass Sherlock named: `{dist,schemas}` has neither `*`
+    // nor `!`, so a blacklist would keep the literal and drop the real dirs.
+    const root = mkdtempSync(join(tmpdir(), "flair-bracefiles-")); roots.push(root);
+    writeFileSync(join(root, "package.json"), JSON.stringify({
+      name: "@tpsdev-ai/flair",
+      version: "0.0.0-test",
+      files: ["{dist,schemas}", "config.yaml", "README.md"],
+    }));
+    mkdirSync(join(root, "dist"), { recursive: true });
+    writeFileSync(join(root, "dist", "keep.js"), "published");
+    mkdirSync(join(root, "schemas"), { recursive: true });
+    writeFileSync(join(root, "schemas", "keep.txt"), "published");
+    writeFileSync(join(root, "config.yaml"), "published: true");
+    writeFileSync(join(root, "README.md"), "# published");
+
+    expect(() => stageDeployRoot(root, "https://example.invalid")).toThrow(
+      /Cannot honour files entry "\{dist,schemas\}"/,
+    );
+  });
+
   test("publishedEntryNames reads files from the root, not a hardcoded copy", () => {
     const root = fixtureRoot(); roots.push(root);
     const names = publishedEntryNames(root);
