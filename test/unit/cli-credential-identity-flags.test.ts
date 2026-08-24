@@ -21,7 +21,7 @@ import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { program, SHARED_CREDENTIAL_FLAGS, SHARED_IDENTITY_FLAGS } from "../../src/cli";
 
-function findCommand(root: { commands: Array<{ name: () => string }> }, path: string[]): any {
+function findCommand(root: { commands: readonly { name: () => string }[] }, path: string[]): any {
   let node: any = root;
   for (const name of path) {
     node = node.commands.find((c: any) => c.name() === name);
