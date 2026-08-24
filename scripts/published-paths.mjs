@@ -8,9 +8,10 @@
 // repo so a change to one without the other is a failure, not a comment.
 //
 // Source trees are not in `files[]`. `src/` and `resources/` compile into the
-// published `dist/` entry. A top-level-name-only check would treat them as
-// unpublished and silently stop requiring fragments on real shipping changes —
-// the failure direction flair#1098 calls the worst one.
+// published `dist/` entry. Workspace packages (`workspaces` in package.json)
+// ship as their own npm packages. A top-level-name-only check would treat both
+// as unpublished and silently stop requiring fragments on real shipping
+// changes — the failure direction flair#1098 calls the worst one.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -49,15 +50,46 @@ export function hasDeclaredFiles(packageRoot) {
   }
 }
 
-export function pathTouchesPublished(relPath, published) {
+function workspacePatterns(packageRoot) {
+  try {
+    const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+    if (Array.isArray(pkg.workspaces)) return pkg.workspaces;
+    if (pkg.workspaces && Array.isArray(pkg.workspaces.packages)) return pkg.workspaces.packages;
+  } catch {
+    /* no workspaces declared */
+  }
+  return [];
+}
+
+/** Top-level directory names declared as npm workspaces (`packages/*` → `packages`). */
+export function workspaceTopLevels(packageRoot) {
+  return new Set(
+    workspacePatterns(packageRoot)
+      .map((w) => String(w).replace(/^\.\//, "").split("/")[0])
+      .filter((t) => t !== "" && t !== "*" && !t.startsWith("!")),
+  );
+}
+
+/**
+ * Top-level names that count as shipping for the changelog gate: `files[]` plus
+ * npm always-includes, plus source trees that compile into `dist/`, plus
+ * workspace package roots. `publishedEntryNames()` stays the deploy-filter
+ * set — this is that set plus the mappings the changelog rule has to get right.
+ */
+export function shippingTopLevels(packageRoot) {
+  const published = publishedEntryNames(packageRoot);
+  const tops = new Set(published);
+  if (published.has("dist")) {
+    for (const root of DIST_SOURCE_ROOTS) tops.add(root);
+  }
+  for (const root of workspaceTopLevels(packageRoot)) tops.add(root);
+  return tops;
+}
+
+export function pathTouchesPublished(relPath, shipping) {
   const p = String(relPath).replaceAll("\\", "/").replace(/^\.\//, "");
   if (!p) return false;
-  const top = p.split("/")[0];
-  if (published.has(top)) return true;
-  // src/ and resources/ ship via dist/. Mapping must be present or a fix: on
-  // src/cli.ts would look unpublished and the gate would go quiet.
-  if (DIST_SOURCE_ROOTS.has(top) && published.has("dist")) return true;
-  return false;
+  return shipping.has(p.split("/")[0]);
 }
 
 /**
@@ -73,6 +105,6 @@ export function changeTouchesPublished(relPaths, packageRoot) {
   if (!hasDeclaredFiles(packageRoot)) return true;
   const paths = (relPaths ?? []).map((p) => String(p).trim()).filter((p) => p !== "");
   if (paths.length === 0) return true;
-  const published = publishedEntryNames(packageRoot);
-  return paths.some((p) => pathTouchesPublished(p, published));
+  const shipping = shippingTopLevels(packageRoot);
+  return paths.some((p) => pathTouchesPublished(p, shipping));
 }

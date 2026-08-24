@@ -21,6 +21,7 @@ import {
   changeTouchesPublished,
   pathTouchesPublished,
   publishedEntryNames,
+  shippingTopLevels,
 } from "../../scripts/published-paths.mjs";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -72,6 +73,7 @@ function makePathAwareRepo(opts: {
     name: "@tpsdev-ai/flair",
     version: "0.1.0",
     private: true,
+    workspaces: ["packages/*"],
   };
   if (opts.files !== undefined) pkg.files = opts.files;
   else {
@@ -138,27 +140,46 @@ describe("published set matches publishedEntryNames()", () => {
 
 describe("pathTouchesPublished mapping", () => {
   const published = publishedEntryNames(REPO_ROOT);
+  const shipping = shippingTopLevels(REPO_ROOT);
 
   test("src/ ships via dist even though src is not in files[]", () => {
     expect(published.has("src")).toBe(false);
     expect(published.has("dist")).toBe(true);
-    expect(pathTouchesPublished("src/cli.ts", published)).toBe(true);
+    expect(pathTouchesPublished("src/cli.ts", shipping)).toBe(true);
   });
 
   test("resources/ ships via dist even though resources is not in files[]", () => {
     expect(published.has("resources")).toBe(false);
-    expect(pathTouchesPublished("resources/memory.ts", published)).toBe(true);
+    expect(pathTouchesPublished("resources/memory.ts", shipping)).toBe(true);
   });
 
   test("docs/ ships — it is in files[]", () => {
     expect(published.has("docs")).toBe(true);
-    expect(pathTouchesPublished("docs/quickstart.md", published)).toBe(true);
+    expect(pathTouchesPublished("docs/quickstart.md", shipping)).toBe(true);
+  });
+
+  test("workspace packages ship — they are separately published", () => {
+    expect(published.has("packages")).toBe(false);
+    expect(pathTouchesPublished("packages/flair-client/src/index.ts", shipping)).toBe(true);
+  });
+
+  test("workspace trees are derived from workspaces, not a hardcoded packages/", () => {
+    const dir = track(mkdtempSync(join(tmpdir(), "flair-published-workspaces-")));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({
+      name: "x",
+      version: "0.0.0",
+      files: ["dist/"],
+      workspaces: ["libs/*"],
+    }));
+    const other = shippingTopLevels(dir);
+    expect(pathTouchesPublished("libs/foo/index.ts", other)).toBe(true);
+    expect(pathTouchesPublished("packages/foo/index.ts", other)).toBe(false);
   });
 
   test("scripts/, tests, and CI do not ship", () => {
-    expect(pathTouchesPublished("scripts/release.sh", published)).toBe(false);
-    expect(pathTouchesPublished("test/unit/foo.test.ts", published)).toBe(false);
-    expect(pathTouchesPublished(".github/workflows/test.yml", published)).toBe(false);
+    expect(pathTouchesPublished("scripts/release.sh", shipping)).toBe(false);
+    expect(pathTouchesPublished("test/unit/foo.test.ts", shipping)).toBe(false);
+    expect(pathTouchesPublished(".github/workflows/test.yml", shipping)).toBe(false);
   });
 
   test("missing files[] is fail-closed — cannot prove a path is unpublished", () => {
@@ -188,6 +209,18 @@ describe("changelog-unreleased per-change rule, path-aware", () => {
       commitRel: join("src", "cli.ts"),
       commitBody: "const DEFAULT_PORT = 9927;\nexport { DEFAULT_PORT };\n// shipping change\n",
       commitMsg: "fix: shipping CLI change",
+    });
+    const res = runGate(dir);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain("changelog fragment");
+    expect(res.out).toMatch(/feat\/fix commit/);
+  });
+
+  test("a feat/fix that touches packages/ still requires a fragment", () => {
+    const dir = makePathAwareRepo({
+      commitRel: join("packages", "flair-client", "src", "index.ts"),
+      commitBody: "export const n = 1;\n",
+      commitMsg: "fix: shipping workspace package change",
     });
     const res = runGate(dir);
     expect(res.status).not.toBe(0);

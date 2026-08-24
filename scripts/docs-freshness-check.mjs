@@ -406,8 +406,10 @@ defineCheck("changelog-unreleased", null, () => {
   // A feat/fix that cannot reach a user — scripts/, CI, tests — is not a
   // changelog event. The published set is package.json's `files[]` (the same
   // derivation as publishedEntryNames()), plus src/ and resources/ which compile
-  // into the published dist/ entry. Unknown (no files[], no changed-path list)
-  // stays fail-closed: require a fragment rather than silently stop firing.
+  // into the published dist/ entry, plus workspace package trees from
+  // `workspaces` (they ship as their own npm packages). Unknown (no files[],
+  // no changed-path list) stays fail-closed: require a fragment rather than
+  // silently stop firing.
   //
   // Default true so a missing merge-base does not become an unpublished escape.
   let thisChangeShips = true;
