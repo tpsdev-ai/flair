@@ -6938,6 +6938,48 @@ function driverCheckAppliesTo(opts: { target?: string }): boolean {
   return !target || isLocalBase(target.replace(/\/$/, ""));
 }
 
+/**
+ * flair#1108: a bare undici/Node "fetch failed" names neither the URL
+ * that was probed nor the knob that would change it. These helpers are
+ * the operator-facing sentence and the setting that produced (or would
+ * change) that URL. Pure so the contract can be unit-tested without
+ * driving process.exit.
+ */
+export function federationStatusUrlSetting(opts: { target?: string; port?: string | number }): string {
+  if (opts.target) return "--target";
+  if (process.env.FLAIR_TARGET) return "FLAIR_TARGET";
+  if (process.env.FLAIR_URL) return "FLAIR_URL";
+  if (opts.port !== undefined && opts.port !== null && String(opts.port) !== "") return "--port";
+  return "FLAIR_URL or --port";
+}
+
+export function describeFederationStatusFetchFailed(url: string, setting: string): string {
+  return `fetch failed against ${url} (set ${setting})`;
+}
+
+/** True for a connect-level failure (no HTTP status): Node's undici
+ *  `TypeError: fetch failed`, Bun's `Unable to connect…`, or a cause
+ *  carrying a connect/DNS errno. Auth and HTTP errors stay out. */
+export function isFederationStatusConnectFailure(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/\bfetch failed\b/i.test(msg)) return true;
+  if (/unable to connect/i.test(msg)) return true;
+  const cause = err instanceof Error ? (err as { cause?: unknown }).cause : undefined;
+  const code = cause && typeof cause === "object" && cause && "code" in cause
+    ? String((cause as { code?: unknown }).code)
+    : "";
+  return /^(ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH)$/.test(code);
+}
+
+export function rewriteFederationStatusFetchFailed(err: unknown, url: string, setting: string): unknown {
+  if (!isFederationStatusConnectFailure(err)) return err;
+  const next = new Error(describeFederationStatusFetchFailed(url, setting));
+  if (err && typeof err === "object" && "status" in err) {
+    (next as { status?: unknown }).status = (err as { status?: unknown }).status;
+  }
+  return next;
+}
+
 federation
   .command("status")
   .description("Show federation status and peer connections")
@@ -6946,8 +6988,11 @@ federation
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .option("--json", "Emit JSON {instance, peers, driver} (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
-    const target = resolveTarget(opts);
-    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+    // Same URL api() would have derived, including --port (the command
+    // advertised --port but previously dropped it on the floor). Naming
+    // that URL on fetch failure is only honest if it is the URL we probe.
+    const baseUrl = resolveBaseUrl(opts).replace(/\/$/, "");
+    const urlSetting = federationStatusUrlSetting(opts);
     const mode = render.resolveOutputMode(opts);
 
     // flair#1233: fetch instance and peers INDEPENDENTLY. One read failing
@@ -6958,19 +7003,19 @@ federation
     let instance: any = null;
     let instanceErr: any = null;
     try {
-      instance = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
+      instance = await api("GET", "/FederationInstance", undefined, { baseUrl });
     } catch (err) {
-      instanceErr = err;
+      instanceErr = rewriteFederationStatusFetchFailed(err, baseUrl, urlSetting);
     }
 
     // peers: null = unverifiable (the read failed), [] = verified empty.
     let peers: any[] | null = null;
     let peersErr: any = null;
     try {
-      const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+      const r = await api("GET", "/FederationPeers", undefined, { baseUrl });
       peers = r.peers ?? [];
     } catch (err) {
-      peersErr = err;
+      peersErr = rewriteFederationStatusFetchFailed(err, baseUrl, urlSetting);
     }
 
     // Auth-shaped failures stay FATAL even when the other read succeeded:
