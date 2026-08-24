@@ -429,6 +429,30 @@ describe("stageDeployRoot — the payload equals the published file set", () => 
     expect(() => stageDeployRoot(root, "https://example.invalid")).toThrow(/published file set/);
   });
 
+  test("a files entry it cannot interpret is a named refusal, not a silent omit (flair#1083)", () => {
+    // The trap: `files` is non-empty so the emptiness refusal does not fire,
+    // and the only dist-selecting entry is a glob the old filter dropped.
+    // Without the throw, stageDeployRoot would succeed with a payload missing
+    // dist/ — the file is in the published package and absent from the deploy.
+    const root = mkdtempSync(join(tmpdir(), "flair-globfiles-")); roots.push(root);
+    writeFileSync(join(root, "package.json"), JSON.stringify({
+      name: "@tpsdev-ai/flair",
+      version: "0.0.0-test",
+      files: ["dist/**/*.js", "schemas/", "config.yaml", "README.md"],
+    }));
+    mkdirSync(join(root, "dist"), { recursive: true });
+    writeFileSync(join(root, "dist", "keep.js"), "published");
+    mkdirSync(join(root, "schemas"), { recursive: true });
+    writeFileSync(join(root, "schemas", "keep.txt"), "published");
+    writeFileSync(join(root, "config.yaml"), "published: true");
+    writeFileSync(join(root, "README.md"), "# published");
+
+    expect(() => stageDeployRoot(root, "https://example.invalid")).toThrow(
+      /Cannot honour files entry "dist\/\*\*\/\*\.js"/,
+    );
+    expect(() => publishedEntryNames(root)).toThrow(/plain top-level entries only/);
+  });
+
   test("publishedEntryNames reads files from the root, not a hardcoded copy", () => {
     const root = fixtureRoot(); roots.push(root);
     const names = publishedEntryNames(root);

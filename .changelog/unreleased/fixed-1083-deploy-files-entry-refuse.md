@@ -1,0 +1,1 @@
+- **`flair deploy` refuses a `files` entry it cannot honour, instead of silently dropping it.** A glob or negation in `package.json`'s `files` used to vanish from the deploy payload with no error — npm would publish the files and the deployed component would not contain them. Deploy now fails with a message naming the entry. (flair#1083)
