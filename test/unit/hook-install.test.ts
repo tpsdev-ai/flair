@@ -7,6 +7,8 @@ import {
   installHook,
   uninstallHook,
   hookStatus,
+  hookStatusIdentityLines,
+  HOOK_STATUS_UNPARSED,
   buildHookCommand,
   buildContinuityHookCommand,
   installContinuityHooks,
@@ -22,7 +24,9 @@ import {
   SESSION_START_HOOK_MARKER,
   CONTINUITY_CAPTURE_HOOK_MARKER,
   buildContinuityCaptureHookCommand,
+  buildSessionStartHookCommand,
   checkSessionStartHook,
+  fixSessionStartHook,
 } from "../../src/doctor-client.ts";
 // NOTE: the degradation-timeout test (Sherlock condition 5, "mock the
 // fetch") lives in packages/flair-mcp/test/session-start-hook.test.ts, NOT
@@ -79,6 +83,20 @@ describe("buildHookCommand / parseHookCommandEnv", () => {
     const parsed = parseHookCommandEnv(command);
     expect(parsed.agentId).toBe(AGENT);
     expect(parsed.flairUrl).toBe(URL);
+  });
+
+  it("reads agentId from the installer sh -c wrapper when FLAIR_URL is omitted (flair init / docs form)", () => {
+    // flair#1325: `flair init` and docs/mcp-clients.md write this exact
+    // command — sh -c, FLAIR_AGENT_ID, no FLAIR_URL. Missing URL is
+    // intentional (hook falls back to flair-client's localhost default),
+    // not a parse failure, and must not produce a garbage capture from
+    // the wrapper's `$(...)`.
+    const command = buildSessionStartHookCommand("canary");
+    expect(command.startsWith("sh -c '")).toBe(true);
+    expect(command).not.toContain("FLAIR_URL=");
+    const parsed = parseHookCommandEnv(command);
+    expect(parsed.agentId).toBe("canary");
+    expect(parsed.flairUrl).toBeUndefined();
   });
 
   it("doctor's own marker constant is present verbatim (checkSessionStartHook compatibility)", () => {
@@ -367,6 +385,100 @@ describe("hookStatus", () => {
     const status = hookStatus(isoHome, "claude-code");
     expect(status.wired).toBe(true);
     expect(status.correctShape).toBe(false);
+  });
+
+  it("after a docs-faithful flair init install, status does not emit the unknown-URL line (flair#1325)", () => {
+    // `flair init --agent canary` writes via fixSessionStartHook →
+    // buildSessionStartHookCommand(agentId) — the sh -c wrapper, no
+    // FLAIR_URL. Wired-detection already saw this as ours; the identity
+    // lines must not claim the command was unparseable.
+    const fix = fixSessionStartHook(isoHome, "canary");
+    expect(fix.ok).toBe(true);
+
+    const status = hookStatus(isoHome, "claude-code");
+    expect(status.wired).toBe(true);
+    expect(status.correctShape).toBe(true);
+    expect(status.agentId).toBe("canary");
+    expect(status.flairUrl).toBeUndefined();
+    expect(status.command?.startsWith("sh -c '")).toBe(true);
+
+    const lines = hookStatusIdentityLines(status);
+    const rendered = lines.map((l) => `${l.label}: ${l.value}`).join("\n");
+    expect(rendered).not.toContain(HOOK_STATUS_UNPARSED);
+    expect(lines).toEqual([{ label: "Agent", value: "canary" }]);
+  });
+
+  it("hook install (URL present) still prints the recovered Flair URL", () => {
+    installHook({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    const lines = hookStatusIdentityLines(hookStatus(isoHome, "claude-code"));
+    expect(lines).toEqual([
+      { label: "Agent", value: AGENT },
+      { label: "Flair URL", value: URL },
+    ]);
+  });
+
+  it("an unrelated SessionStart hook is not a false all-clear", () => {
+    const path = hookSettingsPath(isoHome, "claude-code");
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "unrelated-session-hook" }] }] } }),
+    );
+    const status = hookStatus(isoHome, "claude-code");
+    expect(status.wired).toBe(false);
+    expect(status.correctShape).toBe(false);
+  });
+
+  it("a marker-only decoy stays wired-but-unparsed (unknown lines, not a silent omit)", () => {
+    const path = hookSettingsPath(isoHome, "claude-code");
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: `echo ${SESSION_START_HOOK_MARKER}-decoy` }] }] } }),
+    );
+    const status = hookStatus(isoHome, "claude-code");
+    expect(status.wired).toBe(true);
+    expect(status.correctShape).toBe(false);
+    expect(hookStatusIdentityLines(status)).toEqual([
+      { label: "Agent", value: HOOK_STATUS_UNPARSED },
+      { label: "Flair URL", value: HOOK_STATUS_UNPARSED },
+    ]);
+  });
+
+  it("wired correct-shape with no env assignments is not a silent all-clear", () => {
+    // correctShape is only `npx -y -p @tpsdev-ai/flair-mcp flair-session-start`
+    // as a substring. A command that matches that but carries no
+    // FLAIR_AGENT_ID is not the installer-no-URL form; omitting the
+    // unknown lines would print a clean wired result with neither values
+    // nor a parse warning.
+    const path = hookSettingsPath(isoHome, "claude-code");
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            {
+              hooks: [
+                {
+                  type: "command",
+                  command: `npx -y -p @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    const status = hookStatus(isoHome, "claude-code");
+    expect(status.wired).toBe(true);
+    expect(status.correctShape).toBe(true);
+    expect(status.agentId).toBeUndefined();
+    expect(status.flairUrl).toBeUndefined();
+    expect(hookStatusIdentityLines(status)).toEqual([
+      { label: "Agent", value: HOOK_STATUS_UNPARSED },
+      { label: "Flair URL", value: HOOK_STATUS_UNPARSED },
+    ]);
   });
 });
 
