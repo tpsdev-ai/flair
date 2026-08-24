@@ -838,8 +838,10 @@ describe("enableScheduler — FLAIR_BIN capture (flair#1279)", () => {
 
   it("a relative capture is resolved to an absolute path before it is baked", () => {
     const r = enableScheduler(baseOpts({ platformOverride: "darwin", flairBin: "dist/cli.js" }));
-    expect(r.flairBin).toBe(resolve("dist/cli.js"));
-    expect(r.flairBin.startsWith("/")).toBe(true);
+    const baked = r.flairBin;
+    if (baked === undefined) throw new Error("enableScheduler must set flairBin");
+    expect(baked).toBe(resolve("dist/cli.js"));
+    expect(baked.startsWith("/")).toBe(true);
     expect(r.flairBinCanonical).toBe(false);
     const shim = readFileSync(shimPath, "utf-8");
     expect(shim).toContain(`exec "/usr/local/bin/node" "${resolve("dist/cli.js")}" federation sync`);
