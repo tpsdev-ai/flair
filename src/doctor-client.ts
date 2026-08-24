@@ -972,6 +972,12 @@ export function extractFlairMcpPin(text: string): string | null {
  * version pinned in that wiring, or null when the only wiring found is unpinned
  * (a bare npx spec / a pre-#1143 SessionStart hook).
  *
+ * Client MCP pins win over the SessionStart hook pin. `flair upgrade`
+ * refreshes those client configs (#1135/#1324), not the hook; a stale hook
+ * pin must not shadow a just-refreshed client pin and keep flair-mcp marked
+ * outdated (flair#1143). The hook still establishes `wired` and contributes
+ * a pin only when no client config carries one.
+ *
  * Iterates the SAME client registry (ALL_CLIENTS) and per-client config paths
  * (clientConfigPath) that wiring uses, so a client added to the registry is
  * scanned here automatically — no second list to keep in step.
@@ -996,15 +1002,17 @@ export function detectWiredFlairMcp(homeDir: string): FlairMcpWiring {
     }
   };
 
-  // 1. The SessionStart hook (claude-code). Establishes wiring; may carry a pin.
-  const hook = checkSessionStartHook(homeDir);
-  if (hook.present && isFlairHookCommand(hook.command ?? "")) note(hook.command);
-
-  // 2. Every known client's MCP config — a wired flair block carries the spec.
+  // 1. Every known client's MCP config — a wired flair block carries the spec.
+  //    Scanned first so a client pin wins (see module note above).
   for (const client of ALL_CLIENTS) {
     const configPath = withHome(homeDir, () => clientConfigPath(client.id));
     note(readTextFile(configPath));
   }
+
+  // 2. The SessionStart hook (claude-code). Establishes wiring; may carry a
+  //    pin, but never overrides a client pin already taken above.
+  const hook = checkSessionStartHook(homeDir);
+  if (hook.present && isFlairHookCommand(hook.command ?? "")) note(hook.command);
 
   return { wired, pinnedVersion };
 }

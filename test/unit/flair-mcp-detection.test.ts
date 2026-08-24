@@ -133,6 +133,47 @@ describe("detectWiredFlairMcp (reads actual config files under HOME)", () => {
     });
   });
 
+  test("stale hook pin does not shadow a refreshed client pin (flair#1143 / upgrade refresh)", () => {
+    // After `flair upgrade` the client MCP spec is re-pinned to latest, but
+    // the SessionStart hook is left alone until `flair hook install`. The
+    // hook used to be scanned first, so its stale pin kept flair-mcp marked
+    // outdated and the advertised client refresh could not clear it.
+    withTempHome((home) => {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", "settings.json"),
+        JSON.stringify({
+          hooks: {
+            SessionStart: [
+              {
+                hooks: [
+                  {
+                    type: "command",
+                    command: `sh -c 'out=$(FLAIR_AGENT_ID=me npx -y -p @tpsdev-ai/flair-mcp@0.40.0 flair-session-start 2>/dev/null) && printf %s "$out" || true'`,
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+      mkdirSync(join(home, ".gemini"), { recursive: true });
+      writeFileSync(
+        join(home, ".gemini", "settings.json"),
+        JSON.stringify({
+          mcpServers: {
+            flair: {
+              command: "npx",
+              args: ["-y", `@tpsdev-ai/flair-mcp@${LATEST}`],
+              env: { FLAIR_AGENT_ID: "me", FLAIR_URL: "http://127.0.0.1:9926" },
+            },
+          },
+        }),
+      );
+      expect(detectWiredFlairMcp(home)).toEqual({ wired: true, pinnedVersion: LATEST });
+    });
+  });
+
   test("hook present but NO global install => resolves to current, NOT missing (issue #1208 acceptance)", () => {
     withTempHome((home) => {
       mkdirSync(join(home, ".claude"), { recursive: true });
