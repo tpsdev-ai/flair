@@ -13172,7 +13172,10 @@ program
       process.exit(1);
     }
 
-    const baseUrl = `http://127.0.0.1:${resolveHttpPort(opts)}`;
+    // Single source of truth (flair#1351): banner prints the URL the test's
+    // own client uses. resolveBaseUrl is the existing CLI resolver; pass the
+    // same value through to api() so the two cannot diverge.
+    const baseUrl = resolveBaseUrl(opts);
     console.log(`\n${render.wrap(render.c.bold, "Flair test")} ${render.wrap(render.c.dim, `(url: ${baseUrl})`)}\n`);
 
     let passed = 0;
@@ -13207,7 +13210,7 @@ program
         createdAt: new Date().toISOString(),
       };
       if (agentId) body.agentId = agentId;
-      await api("PUT", `/Memory/${id}`, body);
+      await api("PUT", `/Memory/${id}`, body, { baseUrl });
       memoryId = id;
       return true;
     });
@@ -13217,7 +13220,7 @@ program
       await new Promise(r => setTimeout(r, 1500)); // allow indexing
       const body: Record<string, any> = { q: "flair test", limit: 5 };
       if (agentId) body.agentId = agentId;
-      const result = await api("POST", "/SemanticSearch", body);
+      const result = await api("POST", "/SemanticSearch", body, { baseUrl });
       return (result?.results?.length ?? 0) > 0;
     });
 
@@ -13228,7 +13231,7 @@ program
         console.log(`       (skipped — no id returned from write step)`);
         return true;
       }
-      await api("DELETE", `/Memory/${memoryId}`, agentId ? { agentId } : undefined);
+      await api("DELETE", `/Memory/${memoryId}`, agentId ? { agentId } : undefined, { baseUrl });
       return true;
     });
 
