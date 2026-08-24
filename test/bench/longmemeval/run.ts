@@ -29,6 +29,7 @@ import { loadDataset, selectSlice, abilityOf, isAbstention } from "./dataset";
 import { runOnce, SELECTED_ARMS, writeProgress, setJournalContext } from "./eval";
 import { aggregateArmAcrossRuns, type ArmRunMetrics } from "./metrics";
 import { buildArtifact, writeArtifact, verifyArtifactHash } from "./artifact";
+import { formatReport } from "./report";
 import { ALL_ARMS, type Arm } from "./arms";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -38,8 +39,6 @@ function arg(flag: string, dflt?: string): string | undefined {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : dflt;
 }
 const hasFlag = (f: string) => process.argv.includes(f);
-const fmt = (x: number, d = 3) => x.toFixed(d);
-const pct = (x: number) => (x * 100).toFixed(1) + "%";
 
 function gitCommit(): string | null {
   try { return execSync("git rev-parse HEAD", { cwd: REPO_ROOT }).toString().trim(); } catch { return null; }
@@ -181,34 +180,9 @@ async function runSlice(): Promise<void> {
   });
   const artifactPath = writeArtifact(artifact, outDir);
 
-  // ── report ──
-  console.log(`\n${"═".repeat(64)}\n  RESULTS (${validationSlice ? "VALIDATION SLICE — NOT PUBLISHABLE" : "run"}) — ${runs} run(s), mean±std\n${"═".repeat(64)}`);
-  for (const a of aggregate) {
-    console.log(`\n[${a.arm}]  overall accuracy: ${pct(a.overallAccuracy.mean)} ± ${pct(a.overallAccuracy.std)}   (runs: ${a.overallAccuracy.runs.map((x) => pct(x)).join(", ")})`);
-    console.log(`    ${"overall (answerable only)".padEnd(28)} ${pct(a.overallAccuracyAnswerable.mean)} ± ${pct(a.overallAccuracyAnswerable.std)}`);
-    for (const [ab, msd] of Object.entries(a.perAbility)) {
-      console.log(`    ${ab.padEnd(28)} ${pct(msd!.mean)} ± ${pct(msd!.std)}`);
-    }
-    console.log(`    ${"abstention (broken out)".padEnd(28)} ${pct(a.abstentionAccuracy.mean)} ± ${pct(a.abstentionAccuracy.std)}`);
-    console.log(`    ${"not-attempted (answerable)".padEnd(28)} ${pct(a.notAttemptedRateAnswerable.mean)}`);
-    console.log(`    ${"factual F1 (cross-check)".padEnd(28)} ${fmt(a.factualF1.mean)}   containment-EM ${fmt(a.factualContainmentEM.mean)}`);
-    console.log(`    ${"tokens/query (mean)".padEnd(28)} ${a.tokensPerQueryMean.mean.toFixed(0)}`);
-    console.log(`    ${"latency p50 / p95 (ms)".padEnd(28)} ${a.latencyP50Ms.mean.toFixed(0)} / ${a.latencyP95Ms.mean.toFixed(0)}`);
-    if (a.judgeErrorsTotal > 0) console.log(`    !! judge errors: ${a.judgeErrorsTotal} (unparseable verdicts — NOT counted as pass)`);
-  }
-  // Contamination / validity reads — each only when its arm(s) ran.
-  const nc = aggregate.find((a) => a.arm === "no-context");
-  const fl = aggregate.find((a) => a.arm === "flair");
-  const fc = aggregate.find((a) => a.arm === "full-context");
-  console.log(`\n── contamination / validity reads (ANSWERABLE questions only) ──`);
-  if (nc) {
-    console.log(`  no-context accuracy = ${pct(nc.overallAccuracyAnswerable.mean)}  (HIGH ⇒ reader prior knowledge / contamination — number suspect)`);
-    console.log(`    (measured on answerable questions — an abstention question is trivially correct with no context, so it is excluded here)`);
-  }
-  if (fc && fl) {
-    console.log(`  full-context − flair = ${pct(fc.overallAccuracyAnswerable.mean - fl.overallAccuracyAnswerable.mean)}  (≈0 ⇒ measuring long-context not memory; large ⇒ retrieval losing info)`);
-  } else {
-    console.log(`  full-context − flair: NOT AVAILABLE (full-context arm not run — LME_ARMS=${SELECTED_ARMS.join(",")})`);
+  // ── report ── (formatting lives in report.ts so it can be tested)
+  for (const line of formatReport({ aggregate, runs, validationSlice, selectedArms: SELECTED_ARMS })) {
+    console.log(line);
   }
   writeProgress({ done: true, artifactPath });
   console.log(`\nartifactHash: ${artifact.artifactHash}`);
