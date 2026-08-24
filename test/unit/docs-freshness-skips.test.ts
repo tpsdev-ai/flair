@@ -36,7 +36,7 @@ function makeFixture(opts: {
   const dir = mkdtempSync(join(tmpdir(), "flair-docs-freshness-"));
 
   mkdirSync(join(dir, "scripts"), { recursive: true });
-  for (const f of ["docs-freshness-check.mjs", "changelog-fragments.mjs"]) {
+  for (const f of ["docs-freshness-check.mjs", "changelog-fragments.mjs", "published-paths.mjs"]) {
     cpSync(join(REPO_ROOT, "scripts", f), join(dir, "scripts", f));
   }
 
