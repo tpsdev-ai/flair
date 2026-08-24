@@ -114,6 +114,19 @@ describe("detectWiredFlairMcp (reads actual config files under HOME)", () => {
     });
   });
 
+  test("Codex SessionStart hook in ~/.codex/hooks.json => wired, pin extracted (flair#1148)", () => {
+    withTempHome((home) => {
+      mkdirSync(join(home, ".codex"), { recursive: true });
+      writeFileSync(
+        join(home, ".codex", "hooks.json"),
+        JSON.stringify({
+          hooks: { SessionStart: [{ hooks: [{ type: "command", command: buildSessionStartHookCommand("codexbot") }] }] },
+        }),
+      );
+      expect(detectWiredFlairMcp(home)).toEqual({ wired: true, pinnedVersion: flairCliVersion() });
+    });
+  });
+
   test("client MCP config with a pinned flair server => wired, pin extracted", () => {
     withTempHome((home) => {
       mkdirSync(join(home, ".gemini"), { recursive: true });
@@ -171,6 +184,36 @@ describe("detectWiredFlairMcp (reads actual config files under HOME)", () => {
         }),
       );
       expect(detectWiredFlairMcp(home)).toEqual({ wired: true, pinnedVersion: LATEST });
+    });
+  });
+
+  test("Codex hook pin does not shadow a client pin (flair#1143 precedence)", () => {
+    // Same rule as the Claude Code case above, pinned on the Codex path so a
+    // rebase that inserts ~/.codex/hooks.json *before* ALL_CLIENTS goes red
+    // instead of silently inverting the #1393 client-first scan.
+    withTempHome((home) => {
+      mkdirSync(join(home, ".codex"), { recursive: true });
+      writeFileSync(
+        join(home, ".codex", "hooks.json"),
+        JSON.stringify({
+          hooks: { SessionStart: [{ hooks: [{ type: "command", command: buildSessionStartHookCommand("codexbot") }] }] },
+        }),
+      );
+      mkdirSync(join(home, ".gemini"), { recursive: true });
+      writeFileSync(
+        join(home, ".gemini", "settings.json"),
+        JSON.stringify({
+          mcpServers: {
+            flair: {
+              command: "npx",
+              args: ["-y", "@tpsdev-ai/flair-mcp@0.44.5"],
+              env: { FLAIR_AGENT_ID: "me", FLAIR_URL: "http://127.0.0.1:9926" },
+            },
+          },
+        }),
+      );
+      expect(detectWiredFlairMcp(home)).toEqual({ wired: true, pinnedVersion: "0.44.5" });
+      expect(flairCliVersion()).not.toBe("0.44.5");
     });
   });
 

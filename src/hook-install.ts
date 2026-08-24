@@ -65,6 +65,7 @@ import {
   hookCommandIsSilenced,
   isHookCommandValueSafe,
   isSessionStartHookInvocation,
+  readClientMcpBlock,
   type ContinuityCaptureHookReport,
   type ContinuityHookEvent,
   type ContinuityMutationAction,
@@ -72,10 +73,11 @@ import {
 
 // ── harness registry ────────────────────────────────────────────────────────
 
-/** v1 supports exactly one harness. The flag/type exist so a second harness
- *  is an additive registry entry, not a rewrite (Kern's #719 verdict: "a
- *  switch statement... is fine until we have 3+ harnesses"). */
-export const SUPPORTED_HARNESSES = ["claude-code"] as const;
+/** SessionStart hook harnesses. A second harness is an additive registry
+ *  entry, not a rewrite (Kern's #719 verdict: "a switch statement... is
+ *  fine until we have 3+ harnesses"). Codex writes the same JSON hook
+ *  schema Claude Code uses, into `~/.codex/hooks.json` (flair#1148). */
+export const SUPPORTED_HARNESSES = ["claude-code", "codex"] as const;
 export type Harness = (typeof SUPPORTED_HARNESSES)[number];
 
 export function isSupportedHarness(value: string): value is Harness {
@@ -89,7 +91,43 @@ export function hookSettingsPath(homeDir: string, harness: Harness): string {
   switch (harness) {
     case "claude-code":
       return join(homeDir, ".claude", "settings.json");
+    case "codex":
+      return join(homeDir, ".codex", "hooks.json");
   }
+}
+
+/** Continuity capture (PostToolUse + Stop) is Claude Code only. The matcher
+ *  is Claude tool names; writing it into another harness looks enabled and
+ *  never journals (flair#1148 Bugbot). SessionStart stays per-harness. */
+export function harnessSupportsContinuity(harness: Harness): boolean {
+  return harness === "claude-code";
+}
+
+/** Status/doctor hint for `flair hook install`. Claude Code stays the bare
+ *  default; every other harness is named so the hint cannot silently write
+ *  the wrong file (flair#1148 Bugbot). */
+export function hookInstallHint(harness: Harness, extraFlags = ""): string {
+  const parts = ["flair hook install"];
+  if (extraFlags) parts.push(extraFlags);
+  if (harness !== "claude-code") parts.push(`--harness ${harness}`);
+  return parts.join(" ");
+}
+
+/** Agent id for a hook install: flag, env, this harness's MCP block, then
+ *  Claude Code's block as a last resort (same agent is often shared). */
+export function resolveHookAgentId(
+  opts: { agent?: string; agentId?: string },
+  homeDir: string,
+  harness: Harness,
+): string | undefined {
+  return (
+    opts.agent ||
+    opts.agentId ||
+    process.env.FLAIR_AGENT_ID ||
+    readClientMcpBlock(harness, homeDir).agentId ||
+    (harness !== "claude-code" ? readClientMcpBlock("claude-code", homeDir).agentId : undefined) ||
+    undefined
+  );
 }
 
 /** Backup path convention: a single sibling `<path>.bak`, overwritten on
@@ -575,6 +613,14 @@ export function installContinuityHooks(opts: InstallHookOptions): ContinuityMuta
   const dryRun = !!opts.dryRun;
   const path = hookSettingsPath(homeDir, harness);
 
+  if (!harnessSupportsContinuity(harness)) {
+    return {
+      ok: false, path, harness, dryRun,
+      message: `continuity capture is Claude Code only — ${harness} has no PostToolUse/Stop matcher Flair can journal (SessionStart is still ${hookInstallHint(harness)})`,
+      backupPath: null, actions: null,
+    };
+  }
+
   for (const [label, value] of [["agent id", agentId], ["Flair URL", flairUrl]] as const) {
     if (!isHookCommandValueSafe(value)) {
       return {
@@ -702,10 +748,5 @@ export function uninstallContinuityHooks(opts: UninstallHookOptions): Continuity
 /** Read-only continuity status for `flair hook status` — the same report
  *  doctor's check consumes, resolved through the harness's settings path. */
 export function continuityHookStatus(homeDir: string, harness: Harness): ContinuityCaptureHookReport {
-  // hookSettingsPath and checkContinuityCaptureHooks both resolve
-  // ~/.claude/settings.json from homeDir; asserting through the harness
-  // registry keeps a future second harness from silently reading the wrong
-  // file.
-  void hookSettingsPath(homeDir, harness);
-  return checkContinuityCaptureHooks(homeDir);
+  return checkContinuityCaptureHooks(homeDir, hookSettingsPath(homeDir, harness));
 }

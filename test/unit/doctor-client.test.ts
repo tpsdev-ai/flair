@@ -375,6 +375,21 @@ describe("fixSessionStartHook", () => {
     const res = checkSessionStartHook(isoHome);
     expect(res.present).toBe(true);
   });
+
+  it("codex path: fix + check write and read ~/.codex/hooks.json (flair#1148)", () => {
+    const path = join(isoHome, ".codex", "hooks.json");
+    const res = fixSessionStartHook(isoHome, "codexbot", path);
+    expect(res.ok).toBe(true);
+    expect(res.path).toBe(path);
+    expect(res.message).toContain(path);
+    expect(existsSync(join(isoHome, ".claude", "settings.json"))).toBe(false);
+
+    const check = checkSessionStartHook(isoHome, path);
+    expect(check.present).toBe(true);
+    expect(check.path).toBe(path);
+    expect(check.command).toContain("FLAIR_AGENT_ID=codexbot");
+    expect(checkSessionStartHook(isoHome).present).toBe(false);
+  });
 });
 
 /**

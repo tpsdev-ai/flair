@@ -128,6 +128,10 @@ import {
   continuityHookStatus,
   isSupportedHarness,
   SUPPORTED_HARNESSES,
+  hookSettingsPath,
+  hookInstallHint,
+  harnessSupportsContinuity,
+  resolveHookAgentId,
   type Harness,
 } from "./hook-install.js";
 import {
@@ -5129,22 +5133,13 @@ keys
 // section is pure CLI plumbing: option parsing, default resolution, and
 // rendering the pure functions' results.
 
-function resolveHookAgentId(opts: { agent?: string; agentId?: string }, homeDir: string): string | undefined {
-  return (
-    opts.agent ||
-    opts.agentId ||
-    process.env.FLAIR_AGENT_ID ||
-    readClientMcpBlock("claude-code", homeDir).agentId ||
-    undefined
-  );
-}
-
-function resolveHookFlairUrl(opts: { url?: string }, homeDir: string): string {
+function resolveHookFlairUrl(opts: { url?: string }, homeDir: string, harness: Harness): string {
   return (
     opts.url ||
     process.env.FLAIR_TARGET ||
     process.env.FLAIR_URL ||
-    readClientMcpBlock("claude-code", homeDir).flairUrl ||
+    readClientMcpBlock(harness, homeDir).flairUrl ||
+    (harness !== "claude-code" ? readClientMcpBlock("claude-code", homeDir).flairUrl : undefined) ||
     resolveBaseUrl({})
   );
 }
@@ -5165,21 +5160,21 @@ hook
   .description("Wire the Flair SessionStart hook into the harness config so memory loads automatically at session start")
   .option("--harness <name>", `Target harness (${SUPPORTED_HARNESSES.join(", ")})`, "claude-code")
   .option("--dry-run", "Print the exact JSON delta without writing")
-  .option("--agent <id>", "Agent ID to wire (else FLAIR_AGENT_ID, else the agent already wired for the claude-code MCP client)")
+  .option("--agent <id>", "Agent ID to wire (else FLAIR_AGENT_ID, else the agent already wired for this harness's MCP client)")
   .option("--agent-id <id>", "Alias for --agent")
-  .option("--url <url>", "Flair URL to wire (else FLAIR_TARGET/FLAIR_URL, else the existing claude-code MCP wiring, else the local default)")
+  .option("--url <url>", "Flair URL to wire (else FLAIR_TARGET/FLAIR_URL, else this harness's MCP wiring, else the local default)")
   .option("--continuity", "Wire the continuity capture hooks instead (PostToolUse + Stop — flair#1257; installing them IS the opt-in)")
   .action((opts) => {
     const harness = requireSupportedHarness(opts.harness);
     const home = homedir();
-    const agentId = resolveHookAgentId(opts, home);
+    const agentId = resolveHookAgentId(opts, home, harness);
     if (!agentId) {
       console.error(
         "No agent id known — pass --agent <id>, set FLAIR_AGENT_ID, or run `flair init` / `flair agent add` first.",
       );
       process.exit(1);
     }
-    const flairUrl = resolveHookFlairUrl(opts, home);
+    const flairUrl = resolveHookFlairUrl(opts, home, harness);
     const dryRun = !!opts.dryRun;
 
     if (opts.continuity) {
@@ -5264,14 +5259,17 @@ hook
     // status in every branch below. "absent" is NOT a failure: installing the
     // pair is the opt-in, so absence renders as "not enabled".
     const renderContinuity = (): void => {
+      // Continuity is Claude Code only. Do not tip `--continuity --harness
+      // <other>` — that writes Claude tool matchers into the wrong file.
+      if (!harnessSupportsContinuity(harness)) return;
       const cont = continuityHookStatus(home, harness);
       if (cont.state === "installed") {
         console.log(`  ${render.icons.ok} continuity capture: PostToolUse + Stop wired`);
       } else if (cont.state === "absent") {
-        console.log(`  ${render.icons.info} continuity capture: not enabled ${render.wrap(render.c.dim, "(opt-in: flair hook install --continuity)")}`);
+        console.log(`  ${render.icons.info} continuity capture: not enabled ${render.wrap(render.c.dim, `(opt-in: ${hookInstallHint(harness, "--continuity")})`)}`);
       } else {
         const missing = !cont.postToolUse.present ? "PostToolUse missing" : !cont.stop.present ? "Stop missing" : "stale form";
-        console.log(`  ${render.icons.warn} continuity capture: ${cont.state} (${missing}) ${render.wrap(render.c.dim, "— re-run: flair hook install --continuity")}`);
+        console.log(`  ${render.icons.warn} continuity capture: ${cont.state} (${missing}) ${render.wrap(render.c.dim, `— re-run: ${hookInstallHint(harness, "--continuity")}`)}`);
       }
     };
 
@@ -5287,7 +5285,7 @@ hook
 
     if (!status.wired) {
       console.log(`  ${render.icons.error} not wired`);
-      console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install`);
+      console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
       renderContinuity();
       console.log("");
       process.exit(1);
@@ -5308,7 +5306,7 @@ hook
     if (status.silenced) {
       console.log(`     ${render.wrap(render.c.dim, "On failure:")} silent (exit 0, no output)`);
     } else {
-      console.log(`     ${render.icons.warn} ${render.wrap(render.c.dim, "On failure:")} prints an error on every session — run \`flair hook install\` to adopt the silent form`);
+      console.log(`     ${render.icons.warn} ${render.wrap(render.c.dim, "On failure:")} prints an error on every session — run \`${hookInstallHint(status.harness)}\` to adopt the silent form`);
     }
     renderContinuity();
     console.log("");
@@ -14159,8 +14157,8 @@ program
     // Antigravity) the MCP block present + reachable + the configured agent
     // genuinely registered; for pi (a NATIVE EXTENSION host — flair#1342) the
     // pi-flair reference in pi's own settings, including the flair#1346
-    // npm:-under-"extensions" trap; plus CLAUDE.md + the SessionStart hook
-    // (Claude Code only, since only Claude Code has those mechanisms). Reuses
+    // npm:-under-"extensions" trap; plus CLAUDE.md (Claude Code) and the
+    // SessionStart hook (Claude Code + Codex — flair#1148). Reuses
     // detectClients() rather than reimplementing client detection.
     console.log(`\n  ${render.wrap(render.c.bold, "Client integration")}`);
 
@@ -14183,6 +14181,7 @@ program
       console.log(`  ${render.icons.info} No MCP client detected — skipping client-integration checks`);
     } else {
       let claudeCodeAgentId: string | undefined;
+      let codexAgentId: string | undefined;
       let anyKnownAgentId: string | undefined;
 
       // `doctor --fix` writes client configs through the same wire functions
@@ -14355,6 +14354,7 @@ program
 
         const block = readClientMcpBlock(client.id, homedir());
         if (client.id === "claude-code" && block.agentId) claudeCodeAgentId = block.agentId;
+        if (client.id === "codex" && block.agentId) codexAgentId = block.agentId;
         if (block.agentId) anyKnownAgentId = anyKnownAgentId ?? block.agentId;
 
         if (!block.present) {
@@ -14398,7 +14398,12 @@ program
                     client.id === "antigravity" ? wireAntigravity(wireEnv) :
                     wireCursor(wireEnv);
                   console.log(`     ${wireResult.ok ? render.icons.ok : render.icons.warn} ${wireResult.message}`);
-                  if (wireResult.ok) fixed++;
+                  if (wireResult.ok) {
+                    fixed++;
+                    if (client.id === "claude-code") claudeCodeAgentId = fixAgentId;
+                    if (client.id === "codex") codexAgentId = fixAgentId;
+                    anyKnownAgentId = anyKnownAgentId ?? fixAgentId;
+                  }
                 }
               }
             }
@@ -14450,8 +14455,9 @@ program
         }
       }
 
-      // Claude-Code-specific: CLAUDE.md + SessionStart hook. Only Claude Code
-      // has these mechanisms, so only run them when claude-code was detected.
+      // Claude-Code-specific: CLAUDE.md + SessionStart hook + continuity.
+      // Codex has a SessionStart hook too (checked below); CLAUDE.md and
+      // continuity stay Claude Code only.
       if (detectedClients.some((c) => c.id === "claude-code")) {
         const claudeMd = checkClaudeMdBootstrap(process.cwd(), homedir());
         if (claudeMd.present) {
@@ -14615,6 +14621,80 @@ program
             }
           } else {
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair doctor --fix ${render.wrap(render.c.dim, "(rewrites both entries to the current form — same agent, same instance)")}`);
+          }
+          issues++;
+        }
+      }
+
+      // Codex SessionStart hook (flair#1148) — same flair-session-start
+      // command Claude Code uses, written to ~/.codex/hooks.json. Continuity
+      // and CLAUDE.md stay Claude-Code-only; Codex's session-start mechanism
+      // is the hook file.
+      if (detectedClients.some((c) => c.id === "codex")) {
+        const hook = inspectSessionStartHook(homedir(), { settingsPath: hookSettingsPath(homedir(), "codex") });
+        if (hook.present) {
+          if (hook.execution === "broken") {
+            if (hook.silenced) {
+              console.log(`  ${render.icons.ok} SessionStart hook (codex): wired in ${render.wrap(render.c.dim, hook.path)} — not yet exercised`);
+              console.log(`     ${render.wrap(render.c.dim, hook.detail ?? "")}`);
+              console.log(`     ${render.wrap(render.c.dim, "The hook is correctly wired but the adapter has not been fetched yet.")}`);
+              console.log(`     ${render.wrap(render.c.dim, "This is normal on a fresh install — the first Codex session will warm the npx cache.")}`);
+              console.log(`     ${render.wrap(render.c.dim, "Codex requires /hooks to trust a newly written command before it runs.")}`);
+            } else {
+              console.log(`  ${render.icons.warn} SessionStart hook (codex): wired in ${render.wrap(render.c.dim, hook.path)}, but its command did not run just now`);
+              console.log(`     ${render.wrap(render.c.dim, hook.detail ?? "")}`);
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install --harness codex ${render.wrap(render.c.dim, "(rewrites the hook to the current silent-failure form)")}`);
+            }
+          } else if (hook.execution === "unknown") {
+            console.log(`  ${render.icons.warn} SessionStart hook (codex): wired in ${render.wrap(render.c.dim, hook.path)}, but could not be verified ${render.wrap(render.c.dim, `(${hook.detail ?? "no detail"})`)}`);
+          } else if (!hook.ours) {
+            console.log(`  ${render.icons.ok} SessionStart hook (codex): wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "(custom command — not verified, not modified)")}`);
+          } else {
+            console.log(`  ${render.icons.ok} SessionStart hook (codex): flair-session-start wired in ${render.wrap(render.c.dim, hook.path)} ${render.wrap(render.c.dim, "and still runs")}`);
+          }
+
+          if (!hook.silenced && hook.ours) {
+            console.log(`  ${render.icons.warn} SessionStart hook (codex): a failure would print an error on every session (this command predates the silent-failure fix)`);
+            if (hook.upgradable) {
+              if (autoFix) {
+                if (dryRun) {
+                  console.log(`     ${render.wrap(render.c.dim, "Would rewrite the hook command in")} ${hook.path}`);
+                } else {
+                  const proceed = await confirmFix(`  Rewrite the Flair SessionStart hook in ${hook.path} so failures stay silent? [y/N] `);
+                  if (!proceed) {
+                    console.log(`     Skipped.`);
+                  } else {
+                    const upgrade = upgradeSessionStartHookCommand(homedir(), hook.path);
+                    console.log(`     ${upgrade.ok ? render.icons.ok : render.icons.warn} ${upgrade.message}`);
+                    if (upgrade.ok && upgrade.changed) fixed++;
+                  }
+                }
+              } else {
+                console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install --harness codex ${render.wrap(render.c.dim, "(rewrites the hook command in place — same agent, same instance)")}`);
+              }
+            } else {
+              console.log(`     ${render.wrap(render.c.dim, "This hook was hand-edited, so Flair will not rewrite it. To adopt the current form:")} flair hook install --harness codex`);
+            }
+            issues++;
+          }
+        } else {
+          console.log(`  ${render.icons.error} SessionStart hook (codex): not found in ${render.wrap(render.c.dim, hook.path)}`);
+          if (autoFix) {
+            if (dryRun) {
+              console.log(`     ${render.wrap(render.c.dim, "Would add SessionStart hook to")} ${hook.path}`);
+            } else {
+              const proceed = await confirmFix(`  Add the flair-session-start SessionStart hook to ${hook.path}? [y/N] `);
+              if (!proceed) {
+                console.log(`     Skipped.`);
+              } else {
+                const fixAgentId = resolveHookAgentId({ agent: opts.agent }, homedir(), "codex");
+                const fixRes = fixSessionStartHook(homedir(), fixAgentId, hook.path);
+                console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
+                if (fixRes.ok) fixed++;
+              }
+            }
+          } else {
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} flair hook install --harness codex`);
           }
           issues++;
         }
