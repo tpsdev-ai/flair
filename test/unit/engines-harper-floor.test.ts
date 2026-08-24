@@ -10,8 +10,7 @@
 // second copy of Harper's range is a new thing to drift — Harper's floor
 // moved once and will move again, and nothing currently notices.
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -28,15 +27,13 @@ function enginesOf(pkg: Record<string, unknown>): { node?: unknown } | undefined
   return engines as { node?: unknown };
 }
 
-/** Same resolution order as readInstalledHarperVersion — the Harper we embed. */
+/** Same resolution order as readInstalledHarperVersion — the Harper we embed.
+ *  Filesystem lookup, not require.resolve: Harper's exports map does not
+ *  expose `./package.json`. */
 function installedHarperPkgPath(): string {
-  const require = createRequire(join(REPO_ROOT, "package.json"));
-  for (const spec of ["harper/package.json", "@harperfast/harper/package.json"]) {
-    try {
-      return require.resolve(spec);
-    } catch {
-      continue;
-    }
+  for (const name of ["harper", "@harperfast/harper"]) {
+    const pkgPath = join(REPO_ROOT, "node_modules", ...name.split("/"), "package.json");
+    if (existsSync(pkgPath)) return pkgPath;
   }
   throw new Error(
     "installed harper/package.json not found; cannot derive Harper's engines.node floor",
