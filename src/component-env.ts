@@ -258,15 +258,47 @@ export function planComponentEnv(
 }
 
 /**
+ * True when `envPath` is inside a `node_modules` tree (any platform separator).
+ *
+ * A `.env` there is not a durable location: it does not exist on a stock npm
+ * install and `npm upgrade` / `flair upgrade` wipes the package directory
+ * (flair#1313). Doctor and deploy must never name that path as the fix.
+ */
+export function isNodeModulesEnvPath(envPath: string): boolean {
+  return envPath.split(/[\\/]/).includes("node_modules");
+}
+
+/**
+ * The location `publicUrlRemedy` names when the component path is inside
+ * `node_modules`. Three durable channels, matching what the deploy actually
+ * reads: the process environment that starts Harper (CLI / launchd / systemd),
+ * or the component `.env` on a Fabric/server deploy (`loadEnv` in config.yaml).
+ */
+export const DURABLE_PUBLIC_URL_LOCATION =
+  "the Flair process environment (launchd EnvironmentVariables, systemd Environment=, " +
+  "or export before flair start/restart) or, on a Fabric/server deploy, the component " +
+  `${COMPONENT_ENV_FILENAME} that Harper's loadEnv plugin reads — never a ${COMPONENT_ENV_FILENAME} ` +
+  "inside node_modules (that path does not exist by default and is wiped on every upgrade)";
+
+/**
  * The remedy string for a missing/loopback `FLAIR_PUBLIC_URL`. One definition so
  * `flair deploy` and `flair doctor` cannot drift into naming different files.
  *
- * It names all three things an operator needs: the FILE, the KEY, and the fact that
- * the file is only read because config.yaml declares Harper's `loadEnv` plugin —
- * without which the file is present and inert, which is what made flair#1000 hard
- * to see.
+ * When `envPath` is a durable component location (the deploy root, a server
+ * component dir), it names the FILE, the KEY, and the fact that the file is
+ * only read because config.yaml declares Harper's `loadEnv` plugin — without
+ * which the file is present and inert, which is what made flair#1000 hard to
+ * see.
+ *
+ * When `envPath` is inside `node_modules` (a global `npm install -g` package
+ * dir), naming that file would send the operator to a path that does not exist
+ * by default and is destroyed on every upgrade (flair#1313). The remedy then
+ * names the durable process-environment / server-component channels instead.
  */
 export function publicUrlRemedy(envPath: string, exampleUrl = "https://flair.example.com"): string {
+  if (isNodeModulesEnvPath(envPath)) {
+    return `set ${PUBLIC_URL_KEY}=${exampleUrl} in ${DURABLE_PUBLIC_URL_LOCATION}, then restart the instance`;
+  }
   return (
     `set ${PUBLIC_URL_KEY}=${exampleUrl} in ${envPath} (Harper reads a component's ` +
     `${COMPONENT_ENV_FILENAME} only because flair's config.yaml declares the loadEnv plugin, ` +
@@ -283,7 +315,11 @@ export interface PublicUrlDoctorInput {
   componentEnvValue: string | null;
   /** `FLAIR_PUBLIC_URL` visible to the CLI process, or null. */
   processEnvValue: string | null;
-  /** Absolute path of the component `.env` the remedy should name. */
+  /**
+   * Absolute path of the component `.env` doctor inspected. Named in the
+   * remedy only when it is a durable location — never when it sits inside
+   * `node_modules` (flair#1313).
+   */
   componentEnvPath: string;
 }
 
@@ -325,6 +361,20 @@ export function describePublicUrlFinding(input: PublicUrlDoctorInput): PublicUrl
   }
 
   if (componentEnvValue !== null && !isLoopbackUrl(componentEnvValue)) {
+    if (isNodeModulesEnvPath(componentEnvPath)) {
+      // The value is in an upgrade-wiped location. Naming that path — even to
+      // say "confirm loadEnv" — would send the operator back into node_modules
+      // (flair#1313). Move the value to a durable channel.
+      return {
+        isIssue: true,
+        icon: "error",
+        message:
+          `${PUBLIC_URL_KEY} is set in a ${COMPONENT_ENV_FILENAME} inside the npm package ` +
+          `directory but discovery still advertises ${advertisedIssuer} — that file is ` +
+          `wiped on every upgrade and is not a durable location`,
+        fixHint: publicUrlRemedy(componentEnvPath, componentEnvValue),
+      };
+    }
     return {
       isIssue: true,
       icon: "error",

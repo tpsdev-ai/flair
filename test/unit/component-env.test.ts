@@ -14,8 +14,10 @@ import {
   PUBLIC_URL_KEY,
   assertNoSecretKeysAdded,
   describePublicUrlFinding,
+  DURABLE_PUBLIC_URL_LOCATION,
   envKeyNames,
   isLoopbackUrl,
+  isNodeModulesEnvPath,
   looksLikeSecretKey,
   planComponentEnv,
   publicUrlRemedy,
@@ -178,6 +180,20 @@ describe("assertNoSecretKeysAdded", () => {
   });
 });
 
+describe("isNodeModulesEnvPath", () => {
+  test("recognises a path inside an npm package tree (posix and win32)", () => {
+    expect(isNodeModulesEnvPath("/lib/node_modules/@tpsdev-ai/flair/.env")).toBe(true);
+    expect(isNodeModulesEnvPath("/usr/lib/node_modules/@tpsdev-ai/flair/.env")).toBe(true);
+    expect(isNodeModulesEnvPath("C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\@tpsdev-ai\\flair\\.env")).toBe(true);
+  });
+
+  test("does not treat a durable component or deploy-root path as node_modules", () => {
+    expect(isNodeModulesEnvPath("/opt/flair/.env")).toBe(false);
+    expect(isNodeModulesEnvPath(".env in the deploy root")).toBe(false);
+    expect(isNodeModulesEnvPath("/home/harperdb/hdb/components/flair/.env")).toBe(false);
+  });
+});
+
 describe("publicUrlRemedy", () => {
   test("names the file, the key and the loadEnv requirement", () => {
     const remedy = publicUrlRemedy("/opt/flair/.env");
@@ -185,6 +201,18 @@ describe("publicUrlRemedy", () => {
     expect(remedy).toContain(PUBLIC_URL_KEY);
     expect(remedy).toContain("loadEnv");
     expect(remedy).toContain(COMPONENT_ENV_FILENAME);
+    expect(remedy).not.toContain("node_modules");
+  });
+
+  test("never names a .env inside node_modules — that path is wiped on upgrade (flair#1313)", () => {
+    const npmPath = "/lib/node_modules/@tpsdev-ai/flair/.env";
+    const remedy = publicUrlRemedy(npmPath);
+    expect(remedy).not.toContain(npmPath);
+    expect(remedy).not.toContain("/lib/node_modules");
+    expect(remedy).toContain(PUBLIC_URL_KEY);
+    expect(remedy).toContain(DURABLE_PUBLIC_URL_LOCATION);
+    expect(remedy).toContain("loadEnv");
+    expect(remedy).toMatch(/launchd|systemd|process environment/);
   });
 });
 
@@ -226,6 +254,55 @@ describe("describePublicUrlFinding (flair doctor)", () => {
     expect(f.isIssue).toBe(true);
     expect(f.fixHint).toContain(ENV_PATH);
     expect(f.fixHint).toContain("https://flair.example.com");
+  });
+
+  test("ISSUE: a .env inside node_modules is not named as the fix (flair#1313)", () => {
+    const npmPath = "/lib/node_modules/@tpsdev-ai/flair/.env";
+    const f = describePublicUrlFinding({
+      advertisedIssuer: "http://127.0.0.1:19926",
+      componentEnvValue: null,
+      processEnvValue: null,
+      componentEnvPath: npmPath,
+    })!;
+    expect(f.fixHint).toBeDefined();
+    expect(f.fixHint).not.toContain(npmPath);
+    expect(f.fixHint).not.toContain("/lib/node_modules");
+    expect(f.fixHint).toContain(PUBLIC_URL_KEY);
+    expect(f.fixHint).toContain("loadEnv");
+    expect(f.message).not.toContain("node_modules/@tpsdev-ai");
+  });
+
+  test("ISSUE: a value in this shell must not send the operator into node_modules", () => {
+    // The canary shape: doctor sees FLAIR_PUBLIC_URL in the CLI process and
+    // used to name /lib/node_modules/@tpsdev-ai/flair/.env as the fix.
+    const npmPath = "/lib/node_modules/@tpsdev-ai/flair/.env";
+    const f = describePublicUrlFinding({
+      advertisedIssuer: "http://127.0.0.1:9980",
+      componentEnvValue: null,
+      processEnvValue: "https://flair.example.com",
+      componentEnvPath: npmPath,
+    })!;
+    expect(f.isIssue).toBe(true);
+    expect(f.fixHint).not.toContain(npmPath);
+    expect(f.fixHint).not.toContain("/lib/node_modules");
+    expect(f.fixHint).toContain("https://flair.example.com");
+    expect(f.fixHint).toContain(DURABLE_PUBLIC_URL_LOCATION);
+  });
+
+  test("ISSUE: a value sitting in the npm-package .env is drift, and the remedy is durable", () => {
+    const npmPath = "/usr/lib/node_modules/@tpsdev-ai/flair/.env";
+    const f = describePublicUrlFinding({
+      advertisedIssuer: "http://127.0.0.1:9980",
+      componentEnvValue: "https://flair.example.com",
+      processEnvValue: null,
+      componentEnvPath: npmPath,
+    })!;
+    expect(f.isIssue).toBe(true);
+    expect(f.icon).toBe("error");
+    expect(f.message).not.toContain(npmPath);
+    expect(f.fixHint).not.toContain(npmPath);
+    expect(f.fixHint).toContain("https://flair.example.com");
+    expect(f.fixHint).toContain(DURABLE_PUBLIC_URL_LOCATION);
   });
 
   test("unset everywhere is INFORMATION, not a finding — a check that always fires is noise", () => {

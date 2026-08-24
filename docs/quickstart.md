@@ -164,6 +164,14 @@ Add `--explain` to see the ranking inputs per hit — the raw score, the composi
 
 ## 6. Give your agent context on boot
 
+With MCP wired (`flair init` does this for every client it detects), the recommended session-start is the `bootstrap` tool. In Claude Code that appears as `mcp__flair__bootstrap` (Claude Code's namespaced name for the server's `bootstrap` tool). Add this to your `CLAUDE.md`:
+
+```
+At the start of every session, run mcp__flair__bootstrap before responding.
+```
+
+Use the CLI variant — `flair bootstrap --agent <id>` — when MCP is not wired: previewing context yourself, a script, or any agent that can run a shell command.
+
 ```bash
 flair bootstrap --agent local --max-tokens 2000
 ```
@@ -174,15 +182,7 @@ flair bootstrap --agent local --max-tokens 2000
 ✓ budget 20/2000 tokens (1%) · ✓ 1 included · ✓ 0 truncated
 ```
 
-Soul entries and relevant memories, in one block sized to a token budget. Paste it into any LLM session — Claude Code, Codex, Cursor, an API call — to hand the agent its identity and memory in one shot.
-
-Using Claude Code? Add this to your `CLAUDE.md`:
-
-```
-At the start of every session, run mcp__flair__bootstrap before responding.
-```
-
-With the MCP server wired up — `flair init` does this automatically for every client it detects — Claude Code runs bootstrap on every new session. See the [integration section in README.md](../README.md#integration).
+Soul entries and relevant memories, in one block sized to a token budget. Paste that CLI output into any LLM session that does not have the MCP server — Codex, Cursor, an API call — to hand the agent its identity and memory in one shot. See the [integration section in README.md](../README.md#integration).
 
 ## What's next
 
