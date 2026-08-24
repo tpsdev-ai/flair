@@ -152,7 +152,7 @@ describe("ExplainPlan", () => {
     expect(firstCondition["attribute"]).toBe("tags");
     expect(firstCondition["comparator"]).toBe("equals");
     expect(firstCondition["value"]).toBe(tag);
-  });
+  }, { timeout: 60_000 }); // 150 embeds (3 users × 50) — not a 5s unit of work; matches metadata_and_list
 
   it("empty user returns empty", async () => {
     if (!config || !service) {

@@ -108,7 +108,7 @@ EXPOSE 19926
 CMD ["flair", "start", "--foreground"]
 ```
 
-Note: embeddings run on CPU in Docker (no Metal acceleration). Performance is acceptable for small-to-medium memory stores (< 10K memories).
+Note: embeddings run on CPU in Docker (no Metal acceleration). Performance is acceptable for small-to-medium memory stores (< 10K memories). Thread count follows `FLAIR_EMBED_THREADS` (default `max(1, availableParallelism() − 1)`); pin it if the container CPU quota and the host you want to use disagree.
 
 ---
 
@@ -186,6 +186,16 @@ Set these in the Flair process environment (`~/Library/LaunchAgents/ai.tpsdev.fl
 | `FLAIR_KEY_PASSPHRASE` | Passphrase used to derive the AES-256-GCM key that wraps federation private-key seeds at rest. Auto-generated to `~/.flair/keys/.passphrase` if unset. | Set explicitly for production federation deployments so the passphrase isn't auto-generated and lost on disk wipe. |
 | `HTTP_PORT` | Override the Harper HTTP port. Useful for sandboxes; production deployments should configure the port in `config.yaml` instead. | Rare. |
 | `FLAIR_OPS_BIND` | Bind address for the Harper **ops API**. Resolution order: `flair init --ops-bind` > this variable > the `opsBind` key `flair init` persists in `~/.flair/config.yaml` > `127.0.0.1`. Every Flair-managed Harper start re-asserts the resolved value, so the persisted key is what makes a choice survive `flair restart` / `flair upgrade`. | Only for deployments that genuinely need remote ops admin (multi-host / Fabric) — set it to `0.0.0.0`, or record it once with `flair init --ops-bind 0.0.0.0`. Single-host installs want the loopback default. |
+
+### Performance-related environment variables
+
+These are read by the Harper process at boot (same places as the table above: launchd plist, systemd unit, component `.env` / Fabric env). They are **not** `config.yaml` keys — embedding registration is in-process and must not persist into Harper's config file.
+
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `FLAIR_EMBED_THREADS` | `max(1, availableParallelism() − 1)` | CPU threads for in-process embedding (harper-fabric-embeddings / llama.cpp). Host-aware so a 4-core box does not inherit HFE's fixed 6, and an 8-vCPU ingest host is not stuck at 6 idle cores. One core is left for Harper's event loop and the OS. `availableParallelism()` respects a container CPU quota. Set a positive integer to pin. Invalid values fall back to the default. |
+| `FLAIR_HYBRID_RETRIEVAL` | `true` | Hybrid BM25 + vector retrieval. Set `false` / `0` / `off` to revert to the legacy HNSW + keyword-bump path. |
+| `FLAIR_MODELS_DIR` | `<data-dir>/models` | Directory the embedding GGUF is loaded from (and downloaded into on first boot). Point this at a pre-seeded directory to skip the HuggingFace download; see [troubleshooting.md](troubleshooting.md). |
 
 ---
 
