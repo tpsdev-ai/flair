@@ -118,14 +118,13 @@ export class FlairClient {
       headers["Authorization"] = signRequest(this.agentId, key, method, path);
     } else if (this.basicAuth) {
       headers["Authorization"] = this.basicAuth;
+      // Basic-only snapshot — do not spread a prior inspectKeyLookup result.
+      // A 401 here is about admin credentials, not key-file paths (review on #1390).
       this.lastKeyLookup = {
-        ...(this.lastKeyLookup ?? {
-          agentId: this.agentId,
-          home: "",
-          candidates: [],
-          resolvedPath: null,
-          signed: false,
-        }),
+        agentId: this.agentId,
+        home: "",
+        candidates: [],
+        resolvedPath: null,
         signed: false,
         authMethod: "basic",
       };

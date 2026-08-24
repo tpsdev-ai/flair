@@ -31,8 +31,8 @@ describe("classifyError 401 names key lookup (flair#1271)", () => {
   test("basic-auth 401 names admin credentials, not FLAIR_KEY_PATH", () => {
     const lookup = {
       agentId: "grok-cos",
-      home: "/home/agent",
-      candidates: [{ path: "/home/agent/.flair/keys/grok-cos.key", exists: false }],
+      home: "",
+      candidates: [] as { path: string; exists: boolean }[],
       resolvedPath: null,
       signed: false as const,
       authMethod: "basic" as const,
@@ -41,7 +41,10 @@ describe("classifyError 401 names key lookup (flair#1271)", () => {
     const text = classifyError(err, "https://hub.example.com");
     expect(text).toContain("Basic admin credentials");
     expect(text).toContain("FLAIR_ADMIN_PASSWORD");
+    expect(text).not.toContain("Looked for a key at");
+    expect(text).not.toContain(".key");
     expect(text).not.toContain("FLAIR_KEY_PATH");
+    expect(text).not.toContain("os.homedir()");
   });
 
   test("signed 401 names the key file that was used", () => {

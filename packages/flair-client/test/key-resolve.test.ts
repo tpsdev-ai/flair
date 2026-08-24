@@ -217,10 +217,16 @@ describe("missed freshly-created key (flair#1271)", () => {
     const err = caught as InstanceType<typeof FlairError>;
     expect(err.keyLookup!.authMethod).toBe("basic");
     expect(err.keyLookup!.signed).toBe(false);
+    expect(err.keyLookup!.candidates).toEqual([]);
+    expect(err.keyLookup!.home).toBe("");
+    expect(err.keyLookup!.resolvedPath).toBeNull();
     const text = formatKeyLookup(err.keyLookup!);
     expect(text).toContain("Basic admin credentials");
     expect(text).toContain("FLAIR_ADMIN_PASSWORD");
+    expect(text).not.toContain("Looked for a key at");
+    expect(text).not.toContain(".key");
     expect(text).not.toContain("FLAIR_KEY_PATH");
+    expect(text).not.toContain("os.homedir()");
   });
 });
 
@@ -252,10 +258,14 @@ describe("formatKeyLookup (flair#1271)", () => {
       signed: false,
       authMethod: "basic",
     });
+    expect(text).toContain("agent 'grok-cos'");
     expect(text).toContain("Basic admin credentials");
     expect(text).toContain("FLAIR_ADMIN_USER");
     expect(text).toContain("FLAIR_ADMIN_PASSWORD");
+    expect(text).not.toContain("Looked for a key at");
+    expect(text).not.toContain(".key");
     expect(text).not.toContain("FLAIR_KEY_PATH");
+    expect(text).not.toContain("os.homedir()");
     expect(text).not.toContain("without a signing key");
   });
 

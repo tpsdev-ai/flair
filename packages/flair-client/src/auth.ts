@@ -160,11 +160,15 @@ export function formatKeyLookup(state: KeyLookupState): string {
     ? `agent '${state.agentId}'`
     : "this agent (FLAIR_AGENT_ID unset)";
   const method = authMethodOf(state);
+  if (method === "basic") {
+    return (
+      `${actor} sent this request with Basic admin credentials (FLAIR_ADMIN_USER / FLAIR_ADMIN_PASSWORD), not an Ed25519 key.\n` +
+      "The server rejected those admin credentials. Check FLAIR_ADMIN_USER and FLAIR_ADMIN_PASSWORD — this 401 is not a missing agent key."
+    );
+  }
   const stateLine = method === "ed25519"
     ? `${actor} signed with ${state.resolvedPath}.`
-    : method === "basic"
-      ? `${actor} sent this request with Basic admin credentials (FLAIR_ADMIN_USER / FLAIR_ADMIN_PASSWORD), not an Ed25519 key.`
-      : `${actor} sent this request without a signing key.`;
+    : `${actor} sent this request without a signing key.`;
   const homeLine = `os.homedir() at lookup: ${state.home || "(empty — refused to fall back to cwd)"}`;
   const looked = state.candidates.length === 0
     ? "Looked for a key at: (no candidate paths — home could not be resolved)."
@@ -174,9 +178,7 @@ export function formatKeyLookup(state: KeyLookupState): string {
       ].join("\n");
   const remedy = method === "ed25519"
     ? "The server rejected the signature. Confirm the agent is registered (`flair agent add <id>`) and this key matches the Agent record. A daemon restart can also produce this — check `flair status`."
-    : method === "basic"
-      ? "The server rejected those admin credentials. Check FLAIR_ADMIN_USER and FLAIR_ADMIN_PASSWORD — this 401 is not a missing agent key."
-      : "If `flair agent add` wrote the key, this process's home may differ from that shell, or the file appeared after an earlier lookup. Retry the tool (misses are no longer cached). Still missing? Set FLAIR_KEY_PATH to the absolute path of the .key file.";
+    : "If `flair agent add` wrote the key, this process's home may differ from that shell, or the file appeared after an earlier lookup. Retry the tool (misses are no longer cached). Still missing? Set FLAIR_KEY_PATH to the absolute path of the .key file.";
   return `${stateLine}\n${homeLine}\n${looked}\n${remedy}`;
 }
 
