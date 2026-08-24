@@ -61,25 +61,43 @@ opt-in, never something the server infers. The practical consequences:
   agent id to attach the sub to it; the step's output states the resulting
   `sub → Agent` mapping in as many words.
 - **Linking a sub to an existing Agent (the same-identity opt-in).** Re-run
-  `flair mcp enable` with the SAME `--idp-provider`/`--idp-subject` and
-  `--principal <your-cli-agent-id>`. The existing `(provider, subject)`
-  Credential is RE-POINTED to that principal — one Credential row per subject,
-  so resolution stays deterministic. The link *replaces* the mapping; it does
-  not merge the two agents' memories.
+  `flair mcp enable` with the SAME `--idp-subject` and `--principal
+  <your-cli-agent-id>`. The existing Credential for that subject is RE-POINTED
+  to that principal — one ACTIVE Credential row per subject, so resolution stays
+  deterministic. The link *replaces* the mapping; it does not merge the two
+  agents' memories.
 - **First diagnostic: ask the server who you are.** The `bootstrap` tool's
   response always carries the resolved `agentId` and a `scope` descriptor
   (`scope.agentId` / `scope.isAdmin` / `scope.reads`, flair#1182). "My memory
   is empty over the connector" + a `bootstrap.agentId` you don't recognize =
   the sub resolved to a different (often JIT-provisioned) Agent — link it as
   above.
-- **JIT caveat.** A JIT-provisioned mapping (`FLAIR_MCP_JIT_PROVISION=1`)
-  stamps `idpProvider: "mcp-oauth"`. Runtime resolution matches on
-  `(kind, idpSubject)` only, but the *linking* upsert matches on
-  `(kind, idpProvider, idpSubject)` — so when re-linking a JIT-provisioned
-  sub, pass `--idp-provider mcp-oauth` (matching the JIT stamp), or first
-  revoke the JIT credential (`status: "revoked"`). Linking under a different
-  provider name creates a SECOND active credential for the same subject, and
-  which one wins resolution is unspecified.
+- **Re-linking under a different provider name SUPERSEDES (flair#1317).** A
+  JIT-provisioned mapping (`FLAIR_MCP_JIT_PROVISION=1`) stamps `idpProvider:
+  "mcp-oauth"`, so re-linking that sub as, say, `github` is a *provider change*.
+  The invariant is **at most one ACTIVE `Credential(kind:"idp", idpSubject)` per
+  subject, regardless of provider** — the same key runtime resolution uses. So
+  the link revokes the prior credential (terminal `status: "revoked"`, the row
+  retained for audit) and writes the new one, in a single batched write. You do
+  NOT need to match `--idp-provider` to the JIT stamp, and you do not need to
+  revoke anything by hand first. `provisionIdpIdentityMapping` returns
+  `credentialSuperseded: true` with the revoked ids, and the `flair mcp enable`
+  identity-mapping step prints them.
+
+  Read `credentialSuperseded` as **"the prior credential for this subject is now
+  dead"**, not "a duplicate was tidied up". `idpProvider` is audit/diagnostic
+  metadata on the row; it does not namespace the subject. Residual risk, ruled
+  acceptable (Sherlock, #1317): anyone who can run the link for a subject can
+  revoke that subject's existing credential, so two genuinely different people
+  sharing one subject string across providers would evict each other. IdP
+  subjects are opaque per-IdP identifiers, so this is remote — and the
+  alternative, duplicate active credentials resolved by iteration order, is
+  strictly worse.
+
+  Before the fix, the linking upsert deduped on `(kind, idpProvider,
+  idpSubject)` while resolution read `(kind, idpSubject)`, so a cross-provider
+  re-link silently created a SECOND active credential and which one won was
+  unspecified.
 
 The two-identity contract (a distinct connector agent sees other agents'
 org-non-private rows, never their private rows, 404-never-403 by id; a linked
