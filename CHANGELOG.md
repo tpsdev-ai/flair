@@ -142,6 +142,10 @@ so a hand-written entry here is lost.
   Pinned by `test/integration/mcp-connector-principal-mapping.test.ts` (e), which
   reads two active credentials on unmodified main, and by (f), which proves a
   revoked credential does not resolve at all — not merely that it loses a race.
+  **Before this fix, `revoked` was not terminal — a same-provider re-link would
+  reactivate a revoked row.** If you have relied on revoking a credential as a
+  permanent cut-off, that guarantee starts with this release; prior revocations
+  were reactivatable by a subsequent link under the same provider.
 
 - **Hybrid recall no longer rebuilds a full BM25 index on every query** (flair#1357;
   Kern's design ruling, 2026-08-23). The hybrid lexical leg used to fetch the
