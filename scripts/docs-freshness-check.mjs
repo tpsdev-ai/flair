@@ -33,6 +33,7 @@ import {
   readFragments,
   strayUnreleasedEntries,
 } from "./changelog-fragments.mjs";
+import { changeTouchesPublished } from "./published-paths.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 const IN_CI = !!process.env.GITHUB_ACTIONS;
@@ -299,8 +300,10 @@ defineCheck("package-name-drift", "prose doc", () => {
 
 // ── Check 5: unreleased changelog entries exist when work has landed ────────────
 // FAILS when feat/fix commits exist since the latest v* tag but no changelog
-// fragment is staged under .changelog/unreleased/. Degrades to a skip (never a
-// false fail) when there is no tag or git history to compare against.
+// fragment is staged under .changelog/unreleased/. Path-aware (flair#1098): a
+// feat/fix that touches only unpublished paths (scripts/, tests, CI) does not
+// require a fragment. Degrades to a skip (never a false fail) when there is no
+// tag or git history to compare against.
 //
 // Entries moved out of CHANGELOG.md's [Unreleased] block and into one file per
 // change (flair#835) — concurrent PRs were conflicting on those lines every time,
@@ -399,14 +402,42 @@ defineCheck("changelog-unreleased", null, () => {
     }
   }
 
-  if (commitsSinceTag !== null && commitsSinceTag > 0 && !hasContent) {
+  // ── Path awareness (flair#1098) ──────────────────────────────────────────────
+  // A feat/fix that cannot reach a user — scripts/, CI, tests — is not a
+  // changelog event. The published set is package.json's `files[]` (the same
+  // derivation as publishedEntryNames()), plus src/ and resources/ which compile
+  // into the published dist/ entry (mapped only when dist ships), plus
+  // packages/ and examples/ which ship independently of that entry. Unknown
+  // (no files[], no changed-path list) stays fail-closed: require a fragment
+  // rather than silently stop firing.
+  //
+  // Default true so a missing merge-base does not become an unpublished escape.
+  let thisChangeShips = true;
+  const baseRef = process.env.GITHUB_BASE_REF
+    ? `origin/${process.env.GITHUB_BASE_REF}`
+    : "origin/main";
+  let base = "";
+  try {
+    base = execFileSync("git", ["merge-base", "HEAD", baseRef],
+      { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    if (base) {
+      const changed = execFileSync("git", ["diff", "--name-only", `${base}..HEAD`],
+        { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+      const changedPaths = changed ? changed.split("\n") : [];
+      thisChangeShips = changeTouchesPublished(changedPaths, ROOT);
+    }
+  } catch {
+    // merge-base or diff unavailable — leave thisChangeShips true (fail-closed).
+  }
+
+  if (commitsSinceTag !== null && commitsSinceTag > 0 && !hasContent && thisChangeShips) {
     failures.push({
       file: `${FRAGMENT_DIR_REL}/`, line: 1,
       msg: `no changelog fragments staged, but ${commitsSinceTag} feat/fix commit(s) have landed since the last release tag. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md describing what changed (categories: ${CATEGORIES.join(", ")}).`,
     });
   }
 
-  // ── Per-change rule (flair#1036) ─────────────────────────────────────────────
+  // ── Per-change rule (flair#1036, path-aware in flair#1098) ───────────────────
   // The rule above asks whether the DIRECTORY is non-empty, which makes it nearly
   // inert: once any one PR contributes a fragment, every subsequent PR satisfies
   // it until the next release empties the directory again. Its only live window
@@ -421,13 +452,9 @@ defineCheck("changelog-unreleased", null, () => {
   //
   // So ask the question about THIS change instead: did the commits under review
   // add a fragment? A fragment must be ADDED (--diff-filter=A) — editing someone
-  // else's staged entry is not writing your own.
-  const baseRef = process.env.GITHUB_BASE_REF
-    ? `origin/${process.env.GITHUB_BASE_REF}`
-    : "origin/main";
+  // else's staged entry is not writing your own. And only if the change touches
+  // a published path: a scripts/-only fix is not a changelog event.
   try {
-    const base = execFileSync("git", ["merge-base", "HEAD", baseRef],
-      { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
     if (base) {
       const range = `${base}..HEAD`;
       const subjects = execFileSync("git", ["log", range, "--pretty=%s"],
@@ -440,7 +467,7 @@ defineCheck("changelog-unreleased", null, () => {
         { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
       const addedCount = added ? added.split("\n").filter((p) => !/\/README\.md$/.test(p)).length : 0;
 
-      if (changeCommits > 0 && addedCount === 0) {
+      if (thisChangeShips && changeCommits > 0 && addedCount === 0) {
         failures.push({
           file: `${FRAGMENT_DIR_REL}/`, line: 1,
           msg: `this change has ${changeCommits} feat/fix commit(s) since ${baseRef} but adds no changelog fragment. The directory being non-empty is not enough — an entry already there belongs to someone else's change. Add ${FRAGMENT_DIR_REL}/<category>-<slug>.md (categories: ${CATEGORIES.join(", ")}).`,
