@@ -873,15 +873,16 @@ export function publishedEntryNames(packageRoot: string): Set<string> {
   // `files` entries are npm patterns; the ones flair uses are plain top-level
   // names, optionally trailing-slashed ("dist/"). Normalise to the entry name.
   //
-  // A glob or negation is a listed entry we cannot honour. The old filter
-  // dropped those silently, so npm pack would include them and the deployed
-  // component would not, with nothing saying why (flair#1083). Refuse instead:
-  // same fail-closed direction, but loud at the moment someone introduces it.
+  // Honourable iff the entry is a plain top-level name. A blacklist of `*` and
+  // `!` lets `?`, `[]`, `{}` (and anything else minimatch understands) through
+  // as a literal that matches no real file — the same silent drop this fix
+  // exists to prevent (Sherlock on #1398). Whitelist: there is no
+  // differently-malformed form that slips through.
   const names: string[] = [];
   for (const raw of declared) {
     const f = String(raw).replace(/^\.\//, "").replace(/\/+$/, "");
     if (f === "") continue;
-    if (f.includes("*") || f.startsWith("!")) {
+    if (f === "." || f === ".." || !/^[a-zA-Z0-9._-]+$/.test(f)) {
       throw new Error(
         `Cannot honour files entry ${JSON.stringify(String(raw))}: the deploy payload filter supports plain ` +
           `top-level entries only. Either simplify the entry, or extend publishedEntryNames() ` +

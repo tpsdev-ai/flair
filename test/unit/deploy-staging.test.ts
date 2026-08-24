@@ -453,6 +453,28 @@ describe("stageDeployRoot — the payload equals the published file set", () => 
     expect(() => publishedEntryNames(root)).toThrow(/plain top-level entries only/);
   });
 
+  test("a ? wildcard files entry is a named refusal, not a silent omit (flair#1083)", () => {
+    // Blacklisting `*` and `!` still let `dist/?.js` through as a literal
+    // name that matches nothing — npm pack would include the files, the
+    // payload would not. The whitelist refuses any non-plain top-level name.
+    const root = mkdtempSync(join(tmpdir(), "flair-qfiles-")); roots.push(root);
+    writeFileSync(join(root, "package.json"), JSON.stringify({
+      name: "@tpsdev-ai/flair",
+      version: "0.0.0-test",
+      files: ["dist/?.js", "schemas/", "config.yaml", "README.md"],
+    }));
+    mkdirSync(join(root, "dist"), { recursive: true });
+    writeFileSync(join(root, "dist", "a.js"), "published");
+    mkdirSync(join(root, "schemas"), { recursive: true });
+    writeFileSync(join(root, "schemas", "keep.txt"), "published");
+    writeFileSync(join(root, "config.yaml"), "published: true");
+    writeFileSync(join(root, "README.md"), "# published");
+
+    expect(() => stageDeployRoot(root, "https://example.invalid")).toThrow(
+      /Cannot honour files entry "dist\/\?\.js"/,
+    );
+  });
+
   test("publishedEntryNames reads files from the root, not a hardcoded copy", () => {
     const root = fixtureRoot(); roots.push(root);
     const names = publishedEntryNames(root);
