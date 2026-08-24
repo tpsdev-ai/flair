@@ -248,7 +248,7 @@ describe("the impl-term-leak gate cannot report clean without scanning", () => {
     // argv overflow) into its "no matches" status (1). Verified empirically: a
     // grep over a chmod-000 file returns 2, and the old line printed
     // "No leaks found." and exited 0.
-    const grepLine = src.split("\n").find((l) => l.includes("grep -n -E \"$PATTERNS\"")) ?? "";
+    const grepLine = src.split("\n").find((l) => l.includes("grep -n -H -E \"$PATTERNS\"")) ?? "";
     expect(grepLine.length).toBeGreaterThan(0);
     expect(grepLine).not.toMatch(/\|\|\s*(true|:)/);
     expect(src).toContain("GREP_RC");

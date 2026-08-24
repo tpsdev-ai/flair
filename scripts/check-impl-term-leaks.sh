@@ -16,6 +16,8 @@ PATTERNS="$BEAD_PATTERN|$LABEL_PATTERN"
 # Exact-literal allowlist of English ops-* compounds that are not bead IDs (flair#1381).
 # Not a regex. Not a heuristic. A real bead ID can only get onto this list by being
 # added here, in a diff, visibly. Membership is string equality against one line.
+# ops-api is three letters and the bead pattern requires four — listed anyway so
+# the exemption stays explicit if the pattern ever widens.
 ALLOWLIST_EXACT='
 ops-port
 ops-api
@@ -82,8 +84,12 @@ while IFS= read -r line; do
   [[ -n "$line" ]] && FILES+=("$line")
 done < "$TMPFILE"
 
+# -H (--with-filename) is required: grep omits the path when the corpus is a
+# single file, and the finding formatter below splits on file:line:content.
+# Without -H a one-file scan (the exact shape of the unit fixtures) would
+# print the raw line and never name the token or the rule (flair#1381).
 set +e
-OUTPUT=$(grep -n -E "$PATTERNS" "${FILES[@]}" 2>"$ERRFILE")
+OUTPUT=$(grep -n -H -E "$PATTERNS" "${FILES[@]}" 2>"$ERRFILE")
 GREP_RC=$?
 set -e
 
@@ -127,11 +133,13 @@ if [[ -n "$OUTPUT" ]]; then
     lineno="${rest%%:*}"
     content="${rest#*:}"
 
-    if [[ -z "$lineno" || "$file" == "$match" || "$lineno" == "$rest" ]]; then
-      FINDINGS="${FINDINGS}${match}"$'\n'
-      FINDING_COUNT=$((FINDING_COUNT + 1))
-      continue
-    fi
+    case "$lineno" in
+      ''|*[!0-9]*)
+        FINDINGS="${FINDINGS}${match}"$'\n'
+        FINDING_COUNT=$((FINDING_COUNT + 1))
+        continue
+        ;;
+    esac
 
     line_hits=0
 
