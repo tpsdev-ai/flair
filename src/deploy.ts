@@ -881,7 +881,10 @@ export function publishedEntryNames(packageRoot: string): Set<string> {
   const names: string[] = [];
   for (const raw of declared) {
     const f = String(raw).replace(/^\.\//, "").replace(/\/+$/, "");
-    if (f === "") continue;
+    // Empty after normalize (`""`, `./`, `/`) is a listed entry we cannot
+    // honour as a plain top-level name. Skipping it left hasDeclaredFiles
+    // true and shipped only the always-includes — the same silent omit
+    // (Bugbot on #1398).
     if (f === "." || f === ".." || !/^[a-zA-Z0-9._-]+$/.test(f)) {
       throw new Error(
         `Cannot honour files entry ${JSON.stringify(String(raw))}: the deploy payload filter supports plain ` +

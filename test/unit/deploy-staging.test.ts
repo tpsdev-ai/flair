@@ -496,6 +496,23 @@ describe("stageDeployRoot — the payload equals the published file set", () => 
     );
   });
 
+  test("a ./ files entry is a named refusal, not a skip that ships only always-includes (flair#1083)", () => {
+    // `./` strips to empty. Skipping it left hasDeclaredFiles true and
+    // staged a payload with no dist/ — Bugbot on #1398.
+    const root = mkdtempSync(join(tmpdir(), "flair-dotslash-")); roots.push(root);
+    writeFileSync(join(root, "package.json"), JSON.stringify({
+      name: "@tpsdev-ai/flair",
+      version: "0.0.0-test",
+      files: ["./"],
+    }));
+    mkdirSync(join(root, "dist"), { recursive: true });
+    writeFileSync(join(root, "dist", "keep.js"), "published");
+
+    expect(() => stageDeployRoot(root, "https://example.invalid")).toThrow(
+      /Cannot honour files entry "\.\/"/,
+    );
+  });
+
   test("publishedEntryNames reads files from the root, not a hardcoded copy", () => {
     const root = fixtureRoot(); roots.push(root);
     const names = publishedEntryNames(root);
