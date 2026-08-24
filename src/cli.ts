@@ -14930,7 +14930,8 @@ program
 // from /HealthDetail at all — it's the one metric in this file that requires
 // live QUERIES, because it's checking whether querying itself still works.
 // For a sample of the querying agent's OWN memories (fetchRecallSpotCheckData
-// below, GET /Memory?agentId=<self>), a CUE is derived from each memory
+// below, a projected+bounded GET /Memory — flair#1360: never the unfiltered
+// collection with embeddings inline), a CUE is derived from each memory
 // (deriveRecallCue — its `subject` if present, else the leading ~8 words /
 // first sentence of `content`; a PARTIAL cue, never the full content) and
 // searched for through the EXACT SAME authenticated read path `flair memory
@@ -14996,6 +14997,69 @@ export const QUALITY_HASH_FALLBACK_DEGRADED_PCT = 10;
  *  "first-pass default, tunable later" spirit as the thresholds above. */
 export const QUALITY_RECALL_SAMPLE_SIZE = 10;
 export const QUALITY_RECALL_K = 5;
+
+/**
+ * Fields the recall spot-check and the quality-snapshot lookup actually
+ * read. Harper REST `select(...)` (same syntax adk-flair-js's listMemories
+ * already uses) projects these server-side so the nightly sweep never
+ * pulls embedding vectors inline — the defect in flair#1360 was an
+ * unfiltered `GET /Memory?agentId=…` that returned every row's 768-d
+ * vector (~66 MB × 2 per `--emit` run on a 3k-row store) just to sample
+ * 10 memories. `type` is intentionally omitted: it is not a declared
+ * Memory column (see schemas/memory.graphql); snapshot exclusion keys
+ * off `subject` (`quality-snapshot/…`).
+ */
+export const QUALITY_MEMORY_LIST_SELECT = ["id", "subject", "content", "createdAt"] as const;
+
+/**
+ * Extra most-recent rows fetched beyond `sampleSize` so
+ * `planRecallSpotCheck` can drop the sweep's own quality-snapshot
+ * bookkeeping and still fill a 10-row window — without scanning the
+ * table. Nightly `--emit` writes one snapshot per run; 16 is a buffer
+ * for a few extra `--emit`s in the same recency window, not a second
+ * full-table read.
+ */
+export const QUALITY_RECALL_SNAPSHOT_OVERFETCH = 16;
+
+/** Injectable GET/POST used by the quality I/O helpers so tests can lock
+ *  the Memory listing URL (flair#1360) without a live Harper. */
+export type QualityApi = (
+  method: string,
+  path: string,
+  body?: unknown,
+  options?: { baseUrl?: string; keysDir?: string; agentId?: string | null },
+) => Promise<any>;
+
+/**
+ * Harper REST collection path for the recall spot-check's sample fetch:
+ * agent-scoped, projected (never `embedding`), recency-sorted, bounded.
+ * `limit(start,end)` is Harper's offset window — same as
+ * packages/adk-flair-js/src/memory_service.ts.
+ */
+export function qualityRecallSamplePath(
+  agentId: string,
+  sampleSize: number = QUALITY_RECALL_SAMPLE_SIZE,
+): string {
+  const select = QUALITY_MEMORY_LIST_SELECT.join(",");
+  const end = sampleSize + QUALITY_RECALL_SNAPSHOT_OVERFETCH;
+  return `/Memory?agentId=${encodeURIComponent(agentId)}&select(${select})&sort(-createdAt)&limit(0,${end})`;
+}
+
+/**
+ * Harper REST collection path for the previous quality-snapshot lookup:
+ * same projection as the sample fetch (never `embedding`). Subject is
+ * passed as a query equals (indexed) plus a client-side re-filter —
+ * Memory.search() historically did not turn bare query params into
+ * conditions beyond the signed agent scope, so the client-side filter
+ * in fetchPreviousQualitySnapshot stays as defense in depth. No `limit`:
+ * a bounded window could miss yesterday's snapshot after a busy day of
+ * writes, and without a reliable server-side subject pushdown that
+ * would silently look like a first run.
+ */
+export function qualitySnapshotLookupPath(agentId: string, subject: string): string {
+  const select = QUALITY_MEMORY_LIST_SELECT.join(",");
+  return `/Memory?agentId=${encodeURIComponent(agentId)}&subject=${encodeURIComponent(subject)}&select(${select})&sort(-createdAt)`;
+}
 
 export interface QualityMetricGap {
   metric: string;
@@ -15569,20 +15633,23 @@ export function computeQualityReport(
  * `agentId`'s own memories and, for each, search for a cue derived from it.
  * Reuses the EXACT read path `flair memory search` / `flair memory list`
  * use — `api()` (→ authedRequest's 5-tier resolver) for both the
- * `GET /Memory?agentId=...` sample fetch and the `POST /SemanticSearch`
- * queries — so this has zero new endpoint and zero new auth mechanism; it
- * is scoped to `agentId`'s own memories exactly as those commands already
- * are. Never throws: every failure mode (no agentId, fewer than
- * `sampleSize` memories, a fetch/search error) returns `{ ok: false,
- * skipReason }` for computeQualityReport to turn into a `gaps` entry.
+ * projected, bounded `GET /Memory?…&select(…)&limit(…)` sample fetch
+ * (flair#1360 — never the unfiltered collection with embeddings inline)
+ * and the `POST /SemanticSearch` queries — so this has zero new endpoint
+ * and zero new auth mechanism; it is scoped to `agentId`'s own memories
+ * exactly as those commands already are. Never throws: every failure mode
+ * (no agentId, fewer than `sampleSize` memories, a fetch/search error)
+ * returns `{ ok: false, skipReason }` for computeQualityReport to turn
+ * into a `gaps` entry.
  */
-async function fetchRecallSpotCheckData(
+export async function fetchRecallSpotCheckData(
   agentId: string | null,
   baseUrl: string,
-  opts: { sampleSize?: number; k?: number } = {},
+  opts: { sampleSize?: number; k?: number; request?: QualityApi } = {},
 ): Promise<RecallSpotCheckFetchResult> {
   const sampleSize = opts.sampleSize ?? QUALITY_RECALL_SAMPLE_SIZE;
   const k = opts.k ?? QUALITY_RECALL_K;
+  const request = opts.request ?? api;
 
   if (!agentId) {
     return { ok: false, skipReason: "no agent identity to query as — pass --agent or set FLAIR_AGENT_ID" };
@@ -15590,8 +15657,7 @@ async function fetchRecallSpotCheckData(
 
   let all: any[];
   try {
-    const q = new URLSearchParams({ agentId }).toString();
-    const raw = await api("GET", `/Memory?${q}`, undefined, { baseUrl, agentId });
+    const raw = await request("GET", qualityRecallSamplePath(agentId, sampleSize), undefined, { baseUrl, agentId });
     all = Array.isArray(raw) ? raw : (raw?.results ?? raw?.items ?? []);
   } catch (err: any) {
     return { ok: false, agentId, skipReason: `could not fetch memories to sample: ${err?.message ?? String(err)}` };
@@ -15623,7 +15689,7 @@ async function fetchRecallSpotCheckData(
   try {
     for (const { id, cue } of plan.sampled) {
       const body = { agentId, q: cue, limit: k };
-      const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId });
+      const res = await request("POST", "/SemanticSearch", body, { baseUrl, agentId });
       const results: any[] = Array.isArray(res) ? res : (res?.results ?? []);
       sampledIds.push(id);
       perQueryResultIds.push(results.map((r: any) => String(r.id)));
@@ -15883,21 +15949,28 @@ export function qualitySnapshotSubject(baseUrl: string): string {
 }
 
 /** Fetch the most recent prior quality snapshot for `agentId` at `baseUrl`,
- *  via the exact same read path fetchRecallSpotCheckData uses (`api("GET",
- *  "/Memory?agentId=...")`, self-scoped by the signed request's own agent
- *  identity — no new endpoint). Filters client-side by subject (the server's
- *  `GET /Memory?...` doesn't translate query params into search conditions
- *  beyond the signed agentId scope — see resources/Memory.ts's search()),
- *  same client-side-filter pattern `memory list --hash-fallback` already
- *  uses. Returns null on: no prior snapshot, a fetch error, or a snapshot row
- *  whose content isn't parseable/versioned JSON (never throws — a corrupt or
- *  foreign row degrades to "no snapshot", same as a genuine first run, rather
- *  than crashing `--emit`). */
-async function fetchPreviousQualitySnapshot(agentId: string, baseUrl: string, subject: string): Promise<QualitySnapshotCore | null> {
+ *  via the same signed `GET /Memory` read path fetchRecallSpotCheckData
+ *  uses (self-scoped by the signed request's own agent identity — no new
+ *  endpoint). Projects the same fields (never embeddings — flair#1360) and
+ *  asks for `subject` as a query equals; still filters client-side by
+ *  subject because Memory.search() historically did not turn bare query
+ *  params into search conditions beyond the signed agentId scope (see
+ *  resources/Memory.ts's search()), same client-side-filter pattern
+ *  `memory list --hash-fallback` already uses. Returns null on: no prior
+ *  snapshot, a fetch error, or a snapshot row whose content isn't
+ *  parseable/versioned JSON (never throws — a corrupt or foreign row
+ *  degrades to "no snapshot", same as a genuine first run, rather than
+ *  crashing `--emit`). */
+export async function fetchPreviousQualitySnapshot(
+  agentId: string,
+  baseUrl: string,
+  subject: string,
+  opts: { request?: QualityApi } = {},
+): Promise<QualitySnapshotCore | null> {
+  const request = opts.request ?? api;
   let all: any[];
   try {
-    const q = new URLSearchParams({ agentId }).toString();
-    const raw = await api("GET", `/Memory?${q}`, undefined, { baseUrl, agentId });
+    const raw = await request("GET", qualitySnapshotLookupPath(agentId, subject), undefined, { baseUrl, agentId });
     all = Array.isArray(raw) ? raw : (raw?.results ?? raw?.items ?? []);
   } catch {
     return null;
