@@ -112,13 +112,18 @@ describe("rewriteFederationStatusFetchFailed", () => {
 });
 
 describe("isFederationStatusAuthFailure", () => {
-  test("a rewritten fetch-failed against a URL containing 401 is not auth", () => {
+  test("a rewritten fetch-failed against a whole-token 401 URL is not auth", () => {
+    // `--port 401`, not 4010: the digit-boundary regex already rejects 4010,
+    // so that fixture would still pass if the connect-failure guard were
+    // removed. :401 is a whole token — without the guard this is auth-shaped.
     const rewritten = rewriteFederationStatusFetchFailed(
       new TypeError("fetch failed"),
-      "http://127.0.0.1:4010",
+      "http://127.0.0.1:401",
       "--port",
     );
-    expect((rewritten as Error).message).toContain("4010");
+    const msg = (rewritten as Error).message;
+    expect(msg).toContain("http://127.0.0.1:401");
+    expect(msg).toMatch(/(?:^|\D)401(?:\D|$)/);
     expect(isFederationStatusAuthFailure(rewritten)).toBe(false);
   });
 

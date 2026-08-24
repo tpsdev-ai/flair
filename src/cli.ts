@@ -6982,8 +6982,8 @@ export function rewriteFederationStatusFetchFailed(err: unknown, url: string, se
 
 /**
  * Auth-shaped vs connect-level for `federation status`. A rewritten
- * fetch-failed sentence embeds the probed URL; that URL can contain the
- * digits `401` (e.g. `--port 4010`). The old `message.includes("401")`
+ * fetch-failed sentence embeds the probed URL; that URL can contain a
+ * whole-token `401` (e.g. `--port 401`). The old `message.includes("401")`
  * check then printed the credential remedy and hid the URL+setting this
  * change exists to surface (Bugbot on flair#1108).
  */
