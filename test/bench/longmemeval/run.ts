@@ -12,8 +12,18 @@
  *       Pins the dataset (sha256), the reader + judge (digest), num_ctx, and all
  *       configs. Produces a number; NEVER publishes one (artifact.ts NOTICE).
  *
- * Reproducibility: `ollama pull` the pinned digests + fetch the pinned dataset
- * (see README) and anyone re-runs the exact number locally — no OpenAI key.
+ * What a re-runner can verify: `ollama pull` the pinned digests + fetch the
+ * pinned dataset (see README) and anyone re-derives the `configHash` exactly —
+ * that is the anchor, and it is what "did they run what they said they ran"
+ * rests on, together with the exact prompts, the dataset selection and the judge
+ * rubric. No OpenAI key, no spend.
+ *
+ * The NUMBERS are a different claim. `runHash` re-derives only where the reader
+ * is bitwise-stable (expected under `local`, not under `cloud`), and
+ * `artifactHash` is a SEAL — tamper-evidence for a signed-off artifact — not a
+ * reproducibility proof. Under `cloud`, accuracy is a statistical result: re-run
+ * and compare within variance, using the reader-determinism probe this command
+ * records in the artifact's provenance as the variance to compare against.
  */
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -30,6 +40,9 @@ import { runOnce, SELECTED_ARMS, writeProgress, setJournalContext } from "./eval
 import { aggregateArmAcrossRuns, type ArmRunMetrics } from "./metrics";
 import { buildArtifact, writeArtifact, verifyArtifactHash } from "./artifact";
 import { formatReport } from "./report";
+import {
+  probeReaderDeterminism, failedProbe, printReaderDeterminism, type ReaderDeterminism,
+} from "./determinism";
 import { ALL_ARMS, type Arm } from "./arms";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -165,6 +178,27 @@ async function runSlice(): Promise<void> {
   }
   console.log(`configHash: ${configHash}\n`);
 
+  // ── Reader-determinism probe (flair#1368) ──────────────────────────────────
+  // Runs BEFORE the measurement runs, on a FIXED question sample independent of
+  // the slice, so its numbers are comparable across every run this harness ever
+  // publishes. Its result lands in the artifact's UNHASHED provenance partition:
+  // determinism legitimately differs run to run, and hashing it would make every
+  // honest re-run look like tampering.
+  //
+  // A probe failure does NOT abort the run — the probe characterises the reader,
+  // it does not gate the measurement, and killing a multi-hour run over it would
+  // be the wrong trade. It is recorded as an error in the artifact instead, so
+  // "we did not probe" can never be mistaken for "we probed and found nothing".
+  let readerDeterminism: ReaderDeterminism;
+  try {
+    readerDeterminism = await probeReaderDeterminism(host, entries, { log: (s) => console.log(s) });
+  } catch (err) {
+    readerDeterminism = failedProbe(host, err);
+    console.error(`\n!! reader-determinism probe FAILED: ${readerDeterminism.error}`);
+    console.error(`   Recorded as an error in the artifact provenance; the run continues.\n`);
+  }
+  printReaderDeterminism(readerDeterminism);
+
   const perArmRuns = new Map<Arm, ArmRunMetrics[]>(SELECTED_ARMS.map((a) => [a, []]));
   const runHashes: string[] = [];
   for (let i = 1; i <= runs; i++) {
@@ -177,6 +211,7 @@ async function runSlice(): Promise<void> {
   const artifact = buildArtifact({
     configHash, config: manifest, runHashes, aggregate,
     gitCommit: gitCommit(), ollamaHost: host, benchHost: process.env.LME_BENCH_HOST ?? "rockit", validationSlice,
+    readerDeterminism,
   });
   const artifactPath = writeArtifact(artifact, outDir);
 
@@ -185,8 +220,9 @@ async function runSlice(): Promise<void> {
     console.log(line);
   }
   writeProgress({ done: true, artifactPath });
-  console.log(`\nartifactHash: ${artifact.artifactHash}`);
-  console.log(`artifact self-verifies: ${verifyArtifactHash(artifact)}`);
+  console.log(`\nconfigHash (THE ANCHOR — re-derivable by anyone with the repo): ${configHash}`);
+  console.log(`artifactHash (A SEAL — tamper-evidence, not a reproducibility proof): ${artifact.artifactHash}`);
+  console.log(`artifact self-verifies (unmodified since it was written): ${verifyArtifactHash(artifact)}`);
   console.log(`written: ${artifactPath}`);
   console.log(`\nNOTICE: ${artifact.notice}\n`);
 }

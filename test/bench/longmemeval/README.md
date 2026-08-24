@@ -9,16 +9,20 @@ answer. It sits on top of the shared plumbing merged in #1216-a
 diverge on how memories are written or read (a divergence would be a silent
 confound).
 
-**Reproducibility is the edge.** Everything that can move the number is pinned
-and committed: the dataset (by HF commit + sha256), the judge and reader (by
-Ollama manifest digest — tags are mutable, digests are not), num_ctx, the
-retrieval config, the ingestion granularity, the store topology, and the exact
-judge/reader prompt strings (all folded into the config hash). Anyone re-runs
-the exact configuration with `ollama pull` — no OpenAI key, no per-run spend.
+**`configHash` is the anchor, and "verify it yourself" rests on it.** Everything
+that can move the number is pinned and committed: the dataset (by HF commit +
+sha256), the judge and reader (by Ollama manifest digest — tags are mutable,
+digests are not), num_ctx, the retrieval config, the ingestion granularity, the
+store topology, and the exact judge/reader prompt strings (all folded into the
+config hash). Anyone with the repo re-derives `configHash` exactly, and re-runs
+the same configuration with `ollama pull` — no OpenAI key, no per-run spend.
 
-Read "What 'reproducible' does and does not mean here" below before quoting
-that sentence at anyone: the config reproduces exactly, the reader's *text*
-does not under the cloud profile.
+**"Verify it yourself" rests on `configHash` plus the exact prompts, the dataset
+selection and the judge rubric — not on `artifactHash`.** `artifactHash` is a
+*seal*: tamper-evidence for a signed-off artifact. It is not a reproducibility
+proof and never was, even locally. Read
+"[What 'reproducible' does and does not mean here](#what-reproducible-does-and-does-not-mean-here)"
+below before quoting any of this at anyone.
 
 ## Arms
 
@@ -182,6 +186,7 @@ variant to hash — hashing it would content-address the breakage:
 | `LME_FLAIR_PKG_DIR`, `LME_HARPER_BIN_DIR` | locate the system under test | say *where* Flair lives, not how it behaves |
 | `LME_BENCH_HOST` | provenance label | lands in the artifact's unhashed provenance partition |
 | `LME_SHARED_COUNT_PROBE=1` | row-count probe logging | logging only |
+| `LME_DETERMINISM_SAMPLES` | N for the reader-determinism probe (default 10, minimum 2) | the probe CHARACTERISES the reader on a fixed sample outside the measured slice; it never feeds an answer, a verdict or a metric, and its record is unhashed provenance |
 
 ### Ingest-reuse (shared store, alternating mode)
 
@@ -202,23 +207,48 @@ reason it was reachable, not the reason it is correct.)
 ### Resume, and what the hashes actually guarantee
 
 `runHash` content-addresses the run's **decisions** (answer / verdict /
-tokensFed / extraction) and is resume-invariant. `configHash` is deterministic
-from the config.
+tokensFed / extraction) and is resume-invariant: banked `(question, arm)` pairs
+are replayed, never re-evaluated, so a resumed run and an uninterrupted one hold
+the same decision set.
 
 `artifactHash` covers the whole aggregate, which includes latency percentiles —
-wall clock. **Artifact hashes are therefore not host- or wall-clock invariant**;
-`configHash` and `runHash` are the reproducible identities. Banked journal lines
-carry their original `latencyMs` so a resumed run replays latency faithfully,
-but a journal written before that field existed falls back to `0`.
+wall clock. So an artifact hash is not wall-clock invariant, and that is fine,
+because **it is a seal rather than an identity to reproduce**. Banked journal
+lines carry their original `latencyMs` so a resumed run replays latency
+faithfully, but a journal written before that field existed falls back to `0`.
 
 ### What "reproducible" does and does not mean here
 
-Be precise about this, because the claim is the product.
+Be precise about this, because the claim is the product. There are three
+identities and they carry three different strengths of claim. Lead with the
+first one.
 
-**Reproducible:** `configHash`. It is a pure function of the pinned config, so
-any checkout with the same profile and slice derives it exactly. The
-reproduction of the published headline `configHash` from repo code is asserted
-in `test/unit/longmemeval-repro.test.ts`.
+#### Tier 1 — `configHash`: the anchor, re-derivable by anyone
+
+A pure function of the pinned config, so any checkout with the same profile and
+slice derives it **exactly**. It survives cloud nondeterminism because it hashes
+*configuration*, not output. This is what "did they run what they said they ran"
+actually rests on, and the reproduction of the published headline `configHash`
+from repo code is asserted in `test/unit/longmemeval-repro.test.ts`.
+
+#### Tier 2 — `runHash`: the decision set, statistical under `cloud`
+
+Content-addresses answer / verdict / tokensFed / extraction. Under `local` it is
+*expected* to re-derive — **expected, not measured**, so it is not claimed.
+Under `cloud` the answer *text* is not bitwise-stable, so `runHash` does not
+re-derive. The honest claim there: *accuracy is a statistical result — re-run
+and compare within variance; completion text is not bitwise-stable.* The
+variance to compare against is published in the artifact — see
+[the reader-determinism probe](#the-reader-determinism-probe) below.
+
+#### Tier 3 — `artifactHash`: a seal, not a proof
+
+It detects post-hoc modification of an artifact a human signed off on. **It is
+not reproducibility evidence and never was, even locally** — it covers wall-clock
+latency percentiles and, through the run hashes, completion text.
+
+So: **"verify it yourself" rests on `configHash` plus the exact prompts, the
+dataset selection and the judge rubric — not on `artifactHash`.**
 
 #### Reproducing a past run as the harness evolves
 
@@ -286,6 +316,70 @@ do not claim it without a measurement. (The cloud *judge* returned an identical
 verdict 4/4 in the same probe, but on a trivial 16-token prompt — that is not
 evidence of judge determinism on real rubric prompts.)
 
+### The reader-determinism probe
+
+*"Re-run and compare within variance"* is an **empty instruction unless the
+variance is published.** Someone re-running this benchmark against the same cloud
+reader will get different completion text than we did; without a published
+determinism measurement they cannot tell whether their divergence is normal or
+evidence that we got something wrong.
+
+So every run measures it and records it (`determinism.ts`, flair#1368). Per
+probed question:
+
+| field | meaning |
+|---|---|
+| `samples` | **N** — repeated calls with a byte-identical prompt (default 10) |
+| `distinctCompletions` | **M** — unique completion strings across the N calls |
+| `commonPrefixLength` | characters every completion shares before the first divergence |
+| `verdictAgreementRate` | (count of the modal verdict) / N — an unparseable verdict is its own bucket, never folded into a real one |
+
+Plus `questionIds` (the fixed sample), the resolved `reader` pin, and
+`promptConstruction`. A `summary` rolls the questions up with the aggregation
+named in each field: `maxDistinctCompletions`, `minCommonPrefixLength`,
+`minVerdictAgreementRate`.
+
+Four properties make the numbers worth comparing, and each is enforced rather
+than asked for:
+
+- **Identical reader configuration.** The probe issues `buildReaderRequest()`
+  from `eval.ts` — the single definition of a reader call that the main run also
+  issues — and calls `readerAnswer()` / `judgeOne()` themselves. It takes no
+  reader parameters of its own, so there is nothing to set on one path and
+  forget on the other. A probe that quietly measured different settings would be
+  *worse* than no probe, because its numbers would look authoritative.
+- **Fixed question sample.** `PROBE_QUESTION_IDS` is a hardcoded constant, not a
+  draw from the run's slice. A sample that moved per run would make probes
+  incomparable across runs — the one property the probe exists to provide. The
+  ids are written into the artifact, and a probe id missing from the dataset is
+  fatal, never a silent skip. **Changing that list breaks comparability with
+  every probe already published**; treat it as a new measurement if you must.
+- **Unhashed provenance.** The record lands in the artifact's provenance
+  partition. Determinism legitimately differs run to run, so if it fed
+  `artifactHash`, every honest re-run would look like tampering. Asserted, not
+  assumed (`test/unit/longmemeval-artifact.test.ts`).
+- **The judge is never sampled.** All N completions are scored.
+
+**Limitation, stated because it is real.** The probe does not retrieve from a
+live Flair. It builds a retrieval-*shaped* context deterministically from the
+question's own haystack and formats it through the harness's own pinned payload
+formatter, so the probe prompt is a pure function of (dataset, question id,
+pinned prompts, pinned payload format, `readerTopK`) and a re-runner rebuilds it
+**byte-identically** without needing our store or our index state. That
+reproducibility is the point — a probe whose own input could not be reproduced
+would not support the comparison it exists for. The trade is that the context is
+the same *shape* and comparable size as a real retrieval payload, not the same
+*content*.
+
+`LME_DETERMINISM_SAMPLES` raises or lowers N; the value used is recorded next to
+every number it produced. Below 2 is fatal rather than clamped — one call cannot
+measure agreement between calls, and "1 distinct completion" from a single
+sample would be a fabricated determinism claim.
+
+A failed probe is recorded **as an error in the artifact**, not omitted: "we did
+not probe" and "we probed and it broke" are different facts, and a probe failure
+does not abort the measurement run.
+
 ## The publish gate is structural
 
 The run emits a **content-addressed artifact** (`artifact.ts`): config hash +
@@ -295,6 +389,12 @@ gated human decision recorded against a specific `artifactHash` — spend and
 outward-publishing are the founder's gates. The full ≥5×500 publishable run is a
 separate gated execution; the default `--runs`/`--n` here are sized for
 validation.
+
+What the hash does *for this gate*: it binds a sign-off to one exact set of
+numbers, so "approved to publish artifact `<hash>`" cannot later be attached to
+a different set. That is tamper-evidence — a **seal**, not a reproducibility
+proof. Anyone checking that we ran what we said we ran should check
+`configHash`.
 
 ## Isolation
 

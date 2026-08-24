@@ -1,8 +1,10 @@
 /**
  * ollama.ts — the ONE deterministic Ollama call path for the Layer 2 harness.
  *
- * Both the reader and the judge run LOCAL on Newton via Ollama. Reproducibility
- * is the edge (#1216 design), so this client is deliberately narrow:
+ * Under the `local` profile both the reader and the judge run on Newton via
+ * Ollama; under `cloud` the same call path talks to ollama.com. Either way the
+ * client is deliberately narrow, because every knob below is one that would
+ * otherwise put sampling noise inside the measurement:
  *
  *   - temperature 0 + a fixed seed + a fixed num_ctx — the run-to-run mean±std
  *     must reflect the memory layer, not sampling noise. A temp≠0 judge would
@@ -19,8 +21,11 @@
  *   - DIGEST-pinned. Ollama tags are MUTABLE; sha256 manifest digests are not.
  *     assertModelPinned() refuses to run if the model currently resolving on
  *     the host does not match the digest recorded in config.ts — so "I re-ran
- *     the exact number" means the exact weights, not whatever the tag points at
- *     today.
+ *     the exact CONFIGURATION" means the exact weights, not whatever the tag
+ *     points at today. Note the scope: this pins what was run. It does not make
+ *     the OUTPUT re-derivable — the cloud reader is not bitwise-stable at
+ *     temperature 0 / seed 0, which is what determinism.ts measures and
+ *     publishes.
  *
  * Pure transport + a pin check. No dataset, no prompts, no scoring.
  */
@@ -156,8 +161,10 @@ export async function generate(
 
 /**
  * Refuse to run unless the model's CURRENT manifest digest on the host matches
- * the digest pinned in config.ts. Tags are mutable; a silent re-tag would make
- * "re-run the number" reproduce a different model. Fail loud, never warn-and-go
+ * the digest pinned in config.ts. Tags are mutable; a silent re-tag would let a
+ * run that reports the pinned `configHash` have been served by different
+ * weights — the anchor would name a configuration that was not the one that
+ * ran. Fail loud, never warn-and-go
  * (a shipped default that resolves to whatever-is-there is a trust anchor —
  * MEMORY.md).
  */

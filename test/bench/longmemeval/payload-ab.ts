@@ -463,9 +463,15 @@ function report(
   };
 
   // Same partition discipline as the four-arm artifact (artifact.ts): hashed
-  // CONTENT above, unhashed PROVENANCE (generatedAt, host, notice, artifactHash)
-  // below, stamped after. resultsHash content-addresses the results alone so a
-  // reviewer can cite the numbers independently of the config they came from.
+  // CONTENT above, unhashed PROVENANCE below, stamped after. The provenance key
+  // set is artifact.PROVENANCE_KEYS — deliberately NOT restated here, so this
+  // artifact inherits the partition instead of holding a second copy of it that
+  // could fall out of date. resultsHash content-addresses the results alone so
+  // a reviewer can cite the numbers independently of the config they came from.
+  //
+  // As there: `artifactHash` is a SEAL (tamper-evidence for a signed-off
+  // artifact), not a reproducibility proof. `configHash` is the re-derivable
+  // anchor.
   const artifact = stampArtifactHash({
     schema: "longmemeval-s.payload-ab.artifact/1",
     validationSlice: true,
@@ -511,9 +517,9 @@ function report(
   console.log(`  gold ANSWER  hit rate (a has_answer turn retrieved)             : ${pct(answerHitRate)}`);
   console.log(`    with gold evidence    (n=${tEv.n}): A ${pct(tEv.v1Accuracy)} B ${pct(tEv.v2Accuracy)} | wins ${tEv.wins} losses ${tEv.losses} discordant ${mcEv.discordant} p=${mcEv.p.toFixed(4)}`);
   console.log(`    without gold evidence (n=${tNo.n}): A ${pct(tNo.v1Accuracy)} B ${pct(tNo.v2Accuracy)} | wins ${tNo.wins} losses ${tNo.losses} discordant ${mcNo.discordant} p=${mcNo.p.toFixed(4)}`);
-  console.log(`\n  configHash  : ${configHash}`);
+  console.log(`\n  configHash  : ${configHash}   (the anchor — re-derivable by anyone with the repo)`);
   console.log(`  resultsHash : ${artifact.resultsHash}`);
-  console.log(`  artifactHash: ${artifact.artifactHash}`);
+  console.log(`  artifactHash: ${artifact.artifactHash}   (a seal — tamper-evidence, not a reproducibility proof)`);
   console.log(`  self-verifies: ${verifyStampedHash(artifact)}`);
   console.log(`  written     : ${outPath}`);
   console.log(`\nNOTICE: ${artifact.notice}\n`);
