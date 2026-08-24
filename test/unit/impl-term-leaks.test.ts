@@ -85,10 +85,18 @@ describe("impl-term-leak gate: exact-literal allowlist PASSES (flair#1381)", () 
     expect(res.status).toBe(0);
   });
 
-  test("CLI flags with a leading hyphen still PASS (--ops-target)", () => {
-    const dir = fixture("flair agent add --ops-target <ops-url> --admin-pass-file <path>\n");
+  test("a leading hyphen still excludes a non-allowlisted ops-* token", () => {
+    // The fixture used to prove the guard must not itself be on the allowlist.
+    // `--ops-target` would still exit 0 if the [^-a-z0-9] guard disappeared,
+    // because ops-target is exempt. `--ops-xllz` is a real bead-ID shape:
+    // bare it fails (test above); prefixed with `--` it passes only if the
+    // preceding hyphen excludes it.
+    const src = readFileSync(SCRIPT, "utf8");
+    expect(src).not.toMatch(/^ops-xllz$/m);
+    const dir = fixture("flair agent add --ops-xllz <ops-url>\n");
     const res = runGate(dir);
     expect(res.status).toBe(0);
+    expect(res.out).toContain("No leaks found");
   });
 
   test("a near-miss compound that is not on the allowlist still FAILS", () => {
