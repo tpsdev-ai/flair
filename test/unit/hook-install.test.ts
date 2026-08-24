@@ -28,6 +28,7 @@ import {
   checkSessionStartHook,
   fixSessionStartHook,
 } from "../../src/doctor-client.ts";
+import { mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 // NOTE: the degradation-timeout test (Sherlock condition 5, "mock the
 // fetch") lives in packages/flair-mcp/test/session-start-hook.test.ts, NOT
 // here. That file already imports runHook (which transitively imports
@@ -79,7 +80,7 @@ describe("buildHookCommand / parseHookCommandEnv", () => {
   it("round-trips agentId and flairUrl through the command string", () => {
     const command = buildHookCommand(AGENT, URL);
     expect(command).toContain(SESSION_START_HOOK_MARKER);
-    expect(command).toContain("npx -y -p @tpsdev-ai/flair-mcp");
+    expect(command).toContain(`npx -y -p ${mcpServerSpec()} ${SESSION_START_HOOK_MARKER}`);
     const parsed = parseHookCommandEnv(command);
     expect(parsed.agentId).toBe(AGENT);
     expect(parsed.flairUrl).toBe(URL);
@@ -144,6 +145,23 @@ describe("installHook — idempotent re-run", () => {
     const config = JSON.parse(secondContent);
     expect(config.hooks.SessionStart.length).toBe(1);
     expect(config.hooks.SessionStart[0].hooks.length).toBe(1);
+  });
+
+  it("re-running upgrades a pre-#1143 unpinned hook to the current pin", () => {
+    const path = hookSettingsPath(isoHome, "claude-code");
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    const unpinned = `sh -c 'out=$(FLAIR_AGENT_ID=${AGENT} FLAIR_URL=${URL} npx -y -p @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER} 2>/dev/null) && printf %s "$out" || true'`;
+    writeFileSync(
+      path,
+      JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: unpinned }] }] } }),
+    );
+    const result = installHook({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    expect(result.ok).toBe(true);
+    expect(result.delta?.action).toBe("update");
+    const config = JSON.parse(readFileSync(path, "utf-8"));
+    const command = config.hooks.SessionStart[0].hooks[0].command;
+    expect(command).toContain(`npx -y -p ${mcpServerSpec()} ${SESSION_START_HOOK_MARKER}`);
+    expect(command).not.toBe(unpinned);
   });
 
   it("re-running with a different agent/url UPDATES the one entry in place (no duplicate)", () => {
@@ -358,6 +376,33 @@ describe("hookStatus", () => {
     expect(status.correctShape).toBe(true);
     expect(status.agentId).toBe(AGENT);
     expect(status.flairUrl).toBe(URL);
+    expect(status.command).toContain(`npx -y -p ${mcpServerSpec()} ${SESSION_START_HOOK_MARKER}`);
+  });
+
+  it("still treats a pre-#1143 unpinned -p invocation as correctShape", () => {
+    const path = hookSettingsPath(isoHome, "claude-code");
+    mkdirSync(join(isoHome, ".claude"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            {
+              hooks: [
+                {
+                  type: "command",
+                  command: `sh -c 'out=$(FLAIR_AGENT_ID=${AGENT} npx -y -p @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER} 2>/dev/null) && printf %s "$out" || true'`,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    const status = hookStatus(isoHome, "claude-code");
+    expect(status.wired).toBe(true);
+    expect(status.correctShape).toBe(true);
+    expect(status.agentId).toBe(AGENT);
   });
 
   it("wired but NOT correctShape for a hand-edited command that merely contains the marker", () => {
@@ -446,11 +491,10 @@ describe("hookStatus", () => {
   });
 
   it("wired correct-shape with no env assignments is not a silent all-clear", () => {
-    // correctShape is only `npx -y -p @tpsdev-ai/flair-mcp flair-session-start`
-    // as a substring. A command that matches that but carries no
-    // FLAIR_AGENT_ID is not the installer-no-URL form; omitting the
-    // unknown lines would print a clean wired result with neither values
-    // nor a parse warning.
+    // correctShape is the `npx -y -p` invocation (pinned or not). A command
+    // that matches that but carries no FLAIR_AGENT_ID is not the
+    // installer-no-URL form; omitting the unknown lines would print a clean
+    // wired result with neither values nor a parse warning.
     const path = hookSettingsPath(isoHome, "claude-code");
     mkdirSync(join(isoHome, ".claude"), { recursive: true });
     writeFileSync(

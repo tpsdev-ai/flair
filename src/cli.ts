@@ -3067,9 +3067,9 @@ export function upgradeStatusSuffix(name: string, status: UpgradeStatus): string
  *      is `flair doctor --fix`, never `npm install -g`.
  *   3. Wired with a concrete pin — that pin IS the installed version
  *      (current when it equals latest, else outdated → re-pin via doctor).
- *   4. Wired but unpinned (a bare npx spec / the SessionStart hook) — `npx -y`
- *      re-resolves latest every session, so the effective version IS latest →
- *      current.
+ *   4. Wired but unpinned (a bare npx spec / a pre-#1143 SessionStart hook) —
+ *      `npx -y` re-resolves latest every session, so the effective version IS
+ *      latest → current.
  */
 export function resolveFlairMcpFinding(
   globalProbe: string | null,
@@ -5198,6 +5198,10 @@ hook
 
     console.log(`\n${render.wrap(render.c.bold, "🪝 flair hook install")}${dryRun ? render.wrap(render.c.dim, " (dry run)") : ""}\n`);
     console.log(`  ${result.ok ? render.icons.ok : render.icons.error} ${result.message}`);
+    const pinWarning = unpinnedSpecWarning();
+    if (pinWarning && result.ok) {
+      for (const line of pinWarning.split("\n")) console.error(`   ⚠ ${line}`);
+    }
     if (result.backupPath) {
       console.log(`     ${render.wrap(render.c.dim, `backup: ${result.backupPath}`)}`);
     }
