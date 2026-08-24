@@ -31,32 +31,104 @@ export const DATASET = {
   totalQuestions: 500,
 } as const;
 
-// ── Judge: gemma4:31b-it-q8_0, LOCAL on Newton via Ollama ────────────────────
-// Pinned by manifest digest (immutable); the GGUF weights blob sha256 is
-// recorded too, as an even-more-verifiable content hash of the weights.
-export const JUDGE = {
-  model: "gemma4:31b-it-q8_0",
-  manifestDigest: "sha256:53dd8459790f8795177444daa9e33f417e03c0d1cdedb80b6c73898603d20aef",
-  weightsSha256: "sha256:a0feadb736f521df6de4b1bd3cbf06c00f9fd04570ddc1e47b8ec9ecbbd6b51d",
-  family: "gemma4",
-  temperature: 0,
-  seed: 0,
-  numCtx: 8192,
-  numPredict: 16,
+// ── Model profiles: `local` (Newton) and `cloud` (ollama.com) ────────────────
+//
+// ARTIFACT-AFFECTING, and already captured with no new hashed field. The judge
+// and reader are different MODELS across profiles, so they trivially change
+// what is measured — but `configManifest()` has always folded the whole JUDGE
+// and READER objects (model + manifestDigest + family + sampling params) into
+// the hash. Selecting a profile therefore changes the configHash through the
+// pins themselves, exactly as pulling a different model would.
+//
+// This is why the selector must NOT add a `modelProfile` key to the manifest:
+// the profile name is a redundant restatement of the pins, and adding it would
+// change the hash of every LOCAL run that has already been published for no
+// gain in information. The pins ARE the identity; the profile name is a
+// convenience for choosing between two pinned sets.
+//
+// Ported from tps-bench (2026-08-20), where the headline runs were made. The
+// VM edited these constants IN PLACE to the cloud values — which is precisely
+// the drift #1366 is about: the repo could then only express the local pins,
+// so a clean checkout could not reproduce the published configHash at all.
+// Both pinned sets now live here and `local` remains the default, so an
+// unset environment reproduces pre-port behavior byte-for-byte.
+export type ModelProfile = "local" | "cloud";
+export const MODEL_PROFILE: ModelProfile = (() => {
+  // `|| "local"`, not `?? "local"`: an env var exported as EMPTY is the shell's
+  // ordinary way of saying "unset" (`LME_MODEL_PROFILE= bun run ...`, or a CI
+  // runner materialising an undefined secret), and treating that as an invalid
+  // value would fail a run that asked for nothing unusual. Any NON-EMPTY value
+  // that is not a known profile is still fatal — an unrecognised profile must
+  // never quietly resolve to a default and mislabel the artifact's pins.
+  const raw = process.env.LME_MODEL_PROFILE || "local";
+  if (raw !== "local" && raw !== "cloud") {
+    throw new Error(
+      `LME_MODEL_PROFILE must be "local" or "cloud" (got "${raw}"). ` +
+      `local = the Newton pins; cloud = the ollama.com pins used for the published headline run.`,
+    );
+  }
+  return raw;
+})();
+
+// Judge: Gemma family. LOCAL is pinned by manifest digest (immutable) plus the
+// GGUF weights blob sha256, an even-more-verifiable content hash of the
+// weights. CLOUD cannot offer a weights hash — ollama.com does not publish
+// one — so the field records that explicitly rather than being dropped: a
+// missing key and a knowingly-unavailable key must not hash the same.
+const JUDGE_PROFILES = {
+  local: {
+    model: "gemma4:31b-it-q8_0",
+    manifestDigest: "sha256:53dd8459790f8795177444daa9e33f417e03c0d1cdedb80b6c73898603d20aef",
+    weightsSha256: "sha256:a0feadb736f521df6de4b1bd3cbf06c00f9fd04570ddc1e47b8ec9ecbbd6b51d",
+    family: "gemma4",
+    temperature: 0,
+    seed: 0,
+    numCtx: 8192,
+    numPredict: 16,
+  },
+  cloud: {
+    // Tag "gemma4:31b" is the cloud-API name for gemma4:31b-cloud; digest
+    // recorded from ollama.com /api/tags on 2026-08-20.
+    model: "gemma4:31b",
+    manifestDigest: "sha256:221b330d11a8",
+    weightsSha256: "cloud-hosted:not-published",
+    family: "gemma4",
+    temperature: 0,
+    seed: 0,
+    numCtx: 8192,
+    numPredict: 16,
+  },
 } as const;
 
-// ── Reader: qwen3.6:27b-coding-mxfp8 (Qwen family) ───────────────────────────
-// A DIFFERENT family than the Gemma judge — the self-preference control
-// (judge family != reader family). Pinned by manifest digest.
-export const READER = {
-  model: "qwen3.6:27b-coding-mxfp8",
-  manifestDigest: "sha256:a7185d39ff35a472a2721b87e1bbb90810bcd381d415666ce2137838e66f2780",
-  family: "qwen3_5",
-  temperature: 0,
-  seed: 0,
-  numCtx: 16384,       // retrieval arms (flair / vector-only / no-context)
-  numPredict: 256,
+// Reader: Qwen family — a DIFFERENT family than the Gemma judge, which is the
+// self-preference control (judge family != reader family, asserted below).
+// The cloud profile keeps family "qwen3_5", so the control is preserved across
+// profiles rather than quietly depending on which one you ran.
+const READER_PROFILES = {
+  local: {
+    model: "qwen3.6:27b-coding-mxfp8",
+    manifestDigest: "sha256:a7185d39ff35a472a2721b87e1bbb90810bcd381d415666ce2137838e66f2780",
+    family: "qwen3_5",
+    temperature: 0,
+    seed: 0,
+    numCtx: 16384,       // retrieval arms (flair / vector-only / no-context)
+    numPredict: 256,
+  },
+  cloud: {
+    // Strongest general Qwen-family cloud tag; digest recorded from
+    // ollama.com /api/tags on 2026-08-20.
+    model: "qwen3.5:397b",
+    manifestDigest: "sha256:b909ca2f1b7f",
+    family: "qwen3_5",
+    temperature: 0,
+    seed: 0,
+    numCtx: 16384,
+    numPredict: 256,
+  },
 } as const;
+
+export const JUDGE = JUDGE_PROFILES[MODEL_PROFILE];
+export const READER = READER_PROFILES[MODEL_PROFILE];
 
 // The full-context arm needs a much larger (still fixed, still pinned) window
 // to hold a ~115k-token haystack — its job is to be the ceiling, so it must
