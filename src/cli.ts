@@ -13897,6 +13897,9 @@ program
 
       // The component directory for a local install is the flair package itself:
       // `flair start` spawns `harper run .` with cwd = flairPackageDir().
+      // That path is often inside node_modules on an npm install-g; doctor still
+      // READs it for drift detection, but describePublicUrlFinding never names
+      // it as the fix (flair#1313 — wiped on every upgrade).
       const componentEnvPath = join(flairPackageDir(), COMPONENT_ENV_FILENAME);
       let componentEnvValue: string | null = null;
       try {

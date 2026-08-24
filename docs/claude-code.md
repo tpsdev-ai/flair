@@ -43,9 +43,14 @@ Copy this into your project's `CLAUDE.md` (or `.claude/settings.md`, `AGENTS.md`
 
     Run this FIRST, before doing anything else:
 
-        flair bootstrap --agent my-project --max-tokens 4000
+        mcp__flair__bootstrap
 
+    (`mcp__flair__bootstrap` is Claude Code's namespaced name for the server's `bootstrap` tool.)
     Read the output — that's your soul and recent memories.
+
+    Use the CLI variant when MCP is not wired — previewing context yourself, a script, or any agent that can run a shell command:
+
+        flair bootstrap --agent my-project --max-tokens 4000
 
     ### During work
 
@@ -121,9 +126,11 @@ export FLAIR_URL=http://localhost:19926  # default, only needed if custom
 Then the CLAUDE.md simplifies to:
 
     ## Memory
-    - Bootstrap: `flair bootstrap`
+    - Bootstrap: `mcp__flair__bootstrap`
     - Remember: `flair memory add --content "what you learned"`
     - Search: `flair search "your query"`
+
+    Use `flair bootstrap` when MCP is not wired.
 
 ## Soul (Personality / Context)
 
@@ -143,7 +150,7 @@ flair soul set --agent my-project --key review \
   --value "Check for: error handling, edge cases, performance implications, security."
 ```
 
-Soul entries are included in every `flair bootstrap` — they're the persistent context that shapes how Claude Code thinks about your project.
+Soul entries are included in every bootstrap — they're the persistent context that shapes how Claude Code thinks about your project.
 
 ## Remote Flair
 

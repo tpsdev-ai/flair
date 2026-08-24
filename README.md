@@ -213,6 +213,8 @@ Then add to your `CLAUDE.md`:
 
     At the start of every session, run mcp__flair__bootstrap before responding.
 
+(`mcp__flair__bootstrap` is Claude Code's namespaced name for the server's `bootstrap` tool.) Use `flair bootstrap --agent <id>` when MCP is not wired — previewing context, scripts, or any agent that can run a shell command.
+
 The `flair-mcp` server exposes `memory_store`, `memory_search`, `memory_update`, `memory_get`, `memory_delete`, `relationship_store`, `bootstrap`, `soul_set`, `soul_get`, `flair_workspace_set` and `flair_orgevent`. Memory follows the agent across CLIs — same instance, same identity, switch harness without losing state.
 
 Per-CLI config snippets (Gemini CLI's `~/.gemini/settings.json`, Codex CLI's `~/.codex/config.toml`) are in **[docs/mcp-clients.md](docs/mcp-clients.md)**; a deeper Claude Code walk-through is in [docs/claude-code.md](docs/claude-code.md).
