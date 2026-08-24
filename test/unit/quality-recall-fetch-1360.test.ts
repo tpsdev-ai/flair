@@ -32,6 +32,7 @@ import {
   qualitySnapshotLookupPath,
   qualitySnapshotSubject,
   type QualityApi,
+  type QualitySnapshotCore,
 } from "../../src/cli.ts";
 
 const SELECT_RE = /[?&]select\(([^)]*)\)/;
@@ -53,7 +54,7 @@ function assertNoEmbeddings(path: string): void {
 describe("flair#1360 — quality Memory listing is projected and bounded", () => {
   test("QUALITY_MEMORY_LIST_SELECT is exactly the fields the planner/snapshot read — never embeddings", () => {
     expect([...QUALITY_MEMORY_LIST_SELECT].sort()).toEqual(
-      ["content", "createdAt", "id", "subject"].sort(),
+      ["content", "createdAt", "id", "subject"],
     );
     expect(QUALITY_MEMORY_LIST_SELECT).not.toContain("embedding");
     expect(QUALITY_MEMORY_LIST_SELECT).not.toContain("embeddingModel");
@@ -161,7 +162,7 @@ describe("flair#1360 — fetchRecallSpotCheckData does not GET the whole table w
 describe("flair#1360 — fetchPreviousQualitySnapshot does not pull embeddings", () => {
   test("GETs the projected snapshot path, never an unfiltered collection", async () => {
     const subject = qualitySnapshotSubject("http://127.0.0.1:9926");
-    const snapshot = {
+    const snapshot: QualitySnapshotCore = {
       schemaVersion: 1,
       computedAt: "2026-08-23T00:00:00.000Z",
       agentFilter: "flint",
