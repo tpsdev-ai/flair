@@ -1,0 +1,1 @@
+- **`flair memory add` accepts the same credential flags as `backup` and `federation sync`.** `--admin-pass-file` is no longer an unknown option, and `--agent` is optional when `FLAIR_AGENT_ID` is set — commander no longer rejects the env fallback as a missing required flag. (flair#1106)
