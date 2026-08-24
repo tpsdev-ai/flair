@@ -96,6 +96,13 @@ export function hookSettingsPath(homeDir: string, harness: Harness): string {
   }
 }
 
+/** Continuity capture (PostToolUse + Stop) is Claude Code only. The matcher
+ *  is Claude tool names; writing it into another harness looks enabled and
+ *  never journals (flair#1148 Bugbot). SessionStart stays per-harness. */
+export function harnessSupportsContinuity(harness: Harness): boolean {
+  return harness === "claude-code";
+}
+
 /** Status/doctor hint for `flair hook install`. Claude Code stays the bare
  *  default; every other harness is named so the hint cannot silently write
  *  the wrong file (flair#1148 Bugbot). */
@@ -605,6 +612,14 @@ export function installContinuityHooks(opts: InstallHookOptions): ContinuityMuta
   const { homeDir, harness, agentId, flairUrl } = opts;
   const dryRun = !!opts.dryRun;
   const path = hookSettingsPath(homeDir, harness);
+
+  if (!harnessSupportsContinuity(harness)) {
+    return {
+      ok: false, path, harness, dryRun,
+      message: `continuity capture is Claude Code only — ${harness} has no PostToolUse/Stop matcher Flair can journal (SessionStart is still ${hookInstallHint(harness)})`,
+      backupPath: null, actions: null,
+    };
+  }
 
   for (const [label, value] of [["agent id", agentId], ["Flair URL", flairUrl]] as const) {
     if (!isHookCommandValueSafe(value)) {

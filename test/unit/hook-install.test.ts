@@ -18,6 +18,7 @@ import {
   hookSettingsPath,
   hookBackupPath,
   hookInstallHint,
+  harnessSupportsContinuity,
   resolveHookAgentId,
   isSupportedHarness,
   SUPPORTED_HARNESSES,
@@ -88,6 +89,8 @@ describe("harness registry", () => {
     expect(hookInstallHint("claude-code", "--continuity")).toBe("flair hook install --continuity");
     expect(hookInstallHint("codex")).toBe("flair hook install --harness codex");
     expect(hookInstallHint("codex", "--continuity")).toBe("flair hook install --continuity --harness codex");
+    expect(harnessSupportsContinuity("claude-code")).toBe(true);
+    expect(harnessSupportsContinuity("codex")).toBe(false);
   });
 
   it("resolveHookAgentId prefers Codex MCP, then falls back to Claude Code (flair#1148)", () => {
@@ -758,6 +761,21 @@ describe("continuity hook install/uninstall/status wrappers", () => {
     expect(dry.ok).toBe(true);
     expect(dry.actions).toEqual({ PostToolUse: "remove", Stop: "remove" });
     expect(readFileSync(settingsPath(), "utf-8")).toBe(before);
+  });
+
+  it("Codex continuity install is refused and writes nothing (flair#1148)", () => {
+    const res = installContinuityHooks({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    expect(res.ok).toBe(false);
+    expect(res.actions).toBeNull();
+    expect(existsSync(join(isoHome, ".codex"))).toBe(false);
+
+    const dry = installContinuityHooks({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL, dryRun: true });
+    expect(dry.ok).toBe(false);
+    expect(existsSync(join(isoHome, ".codex"))).toBe(false);
+
+    const session = installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    expect(session.ok).toBe(true);
+    expect(existsSync(hookSettingsPath(isoHome, "codex"))).toBe(true);
   });
 
   it("continuity install never disturbs an existing SessionStart hook (and vice versa)", () => {

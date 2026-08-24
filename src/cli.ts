@@ -130,6 +130,7 @@ import {
   SUPPORTED_HARNESSES,
   hookSettingsPath,
   hookInstallHint,
+  harnessSupportsContinuity,
   resolveHookAgentId,
   type Harness,
 } from "./hook-install.js";
@@ -5258,6 +5259,9 @@ hook
     // status in every branch below. "absent" is NOT a failure: installing the
     // pair is the opt-in, so absence renders as "not enabled".
     const renderContinuity = (): void => {
+      // Continuity is Claude Code only. Do not tip `--continuity --harness
+      // <other>` — that writes Claude tool matchers into the wrong file.
+      if (!harnessSupportsContinuity(harness)) return;
       const cont = continuityHookStatus(home, harness);
       if (cont.state === "installed") {
         console.log(`  ${render.icons.ok} continuity capture: PostToolUse + Stop wired`);

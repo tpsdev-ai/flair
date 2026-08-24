@@ -5,4 +5,7 @@
   Codex is detected; after install, trust the command with `/hooks`. Clients
   with no session-start hook get a documented AGENTS.md / GEMINI.md fallback
   in `docs/mcp-clients.md` so MCP wiring alone is not mistaken for done
-  (flair#1148).
+  (flair#1148). Continuity capture (`--continuity`) stays Claude Code only —
+  Codex status does not offer it, and `flair hook install --continuity
+  --harness codex` refuses rather than writing unused PostToolUse/Stop
+  entries.
