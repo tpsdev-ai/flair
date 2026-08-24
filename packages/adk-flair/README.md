@@ -160,6 +160,78 @@ wins over the env var.
 The resolved URL and the effective timeouts are logged once at WARNING on the
 first request.
 
+## Hosted Flair
+
+If your ADK agent just got a 404 against a hosted Flair, read this before
+changing verbs or pasting admin credentials into the environment.
+
+The same identity model applies to every Ed25519 adapter. The shared write-up
+is [docs/integrations.md — Hosted Flair auth](../../docs/integrations.md#hosted-flair-auth--your-agent-got-a-404).
+This section is the ADK-shaped version.
+
+### Identity is three things that must match
+
+`adk-flair` signs every request with an Ed25519 key. The hosted instance
+accepts the request only when all three line up:
+
+1. **`FLAIR_AGENT_ID`** — the id inside the signature. Must be the id you
+   registered, not a display name and not a different agent's id.
+2. **`FLAIR_KEYFILE`** — the private key on **this** machine (the one running
+   ADK). `flair agent add` writes `~/.flair/keys/<id>.key`. A leading `~` is
+   expanded. The private key never leaves the host.
+3. **A server-side `Agent` row on the instance at `FLAIR_URL`** whose
+   `publicKey` matches that keyfile. Registration is per instance. A key
+   minted by local `flair init` / `flair agent add` (no `--target`) is not
+   registered on Fabric.
+
+```bash
+export FLAIR_ALLOW_REMOTE_URL=1
+export FLAIR_URL=https://<cluster>.<org>.harperfabric.com
+export FLAIR_AGENT_ID=my-adk-app
+export FLAIR_KEYFILE=$HOME/.flair/keys/my-adk-app.key
+export FLAIR_HTTP_TIMEOUT=30   # defaults are localhost fail-fast; see above
+
+# Register THIS id against THAT instance (ops URL is not data-port − 1 on Fabric)
+flair agent add my-adk-app \
+  --target "$FLAIR_URL" \
+  --ops-target <ops-url> \
+  --admin-pass-file ~/.flair/fabric-admin-pass
+```
+
+The full Fabric registration sequence, including the ops port trap and
+`--admin-pass-file`, is [docs/quickstart-fabric.md](../../docs/quickstart-fabric.md).
+Do not leave the Fabric admin password in the agent's standing env — it is
+for registration, once.
+
+### The three failure shapes
+
+| Shape | What is true | What you see | What to do |
+|---|---|---|---|
+| **Record missing** | No `Agent` row for `FLAIR_AGENT_ID` on this `FLAIR_URL` | `401 {"error":"unknown_agent"}` on every signed call (`add_memory`, search, list) | `flair agent add` with `--target` / `--ops-target` as above. `flair agent list` is localhost-only — it cannot see the hosted registry. |
+| **Key mismatch** | The id exists; the public key on the server is not the key in `FLAIR_KEYFILE` | `401 {"error":"invalid_signature"}` | Same id, wrong file — copied from another host, rotated on one side only, or `FLAIR_KEYFILE` pointing at a different agent's key. Point `FLAIR_KEYFILE` at the key that matches this instance, or re-seed the hosted row from this machine's key (`flair agent add my-adk-app --target "$FLAIR_URL" --ops-target <ops-url> --admin-pass-file <path>` reuses the local file). `flair agent rotate-key` is localhost-only. Restart the ADK process so it reloads the key. |
+| **Config wrong** | Identity may be fine; you are not hitting the Flair you think | Timeouts, `ConnectError`, or **404 from Harper's catch-all** | Confirm `FLAIR_ALLOW_REMOTE_URL=1`, a raised `FLAIR_HTTP_TIMEOUT`, and a `FLAIR_URL` with **no path prefix**. Cloud-agent localhost is the VM, not your laptop. `/Health` can be 200 while `/Memory` is still 404 if the Flair app is not loaded yet. |
+
+Clock skew is a fourth, rarer 401: `timestamp_out_of_window`.
+
+### 404 on by-id routes is not an existence signal
+
+`GET /Memory/{id}` and `PUT /Memory/{id}` return **404** both when the id is
+absent **and** when the record exists but this principal may not see it
+(another agent's `private` memory, or outside the read scope). Same status,
+same body. That is fail-closed ownership
+([flair#1264](https://github.com/tpsdev-ai/flair/issues/1264)) — a 403 would
+confirm the id exists and can name the owner.
+
+**Do not treat that 404 as "the record is missing, so create it" or "Harper
+rejected the verb."** This package already creates via `POST /Memory/` (id
+in the body) and falls back to PUT only on 409. A by-id 404 after a write
+usually means you are not the owner the server thinks you are — the three
+shapes above — not that you should switch POST for PUT.
+
+`search_memory` swallows transport failures to empty (ADK's contract).
+`list_memories` and the write path raise `FlairRequestError` with
+`.status_code` — read that status before guessing.
+
 ## Security
 
 ### Per-user isolation

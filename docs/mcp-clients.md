@@ -298,7 +298,7 @@ Future MCP-capable agent CLIs (and there are more landing every month) will work
 
 **"connection_error: could not reach Flair at http://127.0.0.1:19926".** The Flair server isn't running. Run `flair status` to check; `flair start` to bring it up.
 
-**"auth_error: …" on every call.** The agent identity doesn't match a registered key. Re-run `flair agent add <id>` (idempotent on re-add — won't lose existing memories).
+**"auth_error: …" on every call.** The agent identity doesn't match a registered key. Re-run `flair agent add <id>` (idempotent on re-add — won't lose existing memories). Against a hosted instance the same three shapes apply (record missing / key mismatch / config wrong), and a by-id 404 is fail-closed ownership, not an existence signal — [Hosted Flair auth](integrations.md#hosted-flair-auth--your-agent-got-a-404).
 
 **Tool calls succeed but the agent doesn't see results in subsequent turns.** Check that the CLI is actually invoking `bootstrap` at session start — most CLIs need an explicit prompt nudge ("call the bootstrap tool now") on first use. Subsequent turns should pick up automatically once the CLI sees the schema.
 

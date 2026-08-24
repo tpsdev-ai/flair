@@ -105,6 +105,31 @@ date
 
 If using the MCP server, restart Claude Code after rotating keys.
 
+`flair agent list` is localhost-only. Against a hosted instance, the
+discriminator is the 401 body on a signed request (`unknown_agent` vs
+`invalid_signature`), not a local agent list. Adapter-shaped walkthrough:
+[integrations.md — Hosted Flair auth](integrations.md#hosted-flair-auth--your-agent-got-a-404).
+
+### 404 on `GET`/`PUT /Memory/{id}`
+
+**Symptoms:** `memory_get`, a by-id update, or an adapter write/read against
+`/Memory/{id}` returns 404. The agent reports "not found" or "Harper rejected
+the verb."
+
+**This is not an existence signal.** By-id routes return the same 404 when
+the id is absent and when the record exists but the caller may not see it
+(fail-closed ownership, [flair#1264](https://github.com/tpsdev-ai/flair/issues/1264)).
+A 403 would confirm the id and can name the owner; Flair refuses that.
+
+**Also not this:** `401 unknown_agent` / `401 invalid_signature` (identity —
+see above). Harper's catch-all 404 when the Flair app is not loaded yet
+(`/Health` can already be 200). A `FLAIR_URL` with a path prefix.
+
+Creates go to `POST /Memory/` (id in the body). Do not treat a by-id 404 as
+a reason to paste admin credentials into the agent's environment.
+
+Full adapter guide: [integrations.md — Hosted Flair auth](integrations.md#hosted-flair-auth--your-agent-got-a-404).
+
 ### "signing key ... could not be parsed as an Ed25519 private key"
 
 **Symptoms:** `flair doctor` reports, naming the file:
