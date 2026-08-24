@@ -303,15 +303,71 @@ describe("buildSecretsBundle / writeSecretsStagingFile / provisionSecrets", () =
 
 // ─── identity mapping (Credential kind:idp) ──────────────────────────────────
 
+/**
+ * A minimal in-memory Credential table for the ops-API mocks (flair#1317).
+ *
+ * `provisionIdpIdentityMapping` now READS BACK its own write to assert the
+ * `(kind, idpSubject)` uniqueness invariant, so a mock that answers every
+ * `search_by_conditions` with a constant `[]` can no longer express a
+ * SUCCESSFUL provision — the read-back would see zero active credentials and
+ * the function would (correctly) fail closed. A fixture that cannot express
+ * the success path cannot express the defect either, so the mocks get a real
+ * (tiny) store rather than a constant.
+ *
+ * `handle` answers the two Credential ops and returns `null` for anything
+ * else, so each caller keeps its own fallthrough.
+ */
+function credentialTable(seed: Record<string, any>[] = []) {
+  const rows = new Map<string, any>(
+    seed.map((r) => [String(r.id), { kind: "idp", status: "active", ...r }]),
+  );
+  const handle = (body: any): Response | null => {
+    if (body?.operation === "search_by_conditions" && (body.table ?? "Credential") === "Credential") {
+      const cond = (name: string) =>
+        (body.conditions ?? []).find((c: any) => c.search_attribute === name)?.search_value;
+      const kind = cond("kind");
+      const subject = cond("idpSubject");
+      const provider = cond("idpProvider");
+      const hits = [...rows.values()].filter(
+        (r) =>
+          (kind === undefined || r.kind === kind) &&
+          (subject === undefined || r.idpSubject === subject) &&
+          (provider === undefined || r.idpProvider === provider),
+      );
+      return new Response(JSON.stringify(hits), { status: 200 });
+    }
+    if (body?.operation === "upsert" && body.table === "Credential") {
+      // Merge semantics, as the ops API applies: attributes absent from the
+      // record (JSON.stringify already dropped the `undefined`s) leave the
+      // stored value alone.
+      for (const rec of body.records ?? []) {
+        const id = String(rec.id);
+        rows.set(id, { ...(rows.get(id) ?? {}), ...rec });
+      }
+      return new Response(JSON.stringify({ message: "upserted" }), { status: 200 });
+    }
+    return null;
+  };
+  return { rows, handle, active: () => [...rows.values()].filter((r) => r.status !== "revoked") };
+}
+
 function mockOpsFetch(opts: {
   existingPrincipal?: boolean;
-  existingCredential?: { id: string } | null;
+  existingCredential?: Record<string, any> | null;
+  /** flair#1317 — seed several rows for one subject (the pre-fix duplicate state). */
+  existingCredentials?: Record<string, any>[];
   failFind?: boolean;
   failFindStatus?: number;
   failInsert?: boolean;
   failUpsert?: boolean;
-} = {}): { fetchImpl: typeof fetch; calls: any[] } {
+  /** flair#1317 — make the post-write invariant read-back lie (see its test). */
+  poisonReadBack?: (rows: Map<string, any>) => void;
+} = {}): { fetchImpl: typeof fetch; calls: any[]; creds: ReturnType<typeof credentialTable> } {
   const calls: any[] = [];
+  const seed = opts.existingCredentials ?? (opts.existingCredential ? [opts.existingCredential] : []);
+  const creds = credentialTable(
+    seed.map((c) => ({ idpProvider: "github", idpSubject: "octocat", principalId: "self", ...c })),
+  );
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     calls.push({ url: String(url), body });
@@ -323,12 +379,15 @@ function mockOpsFetch(opts: {
       if (opts.failInsert) return new Response("insert failed", { status: 500 });
       return new Response(JSON.stringify({ message: "inserted" }), { status: 200 });
     }
-    if (body.operation === "search_by_conditions" && body.table === "Credential") {
-      return new Response(JSON.stringify(opts.existingCredential ? [opts.existingCredential] : []), { status: 200 });
+    if (body.operation === "upsert" && body.table === "Credential" && opts.failUpsert) {
+      return new Response("upsert failed", { status: 500 });
     }
-    if (body.operation === "upsert" && body.table === "Credential") {
-      if (opts.failUpsert) return new Response("upsert failed", { status: 500 });
-      return new Response(JSON.stringify({ message: "upserted" }), { status: 200 });
+    const credRes = creds.handle(body);
+    if (credRes) {
+      // The write has landed; let a test corrupt the store before the
+      // invariant read-back sees it.
+      if (body.operation === "upsert") opts.poisonReadBack?.(creds.rows);
+      return credRes;
     }
     if (body.operation === "set_configuration") {
       return new Response(JSON.stringify({ message: "Configuration successfully set." }), { status: 200 });
@@ -338,7 +397,7 @@ function mockOpsFetch(opts: {
     }
     return new Response("{}", { status: 200 });
   }) as typeof fetch;
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, creds };
 }
 
 describe("provisionIdpIdentityMapping", () => {
@@ -350,8 +409,13 @@ describe("provisionIdpIdentityMapping", () => {
     );
     expect(result.principalCreated).toBe(true);
     expect(result.credentialReused).toBe(false);
+    expect(result.credentialSuperseded).toBe(false);
+    expect(result.supersededCredentialIds).toEqual([]);
     const ops = calls.map((c) => c.body.operation);
-    expect(ops).toEqual(["search_by_value", "insert", "search_by_conditions", "upsert"]);
+    // The trailing search_by_conditions is the flair#1317 invariant read-back:
+    // the function asks the STORE whether exactly one active credential now
+    // maps the subject, rather than trusting the write it just issued.
+    expect(ops).toEqual(["search_by_value", "insert", "search_by_conditions", "upsert", "search_by_conditions"]);
     const credRecord = calls[3].body.records[0];
     expect(credRecord.kind).toBe("idp");
     expect(credRecord.idpProvider).toBe("github");
@@ -367,9 +431,135 @@ describe("provisionIdpIdentityMapping", () => {
     );
     expect(result.principalCreated).toBe(false);
     expect(result.credentialReused).toBe(true);
+    expect(result.credentialSuperseded).toBe(false);
     expect(result.credentialId).toBe("cred_existing");
     const ops = calls.map((c) => c.body.operation);
-    expect(ops).toEqual(["search_by_value", "search_by_conditions", "upsert"]);
+    expect(ops).toEqual(["search_by_value", "search_by_conditions", "upsert", "search_by_conditions"]);
+  });
+
+  // ─── flair#1317 — the (kind, idpSubject) uniqueness constraint ─────────────
+
+  test("flair#1317: the dedup lookup keys on (kind, idpSubject) ONLY — provider must not narrow it", async () => {
+    // The defect in one assertion. The old lookup added an idpProvider
+    // condition, so a credential written under another provider name was
+    // invisible to dedup while remaining visible to the resolver, whose key is
+    // (kind, idpSubject).
+    const { fetchImpl, calls } = mockOpsFetch({ existingPrincipal: true });
+    await provisionIdpIdentityMapping(
+      { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+      { fetchImpl },
+    );
+    const searches = calls.filter((c) => c.body.operation === "search_by_conditions");
+    expect(searches.length).toBe(2); // the dedup lookup + the invariant read-back
+    for (const s of searches) {
+      const attrs = s.body.conditions.map((c: any) => c.search_attribute).sort();
+      expect(attrs).toEqual(["idpSubject", "kind"]);
+    }
+  });
+
+  test("flair#1317: a re-link under a DIFFERENT provider supersedes — new credential active, prior REVOKED, reported by id", async () => {
+    const { fetchImpl, creds } = mockOpsFetch({
+      existingPrincipal: true,
+      existingCredential: { id: "cred_jit", idpProvider: "mcp-oauth", principalId: "agt_jit" },
+    });
+    const result = await provisionIdpIdentityMapping(
+      { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+      { fetchImpl, now: () => "2026-08-24T00:00:00.000Z" },
+    );
+    expect(result.credentialReused, "a cross-provider re-link is not a reuse").toBe(false);
+    expect(result.credentialSuperseded).toBe(true);
+    expect(result.supersededCredentialIds).toEqual(["cred_jit"]);
+    expect(result.credentialId).not.toBe("cred_jit");
+
+    // The store, not the return value: exactly one resolvable row, and the
+    // prior one is RETAINED with the terminal state (not deleted, not soft).
+    expect(creds.active().map((r) => r.id)).toEqual([result.credentialId]);
+    expect(creds.rows.get("cred_jit")?.status).toBe("revoked");
+    expect(creds.rows.get("cred_jit")?.principalId, "the revoked row keeps its prior principal for audit").toBe("agt_jit");
+  });
+
+  test("flair#1317: supersede is ONE batched write — no observable two-active or zero-active window", async () => {
+    // Sherlock's atomicity requirement, at the granularity this surface can be
+    // observed: the re-point/insert and every revocation leave in a SINGLE
+    // ops-API operation, and the new credential is first in the batch so even a
+    // partially-applied batch can never strand the subject with zero.
+    const { fetchImpl, calls } = mockOpsFetch({
+      existingPrincipal: true,
+      existingCredentials: [
+        { id: "cred_a", idpProvider: "mcp-oauth", principalId: "agt_a" },
+        { id: "cred_b", idpProvider: "okta", principalId: "agt_b" },
+      ],
+    });
+    const result = await provisionIdpIdentityMapping(
+      { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+      { fetchImpl },
+    );
+    const upserts = calls.filter((c) => c.body.operation === "upsert" && c.body.table === "Credential");
+    expect(upserts.length, "one write, not a deactivate-then-create sequence").toBe(1);
+    const records = upserts[0].body.records;
+    expect(records[0].id, "the surviving credential is written FIRST").toBe(result.credentialId);
+    expect(records[0].status).toBe("active");
+    expect(records.slice(1).map((r: any) => [r.id, r.status])).toEqual([
+      ["cred_a", "revoked"],
+      ["cred_b", "revoked"],
+    ]);
+    // …and the pre-existing duplicate state is HEALED, not preserved.
+    expect(result.supersededCredentialIds).toEqual(["cred_a", "cred_b"]);
+  });
+
+  test("flair#1317: a REVOKED credential is never resurrected — same provider, same subject mints a fresh one", async () => {
+    // Sherlock addition 2: "revoked" is terminal. Reusing a revoked row would
+    // make the supersede a soft flag with a re-activation path back.
+    const { fetchImpl, creds } = mockOpsFetch({
+      existingPrincipal: true,
+      existingCredential: { id: "cred_dead", idpProvider: "github", status: "revoked" },
+    });
+    const result = await provisionIdpIdentityMapping(
+      { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+      { fetchImpl },
+    );
+    expect(result.credentialId).not.toBe("cred_dead");
+    expect(result.credentialReused).toBe(false);
+    expect(creds.rows.get("cred_dead")?.status, "the revoked row stays revoked").toBe("revoked");
+    // It was already dead, so nothing was superseded by this call.
+    expect(result.credentialSuperseded).toBe(false);
+  });
+
+  test("flair#1317: the post-write invariant read-back can FAIL — a store left with two active rows throws, never returns a mapping", async () => {
+    // The check must be able to fire. Poison the store right after the write so
+    // the read-back sees the very state the fix exists to prevent; if this
+    // still returned a mapping, the invariant assertion would be decorative.
+    const { fetchImpl } = mockOpsFetch({
+      existingPrincipal: true,
+      poisonReadBack: (rows) => {
+        rows.set("cred_smuggled", {
+          id: "cred_smuggled", kind: "idp", status: "active",
+          idpProvider: "smuggled", idpSubject: "octocat", principalId: "agt_other",
+        });
+      },
+    });
+    await expect(
+      provisionIdpIdentityMapping(
+        { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+        { fetchImpl },
+      ),
+    ).rejects.toThrow(/uniqueness invariant does not hold.*2 active Credential/s);
+  });
+
+  test("flair#1317: the invariant error names the actor, the state and the remedy", async () => {
+    const { fetchImpl } = mockOpsFetch({
+      existingPrincipal: true,
+      poisonReadBack: (rows) => rows.clear(), // write vanished → zero active
+    });
+    const err = await provisionIdpIdentityMapping(
+      { opsPortOrUrl: ISSUER, adminUser: "admin", adminPass: "pw", principal: "self", principalKind: "human", idpProvider: "github", idpSubject: "octocat" },
+      { fetchImpl },
+    ).catch((e) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("octocat");           // which subject
+    expect(err.message).toContain("0 active");           // what state
+    expect(err.message).toContain("flair#1317");         // why it matters
+    expect(err.message).toMatch(/revoke the rows/);      // what to do
   });
 
   test("throws on a failed principal lookup, never proceeds to write", async () => {
@@ -539,6 +729,7 @@ describe("buildClaudePasteBlock", () => {
 
 function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sysInfoPidProvider?: () => number } = {}): { fetchImpl: typeof fetch; calls: string[] } {
   const calls: string[] = [];
+  const creds = credentialTable(); // flair#1317 — the mapping step reads its own write back
   let _sysInfoCallCount = 0;
   const fetchImpl = (async (url: any, init?: RequestInit) => {
     const urlStr = String(url);
@@ -552,7 +743,8 @@ function fullMockFetch(overrides: { verifyStatus?: number; verifyBody?: any; sys
     const body = JSON.parse(String(init?.body ?? "{}"));
     calls.push(`ops:${body.operation}`);
     if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 }); // principal exists
-    if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 }); // no existing credential
+    const credRes = creds.handle(body); // Credential search/upsert against a real (tiny) store
+    if (credRes) return credRes;
     if (body.operation === "system_information") {
        _sysInfoCallCount++;
        const pid = overrides.sysInfoPidProvider
@@ -844,6 +1036,7 @@ describe("enableMcp — flair#1120 restart verification", () => {
   test("sysinfo fails on first call: failedStep is restart, never identity-mapping", async () => {
     const calls: any[] = [];
     let sysInfoCount = 0;
+    const creds = credentialTable();
     const fetchImpl = (async (url: any, init?: RequestInit) => {
       const urlStr = String(url);
       const body = JSON.parse(String(init?.body ?? "{}"));
@@ -857,9 +1050,8 @@ describe("enableMcp — flair#1120 restart verification", () => {
         return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid: 67890 }] } }), { status: 200 });
            }
       if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
-      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.table === "Credential") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const credRes = creds.handle(body); // flair#1317: the mapping step reads its own write back
+      if (credRes) return credRes;
       if (urlStr.includes(".well-known")) {
         return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
           }
@@ -887,6 +1079,7 @@ describe("enableMcp — flair#1120 restart verification", () => {
     const calls: any[] = [];
     let sysInfoCallCount = 0;
     // Mock fetch: system_information always returns same PID (simulating thread bounce)
+    const creds = credentialTable();
     const fetchImpl = (async (url: any, init?: RequestInit) => {
       const urlStr = String(url);
       const body = JSON.parse(String(init?.body ?? "{}"));
@@ -897,9 +1090,8 @@ describe("enableMcp — flair#1120 restart verification", () => {
         return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid: 12345 }] } }), { status: 200 });
        }
       if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
-      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.table === "Credential") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const credRes = creds.handle(body); // flair#1317: the mapping step reads its own write back
+      if (credRes) return credRes;
        // self-verify endpoint
       if (urlStr.includes(".well-known")) {
         return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
@@ -938,6 +1130,7 @@ describe("enableMcp — flair#1120 restart verification", () => {
     const calls: any[] = [];
     let sysInfoCallCount = 0;
     // Mock fetch: system_information returns different PID on second call (real restart)
+    const creds = credentialTable();
     const fetchImpl = (async (url: any, init?: RequestInit) => {
       const urlStr = String(url);
       const body = JSON.parse(String(init?.body ?? "{}"));
@@ -949,9 +1142,8 @@ describe("enableMcp — flair#1120 restart verification", () => {
         return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid }] } }), { status: 200 });
        }
       if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
-      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.table === "Credential") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const credRes = creds.handle(body); // flair#1317: the mapping step reads its own write back
+      if (credRes) return credRes;
       if (urlStr.includes(".well-known")) {
         return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
        }
@@ -985,6 +1177,7 @@ describe("enableMcp — flair#1120 restart verification", () => {
   test("old PID for first 2 polls then new PID: SUCCEEDS (no false alarm)", async () => {
     const calls: any[] = [];
     let sysInfoCount = 0;
+    const creds = credentialTable();
     const fetchImpl = (async (url: any, init?: RequestInit) => {
       const urlStr = String(url);
       const body = JSON.parse(String(init?.body ?? "{}"));
@@ -1000,9 +1193,8 @@ describe("enableMcp — flair#1120 restart verification", () => {
         return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid: 67890 }] } }), { status: 200 });
         }
       if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
-      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.table === "Credential") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const credRes = creds.handle(body); // flair#1317: the mapping step reads its own write back
+      if (credRes) return credRes;
       if (urlStr.includes(".well-known")) {
         return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
         }
@@ -1035,6 +1227,7 @@ describe("enableMcp — flair#1120 restart verification", () => {
   test("always old PID: thread-bounce failure after timeout, failedStep verify-restart", async () => {
     const calls: any[] = [];
     let sysInfoCount = 0;
+    const creds = credentialTable();
     const fetchImpl = (async (url: any, init?: RequestInit) => {
       const urlStr = String(url);
       const body = JSON.parse(String(init?.body ?? "{}"));
@@ -1045,9 +1238,8 @@ describe("enableMcp — flair#1120 restart verification", () => {
         return new Response(JSON.stringify({ harperdb_processes: { core: [{ pid: 12345 }] } }), { status: 200 });
         }
       if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
-      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.table === "Credential") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const credRes = creds.handle(body); // flair#1317: the mapping step reads its own write back
+      if (credRes) return credRes;
       if (urlStr.includes(".well-known")) {
         return new Response(JSON.stringify(CIMD_METADATA), { status: 200 });
         }
@@ -1270,13 +1462,14 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
   test("Fabric origin: reports operator-deploy requirement, never restarts", async () => {
     const FABRIC_ISSUER = "https://my-flair.harperfabric.com";
     const calls: string[] = [];
+    const creds = credentialTable();
     const fetchImpl = (async (url: any, init?: RequestInit) => {
       const urlStr = String(url);
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       calls.push(`ops:${body.operation ?? urlStr}`);
       if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
-      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const credRes = creds.handle(body); // flair#1317: the mapping step reads its own write back
+      if (credRes) return credRes;
       return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
     }) as typeof fetch;
 
@@ -1318,11 +1511,12 @@ describe("enableMcp — Fabric operator-deploy (flair#1136)", () => {
 
   test("Fabric origin: result includes issuer and resource for status checks", async () => {
     const FABRIC_ISSUER = "https://my-flair.harperfabric.com";
+    const creds = credentialTable();
     const fetchImpl = (async (url: any, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       if (body.operation === "search_by_value") return new Response(JSON.stringify([{ id: "self" }]), { status: 200 });
-      if (body.operation === "search_by_conditions") return new Response(JSON.stringify([]), { status: 200 });
-      if (body.operation === "upsert") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      const credRes = creds.handle(body); // flair#1317: the mapping step reads its own write back
+      if (credRes) return credRes;
       return new Response(JSON.stringify({ message: "ok" }), { status: 200 });
     }) as typeof fetch;
 

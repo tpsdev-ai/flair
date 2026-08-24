@@ -42,7 +42,18 @@
 //       principal=A re-points the SAME Credential row (no duplicate; resolution
 //       stays deterministic), after which the connector sees exactly what A
 //       sees — including NO LONGER seeing B's private rows (the link replaces
-//       the mapping, it does not union identities).
+//       the mapping, it does not union identities);
+//   (e) flair#1317 — RE-LINKING UNDER A DIFFERENT PROVIDER SUPERSEDES. The
+//       linking layer used to dedup on (kind, idpProvider, idpSubject) while
+//       the resolver reads (kind, idpSubject), so a re-link under a new
+//       provider name minted a SECOND active credential for the same subject
+//       and resolution became iteration-order-dependent. K&S ruling: unify the
+//       linking key on (kind, idpSubject); at most one ACTIVE credential per
+//       subject regardless of provider; the prior credential is hard-revoked,
+//       not duplicated;
+//   (f) flair#1317 fail-closed — a REVOKED credential does not resolve AT ALL,
+//       not merely "isn't returned first". This is the property that makes
+//       (e)'s supersede a real revocation rather than a re-ordering.
 //
 // MUTATION PROOF (fixture can express leakage): flip PRIVATE_VISIBILITY below
 // to "shared" and the never-sees-private assertions in (a)/(c) FAIL — the
@@ -70,6 +81,9 @@ const AGENT_A = `pm-cli-a-${sfx}`; // the operator's CLI identity
 const AGENT_B = `pm-conn-b-${sfx}`; // the connector's distinct identity
 const SUB = `pm-idp-sub-${sfx}`; // the IdP subject the token carries
 const PROVIDER = "github"; // same provider on provision AND link (see docs note)
+// flair#1317: the SECOND provider name the same subject gets re-linked under.
+// Under the pre-fix linking key this minted a duplicate active credential.
+const OTHER_PROVIDER = "mcp-oauth"; // the JIT stamp — the real-world collision
 
 // Single rare tokens so the BM25 lane surfaces them even keyword-only
 // (pattern: mcp-wrapper-layer-suite's SEARCH_TOKEN).
@@ -140,6 +154,19 @@ async function adminSearch(table: string, attribute: string, value: string): Pro
   });
   const body = await res.json().catch(() => []);
   return Array.isArray(body) ? body : [];
+}
+
+/** Write records straight into storage, past every resource-level gate. */
+async function adminUpsert(table: string, records: Record<string, unknown>[]): Promise<void> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`),
+    },
+    body: JSON.stringify({ operation: "upsert", database: "flair", table, records }),
+  });
+  if (!res.ok) throw new Error(`admin upsert ${table} → HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
 }
 
 beforeAll(async () => {
@@ -354,5 +381,116 @@ describe("flair#1280 — connector principal mapping (distinct-by-default, forma
       const connectorSees = rpc.result?.isError !== true && rpc.result?.structuredContent?.id === id;
       expect(connectorSees, `${label}: connector visibility (${connectorSees}) must equal A's direct visibility (${aSees})`).toBe(aSees);
     }
+  }, 120_000);
+
+  // ─── flair#1317 — the credential-matching asymmetry ────────────────────────
+  //
+  // RED ON MAIN (this is the regression, not a restatement): on unmodified
+  // main `provisionIdpIdentityMapping` dedups on (kind, idpProvider,
+  // idpSubject), so re-linking SUB under OTHER_PROVIDER finds nothing to reuse
+  // and INSERTS a second credential. Both are `status: "active"` and both match
+  // the resolver's (kind, idpSubject) filter, so `resolveAgentFromSub` returns
+  // whichever the search iterator serves first — identity resolution by
+  // iteration order. The `active.length` assertion below reads 2 on main.
+  test("(e) flair#1317 — re-linking the SAME subject under a DIFFERENT provider SUPERSEDES: one active credential, prior hard-revoked", async () => {
+    // PRECONDITION (and the control that the fixture is in the state the
+    // regression needs): after (d) there is exactly one active credential for
+    // SUB and it points at A, under PROVIDER.
+    const before = (await adminSearch("Credential", "idpSubject", SUB))
+      .filter((c) => c.kind === "idp" && c.status !== "revoked");
+    expect(before.length, "precondition: one active credential for SUB before the cross-provider re-link").toBe(1);
+    expect(before[0].principalId).toBe(AGENT_A);
+    expect(before[0].idpProvider).toBe(PROVIDER);
+
+    // THE DEFECT'S TRIGGER: same subject, DIFFERENT provider name.
+    const mapping = await provisionIdpIdentityMapping({
+      opsPortOrUrl: opsPort,
+      adminUser: harper.admin.username,
+      adminPass: harper.admin.password,
+      principal: AGENT_B,
+      principalKind: "agent",
+      idpProvider: OTHER_PROVIDER,
+      idpSubject: SUB,
+    });
+
+    const creds = (await adminSearch("Credential", "idpSubject", SUB)).filter((c) => c.kind === "idp");
+    const active = creds.filter((c) => c.status !== "revoked");
+
+    // THE INVARIANT: at most one ACTIVE Credential per (kind, idpSubject),
+    // regardless of provider — the constraint the resolver already assumes.
+    expect(
+      active.length,
+      `at most one active credential per (kind, idpSubject) — got ${active.length}: ` +
+        JSON.stringify(active.map((c) => ({ id: c.id, provider: c.idpProvider, principal: c.principalId, status: c.status }))),
+    ).toBe(1);
+    expect(active[0].principalId).toBe(AGENT_B);
+    expect(active[0].idpProvider).toBe(OTHER_PROVIDER);
+    expect(active[0].id).toBe(mapping.credentialId);
+
+    // SUPERSEDE, not duplicate and not delete: the prior row is RETAINED (so
+    // the revocation is recoverable from storage and from Harper's table audit
+    // log, which records the full record image of every write) and carries the
+    // TERMINAL "revoked" state — never a soft flag a later path could flip back.
+    const prior = creds.find((c) => c.id === firstCredentialId);
+    expect(prior, "the superseded credential row must be retained, not deleted").toBeDefined();
+    expect(prior!.status, "the superseded credential must be hard-revoked").toBe("revoked");
+    expect(prior!.principalId, "the superseded row keeps its prior principal for audit").toBe(AGENT_A);
+
+    // OBSERVABILITY: the caller is told a credential DIED, by id. `flair mcp
+    // enable`'s identity-mapping step reports this — an operator who re-links
+    // under a new provider name must not discover the revocation later.
+    expect(mapping.credentialSuperseded, "the result must report the supersede").toBe(true);
+    expect(mapping.supersededCredentialIds).toContain(firstCredentialId);
+    expect(mapping.credentialReused, "a cross-provider re-link is not a reuse").toBe(false);
+    expect(mapping.credentialId).not.toBe(firstCredentialId);
+
+    // DETERMINISM AT RUNTIME, repeated: with one active credential there is no
+    // iteration order left to depend on. (Repetition is the instrument: a
+    // two-active store can return the same answer once by luck.)
+    for (let i = 0; i < 3; i++) {
+      const boot = await mcpTool(SUB, "bootstrap", {});
+      expect(boot?.agentId, `bootstrap must resolve to B on every call (call ${i + 1})`).toBe(AGENT_B);
+      expect(boot?.scope?.agentId).toBe(AGENT_B);
+    }
+
+    // And the mapping really MOVED: A's private row — readable over the
+    // connector at the end of (d) — is no longer reachable.
+    const rpc = await mcpCall(SUB, "memory_get", { id: privateId });
+    expect(rpc.result?.isError, "after the supersede the connector is B again: A's private row is 404").toBe(true);
+    expect(rpc.result?.structuredContent?.status).toBe(404);
+  }, 120_000);
+
+  // Not a #1317 regression — #1317's supersede is only worth anything if
+  // "revoked" is a real denial. This pins the resolver's fail-closed property
+  // directly: the revoked credential is the ONLY credential for its subject, so
+  // "not returned first" cannot mask a pass. (Green on main too, by design —
+  // it is the security floor the supersede stands on.)
+  test("(f) flair#1317 fail-closed — a REVOKED credential does not resolve AT ALL, even as its subject's only credential", async () => {
+    const revokedSub = `pm-idp-revoked-${sfx}`;
+    const mapping = await provisionIdpIdentityMapping({
+      opsPortOrUrl: opsPort,
+      adminUser: harper.admin.username,
+      adminPass: harper.admin.password,
+      principal: AGENT_B,
+      principalKind: "agent",
+      idpProvider: PROVIDER,
+      idpSubject: revokedSub,
+    });
+
+    // POSITIVE CONTROL: while ACTIVE this sub resolves — so the denial below is
+    // the revocation, not an unprovisioned subject or a broken fixture.
+    const bootBefore = await mcpTool(revokedSub, "bootstrap", {});
+    expect(bootBefore?.agentId, "control: the active credential resolves").toBe(AGENT_B);
+
+    // The terminal state the supersede writes, applied directly.
+    await adminUpsert("Credential", [{ id: mapping.credentialId, status: "revoked" }]);
+    const [stored] = await adminSearch("Credential", "id", mapping.credentialId);
+    expect(stored?.status, "fixture control: the credential really is revoked in storage").toBe("revoked");
+    expect(stored?.principalId, "the row still names a real principal — so a resolver that ignored status WOULD resolve it").toBe(AGENT_B);
+
+    // THE ASSERTION: denied outright. Not de-prioritised — unresolvable.
+    const rpc = await mcpCall(revokedSub, "bootstrap", {});
+    expect(rpc.error?.message, `a revoked credential must not resolve: ${JSON.stringify(rpc).slice(0, 300)}`)
+      .toContain("not a provisioned flair agent");
   }, 120_000);
 });

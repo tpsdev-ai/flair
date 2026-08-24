@@ -642,14 +642,74 @@ export interface IdentityMappingResult {
   principalCreated: boolean;
   credentialId: string;
   credentialReused: boolean;
+  /**
+   * flair#1317 — did this link REVOKE a prior credential for the same subject?
+   * True whenever one or more active credentials for `(kind:"idp", idpSubject)`
+   * under a DIFFERENT provider name were superseded. Not a cleanup: those
+   * credentials are dead, and anything that depended on them stops resolving.
+   */
+  credentialSuperseded: boolean;
+  /**
+   * The ids revoked by this call, in the order they were written. Plural
+   * because the pre-fix linking key could already have left several active
+   * credentials on one subject — this call heals that state, and the operator
+   * needs every id, not just one. Empty when nothing was superseded.
+   */
+  supersededCredentialIds: string[];
+}
+
+/** The resolver's own predicate, verbatim (resources/mcp-handler.ts
+ *  `resolveAgentFromSub`): a credential is resolvable unless it is explicitly
+ *  revoked. The linking layer MUST use the same test — a credential the linker
+ *  considers inactive but the resolver would still serve is exactly the
+ *  invisible-duplicate hole #1317 is about. */
+function isResolvableCredential(cred: { status?: unknown }): boolean {
+  return cred?.status !== "revoked";
 }
 
 /**
  * Map the operator's IdP subject to their principal via `Credential(kind:
  * "idp")` — the SAME credential surface resources/mcp-handler.ts's
- * `resolveAgentFromSub` reads at request time. Idempotent: an existing
- * mapping for (provider, subject) is reused (lastUsedAt bumped) rather than
- * duplicated; the principal Agent is created only if missing.
+ * `resolveAgentFromSub` reads at request time.
+ *
+ * ## The uniqueness constraint (flair#1317, K&S ruling 2026-08-21)
+ *
+ * **At most one ACTIVE `Credential(kind:"idp", idpSubject:<sub>)` exists at a
+ * time, regardless of `idpProvider`.** This function is where that invariant is
+ * enforced, because it is the only supported writer of the mapping.
+ *
+ * It used to dedup on `(kind, idpProvider, idpSubject)` while the resolver read
+ * `(kind, idpSubject)`. A re-link under a different provider name therefore
+ * matched nothing, INSERTED a second active credential, and left
+ * `resolveAgentFromSub` picking whichever row its search iterator served first
+ * — identity resolution by iteration order, on a security-relevant mapping.
+ *
+ * The resolver's key is the correct one and does not change: an IdP subject is
+ * an identity, and "who is this subject?" has exactly one answer. `idpProvider`
+ * stays on the row as audit/diagnostic metadata, but it does not participate in
+ * uniqueness. So:
+ *
+ *   - same provider, existing active credential → RE-POINT it (`credentialReused`);
+ *   - any OTHER active credential for the subject → SUPERSEDE it: terminal
+ *     `status: "revoked"`, never a soft flag a later path could flip back
+ *     (revoked rows are never reused here — a re-link after a revoke mints a
+ *     fresh credential);
+ *   - the re-point/insert and every revocation go out as ONE ops-API `upsert`
+ *     batch, so there is no observable window with two active credentials or
+ *     zero. If the batch fails, nothing is claimed and the call throws;
+ *   - after the write the invariant is RE-READ and asserted. A store that
+ *     somehow holds ≠1 active credential for the subject is a hard error, not a
+ *     silent nondeterministic mapping.
+ *
+ * The principal Agent is created only if missing.
+ *
+ * RESIDUAL RISK, by design (Sherlock, #1317): whoever can call this for a
+ * subject can revoke that subject's prior credential. If two genuinely
+ * different people ever shared a subject string across providers, one's link
+ * kills the other's mapping. IdP subjects are opaque per-IdP identifiers so the
+ * collision is remote, and the alternative — duplicate active credentials with
+ * order-dependent resolution — is strictly worse. `credentialSuperseded` exists
+ * so the operator is told, not so the event is hidden.
  */
 export async function provisionIdpIdentityMapping(
   params: IdentityMappingParams,
@@ -725,27 +785,47 @@ export async function provisionIdpIdentityMapping(
     principalCreated = true;
   }
 
-  // Reuse an existing Credential(kind:idp, provider, subject) mapping if present.
-  const searchCredRes = await fetchImpl(opsUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authHeader },
-    body: JSON.stringify({
-      operation: "search_by_conditions",
-      database: "flair",
-      table: "Credential",
-      operator: "and",
-      conditions: [
-        { search_attribute: "kind", search_type: "equals", search_value: "idp" },
-        { search_attribute: "idpProvider", search_type: "equals", search_value: params.idpProvider },
-        { search_attribute: "idpSubject", search_type: "equals", search_value: params.idpSubject },
-      ],
-      get_attributes: ["id", "principalId"],
-    }),
-  });
-  const existingCreds = searchCredRes.ok ? await searchCredRes.json().catch(() => []) : [];
-  const existing = Array.isArray(existingCreds) ? existingCreds[0] : undefined;
+  // ── flair#1317: look SUBJECT-WIDE, not (provider, subject) ─────────────────
+  // The resolver's key is (kind, idpSubject); anything narrower here leaves
+  // credentials that dedup cannot see but resolution can.
+  const findCredentialsForSubject = async (): Promise<any[]> => {
+    const res = await fetchImpl(opsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: authHeader },
+      body: JSON.stringify({
+        operation: "search_by_conditions",
+        database: "flair",
+        table: "Credential",
+        operator: "and",
+        conditions: [
+          { search_attribute: "kind", search_type: "equals", search_value: "idp" },
+          { search_attribute: "idpSubject", search_type: "equals", search_value: params.idpSubject },
+        ],
+        get_attributes: ["id", "principalId", "idpProvider", "idpSubject", "status", "label", "createdAt"],
+      }),
+    });
+    const body = res.ok ? await res.json().catch(() => []) : [];
+    return Array.isArray(body) ? body : [];
+  };
 
-  const credentialId = existing?.id ?? `cred_idp_${params.idpProvider}_${randomBytes(6).toString("hex")}`;
+  const subjectCreds = await findCredentialsForSubject();
+  const activeCreds = subjectCreds.filter(isResolvableCredential);
+
+  // Survivor: an ACTIVE same-provider credential is re-pointed (the idempotent
+  // re-run and the documented same-provider link). A revoked one is never
+  // resurrected — a re-link after a revoke mints a fresh credential.
+  const reused = activeCreds.find((c) => c?.idpProvider === params.idpProvider && c?.id);
+  const credentialId = reused?.id ?? `cred_idp_${params.idpProvider}_${randomBytes(6).toString("hex")}`;
+
+  // Everything else active for this subject is superseded. Under the old
+  // (provider, subject) key these rows were simply invisible; they are what made
+  // resolution order-dependent.
+  const superseded = activeCreds.filter((c) => c?.id && c.id !== credentialId);
+
+  // ONE batched write: the survivor first, then the revocations. A single
+  // ops-API operation is the strongest atomicity this surface can express, and
+  // ordering the survivor first means even a partially-applied batch can never
+  // leave the subject with ZERO resolvable credentials (the fail-open denial).
   const upsertRes = await fetchImpl(opsUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -762,9 +842,25 @@ export async function provisionIdpIdentityMapping(
           status: "active",
           idpProvider: params.idpProvider,
           idpSubject: params.idpSubject,
-          createdAt: existing ? undefined : now,
+          createdAt: reused ? undefined : now,
           lastUsedAt: now,
         },
+        // Retained, not deleted: the revocation stays legible in storage and in
+        // Harper's table audit log (which records the full record image of
+        // every write). Identifying fields are echoed back so the row survives
+        // as a well-formed, revoked credential whichever merge semantics the
+        // ops API applies.
+        ...superseded.map((c) => ({
+          id: c.id,
+          principalId: c.principalId,
+          kind: "idp",
+          label: c.label,
+          status: "revoked",
+          idpProvider: c.idpProvider,
+          idpSubject: params.idpSubject,
+          createdAt: c.createdAt,
+          updatedAt: now,
+        })),
       ],
     }),
   });
@@ -773,7 +869,29 @@ export async function provisionIdpIdentityMapping(
     throw new Error(`Identity mapping: failed to write Credential(kind:idp) mapping (HTTP ${upsertRes.status}): ${text}`);
   }
 
-  return { principalCreated, credentialId, credentialReused: Boolean(existing) };
+  // ── The invariant, RE-READ ────────────────────────────────────────────────
+  // Asserting what we intended to write proves nothing. This asks the store.
+  // ≠1 active credential means the resolver's answer for this subject is
+  // order-dependent, so this fails LOUDLY rather than returning a mapping the
+  // operator would reasonably believe is deterministic.
+  const afterCreds = (await findCredentialsForSubject()).filter(isResolvableCredential);
+  if (afterCreds.length !== 1 || afterCreds[0]?.id !== credentialId) {
+    const seen = afterCreds.map((c) => `${c?.id} → ${c?.principalId} (provider '${c?.idpProvider}')`).join("; ") || "none";
+    throw new Error(
+      `Identity mapping: the uniqueness invariant does not hold after the write — subject '${params.idpSubject}' ` +
+        `has ${afterCreds.length} active Credential(kind:idp) row(s) [${seen}], expected exactly 1 (${credentialId}). ` +
+        `Runtime resolution for this subject would be iteration-order-dependent (flair#1317). ` +
+        `Inspect the Credential table for kind:"idp" idpSubject:"${params.idpSubject}" and revoke the rows that should not resolve.`,
+    );
+  }
+
+  return {
+    principalCreated,
+    credentialId,
+    credentialReused: Boolean(reused),
+    credentialSuperseded: superseded.length > 0,
+    supersededCredentialIds: superseded.map((c) => String(c.id)),
+  };
 }
 
 // ─── Restart only ────────────────────────────────────────────────────────────
@@ -1345,11 +1463,22 @@ export async function enableMcp(params: EnableMcpParams, deps: EnableMcpDeps = {
     // and the one silent failure mode this surface has is discovering that
     // via an empty bootstrap. So the step that creates the mapping states it
     // plainly, names the link remedy, and points at the runtime diagnostic.
+    // flair#1317 — a cross-provider re-link REVOKES the subject's prior
+    // credential (one active credential per subject is the invariant). That is
+    // a credential dying, so it is stated as such, by id: an operator must
+    // never discover it later from something that stopped working.
+    const supersedeNote = mapping.credentialSuperseded
+      ? ` SUPERSEDED: ${mapping.supersededCredentialIds.length} prior Credential(kind:idp) row(s) for this subject ` +
+        `were REVOKED, not de-duplicated — ${mapping.supersededCredentialIds.join(", ")}. ` +
+        `They no longer resolve, and anything relying on them stops working. ` +
+        `Exactly one active credential per (kind, idpSubject) is the invariant that keeps resolution deterministic.`
+      : "";
     push(true,
       `connector identity: sub '${params.idpSubject}' (provider '${idpProvider}') resolves to Agent '${principal}' — ` +
         `every /mcp call reads and writes AS '${principal}'. ` +
         `principal ${mapping.principalCreated ? "created" : "already existed"}; ` +
-        `Credential(kind:idp) ${mapping.credentialReused ? "re-pointed" : "created"} (${mapping.credentialId}). ` +
+        `Credential(kind:idp) ${mapping.credentialReused ? "re-pointed" : "created"} (${mapping.credentialId}).` +
+        `${supersedeNote} ` +
         `If your CLI signs as a DIFFERENT agent id, the connector sees that agent's DISTINCT memory scope (by design) — ` +
         `re-run with --principal <your-agent-id> to link them. ` +
         `Diagnostic: the bootstrap tool's agentId/scope fields always say who the server resolved you to.`,
