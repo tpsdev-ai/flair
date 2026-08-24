@@ -9,9 +9,16 @@
  * that hash — so a reviewer can verify the reported number came from THIS
  * config, and config-shopping (run 10, publish the best) leaves a trace.
  *
- * Reproducibility is the edge (#1216): anyone re-runs the exact number locally
- * with `ollama pull` at the pinned digests + this dataset commit — no OpenAI
- * key, no spend. Pin by DIGEST, never by tag (tags are mutable).
+ * `configHash` is THE ANCHOR of the whole verification story (Sherlock,
+ * flair#1368): a pure function of pinned configuration that anyone with the repo
+ * re-derives exactly, with `ollama pull` at the pinned digests + this dataset
+ * commit — no OpenAI key, no spend. It survives cloud nondeterminism precisely
+ * because it hashes CONFIGURATION, not output.
+ *
+ * Say what it does and does not carry. It answers "did they run what they said
+ * they ran". It does not make the NUMBERS re-derivable: `runHash` re-derives
+ * only where the reader is bitwise-stable, and `artifactHash` is a seal, not a
+ * proof (artifact.ts). Pin by DIGEST, never by tag (tags are mutable).
  */
 import { createHash } from "node:crypto";
 import { JUDGE_PROMPT_TEMPLATES } from "./judge";

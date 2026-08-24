@@ -21,7 +21,7 @@ import {
   type BenchClient, type TestAgent,
 } from "../../../packages/flair-bench/lib/index";
 import { OLLAMA_HOST, READER, JUDGE, RETRIEVAL, FULL_CONTEXT } from "./config";
-import { generate } from "./ollama";
+import { generate, type OllamaModelSpec } from "./ollama";
 import { buildJudgePrompt, parseVerdict, JudgeParseError, type LmeTask } from "./judge";
 import { buildReaderPrompt, formatRetrieved, formatFullContext, HARPER_ARMS, ALL_ARMS, type Arm } from "./arms";
 import { writeFileSync, rmSync, appendFileSync, readFileSync, existsSync } from "node:fs";
@@ -146,9 +146,13 @@ export function setJournalContext(configHash: string): void { JOURNAL_CFG = conf
 // `latencyMs`, so a journal written by this code replays latency faithfully;
 // but a line from BEFORE the journal recorded latencyMs falls back to 0 and
 // would drag those percentiles down. Accuracy metrics are exact either way.
-// Note this is a property of artifactHash generally, not of resume: artifact
-// hashes are not wall-clock invariant, so `configHash` + `runHash` are the
-// reproducible identities. (Tracked as a separate finding on #1366.)
+// Note this is a property of artifactHash generally, not of resume:
+// `artifactHash` IS A SEAL, NOT A PROOF — it detects post-hoc modification of a
+// signed-off artifact and was never a reproducibility claim, even locally.
+// `configHash` is the re-derivable anchor; `runHash` re-derives under the
+// `local` profile (unmeasured) and is statistical under `cloud`. See the
+// README section "What 'reproducible' does and does not mean here".
+// (Tracked as a separate finding on #1366.)
 //
 // Extraction is recomputed from the dataset rather than journalled, so an
 // extraction-method change cannot be silently inherited from an old journal.
@@ -197,19 +201,61 @@ export function writeProgress(patch: Partial<typeof progressState> = {}): void {
   try { writeFileSync(PROGRESS_FILE, JSON.stringify(progressState, null, 2)); } catch { /* progress is best-effort */ }
 }
 
-/** One reader call for a given assembled context. */
-async function readerAnswer(
+/**
+ * The FULLY RESOLVED reader request for one (question, arm): the model pin, its
+ * sampling parameters, the effective num_ctx, and the assembled prompt — in one
+ * object.
+ *
+ * This exists so the harness has exactly ONE definition of "what a reader call
+ * is". `readerAnswer()` below issues it, and the reader-determinism probe
+ * (determinism.ts, flair#1368) issues the SAME object rather than assembling a
+ * second one out of its own parameters.
+ *
+ * That is deliberate and it is the whole reason the probe is trustworthy. A
+ * probe that quietly used a different temperature, seed, num_ctx or prompt
+ * shape would be measuring a DIFFERENT system, and its numbers would be worse
+ * than no numbers at all because they would look authoritative. The drift is
+ * removed by SHAPE — the probe takes no reader parameters, so there is nothing
+ * for a future edit to set on one path and forget on the other — rather than by
+ * a comment asking the next editor to keep two call sites in step.
+ */
+export interface ReaderRequest {
+  /** The pinned reader spec — model, manifest digest, temperature, seed,
+   *  num_ctx, num_predict. Identical object for every arm (Kern §5a: the reader
+   *  is pinned across arms; only the CONTEXT differs). */
+  spec: OllamaModelSpec;
+  /** The assembled prompt, exactly as it goes on the wire. */
+  prompt: string;
+  /** Per-call overrides. Only the full-context arm sets one, and it is still
+   *  fixed and still hashed (config.FULL_CONTEXT). */
+  opts: { numCtxOverride?: number };
+}
+
+export function buildReaderRequest(
+  question: string, questionDate: string, context: string, arm: Arm,
+): ReaderRequest {
+  return {
+    spec: READER,
+    prompt: buildReaderPrompt(question, questionDate, context),
+    opts: { numCtxOverride: arm === "full-context" ? FULL_CONTEXT.numCtx : undefined },
+  };
+}
+
+/** One reader call for a given assembled context. Exported so the determinism
+ *  probe repeats THIS call rather than a lookalike of it. */
+export async function readerAnswer(
   host: string, question: string, questionDate: string, context: string, arm: Arm,
 ): Promise<{ answer: string; tokensFed: number; latencyMs: number }> {
-  const prompt = buildReaderPrompt(question, questionDate, context);
-  const numCtxOverride = arm === "full-context" ? FULL_CONTEXT.numCtx : undefined;
-  const g = await generate(host, READER, prompt, { numCtxOverride });
+  const req = buildReaderRequest(question, questionDate, context, arm);
+  const g = await generate(host, req.spec, req.prompt, req.opts);
   return { answer: clean(g.response), tokensFed: g.promptTokens, latencyMs: g.latencyMs };
 }
 
 /** One judge call. Returns verdict=null + judgeError on an unparseable verdict
- *  (never a silent pass). */
-async function judgeOne(
+ *  (never a silent pass). Exported for the same reason as readerAnswer: the
+ *  determinism probe scores its N completions through the run's OWN judge path,
+ *  not a re-implementation of it. */
+export async function judgeOne(
   host: string, task: LmeTask, question: string, answer: string, response: string, abstention: boolean,
 ): Promise<{ verdict: QuestionArmResult["verdict"]; judgeError?: string }> {
   const { prompt, allowed } = buildJudgePrompt({ task, question, answer, response, abstention });
@@ -719,7 +765,15 @@ export async function runOnce(runIndex: number, entries: LmeEntry[], opts: RunOp
   const armMetrics = SELECTED_ARMS.map((a) => aggregateArmRun(a, results));
 
   // Content-address the run by its DECISIONS (answer/verdict/tokens/extraction),
-  // NOT wall-clock latency — a faithful re-run reproduces this hash.
+  // NOT wall-clock latency.
+  //
+  // What re-derives, precisely (Sherlock's tier 2, flair#1368): because the
+  // answer TEXT is in here, this hash re-derives only where the reader is
+  // bitwise-stable. Under `local` that is expected but UNMEASURED, so it is not
+  // claimed. Under `cloud` it does not hold — batched inference is not
+  // bitwise-stable at temperature 0 / seed 0 — so a cloud accuracy is a
+  // statistical result to be compared within variance, and determinism.ts
+  // publishes the variance to compare against.
   const decisions = results
     .map((r) => ({
       questionId: r.questionId, arm: r.arm, answer: r.answer,

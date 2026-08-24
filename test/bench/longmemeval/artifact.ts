@@ -8,17 +8,46 @@
  *
  *   artifactHash = sha256( canonical( configHash + per-run hashes + numbers ) )
  *
- * The artifact is partitioned into hashed CONTENT (schema, validationSlice,
- * configHash, config, runHashes, aggregate, gitCommit) and unhashed PROVENANCE
- * (generatedAt, host, notice, artifactHash). Provenance is stamped AFTER hashing
- * and stripped BEFORE verification, so two runs with identical content hash
- * identically regardless of wall clock or host — host-invariance IS the
- * reproducibility claim.
+ * ── artifactHash IS A SEAL, NOT A PROOF ──────────────────────────────────────
  *
- * A human sign-off is recorded against a specific artifactHash — "approved to
- * publish artifact <hash>", not "the number seemed fine at some point". A
- * reviewer can recompute the hash from the committed config + the recorded
- * per-run outputs and confirm the published number is the one that was signed.
+ * State this correction before anything else, because the file used to imply
+ * the opposite. `artifactHash` is TAMPER-EVIDENCE. It binds a human sign-off to
+ * one exact set of numbers — "approved to publish artifact <hash>", not "the
+ * number seemed fine at some point" — so a later edit to a published artifact is
+ * detectable. It is NOT a reproducibility proof and never was, even locally: it
+ * covers wall-clock latency percentiles and (through the run hashes) completion
+ * text, neither of which a faithful re-run reproduces.
+ *
+ * The three identities, in the order a reader should trust them (Sherlock,
+ * flair#1368):
+ *
+ *   configHash    THE ANCHOR. A pure function of the pinned config; anyone with
+ *                 the repo re-derives it exactly. It survives cloud
+ *                 nondeterminism because it hashes CONFIGURATION, not output.
+ *                 "Did they run what they said they ran" rests on this.
+ *   runHash       THE DECISION SET (answer / verdict / tokensFed / extraction).
+ *                 Expected re-derivable under the `local` profile — expected,
+ *                 not measured, so it is not claimed. Under `cloud` the
+ *                 completion text is not bitwise-stable, so this does not
+ *                 re-derive; accuracy is a statistical result there.
+ *   artifactHash  THE SEAL. Tamper-evidence for a signed-off artifact.
+ *
+ * "Verify it yourself" therefore rests on `configHash` plus the exact prompts,
+ * the dataset selection and the judge rubric — NOT on `artifactHash`.
+ *
+ * ── The partition ────────────────────────────────────────────────────────────
+ *
+ * Hashed CONTENT: schema, validationSlice, configHash, config, runHashes,
+ * aggregate, gitCommit. Unhashed PROVENANCE: generatedAt, host, notice,
+ * readerDeterminism, artifactHash. Provenance is stamped AFTER hashing and
+ * stripped BEFORE verification, so two runs with identical content hash
+ * identically regardless of wall clock, host, or measured reader
+ * nondeterminism.
+ *
+ * `readerDeterminism` (flair#1368) is provenance for a specific reason worth
+ * stating: a determinism measurement legitimately differs run to run, so if it
+ * fed the hash, every honest re-run would look like tampering — the seal would
+ * fire on exactly the thing it is not meant to detect.
  *
  * There is deliberately NO publish function and NO --publish flag here. The
  * artifact carries a NOTICE stating exactly that.
@@ -27,6 +56,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalJson, sha256hex } from "./config";
 import type { ArmAggregate, ArmRunMetrics } from "./metrics";
+import type { ReaderDeterminism } from "./determinism";
 
 export interface RunRecord {
   runIndex: number;
@@ -47,11 +77,22 @@ export interface Artifact {
   aggregate: ArmAggregate[];
 
   // ── Unhashed PROVENANCE — stamped AFTER hashing, stripped BEFORE verify. ──
-  // These describe WHERE/WHEN the number was produced, not WHAT it is, so they
-  // must never enter the hash (host-invariance IS the reproducibility claim).
+  // These describe WHERE/WHEN/HOW-STABLY the number was produced, not WHAT it
+  // is, so they must never enter the hash: the seal must fire on a changed
+  // NUMBER, and never on a different host, a different clock, or a different
+  // (honest) determinism reading.
   notice: string;
   generatedAt: string;
   host: { ollama: string; benchHost: string };
+  /** MEASURED reader nondeterminism (determinism.ts, flair#1368): N calls with a
+   *  byte-identical prompt, M distinct completions, common-prefix length, and
+   *  verdict-agreement rate, on a FIXED question sample recorded alongside.
+   *
+   *  This is the published variance that makes "re-run and compare within
+   *  variance" a checkable instruction instead of an empty one. It is
+   *  PROVENANCE, never content: it legitimately differs between honest runs, so
+   *  hashing it would make every faithful re-run look like tampering. */
+  readerDeterminism?: ReaderDeterminism;
   /** Filled in AFTER hashing (excluded from the hash — the hash addresses
    *  the content partition above it). */
   artifactHash?: string;
@@ -70,6 +111,11 @@ export interface BuildArtifactInput {
   ollamaHost: string;
   benchHost: string;
   validationSlice: boolean;
+  /** Optional so a caller that has no probe result (a failed probe supplies a
+   *  record with `error` set — see determinism.failedProbe) is not forced to
+   *  invent one. Omitted ⇒ the key is absent from the artifact entirely, which
+   *  is honestly different from "probed and found deterministic". */
+  readerDeterminism?: ReaderDeterminism;
 }
 
 /** Provenance fields — stamped AFTER hashing and stripped BEFORE verification.
@@ -77,7 +123,9 @@ export interface BuildArtifactInput {
  *  for the partition, so buildArtifact and verifyArtifactHash can never drift —
  *  and it is EXPORTED so a second artifact schema (the payload A/B) inherits
  *  the identical partition instead of re-deciding it. */
-export const PROVENANCE_KEYS = ["generatedAt", "host", "notice", "artifactHash"] as const;
+export const PROVENANCE_KEYS = [
+  "generatedAt", "host", "notice", "readerDeterminism", "artifactHash",
+] as const;
 
 /** The hashed-content partition of any artifact: everything except provenance. */
 export function hashedContent(art: object): Record<string, unknown> {
@@ -117,16 +165,20 @@ export function buildArtifact(input: BuildArtifactInput): Artifact {
     runHashes: input.runHashes,
     aggregate: input.aggregate,
   };
-  // Hash the CONTENT partition only — provenance (generatedAt, host, notice) is
-  // excluded so two runs with identical content hash identically regardless of
-  // wall clock or host. canonicalJson sorts keys, and artifactHash is absent at
+  if (input.readerDeterminism) art.readerDeterminism = input.readerDeterminism;
+  // Hash the CONTENT partition only — provenance (generatedAt, host, notice,
+  // readerDeterminism) is excluded so two runs with identical content hash
+  // identically regardless of wall clock, host, or measured reader
+  // nondeterminism. canonicalJson sorts keys, and artifactHash is absent at
   // this point, so it cannot address itself.
   return stampArtifactHash(art);
 }
 
 /** Recompute the hash of an artifact object (verification): strip the provenance
- *  partition (generatedAt, host, notice, artifactHash), canonicalise, sha256 —
- *  must equal the stored artifactHash. */
+ *  partition (generatedAt, host, notice, readerDeterminism, artifactHash),
+ *  canonicalise, sha256 — must equal the stored artifactHash. A match proves the
+ *  artifact has not been modified since sign-off; it does NOT prove the numbers
+ *  are reproducible. See the header. */
 export function verifyArtifactHash(art: Artifact): boolean {
   return verifyStampedHash(art);
 }
