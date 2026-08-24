@@ -107,6 +107,9 @@ logging:
 | `HDB_ADMIN_PASSWORD` | Bootstrap password for the embedded Harper. After first start, the persisted user record is the source of truth. | Set at install time. See [secrets-and-keys.md](secrets-and-keys.md) for rotation. |
 | `FLAIR_KEY_PASSPHRASE` | Passphrase for AES-256-GCM encryption of federation private-key seeds. | Set explicitly for production federation deployments. |
 | `FLAIR_URL` | Override the Flair base URL for CLI commands (points to a remote instance). | When connecting from a different machine. |
+| `FLAIR_EMBED_THREADS` | CPU threads for in-process embedding. Default is `max(1, availableParallelism() − 1)` — host-aware, one core left for Harper. | Pin a positive integer on a dedicated ingest host, or when the default leaves cores idle / oversubscribed. See [deployment.md](deployment.md#performance-related-environment-variables). |
+| `FLAIR_HYBRID_RETRIEVAL` | Hybrid BM25 + vector retrieval (default on). | Set `false` to revert to HNSW-only. |
+| `FLAIR_MODELS_DIR` | Directory the embedding GGUF is loaded from. | When the model lives outside `<data-dir>/models`. |
 
 ---
 

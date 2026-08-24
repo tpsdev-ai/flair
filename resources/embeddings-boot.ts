@@ -84,6 +84,7 @@
  * Harper boot), registration is skipped and logged — Harper falls back to
  * keyword-only search, matching the pre-existing degrade contract.
  */
+import { availableParallelism } from "node:os";
 import { resolveModelsDir } from "./embeddings-provider.js";
 
 const LOGICAL_NAME = "default";
@@ -152,6 +153,44 @@ function benchModelPathOverride(): string | undefined {
   return process.env.FLAIR_RECALL_HARNESS_MODEL_PATH || undefined;
 }
 
+/**
+ * llama.cpp CPU thread count passed to HFE `register({config:{threads}})`.
+ *
+ * HFE's own default is a fixed 6 (see harper-fabric-embeddings' `init()`
+ * table). flair never used to pass `threads`, so every host inherited that
+ * 6: an 8-vCPU ingest box left cores idle (flair#1330), a 4-core laptop
+ * oversubscribed. We always pass an explicit value.
+ *
+ * Default (unset / empty / non-integer / <1): `max(1, cores - 1)`. Safer
+ * than `min(6, cores)` — that still leaves the 8-vCPU case idle at 6 —
+ * and safer than using every core: Harper's JS worker (`THREADS_COUNT=1`)
+ * and the OS keep one. `availableParallelism()` (not `os.cpus().length`)
+ * so a cgroup CPU quota (Docker / k8s / Fabric) is what we count.
+ *
+ * Override: `FLAIR_EMBED_THREADS` — a positive integer, env-only. A
+ * config.yaml key would go through Harper's models-config persist path,
+ * which is exactly the class of state embeddings-boot exists to avoid
+ * (flair#694). Invalid values fall through to the host-aware default.
+ */
+export function resolveEmbedThreads(
+  env: NodeJS.ProcessEnv = process.env,
+  cores: number = availableParallelism(),
+): number {
+  const parsed = parsePositiveInt(env.FLAIR_EMBED_THREADS);
+  if (parsed !== undefined) return parsed;
+  const safeCores = Number.isFinite(cores) && cores >= 1 ? Math.floor(cores) : 1;
+  return Math.max(1, safeCores - 1);
+}
+
+function parsePositiveInt(raw: string | undefined): number | undefined {
+  if (raw == null) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n < 1) return undefined;
+  return n;
+}
+
 let registered = false;
 
 /**
@@ -165,12 +204,16 @@ export async function registerEmbeddingsBackend(): Promise<void> {
   try {
     const { register } = await import("harper-fabric-embeddings");
     const modelPath = benchModelPathOverride();
+    const threads = resolveEmbedThreads();
     await register({
       logicalName: LOGICAL_NAME,
       kind: "embedding",
-      config: modelPath
-        ? { modelPath, pooling: EMBEDDING_POOLING }
-        : { modelName: MODEL_NAME, modelsDir: resolveModelsDir(), pooling: EMBEDDING_POOLING },
+      config: {
+        ...(modelPath
+          ? { modelPath, pooling: EMBEDDING_POOLING }
+          : { modelName: MODEL_NAME, modelsDir: resolveModelsDir(), pooling: EMBEDDING_POOLING }),
+        threads,
+      },
     });
   } catch (err) {
     // Not installed, or globalThis.models isn't ready (module loaded outside
