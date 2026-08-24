@@ -1,6 +1,7 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { FlairClient } from "@tpsdev-ai/flair-client";
 
 /**
  * pi-flair extension tests — validates tool registration and config resolution.
@@ -14,8 +15,10 @@ import { fileURLToPath } from "node:url";
  * Integration tests require running Flair server (not unit tests).
  */
 
-// Import the real classifyError function
-import { classifyError as classifyErrorReal, DEFAULT_FLAIR_URL } from "../src/index";
+// Real exports — classifyError is already a named export; the default export
+// is the extension installer whose memory_store execute we call below
+// (flair#1384). Do not reconstruct those responses as local literals.
+import registerPiFlair, { classifyError as classifyErrorReal, DEFAULT_FLAIR_URL } from "../src/index";
 
 // ─── Config Tests ─────────────────────────────────────────────────────────────
 
@@ -226,36 +229,102 @@ describe("Dedup Detection — explicit `deduped` flag (flair#449 fix)", () => {
   });
 });
 
-// ─── Response Shape Tests ────────────────────────────────────────────────────
+// ─── Response Shape Tests (flair#1384) ───────────────────────────────────────
+//
+// The previous block constructed `result` / `response` as local literals and
+// asserted on them. It never called src/index.ts, so it could not fail, and
+// it pinned the pre-#985 `mergedWith` / implicit-not-written contract. The
+// real execute path (src/index.ts memory_store) emits
+// `{ written: true, matchedId }` — a collision SIGNAL, never a dropped write.
+//
+// These tests import the default export, register it, invoke the real
+// execute, and assert on *its* output. FlairClient.prototype.request is
+// patched so no network happens; everything above that boundary (including
+// memory.write merge + the tool's details construction) runs unmodified —
+// same isolation shape as packages/openclaw-flair/test/plugin.test.ts.
 
-describe("memory_store response shape — programmatic dedup signal", () => {
-  // The PR adds a structured `details` field so callers can react to
-  // dedup programmatically (not just parse prose). LLMs sometimes
-  // compress the prose ("Similar memory exists") into "got the ID" and
-  // miss the dedup signal — see flair#449.
+function createMockPi() {
+  const tools = new Map<string, { name: string; execute: Function }>();
+  return {
+    registerTool(spec: { name: string; execute: Function }) {
+      tools.set(spec.name, spec);
+    },
+    on() {},
+    _tools: tools,
+  };
+}
 
-  test("dedup response includes details.deduplicated=true + mergedWith", () => {
-    const result = { id: "pi-test-existing-1", deduped: true, content: "existing" };
-    const wasDeduped = (result as any).deduped === true;
-    const response = {
-      content: [{ type: "text", text: "Similar memory ..." }],
-      details: wasDeduped
-        ? { deduplicated: true, mergedWith: result.id }
-        : { deduplicated: false, id: result.id },
-    };
-    expect(response.details).toEqual({ deduplicated: true, mergedWith: "pi-test-existing-1" });
+async function executeMemoryStore(
+  writeResponse: Record<string, unknown>,
+  params: { content: string; durability?: string; tags?: string[] },
+) {
+  (FlairClient.prototype as any).request = async () => writeResponse;
+  const pi = createMockPi();
+  registerPiFlair(pi as any);
+  const tool = pi._tools.get("memory_store");
+  if (!tool) throw new Error("memory_store was not registered");
+  return tool.execute("tool-call-1", params);
+}
+
+describe("memory_store response shape — real extension (flair#1384)", () => {
+  const originalRequest = FlairClient.prototype.request;
+  const originalAgentId = process.env.FLAIR_AGENT_ID;
+
+  beforeEach(() => {
+    process.env.FLAIR_AGENT_ID = "pi-test";
   });
 
-  test("success response includes details.deduplicated=false + id", () => {
-    const result = { id: "pi-test-new-uuid", content: "new" };
-    const wasDeduped = (result as any).deduped === true;
-    const response = {
-      content: [{ type: "text", text: "Memory stored ..." }],
-      details: wasDeduped
-        ? { deduplicated: true, mergedWith: result.id }
-        : { deduplicated: false, id: result.id },
-    };
-    expect(response.details).toEqual({ deduplicated: false, id: "pi-test-new-uuid" });
+  afterEach(() => {
+    FlairClient.prototype.request = originalRequest;
+    if (originalAgentId === undefined) {
+      delete process.env.FLAIR_AGENT_ID;
+    } else {
+      process.env.FLAIR_AGENT_ID = originalAgentId;
+    }
+  });
+
+  test("dedup collision: details.written=true + matchedId, never mergedWith", async () => {
+    const result = await executeMemoryStore(
+      {
+        id: "pi-test-new-1",
+        deduplicated: true,
+        matchedId: "pi-test-existing-1",
+        written: true,
+      },
+      { content: "collision content" },
+    );
+
+    expect(result.details).toEqual({
+      deduplicated: true,
+      id: "pi-test-new-1",
+      written: true,
+      matchedId: "pi-test-existing-1",
+    });
+    expect(result.details).not.toHaveProperty("mergedWith");
+    expect(result.content[0].text).toContain("Memory stored (id: pi-test-new-1)");
+    expect(result.content[0].text).toContain("similar to existing memory (id: pi-test-existing-1)");
+    expect(result.content[0].text).toContain("both are kept");
+  });
+
+  test("fresh write: details.written=true + id, no matchedId / no mergedWith", async () => {
+    const result = await executeMemoryStore(
+      {
+        id: "pi-test-new-uuid",
+        deduplicated: false,
+        written: true,
+      },
+      { content: "new distinct content" },
+    );
+
+    expect(result.details).toEqual({
+      deduplicated: false,
+      id: "pi-test-new-uuid",
+      written: true,
+    });
+    expect(result.details).not.toHaveProperty("matchedId");
+    expect(result.details).not.toHaveProperty("mergedWith");
+    expect(result.content[0].text).toContain("Memory stored (id: pi-test-new-uuid)");
+    expect(result.content[0].text).not.toContain("similar to existing");
   });
 });
 
