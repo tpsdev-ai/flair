@@ -17,6 +17,15 @@
  * a request-level override would be inventing a production knob to satisfy a
  * test.
  *
+ * "IDENTICAL" MEANS IDS AND ORDER, UNDER THE EXPLICIT TIE-BREAK both paths now
+ * share (score DESC, then ascending id — flair#1363). Before that tie-break
+ * existed this suite reported 5/73 divergences, every one of them a single
+ * position at the tail of the window where two documents scored bit-identically
+ * and the legacy path was ordering them by Harper's corpus-iteration order —
+ * an order that is a query-plan artifact, not a ranking decision. Those five
+ * are the known, ruled-on change; they MATCH now, and the duplicate-content
+ * triple below pins the tie order itself rather than leaving it implied.
+ *
  * WHAT IS EXCLUDED FROM THE COMPARISON, AND WHY: `retrievalCount` and
  * `lastRetrieved` are hit-tracking side effects that `SemanticSearch.post()`
  * writes for every result it returns. Running the query set twice necessarily
@@ -280,11 +289,25 @@ describe("flair#1357 — indexed vs legacy lexical leg, real Harper, same data d
     expect(diverged.join("\n"), `${diverged.length}/${QUERIES.length} queries diverged`).toBe("");
   });
 
-  test("the duplicate-content triple keeps its tie order across both paths", () => {
+  test("the duplicate-content triple resolves identically on every run (flair#1363)", () => {
+    // SCOPE NOTE: this is the FUSED response order, not the lexical leg's. The
+    // BM25 tie-break orders the LEXICAL leg; by the time these ids reach a
+    // response they have been through candidate-union RRF with the HNSW leg,
+    // and three identically-embedded documents get whatever relative semantic
+    // rank Harper's vector index gives them. Asserting ascending id HERE would
+    // be asserting a property of the wrong layer — the lexical leg's tie order
+    // is pinned directly, against its own output, in test/unit/bm25.test.ts and
+    // test/unit-isolated/bm25-index-equivalence-1357.test.ts.
+    //
+    // What this level can prove, and what matters here: the triple surfaces,
+    // and all three runs agree about it — so the tie no longer leaks the query
+    // plan into the answer.
     const tieOrder = (json: string) =>
       JSON.parse(json).results.map((r: any) => r.id).filter((id: string) => id.startsWith("eq-tie-"));
     const name = "plain/5"; // the query whose text IS the duplicated body
-    expect(tieOrder(legacyResults[name]).length).toBeGreaterThan(1);
-    expect(tieOrder(indexedResults[name])).toEqual(tieOrder(legacyResults[name]));
+    const seen = tieOrder(legacyResults[name]);
+    expect(seen.length, "the tie fixture must actually surface").toBeGreaterThan(1);
+    expect(tieOrder(indexedResults[name])).toEqual(seen);
+    expect(tieOrder(legacyRestart[name])).toEqual(seen);
   });
 });

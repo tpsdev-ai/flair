@@ -14,17 +14,25 @@
  * same ids, same order, same fields, same numbers. Not "same set", not
  * "close enough".
  *
- * ── CORPUS ORDER AND TIES ───────────────────────────────────────────────────
- * `buildBM25().rank()` sorts with `(a,b) => b.score - a.score`, and
- * `Array.prototype.sort` is stable, so EQUAL-SCORING documents come back in
- * corpus-iteration order — which, measured against a live instance
- * (test/integration/bm25-index-scan-order-1357.test.ts), is a QUERY-PLANNER
- * artifact: own-agent rows lead under the multi-agent scope OR-group, plain
- * primary-key order under a tag/subject filter. The index cannot reproduce
- * that, so it DECLINES any query whose returned window contains a score tie
- * and the legacy scan answers instead. The mock below iterates in primary-key
- * order (one of the two real orders), inserts ids in shuffled order, and plants
- * exact-duplicate contents so the decline path is genuinely exercised.
+ * ── WHAT "BYTE-IDENTICAL" MEANS HERE (flair#1363, Kern 2026-08-24) ──────────
+ * Identical ids AND identical order, under an EXPLICIT tie-break: both paths
+ * sort by score DESC then ascending id.
+ *
+ * It could not mean anything else. `buildBM25().rank()` used to sort on score
+ * alone; a stable sort then left equal-scoring documents in Harper's
+ * corpus-iteration order, and that order is a query-planner artifact —
+ * measured on a live instance, the same rows for the same query text iterate
+ * own-agent-first under the multi-agent read-scope OR-group and
+ * primary-key-first under a tags/subject filter
+ * (test/integration/bm25-index-scan-order-1357.test.ts). Kern's ruling:
+ * "byte-identical to a nondeterministic source is a contradiction." So the
+ * tie-break is explicit in BOTH paths now, and this suite holds them to it.
+ *
+ * The mock iterates in primary-key order (one of the two real orders) and the
+ * fixture inserts ids in SHUFFLED order, so a path that still leaned on corpus
+ * order would diverge here. The exact-duplicate triple shares the query
+ * vocabulary deliberately: it plants ties inside the returned window of most
+ * query shapes rather than in a corner case.
  */
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 
@@ -202,13 +210,11 @@ function seedCorpus(n: number): void {
     if (rnd() < 0.05) row.supersedes = rows.length > 0 ? rows[Math.floor(rnd() * rows.length)].id : undefined;
     rows.push(row);
   }
-  // TIE FODDER: exact-duplicate bodies. Their BM25 scores are bit-identical for
-  // any query, so they are the decline guard's fixture. Their vocabulary is
-  // PRIVATE to them (`tiemarker`, `tz*` — absent from QUERY_VOCAB and FILLER),
-  // because three identical documents sharing the query vocabulary would tie
-  // inside the window of nearly every query and push the whole suite onto the
-  // fallback path, which is exactly what it must not silently do.
-  const twin = "tiemarker tz1 tz2 tz3 tz4 tz5 tz6 tz7";
+  // TIE FODDER: three exact-duplicate bodies drawn from the QUERY vocabulary,
+  // so they tie inside the returned window of most query shapes rather than in
+  // some corner. Their ids sort (aaa, mmm, zzz) against their insertion order
+  // (zzz, aaa, mmm), so only a real tie-break puts them in id order.
+  const twin = "vertex ingress proxy certificate fingerprint handshake rollout cluster";
   for (const [suffix, agentId] of [["zzz", "agent-a"], ["aaa", "agent-a"], ["mmm", "agent-b"]] as const) {
     rows.push({
       id: `mem-tie-${suffix}`, agentId, content: twin, contentHash: `tie-${suffix}`,
@@ -419,14 +425,17 @@ describe("flair#1357 — the indexed lexical leg is byte-identical to the legacy
     // whose returned window contains a BM25 score tie (the decline guard), so
     // this asserts a FLOOR on how much the index actually served rather than
     // exact equality — but a floor high enough that a blanket decline fails.
+    // ── THE ANTI-VACUITY CONTROL ─────────────────────────────────────────────
+    // Everything above would pass trivially if the index quietly declined every
+    // query and both "paths" were the same legacy code. Only the one case with
+    // NO query text at all (the full scoped listing) has a lexical leg to
+    // decline, so exactly one case may scan. Score ties are no longer a reason
+    // to fall back (flair#1363) — if this list grows a tie-shaped entry, the
+    // shared tie-break has come apart.
     const served = cases.length - fellBack.length;
     console.log(`\n  BM25 INDEX SERVE RATE: ${served}/${cases.length} query shapes ` +
-      `(${((100 * served) / cases.length).toFixed(0)}%); the rest hit the tie-decline guard ` +
-      `or have no query text.\n`);
-    expect(fellBack, "the no-text listing must fall back").toContain("listing");
-    // The index must actually serve SOMETHING, or every "both paths agree"
-    // assertion above is two runs of the same legacy code agreeing with itself.
-    expect(served, "the index served nothing — every equivalence assertion above is vacuous").toBeGreaterThan(0);
+      `(${((100 * served) / cases.length).toFixed(0)}%)\n`);
+    expect(fellBack.sort(), "queries that fell back to the legacy corpus scan").toEqual(["listing"]);
     expect(corpusScans).toBeGreaterThan(scansAfterBuild); // legacy control ran
     expect(bm25IndexStatus().state).toBe("ready");
   }, 120_000);
@@ -465,10 +474,10 @@ describe("flair#1357 — the indexed lexical leg is byte-identical to the legacy
     expect(JSON.stringify(corrupted)).not.toBe(JSON.stringify(legacy));
   }, 60_000);
 
-  it("a score tie in the returned window makes the index DECLINE, and the answer still matches", async () => {
+  it("tied documents come back in ascending id order on BOTH paths (flair#1363)", async () => {
     const { condition, isAllowed } = scopeFor("agent-a");
     const params = {
-      q: "tiemarker tz1 tz2 tz3",
+      q: "vertex ingress proxy certificate fingerprint handshake rollout cluster",
       queryEmbedding: qEmbFor(4242),
       conditions: [condition, { attribute: "archived", comparator: "not_equal", value: true }],
       limit: 200, agentId: "agent-a", isAllowed, hybrid: true, scoring: "raw", minScore: 0,
@@ -476,18 +485,27 @@ describe("flair#1357 — the indexed lexical leg is byte-identical to the legacy
     process.env.FLAIR_BM25_INDEX = "true";
     __resetBm25IndexForTests();
     await retrieveCandidates({ ...params } as any); // build
-    // The three exact-duplicate bodies tie on this query, so the index must
-    // refuse to serve the lexical leg at all.
-    const declined = await indexedBm25Ids({
+    // The index must SERVE this — a tie is no longer a reason to decline.
+    const servedIds = await indexedBm25Ids({
       q: params.q, conditions: params.conditions as any, timeFilters: {},
       isAllowed: params.isAllowed, limit: 50,
     });
-    expect(declined, "a window containing tied scores must be declined, not guessed").toBeNull();
+    expect(servedIds, "a tie is no longer a reason to decline the lexical leg").not.toBeNull();
+
+    // THE CONTRACT, asserted against the LEXICAL LEG's own output: all three
+    // duplicates rank in ASCENDING ID order — not the order they were inserted
+    // in (zzz, aaa, mmm), which is what inheriting corpus order produced.
+    expect(servedIds!.filter((id) => id.startsWith("mem-tie-")))
+      .toEqual(["mem-tie-aaa", "mem-tie-mmm", "mem-tie-zzz"]);
+
+    // The OTHER implementation of the same comparator is pinned directly
+    // against `buildBM25` in test/unit/bm25.test.ts. Reconstructing the scoped
+    // corpus here to re-derive the legacy leg would mean reimplementing
+    // `isAllowedBm25Candidate`'s conditions AND temporal filters in the test —
+    // and a test that duplicates the production filter stops testing it. The
+    // end-to-end equality below covers the two legs meeting.
 
     const { legacy, indexed } = await runBoth(params);
-    const tieOrder = (rs: any[]) => rs.map((r: any) => r.id).filter((id: string) => id.startsWith("mem-tie-"));
-    expect(tieOrder(legacy).length).toBe(3);
-    expect(tieOrder(indexed)).toEqual(tieOrder(legacy));
     expect(JSON.stringify(indexed)).toBe(JSON.stringify(legacy));
   }, 60_000);
 });

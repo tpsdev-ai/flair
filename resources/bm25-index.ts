@@ -34,20 +34,25 @@
 //      doubles are bit-identical: query terms are accumulated in
 //      `[...new Set(tokenize(q))]` order, and `avgdl` is a sum of integers
 //      (exact in a double regardless of summation order) divided by N.
-//   3. TIE-BREAKING IS NOT REPRODUCIBLE, SO TIES ARE DECLINED. Equal-scoring
-//      documents come back from `buildBM25().rank()` in Harper's corpus
-//      ITERATION order (stable sort), and that order is a query-planner
-//      artifact: measured, a scan under the multi-agent read-scope OR-group
-//      yields the reader's OWN agentId-indexed rows first and the rest after,
-//      while the same scan under a tags/subject filter comes back in
-//      primary-key order. When a tie could affect the returned window, `rank()`
-//      returns null and the caller falls back to the legacy scan. See the
-//      guard at the end of `rank()`.
+//   3. TIE-BREAKING IS EXPLICIT AND SHARED (flair#1363). Equal-scoring
+//      documents used to come back from `buildBM25().rank()` in Harper's
+//      corpus ITERATION order (stable sort over the fetched corpus) — a
+//      query-planner artifact, measured to differ between the multi-agent
+//      read-scope OR-group (reader's own rows first) and a tags/subject filter
+//      (plain primary-key order) for the same rows and the same query text. No
+//      index can reconstruct a planner, so hybrid recall was nondeterministic
+//      for tied documents and this work could not have been correct while that
+//      remained true. Kern's ruling (2026-08-24): "byte-identical to a
+//      nondeterministic source is a contradiction." Both paths now sort by
+//      score DESC then ascending `id`, so the tie order is defined, identical,
+//      and reproducible without Harper.
 //   4. ANYTHING THIS MODULE CANNOT REPRODUCE EXACTLY MUST NOT BE SERVED FROM
 //      THE INDEX. `planQuery()` below is a conservative allowlist: an
 //      unrecognised condition attribute, comparator, or shape returns a plan
 //      of `null`, and the caller falls back to the legacy per-query corpus
-//      scan. Unknown means SLOW, never means WRONG.
+//      scan. Unknown means SLOW, never means WRONG. (Score ties were briefly
+//      in this category too — see 3; they no longer are, because the tie order
+//      is now defined rather than inherited.)
 //
 // Harper-free on purpose — same rationale as ./bm25.ts and ./scoring.ts: the
 // scoring, the scope evaluation and the statistics derivation are unit-testable
@@ -590,41 +595,23 @@ export class Bm25Index {
     }
 
     // ── Rank ────────────────────────────────────────────────────────────────
-    // score>0 only (buildBM25's caller drops zeroes), then score DESC with ties
-    // broken by ascending id — the stable-sort-over-corpus-order semantics of
-    // the legacy path, given Harper scans in primary-key order.
+    // score>0 only — `buildBM25`'s caller drops zeroes, and a document can only
+    // score 0 here by containing no query term at all (the +1 IDF variant is
+    // strictly positive for every term, so a match always contributes).
     const out: { id: string; score: number }[] = [];
     for (const [slot, score] of scores) {
       if (score > 0) out.push({ id: this.slots[slot]!.id, score });
     }
-    // Score DESC. The id component only makes the sort a total order (so the
-    // ambiguity check below sees equal scores adjacent and the function is
-    // deterministic) — it never decides a RETURNED order, because any tie
-    // inside the window makes this function return null.
+    // Score DESC, ties by ascending id — CHARACTER-FOR-CHARACTER the comparator
+    // `buildBM25().rank()` uses (resources/bm25.ts). That shared comparator is
+    // the whole reason this index can serve the lexical leg: tie order used to
+    // be inherited from Harper's corpus-scan order, which is a query-plan
+    // artifact an index cannot reconstruct (flair#1363). If one of these two
+    // comparators is ever changed, change BOTH — they are one contract written
+    // in two places, and test/unit/bm25-index-latency-1357.test.ts asserts
+    // top-N equality between the two implementations.
     out.sort((a, b) => (b.score - a.score) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
-    // ── TIE AMBIGUITY: DECLINE RATHER THAN GUESS ────────────────────────────
-    // `buildBM25().rank()` sorts by score with `Array.prototype.sort`, which is
-    // stable, so EQUAL-SCORING documents come back in the order Harper yielded
-    // the corpus. That order is a QUERY-PLANNER ARTIFACT, not a property this
-    // index can reconstruct: measured against a live instance
-    // (test/integration/bm25-index-scan-order-1357.test.ts), a scan under the
-    // multi-agent read-scope OR-group yields the READER'S OWN agentId-indexed
-    // rows first and everything else after — while the same scan under a
-    // tags/subject filter comes back in primary-key order. Different plan,
-    // different tie order, same query text.
-    //
-    // Reproducing that would mean reproducing Harper's planner. Reordering
-    // ties ourselves would be a RANKING CHANGE, which this work is explicitly
-    // not allowed to make. So when a score tie could affect the returned
-    // window, the index declines and the caller's legacy corpus scan answers —
-    // slower, and exactly right. Ties strictly BELOW the window cannot change
-    // which ids are returned or in what order, so they are ignored; the pair
-    // STRADDLING the boundary can (it decides the last slot), so it is checked.
-    const bound = Math.min(out.length, limit + 1);
-    for (let i = 1; i < bound; i++) {
-      if (out[i].score === out[i - 1].score) return null;
-    }
     return out.slice(0, limit).map((r) => r.id);
   }
 }

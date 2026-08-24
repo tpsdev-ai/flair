@@ -46,6 +46,50 @@ describe("feature flag — FLAIR_HYBRID_RETRIEVAL (ACTIVATED 2026-07-08: default
   });
 });
 
+describe("tie-break — score DESC, then ascending id (flair#1363)", () => {
+  // Before this comparator was explicit, `rank()` sorted on score alone. A
+  // stable sort then left EQUAL-SCORING documents in the order the caller had
+  // fetched the corpus in — Harper's, which is a query-plan artifact: measured
+  // on a live instance, the same rows for the same query text iterate
+  // own-agent-first under the read-scope OR-group and primary-key-first under a
+  // tags/subject filter (test/integration/bm25-index-scan-order-1357.test.ts).
+  // So hybrid recall was NONDETERMINISTIC for tied documents, and only exact
+  // ties moved, which is why nothing caught it. The explicit tie-break is also
+  // what makes resources/bm25-index.ts able to serve the lexical leg at all —
+  // it can reproduce `id` ascending; it cannot reproduce a planner.
+  const tied = [
+    { id: "zzz", content: "alpha beta gamma" },
+    { id: "aaa", content: "alpha beta gamma" },
+    { id: "mmm", content: "alpha beta gamma" },
+  ];
+
+  test("documents with identical scores come back in ascending id order", () => {
+    const ranked = buildBM25(tied).rank("alpha beta gamma");
+    // Genuinely tied — otherwise this asserts nothing about tie-breaking.
+    expect(new Set(ranked.map((r) => r.score)).size).toBe(1);
+    expect(ranked.map((r) => r.id)).toEqual(["aaa", "mmm", "zzz"]);
+  });
+
+  test("insertion order does NOT decide it — the same set in any order ranks the same", () => {
+    // This is the property the old stable-sort-only comparator failed: corpus
+    // order leaked into the result. Feed the same documents in a different
+    // order and the ranking must not move.
+    const shuffled = [tied[1], tied[2], tied[0]];
+    expect(buildBM25(shuffled).rank("alpha beta gamma").map((r) => r.id))
+      .toEqual(buildBM25(tied).rank("alpha beta gamma").map((r) => r.id));
+  });
+
+  test("score still dominates — the tie-break only orders EQUAL scores", () => {
+    const docs = [
+      { id: "zzz", content: "alpha alpha alpha beta" }, // strongest
+      { id: "aaa", content: "alpha unrelated words here padding padding padding" },
+    ];
+    const ranked = buildBM25(docs).rank("alpha");
+    expect(ranked[0].score).toBeGreaterThan(ranked[1].score);
+    expect(ranked.map((r) => r.id)).toEqual(["zzz", "aaa"]); // NOT id order
+  });
+});
+
 describe("BM25 params (Kern-approved)", () => {
   test("k1≈1.2, b≈0.75, RRF K=60, SEM_LIMIT=50", () => {
     expect(BM25_K1).toBe(1.2);

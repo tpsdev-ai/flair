@@ -16,9 +16,17 @@
  *     READER'S OWN rows first, in primary-key order, and everything else after;
  *     under a tags/subject filter the same store comes back in plain
  *     primary-key order. Two different orders for the same rows, decided by the
- *     plan. That is why the index DECLINES a query whose returned window
- *     contains a BM25 score tie (resources/bm25-index.ts, end of `rank()`)
- *     instead of imposing a tie-break of its own.
+ *     plan.
+ *
+ *     THIS MEASUREMENT IS THE EVIDENCE BEHIND flair#1363. Hybrid recall was
+ *     nondeterministic for tied documents — the ranking it produced depended on
+ *     which plan Harper picked, which depends on data distribution. Kern's
+ *     ruling (2026-08-24): "byte-identical to a nondeterministic source is a
+ *     contradiction." Both the legacy scan and the index now break ties on
+ *     ascending `id` (resources/bm25.ts and resources/bm25-index.ts), so the
+ *     order below no longer reaches ranking at all. Keep this test: it is the
+ *     reason the tie-break exists, and it is what would tell us if the premise
+ *     ever changed.
  *
  *     This test originally seeded ONE agent, and passed — because with a single
  *     agentId, "grouped by the agentId index" and "ascending primary key" are

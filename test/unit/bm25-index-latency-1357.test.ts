@@ -57,7 +57,7 @@ const CONDITIONS = [
 const isAllowed: any = (r: any) => !!r && (r.agentId === AGENT || r.visibility !== "private");
 isAllowed.scopableOnly = true;
 
-const TOPICAL_COUNT = 200;
+const TOPICAL_COUNT = 500;
 
 function makeCorpus(distractors: number): IndexRecord[] {
   const rnd = mulberry32(1357);
@@ -80,14 +80,11 @@ function makeCorpus(distractors: number): IndexRecord[] {
     // scan — which would silently turn this file into a measurement of the
     // legacy path against itself.
     const words: string[] = [];
-    // UNIQUE length per topical document. Two documents with the same length
-    // and the same term counts score identically, and an exact tie inside the
-    // returned window makes the index decline by design
-    // (resources/bm25-index.ts) and fall back to the legacy scan — which would
-    // silently turn this file into a measurement of the legacy path against
-    // itself. Distinct lengths give distinct length normalisation, so the
-    // window this test measures is genuinely served from the index.
-    const len = 20 + i;
+    // 26 tokens — the measured live-corpus median
+    // (test/bench/corpus-profiler/profiles/corpus-v2.json). Many of these
+    // documents tie on any given query, which is the realistic case and, since
+    // flair#1363, a case the index serves rather than declines.
+    const len = 26;
     for (let w = 0; w < len; w++) words.push(TOPICAL_VOCAB[Math.floor(rnd() * TOPICAL_VOCAB.length)]);
     emit(`topical-${String(i).padStart(6, "0")}`, words);
   }
@@ -130,7 +127,10 @@ function timeIndexed(idx: Bm25Index, samples: number): number {
     const t0 = performance.now();
     const ids = idx.rank({ q, conditions: CONDITIONS, isAllowed, limit: SEM_LIMIT });
     const t1 = performance.now();
-    if (ids === null) throw new Error("index declined a query this test requires it to serve (score tie in the window — the fixture must keep scores distinct)");
+    // Tripwire, not an expected branch: `planQuery` serves these conditions,
+    // and score ties stopped being a reason to decline in flair#1363. A null
+    // here would mean this file is timing the legacy path against itself.
+    if (ids === null) throw new Error("index declined a query this test requires it to serve");
     times.push(t1 - t0);
   }
   return median(times);

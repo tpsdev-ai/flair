@@ -108,7 +108,37 @@ export function buildBM25(docs: BM25Doc[]): BM25Index {
       }
       return { id: d.id, score: s };
     });
-    scored.sort((a, b) => b.score - a.score);
+    // Score DESC, ties broken by ascending id (flair#1363, Kern-ruled
+    // 2026-08-24, landed with the flair#1357 index work).
+    //
+    // This sort used to be `(a, b) => b.score - a.score` alone. Because
+    // `Array.prototype.sort` is stable, equal-scoring documents then came back
+    // in whatever order Harper's corpus scan had yielded them — and THAT order
+    // is a query-plan artifact, not a property of the store. Measured against a
+    // live instance (test/integration/bm25-index-scan-order-1357.test.ts): the
+    // same rows, for the same query text, iterate in one order under the
+    // multi-agent read-scope OR-group (the reader's own agentId-indexed rows
+    // lead, everything else follows) and in a DIFFERENT one under a
+    // tags/subject filter (plain primary-key order). Harper's planner is
+    // cost-based, so which of those applies is a function of data
+    // distribution. Hybrid recall was therefore nondeterministic for tied
+    // documents, and nothing in the suite could see it — only exact score ties
+    // move, and they move at the tail of the result window.
+    //
+    // Ties are NOT a curiosity: a document matching one rare query term once,
+    // with the same token count as another such document, scores identically,
+    // and flair's live corpus clusters at 19-33 tokens
+    // (test/bench/corpus-profiler/profiles/corpus-v2.json). Measured at
+    // realistic corpus shapes, 96-99% of queries have a tie inside the returned
+    // window.
+    //
+    // Making the tie-break EXPLICIT is what lets resources/bm25-index.ts serve
+    // the lexical leg at all: an index cannot reproduce a planner, but it can
+    // reproduce `id` ascending. Both paths now sort exactly this way, so their
+    // output is identical including tie order. The ranking change is confined
+    // to documents whose BM25 scores are bit-identical — where there was no
+    // defined order to preserve, only an accident to stop inheriting.
+    scored.sort((a, b) => (b.score - a.score) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     return scored;
   }
 
