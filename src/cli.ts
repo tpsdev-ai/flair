@@ -6942,6 +6942,90 @@ function driverCheckAppliesTo(opts: { target?: string }): boolean {
   return !target || isLocalBase(target.replace(/\/$/, ""));
 }
 
+/**
+ * flair#1108: a bare undici/Node "fetch failed" names neither the URL
+ * that was probed nor the knob that would change it. These helpers are
+ * the operator-facing sentence and the setting that produced (or would
+ * change) that URL. Pure so the contract can be unit-tested without
+ * driving process.exit.
+ */
+export function federationStatusUrlSetting(opts: { target?: string; port?: string | number }): string {
+  if (opts.target) return "--target";
+  if (process.env.FLAIR_TARGET) return "FLAIR_TARGET";
+  if (process.env.FLAIR_URL) return "FLAIR_URL";
+  if (opts.port !== undefined && opts.port !== null && String(opts.port) !== "") return "--port";
+  return "FLAIR_URL or --port";
+}
+
+export function describeFederationStatusFetchFailed(url: string, setting: string): string {
+  return `fetch failed against ${url} (set ${setting})`;
+}
+
+/** True for a connect-level failure (no HTTP status): Node's undici
+ *  `TypeError: fetch failed`, Bun's `Unable to connect…`, or a cause
+ *  carrying a connect/DNS errno. Auth and HTTP errors stay out. */
+export function isFederationStatusConnectFailure(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/\bfetch failed\b/i.test(msg)) return true;
+  if (/unable to connect/i.test(msg)) return true;
+  const cause = err instanceof Error ? (err as { cause?: unknown }).cause : undefined;
+  const code = cause && typeof cause === "object" && cause && "code" in cause
+    ? String((cause as { code?: unknown }).code)
+    : "";
+  return /^(ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH)$/.test(code);
+}
+
+export function rewriteFederationStatusFetchFailed(err: unknown, url: string, setting: string): unknown {
+  if (!isFederationStatusConnectFailure(err)) return err;
+  const next = new Error(describeFederationStatusFetchFailed(url, setting));
+  if (err && typeof err === "object" && "status" in err) {
+    (next as { status?: unknown }).status = (err as { status?: unknown }).status;
+  }
+  return next;
+}
+
+/**
+ * Auth-shaped vs connect-level for `federation status`. A rewritten
+ * fetch-failed sentence embeds the probed URL; that URL can contain a
+ * whole-token `401` (e.g. `--port 401`). The old `message.includes("401")`
+ * check then printed the credential remedy and hid the URL+setting this
+ * change exists to surface (Bugbot on flair#1108).
+ */
+export function isFederationStatusAuthFailure(err: unknown): boolean {
+  if (!err) return false;
+  if (isFederationStatusConnectFailure(err)) return false;
+  if (typeof err === "object" && "status" in err) {
+    const status = (err as { status?: unknown }).status;
+    if (status === 401 || status === 403) return true;
+  }
+  const m = err instanceof Error
+    ? err.message
+    : String(typeof err === "object" && err && "message" in err
+      ? (err as { message?: unknown }).message ?? err
+      : err);
+  return m.includes("missing_or_invalid_authorization") || /(?:^|\D)401(?:\D|$)/.test(m);
+}
+
+/**
+ * Whether to print the "set one of: FLAIR_AGENT_ID / FLAIR_ADMIN_PASS /
+ * FLAIR_TOKEN" block. Narrower than `isFederationStatusAuthFailure`: a
+ * 403 with credentials already sent (wrong password) is fatal, but the
+ * server's own body is the honest message — the credential-list remedy
+ * is for missing/invalid auth (401), not a rejected password (flair#634).
+ */
+export function isFederationStatusAuthRemedy(err: unknown): boolean {
+  if (!err || isFederationStatusConnectFailure(err)) return false;
+  if (typeof err === "object" && "status" in err && (err as { status?: unknown }).status === 401) {
+    return true;
+  }
+  const m = err instanceof Error
+    ? err.message
+    : String(typeof err === "object" && err && "message" in err
+      ? (err as { message?: unknown }).message ?? err
+      : err);
+  return m.includes("missing_or_invalid_authorization") || /(?:^|\D)401(?:\D|$)/.test(m);
+}
+
 federation
   .command("status")
   .description("Show federation status and peer connections")
@@ -6950,8 +7034,11 @@ federation
   .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
   .option("--json", "Emit JSON {instance, peers, driver} (also: pipe + FLAIR_OUTPUT=json)")
   .action(async (opts) => {
-    const target = resolveTarget(opts);
-    const baseUrl = target ? target.replace(/\/$/, "") : undefined;
+    // Same URL api() would have derived, including --port (the command
+    // advertised --port but previously dropped it on the floor). Naming
+    // that URL on fetch failure is only honest if it is the URL we probe.
+    const baseUrl = resolveBaseUrl(opts).replace(/\/$/, "");
+    const urlSetting = federationStatusUrlSetting(opts);
     const mode = render.resolveOutputMode(opts);
 
     // flair#1233: fetch instance and peers INDEPENDENTLY. One read failing
@@ -6962,19 +7049,19 @@ federation
     let instance: any = null;
     let instanceErr: any = null;
     try {
-      instance = await api("GET", "/FederationInstance", undefined, baseUrl ? { baseUrl } : undefined);
+      instance = await api("GET", "/FederationInstance", undefined, { baseUrl });
     } catch (err) {
-      instanceErr = err;
+      instanceErr = rewriteFederationStatusFetchFailed(err, baseUrl, urlSetting);
     }
 
     // peers: null = unverifiable (the read failed), [] = verified empty.
     let peers: any[] | null = null;
     let peersErr: any = null;
     try {
-      const r = await api("GET", "/FederationPeers", undefined, baseUrl ? { baseUrl } : undefined);
+      const r = await api("GET", "/FederationPeers", undefined, { baseUrl });
       peers = r.peers ?? [];
     } catch (err) {
-      peersErr = err;
+      peersErr = rewriteFederationStatusFetchFailed(err, baseUrl, urlSetting);
     }
 
     // Auth-shaped failures stay FATAL even when the other read succeeded:
@@ -6982,20 +7069,13 @@ federation
     // property of the session's credentials, not of one endpoint — and
     // degrading it to "unverifiable" would swallow the actionable remedy
     // (flair#634's UX, kept). Only non-auth failures degrade independently.
-    const authShaped = (err: any): boolean => {
-      if (!err) return false;
-      if (err.status === 401 || err.status === 403) return true;
-      const m = String(err.message ?? err);
-      return m.includes("missing_or_invalid_authorization") || m.includes("401");
-    };
-
     // Both reads failed → nothing to render at all. Either way keep the
     // classic failure UX (auth remedy when it's an auth problem), exit
     // non-zero.
-    if ((instanceErr && peersErr) || authShaped(instanceErr) || authShaped(peersErr)) {
+    if ((instanceErr && peersErr) || isFederationStatusAuthFailure(instanceErr) || isFederationStatusAuthFailure(peersErr)) {
       const primaryErr = instanceErr ?? peersErr;
       const msg = String(primaryErr.message ?? primaryErr);
-      if (msg.includes("missing_or_invalid_authorization") || msg.includes("401")) {
+      if (isFederationStatusAuthRemedy(primaryErr)) {
         console.error(`${render.icons.error} federation status requires auth.`);
         console.error(`  ${render.wrap(render.c.dim, "Set one of:")}`);
         console.error(`    ${render.wrap(render.c.cyan, "FLAIR_AGENT_ID=<your-agent-id>")}     ${render.wrap(render.c.dim, "(Ed25519 — uses ~/.flair/keys/<id>.key)")}`);
