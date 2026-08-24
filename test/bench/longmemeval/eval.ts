@@ -75,7 +75,7 @@ function extractionFor(entry: LmeEntry, answer: string) {
  *  retrieval metadata are supplied by the caller (Harper arms retrieve first). */
 async function evalOne(
   host: string, entry: LmeEntry, arm: Arm, context: string,
-  extra: { retrievalMs?: number; truncated?: boolean },
+  extra: { retrievalMs?: number; truncated?: boolean; rankedIds?: string[] },
 ): Promise<QuestionArmResult> {
   const r = await readerAnswer(host, entry.question, entry.question_date, context, arm);
   const abstention = isAbstention(entry);
@@ -92,6 +92,7 @@ async function evalOne(
     tokensFed: r.tokensFed,
     latencyMs: r.latencyMs + (extra.retrievalMs ?? 0),
     retrievalMs: extra.retrievalMs,
+    rankedIds: extra.rankedIds,
     truncated: extra.truncated,
   };
 }
@@ -136,7 +137,7 @@ async function runHarperArm(
       const ctx = await retrieveContext(client, entry.question, { limit: RETRIEVAL.readerTopK, scoring: RETRIEVAL.scoring });
       const retrievalMs = performance.now() - t0;
       const context = formatRetrieved(ctx.items);
-      out.push(await evalOne(host, entry, arm, context, { retrievalMs }));
+      out.push(await evalOne(host, entry, arm, context, { retrievalMs, rankedIds: ctx.rankedIds }));
       if ((qi + 1) % 5 === 0 || qi === entries.length - 1) {
         log(`  [${arm}] ${qi + 1}/${entries.length} (last ingest ${ingest.written} events, ${ingest.elapsedMs.toFixed(0)}ms)`);
       }

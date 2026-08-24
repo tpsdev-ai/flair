@@ -93,6 +93,10 @@ export interface RetrievedItem {
   id: string;
   score: number;
   content?: string;
+  /** ISO createdAt of the memory as returned by SemanticSearch (DEFAULT_SELECT
+   *  includes it). Layer 2's reader payload (v2-dated) prefixes each retrieved
+   *  memory with its date so temporal questions have something to reason over. */
+  createdAt?: string;
 }
 
 export interface RetrievedContext {

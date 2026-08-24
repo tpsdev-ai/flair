@@ -32,7 +32,12 @@ export interface QuestionArmResult {
   extraction?: ExtractionScore; // present only for factual-subset questions
   tokensFed: number;
   latencyMs: number;
+  /** Retrieval wall-clock, separate from reader latency (Harper arms only). */
   retrievalMs?: number;
+  /** Retrieved memory ids in final rank order (Harper arms only) — closes the
+   *  journal blind spot where a wrong answer can't be attributed to retrieval
+   *  vs the reader without re-running the query. */
+  rankedIds?: string[];
   truncated?: boolean;
 }
 

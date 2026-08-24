@@ -1,0 +1,714 @@
+{
+  "schema": "longmemeval-s.payload-ab.artifact/1",
+  "validationSlice": true,
+  "gitCommit": null,
+  "configHash": "d2d614b8c458f3e9f09d22f6bcda6fe04d56e7199e2e5a9476245c83b50816ee",
+  "config": {
+    "schema": "longmemeval-s.payload-ab.config/1",
+    "design": {
+      "kind": "paired-same-retrieval-ab",
+      "unitOfAnalysis": "question",
+      "statedAs": "For each question: ingest its haystack ONCE, retrieve ONCE, then format that SAME retrieved set both ways and run the pinned reader twice (once per payload format), judging both with the pinned judge. Ingest, retrieval, reader model, judge model, prompts and question set are IDENTICAL across the two sides by construction — the ONLY difference is the payload format of the retrieved memories inside the reader prompt.",
+      "sideA": "v1-undated",
+      "sideB": "v2-dated",
+      "sideOrder": "A then B, fixed (reader is stateless at temperature 0; order was NOT randomised)",
+      "statistic": "Exact two-sided McNemar on the discordant pairs (v1-wrong/v2-right vs v1-right/v2-wrong). Concordant pairs carry no information about the format and are reported but not tested.",
+      "powerNote": "Pairing differences out question difficulty and retrieval luck, which dominate the variance here; n=60 paired is worth roughly n=180 unpaired for this contrast. It still cannot detect an effect smaller than the discordant count can express — the artifact reports that count so the reader can judge the null honestly.",
+      "attribution": "Per question the retrieved id set is checked against the dataset's own evidence labels (answer_session_ids, and the per-turn has_answer flags within them). A null result on the gold-evidence-hit subset means dates did not help; a null driven by misses means the evidence was not there to date in the first place."
+    },
+    "dataset": {
+      "name": "LongMemEval_s",
+      "hfRepo": "xiaowu0162/longmemeval",
+      "hfRevision": "2ec2a557f339b6c0369619b1ed5793734cc87533",
+      "file": "longmemeval_s",
+      "sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894",
+      "githubRepo": "xiaowu0162/LongMemEval",
+      "githubCommit": "9e0b455f4ef0e2ab8f2e582289761153549043fc",
+      "totalQuestions": 500
+    },
+    "judge": {
+      "model": "gemma4:31b",
+      "manifestDigest": "sha256:221b330d11a8",
+      "weightsSha256": "cloud-hosted:not-published",
+      "family": "gemma4",
+      "temperature": 0,
+      "seed": 0,
+      "numCtx": 8192,
+      "numPredict": 16
+    },
+    "reader": {
+      "model": "qwen3.5:397b",
+      "manifestDigest": "sha256:b909ca2f1b7f",
+      "family": "qwen3_5",
+      "temperature": 0,
+      "seed": 0,
+      "numCtx": 16384,
+      "numPredict": 256
+    },
+    "retrieval": {
+      "scoring": "raw",
+      "readerTopK": 20,
+      "hybrid": true,
+      "arm": "flair",
+      "storeSharing": "one-shared-store-no-mode-flips"
+    },
+    "ingestion": {
+      "granularity": "per-event"
+    },
+    "prompts": {
+      "judge": {
+        "answerable": "I will give you a question, a correct answer, and a response from a model. Classify the model's response into exactly one category:\n\nA (CORRECT): the response contains the correct answer. If the response is equivalent to the correct answer, or contains all the intermediate steps needed to reach the correct answer, classify A.{taskRule}\nB (INCORRECT): the response commits to an answer that is wrong, contradicts the correct answer, or contains only a SUBSET of the information the correct answer requires.\nC (NOT_ATTEMPTED): the response does not commit to any answer — it declines, says it does not know, or says the information is unavailable — WITHOUT stating a wrong answer.\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}\n\nRespond with ONLY a single letter: A, B, or C.",
+        "preference": "I will give you a question, a rubric describing the desired personalized response, and a response from a model. Classify the model's response into exactly one category:\n\nA (CORRECT): the response satisfies the desired response — it recalls and utilises the user's personal information correctly. It need not reflect every point in the rubric.\nB (INCORRECT): the response fails to utilise the user's personal information, or contradicts the rubric.\nC (NOT_ATTEMPTED): the response declines or does not attempt a personalized response.\n\nQuestion: {question}\n\nRubric: {answer}\n\nModel Response: {response}\n\nRespond with ONLY a single letter: A, B, or C.",
+        "abstention": "I will give you an UNANSWERABLE question, an explanation of why it cannot be answered from the available information, and a response from a model. Classify the model's response into exactly one category:\n\nA (CORRECT): the model correctly identifies the question as unanswerable — it says the information is incomplete, missing, or that it does not know.\nB (INCORRECT): the model fabricates or asserts a concrete answer instead of identifying the question as unanswerable.\n\nQuestion: {question}\n\nExplanation: {answer}\n\nModel Response: {response}\n\nRespond with ONLY a single letter: A or B.",
+        "taskRule": {
+          "single-session-user": "",
+          "single-session-assistant": "",
+          "multi-session": "",
+          "temporal-reasoning": " Do not penalize off-by-one errors for the number of days/weeks/months: if the question asks for a number of days/weeks/months and the response is off by one (e.g. 19 when the answer is 18), still classify it as A (CORRECT).",
+          "knowledge-update": " If the response contains some previous information along with an updated answer, classify it as A (CORRECT) as long as the updated answer is the required answer.",
+          "single-session-preference": ""
+        },
+        "version": "1.0.0-ternary-port"
+      },
+      "readerSystem": "You are a helpful assistant answering the user's question using ONLY the conversation memory provided. Answer concisely and directly. If the provided memory does not contain enough information to answer, reply that you do not know rather than guessing.",
+      "readerPromptVersion": "1.0.0",
+      "payloadFormats": {
+        "A": "v1-undated",
+        "B": "v2-dated"
+      }
+    },
+    "extraction": {
+      "name": "squad-normalize+token-f1+containment-em",
+      "version": "1.0.0"
+    },
+    "slice": {
+      "ability": "temporal-reasoning",
+      "n": 60,
+      "seed": 0,
+      "abilityCandidates": 127,
+      "selectionRule": "entries with abilityOf(e)===ability (abstention rolls up to 'abstention', so *_abs is excluded by construction), ordered by sha256(`${seed}:${question_id}`) ascending, first n taken, emitted sorted by question_id. A keyed pseudo-random draw, NOT a lexicographic prefix: question_id prefixes encode question provenance (gpt4_* is 67% of the temporal-reasoning population but only 30% of a lexicographic first-60), so a prefix draw would confound provenance with the treatment.",
+      "questionIds": [
+        "0bc8ad92",
+        "0bc8ad93",
+        "2c63a862",
+        "2ebe6c90",
+        "5e1b23de",
+        "6613b389",
+        "6e984301",
+        "6e984302",
+        "71017277",
+        "8077ef71",
+        "982b5123",
+        "9a707b82",
+        "b46e15ed",
+        "bbf86515",
+        "cc6d1ec1",
+        "dcfa8644",
+        "eac54adc",
+        "eac54add",
+        "gpt4_0a05b494",
+        "gpt4_0b2f1d21",
+        "gpt4_18c2b244",
+        "gpt4_1916e0ea",
+        "gpt4_1d4ab0c9",
+        "gpt4_1e4a8aeb",
+        "gpt4_1e4a8aec",
+        "gpt4_2312f94c",
+        "gpt4_2487a7cb",
+        "gpt4_2655b836",
+        "gpt4_2c50253f",
+        "gpt4_2d58bcd6",
+        "gpt4_2f584639",
+        "gpt4_468eb064",
+        "gpt4_483dd43c",
+        "gpt4_4edbafa2",
+        "gpt4_4fc4f797",
+        "gpt4_5438fa52",
+        "gpt4_61e13b3c",
+        "gpt4_6ed717ea",
+        "gpt4_70e84552",
+        "gpt4_74aed68e",
+        "gpt4_78cf46a3",
+        "gpt4_7a0daae1",
+        "gpt4_7bc6cf22",
+        "gpt4_7ca326fa",
+        "gpt4_7ddcf75f",
+        "gpt4_7de946e7",
+        "gpt4_7f6b06db",
+        "gpt4_8279ba03",
+        "gpt4_85da3956",
+        "gpt4_8c8961ae",
+        "gpt4_8e165409",
+        "gpt4_93159ced",
+        "gpt4_98f46fc6",
+        "gpt4_a2d1d1f6",
+        "gpt4_c27434e8",
+        "gpt4_d6585ce8",
+        "gpt4_e072b769",
+        "gpt4_e414231e",
+        "gpt4_f420262d",
+        "gpt4_fa19884c"
+      ]
+    }
+  },
+  "resultsHash": "66937623abe34a0435301f2335ffa472e0f12ab66de9796439cb7ff1309afe7f",
+  "results": {
+    "pairsAttempted": 60,
+    "pairsVoidedByJudgeError": 0,
+    "overall": {
+      "table": {
+        "bothRight": 18,
+        "bothWrong": 17,
+        "wins": 24,
+        "losses": 1,
+        "n": 60,
+        "v1Accuracy": 0.31666666666666665,
+        "v2Accuracy": 0.7,
+        "delta": 0.3833333333333333
+      },
+      "mcnemar": {
+        "wins": 24,
+        "losses": 1,
+        "discordant": 25,
+        "p": 0.0000015497207641601533,
+        "direction": "v2",
+        "minSplitForP05": 18
+      }
+    },
+    "attribution": {
+      "goldSessionHitRate": 0.9833333333333333,
+      "goldAnswerHitRate": 0.9,
+      "withGoldEvidence": {
+        "n": 54,
+        "table": {
+          "bothRight": 18,
+          "bothWrong": 12,
+          "wins": 23,
+          "losses": 1,
+          "n": 54,
+          "v1Accuracy": 0.35185185185185186,
+          "v2Accuracy": 0.7592592592592593,
+          "delta": 0.40740740740740744
+        },
+        "mcnemar": {
+          "wins": 23,
+          "losses": 1,
+          "discordant": 24,
+          "p": 0.000002980232238769545,
+          "direction": "v2",
+          "minSplitForP05": 18
+        }
+      },
+      "withoutGoldEvidence": {
+        "n": 6,
+        "table": {
+          "bothRight": 0,
+          "bothWrong": 5,
+          "wins": 1,
+          "losses": 0,
+          "n": 6,
+          "v1Accuracy": 0,
+          "v2Accuracy": 0.16666666666666666,
+          "delta": 0.16666666666666666
+        },
+        "mcnemar": {
+          "wins": 1,
+          "losses": 0,
+          "discordant": 1,
+          "p": 1,
+          "direction": "v2",
+          "minSplitForP05": null
+        }
+      }
+    },
+    "perQuestion": [
+      {
+        "questionId": "0bc8ad92",
+        "a": "NOT_ATTEMPTED",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "0bc8ad93",
+        "a": "NOT_ATTEMPTED",
+        "b": "INCORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "2c63a862",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "2ebe6c90",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "5e1b23de",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "6613b389",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "6e984301",
+        "a": "NOT_ATTEMPTED",
+        "b": "INCORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "6e984302",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 0,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "71017277",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 0,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "8077ef71",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "982b5123",
+        "a": "INCORRECT",
+        "b": "INCORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "9a707b82",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "b46e15ed",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 3,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "bbf86515",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "cc6d1ec1",
+        "a": "CORRECT",
+        "b": "INCORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "dcfa8644",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "eac54adc",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "eac54add",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": false,
+        "goldAnswerHitCount": 0,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_0a05b494",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_0b2f1d21",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_18c2b244",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 3,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_1916e0ea",
+        "a": "NOT_ATTEMPTED",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_1d4ab0c9",
+        "a": "NOT_ATTEMPTED",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_1e4a8aeb",
+        "a": "NOT_ATTEMPTED",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_1e4a8aec",
+        "a": "NOT_ATTEMPTED",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 0,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_2312f94c",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_2487a7cb",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_2655b836",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_2c50253f",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_2d58bcd6",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_2f584639",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_468eb064",
+        "a": "NOT_ATTEMPTED",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_483dd43c",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_4edbafa2",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_4fc4f797",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_5438fa52",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_61e13b3c",
+        "a": "NOT_ATTEMPTED",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_6ed717ea",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_70e84552",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_74aed68e",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_78cf46a3",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_7a0daae1",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_7bc6cf22",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_7ca326fa",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 3,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_7ddcf75f",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_7de946e7",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_7f6b06db",
+        "a": "NOT_ATTEMPTED",
+        "b": "INCORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_8279ba03",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 0,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_85da3956",
+        "a": "NOT_ATTEMPTED",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_8c8961ae",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_8e165409",
+        "a": "NOT_ATTEMPTED",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_93159ced",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 3,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_98f46fc6",
+        "a": "NOT_ATTEMPTED",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_a2d1d1f6",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_c27434e8",
+        "a": "CORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_d6585ce8",
+        "a": "INCORRECT",
+        "b": "INCORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_e072b769",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 1,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_e414231e",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_f420262d",
+        "a": "NOT_ATTEMPTED",
+        "b": "NOT_ATTEMPTED",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 0,
+        "retrievedCount": 20
+      },
+      {
+        "questionId": "gpt4_fa19884c",
+        "a": "INCORRECT",
+        "b": "CORRECT",
+        "goldSessionHit": true,
+        "goldAnswerHitCount": 2,
+        "retrievedCount": 20
+      }
+    ]
+  },
+  "notice": "VALIDATION ARTIFACT — NOT FOR PUBLICATION. This harness produces numbers; it does not publish them. Publishing any number requires a recorded human sign-off referencing this artifact's artifactHash. Spend and outward-publishing are the founder's gates.",
+  "generatedAt": "2026-08-24T03:53:23.788Z",
+  "host": {
+    "ollama": "https://ollama.com",
+    "benchHost": "tps-bench.exe.xyz"
+  },
+  "artifactHash": "dede855fae8efe60573757aef0e005a0e7396e1efe93a6e1a2b3018f1c81e9a5"
+}

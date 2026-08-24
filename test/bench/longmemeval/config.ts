@@ -15,7 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import { JUDGE_PROMPT_TEMPLATES } from "./judge";
-import { READER_SYSTEM, READER_PROMPT_VERSION, ALL_ARMS } from "./arms";
+import { READER_SYSTEM, READER_PROMPT_VERSION, READER_PAYLOAD_FORMAT, ALL_ARMS } from "./arms";
 import { EXTRACTION_METHOD } from "./extraction";
 
 // ── Dataset: LongMemEval_s, pinned to an immutable HF commit + file sha256 ────
@@ -117,6 +117,11 @@ export function configManifest(slice: { n: number; seed: number; questionIds: st
       judge: JUDGE_PROMPT_TEMPLATES,
       readerSystem: READER_SYSTEM,
       readerPromptVersion: READER_PROMPT_VERSION,
+      // The retrieved-memory payload format fed to the reader (arms.ts
+      // formatRetrieved). Hashed for the same reason the prompt strings are:
+      // a payload-format change is a MEASUREMENT VARIANT and must never hash
+      // identically to a run on the old format. v2-dated = dates on each line.
+      readerPayloadFormat: READER_PAYLOAD_FORMAT,
     },
     extraction: EXTRACTION_METHOD,
     slice: {
@@ -130,7 +135,23 @@ export function configManifest(slice: { n: number; seed: number; questionIds: st
 }
 
 /** Canonical JSON: keys sorted recursively, so the hash is stable across
- *  machines and key-insertion order. */
+ *  machines and key-insertion order.
+ *
+ *  PORTABILITY CAVEAT (verified 2026-08-23 while re-deriving a payload-A/B
+ *  artifact hash in Python): the canonical form inherits `JSON.stringify`'s
+ *  NUMBER formatting, which is ECMAScript's Number::toString — exponential
+ *  notation only when the decimal exponent is < -6 or >= 21. Python's `repr`
+ *  switches to exponential at 1e-4, so a naive Python re-implementation
+ *  serialises 2.98e-6 as "2.980232238769545e-06" where this emits
+ *  "0.000002980232238769545", and the recomputed hash MISMATCHES on content
+ *  that is byte-identical in meaning.
+ *
+ *  This bites exactly where it is least welcome: tiny p-values, i.e. a STRONG
+ *  result. A reviewer verifying an artifact outside JS must replicate
+ *  Number::toString or compare via a JS runtime — a mismatch there is a
+ *  formatting artefact, NOT evidence of tampering. Left as-is deliberately:
+ *  changing the number format now would invalidate every artifact already
+ *  hashed. Document it, do not silently "fix" it. */
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(sortDeep(value));
 }

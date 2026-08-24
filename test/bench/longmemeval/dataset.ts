@@ -172,4 +172,93 @@ export function selectSlice(entries: LmeEntry[], n: number, seed = 0): LmeEntry[
   return picked.sort((a, b) => a.question_id.localeCompare(b.question_id));
 }
 
+/**
+ * Deterministically select `n` questions of ONE ability — the shape a targeted
+ * A/B needs. `selectSlice` round-robins ACROSS abilities and so cannot express
+ * "60 temporal-reasoning questions"; that mismatch is exactly why the 30-question
+ * smoke slice carried only a handful of temporal questions and scored 100% on
+ * them (a ceiling — the check could not fire).
+ *
+ * Selection rule, stated so a reviewer can re-derive the exact slice:
+ *   1. keep entries with abilityOf(e) === ability. Abstention questions roll up
+ *      to "abstention" regardless of type, so asking for "temporal-reasoning"
+ *      excludes the *_abs variants BY CONSTRUCTION (127 of the 133 temporal
+ *      entries in LongMemEval_s).
+ *   2. order by sha256("<seed>:" + question_id) ascending; ties (impossible in
+ *      practice) broken by question_id.
+ *   3. take the first n.
+ *   4. emit sorted by question_id — stable output, so the config hash does not
+ *      depend on draw order.
+ *
+ * Step 2 is a KEYED PSEUDO-RANDOM draw, not a lexicographic prefix, on purpose.
+ * LongMemEval question_ids carry a meaningful prefix: `gpt4_*` marks the GPT-4-
+ * generated subpopulation, 85 of the 127 temporal-reasoning questions (67%). A
+ * lexicographic first-60 draws 18/60 of them (30%) — a sample skewed on question
+ * provenance, which is a confound, not a sample. The hashed order draws 42/60
+ * (70%), matching the population.
+ *
+ * Throws when fewer than `n` candidates exist: a silently-short slice would make
+ * the reported n a lie.
+ */
+export function selectAbilitySlice(entries: LmeEntry[], ability: Ability, n: number, seed = 0): LmeEntry[] {
+  const candidates = entries.filter((e) => abilityOf(e) === ability);
+  if (candidates.length < n) {
+    throw new Error(
+      `selectAbilitySlice: asked for ${n} "${ability}" questions but only ${candidates.length} exist in this dataset`,
+    );
+  }
+  const key = (e: LmeEntry) => createHash("sha256").update(`${seed}:${e.question_id}`).digest("hex");
+  const keyed = candidates.map((e) => ({ e, k: key(e) }));
+  keyed.sort((a, b) => a.k.localeCompare(b.k) || a.e.question_id.localeCompare(b.e.question_id));
+  return keyed.slice(0, n).map((x) => x.e).sort((a, b) => a.question_id.localeCompare(b.question_id));
+}
+
+/** Where a question's answer actually lives, in the SAME id space the ingest
+ *  writes (`<question_id>__s<sessionIdx>__t<turnIdx>`), so a retrieved-id list
+ *  can be checked against it directly. */
+export interface GoldEvidence {
+  /** The sessions LongMemEval labels as containing the answer. */
+  sessionIds: string[];
+  /** Every ingested event id in those sessions. */
+  sessionEventIds: string[];
+  /** The event ids of the specific turns flagged `has_answer` — the tightest
+   *  evidence label the dataset offers. */
+  answerEventIds: string[];
+}
+
+/**
+ * Map `answer_session_ids` + per-turn `has_answer` into ingested event ids.
+ *
+ * Verified against LongMemEval_s (2026-08-23, all 127 temporal-reasoning
+ * questions): every answer_session_id resolves inside haystack_session_ids,
+ * every question has at least one `has_answer` turn, and no `has_answer` turn
+ * falls outside a labelled answer session. So a zero here means the retrieval
+ * genuinely missed the evidence — it does not mean the label was unmappable.
+ * `unresolvedSessionIds` is returned rather than swallowed so a future dataset
+ * revision that breaks that property is loud instead of silently scoring 0.
+ */
+export function goldEvidenceFor(entry: LmeEntry): GoldEvidence & { unresolvedSessionIds: string[] } {
+  const gold = new Set(entry.answer_session_ids ?? []);
+  const sessionEventIds: string[] = [];
+  const answerEventIds: string[] = [];
+  const resolved = new Set<string>();
+  for (let si = 0; si < entry.haystack_sessions.length; si++) {
+    const sessionId = entry.haystack_session_ids?.[si] ?? `${entry.question_id}-s${si}`;
+    if (!gold.has(sessionId)) continue;
+    resolved.add(sessionId);
+    const turns = entry.haystack_sessions[si]!;
+    for (let ti = 0; ti < turns.length; ti++) {
+      const id = `${entry.question_id}__s${si}__t${ti}`;
+      sessionEventIds.push(id);
+      if (turns[ti]!.has_answer) answerEventIds.push(id);
+    }
+  }
+  return {
+    sessionIds: [...gold],
+    sessionEventIds,
+    answerEventIds,
+    unresolvedSessionIds: [...gold].filter((s) => !resolved.has(s)),
+  };
+}
+
 export { TYPE_TO_ABILITY };

@@ -74,14 +74,31 @@ export interface BuildArtifactInput {
 
 /** Provenance fields — stamped AFTER hashing and stripped BEFORE verification.
  *  Everything else is hashed content. This list is the single source of truth
- *  for the partition, so buildArtifact and verifyArtifactHash can never drift. */
-const PROVENANCE_KEYS = ["generatedAt", "host", "notice", "artifactHash"] as const;
+ *  for the partition, so buildArtifact and verifyArtifactHash can never drift —
+ *  and it is EXPORTED so a second artifact schema (the payload A/B) inherits
+ *  the identical partition instead of re-deciding it. */
+export const PROVENANCE_KEYS = ["generatedAt", "host", "notice", "artifactHash"] as const;
 
-/** The hashed-content partition of an artifact: everything except provenance. */
-function hashedContent(art: Artifact): Record<string, unknown> {
-  const content: Record<string, unknown> = { ...art };
+/** The hashed-content partition of any artifact: everything except provenance. */
+export function hashedContent(art: object): Record<string, unknown> {
+  const content: Record<string, unknown> = { ...(art as Record<string, unknown>) };
   for (const key of PROVENANCE_KEYS) delete content[key];
   return content;
+}
+
+/** Stamp `artifactHash` onto any artifact-shaped object, addressing only its
+ *  content partition. The field is absent while hashing, so it can never
+ *  address itself. */
+export function stampArtifactHash<T extends object>(art: T): T & { artifactHash: string } {
+  const stamped = art as T & { artifactHash?: string };
+  delete stamped.artifactHash;
+  stamped.artifactHash = sha256hex(canonicalJson(hashedContent(stamped)));
+  return stamped as T & { artifactHash: string };
+}
+
+/** Recompute and compare the hash of any artifact-shaped object. */
+export function verifyStampedHash(art: object & { artifactHash?: string }): boolean {
+  return sha256hex(canonicalJson(hashedContent(art))) === art.artifactHash;
 }
 
 export function buildArtifact(input: BuildArtifactInput): Artifact {
@@ -104,15 +121,14 @@ export function buildArtifact(input: BuildArtifactInput): Artifact {
   // excluded so two runs with identical content hash identically regardless of
   // wall clock or host. canonicalJson sorts keys, and artifactHash is absent at
   // this point, so it cannot address itself.
-  art.artifactHash = sha256hex(canonicalJson(hashedContent(art)));
-  return art;
+  return stampArtifactHash(art);
 }
 
 /** Recompute the hash of an artifact object (verification): strip the provenance
  *  partition (generatedAt, host, notice, artifactHash), canonicalise, sha256 —
  *  must equal the stored artifactHash. */
 export function verifyArtifactHash(art: Artifact): boolean {
-  return sha256hex(canonicalJson(hashedContent(art))) === art.artifactHash;
+  return verifyStampedHash(art);
 }
 
 export function writeArtifact(art: Artifact, outDir: string): string {

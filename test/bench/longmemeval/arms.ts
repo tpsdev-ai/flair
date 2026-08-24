@@ -35,11 +35,41 @@ export const READER_SYSTEM =
   "Answer concisely and directly. If the provided memory does not contain enough information to answer, " +
   "reply that you do not know rather than guessing.";
 
-/** Format retrieved memories (flair / vector-only) as a compact context block.
- *  Items arrive rank-ordered (rank 0 = best). */
-export function formatRetrieved(items: RetrievedItem[]): string {
+/** The retrieved-memory payload formats the reader can be fed. Both are real,
+ *  runnable formats — v1-undated is not dead code, it is the CONTROL side of
+ *  the paired A/B (payload-ab.ts). */
+export type PayloadFormat = "v1-undated" | "v2-dated";
+export const PAYLOAD_FORMATS: PayloadFormat[] = ["v1-undated", "v2-dated"];
+
+/** Format retrieved memories (flair / vector-only) as a compact context block,
+ *  in an EXPLICIT payload format. Items arrive rank-ordered (rank 0 = best).
+ *
+ *  v1-undated  `- content`               — the pre-2026-08-23 shape.
+ *  v2-dated    `- [YYYY-MM-DD] content`  — the memory's createdAt date prefixed,
+ *              date-only, matching the full-context arm's `[Session X — date]`
+ *              headers. A memory without a createdAt falls back to the v1 line.
+ *
+ *  The v2 hypothesis (2026-08 headline-run journal analysis): temporal-reasoning
+ *  sat at 37% with 33 wrong answers where both retrieval tells looked healthy —
+ *  the reader had the right memories but no dates to reason over, while the
+ *  full-context arm always sees session dates. payload-ab.ts is the experiment
+ *  that tests it; this function is the single place the two formats are
+ *  defined, so the A/B and the headline run can never drift apart. */
+export function formatRetrievedAs(items: RetrievedItem[], format: PayloadFormat): string {
   if (items.length === 0) return "(no relevant memory found)";
-  return items.map((it, i) => `- ${(it.content ?? "").trim()}`).join("\n");
+  return items.map((it) => {
+    const content = (it.content ?? "").trim();
+    if (format === "v1-undated") return `- ${content}`;
+    const date = typeof it.createdAt === "string" ? it.createdAt.slice(0, 10) : "";
+    return date ? `- [${date}] ${content}` : `- ${content}`;
+  }).join("\n");
+}
+
+/** Format retrieved memories at the payload format this build is PINNED to
+ *  (READER_PAYLOAD_FORMAT — hashed into the config manifest). The four-arm
+ *  headline run calls this; the A/B calls formatRetrievedAs directly. */
+export function formatRetrieved(items: RetrievedItem[]): string {
+  return formatRetrievedAs(items, READER_PAYLOAD_FORMAT);
 }
 
 /** Format the full haystack (full-context arm), in chronological session order
@@ -76,3 +106,12 @@ export function buildReaderPrompt(question: string, questionDate: string, contex
 }
 
 export const READER_PROMPT_VERSION = "1.0.0";
+
+/** Version stamp for the RETRIEVED-memory payload format (formatRetrieved's
+ *  output shape). Mirrors how the judge/reader prompts are versioned: it is
+ *  part of the hashed config manifest (config.ts prompts block), so a payload
+ *  format change can never hash identically to a run on the old format.
+ *    v1-undated — bare `- content` lines (the shape every run before 2026-08-23
+ *                 used; it was implicit then, it is named now)
+ *    v2-dated   — `- [YYYY-MM-DD] content` (createdAt date prefixed per memory) */
+export const READER_PAYLOAD_FORMAT: PayloadFormat = "v2-dated";
