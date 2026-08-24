@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildArtifact, verifyArtifactHash, writeArtifact, hashRunResults } from "../bench/longmemeval/artifact";
 import { configManifest, hashConfig, canonicalJson } from "../bench/longmemeval/config";
+import { aggregateArmRun, aggregateArmAcrossRuns } from "../bench/longmemeval/metrics";
 
 // The publish gate is STRUCTURAL (Sherlock #4): the run emits a content-
 // addressed artifact, and a human signs off on a specific artifactHash. These
@@ -41,7 +42,10 @@ describe("artifact — content addressing", () => {
     const a = buildArtifact(baseInput());
     const b = buildArtifact({
       ...baseInput(),
-      aggregate: [{ arm: "flair", overallAccuracy: { mean: 0.42, std: 0, runs: [0.42] } }] as any,
+      aggregate: [{
+        arm: "flair", runs: 1, varianceMeasured: false,
+        overallAccuracy: { mean: 0.42, std: null, runs: [0.42] },
+      }] as any,
     });
     expect(b.artifactHash).not.toBe(a.artifactHash);
   });
@@ -66,6 +70,24 @@ describe("artifact — content addressing", () => {
     const art = buildArtifact(baseInput());
     expect(art.notice).toContain("NOT FOR PUBLICATION");
     expect(art.notice).toContain("sign-off");
+  });
+
+  test("a single-run aggregate lands in the artifact as varianceMeasured: false, std: null (#1376)", () => {
+    // The artifact is what a downstream reader consumes without ever seeing the
+    // console report. `std: 0` there would let them re-derive the same overclaim
+    // the headline used to make, so the absence has to survive serialisation as
+    // a distinct fact — asserted through JSON, because a `null` that a
+    // serializer drops is an absence that reads as "field not applicable".
+    const perRun = [aggregateArmRun("flair", [
+      { questionId: "q1", ability: "information-extraction", isAbstention: false, arm: "flair",
+        answer: "", verdict: "CORRECT", tokensFed: 10, latencyMs: 1 },
+    ])];
+    const art = buildArtifact({ ...baseInput(), aggregate: [aggregateArmAcrossRuns("flair", perRun)] });
+    const roundTripped = JSON.parse(JSON.stringify(art));
+    expect(roundTripped.aggregate[0].varianceMeasured).toBe(false);
+    expect(roundTripped.aggregate[0].overallAccuracy).toHaveProperty("std");
+    expect(roundTripped.aggregate[0].overallAccuracy.std).toBeNull();
+    expect(roundTripped.aggregate[0].overallAccuracy.std).not.toBe(0);
   });
 
   test("there is no publish function exported", async () => {
