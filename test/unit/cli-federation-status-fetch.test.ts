@@ -12,6 +12,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
   describeFederationStatusFetchFailed,
   federationStatusUrlSetting,
+  isFederationStatusAuthFailure,
   rewriteFederationStatusFetchFailed,
 } from "../../src/cli.ts";
 
@@ -107,5 +108,24 @@ describe("rewriteFederationStatusFetchFailed", () => {
   test("leaves a non-fetch error (auth, HTTP) unchanged", () => {
     const err = new Error("missing_or_invalid_authorization");
     expect(rewriteFederationStatusFetchFailed(err, "http://x", "FLAIR_URL")).toBe(err);
+  });
+});
+
+describe("isFederationStatusAuthFailure", () => {
+  test("a rewritten fetch-failed against a URL containing 401 is not auth", () => {
+    const rewritten = rewriteFederationStatusFetchFailed(
+      new TypeError("fetch failed"),
+      "http://127.0.0.1:4010",
+      "--port",
+    );
+    expect((rewritten as Error).message).toContain("4010");
+    expect(isFederationStatusAuthFailure(rewritten)).toBe(false);
+  });
+
+  test("status 401 / missing_or_invalid_authorization stay auth-shaped", () => {
+    const withStatus = new Error("HTTP 401");
+    (withStatus as { status?: number }).status = 401;
+    expect(isFederationStatusAuthFailure(withStatus)).toBe(true);
+    expect(isFederationStatusAuthFailure(new Error("missing_or_invalid_authorization"))).toBe(true);
   });
 });

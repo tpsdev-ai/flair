@@ -6980,6 +6980,28 @@ export function rewriteFederationStatusFetchFailed(err: unknown, url: string, se
   return next;
 }
 
+/**
+ * Auth-shaped vs connect-level for `federation status`. A rewritten
+ * fetch-failed sentence embeds the probed URL; that URL can contain the
+ * digits `401` (e.g. `--port 4010`). The old `message.includes("401")`
+ * check then printed the credential remedy and hid the URL+setting this
+ * change exists to surface (Bugbot on flair#1108).
+ */
+export function isFederationStatusAuthFailure(err: unknown): boolean {
+  if (!err) return false;
+  if (isFederationStatusConnectFailure(err)) return false;
+  if (typeof err === "object" && "status" in err) {
+    const status = (err as { status?: unknown }).status;
+    if (status === 401 || status === 403) return true;
+  }
+  const m = err instanceof Error
+    ? err.message
+    : String(typeof err === "object" && err && "message" in err
+      ? (err as { message?: unknown }).message ?? err
+      : err);
+  return m.includes("missing_or_invalid_authorization") || /(?:^|\D)401(?:\D|$)/.test(m);
+}
+
 federation
   .command("status")
   .description("Show federation status and peer connections")
@@ -7023,20 +7045,13 @@ federation
     // property of the session's credentials, not of one endpoint — and
     // degrading it to "unverifiable" would swallow the actionable remedy
     // (flair#634's UX, kept). Only non-auth failures degrade independently.
-    const authShaped = (err: any): boolean => {
-      if (!err) return false;
-      if (err.status === 401 || err.status === 403) return true;
-      const m = String(err.message ?? err);
-      return m.includes("missing_or_invalid_authorization") || m.includes("401");
-    };
-
     // Both reads failed → nothing to render at all. Either way keep the
     // classic failure UX (auth remedy when it's an auth problem), exit
     // non-zero.
-    if ((instanceErr && peersErr) || authShaped(instanceErr) || authShaped(peersErr)) {
+    if ((instanceErr && peersErr) || isFederationStatusAuthFailure(instanceErr) || isFederationStatusAuthFailure(peersErr)) {
       const primaryErr = instanceErr ?? peersErr;
       const msg = String(primaryErr.message ?? primaryErr);
-      if (msg.includes("missing_or_invalid_authorization") || msg.includes("401")) {
+      if (isFederationStatusAuthFailure(primaryErr)) {
         console.error(`${render.icons.error} federation status requires auth.`);
         console.error(`  ${render.wrap(render.c.dim, "Set one of:")}`);
         console.error(`    ${render.wrap(render.c.cyan, "FLAIR_AGENT_ID=<your-agent-id>")}     ${render.wrap(render.c.dim, "(Ed25519 — uses ~/.flair/keys/<id>.key)")}`);
