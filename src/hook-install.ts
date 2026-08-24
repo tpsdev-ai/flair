@@ -116,13 +116,70 @@ export function buildHookCommand(agentId: string, flairUrl: string): string {
   return buildSessionStartHookCommand(agentId, flairUrl);
 }
 
+/**
+ * Peel the installer `sh -c '...'` wrapper (and its `out=$(...)` capture)
+ * so env assignments can be read from the inner invocation. Leaves a bare
+ * command (legacy pre-#1007, hand-rolled) unchanged. Never throws.
+ */
+function unwrapInstallerHookCommand(command: string): string {
+  const shc = command.match(/^sh\s+-c\s+(['"])([\s\S]*)\1\s*$/);
+  const body = shc ? shc[2]! : command;
+  // SessionStart installer: `out=$(<invocation> 2>/dev/null) && printf ...`
+  const captured = body.match(/^out=\$\((.*)\)\s*&&/);
+  return captured ? captured[1]! : body;
+}
+
+/** Env values the installer interpolates are allow-listed (see
+ *  isHookCommandValueSafe). Stop before whitespace or the shell
+ *  metacharacters the `$(...)` wrapper can leave adjacent to a value. */
+const HOOK_ENV_VALUE_RE = /[^\s'"$();|&<>]+/;
+
 /** Best-effort recovery of the agentId/flairUrl a previously-wired hook
- *  command carries — used by `flair hook status`. Pure string scan, never
- *  throws on an unexpected shape. */
+ *  command carries — used by `flair hook status`. Understands the
+ *  installer-written `sh -c` wrapper (`flair init`, `flair hook install`,
+ *  docs/mcp-clients.md) as well as a bare invocation. Pure string scan,
+ *  never throws on an unexpected shape. A missing FLAIR_URL is not a
+ *  parse failure: `flair init` / doctor's minimal shape omit it on
+ *  purpose (the hook then uses flair-client's localhost default). */
 export function parseHookCommandEnv(command: string): { agentId?: string; flairUrl?: string } {
-  const agentMatch = command.match(/FLAIR_AGENT_ID=(\S+)/);
-  const urlMatch = command.match(/FLAIR_URL=(\S+)/);
+  const source = unwrapInstallerHookCommand(command);
+  const agentMatch = source.match(new RegExp(`FLAIR_AGENT_ID=(${HOOK_ENV_VALUE_RE.source})`));
+  const urlMatch = source.match(new RegExp(`FLAIR_URL=(${HOOK_ENV_VALUE_RE.source})`));
   return { agentId: agentMatch?.[1], flairUrl: urlMatch?.[1] };
+}
+
+/** Printed by `flair hook status` only when the command is wired but its
+ *  agent/URL really could not be recovered — never for the installer
+ *  `sh -c` form that simply omits FLAIR_URL (flair#1325). */
+export const HOOK_STATUS_UNPARSED = "(unknown — could not parse command)";
+
+export interface HookStatusIdentityLine {
+  label: "Agent" | "Flair URL";
+  value: string;
+}
+
+/** Agent / Flair URL lines `flair hook status` prints under a wired hook.
+ *  Recovered values are shown. The installer-no-URL omit (flair#1325) is
+ *  allowed ONLY when agentId was parsed — that is the real `flair init`
+ *  shape (`FLAIR_AGENT_ID` set, `FLAIR_URL` omitted). correctShape alone
+ *  is not enough: it is an npx-substring check and a wired correct-shape
+ *  command with no env assignments must still show the unknown lines,
+ *  not a silent all-clear. */
+export function hookStatusIdentityLines(
+  status: Pick<HookStatusResult, "agentId" | "flairUrl">,
+): HookStatusIdentityLine[] {
+  const lines: HookStatusIdentityLine[] = [];
+  if (status.agentId) {
+    lines.push({ label: "Agent", value: status.agentId });
+  } else {
+    lines.push({ label: "Agent", value: HOOK_STATUS_UNPARSED });
+  }
+  if (status.flairUrl) {
+    lines.push({ label: "Flair URL", value: status.flairUrl });
+  } else if (!status.agentId) {
+    lines.push({ label: "Flair URL", value: HOOK_STATUS_UNPARSED });
+  }
+  return lines;
 }
 
 interface HookEntry {

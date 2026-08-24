@@ -121,6 +121,8 @@ import {
   installHook,
   uninstallHook,
   hookStatus,
+  hookStatusIdentityLines,
+  HOOK_STATUS_UNPARSED,
   installContinuityHooks,
   uninstallContinuityHooks,
   continuityHookStatus,
@@ -5288,8 +5290,15 @@ hook
     }
 
     console.log(`  ${status.correctShape ? render.icons.ok : render.icons.warn} wired${status.correctShape ? "" : " (unexpected shape — was it hand-edited?)"}`);
-    console.log(`     ${render.wrap(render.c.dim, "Agent:")}     ${status.agentId ?? render.wrap(render.c.dim, "(unknown — could not parse command)")}`);
-    console.log(`     ${render.wrap(render.c.dim, "Flair URL:")} ${status.flairUrl ?? render.wrap(render.c.dim, "(unknown — could not parse command)")}`);
+    // flair#1325 — skip the URL line only when agentId was recovered
+    // (the installer form that omits FLAIR_URL). A wired correct-shape
+    // command with no env assignments still prints unknown, not a
+    // silent all-clear.
+    for (const line of hookStatusIdentityLines(status)) {
+      const label = line.label === "Agent" ? "Agent:    " : "Flair URL:";
+      const value = line.value === HOOK_STATUS_UNPARSED ? render.wrap(render.c.dim, line.value) : line.value;
+      console.log(`     ${render.wrap(render.c.dim, label)} ${value}`);
+    }
     // flair#1007 — whether a command that stopped resolving would fail quietly
     // or print an error on every session start.
     if (status.silenced) {
