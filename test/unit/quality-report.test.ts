@@ -479,18 +479,22 @@ describe("computeQualityReport", () => {
     });
 
     test("falls back to content when subject is empty/whitespace-only", () => {
+      // Cap widened 8 → 25 words in flair#967: 25 is the content arm that was
+      // actually MEASURED in the same-instant A/B (recall@5 1.00 / MRR 0.78 vs
+      // the subject arm's 0.60 / 0.16), so it is the cue length with evidence
+      // behind it. Still capped — see the ~25-word test below.
       const cue = deriveRecallCue({
         subject: "   ",
         content: "Rotate the Harper admin password using the domain socket procedure documented in ops.",
       });
-      expect(cue).toBe("Rotate the Harper admin password using the domain");
+      expect(cue).toBe("Rotate the Harper admin password using the domain socket procedure documented in ops.");
     });
 
-    test("falls back to content when subject is absent, capped to the leading ~8 words of the first sentence", () => {
+    test("falls back to content when subject is absent, capped to the leading ~25 words of the first sentence", () => {
       const cue = deriveRecallCue({
         content: "Never dump or decode a secret file, use length-only probes instead.",
       });
-      expect(cue).toBe("Never dump or decode a secret file, use");
+      expect(cue).toBe("Never dump or decode a secret file, use length-only probes instead.");
     });
 
     test("very short/trivial subject falls back to content rather than being used as-is", () => {
@@ -502,15 +506,26 @@ describe("computeQualityReport", () => {
       expect(deriveRecallCue({ content: "Ports rotated today." })).toBe("Ports rotated today.");
     });
 
-    test("caps at the leading ~8 words — never returns the full content (a PARTIAL cue, not the memory itself)", () => {
-      const cue = deriveRecallCue({ content: "one two three four five six seven eight nine ten eleven twelve" });
-      expect(cue.split(/\s+/).length).toBeLessThanOrEqual(8);
-      expect(cue).not.toContain("twelve");
+    test("caps at the leading ~25 words — never returns the full content (a PARTIAL cue, not the memory itself)", () => {
+      const words = Array.from({ length: 40 }, (_, i) => `w${i + 1}`).join(" ");
+      const cue = deriveRecallCue({ content: words });
+      expect(cue.split(/\s+/).length).toBeLessThanOrEqual(25);
+      expect(cue).not.toContain("w40");
     });
 
     test("both subject and content absent/empty → empty cue, not a crash", () => {
       expect(deriveRecallCue({})).toBe("");
       expect(deriveRecallCue({ subject: "", content: "" })).toBe("");
+    });
+
+    // flair#967 — the subject preference is now gated on the subject being
+    // DISCRIMINATIVE, not merely present. Full rule + red-on-main proof in
+    // test/unit/quality-recall-spotcheck-967.test.ts; this is the local
+    // regression anchor next to the tests above it changes the meaning of.
+    test("an opaque slug subject is not a cue — falls back to content (flair#967)", () => {
+      expect(deriveRecallCue({ subject: "pr-1359", content: "Kern architecture review of the presence-beat refactor." })).toBe(
+        "Kern architecture review of the presence-beat refactor.",
+      );
     });
   });
 
@@ -762,51 +777,41 @@ describe("flair-quality Slice 2 — snapshot + diff + OrgEvent thresholds", () =
     });
   });
 
-  describe("diffQualitySnapshots — recallSpotCheck (recall@k and MRR independently)", () => {
-    test("recall@k drops by more than the delta threshold → regression", () => {
+  describe("diffQualitySnapshots — recallSpotCheck is REPORT-ONLY (flair#967)", () => {
+    // These three used to assert the recall@k / MRR regression events. They
+    // now assert their ABSENCE, because the spot-check no longer carries
+    // alerting authority: 32 nightly runs on rockit production measured
+    // population σ 0.291 and mean |run-to-run delta| 0.223 against a 0.2
+    // threshold (0.69σ — below the metric's own noise floor), and all 6
+    // findings-mails the sweep ever produced in 34 runs were this metric
+    // oscillating. Lifetime precision 0. Recall regressions are detected by
+    // test/integration-heavy/recall-eval-gate.test.ts instead. Full rationale
+    // + the red-on-main proof: test/unit/quality-recall-spotcheck-967.test.ts.
+    test("recall@k drops by more than the old delta threshold → NO event", () => {
       const previous = snap({ recallSpotCheck: { recallAtK: 0.9, mrr: 0.8 } });
       const current = snap({ recallSpotCheck: { recallAtK: 0.6, mrr: 0.8 } }); // drop 0.3
-      const findings = diffQualitySnapshots(current, previous);
-      expect(findings).toEqual([
-        {
-          kind: "quality.regression",
-          scope: "quality",
-          summary: "recall spot-check recall@k dropped from 0.9 to 0.6 since last snapshot",
-          detail: { metric: "recallSpotCheck.recallAtK", before: 0.9, after: 0.6, threshold: QUALITY_EVENT_RECALL_DROP_THRESHOLD },
-        },
-      ]);
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
     });
 
-    test("MRR drops by more than the delta threshold, recall@k steady → regression on mrr only", () => {
+    test("MRR drops by more than the old delta threshold → NO event", () => {
       const previous = snap({ recallSpotCheck: { recallAtK: 0.9, mrr: 0.8 } });
       const current = snap({ recallSpotCheck: { recallAtK: 0.9, mrr: 0.5 } }); // drop 0.3
-      const findings = diffQualitySnapshots(current, previous);
-      expect(findings).toEqual([
-        {
-          kind: "quality.regression",
-          scope: "quality",
-          summary: "recall spot-check MRR dropped from 0.8 to 0.5 since last snapshot",
-          detail: { metric: "recallSpotCheck.mrr", before: 0.8, after: 0.5, threshold: QUALITY_EVENT_RECALL_DROP_THRESHOLD },
-        },
-      ]);
-    });
-
-    test("both recall@k and MRR drop → two independent findings", () => {
-      const previous = snap({ recallSpotCheck: { recallAtK: 0.9, mrr: 0.8 } });
-      const current = snap({ recallSpotCheck: { recallAtK: 0.5, mrr: 0.4 } });
-      const findings = diffQualitySnapshots(current, previous);
-      expect(findings).toHaveLength(2);
-      expect(findings.every((f) => f.kind === "quality.regression")).toBe(true);
-      expect(findings.map((f) => f.detail.metric).sort()).toEqual(["recallSpotCheck.mrr", "recallSpotCheck.recallAtK"]);
-    });
-
-    test("drop of exactly the threshold (0.2) → no event (exclusive boundary)", () => {
-      // 0.5 - 0.3 === 0.2 exactly in IEEE754 double (verified) — picked
-      // deliberately so this boundary test isn't at the mercy of float
-      // rounding noise the way e.g. 0.9 - 0.7 (> 0.2) would be.
-      const previous = snap({ recallSpotCheck: { recallAtK: 0.5, mrr: 0.8 } });
-      const current = snap({ recallSpotCheck: { recallAtK: 0.3, mrr: 0.8 } }); // drop exactly 0.2
       expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("a full collapse of both (0.9/0.8 → 0.0/0.0) still emits nothing — report-only means report-only", () => {
+      const previous = snap({ recallSpotCheck: { recallAtK: 0.9, mrr: 0.8 } });
+      const current = snap({ recallSpotCheck: { recallAtK: 0, mrr: 0 } });
+      expect(diffQualitySnapshots(current, previous)).toEqual([]);
+    });
+
+    test("the drop threshold constant is still literally 0.2 — de-authorised, not widened", () => {
+      expect(QUALITY_EVENT_RECALL_DROP_THRESHOLD).toBe(0.2);
+    });
+
+    test("the snapshot still CARRIES the recall pair — history keeps accumulating even though nothing fires on it", () => {
+      const current = snap({ recallSpotCheck: { recallAtK: 0.42, mrr: 0.21 } });
+      expect(current.recallSpotCheck).toEqual({ recallAtK: 0.42, mrr: 0.21 });
     });
   });
 
@@ -964,7 +969,7 @@ describe("flair-quality Slice 2 — snapshot + diff + OrgEvent thresholds", () =
       const previous = snap({
         embeddingCoverage: { coveragePct: 96 }, // will cross + regress
         staleness: { stalePct: 5 }, // will cross
-        recallSpotCheck: { recallAtK: 0.9, mrr: 0.9 }, // both will regress
+        recallSpotCheck: { recallAtK: 0.9, mrr: 0.9 }, // report-only since #967 — will NOT fire
         quietAgents: {
           perAgent: [
             { id: "anvil", quiet: false, daysSinceLastWrite: 1 }, // will newly-quiet
@@ -988,8 +993,13 @@ describe("flair-quality Slice 2 — snapshot + diff + OrgEvent thresholds", () =
       const findings = diffQualitySnapshots(current, previous);
       const kinds = findings.map((f) => f.kind);
       expect(kinds.filter((k) => k === "quality.threshold_crossed")).toHaveLength(3); // coverage, staleness, anvil-quiet
-      expect(kinds.filter((k) => k === "quality.regression")).toHaveLength(4); // coverage, recall@k, mrr, dedup
-      expect(findings).toHaveLength(7);
+      expect(kinds.filter((k) => k === "quality.regression")).toHaveLength(2); // coverage, dedup
+      expect(findings).toHaveLength(5);
+      // ...and NOT recall@k or MRR, even though both moved 0.5/0.6 here — the
+      // spot-check is report-only since flair#967. This is the "every metric
+      // fires independently" test, so it is also the place a re-armed recall
+      // emission would show up unannounced.
+      expect(findings.some((f) => f.detail.metric.startsWith("recallSpotCheck."))).toBe(false);
       // Every finding is JSON-serializable (this is exactly what ends up in
       // an OrgEvent's `detail` field via JSON.stringify).
       for (const f of findings) expect(() => JSON.stringify(f.detail)).not.toThrow();

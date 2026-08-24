@@ -14928,23 +14928,42 @@ program
 // own id appears in its search's top-k; MRR = mean reciprocal rank (0 if
 // not found within k).
 //
-// Framing — this is a HEALTH SPOT-CHECK, not a benchmark and not a trust
-// judgment. Querying by a cue derived FROM the target memory is easier than
-// a real user query, so a high score means "recall is functioning", not
-// "recall is optimal". Its job is to catch recall CRATERING (embeddings
-// down, index busted) — the score collapsing toward 0 is the signal, not
-// fine-grained precision grading. NOTE (#1216): this cue-from-the-memory
-// design is self-polluting as a recall-QUALITY metric — relevance is
-// query/corpus overlap by construction, so near-duplicate density reads as a
-// recall collapse (flair#967 / #857 / #996). It is deliberately NOT the
-// recall-quality number; that authority is the deterministic, fixed-label,
-// CI-gated eval at test/bench/recall-eval (recall@k / nDCG@10 / MRR). This
-// probe stays scoped to live-health cratering only. Requires an actual
-// agent identity to
-// query AS (semantic search is agent-scoped) — no identity, fewer than the
-// sample-size memories to sample, or a search error all degrade to `null` +
-// a `gaps` entry, same graceful-degradation contract as every metric here —
-// NEVER a false 0.0 masquerading as a real (broken) score.
+// Framing — this is a REPORT-ONLY HEALTH SPOT-CHECK, not a benchmark, not a
+// trust judgment, and (since flair#967) not an alerting signal either.
+// Querying by a cue derived FROM the target memory is easier than a real
+// user query, so a high score means "recall is functioning", not "recall is
+// optimal". NOTE (#1216): this cue-from-the-memory design is self-polluting
+// as a recall-QUALITY metric — relevance is query/corpus overlap by
+// construction, so near-duplicate density reads as a recall collapse
+// (flair#967 / #857 / #996). It is deliberately NOT the recall-quality
+// number; that authority is the deterministic, fixed-label, CI-gated eval at
+// test/bench/recall-eval, wired as a gate in
+// test/integration-heavy/recall-eval-gate.test.ts.
+//
+// flair#967 — WHY THIS METRIC NO LONGER EMITS AN EVENT. Measured on rockit
+// production over 32 nightly runs: population σ = 0.291, mean absolute
+// run-to-run delta = 0.223, against a QUALITY_EVENT_RECALL_DROP_THRESHOLD of
+// 0.2. The alarm sat at 0.69σ — BELOW the metric's own noise floor, so the
+// median night-to-night wobble already exceeded the delta that declared a
+// regression. Replaying diffQualitySnapshots over the stored snapshot series
+// predicts the sweep's 6 findings-mails in 34 runs exactly, 6 for 6, and all
+// six were oscillation: lifetime precision 0. So the emission is gone. The
+// score is still computed, still printed, still snapshotted (history and the
+// cratering signal are both preserved) — it just no longer has the authority
+// to page anyone, because it never once earned it. That authority stays with
+// the deterministic CI gate above, which is fixed-label, hermetic and
+// actually detects ranking regressions. Re-arming this probe is a data
+// question, not a taste question: it needs a measured precision on the FIXED
+// cue derivation first, and a threshold DERIVED from that run-to-run variance
+// (≥2σ on the sample design), not another literal.
+//
+// Requires an actual agent identity to query AS (semantic search is
+// agent-scoped) — no identity, fewer than the sample-size memories to sample,
+// an UNHEALTHY sample (planRecallSpotCheck below: duplicate or empty cues, so
+// the window cannot be scored fairly) or a search error all degrade to `null`
+// + a `gaps` entry, same graceful-degradation contract as every metric here —
+// NEVER a false 0.0 masquerading as a real (broken) score, and never a number
+// quietly computed over a window that could not produce one.
 
 /** First-pass default, same "documented heuristic, not derived from data we
  *  don't have" spirit as health.ts's own 10%-hash-fallback threshold below.
@@ -14968,23 +14987,66 @@ export interface QualityMetricGap {
   reason: string;
 }
 
+/** Leading-word cap on the content-derived cue. 25, matching the arm of the
+ *  flair#967 A/B that was actually measured (same 10 memories, same instance,
+ *  same minute: subject cue → recall@5 0.60 / MRR 0.16; first-25-words-of-
+ *  content cue → 1.00 / 0.78). Still a PARTIAL cue by construction — capped,
+ *  never the whole memory for anything longer than the cap. */
+const RECALL_CUE_CONTENT_WORD_LIMIT = 25;
+
+/**
+ * Is `subject` DISCRIMINATIVE enough to be handed to semantic search as a
+ * query in its own right? (flair#967.)
+ *
+ * The old bar was `length >= 3`, which is a check on whether the subject
+ * EXISTS, not on whether it is a query. Measured consequence: slug-shaped
+ * subjects — `pr-1359`, `kern-2026-08-23`, the spot-check's own
+ * `quality-snapshot/127.0.0.1:9926` — carry almost no semantic signal, so
+ * searching one is a query for nothing in particular (searching `pr-1359` on
+ * rockit production returned, as top-1, a review note about PR #1275 from five
+ * days earlier). Worse, every memory sharing such a subject issues the
+ * IDENTICAL query and gets the IDENTICAL result list, so siblings must
+ * mutually displace each other and all but one are scored as misses no matter
+ * how healthy retrieval is.
+ *
+ * The rule, stated plainly — a subject is used as the cue only when it is:
+ *   1. at least 3 characters (the original bar, kept), AND
+ *   2. NOT opaque-identifier-shaped: an unspaced token carrying a digit or an
+ *      identifier separator (`/ : _ . # @ \`) is a slug, not a phrase.
+ *      Whitespace is the primary discriminator — `Harper 5.2 upgrade` is
+ *      prose and stays a cue; `kern-2026-08-23` is not. A bare hyphen does
+ *      NOT make a slug, so ordinary compounds (`two-gate`) survive, AND
+ *   3. carrying at least one alphabetic run of 3+ characters — a subject with
+ *      no word in it (`---`, `42`) is not a query either.
+ *
+ * Fails CLOSED: anything that isn't clearly a phrase falls back to content,
+ * which the A/B measured as the strictly better cue. Pure — no I/O.
+ */
+export function isDiscriminativeSubject(subject: string | null | undefined): boolean {
+  const s = (subject ?? "").trim();
+  if (s.length < 3) return false;
+  if (!/\s/.test(s) && /[0-9/:_.#@\\]/.test(s)) return false;
+  if (!/[A-Za-z]{3}/.test(s)) return false;
+  return true;
+}
+
 /**
  * Derive a PARTIAL search cue from a memory — used by the recall spot-check
  * (Slice 1d) to query for a memory without handing back its full content.
- * Prefers `subject` when present and non-trivial (a real word or phrase, not
- * empty/whitespace-only padding); otherwise falls back to the first sentence
- * of `content`, capped to the leading ~8 words so the cue stays a genuine
+ * Prefers `subject` ONLY when it is discriminative (isDiscriminativeSubject
+ * above — flair#967); otherwise falls back to the first sentence of
+ * `content`, capped to the leading ~25 words so the cue stays a genuine
  * partial cue rather than the whole memory. Pure — no I/O.
  */
 export function deriveRecallCue(memory: { subject?: string | null; content?: string | null }): string {
   const subject = (memory.subject ?? "").trim();
-  if (subject.length >= 3) return subject;
+  if (isDiscriminativeSubject(subject)) return subject;
   const content = (memory.content ?? "").trim();
   if (!content) return "";
   const sentenceMatch = content.match(/^[^.!?\n]+[.!?]?/);
   const firstSentence = (sentenceMatch ? sentenceMatch[0] : content).trim();
   const words = firstSentence.split(/\s+/).filter(Boolean);
-  const cueWordLimit = 8;
+  const cueWordLimit = RECALL_CUE_CONTENT_WORD_LIMIT;
   return words.length <= cueWordLimit ? firstSentence : words.slice(0, cueWordLimit).join(" ");
 }
 
@@ -15053,6 +15115,121 @@ export interface RecallSpotCheckFetchResult {
   k?: number;
   /** Present when ok is false — why the spot-check was skipped. */
   skipReason?: string;
+  /** Present whenever a window was actually assembled (healthy or not) —
+   *  flair#967's fail-closed sample guard. `healthy: false` is the one skip
+   *  reason that is a statement ABOUT THE SAMPLE rather than about the
+   *  instance, so it's carried structurally, not just in prose. */
+  sampleHealth?: RecallSampleHealth;
+}
+
+/**
+ * Can the sampled window be scored fairly at all? (flair#967, direction 4 in
+ * the issue — "an alert that cannot explain itself cannot be triaged", made
+ * structural.)
+ *
+ * The spot-check scores each sampled memory by searching ONE cue and asking
+ * whether that memory came back. If two sampled memories derive the SAME cue,
+ * they are one query with one answer list, so at most one of them can be found
+ * and the rest are counted as misses no matter how healthy retrieval is. That
+ * is not a low score, it is an UNSCORABLE window — and the honest output is to
+ * say so rather than to publish the number anyway.
+ */
+export interface RecallSampleHealth {
+  healthy: boolean;
+  /** Self-describing, human-readable — becomes the `gaps` entry's reason. */
+  reason?: string;
+  /** The cue values that more than one sampled memory derived. */
+  duplicateCues?: string[];
+  /** How many sampled memories derived NO cue at all (no subject, no content). */
+  emptyCueCount?: number;
+}
+
+/** What planRecallSpotCheck decided: which memories to query, with what cue,
+ *  and whether the resulting window is scorable. */
+export interface RecallSpotCheckPlan {
+  sampled: Array<{ id: string; cue: string }>;
+  health: RecallSampleHealth;
+  /** How many of the tool's own quality-snapshot rows were excluded before
+   *  sampling (flair#967 cause 2 — self-referential bookkeeping is never
+   *  scored: its subject is a hostname slug and its content is boilerplate
+   *  JSON, so it is a guaranteed miss and a permanent constant penalty). */
+  excludedSnapshotRows: number;
+}
+
+/** Rows the spot-check writes itself, and therefore must never grade itself
+ *  on — see RecallSpotCheckPlan['excludedSnapshotRows']. */
+function isQualitySnapshotRow(m: { subject?: string | null; type?: string | null }): boolean {
+  return m?.type === "quality-snapshot" || (m?.subject ?? "").startsWith("quality-snapshot/");
+}
+
+/**
+ * Pure planner for the recall spot-check: raw memory rows → the window to
+ * query (id + cue) plus that window's health. Extracted from
+ * fetchRecallSpotCheckData so the sampling, cue-derivation and
+ * fail-closed health rules are testable without any I/O (flair#967).
+ *
+ * Order of operations, and why:
+ *  1. drop the tool's own quality-snapshot rows (never grade your own
+ *     bookkeeping);
+ *  2. take the `sampleSize` most-recently-written remaining rows (unchanged —
+ *     recency is still the sampling frame; see the issue's direction 3 for the
+ *     stratified-sampling follow-up this deliberately does NOT take on);
+ *  3. derive each cue via deriveRecallCue;
+ *  4. judge the window: any duplicate cue, or any empty cue, makes it
+ *     UNSCORABLE — reported as unhealthy, never silently scored.
+ */
+export function planRecallSpotCheck(
+  memories: Array<{ id?: unknown; subject?: string | null; content?: string | null; createdAt?: string | null; type?: string | null }>,
+  opts: { sampleSize?: number } = {},
+): RecallSpotCheckPlan {
+  const sampleSize = opts.sampleSize ?? QUALITY_RECALL_SAMPLE_SIZE;
+  const rows = Array.isArray(memories) ? memories : [];
+  const scorable = rows.filter((m) => !isQualitySnapshotRow(m ?? {}));
+  const excludedSnapshotRows = rows.length - scorable.length;
+
+  const sorted = scorable.slice().sort((a: any, b: any) => {
+    const ta = a?.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const tb = b?.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return tb - ta;
+  });
+  const sampled = sorted.slice(0, sampleSize).map((m: any) => ({ id: String(m?.id), cue: deriveRecallCue(m ?? {}) }));
+
+  const counts = new Map<string, number>();
+  let emptyCueCount = 0;
+  for (const s of sampled) {
+    if (!s.cue) {
+      emptyCueCount += 1;
+      continue;
+    }
+    counts.set(s.cue, (counts.get(s.cue) ?? 0) + 1);
+  }
+  const duplicateCues = [...counts.entries()].filter(([, n]) => n > 1).map(([cue]) => cue);
+
+  if (duplicateCues.length === 0 && emptyCueCount === 0) {
+    return { sampled, health: { healthy: true }, excludedSnapshotRows };
+  }
+
+  const parts: string[] = [];
+  if (duplicateCues.length > 0) {
+    const shown = duplicateCues.slice(0, 3).map((c) => `"${c.length > 60 ? `${c.slice(0, 57)}...` : c}"`).join(", ");
+    const dupMemberCount = duplicateCues.reduce((n, c) => n + (counts.get(c) ?? 0), 0);
+    parts.push(
+      `${dupMemberCount} of the ${sampled.length} sampled memories derive the same cue as another (${shown}${duplicateCues.length > 3 ? `, +${duplicateCues.length - 3} more` : ""}) — identical cues are one query with one result list, so those memories must displace each other and cannot all be found`,
+    );
+  }
+  if (emptyCueCount > 0) {
+    parts.push(`${emptyCueCount} of the ${sampled.length} sampled memories have no derivable cue (no subject and no content)`);
+  }
+  return {
+    sampled,
+    health: {
+      healthy: false,
+      reason: `sample unhealthy — ${parts.join("; ")}. No score recorded for this run (flair#967: fail closed rather than publish an unscorable number).`,
+      duplicateCues,
+      emptyCueCount,
+    },
+    excludedSnapshotRows,
+  };
 }
 
 export interface QualityAgentActivity {
@@ -15143,9 +15320,15 @@ export interface QualityReport {
    * uses (api() → authedRequest, POST /SemanticSearch) — no new endpoint.
    * `agentId` is the identity the spot-check queried AS (the --agent value,
    * or FLAIR_AGENT_ID). `null` when there's no agent identity to query as,
-   * too few memories to sample, or a search errored — NEVER a false 0.0
-   * masquerading as a real (broken) score; always paired with a `gaps`
-   * entry in that case.
+   * too few scorable memories to sample, the sampled window was UNHEALTHY
+   * (duplicate/empty cues — flair#967's fail-closed guard), or a search
+   * errored — NEVER a false 0.0 masquerading as a real (broken) score, and
+   * never a number computed over a window that could not produce one; always
+   * paired with a `gaps` entry carrying the reason.
+   *
+   * REPORT-ONLY since flair#967: this number is printed and snapshotted for
+   * observability, and emits no OrgEvent at any delta. Recall REGRESSIONS are
+   * detected by test/integration-heavy/recall-eval-gate.test.ts.
    */
   recallSpotCheck: {
     agentId: string | null;
@@ -15399,28 +15582,31 @@ async function fetchRecallSpotCheckData(
     return { ok: false, agentId, skipReason: `could not fetch memories to sample: ${err?.message ?? String(err)}` };
   }
 
-  if (all.length < sampleSize) {
+  // Deterministic sample + cue derivation + fail-closed health judgment, all
+  // pure (planRecallSpotCheck above). Snapshot rows are excluded there, so the
+  // "enough memories" check has to run on the PLANNED window, not on the raw
+  // row count — an instance whose recent writes are mostly the sweep's own
+  // bookkeeping should skip with a reason, not score a short window.
+  const plan = planRecallSpotCheck(all, { sampleSize });
+  if (plan.sampled.length < sampleSize) {
+    const excluded = plan.excludedSnapshotRows > 0 ? ` (${plan.excludedSnapshotRows} quality-snapshot row(s) excluded — the spot-check never grades its own bookkeeping)` : "";
     return {
       ok: false,
       agentId,
-      skipReason: `agent '${agentId}' has ${all.length} memories, fewer than the ${sampleSize} needed to sample`,
+      skipReason: `agent '${agentId}' has ${plan.sampled.length} scorable memories, fewer than the ${sampleSize} needed to sample${excluded}`,
     };
   }
 
-  // Deterministic sample: the sampleSize most-recently-written memories.
-  const sorted = all.slice().sort((a: any, b: any) => {
-    const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-    const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-    return tb - ta;
-  });
-  const sampled = sorted.slice(0, sampleSize);
+  // flair#967: a window whose cues collide cannot be scored fairly — report
+  // that fact instead of a number, and don't spend the searches either.
+  if (!plan.health.healthy) {
+    return { ok: false, agentId, skipReason: plan.health.reason, sampleHealth: plan.health };
+  }
 
   const sampledIds: string[] = [];
   const perQueryResultIds: string[][] = [];
   try {
-    for (const m of sampled) {
-      const id = String(m.id);
-      const cue = deriveRecallCue(m);
+    for (const { id, cue } of plan.sampled) {
       const body = { agentId, q: cue, limit: k };
       const res = await api("POST", "/SemanticSearch", body, { baseUrl, agentId });
       const results: any[] = Array.isArray(res) ? res : (res?.results ?? []);
@@ -15431,7 +15617,7 @@ async function fetchRecallSpotCheckData(
     return { ok: false, agentId, skipReason: `recall spot-check search failed: ${err?.message ?? String(err)}` };
   }
 
-  return { ok: true, agentId, sampledIds, perQueryResultIds, k };
+  return { ok: true, agentId, sampledIds, perQueryResultIds, k, sampleHealth: plan.health };
 }
 
 // ─── flair quality --emit (Slice 2 of the memory-quality-observability arc:
@@ -15483,6 +15669,22 @@ async function fetchRecallSpotCheckData(
 export const QUALITY_EVENT_COVERAGE_ABS_THRESHOLD_PCT = 90;
 export const QUALITY_EVENT_COVERAGE_DROP_THRESHOLD_PCT = 5;
 export const QUALITY_EVENT_STALENESS_ABS_THRESHOLD_PCT = 10;
+/**
+ * RETAINED AT ITS ORIGINAL VALUE AND DELIBERATELY UNWIRED (flair#967).
+ *
+ * Nothing in diffQualitySnapshots reads this any more — the recall spot-check
+ * is report-only and emits no event at any delta (see the Slice 1d framing in
+ * the module doc for the 32-run σ = 0.291 / precision-0 measurement behind
+ * that). The constant stays, unchanged at 0.2, as the standing evidence that
+ * the fix was "remove alerting authority from a metric that never earned it",
+ * NOT "widen the gate until it stops talking" — a silenced check and a
+ * de-authorised one look identical in a changelog and are opposites in
+ * practice, and 0.2 sitting here at 0.69σ is the arithmetic that makes the
+ * difference legible. If this probe is ever re-armed, the replacement
+ * threshold must be DERIVED from the measured run-to-run variance of the
+ * FIXED cue derivation, not typed in — do not just re-reference this literal.
+ * Asserted unchanged by test/unit/quality-recall-spotcheck-967.test.ts.
+ */
 export const QUALITY_EVENT_RECALL_DROP_THRESHOLD = 0.2;
 export const QUALITY_EVENT_DEDUP_GROWTH_PCT_THRESHOLD = 0.5; // >50%
 export const QUALITY_EVENT_DEDUP_GROWTH_ABS_THRESHOLD = 5; // AND by >= 5 clusters
@@ -15585,29 +15787,30 @@ export function diffQualitySnapshots(current: QualitySnapshotCore, previous: Qua
     }
   }
 
-  // ── recall spot-check: recall@k and MRR, same delta-drop threshold ──
-  if (current.recallSpotCheck && previous.recallSpotCheck) {
-    const beforeR = previous.recallSpotCheck.recallAtK;
-    const afterR = current.recallSpotCheck.recallAtK;
-    if (beforeR - afterR > QUALITY_EVENT_RECALL_DROP_THRESHOLD) {
-      findings.push({
-        kind: "quality.regression",
-        scope: "quality",
-        summary: `recall spot-check recall@k dropped from ${beforeR} to ${afterR} since last snapshot`,
-        detail: { metric: "recallSpotCheck.recallAtK", before: beforeR, after: afterR, threshold: QUALITY_EVENT_RECALL_DROP_THRESHOLD },
-      });
-    }
-    const beforeM = previous.recallSpotCheck.mrr;
-    const afterM = current.recallSpotCheck.mrr;
-    if (beforeM - afterM > QUALITY_EVENT_RECALL_DROP_THRESHOLD) {
-      findings.push({
-        kind: "quality.regression",
-        scope: "quality",
-        summary: `recall spot-check MRR dropped from ${beforeM} to ${afterM} since last snapshot`,
-        detail: { metric: "recallSpotCheck.mrr", before: beforeM, after: afterM, threshold: QUALITY_EVENT_RECALL_DROP_THRESHOLD },
-      });
-    }
-  }
+  // ── recall spot-check: REPORT-ONLY, no branch here on purpose (flair#967) ──
+  //
+  // This metric used to emit two quality.regression events (recall@k and MRR,
+  // both at QUALITY_EVENT_RECALL_DROP_THRESHOLD). It no longer emits anything,
+  // at any delta. Measured, on rockit production:
+  //
+  //   32 nightly runs · population σ 0.291 · mean |run-to-run delta| 0.223
+  //   threshold 0.2  →  0.69σ, i.e. BELOW the metric's own noise floor
+  //   6 findings-mails in 34 runs, replay-predicted 6/6 from these branches,
+  //   all 6 oscillation  →  lifetime precision 0
+  //
+  // Removing an emission is not the same move as raising a threshold, and the
+  // distinction is the whole point: raising 0.2 would leave a check that still
+  // claims to detect recall regressions while detecting none, whereas this
+  // hands that job to the instrument that can actually do it — the
+  // deterministic, fixed-label, CI-gated eval in
+  // test/integration-heavy/recall-eval-gate.test.ts (test/bench/recall-eval),
+  // whose floors sit ≥2 whole queries below the measured value against a
+  // 0.000 noise band. QUALITY_EVENT_RECALL_DROP_THRESHOLD is left at 0.2,
+  // unwired, so that stays checkable rather than asserted.
+  //
+  // current.recallSpotCheck / previous.recallSpotCheck are still SNAPSHOTTED
+  // (buildQualitySnapshot above) — the history that made this diagnosis
+  // possible keeps accumulating, and `flair quality` still prints the number.
 
   // ── quiet agents: per-agent, NEWLY quiet only (was false last snapshot,
   // true now) — never re-fires for an agent that was already quiet last
@@ -15799,6 +16002,11 @@ program
 
     if (mode === "json") {
       const out: any = { healthy, url: baseUrl, flairVersion: __pkgVersion, ...report };
+      // flair#967: when a window was assembled, say whether it was scorable —
+      // structurally, not only as prose inside a `gaps` reason. An unhealthy
+      // sample is a FACT ABOUT THE RUN that a consumer must be able to read
+      // without string-matching.
+      if (recallSpotCheckData.sampleHealth) out.recallSampleHealth = recallSpotCheckData.sampleHealth;
       if (emitResult) {
         out.emit = { firstRun: emitResult.firstRun, snapshotId: emitResult.snapshotId, errors: emitResult.errors };
         out.emittedEvents = emitResult.emittedEvents.map((e) => ({
@@ -15915,15 +16123,15 @@ program
       console.log(`  ${render.wrap(render.c.dim, "an ops signal — near-duplicate memories piling up, not a trust judgment")}`);
     }
 
-    // Recall spot-check (flair-quality Slice 1d) — a health SPOT-CHECK, not
-    // a benchmark or trust judgment: catches recall cratering (embeddings/
-    // index down), not a quality grade. See QualityReport['recallSpotCheck']
-    // doc for the full framing.
+    // Recall spot-check (flair-quality Slice 1d) — a REPORT-ONLY health
+    // spot-check: not a benchmark, not a trust judgment, and since flair#967
+    // not an alerting signal either. See QualityReport['recallSpotCheck'] doc
+    // and the Slice 1d module doc for the full framing.
     if (report.recallSpotCheck) {
       const rc = report.recallSpotCheck;
-      console.log(`\n${render.wrap(render.c.bold, "Recall spot-check")} ${render.wrap(render.c.dim, `(agent ${rc.agentId ?? "—"}, health signal — not a benchmark)`)}`);
+      console.log(`\n${render.wrap(render.c.bold, "Recall spot-check")} ${render.wrap(render.c.dim, `(agent ${rc.agentId ?? "—"}, report-only — not a benchmark, not an alert)`)}`);
       console.log(render.kv(`recall@${rc.k}`, `${render.wrap(render.c.bold, rc.recallAtK.toFixed(2))} ${render.wrap(render.c.dim, `(MRR ${rc.mrr.toFixed(2)}, ${rc.sampleSize} sampled)`)}`));
-      console.log(`  ${render.wrap(render.c.dim, "catches recall cratering (embeddings/index down) — a high score means recall is functioning, not that it's optimal")}`);
+      console.log(`  ${render.wrap(render.c.dim, "observability only — recall REGRESSIONS are detected by the deterministic CI gate (test/bench/recall-eval), not by this number")}`);
     }
 
     // Gaps
