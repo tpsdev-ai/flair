@@ -248,7 +248,7 @@ describe("the impl-term-leak gate cannot report clean without scanning", () => {
     // argv overflow) into its "no matches" status (1). Verified empirically: a
     // grep over a chmod-000 file returns 2, and the old line printed
     // "No leaks found." and exited 0.
-    const grepLine = src.split("\n").find((l) => l.includes("grep -n -E \"$PATTERNS\"")) ?? "";
+    const grepLine = src.split("\n").find((l) => l.includes("grep -n -H -E \"$PATTERNS\"")) ?? "";
     expect(grepLine.length).toBeGreaterThan(0);
     expect(grepLine).not.toMatch(/\|\|\s*(true|:)/);
     expect(src).toContain("GREP_RC");
@@ -263,6 +263,19 @@ describe("the impl-term-leak gate cannot report clean without scanning", () => {
     // `$(cat "$TMPFILE")` unquoted splits `docs/name with space.md` into three
     // nonexistent paths — which the old code then reported as clean.
     expect(src).not.toMatch(/grep[^\n]*\$\(cat "\$TMPFILE"\)/);
+  });
+
+  test("the ops-* allowlist is four exact literals compared by string equality (flair#1381)", () => {
+    // A regex or "looks like a word" heuristic would exempt a real bead ID
+    // the first time one happened to look English. The behavioural suite in
+    // impl-term-leaks.test.ts proves the list is load-bearing; this pins the
+    // committed shape so the exemption cannot widen in the source unnoticed.
+    expect(src).toMatch(/^ops-port$/m);
+    expect(src).toMatch(/^ops-api$/m);
+    expect(src).toMatch(/^ops-target$/m);
+    expect(src).toMatch(/^ops-server$/m);
+    expect(src).toContain('[ "$1" = "$allowed" ]');
+    expect(src).not.toMatch(/ops-\(port\|api\|target\|server\)/);
   });
 });
 
