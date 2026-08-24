@@ -17,6 +17,8 @@ import {
   parseHookCommandEnv,
   hookSettingsPath,
   hookBackupPath,
+  hookInstallHint,
+  resolveHookAgentId,
   isSupportedHarness,
   SUPPORTED_HARNESSES,
 } from "../../src/hook-install.ts";
@@ -79,6 +81,35 @@ describe("harness registry", () => {
     expect(isSupportedHarness("cursor")).toBe(false);
     expect(isSupportedHarness("gemini")).toBe(false);
     expect(isSupportedHarness("")).toBe(false);
+  });
+
+  it("hookInstallHint keeps claude-code as the bare default and names every other harness", () => {
+    expect(hookInstallHint("claude-code")).toBe("flair hook install");
+    expect(hookInstallHint("claude-code", "--continuity")).toBe("flair hook install --continuity");
+    expect(hookInstallHint("codex")).toBe("flair hook install --harness codex");
+    expect(hookInstallHint("codex", "--continuity")).toBe("flair hook install --continuity --harness codex");
+  });
+
+  it("resolveHookAgentId prefers Codex MCP, then falls back to Claude Code (flair#1148)", () => {
+    expect(resolveHookAgentId({}, isoHome, "codex")).toBeUndefined();
+
+    writeFileSync(
+      join(isoHome, ".claude.json"),
+      JSON.stringify({
+        mcpServers: {
+          flair: { command: "npx", args: ["-y", "@tpsdev-ai/flair-mcp"], env: { FLAIR_AGENT_ID: "claude-agent" } },
+        },
+      }),
+    );
+    expect(resolveHookAgentId({}, isoHome, "codex")).toBe("claude-agent");
+
+    mkdirSync(join(isoHome, ".codex"), { recursive: true });
+    writeFileSync(
+      join(isoHome, ".codex", "config.toml"),
+      ["[mcp_servers.flair]", 'command = "npx"', 'args = ["-y", "@tpsdev-ai/flair-mcp"]', "", "[mcp_servers.flair.env]", 'FLAIR_AGENT_ID = "codexbot"', ""].join("\n"),
+    );
+    expect(resolveHookAgentId({}, isoHome, "codex")).toBe("codexbot");
+    expect(resolveHookAgentId({ agent: "flag-agent" }, isoHome, "codex")).toBe("flag-agent");
   });
 });
 

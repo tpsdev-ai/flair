@@ -65,6 +65,7 @@ import {
   hookCommandIsSilenced,
   isHookCommandValueSafe,
   isSessionStartHookInvocation,
+  readClientMcpBlock,
   type ContinuityCaptureHookReport,
   type ContinuityHookEvent,
   type ContinuityMutationAction,
@@ -93,6 +94,33 @@ export function hookSettingsPath(homeDir: string, harness: Harness): string {
     case "codex":
       return join(homeDir, ".codex", "hooks.json");
   }
+}
+
+/** Status/doctor hint for `flair hook install`. Claude Code stays the bare
+ *  default; every other harness is named so the hint cannot silently write
+ *  the wrong file (flair#1148 Bugbot). */
+export function hookInstallHint(harness: Harness, extraFlags = ""): string {
+  const parts = ["flair hook install"];
+  if (extraFlags) parts.push(extraFlags);
+  if (harness !== "claude-code") parts.push(`--harness ${harness}`);
+  return parts.join(" ");
+}
+
+/** Agent id for a hook install: flag, env, this harness's MCP block, then
+ *  Claude Code's block as a last resort (same agent is often shared). */
+export function resolveHookAgentId(
+  opts: { agent?: string; agentId?: string },
+  homeDir: string,
+  harness: Harness,
+): string | undefined {
+  return (
+    opts.agent ||
+    opts.agentId ||
+    process.env.FLAIR_AGENT_ID ||
+    readClientMcpBlock(harness, homeDir).agentId ||
+    (harness !== "claude-code" ? readClientMcpBlock("claude-code", homeDir).agentId : undefined) ||
+    undefined
+  );
 }
 
 /** Backup path convention: a single sibling `<path>.bak`, overwritten on

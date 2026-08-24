@@ -129,6 +129,8 @@ import {
   isSupportedHarness,
   SUPPORTED_HARNESSES,
   hookSettingsPath,
+  hookInstallHint,
+  resolveHookAgentId,
   type Harness,
 } from "./hook-install.js";
 import {
@@ -5130,17 +5132,6 @@ keys
 // section is pure CLI plumbing: option parsing, default resolution, and
 // rendering the pure functions' results.
 
-function resolveHookAgentId(opts: { agent?: string; agentId?: string }, homeDir: string, harness: Harness): string | undefined {
-  return (
-    opts.agent ||
-    opts.agentId ||
-    process.env.FLAIR_AGENT_ID ||
-    readClientMcpBlock(harness, homeDir).agentId ||
-    (harness !== "claude-code" ? readClientMcpBlock("claude-code", homeDir).agentId : undefined) ||
-    undefined
-  );
-}
-
 function resolveHookFlairUrl(opts: { url?: string }, homeDir: string, harness: Harness): string {
   return (
     opts.url ||
@@ -5271,10 +5262,10 @@ hook
       if (cont.state === "installed") {
         console.log(`  ${render.icons.ok} continuity capture: PostToolUse + Stop wired`);
       } else if (cont.state === "absent") {
-        console.log(`  ${render.icons.info} continuity capture: not enabled ${render.wrap(render.c.dim, "(opt-in: flair hook install --continuity)")}`);
+        console.log(`  ${render.icons.info} continuity capture: not enabled ${render.wrap(render.c.dim, `(opt-in: ${hookInstallHint(harness, "--continuity")})`)}`);
       } else {
         const missing = !cont.postToolUse.present ? "PostToolUse missing" : !cont.stop.present ? "Stop missing" : "stale form";
-        console.log(`  ${render.icons.warn} continuity capture: ${cont.state} (${missing}) ${render.wrap(render.c.dim, "— re-run: flair hook install --continuity")}`);
+        console.log(`  ${render.icons.warn} continuity capture: ${cont.state} (${missing}) ${render.wrap(render.c.dim, `— re-run: ${hookInstallHint(harness, "--continuity")}`)}`);
       }
     };
 
@@ -5290,8 +5281,7 @@ hook
 
     if (!status.wired) {
       console.log(`  ${render.icons.error} not wired`);
-      const installHint = status.harness === "claude-code" ? "flair hook install" : `flair hook install --harness ${status.harness}`;
-      console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${installHint}`);
+      console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${hookInstallHint(status.harness)}`);
       renderContinuity();
       console.log("");
       process.exit(1);
@@ -5312,7 +5302,7 @@ hook
     if (status.silenced) {
       console.log(`     ${render.wrap(render.c.dim, "On failure:")} silent (exit 0, no output)`);
     } else {
-      console.log(`     ${render.icons.warn} ${render.wrap(render.c.dim, "On failure:")} prints an error on every session — run \`flair hook install\` to adopt the silent form`);
+      console.log(`     ${render.icons.warn} ${render.wrap(render.c.dim, "On failure:")} prints an error on every session — run \`${hookInstallHint(status.harness)}\` to adopt the silent form`);
     }
     renderContinuity();
     console.log("");
@@ -14404,7 +14394,12 @@ program
                     client.id === "antigravity" ? wireAntigravity(wireEnv) :
                     wireCursor(wireEnv);
                   console.log(`     ${wireResult.ok ? render.icons.ok : render.icons.warn} ${wireResult.message}`);
-                  if (wireResult.ok) fixed++;
+                  if (wireResult.ok) {
+                    fixed++;
+                    if (client.id === "claude-code") claudeCodeAgentId = fixAgentId;
+                    if (client.id === "codex") codexAgentId = fixAgentId;
+                    anyKnownAgentId = anyKnownAgentId ?? fixAgentId;
+                  }
                 }
               }
             }
@@ -14688,7 +14683,7 @@ program
               if (!proceed) {
                 console.log(`     Skipped.`);
               } else {
-                const fixAgentId = codexAgentId || opts.agent || process.env.FLAIR_AGENT_ID;
+                const fixAgentId = resolveHookAgentId({ agent: opts.agent }, homedir(), "codex");
                 const fixRes = fixSessionStartHook(homedir(), fixAgentId, hook.path);
                 console.log(`     ${fixRes.ok ? render.icons.ok : render.icons.warn} ${fixRes.message}`);
                 if (fixRes.ok) fixed++;
