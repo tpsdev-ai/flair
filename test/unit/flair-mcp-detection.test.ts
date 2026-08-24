@@ -12,6 +12,7 @@ import {
   detectWiredFlairMcp,
   buildSessionStartHookCommand,
 } from "../../src/doctor-client";
+import { flairCliVersion } from "../../src/lib/mcp-spec";
 
 const LATEST = "0.44.9";
 
@@ -70,8 +71,12 @@ describe("extractFlairMcpPin", () => {
     expect(extractFlairMcpPin('"args": ["-y", "@tpsdev-ai/flair-mcp"]')).toBeNull();
   });
 
-  test("returns null for the (unpinned) SessionStart hook command", () => {
-    expect(extractFlairMcpPin(buildSessionStartHookCommand("me"))).toBeNull();
+  test("pulls the version from the SessionStart hook command (flair#1143)", () => {
+    expect(extractFlairMcpPin(buildSessionStartHookCommand("me"))).toBe(flairCliVersion());
+  });
+
+  test("returns null for a pre-#1143 unpinned SessionStart hook command", () => {
+    expect(extractFlairMcpPin(`FLAIR_AGENT_ID=me npx -y -p @tpsdev-ai/flair-mcp flair-session-start`)).toBeNull();
   });
 
   test("returns null when the package is absent entirely", () => {
@@ -96,7 +101,7 @@ describe("detectWiredFlairMcp (reads actual config files under HOME)", () => {
     });
   });
 
-  test("SessionStart hook present (unpinned) => wired, no pin", () => {
+  test("SessionStart hook present => wired, pin extracted (flair#1143)", () => {
     withTempHome((home) => {
       mkdirSync(join(home, ".claude"), { recursive: true });
       writeFileSync(
@@ -105,7 +110,7 @@ describe("detectWiredFlairMcp (reads actual config files under HOME)", () => {
           hooks: { SessionStart: [{ hooks: [{ type: "command", command: buildSessionStartHookCommand("me") }] }] },
         }),
       );
-      expect(detectWiredFlairMcp(home)).toEqual({ wired: true, pinnedVersion: null });
+      expect(detectWiredFlairMcp(home)).toEqual({ wired: true, pinnedVersion: flairCliVersion() });
     });
   });
 
@@ -128,6 +133,47 @@ describe("detectWiredFlairMcp (reads actual config files under HOME)", () => {
     });
   });
 
+  test("stale hook pin does not shadow a refreshed client pin (flair#1143 / upgrade refresh)", () => {
+    // After `flair upgrade` the client MCP spec is re-pinned to latest, but
+    // the SessionStart hook is left alone until `flair hook install`. The
+    // hook used to be scanned first, so its stale pin kept flair-mcp marked
+    // outdated and the advertised client refresh could not clear it.
+    withTempHome((home) => {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(
+        join(home, ".claude", "settings.json"),
+        JSON.stringify({
+          hooks: {
+            SessionStart: [
+              {
+                hooks: [
+                  {
+                    type: "command",
+                    command: `sh -c 'out=$(FLAIR_AGENT_ID=me npx -y -p @tpsdev-ai/flair-mcp@0.40.0 flair-session-start 2>/dev/null) && printf %s "$out" || true'`,
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+      );
+      mkdirSync(join(home, ".gemini"), { recursive: true });
+      writeFileSync(
+        join(home, ".gemini", "settings.json"),
+        JSON.stringify({
+          mcpServers: {
+            flair: {
+              command: "npx",
+              args: ["-y", `@tpsdev-ai/flair-mcp@${LATEST}`],
+              env: { FLAIR_AGENT_ID: "me", FLAIR_URL: "http://127.0.0.1:9926" },
+            },
+          },
+        }),
+      );
+      expect(detectWiredFlairMcp(home)).toEqual({ wired: true, pinnedVersion: LATEST });
+    });
+  });
+
   test("hook present but NO global install => resolves to current, NOT missing (issue #1208 acceptance)", () => {
     withTempHome((home) => {
       mkdirSync(join(home, ".claude"), { recursive: true });
@@ -137,10 +183,15 @@ describe("detectWiredFlairMcp (reads actual config files under HOME)", () => {
           hooks: { SessionStart: [{ hooks: [{ type: "command", command: buildSessionStartHookCommand("me") }] }] },
         }),
       );
-      // globalProbe null (not globally installed) + hook present.
-      const finding = resolveFlairMcpFinding(null, LATEST, detectWiredFlairMcp(home));
+      // globalProbe null (not globally installed) + hook present. The hook
+      // now carries a pin (flair#1143); treat that pin as latest so this
+      // test still asserts "not missing", not "outdated vs a fixture tag".
+      const wiring = detectWiredFlairMcp(home);
+      expect(wiring.wired).toBe(true);
+      expect(wiring.pinnedVersion).toBe(flairCliVersion());
+      const finding = resolveFlairMcpFinding(null, wiring.pinnedVersion!, wiring);
       expect(finding.status).not.toBe("missing");
-      expect(finding).toEqual({ installed: LATEST, status: "current" });
+      expect(finding).toEqual({ installed: wiring.pinnedVersion, status: "current" });
     });
   });
 });

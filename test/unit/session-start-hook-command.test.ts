@@ -10,8 +10,10 @@ import {
   hookCommandIsSilenced,
   isFlairHookCommand,
   isHookCommandValueSafe,
+  isSessionStartHookInvocation,
   parseLegacySessionStartHookCommand,
 } from "../../src/doctor-client.ts";
+import { mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 
 /**
  * flair#1007 — the SessionStart hook must be SILENT when its `npx` invocation
@@ -138,6 +140,14 @@ describe("buildSessionStartHookCommand — shape", () => {
     expect(cmd).toContain(`FLAIR_AGENT_ID=${AGENT}`);
   });
 
+  it("pins the package to the running CLI version (flair#1143)", () => {
+    // Same mcpServerSpec() as `flair init` writes into client MCP configs —
+    // the hook is user-local wiring, not a public listing.
+    const cmd = buildSessionStartHookCommand(AGENT);
+    expect(cmd).toContain(`npx -y -p ${mcpServerSpec()} ${SESSION_START_HOOK_MARKER}`);
+    expect(isSessionStartHookInvocation(cmd)).toBe(true);
+  });
+
   it("includes FLAIR_URL only when one is given", () => {
     expect(buildSessionStartHookCommand(AGENT)).not.toContain("FLAIR_URL=");
     expect(buildSessionStartHookCommand(AGENT, "http://127.0.0.1:19926")).toContain("FLAIR_URL=http://127.0.0.1:19926");
@@ -151,6 +161,16 @@ describe("buildSessionStartHookCommand — shape", () => {
       expect(() => buildSessionStartHookCommand(bad)).toThrow();
     }
     expect(() => buildSessionStartHookCommand(AGENT, "http://x/'`id`")).toThrow();
+  });
+
+  it("isSessionStartHookInvocation accepts pinned and unpinned -p forms, rejects no -p", () => {
+    expect(isSessionStartHookInvocation(buildSessionStartHookCommand(AGENT))).toBe(true);
+    expect(isSessionStartHookInvocation(`npx -y -p @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`)).toBe(true);
+    expect(isSessionStartHookInvocation(`npx -y -p @tpsdev-ai/flair-mcp@0.33.0 ${SESSION_START_HOOK_MARKER}`)).toBe(true);
+    // pre-#1166: no -p, runs the shim
+    expect(isSessionStartHookInvocation(`npx -y @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`)).toBe(false);
+    expect(isSessionStartHookInvocation(`npx -y @tpsdev-ai/flair-mcp@0.33.0 ${SESSION_START_HOOK_MARKER}`)).toBe(false);
+    expect(isSessionStartHookInvocation("echo flair-session-start")).toBe(false);
   });
 
   it("is recognised as ours and as silenced; the legacy command is neither", () => {

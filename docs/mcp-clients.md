@@ -111,7 +111,7 @@ Or wire it by hand — add a `SessionStart` hook to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'out=$(FLAIR_AGENT_ID=me npx -y -p @tpsdev-ai/flair-mcp flair-session-start 2>/dev/null) && printf %s \"$out\" || true'"
+            "command": "sh -c 'out=$(FLAIR_AGENT_ID=me npx -y -p @tpsdev-ai/flair-mcp@<version> flair-session-start 2>/dev/null) && printf %s \"$out\" || true'"
           }
         ]
       }
@@ -120,12 +120,23 @@ Or wire it by hand — add a `SessionStart` hook to `~/.claude/settings.json`:
 }
 ```
 
-Swap `me` for your `FLAIR_AGENT_ID`. Unlike the MCP-server snippets above, this
-one is shown **unpinned**, because that is what `flair hook install` writes and
-what the tooling recognises: `flair hook status` matches the exact unpinned
-command, so a hand-pinned hook reports `wired: false` there (while `flair
-doctor` still sees it). Pinning this line is therefore not yet supported —
-prefer `flair hook install`.
+Swap `me` for your `FLAIR_AGENT_ID` and `<version>` for `flair --version`. This
+is the same pin `flair init` writes into client MCP configs (`mcpServerSpec()`,
+flair#907): a wired hook should not self-update to a freshly published
+`flair-mcp` any more than a wired MCP client should. `flair hook install`,
+`flair init`, and `flair doctor --fix` (when adding a missing hook) write that
+pin; re-run `flair hook install` to advance a stale or pre-#1143 unpinned hook
+to the running CLI's version.
+
+That is a different surface from public plugin `mcp.json` files, which stay
+**unpinned** on purpose (flair#1308) so directory listings that scrape them do
+not freeze on a shipped version. User-local wiring is pinned; catalog
+manifests are not.
+
+`flair hook status` recognises both the current pinned `-p` form and an older
+unpinned `-p` invocation as `correctShape`. The pre-#1166 form (no `-p`, which
+runs the MCP shim) is still flagged. Prefer `flair hook install` over
+hand-editing.
 
 The `sh -c ... || true` wrapper is not decoration. The invocation resolves a
 package binary through whatever Node runtime your shell exposes, and under a

@@ -32,7 +32,7 @@ import {
   type ClientId,
   type PiSettingsScan,
 } from "./install/clients.js";
-import { FLAIR_MCP_PACKAGE } from "./lib/mcp-spec.js";
+import { FLAIR_MCP_PACKAGE, mcpServerSpec } from "./lib/mcp-spec.js";
 
 // The exact substring `flair init` writes into CLAUDE.md (src/cli.ts, the
 // `init` action) and that the doctor check + fix both key off of.
@@ -54,9 +54,10 @@ export const SESSION_START_HOOK_MARKER = "flair-session-start";
 //
 // WHY THE INVOCATION IS WRAPPED
 // -----------------------------
-// The hook runs `npx -y -p @tpsdev-ai/flair-mcp flair-session-start`: it resolves
-// a package binary through whatever Node runtime the user's shell happens to
-// expose. Under a Node version manager, globally installed packages are
+// The hook runs `npx -y -p @tpsdev-ai/flair-mcp@<version> flair-session-start`
+// (same mcpServerSpec() pin as `flair init`'s user-local MCP client configs —
+// flair#1143). It resolves a package binary through whatever Node runtime the
+// user's shell happens to expose. Under a Node version manager, globally installed packages are
 // per-runtime-version, so a routine and entirely unrelated runtime upgrade
 // orphans that binary. The command then stops resolving and the harness
 // reports a hook error on EVERY session, indefinitely, in wording that names
@@ -137,8 +138,25 @@ export function buildSessionStartHookCommand(agentId: string, flairUrl?: string)
     );
   }
   const env = flairUrl ? `FLAIR_AGENT_ID=${agentId} FLAIR_URL=${flairUrl}` : `FLAIR_AGENT_ID=${agentId}`;
-  const invocation = `${env} npx -y -p @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`;
+  // Same pin as user-local MCP client configs (mcpServerSpec / flair#907).
+  // Public plugin mcp.json stays unpinned (flair#1308) — that is a scraped
+  // listing, not a machine we just wired.
+  const invocation = `${env} npx -y -p ${mcpServerSpec()} ${SESSION_START_HOOK_MARKER}`;
   return `sh -c 'out=$(${invocation} 2>/dev/null) && printf %s "$out" || true'`;
+}
+
+/**
+ * The `npx -y -p` invocation that runs `flair-session-start` — pinned
+ * (`@tpsdev-ai/flair-mcp@<ver>`) or the pre-#1143 unpinned form. Used by
+ * `flair hook status` so a freshly-pinned hook is not reported as
+ * hand-edited, and an older unpinned hook is not reported as broken.
+ * Rejects the pre-#1166 form (no `-p`), which runs the MCP shim.
+ */
+export const SESSION_START_HOOK_INVOCATION_RE =
+  /npx -y -p @tpsdev-ai\/flair-mcp(?:@[^\s"']+)? flair-session-start/;
+
+export function isSessionStartHookInvocation(command: string): boolean {
+  return typeof command === "string" && SESSION_START_HOOK_INVOCATION_RE.test(command);
 }
 
 /**
@@ -933,10 +951,9 @@ export function checkSessionStartHook(homeDir: string): SessionStartHookCheckRes
  * command. Returns the version when the spec is written
  * `@tpsdev-ai/flair-mcp@<ver>`; null for a bare/unpinned spec.
  *
- * The SessionStart hook is deliberately unpinned (`npx -y -p
- * @tpsdev-ai/flair-mcp`, buildSessionStartHookCommand above), so a hook
- * establishes that flair-mcp is wired but never carries a version — the pin
- * comes from the client MCP config.
+ * SessionStart hooks written since flair#1143 carry the same pin as a
+ * client MCP config (`mcpServerSpec()`). A pre-#1143 unpinned hook still
+ * establishes that flair-mcp is wired but contributes no version.
  */
 export function extractFlairMcpPin(text: string): string | null {
   if (typeof text !== "string") return null;
@@ -953,7 +970,13 @@ export function extractFlairMcpPin(text: string): string | null {
  * `wired` is true when a Flair SessionStart hook OR any known client's MCP
  * config references the flair-mcp package. `pinnedVersion` is the concrete
  * version pinned in that wiring, or null when the only wiring found is unpinned
- * (a bare npx spec / the SessionStart hook).
+ * (a bare npx spec / a pre-#1143 SessionStart hook).
+ *
+ * Client MCP pins win over the SessionStart hook pin. `flair upgrade`
+ * refreshes those client configs (#1135/#1324), not the hook; a stale hook
+ * pin must not shadow a just-refreshed client pin and keep flair-mcp marked
+ * outdated (flair#1143). The hook still establishes `wired` and contributes
+ * a pin only when no client config carries one.
  *
  * Iterates the SAME client registry (ALL_CLIENTS) and per-client config paths
  * (clientConfigPath) that wiring uses, so a client added to the registry is
@@ -979,15 +1002,17 @@ export function detectWiredFlairMcp(homeDir: string): FlairMcpWiring {
     }
   };
 
-  // 1. The SessionStart hook (claude-code). Establishes wiring; unpinned by design.
-  const hook = checkSessionStartHook(homeDir);
-  if (hook.present && isFlairHookCommand(hook.command ?? "")) note(hook.command);
-
-  // 2. Every known client's MCP config — a wired flair block carries the spec.
+  // 1. Every known client's MCP config — a wired flair block carries the spec.
+  //    Scanned first so a client pin wins (see module note above).
   for (const client of ALL_CLIENTS) {
     const configPath = withHome(homeDir, () => clientConfigPath(client.id));
     note(readTextFile(configPath));
   }
+
+  // 2. The SessionStart hook (claude-code). Establishes wiring; may carry a
+  //    pin, but never overrides a client pin already taken above.
+  const hook = checkSessionStartHook(homeDir);
+  if (hook.present && isFlairHookCommand(hook.command ?? "")) note(hook.command);
 
   return { wired, pinnedVersion };
 }

@@ -23,6 +23,7 @@ import {
   removeContinuityCaptureHooks,
   hookCommandIsSilenced,
 } from "../../src/doctor-client.ts";
+import { mcpServerSpec } from "../../src/lib/mcp-spec.ts";
 
 /**
  * flair#588 — `flair doctor` client-integration checks. Pure filesystem
@@ -323,6 +324,8 @@ describe("fixSessionStartHook", () => {
     const config = JSON.parse(readFileSync(res.path, "utf-8"));
     const commands = config.hooks.SessionStart.flatMap((g: any) => g.hooks.map((h: any) => h.command));
     expect(commands.some((c: string) => c.includes(SESSION_START_HOOK_MARKER) && c.includes("FLAIR_AGENT_ID=me"))).toBe(true);
+    // flair#1143: doctor --fix writes the same pin as flair init / hook install.
+    expect(commands.some((c: string) => c.includes(`npx -y -p ${mcpServerSpec()} ${SESSION_START_HOOK_MARKER}`))).toBe(true);
   });
 
   it("merge-safe: preserves other top-level keys and other hook types", () => {

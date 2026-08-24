@@ -64,6 +64,7 @@ import {
   computeContinuityHookRemoval,
   hookCommandIsSilenced,
   isHookCommandValueSafe,
+  isSessionStartHookInvocation,
   type ContinuityCaptureHookReport,
   type ContinuityHookEvent,
   type ContinuityMutationAction,
@@ -162,7 +163,7 @@ export interface HookStatusIdentityLine {
  *  Recovered values are shown. The installer-no-URL omit (flair#1325) is
  *  allowed ONLY when agentId was parsed — that is the real `flair init`
  *  shape (`FLAIR_AGENT_ID` set, `FLAIR_URL` omitted). correctShape alone
- *  is not enough: it is an npx-substring check and a wired correct-shape
+ *  is not enough: it is an npx-invocation check and a wired correct-shape
  *  command with no env assignments must still show the unknown lines,
  *  not a silent all-clear. */
 export function hookStatusIdentityLines(
@@ -495,10 +496,10 @@ export interface HookStatusResult {
   harness: Harness;
   path: string;
   wired: boolean;
-  /** True only when the matched hook entry is exactly the shape we write:
-   *  type "command", command containing the full expected invocation — not
-   *  just a loose marker substring match (a hand-edited/partial entry still
-   *  counts as `wired` for doctor-compat purposes but not `correctShape`). */
+  /** True only when the matched hook entry is the `npx -y -p` invocation
+   *  we write (pinned since flair#1143, or the older unpinned `-p` form) —
+   *  not just a loose marker substring match (a hand-edited/partial entry
+   *  still counts as `wired` for doctor-compat purposes but not `correctShape`). */
   correctShape: boolean;
   /** Does the wired command absorb its own failures, or would a command that
    *  stopped resolving print an error on every session start (flair#1007)? */
@@ -526,7 +527,7 @@ export function hookStatus(homeDir: string, harness: Harness): HookStatusResult 
 
   const hookEntry = config.hooks.SessionStart[existing.groupIndex].hooks[existing.hookIndex];
   const command: string = typeof hookEntry?.command === "string" ? hookEntry.command : "";
-  const correctShape = hookEntry?.type === "command" && command.includes(`npx -y -p @tpsdev-ai/flair-mcp ${SESSION_START_HOOK_MARKER}`);
+  const correctShape = hookEntry?.type === "command" && isSessionStartHookInvocation(command);
   const env = parseHookCommandEnv(command);
   return {
     harness, path, wired: true, correctShape,
