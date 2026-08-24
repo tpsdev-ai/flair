@@ -19,6 +19,7 @@
 
 import { Resource, databases } from "harper";
 import { isAdmin } from "./agent-auth.js";
+import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 
 export class MemoryMaintenance extends Resource {
   /** POST requires auth — either an agent acting on its own memories, or admin. */
@@ -75,6 +76,9 @@ export class MemoryMaintenance extends Resource {
           if (!dryRun) {
             try {
               await (databases as any).flair.Memory.delete(record.id);
+              // flair#1357 — ephemeral expiry removes the row from what the
+              // lexical leg may score.
+              noteMemoryDelete(record.id);
               stats.expired++;
             } catch {
               stats.errors++;
@@ -99,11 +103,16 @@ export class MemoryMaintenance extends Resource {
           if (ageDays > 30) {
             if (!dryRun) {
               try {
-                await (databases as any).flair.Memory.update(record.id, {
+                const archivedRow = {
                   ...record,
                   archived: true,
                   archivedAt: now.toISOString(),
-                });
+                };
+                await (databases as any).flair.Memory.update(record.id, archivedRow);
+                // flair#1357 — an `archived` flip changes what the retrieval
+                // conditions (`archived not_equal true`) admit, so the lexical
+                // index has to see it, not just content writes.
+                noteMemoryUpsert(archivedRow);
                 stats.archived++;
               } catch {
                 stats.errors++;

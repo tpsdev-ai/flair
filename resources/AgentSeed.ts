@@ -20,6 +20,7 @@
 import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
 import { reconcileAdminFields } from "./agent-admin.js";
+import { noteMemoryUpsert } from "./bm25-index-service.js";
 
 const DEFAULT_SOUL_KEYS = (agentId: string, displayName: string, role: string, now: string) => ({
   name: displayName,
@@ -132,6 +133,7 @@ export class AgentSeed extends Resource {
           archived: false,
         };
         await (databases as any).flair.Memory.put(record);
+        noteMemoryUpsert(record);
         memories.push(record);
       }
     } // end !hasOnboardingMemory

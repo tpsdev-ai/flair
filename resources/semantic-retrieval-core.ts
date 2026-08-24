@@ -59,6 +59,7 @@ import { cosineSimilarity } from "./dedup.js";
 import { compositeScore } from "./scoring.js";
 import { buildBM25, fuseRrfNormalized, SEM_LIMIT } from "./bm25.js";
 import { isAllowedBm25Candidate, type Condition } from "./bm25-filter.js";
+import { indexedBm25Ids } from "./bm25-index-service.js";
 
 // Convert HNSW cosine distance (1 - similarity) to similarity score.
 function distanceToSimilarity(distance: number): number {
@@ -260,21 +261,60 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       }
     }
 
-    // ── (b) BM25 candidate records over the SCOPED corpus ────────────────
-    const corpusQuery: any = conditions.length > 0
-      ? { conditions, select }
-      : { select };
-    const corpusResults = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(corpusQuery));
+    // ── (b) The BM25 lexical leg ─────────────────────────────────────────
+    //
+    // flair#1357. This used to be unconditional: fetch the WHOLE scoped corpus
+    // out of Harper, then `buildBM25()` it — per query. That made retrieval
+    // latency linear in store size (5.6s p50 at 60k rows, 28.7s at 180k). The
+    // lexical leg is now served from a persistent, incrementally-maintained
+    // index (resources/bm25-index.ts) whose contract is RANKING-IDENTICAL:
+    // same ids, same order, byte for byte. The legacy scan below is still the
+    // reference implementation AND the fallback — the index returns null for
+    // any query it cannot reproduce exactly, and for a query with no text
+    // there is no lexical leg to serve at all.
     const allowedById = new Map<string, any>();
-    const bm25Docs: { id: string; content?: string }[] = [];
-    for await (const record of corpusResults) {
-      // Defense-in-depth: re-check the SAME conditions[] + temporal filters
-      // in-process. Even if a Harper query change ever let an out-of-scope
-      // record through, it is dropped here BEFORE it can be BM25-scored/fused.
-      if (!isAllowedBm25Candidate(record, conditions as Condition[], { sinceDate, asOf })) continue;
-      if (!passesAllowed(record)) continue;
-      allowedById.set(record.id, record);
-      bm25Docs.push({ id: record.id, content: record.content });
+    let bm25Ids: string[] = [];
+    // Only the no-signal listing branch (d) still needs the full scoped
+    // corpus materialised; every other branch resolves records by id.
+    const needCorpusListing = !q && !qEmb;
+    let servedFromIndex = false;
+
+    if (q) {
+      const fromIndex = await indexedBm25Ids({
+        q: String(q),
+        conditions: conditions as Condition[],
+        timeFilters: { sinceDate, asOf },
+        isAllowed,
+        limit: SEM_LIMIT,
+        ctx,
+      });
+      if (fromIndex) {
+        bm25Ids = fromIndex;
+        servedFromIndex = true;
+      }
+    }
+
+    if (!servedFromIndex && (q || needCorpusListing)) {
+      // ── Legacy path: scoped corpus scan + per-query buildBM25() ──────────
+      const corpusQuery: any = conditions.length > 0
+        ? { conditions, select }
+        : { select };
+      const corpusResults = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(corpusQuery));
+      const bm25Docs: { id: string; content?: string }[] = [];
+      for await (const record of corpusResults) {
+        // Defense-in-depth: re-check the SAME conditions[] + temporal filters
+        // in-process. Even if a Harper query change ever let an out-of-scope
+        // record through, it is dropped here BEFORE it can be BM25-scored/fused.
+        if (!isAllowedBm25Candidate(record, conditions as Condition[], { sinceDate, asOf })) continue;
+        if (!passesAllowed(record)) continue;
+        allowedById.set(record.id, record);
+        bm25Docs.push({ id: record.id, content: record.content });
+      }
+      if (q) {
+        const bm25 = buildBM25(bm25Docs);
+        const ranked = bm25.rank(String(q));
+        bm25Ids = ranked.filter(r => r.score > 0).slice(0, SEM_LIMIT).map(r => r.id);
+      }
     }
 
     // Carry semantic candidates that survived their temporal gate into the
@@ -287,12 +327,37 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       }
     }
 
-    // ── (c) BM25 lexical ranking → top SEM_LIMIT (only when q present) ────
-    let bm25Ids: string[] = [];
-    if (q) {
-      const bm25 = buildBM25(bm25Docs);
-      const ranked = bm25.rank(String(q));
-      bm25Ids = ranked.filter(r => r.score > 0).slice(0, SEM_LIMIT).map(r => r.id);
+    // ── (b2) Resolve the index-served BM25 candidates ─────────────────────
+    // On the indexed path there is no corpus map to read from, so a BM25-only
+    // rescue is point-looked-up and projected down to `select`. The projection
+    // reproduces Harper's own `search({select})` shape exactly — the keys of
+    // `select` that the row actually carries, in `select` declaration order
+    // (measured; pinned by test/integration/bm25-index-scan-order-1357.test.ts).
+    //
+    // The freshly-read row is then re-checked against the SAME conditions[] +
+    // temporal filters + scope predicate before it is allowed into the fusion.
+    // The index already applied all three to its own copy of the row; this is
+    // the Sherlock gate applied to the row we are actually about to return, so
+    // a stale index entry can only ever REMOVE a candidate, never smuggle an
+    // out-of-scope record into the union.
+    if (servedFromIndex) {
+      const resolved: string[] = [];
+      for (const id of bm25Ids) {
+        if (allowedById.has(id)) { resolved.push(id); continue; }
+        const full = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(id));
+        if (!full) continue;
+        if (!isAllowedBm25Candidate(full, conditions as Condition[], { sinceDate, asOf })) continue;
+        if (!passesAllowed(full)) continue;
+        const projected: any = {};
+        for (const key of select) if (key in full) projected[key] = (full as any)[key];
+        allowedById.set(id, projected);
+        if (qEmb) {
+          const storedEmbedding = Array.isArray((full as any).embedding) ? (full as any).embedding : [];
+          semSimById.set(id, cosineSimilarity(qEmb, storedEmbedding));
+        }
+        resolved.push(id);
+      }
+      bm25Ids = resolved;
     }
 
     // ── (d) No retrieval signal at all → full scoped listing ────────────
