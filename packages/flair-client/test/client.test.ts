@@ -940,15 +940,20 @@ describe("privateKey config option", () => {
     resolveKeyPathSpy.mockRestore();
     loadPrivateKeySpy.mockRestore();
 
-    const resolveSpy = spyOn(authMod, "resolveKeyPath").mockImplementation(() => null);
+    const inspectSpy = spyOn(authMod, "inspectKeyLookup").mockImplementation(() => ({
+      agentId: "test",
+      home: "/tmp",
+      candidates: [],
+      resolvedPath: null,
+    }));
 
     const client = new FlairClient({ agentId: "test" });
     await client.health();
 
-    // resolveKeyPath SHOULD be called (no privateKey → file fallback)
-    expect(resolveSpy).toHaveBeenCalledTimes(1);
-    expect(resolveSpy).toHaveBeenCalledWith("test", undefined);
+    // inspectKeyLookup SHOULD be called (no privateKey → file fallback)
+    expect(inspectSpy).toHaveBeenCalledTimes(1);
+    expect(inspectSpy).toHaveBeenCalledWith("test", undefined);
 
-    resolveSpy.mockRestore();
+    inspectSpy.mockRestore();
   });
 });

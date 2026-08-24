@@ -10,7 +10,7 @@
 
 import type { KeyObject } from "node:crypto";
 import { createHash, createPrivateKey } from "node:crypto";
-import { loadPrivateKey, resolveKeyPath, signRequest } from "./auth.js";
+import { inspectKeyLookup, loadPrivateKey, signRequest, type KeyLookupState } from "./auth.js";
 import { readEnvOrUnset } from "./env-guard.js";
 import type {
   FlairClientConfig,
@@ -39,9 +39,10 @@ export class FlairClient {
   readonly claimedClient: string | undefined;
 
   private privateKey: KeyObject | null = null;
-  private keyResolved = false;
   private keyPath: string | undefined;
   private rawPrivateKey: string | KeyObject | undefined;
+  /** Last file-key lookup — attached to 401/403 so the error can name paths (flair#1271). */
+  private lastKeyLookup: KeyLookupState | undefined;
   private timeoutMs: number;
   private basicAuth: string | null = null;
 
@@ -71,8 +72,11 @@ export class FlairClient {
   }
 
   private resolveKey(): KeyObject | null {
-    if (this.keyResolved) return this.privateKey;
-    this.keyResolved = true;
+    // Cache a FOUND key only. A miss must be retried on the next request —
+    // flair#1271: `flair agent add` can write ~/.flair/keys/<id>.key after
+    // this client was constructed (or after an earlier probe), and a cached
+    // null left flair-mcp 401ing until FLAIR_KEY_PATH was set by hand.
+    if (this.privateKey) return this.privateKey;
     // In-memory key takes priority over file-based resolution.
     if (this.rawPrivateKey) {
       if (typeof this.rawPrivateKey === "string") {
@@ -80,14 +84,29 @@ export class FlairClient {
       } else {
         this.privateKey = this.rawPrivateKey;
       }
+      this.lastKeyLookup = {
+        agentId: this.agentId,
+        home: "",
+        candidates: [],
+        resolvedPath: "(in-memory)",
+        signed: true,
+        authMethod: "ed25519",
+      };
       return this.privateKey;
     }
-    const path = resolveKeyPath(this.agentId, this.keyPath);
-    if (path) {
+    // inspectKeyLookup calls os.homedir() at this moment — not a module-load
+    // snapshot, not cwd (flair#1271).
+    const lookup = inspectKeyLookup(this.agentId, this.keyPath);
+    if (lookup.resolvedPath) {
       // Key file exists — failure to parse is a hard error.
       // Silent fallback to unauthenticated would be a security risk.
-      this.privateKey = loadPrivateKey(path);
+      this.privateKey = loadPrivateKey(lookup.resolvedPath);
     }
+    this.lastKeyLookup = {
+      ...lookup,
+      signed: this.privateKey != null,
+      authMethod: this.privateKey ? "ed25519" : "none",
+    };
     return this.privateKey;
   }
 
@@ -99,6 +118,16 @@ export class FlairClient {
       headers["Authorization"] = signRequest(this.agentId, key, method, path);
     } else if (this.basicAuth) {
       headers["Authorization"] = this.basicAuth;
+      // Basic-only snapshot — do not spread a prior inspectKeyLookup result.
+      // A 401 here is about admin credentials, not key-file paths (review on #1390).
+      this.lastKeyLookup = {
+        agentId: this.agentId,
+        home: "",
+        candidates: [],
+        resolvedPath: null,
+        signed: false,
+        authMethod: "basic",
+      };
     }
     const res = await fetch(`${this.url}${path}`, {
       method,
@@ -108,7 +137,7 @@ export class FlairClient {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new FlairError(method, path, res.status, text.slice(0, 500));
+      throw new FlairError(method, path, res.status, text.slice(0, 500), this.lastKeyLookup);
     }
     const text = await res.text();
     return text ? JSON.parse(text) : ({} as T);
@@ -543,6 +572,8 @@ export class FlairError extends Error {
     public readonly path: string,
     public readonly status: number,
     public readonly body: string,
+    /** Key-file lookup at the request that failed — named on 401/403 (flair#1271). */
+    public readonly keyLookup?: KeyLookupState,
   ) {
     super(`Flair ${method} ${path} → ${status}: ${body}`);
     this.name = "FlairError";
