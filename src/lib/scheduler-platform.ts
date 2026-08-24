@@ -20,8 +20,8 @@
  * in `verifyFirstRun()`: success may not be claimed until the thing the
  * operator asked for has been observed to happen once.
  */
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { resolve, dirname, isAbsolute } from "node:path";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, realpathSync } from "node:fs";
+import { resolve, dirname, isAbsolute, basename } from "node:path";
 import { platform } from "node:os";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
@@ -195,6 +195,121 @@ export function resolveNodeBin(explicit?: string): string {
       "enable time — refusing to install a shim that would resolve `node` from the service manager's PATH " +
       "at run time. Install node (or put it on PATH for this shell) and re-run enable.",
   );
+}
+
+// ─── flair-bin capture (flair#1279) ─────────────────────────────────────────
+// FLAIR_BIN is still captured at enable time and baked into the shim — #1231
+// forbids a run-time PATH lookup of either node or flair. The hazard that
+// remains is WHAT gets captured: `process.argv[1]` is whatever launched
+// enable, so `node dist/cli.js` during a debug session (or a versioned
+// blue/green tree) becomes the unit's permanent exec target and silently
+// strands it when that path goes away.
+//
+// This module does not rewrite the shim and does not substitute a different
+// binary. It (1) resolves a relative capture to an absolute path so the
+// service manager's cwd cannot reinterpret it, and (2) tells enable to warn
+// when the baked path is not the stable public `flair` entry. Fleet tar-swap
+// deploys that run `node ~/agents/flair/dist/cli.js` keep working; they just
+// hear about the swap risk instead of discovering it after the unit dies.
+
+export interface FlairBinResolution {
+  /** Absolute path baked into the shim as FLAIR_BIN. */
+  path: string;
+  /**
+   * True when `path` is the stable public entry: a file named `flair`, or
+   * the same file as `command -v flair`. Everything else (a working-tree
+   * `dist/cli.js`, a versioned install root) is a capture of the enabling
+   * process, not a public entry.
+   */
+  canonical: boolean;
+  /** Absolute `command -v flair` when one was found; null otherwise. */
+  publicBin: string | null;
+}
+
+export interface ResolveFlairBinHooks {
+  /** Test override for `process.argv[1]` when no explicit path is passed. */
+  argv1?: string;
+  /**
+   * Test override for the public `flair` lookup. `undefined` means "do the
+   * real `command -v flair`"; `null` means "there is no public entry".
+   */
+  publicBin?: string | null;
+}
+
+/**
+ * Resolves the path enable will bake as FLAIR_BIN, and whether that path is
+ * the stable public `flair` entry (flair#1279).
+ *
+ * Resolution order:
+ *   1. `explicit` — caller/test override. Relatives are resolved against cwd.
+ *   2. `hooks.argv1` / `process.argv[1]` — whatever launched enable.
+ *   3. The public `flair` on PATH, only when (1) and (2) are empty.
+ * Nothing absolute resolvable ⇒ throw. A bare `"flair"` is not an exec
+ * target under #1231's `exec <node> <script>` form (`node flair` looks in
+ * cwd, not PATH).
+ */
+export function resolveFlairBin(explicit?: string, hooks?: ResolveFlairBinHooks): FlairBinResolution {
+  const publicBin = hooks && "publicBin" in hooks ? (hooks.publicBin ?? null) : lookupPublicFlairBin();
+  const captured = explicit ?? hooks?.argv1 ?? process.argv[1];
+
+  let path: string;
+  if (typeof captured === "string" && captured.length > 0) {
+    path = isAbsolute(captured) ? captured : resolve(captured);
+  } else if (publicBin) {
+    path = publicBin;
+  } else {
+    throw new Error(
+      "unable to resolve an absolute path to the flair CLI (process.argv[1] was empty and `command -v flair` " +
+        "found nothing). The scheduler shim bakes this path in at enable time — refusing to install a shim " +
+        "whose exec target is unknown. Re-run enable via the `flair` command.",
+    );
+  }
+
+  return { path, publicBin, canonical: isCanonicalFlairBin(path, publicBin) };
+}
+
+/** True when `baked` is the public `flair` entry, not a working-tree capture. */
+export function isCanonicalFlairBin(baked: string, publicBin: string | null): boolean {
+  if (basename(baked) === "flair") return true;
+  if (publicBin && pathsReferToSameFile(baked, publicBin)) return true;
+  return false;
+}
+
+/**
+ * The enable-report lines for a non-canonical FLAIR_BIN. Empty when the
+ * baked path is the public entry — callers should not print a warning then.
+ */
+export function formatFlairBinWarning(baked: string, publicBin: string | null, enableCommand: string): string[] {
+  if (isCanonicalFlairBin(baked, publicBin)) return [];
+  const lines = [
+    `⚠️  FLAIR_BIN is ${baked} — that is the process that ran enable, not a stable public entry.`,
+    `   A later blue/green directory swap, or deleting this working tree, will strand the scheduler unit.`,
+  ];
+  if (publicBin) {
+    lines.push(
+      `   Public \`flair\` on PATH: ${publicBin}. Re-run \`${enableCommand}\` as the \`flair\` command to bake that path instead.`,
+    );
+  } else {
+    lines.push(
+      `   No \`flair\` on PATH. Re-run \`${enableCommand}\` via the installed \`flair\` command (or a stable symlink) so the baked path survives a tree swap.`,
+    );
+  }
+  return lines;
+}
+
+function lookupPublicFlairBin(): string | null {
+  const r = spawnReport(["/bin/sh", "-c", "command -v flair"], STATUS_CHECK_TIMEOUT_MS);
+  const found = r.stdout.trim().split("\n")[0]?.trim() ?? "";
+  if (r.code === 0 && found && isAbsolute(found) && existsSync(found)) return found;
+  return null;
+}
+
+function pathsReferToSameFile(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return resolve(a) === resolve(b);
+  }
 }
 
 // ─── first-run verification (flair#1231) ────────────────────────────────────

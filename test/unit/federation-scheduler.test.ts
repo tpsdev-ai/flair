@@ -778,6 +778,75 @@ describe("formatEnableReport (flair#1231 — no success headline before the FIRS
     expect(r.firstRunVerified).toBe(false);
     expect(r.firstRun).toBeUndefined();
   });
+
+  it("#1279: a working-tree FLAIR_BIN does not flip ok, but the warning is on the success report", () => {
+    const { lines, ok } = formatEnableReport(
+      result({
+        loadResult: { code: 0, stdout: "", stderr: "" },
+        firstRunVerified: true,
+        firstRun: firstRun({ verified: true, outcome: "success", exitCode: 0 }),
+        flairBin: "/home/me/flair/dist/cli.js",
+        flairBinCanonical: false,
+        flairBinPublic: "/usr/local/bin/flair",
+      }),
+      {},
+    );
+    const text = lines.join("\n");
+    expect(ok).toBe(true);
+    expect(text).toContain("✅ Federation sync driver enabled");
+    expect(text).toContain("FLAIR_BIN is /home/me/flair/dist/cli.js");
+    expect(text).toContain("not a stable public entry");
+    expect(text).toContain("flair federation sync enable");
+    expect(text).not.toContain("rem nightly");
+  });
+
+  it("#1279: a canonical FLAIR_BIN produces no warning", () => {
+    const { lines } = formatEnableReport(
+      result({
+        loadResult: { code: 0, stdout: "", stderr: "" },
+        firstRunVerified: true,
+        firstRun: firstRun({ verified: true, outcome: "success", exitCode: 0 }),
+        flairBin: "/usr/local/bin/flair",
+        flairBinCanonical: true,
+      }),
+      {},
+    );
+    expect(lines.join("\n")).not.toContain("FLAIR_BIN is");
+  });
+});
+
+describe("enableScheduler — FLAIR_BIN capture (flair#1279)", () => {
+  it("a public `flair` path is canonical and is what the shim execs under node", () => {
+    const r = enableScheduler(baseOpts({ platformOverride: "linux", flairBin: "/usr/local/bin/flair" }));
+    expect(r.flairBin).toBe("/usr/local/bin/flair");
+    expect(r.flairBinCanonical).toBe(true);
+    const shim = readFileSync(shimPath, "utf-8");
+    expect(shim).toContain(`exec "/usr/local/bin/node" "/usr/local/bin/flair" federation sync`);
+    expect(shim).not.toMatch(/exec\s+node\b/);
+  });
+
+  it("a working-tree dist/cli.js is baked as-is (not substituted) and marked not canonical", () => {
+    const tree = join(testRoot, "checkout", "dist", "cli.js");
+    const r = enableScheduler(baseOpts({ platformOverride: "linux", flairBin: tree }));
+    expect(r.flairBin).toBe(tree);
+    expect(r.flairBinCanonical).toBe(false);
+    const shim = readFileSync(shimPath, "utf-8");
+    // Still #1231's exec-node form — the baked path is the script, not a PATH lookup.
+    expect(shim).toContain(`exec "/usr/local/bin/node" "${tree}" federation sync`);
+    expect(shim).not.toMatch(/command -v flair/);
+  });
+
+  it("a relative capture is resolved to an absolute path before it is baked", () => {
+    const r = enableScheduler(baseOpts({ platformOverride: "darwin", flairBin: "dist/cli.js" }));
+    const baked = r.flairBin;
+    if (baked === undefined) throw new Error("enableScheduler must set flairBin");
+    expect(baked).toBe(resolve("dist/cli.js"));
+    expect(baked.startsWith("/")).toBe(true);
+    expect(r.flairBinCanonical).toBe(false);
+    const shim = readFileSync(shimPath, "utf-8");
+    expect(shim).toContain(`exec "/usr/local/bin/node" "${resolve("dist/cli.js")}" federation sync`);
+    expect(shim).not.toContain(`exec "/usr/local/bin/node" "dist/cli.js"`);
+  });
 });
 
 describe("formatStatusReport", () => {
