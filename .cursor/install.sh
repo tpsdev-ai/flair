@@ -24,10 +24,16 @@ BUN_VERSION="1.3.10"                               # package.json "packageManage
 # sha256 of bun-linux-x64.zip @ bun-v1.3.10, from the release's SHASUMS256.txt.
 BUN_SHA256="f57bc0187e39623de716ba3a389fda5486b2d7be7131a980ba54dc7b733d2e08"
 NODE_FALLBACK_VERSION="v22.23.2"                   # only used if no compatible node exists
+# sha256 of node-<ver>-linux-x64.tar.xz @ NODE_FALLBACK_VERSION, from nodejs.org SHASUMS256.txt.
+NODE_FALLBACK_SHA256="d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307"
 MODEL_FILE="nomic-embed-text-v1.5.Q4_K_M.gguf"     # the default embedding model
 
 export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
 export PATH="$BUN_INSTALL/bin:$PATH"               # bun's bin dir, front of PATH
+# Ensure the front-of-PATH bin dir exists before anything writes into it — both
+# the Bun install and the Node symlink below target it, and the Node pin runs
+# even when Bun is already present (its install branch is then skipped).
+mkdir -p "$BUN_INSTALL/bin"
 
 # ── 1. Bun (pinned + sha256-verified official release archive) ───────────────
 # Installed from the pinned release zip rather than `curl | bash`: deterministic,
@@ -40,7 +46,6 @@ if ! command -v bun >/dev/null 2>&1 || [ "$(bun --version 2>/dev/null || true)" 
     -o "$bun_tmp/bun.zip"
   echo "${BUN_SHA256}  ${bun_tmp}/bun.zip" | sha256sum -c -
   unzip -q "$bun_tmp/bun.zip" -d "$bun_tmp"
-  mkdir -p "$BUN_INSTALL/bin"
   install -m 0755 "$bun_tmp/bun-linux-x64/bun" "$BUN_INSTALL/bin/bun"
   ln -sf "$BUN_INSTALL/bin/bun" "$BUN_INSTALL/bin/bunx"
   rm -rf "$bun_tmp"
@@ -63,12 +68,31 @@ if ! node_is_compatible "$(command -v node || echo /nonexistent)"; then
     if node_is_compatible "$cand"; then COMPAT_NODE="$cand"; break; fi
   done
   if [ -z "$COMPAT_NODE" ]; then
-    echo "No compatible Node found — downloading Node ${NODE_FALLBACK_VERSION}..."
     NODE_DIR="$HOME/.local/node-${NODE_FALLBACK_VERSION}"
-    if [ ! -x "$NODE_DIR/bin/node" ]; then
-      mkdir -p "$NODE_DIR"
-      curl -fsSL "https://nodejs.org/dist/${NODE_FALLBACK_VERSION}/node-${NODE_FALLBACK_VERSION}-linux-x64.tar.xz" \
-        | tar -xJ -C "$NODE_DIR" --strip-components=1
+    # Reuse the cache only if it holds a genuinely compatible node — never trust a
+    # bare `[ -x bin/node ]`, which would pin a partial/corrupt tree from an
+    # interrupted earlier run. Otherwise download to a temp dir, checksum-gate the
+    # tarball, extract there, and promote to the cache ONLY after the extracted
+    # binary passes node_is_compatible; wipe the temp dir on any failure.
+    if ! { [ -x "$NODE_DIR/bin/node" ] && node_is_compatible "$NODE_DIR/bin/node"; }; then
+      echo "No compatible Node found — downloading Node ${NODE_FALLBACK_VERSION}..."
+      rm -rf "$NODE_DIR"
+      node_tmp="$(mktemp -d)"
+      curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+        "https://nodejs.org/dist/${NODE_FALLBACK_VERSION}/node-${NODE_FALLBACK_VERSION}-linux-x64.tar.xz" \
+        -o "$node_tmp/node.tar.xz"
+      echo "${NODE_FALLBACK_SHA256}  ${node_tmp}/node.tar.xz" | sha256sum -c -
+      mkdir -p "$node_tmp/extract"
+      tar -xJf "$node_tmp/node.tar.xz" -C "$node_tmp/extract" --strip-components=1
+      if node_is_compatible "$node_tmp/extract/bin/node"; then
+        mkdir -p "$(dirname "$NODE_DIR")"
+        mv "$node_tmp/extract" "$NODE_DIR"
+      else
+        rm -rf "$node_tmp"
+        echo "error: downloaded Node ${NODE_FALLBACK_VERSION} is not Harper-compatible" >&2
+        exit 1
+      fi
+      rm -rf "$node_tmp"
     fi
     COMPAT_NODE="$NODE_DIR/bin/node"
   fi
