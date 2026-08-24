@@ -96,10 +96,10 @@ flair hook status                # wired? correct shape? which agent/instance?
 flair hook uninstall             # removes only Flair's hook entry
 ```
 
-`--harness claude-code` is the only supported value today (it's also the
-default) — the flag exists so a future harness is an additive registry entry,
-not a breaking change. `flair doctor` already checks for this same hook (see
-below) and recognizes anything `flair hook install` writes.
+`--harness` defaults to `claude-code`. `codex` is also supported (writes
+`~/.codex/hooks.json` — see the Codex section below). `flair doctor` checks
+the same hook for each detected harness and recognizes anything
+`flair hook install` writes.
 
 Or wire it by hand — add a `SessionStart` hook to `~/.claude/settings.json`:
 
@@ -218,6 +218,46 @@ FLAIR_AGENT_ID = "my-project"
 For project-scoped trust (per Codex's MCP guide), the same block in `.codex/config.toml` at the project root.
 
 Restart your Codex CLI session and the `flair_*` tools become available to the agent.
+
+#### Auto-recall on session start (optional hook)
+
+Wiring the MCP server alone does not load memory at session start — Codex
+then has pull tools it never thinks to call. The same `flair-session-start`
+command Claude Code uses writes Codex's SessionStart hook (same JSON schema,
+into `~/.codex/hooks.json`):
+
+```bash
+flair hook install --harness codex
+flair hook status --harness codex
+flair hook uninstall --harness codex
+```
+
+`flair doctor` reports this hook when Codex is detected. After install, trust
+the new command in Codex with `/hooks` — untrusted hooks are listed and
+skipped.
+
+---
+
+## Hookless harnesses (Gemini, Cursor, and anything without SessionStart)
+
+Some clients have no session-start hook Flair can write. Wiring the MCP
+server is necessary but not sufficient — the model still has to choose to
+call `bootstrap`. Add a short instruction block to the file that client
+already loads (`AGENTS.md`, `GEMINI.md`, or the equivalent):
+
+```markdown
+## Flair memory
+
+At the start of every session, call the Flair `bootstrap` tool before
+responding. Before a deep-dive, `memory_search` for related prior work.
+At wrap, `memory_store` durable lessons.
+```
+
+Without that, a config that looks wired is the known failure shape
+([#989](https://github.com/tpsdev-ai/flair/issues/989),
+[#908](https://github.com/tpsdev-ai/flair/issues/908)): tools exist, memory
+never enters the working set. Use `flair hook install` when the client has
+a SessionStart hook; use this static block when it does not.
 
 ---
 

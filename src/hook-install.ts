@@ -72,10 +72,11 @@ import {
 
 // ── harness registry ────────────────────────────────────────────────────────
 
-/** v1 supports exactly one harness. The flag/type exist so a second harness
- *  is an additive registry entry, not a rewrite (Kern's #719 verdict: "a
- *  switch statement... is fine until we have 3+ harnesses"). */
-export const SUPPORTED_HARNESSES = ["claude-code"] as const;
+/** SessionStart hook harnesses. A second harness is an additive registry
+ *  entry, not a rewrite (Kern's #719 verdict: "a switch statement... is
+ *  fine until we have 3+ harnesses"). Codex writes the same JSON hook
+ *  schema Claude Code uses, into `~/.codex/hooks.json` (flair#1148). */
+export const SUPPORTED_HARNESSES = ["claude-code", "codex"] as const;
 export type Harness = (typeof SUPPORTED_HARNESSES)[number];
 
 export function isSupportedHarness(value: string): value is Harness {
@@ -89,6 +90,8 @@ export function hookSettingsPath(homeDir: string, harness: Harness): string {
   switch (harness) {
     case "claude-code":
       return join(homeDir, ".claude", "settings.json");
+    case "codex":
+      return join(homeDir, ".codex", "hooks.json");
   }
 }
 
@@ -702,10 +705,5 @@ export function uninstallContinuityHooks(opts: UninstallHookOptions): Continuity
 /** Read-only continuity status for `flair hook status` — the same report
  *  doctor's check consumes, resolved through the harness's settings path. */
 export function continuityHookStatus(homeDir: string, harness: Harness): ContinuityCaptureHookReport {
-  // hookSettingsPath and checkContinuityCaptureHooks both resolve
-  // ~/.claude/settings.json from homeDir; asserting through the harness
-  // registry keeps a future second harness from silently reading the wrong
-  // file.
-  void hookSettingsPath(homeDir, harness);
-  return checkContinuityCaptureHooks(homeDir);
+  return checkContinuityCaptureHooks(homeDir, hookSettingsPath(homeDir, harness));
 }

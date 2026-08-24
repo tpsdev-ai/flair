@@ -69,6 +69,12 @@ describe("harness registry", () => {
     expect(SUPPORTED_HARNESSES).toContain("claude-code");
   });
 
+  it("codex is supported (flair#1148) and writes ~/.codex/hooks.json", () => {
+    expect(isSupportedHarness("codex")).toBe(true);
+    expect(SUPPORTED_HARNESSES).toContain("codex");
+    expect(hookSettingsPath(isoHome, "codex")).toBe(join(isoHome, ".codex", "hooks.json"));
+  });
+
   it("an unknown harness is rejected", () => {
     expect(isSupportedHarness("cursor")).toBe(false);
     expect(isSupportedHarness("gemini")).toBe(false);
@@ -523,6 +529,64 @@ describe("hookStatus", () => {
       { label: "Agent", value: HOOK_STATUS_UNPARSED },
       { label: "Flair URL", value: HOOK_STATUS_UNPARSED },
     ]);
+  });
+});
+
+describe("codex harness — installer + doctor output (flair#1148)", () => {
+  it("fresh install creates ~/.codex/hooks.json and reports the add", () => {
+    const result = installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    expect(result.ok).toBe(true);
+    expect(result.delta?.action).toBe("add");
+    expect(result.message).toContain(join(isoHome, ".codex", "hooks.json"));
+    expect(result.message).toMatch(/added the SessionStart hook/);
+
+    const path = hookSettingsPath(isoHome, "codex");
+    expect(existsSync(path)).toBe(true);
+    expect(existsSync(join(isoHome, ".claude"))).toBe(false); // never touches Claude Code
+    const config = JSON.parse(readFileSync(path, "utf-8"));
+    const commands = config.hooks.SessionStart.flatMap((g: any) => g.hooks.map((h: any) => h.command));
+    expect(commands.some((c: string) => c.includes(SESSION_START_HOOK_MARKER) && c.includes(`FLAIR_AGENT_ID=${AGENT}`) && c.includes(`FLAIR_URL=${URL}`))).toBe(true);
+  });
+
+  it("status recovers agent/url and doctor sees the Codex path as present", () => {
+    installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    const status = hookStatus(isoHome, "codex");
+    expect(status.harness).toBe("codex");
+    expect(status.path).toBe(join(isoHome, ".codex", "hooks.json"));
+    expect(status.wired).toBe(true);
+    expect(status.correctShape).toBe(true);
+    expect(status.agentId).toBe(AGENT);
+    expect(status.flairUrl).toBe(URL);
+
+    const doctorView = checkSessionStartHook(isoHome, status.path);
+    expect(doctorView.present).toBe(true);
+    expect(doctorView.path).toBe(status.path);
+    expect(doctorView.command).toContain(SESSION_START_HOOK_MARKER);
+
+    // Default doctor check stays Claude-Code-scoped — a Codex-only install
+    // must not look like a Claude Code hook.
+    expect(checkSessionStartHook(isoHome).present).toBe(false);
+  });
+
+  it("uninstall removes only the Codex hook file entry and doctor then reports absent", () => {
+    installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    const result = uninstallHook({ homeDir: isoHome, harness: "codex" });
+    expect(result.ok).toBe(true);
+    expect(result.message).toMatch(/removed the Flair SessionStart hook/);
+    expect(result.message).toContain(join(isoHome, ".codex", "hooks.json"));
+
+    const status = hookStatus(isoHome, "codex");
+    expect(status.wired).toBe(false);
+    expect(checkSessionStartHook(isoHome, hookSettingsPath(isoHome, "codex")).present).toBe(false);
+  });
+
+  it("a Codex install does not satisfy a Claude Code status check (and vice versa)", () => {
+    installHook({ homeDir: isoHome, harness: "codex", agentId: AGENT, flairUrl: URL });
+    expect(hookStatus(isoHome, "claude-code").wired).toBe(false);
+    installHook({ homeDir: isoHome, harness: "claude-code", agentId: AGENT, flairUrl: URL });
+    expect(hookStatus(isoHome, "claude-code").wired).toBe(true);
+    expect(hookStatus(isoHome, "codex").wired).toBe(true);
+    expect(hookSettingsPath(isoHome, "claude-code")).not.toBe(hookSettingsPath(isoHome, "codex"));
   });
 });
 

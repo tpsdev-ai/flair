@@ -129,6 +129,37 @@ describe("classifyHookProbe", () => {
   });
 });
 
+describe("inspectSessionStartHook — Codex hooks.json (flair#1148)", () => {
+  it("absent report names ~/.codex/hooks.json so doctor output is harness-specific", () => {
+    const path = join(isoHome, ".codex", "hooks.json");
+    const res = inspectSessionStartHook(isoHome, { settingsPath: path, probe: false });
+    expect(res.present).toBe(false);
+    expect(res.path).toBe(path);
+    expect(res.execution).toBeNull();
+  });
+
+  it("reads a Codex install and reports wired + ours on that path", () => {
+    const path = join(isoHome, ".codex", "hooks.json");
+    mkdirSync(join(isoHome, ".codex"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: "command", command: buildSessionStartHookCommand("codexbot") }] }] },
+      }),
+    );
+    const res = inspectSessionStartHook(isoHome, {
+      settingsPath: path,
+      probe: () => ({ exitCode: 0, stdout: "{}", stderr: "", timedOut: false, spawnError: null }),
+    });
+    expect(res.present).toBe(true);
+    expect(res.ours).toBe(true);
+    expect(res.silenced).toBe(true);
+    expect(res.path).toBe(path);
+    expect(res.execution).toBe("runs");
+    expect(inspectSessionStartHook(isoHome, { probe: false }).present).toBe(false);
+  });
+});
+
 describe("inspectSessionStartHook (injected probe)", () => {
   const brokenRunner = () => outcome({ exitCode: 127, stderr: "sh: npx: command not found" });
   const workingRunner = () => outcome({ exitCode: 0, stdout: "{}" });

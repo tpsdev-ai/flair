@@ -77,7 +77,7 @@ export const SESSION_START_HOOK_MARKER = "flair-session-start";
 // spawns with `shell: true` and never consults $SHELL (verified against the
 // 2.1.220 bundle; the settings schema's claim that `"shell": "bash"` uses your
 // $SHELL is not what the code does on POSIX). So a bare POSIX fragment would
-// in fact be enough for the one harness we support today.
+// in fact be enough for the JSON-command harnesses we support today.
 //
 // It is still wrapped, because this string is not private to that harness:
 // SUPPORTED_HARNESSES (src/hook-install.ts) is a registry meant to grow, and
@@ -334,8 +334,8 @@ function continuityEventReport(config: any, event: ContinuityHookEvent): Continu
  * pure fs read, no probe. A missing or unparseable settings.json reads as
  * "absent" (not enabled), matching checkSessionStartHook's tolerance.
  */
-export function checkContinuityCaptureHooks(homeDir: string): ContinuityCaptureHookReport {
-  const path = join(homeDir, ".claude", "settings.json");
+export function checkContinuityCaptureHooks(homeDir: string, settingsPath?: string): ContinuityCaptureHookReport {
+  const path = settingsPath ?? join(homeDir, ".claude", "settings.json");
   let config: any = {};
   const raw = readTextFile(path);
   if (raw && raw.trim()) {
@@ -897,7 +897,7 @@ export function fixClaudeMdBootstrap(cwd: string): { ok: boolean; path: string; 
   }
 }
 
-// ── check 4: settings.json SessionStart hook (claude-code only) ────────────
+// ── check 4: SessionStart hook (claude-code settings.json; Codex hooks.json)
 
 export interface SessionStartHookCheckResult {
   present: boolean;
@@ -909,12 +909,14 @@ export interface SessionStartHookCheckResult {
 }
 
 /**
- * Pass when ~/.claude/settings.json exists, parses as JSON, and ANY hook
+ * Pass when the harness settings file exists, parses as JSON, and ANY hook
  * command anywhere under hooks.SessionStart[*].hooks[*].command contains the
  * flair-session-start marker (see docs/mcp-clients.md for the exact shape).
+ * `settingsPath` defaults to ~/.claude/settings.json; pass the Codex
+ * `~/.codex/hooks.json` path (or any other hookSettingsPath) for that harness.
  */
-export function checkSessionStartHook(homeDir: string): SessionStartHookCheckResult {
-  const path = join(homeDir, ".claude", "settings.json");
+export function checkSessionStartHook(homeDir: string, settingsPath?: string): SessionStartHookCheckResult {
+  const path = settingsPath ?? join(homeDir, ".claude", "settings.json");
   const raw = readTextFile(path);
   if (!raw || !raw.trim()) return { present: false, path };
   try {
@@ -1009,24 +1011,34 @@ export function detectWiredFlairMcp(homeDir: string): FlairMcpWiring {
     note(readTextFile(configPath));
   }
 
-  // 2. The SessionStart hook (claude-code). Establishes wiring; may carry a
-  //    pin, but never overrides a client pin already taken above.
-  const hook = checkSessionStartHook(homeDir);
-  if (hook.present && isFlairHookCommand(hook.command ?? "")) note(hook.command);
+  // 2. SessionStart hooks (claude-code settings.json + Codex hooks.json).
+  //    Establish wiring; may carry a pin, but NEVER override a client pin
+  //    already taken above — `note()` only sets pinnedVersion when it is still
+  //    unset, so THIS ORDERING IS THE PRECEDENCE RULE, not decoration. The
+  //    Codex path is additive (flair#1148); it must not reorder these two steps.
+  //    Paths match hookSettingsPath in src/hook-install.ts — listed here to
+  //    avoid a cycle (hook-install already imports this module).
+  for (const hookPath of [
+    join(homeDir, ".claude", "settings.json"),
+    join(homeDir, ".codex", "hooks.json"),
+  ]) {
+    const hook = checkSessionStartHook(homeDir, hookPath);
+    if (hook.present && isFlairHookCommand(hook.command ?? "")) note(hook.command);
+  }
 
   return { wired, pinnedVersion };
 }
 
 /**
- * Merge-safe insert of a Flair SessionStart hook group into
- * ~/.claude/settings.json — creates the file/array if absent, preserves any
- * other existing hooks/keys (read-parse-merge-write, mirroring wireJsonMcp's
- * merge safety in src/install/clients.ts; never a blind overwrite). Dedupes:
- * a no-op (ok:true) if a matching hook is already present, so it's safe to
- * call twice.
+ * Merge-safe insert of a Flair SessionStart hook group into the harness
+ * settings file (default ~/.claude/settings.json) — creates the file/array
+ * if absent, preserves any other existing hooks/keys (read-parse-merge-write,
+ * mirroring wireJsonMcp's merge safety in src/install/clients.ts; never a
+ * blind overwrite). Dedupes: a no-op (ok:true) if a matching hook is already
+ * present, so it's safe to call twice.
  */
-export function fixSessionStartHook(homeDir: string, agentId: string | undefined): { ok: boolean; path: string; message: string } {
-  const path = join(homeDir, ".claude", "settings.json");
+export function fixSessionStartHook(homeDir: string, agentId: string | undefined, settingsPath?: string): { ok: boolean; path: string; message: string } {
+  const path = settingsPath ?? join(homeDir, ".claude", "settings.json");
   if (!agentId) {
     return {
       ok: false,
@@ -1235,9 +1247,9 @@ export interface SessionStartHookCommandReport {
  */
 export function inspectSessionStartHook(
   homeDir: string,
-  opts: { probe?: HookProbeRunner | false; timeoutMs?: number } = {},
+  opts: { probe?: HookProbeRunner | false; timeoutMs?: number; settingsPath?: string } = {},
 ): SessionStartHookCommandReport {
-  const found = checkSessionStartHook(homeDir);
+  const found = checkSessionStartHook(homeDir, opts.settingsPath);
   if (!found.present || !found.command) {
     return { path: found.path, present: false, ours: false, silenced: false, upgradable: false, execution: null };
   }
@@ -1301,8 +1313,8 @@ export function classifyHookReadiness(report: SessionStartHookCommandReport): Ho
  * decision to un-wire ambient memory, and `flair hook uninstall` is the
  * command for that when the user does decide.
  */
-export function upgradeSessionStartHookCommand(homeDir: string): { ok: boolean; path: string; message: string; changed: boolean } {
-  const path = join(homeDir, ".claude", "settings.json");
+export function upgradeSessionStartHookCommand(homeDir: string, settingsPath?: string): { ok: boolean; path: string; message: string; changed: boolean } {
+  const path = settingsPath ?? join(homeDir, ".claude", "settings.json");
   try {
     const raw = readTextFile(path);
     if (!raw || !raw.trim()) return { ok: false, path, changed: false, message: `no ${path} to update` };

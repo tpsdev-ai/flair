@@ -114,6 +114,19 @@ describe("detectWiredFlairMcp (reads actual config files under HOME)", () => {
     });
   });
 
+  test("Codex SessionStart hook in ~/.codex/hooks.json => wired, pin extracted (flair#1148)", () => {
+    withTempHome((home) => {
+      mkdirSync(join(home, ".codex"), { recursive: true });
+      writeFileSync(
+        join(home, ".codex", "hooks.json"),
+        JSON.stringify({
+          hooks: { SessionStart: [{ hooks: [{ type: "command", command: buildSessionStartHookCommand("codexbot") }] }] },
+        }),
+      );
+      expect(detectWiredFlairMcp(home)).toEqual({ wired: true, pinnedVersion: flairCliVersion() });
+    });
+  });
+
   test("client MCP config with a pinned flair server => wired, pin extracted", () => {
     withTempHome((home) => {
       mkdirSync(join(home, ".gemini"), { recursive: true });
