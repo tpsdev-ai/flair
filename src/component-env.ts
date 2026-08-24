@@ -263,8 +263,14 @@ export function planComponentEnv(
  * A `.env` there is not a durable location: it does not exist on a stock npm
  * install and `npm upgrade` / `flair upgrade` wipes the package directory
  * (flair#1313). Doctor and deploy must never name that path as the fix.
+ *
+ * Heuristic, not a guarantee: a path segment equal to `node_modules` is treated
+ * as the npm tree. A durable deploy root that happened to use that as a
+ * directory name (e.g. `/opt/my-node_modules-app/flair/.env`) would be
+ * misclassified. That is not a real deployment shape.
  */
 export function isNodeModulesEnvPath(envPath: string): boolean {
+  // Path-segment match, not a substring of a filename — still a heuristic.
   return envPath.split(/[\\/]/).includes("node_modules");
 }
 
