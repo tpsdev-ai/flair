@@ -89,6 +89,12 @@ server.start();
 
 All values can also be passed directly to the constructor.
 
+Hosted Flair (non-localhost `FLAIR_URL`) uses the same Ed25519 triple as the
+Python package — agent id, keyfile, server-side `Agent` row with a matching
+public key. A 404 on `GET`/`PUT /Memory/{id}` is fail-closed ownership, not
+an existence signal. Walkthrough:
+[docs/integrations.md — Hosted Flair auth](../../docs/integrations.md#hosted-flair-auth--your-agent-got-a-404).
+
 ## Architecture
 
 ### Scope model

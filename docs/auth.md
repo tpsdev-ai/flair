@@ -39,6 +39,11 @@ flair agent add myagent
 
 This is the default and recommended auth for single-instance deployments.
 
+Adapter or hosted-Flair 404? Identity is three things (keyfile + agent id +
+the `Agent` row on **that** instance). A by-id 404 is fail-closed ownership,
+never an existence signal. The adapter write-up is
+[integrations.md — Hosted Flair auth](integrations.md#hosted-flair-auth--your-agent-got-a-404).
+
 ## Deployment shapes: personal vs org
 
 Flair has no `mode`/`shape` config setting — the shape you get is emergent from *how you provision principals*, not something you declare:

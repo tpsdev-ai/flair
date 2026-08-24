@@ -138,6 +138,8 @@ flair agent add mybot --target "$FLAIR_URL" --ops-target <ops-url>
 
 Auth is the same protocol as standalone: Ed25519 signature of `agentId:timestamp:nonce:METHOD:/path`, 30-second replay window, nonce deduplication. The difference is purely the transport — HTTPS instead of localhost HTTP.
 
+An adapter that just got a 404 is almost never "Harper wants a different verb." Check the three identity pieces (keyfile, agent id, `Agent` row on **this** instance) and treat by-id 404 as fail-closed ownership, not an existence signal: [integrations.md — Hosted Flair auth](integrations.md#hosted-flair-auth--your-agent-got-a-404).
+
 See [secrets-and-keys.md](secrets-and-keys.md) for the full threat model.
 
 ---
