@@ -13,6 +13,7 @@ import {
   describeFederationStatusFetchFailed,
   federationStatusUrlSetting,
   isFederationStatusAuthFailure,
+  isFederationStatusAuthRemedy,
   rewriteFederationStatusFetchFailed,
 } from "../../src/cli.ts";
 
@@ -125,6 +126,7 @@ describe("isFederationStatusAuthFailure", () => {
     expect(msg).toContain("http://127.0.0.1:401");
     expect(msg).toMatch(/(?:^|\D)401(?:\D|$)/);
     expect(isFederationStatusAuthFailure(rewritten)).toBe(false);
+    expect(isFederationStatusAuthRemedy(rewritten)).toBe(false);
   });
 
   test("status 401 / missing_or_invalid_authorization stay auth-shaped", () => {
@@ -132,5 +134,17 @@ describe("isFederationStatusAuthFailure", () => {
     (withStatus as { status?: number }).status = 401;
     expect(isFederationStatusAuthFailure(withStatus)).toBe(true);
     expect(isFederationStatusAuthFailure(new Error("missing_or_invalid_authorization"))).toBe(true);
+  });
+
+  test("403 forbidden is fatal-auth but not the credential-list remedy", () => {
+    const forbidden = new Error("forbidden");
+    (forbidden as { status?: number }).status = 403;
+    expect(isFederationStatusAuthFailure(forbidden)).toBe(true);
+    expect(isFederationStatusAuthRemedy(forbidden)).toBe(false);
+  });
+
+  test("401 / missing_or_invalid_authorization get the credential-list remedy", () => {
+    expect(isFederationStatusAuthRemedy(new Error("missing_or_invalid_authorization"))).toBe(true);
+    expect(isFederationStatusAuthRemedy(new Error("HTTP 401"))).toBe(true);
   });
 });

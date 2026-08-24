@@ -7002,6 +7002,23 @@ export function isFederationStatusAuthFailure(err: unknown): boolean {
   return m.includes("missing_or_invalid_authorization") || /(?:^|\D)401(?:\D|$)/.test(m);
 }
 
+/**
+ * Whether to print the "set one of: FLAIR_AGENT_ID / FLAIR_ADMIN_PASS /
+ * FLAIR_TOKEN" block. Narrower than `isFederationStatusAuthFailure`: a
+ * 403 with credentials already sent (wrong password) is fatal, but the
+ * server's own body is the honest message — the credential-list remedy
+ * is for missing/invalid auth (401), not a rejected password (flair#634).
+ */
+export function isFederationStatusAuthRemedy(err: unknown): boolean {
+  if (!err || isFederationStatusConnectFailure(err)) return false;
+  const m = err instanceof Error
+    ? err.message
+    : String(typeof err === "object" && err && "message" in err
+      ? (err as { message?: unknown }).message ?? err
+      : err);
+  return m.includes("missing_or_invalid_authorization") || /(?:^|\D)401(?:\D|$)/.test(m);
+}
+
 federation
   .command("status")
   .description("Show federation status and peer connections")
@@ -7051,7 +7068,7 @@ federation
     if ((instanceErr && peersErr) || isFederationStatusAuthFailure(instanceErr) || isFederationStatusAuthFailure(peersErr)) {
       const primaryErr = instanceErr ?? peersErr;
       const msg = String(primaryErr.message ?? primaryErr);
-      if (isFederationStatusAuthFailure(primaryErr)) {
+      if (isFederationStatusAuthRemedy(primaryErr)) {
         console.error(`${render.icons.error} federation status requires auth.`);
         console.error(`  ${render.wrap(render.c.dim, "Set one of:")}`);
         console.error(`    ${render.wrap(render.c.cyan, "FLAIR_AGENT_ID=<your-agent-id>")}     ${render.wrap(render.c.dim, "(Ed25519 — uses ~/.flair/keys/<id>.key)")}`);
