@@ -264,6 +264,19 @@ describe("the impl-term-leak gate cannot report clean without scanning", () => {
     // nonexistent paths — which the old code then reported as clean.
     expect(src).not.toMatch(/grep[^\n]*\$\(cat "\$TMPFILE"\)/);
   });
+
+  test("the ops-* allowlist is four exact literals compared by string equality (flair#1381)", () => {
+    // A regex or "looks like a word" heuristic would exempt a real bead ID
+    // the first time one happened to look English. The behavioural suite in
+    // impl-term-leaks.test.ts proves the list is load-bearing; this pins the
+    // committed shape so the exemption cannot widen in the source unnoticed.
+    expect(src).toMatch(/^ops-port$/m);
+    expect(src).toMatch(/^ops-api$/m);
+    expect(src).toMatch(/^ops-target$/m);
+    expect(src).toMatch(/^ops-server$/m);
+    expect(src).toContain('[ "$1" = "$allowed" ]');
+    expect(src).not.toMatch(/ops-\(port\|api\|target\|server\)/);
+  });
 });
 
 describe("the release script does not tag a partial publish", () => {
