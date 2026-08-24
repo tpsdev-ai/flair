@@ -7011,6 +7011,9 @@ export function isFederationStatusAuthFailure(err: unknown): boolean {
  */
 export function isFederationStatusAuthRemedy(err: unknown): boolean {
   if (!err || isFederationStatusConnectFailure(err)) return false;
+  if (typeof err === "object" && "status" in err && (err as { status?: unknown }).status === 401) {
+    return true;
+  }
   const m = err instanceof Error
     ? err.message
     : String(typeof err === "object" && err && "message" in err

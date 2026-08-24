@@ -147,4 +147,15 @@ describe("isFederationStatusAuthFailure", () => {
     expect(isFederationStatusAuthRemedy(new Error("missing_or_invalid_authorization"))).toBe(true);
     expect(isFederationStatusAuthRemedy(new Error("HTTP 401"))).toBe(true);
   });
+
+  test("status 401 with a body that does not say 401 still gets the remedy", () => {
+    // ApiHttpError from a 401 whose body is e.g. unknown_agent — no digit
+    // 401 in the text. The status field is what must trigger the remedy;
+    // a message-only check would miss it.
+    const unknownAgent = new Error("unknown_agent");
+    (unknownAgent as { status?: number }).status = 401;
+    expect(unknownAgent.message).not.toMatch(/401/);
+    expect(isFederationStatusAuthRemedy(unknownAgent)).toBe(true);
+    expect(isFederationStatusAuthFailure(unknownAgent)).toBe(true);
+  });
 });
