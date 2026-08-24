@@ -18,6 +18,261 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.49.0] - 2026-08-24
+
+### Added
+
+- **adk-flair-js: `customMetadata` parity with the Python package —
+  store-and-return + caps + `subject` + `listMemories()`** (flair#1335,
+  mirroring flair#1332/#1333 via #1334; design flair#1202). The JS adapter no
+  longer warn-drops `customMetadata`: `addMemory()`/`addEventsToMemory()`
+  serialize it into the client-writable `Memory.metadata` JSON blob —
+  store-and-return only, exactly ADK's contract: the blob is opaque to the
+  server and no key in it has any server-side effect (contract-tested live:
+  `{"visibility":"shared"}` in the blob leaves the record private, with a
+  positive control through the new explicit knobs). Caps reject with an
+  `Error`, never truncate: 64KB serialized, nesting ≤ 16, ≤ 512 keys;
+  non-serializable values skip that key with a warning. `subject` (≤ 512
+  chars, explicit `addMemory` option authoritative over
+  `customMetadata["subject"]`, never auto-extracted) is promoted to the
+  record's indexed `subject` column. `searchMemory()` opts into
+  `/SemanticSearch`'s `includeMetadata` flag and returns `FlairMemoryEntry`
+  objects carrying `customMetadata` (malformed blobs fail soft to `{}` with a
+  warning naming the record id), the record `id`, and the top-level `subject`
+  — surfaced BOTH as `entry.subject` and `customMetadata["subject"]` (column
+  authoritative), since `@google/adk`'s `MemoryEntry` is a plain-object
+  interface; the `customMetadata` channel keeps the return shape identical to
+  the Python package. `author`/`timestamp` now derive from the record's
+  `agentId`/`createdAt` (previously read fields Flair never projects — both
+  were always `undefined`). New `listMemories(appName, userId, {limit≤200,
+  offset})` pages memories newest-first with the full projection, scoped by
+  compound tag + agent identity, both pushed down and re-verified client-side;
+  transport errors propagate (browsing must distinguish "no memories" from
+  "Flair is down"). `addMemory()` also gains the Python package's explicit
+  `durability`/`visibility` options (flair#1234 parity, required by the
+  contract test's positive control) and its deterministic record ids
+  (`entry.id`, else content SHA-256 prefix — re-adds replace, not duplicate).
+  Creates now ride `POST /Memory/` with a 409→`PUT` fallback (flair#1336
+  parity via #1339) — the old PUT-shaped create 404s on hosted Harper Fabric
+  deployments where PUT is update-only.
+
+- **`flair doctor` and `flair init` now know pi.** pi joins the client registry
+  as a native-extension host (pi has no MCP client support): detection is the
+  `pi` binary on PATH or `~/.pi/agent/settings.json` present, and
+  `flair init --client pi` wires a pinned `npm:@tpsdev-ai/pi-flair@<version>`
+  entry under `packages` in pi's settings — same idempotence and
+  existing-config preservation as the MCP clients. `flair doctor` reports
+  wired/not-wired with the pinned version, names the #1346 trap outright (an
+  `npm:` spec under `extensions` is silently ignored by pi; `doctor --fix`
+  moves it to `packages`), and is explicit about the env boundary: pi-flair
+  reads `FLAIR_AGENT_ID`/`FLAIR_URL`/`FLAIR_KEY_PATH` from the shell that
+  launches pi, so doctor verifies its own shell and says so rather than
+  pretending to see every pi launch. (#1342)
+
+- **LongMemEval bench: a paired, same-retrieval A/B runner for the reader
+  payload format (`payload-ab.ts`).** The dated-payload change could not be
+  measured by the existing slice: `selectSlice` round-robins across abilities,
+  so a 30-question smoke slice carried only a handful of temporal-reasoning
+  questions and scored 100% on them at baseline — a ceiling, where the check
+  cannot fire. The new runner fixes both halves of that. `selectAbilitySlice`
+  draws n questions of ONE ability by an explicit, re-derivable rule (hash the
+  question_id with the seed and take the first n — a keyed pseudo-random draw,
+  not a lexicographic prefix, because `gpt4_*` ids mark a subpopulation that a
+  prefix draw would confound with the treatment). And the comparison is PAIRED:
+  per question the haystack is ingested once and retrieved once, then that same
+  retrieved set is formatted both ways and read + judged twice, so question
+  difficulty and retrieval luck are held exactly constant within a pair instead
+  of being sampled twice. The read is an exact two-sided McNemar on the
+  discordant pairs, reported alongside the discordant COUNT and the split that
+  would have been needed for p<0.05 — so an underpowered null is legible as
+  underpowered rather than as "no effect". Each pair also records whether
+  retrieval actually surfaced the dataset's own evidence labels
+  (`answer_session_ids` / per-turn `has_answer`), which is what separates "the
+  dates did not help" from "the evidence was never there to date". Emits the
+  same content-addressed, NOT-FOR-PUBLICATION artifact shape as the four-arm
+  run, with the paired design described inside the hashed config so the
+  artifact explains its own experiment. Bench harness only — shipped Flair
+  behavior is unchanged.
+
+### Changed
+
+- **LongMemEval bench: retrieved memories now reach the reader WITH their
+  dates (`v2-dated` payload), and the per-eval record carries `rankedIds` +
+  `retrievalMs`.** The retrieval arms fed the reader bare `- content` lines
+  while the full-context arm always saw `[Session X — date]` headers — the
+  2026-08 headline-run journal analysis put temporal-reasoning at 37% with 33
+  wrong answers where both retrieval tells looked healthy: the reader had the
+  right memories but no dates to reason over. Each retrieved memory line is now
+  prefixed with its `createdAt` date (`- [YYYY-MM-DD] content`). This is a
+  measurement variant: the payload format is version-stamped
+  (`readerPayloadFormat: "v2-dated"`) inside the hashed config manifest, so
+  dated runs can never hash identically to undated ones. Per-question results
+  additionally record the retrieved ids in final rank order and the retrieval
+  wall-clock separate from reader latency, closing the journal blind spots
+  where a wrong answer could not be attributed retrieval-vs-reader after the
+  fact. Bench harness only — shipped Flair behavior is unchanged.
+
+### Fixed
+
+- **Identity mapping now enforces one active IdP credential per subject, so
+  re-linking a connector under a different provider name supersedes instead of
+  creating a duplicate whose resolution depended on iteration order
+  (flair#1317).** `provisionIdpIdentityMapping` deduplicated on
+  `(kind, idpProvider, idpSubject)` while `resolveAgentFromSub` resolves on
+  `(kind, idpSubject)`. A re-link under a new provider name — the ordinary case
+  when a JIT-provisioned sub (stamped `idpProvider: "mcp-oauth"`) is linked as,
+  say, `github` — matched nothing to reuse and INSERTED a second credential.
+  Both were `status: "active"` and both matched the resolver's filter, so which
+  Agent a token subject resolved to came down to whichever row the search
+  iterator served first: nondeterministic identity resolution on a
+  security-relevant mapping. Per the K&S ruling on #1317, the resolver's key is
+  the correct one and is unchanged; the linking layer now enforces the
+  uniqueness constraint the resolver already assumed. A cross-provider re-link
+  revokes the prior credential (terminal `status: "revoked"`, row retained for
+  audit, never resurrected by a later link) and writes the new one in a single
+  batched ops-API write with the survivor first, so there is no observable
+  two-active or zero-active window; the invariant is then re-read from the store
+  and a violation throws rather than returning a mapping that looks
+  deterministic and is not. `idpProvider` stays on the row as audit metadata but
+  no longer namespaces the subject. The result carries `credentialSuperseded` +
+  `supersededCredentialIds`, and `flair mcp enable`'s identity-mapping step
+  prints them as a revocation, not a de-duplication — an operator must not learn
+  about it later from something that stopped working. The same path heals stores
+  that the old key already left with several active credentials on one subject.
+  Pinned by `test/integration/mcp-connector-principal-mapping.test.ts` (e), which
+  reads two active credentials on unmodified main, and by (f), which proves a
+  revoked credential does not resolve at all — not merely that it loses a race.
+
+- **Hybrid recall no longer rebuilds a full BM25 index on every query** (flair#1357;
+  Kern's design ruling, 2026-08-23). The hybrid lexical leg used to fetch the
+  ENTIRE scoped corpus out of Harper and call `buildBM25()` on it once per
+  recall, so retrieval latency grew linearly with store size — measured p50 5.6s
+  at 60k rows, 12.4s at 120k, 20.1s at 180k, extrapolating past 30s at 250k,
+  while vector-only recall over the same stores moved only 2.4s → 4.7s. The
+  lexical leg is now served from a persistent inverted index
+  (`resources/bm25-index.ts`) built once per process and maintained
+  incrementally from the Memory table's own change feed plus synchronous hooks
+  on flair's write paths, so a query touches only the documents that contain its
+  terms. Measured on a fixed 200-document matchable set inside a store grown 4×
+  (10.2k → 40.2k documents): the old path 35.9ms → 137.2ms per query (3.83×),
+  the new path 0.061ms → 0.059ms (0.96×, flat) — 584× and 2331× faster
+  respectively. The whole scoped-corpus scan is also gone from the
+  embedding-only search path, which never used it.
+
+  **Ranking is unchanged, by construction and by proof.** The index derives
+  per-query SCOPED BM25 statistics (N, avgdl, per-term df over exactly the
+  documents the query's `conditions[]` and temporal filters admit) and
+  accumulates term contributions in the same order as `buildBM25`, so scores are
+  bit-identical. Anything it cannot reproduce exactly — an unrecognised
+  condition attribute or comparator, or a `tags`+`subject` intersection — makes
+  it decline, and the original per-query corpus scan answers instead. Unknown
+  means slower, never different. Verified identical across 130 query shapes
+  against a mocked Harper and 73 query shapes against a live instance over the
+  same data directory, with a legacy-vs-legacy control run proving the harness
+  itself is deterministic.
+
+  `FLAIR_BM25_INDEX=false` (also `0` / `off`) forces every query back onto the
+  original path with no rebuild — the same kill-switch shape as
+  `FLAIR_HYBRID_RETRIEVAL`.
+
+- **Hybrid recall now orders equal-scoring memories deterministically**
+  (flair#1363, found while proving flair#1357 above; Kern-ruled 2026-08-24).
+  `buildBM25().rank()` sorted on score alone, and because `Array.prototype.sort`
+  is stable, documents with bit-identical BM25 scores came back in whatever
+  order the corpus had been fetched in — Harper's, which is a QUERY-PLAN
+  artifact rather than a property of the store. Measured on a live instance: the
+  same rows, for the same query text, iterate in one order under the multi-agent
+  read-scope OR-group (the reader's own `agentId`-indexed rows lead) and in a
+  different one under a `tags`/`subject` filter (plain primary-key order), and
+  Harper's planner is cost-based so which applies depends on data distribution.
+  Ties are common — a memory matching one rare query term once, with the same
+  token count as another, scores identically, and the live corpus clusters at
+  19-33 tokens — so 96-99% of queries at realistic corpus shapes had a tie
+  inside the returned window. Both the scan path and the new index now sort by
+  score descending, then ascending `id`. The only results that move are ones
+  that had no defined order to begin with; nothing above a tie changes position.
+
+- **The LongMemEval bench harness in the repo is now the harness that produced
+  the numbers.** The adaptations made on the bench VM during the headline runs —
+  ollama-cloud key-file auth with 429/5xx backoff, shared-store ingest-reuse,
+  resume from the per-eval journal, and the hardened readiness gate — lived only
+  on that VM, so "run it yourself" reproduced a *different* harness than the one
+  that made the numbers. They are ported here, with each knob classified as
+  artifact-affecting (enters the hashed config) or operational-only, and a
+  standing test that reconstructs each published run's manifest from repo code
+  and asserts it content-addresses to that run's recorded `configHash`. The
+  reconstruction is projected onto the key set the artifact actually recorded,
+  so the manifest can keep growing without invalidating past artifacts — while a
+  changed pin, prompt or extraction method still fails loudly.
+
+  The cloud model pins are added as a `LME_MODEL_PROFILE=local|cloud` selector
+  rather than by editing the pinned constants, so `local` stays the default and
+  hashes exactly as before — no already-published local artifact is invalidated.
+
+  Bench tooling only; nothing in the shipped package changes.
+
+- **The nightly quality sweep's recall spot-check is report-only — it no longer
+  emits `quality.regression` events (flair#967).** Measured over 32 nightly runs
+  on a production instance, the metric's population σ was 0.291 and its mean
+  absolute run-to-run delta 0.223, against a `QUALITY_EVENT_RECALL_DROP_THRESHOLD`
+  of 0.2 — the alarm sat at 0.69σ, below the metric's own noise floor — and all 6
+  findings-mails the sweep had ever produced in 34 runs were this metric
+  oscillating. Lifetime precision: 0. The threshold literal is deliberately left
+  at 0.2: alerting authority was removed from a metric that never earned it, not
+  widened until it stopped talking. Recall regressions are detected by the
+  deterministic, fixed-label, CI-gated eval
+  (`test/integration-heavy/recall-eval-gate.test.ts`); `flair quality` still
+  computes, prints and snapshots recall@k/MRR for observability.
+
+  Two changes also make the retained number worth reading. `deriveRecallCue` no
+  longer hands an opaque slug (`pr-1359`, `kern-2026-08-23`, or the sweep's own
+  `quality-snapshot/<host>`) to semantic search as if it were a query — a
+  same-instant A/B over the same ten memories scored recall@5 0.60 / MRR 0.16
+  from subjects versus 1.00 / 0.78 from content — so a subject is used as the cue
+  only when it is discriminative, and otherwise the leading words of the memory's
+  content are. And a sampled window that cannot be scored fairly (two memories
+  deriving the same cue, so they must displace each other in one result list, or
+  a memory with no derivable cue at all) is now reported as UNHEALTHY with a
+  self-describing reason instead of being scored anyway. The spot-check also
+  stops grading its own `quality-snapshot` bookkeeping rows, which were a
+  guaranteed miss and a permanent constant penalty on every instance running
+  `flair quality --emit`.
+
+- `flair agent add` (and every sibling command that sends Basic admin auth) no longer hardcodes the username `admin` (flair#1345): a new `--admin-user <name>` flag and `FLAIR_ADMIN_USER` env var (flag beats env beats the unchanged `admin` default) are wired on all 26 admin-Basic commands — `init` (existing-instance leg), `agent add/list/rotate-key/remove`, `mcp grant/revoke/enable/disable`, `principal add/list/disable/promote`, `idp add/list/remove`, `grant`/`revoke`, `federation pair/token/sync/watch`, and `backup`/`restore`/`export`/`import` — and honored by the shared `authedRequest` resolver plus the env-credential surfaces (`status deep --bootstrap`, `doctor`, `reembed`, `memory hygiene`). A 401 from the ops-API seed paths now names BOTH possible causes — wrong password (`--admin-pass` / `FLAIR_ADMIN_PASS`) and wrong username (`--admin-user` / `FLAIR_ADMIN_USER`) — instead of leaving a non-`admin` superuser indistinguishable from a bad password.
+
+- **`flair hook status` no longer prints `Flair URL: (unknown — could not parse command)` for the hook `flair init` itself installed.** The installer-written `sh -c` wrapper (documented in `docs/mcp-clients.md`) often omits `FLAIR_URL` on purpose; status now unwraps that command and skips the URL line when none is set, instead of claiming the command was unparseable. A missing or unrelated hook is still not reported as wired.
+
+- n8n-nodes-flair's credential Base URL default now matches Flair's stock port (flair#1352, #1347 family): `http://localhost:19926` (the port a fresh `flair init` actually serves) instead of the legacy `:9926`, so an n8n user pointing the default at a standard local install stops getting connection failures with no hint. The field description leads with :19926 and names :9926 as the common spoke port, and a colon-anchored pin test fails if the default ever flips back.
+
+- pi-flair's built-in `FLAIR_URL` default now matches the docs and Flair's stock port (flair#1347): `http://127.0.0.1:19926` (the port a fresh `flair init` actually serves) instead of the legacy `:9926`, so a default install stops failing every memory call with `connection_error` against a healthy instance. When a connection IS refused, the error now hints the other common local port (19926 ↔ 9926) and names `FLAIR_URL` as the knob, instead of only naming the dead port.
+
+- pi-flair: declare pi's package manifest (`"pi": {"extensions": ["./dist/index.js"]}`)
+  in package.json — pi resolves npm-installed packages only through the `pi` manifest
+  key or convention directories, never `main`, so `pi install npm:@tpsdev-ai/pi-flair`
+  installed the package but silently registered zero tools; only loading `dist/index.js`
+  by file path worked (#1346)
+
+- The `flair status`/`flair doctor` version nudge now tells the truth three ways (flair#1341): a cache-sourced "latest" is labelled with its age (`latest known (checked 9h ago): X`) instead of being stated as current fact — and when a cached answer would print a nudge at all, one fresh registry fetch (same 3s timeout, same offline tolerance) is spent so the printed fact is current whenever possible; the count names what it counted ("N minor versions behind" / "M patch releases behind") instead of calling a minor-version delta "releases"; and the suggested command is the paved path, `flair upgrade`, rather than a bare `npm i -g`.
+
+### Security
+
+- **`form-data` pinned forward to `^4.0.6`, clearing GHSA-fjxv-7rqg-78g4 (critical
+  — predictable multipart boundary from an unsafe random function) and
+  GHSA-hmw2-7cc7-3qxx (high) — and retiring both audit-gate allowlist entries in
+  the same PR, exactly as their `removeWhen` conditions required.** The vulnerable
+  `form-data@4.0.0` was pinned exactly by `n8n-workflow@1.119.0` under the
+  first-party `@tpsdev-ai/n8n-nodes-flair` workspace package, so the lever is a
+  root `overrides` entry — bun overrides are flat and cannot be scoped to one
+  dependency edge, the same mechanism (and the same caveat) recorded for every
+  prior pin in that block. The flat override also moves `@types/request`'s
+  `form-data` (previously a separate `2.5.6` resolution, itself outside the
+  vulnerable range) onto `4.0.6`, collapsing the duplicate out of `bun.lock`; that
+  edge is a types-only consumer with no runtime path. Both allowlist entries
+  carried `expires: 2026-08-26` — the gate would have started hard-failing the
+  build within days, which is the mechanism working as designed. As with the
+  earlier batch: an override is a forward pin, not a fix — it comes off when
+  n8n-workflow resolves a patched `form-data` on its own.
+
 ## [0.48.0] - 2026-08-22
 
 ### Added
