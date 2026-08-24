@@ -38,7 +38,7 @@ Don't see your harness? If it speaks **MCP** — Flair already works with `flair
 
 Written for the person whose adapter just got a 404 against a hosted Flair (Harper Fabric or any non-localhost URL). Laptop `flair init` on `127.0.0.1:19926` is a different machine from the one signing the request.
 
-The protocol lives in [auth.md](auth.md). Key lifecycle lives in [secrets-and-keys.md](secrets-and-keys.md). Fabric registration (including the ops-port trap) lives in [quickstart-fabric.md](quickstart-fabric.md). This section is only the identity check.
+The protocol lives in [auth.md](auth.md). Key lifecycle lives in [secrets-and-keys.md](secrets-and-keys.md). Fabric registration (including the ops port trap) lives in [quickstart-fabric.md](quickstart-fabric.md). This section is only the identity check.
 
 ### Identity is three things that must match
 

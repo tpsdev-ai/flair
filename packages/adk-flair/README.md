@@ -198,7 +198,7 @@ flair agent add my-adk-app \
   --admin-pass-file ~/.flair/fabric-admin-pass
 ```
 
-The full Fabric registration sequence, including the ops-port trap and
+The full Fabric registration sequence, including the ops port trap and
 `--admin-pass-file`, is [docs/quickstart-fabric.md](../../docs/quickstart-fabric.md).
 Do not leave the Fabric admin password in the agent's standing env — it is
 for registration, once.
