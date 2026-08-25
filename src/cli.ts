@@ -903,6 +903,53 @@ function resolveSigningAgentId(opts: { agent?: string }, command?: string): stri
   return resolveSigningIdentityFor(opts, command).agentId;
 }
 
+// ── Shared credential/identity flag surface (flair#1106) ─────────────────────
+// Sibling commands (memory add, backup, federation sync) used to drift on
+// the same concepts: `--admin-pass-file` existed on backup/sync but was an
+// unknown option on `memory add`, and `memory add --agent` was a commander
+// requiredOption so FLAIR_AGENT_ID could never satisfy it. One helper owns
+// the credential flag names/shapes; identity (`--agent`) stays optional so
+// the env fallback can actually apply. This does not invent a new auth
+// model — it only declares the flags authedRequest already resolves.
+
+/** Flag strings the sibling commands must share (name + argument shape). */
+export const SHARED_CREDENTIAL_FLAGS = {
+  adminPass: "--admin-pass <pass>",
+  adminPassFile: "--admin-pass-file <path>",
+  adminUser: "--admin-user <name>",
+} as const;
+
+export const SHARED_IDENTITY_FLAGS = {
+  agent: "--agent <id>",
+} as const;
+
+function addSharedCredentialOptions(cmd: Command): Command {
+  return cmd
+    .option(SHARED_CREDENTIAL_FLAGS.adminPass, "Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)")
+    .option(SHARED_CREDENTIAL_FLAGS.adminPassFile, "Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.")
+    .option(SHARED_CREDENTIAL_FLAGS.adminUser, "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)");
+}
+
+function addSharedIdentityOption(cmd: Command): Command {
+  return cmd.option(SHARED_IDENTITY_FLAGS.agent, "Agent ID (or set FLAIR_AGENT_ID env)");
+}
+
+/**
+ * Resolve `--admin-pass-file` into the same `adminPass` slot the inline flag
+ * uses. Shared so sibling commands cannot drift on how the file is read
+ * (mode 0600 via readAdminPassFileSecure).
+ */
+function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }): void {
+  if (!opts.adminPass && opts.adminPassFile) {
+    try {
+      opts.adminPass = readAdminPassFileSecure(opts.adminPassFile);
+    } catch (err: any) {
+      console.error(`Error reading --admin-pass-file ${opts.adminPassFile}: ${err.message}`);
+      process.exit(1);
+    }
+  }
+}
+
 // Ops port resolution: --ops-port flag > FLAIR_OPS_PORT env > config opsPort > httpPort - 1
 //
 // Deliberately NOT routed through Harper's per-instance config the way
@@ -1712,7 +1759,7 @@ function b64url(bytes: Uint8Array): string {
  * / disabling authorizeLocal there) is tracked separately in flair#654 and is
  * out of scope for this HTTP/REST auth path.
  */
-async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null }): Promise<any> {
+async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; explicitAdminPass?: string; adminUser?: string }): Promise<any> {
   // Resolve port via the canonical path (flair#1129): options.baseUrl > FLAIR_URL > resolveHttpPort.
   // api() callers mean the default install, so resolveHttpPort({}) with no --data-dir is correct.
   const base = options?.baseUrl ?? (process.env.FLAIR_URL || `http://127.0.0.1:${resolveHttpPort({})}`);
@@ -1735,7 +1782,13 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     }
   }
 
-  return authedRequest(method, path, body, { baseUrl: base, agentId, keysDir: options?.keysDir });
+  return authedRequest(method, path, body, {
+    baseUrl: base,
+    agentId,
+    keysDir: options?.keysDir,
+    explicitAdminPass: options?.explicitAdminPass,
+    adminUser: options?.adminUser,
+  });
 }
 
 /**
@@ -7948,28 +8001,18 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
   }
 }
 
-const federationSync = federation
-  .command("sync")
-  .description("Push local changes to the hub (one-shot). Subcommands manage the scheduled driver.")
-  .option("--port <port>", "Harper HTTP port")
-  .option("--admin-pass <pass>", "Admin password")
-  .option("--admin-pass-file <path>", "Read the admin password from a file (e.g. ~/.flair/admin-pass). Preferred for launchd/cron — keeps the secret out of ps and shell history.")
-  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
-  .option("--ops-port <port>", "Harper operations API port")
-  .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
-  .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
-  .action(async (opts) => {
+const federationSync = addSharedCredentialOptions(
+  federation
+    .command("sync")
+    .description("Push local changes to the hub (one-shot). Subcommands manage the scheduled driver.")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--ops-port <port>", "Harper operations API port")
+    .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
+    .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)"),
+).action(async (opts) => {
     // --admin-pass-file resolves into the same `adminPass` slot the inline
     // flag uses, so the scheduler never has to embed a secret in a unit file.
-    // readAdminPassFileSecure() refuses a file that is not owner-only.
-    if (!opts.adminPass && opts.adminPassFile) {
-      try {
-        opts.adminPass = readAdminPassFileSecure(opts.adminPassFile);
-      } catch (err: any) {
-        console.error(`Error reading --admin-pass-file ${opts.adminPassFile}: ${err.message}`);
-        process.exit(1);
-      }
-    }
+    applyAdminPassFile(opts);
     const r = await runFederationSyncOnce(opts);
     if (r.error) {
       console.error(`Error: ${r.error.message}`);
@@ -16614,9 +16657,12 @@ const ENTITIES_OPTION_DESCRIPTION =
   "Comma-separated entity vocabulary strings this record touches (type:value from the closed type set, e.g. repo:tpsdev-ai/flair — see docs/entity-vocabulary.md; feeds `flair attention`)";
 
 const memory = program.command("memory").description("Manage agent memories");
-memory.command("add [content]")
-  .description("Write a new memory row for an agent (content via positional arg or --content)")
-  .requiredOption("--agent <id>")
+addSharedCredentialOptions(
+  addSharedIdentityOption(
+    memory.command("add [content]")
+      .description("Write a new memory row for an agent (content via positional arg or --content)"),
+  ),
+)
   .option("--content <text>", "memory content (alias for positional arg)")
   .option("--durability <d>", "permanent|persistent|standard|ephemeral (default standard). Also decides the default visibility when --visibility is omitted: permanent/persistent -> shared, standard/ephemeral -> private").option("--tags <csv>")
   .option("--summary <text>", "agent-set multi-sentence dense compression (3-tier chain: subject → summary → content)")
@@ -16627,10 +16673,15 @@ memory.command("add [content]")
   .action(async (contentArg, opts) => {
     const content = contentArg ?? opts.content;
     if (!content) { console.error("error: content required (positional arg or --content)"); process.exit(1); }
-    const agentId = resolveSigningAgentId(opts, "memory add") ?? opts.agent;
-    const memId = `${opts.agent}-${Date.now()}`;
+    applyAdminPassFile(opts);
+    const agentId = resolveSigningAgentId(opts, "memory add");
+    if (!agentId) {
+      console.error("error: --agent <id> required (or set FLAIR_AGENT_ID)");
+      process.exit(2);
+    }
+    const memId = `${agentId}-${Date.now()}`;
     const body: any = {
-      id: memId, agentId: opts.agent, content, durability: opts.durability || "standard",
+      id: memId, agentId, content, durability: opts.durability || "standard",
       tags: opts.tags ? String(opts.tags).split(",").map((x: string) => x.trim()).filter(Boolean) : undefined,
       type: "memory", createdAt: new Date().toISOString(),
     };
@@ -16660,7 +16711,11 @@ memory.command("add [content]")
       const entities = parseEntitiesOptionOrExit(String(opts.entities));
       if (entities.length > 0) body.entities = entities;
     }
-    const out = await api("PUT", `/Memory/${memId}`, body, { agentId });
+    const out = await api("PUT", `/Memory/${memId}`, body, {
+      agentId,
+      explicitAdminPass: opts.adminPass,
+      adminUser: opts.adminUser,
+    });
     console.log(JSON.stringify(out, null, 2));
   });
 // ─── flair memory write-task-summary ────────────────────────────────────────
@@ -18177,30 +18232,21 @@ function printTrustError(detail: { bridge?: string; got?: string; context?: Reco
 
 // ─── flair backup ────────────────────────────────────────────────────────────
 
-program
-  .command("backup")
-  .description("Export agents, memories, and souls to a JSON archive")
-  .option("--output <path>", "Output file path (default: ~/.flair/backups/flair-backup-<timestamp>.json)")
-  .option("--agents <ids>", "Comma-separated agent IDs to include (default: all)")
-  .option("--port <port>", "Harper HTTP port")
-  .option("--url <url>", "Flair base URL (overrides --port)")
-  .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS env, or use --admin-pass-file)")
-  .option("--admin-pass-file <path>", "Read admin password from a file (e.g., ~/.flair/admin-pass). Preferred over --admin-pass for launchd/cron — keeps the secret out of ps and shell history.")
-  .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
-  .action(async (opts) => {
+addSharedCredentialOptions(
+  program
+    .command("backup")
+    .description("Export agents, memories, and souls to a JSON archive")
+    .option("--output <path>", "Output file path (default: ~/.flair/backups/flair-backup-<timestamp>.json)")
+    .option("--agents <ids>", "Comma-separated agent IDs to include (default: all)")
+    .option("--port <port>", "Harper HTTP port")
+    .option("--url <url>", "Flair base URL (overrides --port)"),
+).action(async (opts) => {
     const baseUrl: string = opts.url ?? `http://127.0.0.1:${resolveHttpPort(opts)}`;
-    let adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
-    if (!adminPass && opts.adminPassFile) {
-      // readAdminPassFileSecure refuses world/group readable files (mode 0600
-      // recommended). Common gotcha: files generated via
-      // `openssl rand -base64 24 > admin-pass` end in a newline; helper trims it.
-      try {
-        adminPass = readAdminPassFileSecure(opts.adminPassFile);
-      } catch (err: any) {
-        console.error(`Error reading --admin-pass-file ${opts.adminPassFile}: ${err.message}`);
-        process.exit(1);
-      }
-    }
+    applyAdminPassFile(opts);
+    // Env is a second-class fallback after the explicit flags (same order
+    // backup used before the shared helper). FLAIR_ADMIN_PASS is still
+    // accepted so existing scripts keep working.
+    const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
     const adminUser = resolveAdminUser(opts.adminUser);
 
     if (!adminPass) {
