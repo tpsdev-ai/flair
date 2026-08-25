@@ -1,6 +1,6 @@
 {
   "_comment": "Ratchet on the installed tree of `npm i -g` of the packed tarball (apparent bytes, linux CI). NOT the tarball — that is a few MB and would hide a 400 MB tree (flair#1004). Bytes are what the gate compares. The report prints MB as bytes/1024/1024 — do not divide bytes by 1e6 and compare that to the printed MB figure. Linux CI on e1a3e71 measured 309004489 bytes / 542 packages (prints as 294.7 MB). Set slightly above that; lower on purpose when weight drops. Do not disable the gate.",
-  "maxBytes": 330000000,
+  "maxBytes": 100000000,
   "maxPackages": 570,
   "baseline": {
     "bytes": 309004489,
