@@ -203,17 +203,29 @@ jobs:
   # "Unit Tests (22)" / "(24)" / "(26)"). This gate job re-emits the fixed
   # "Unit Tests" name and fails unless every matrix leg succeeded, so branch
   # protection needs no change and still genuinely gates on all three majors.
+  #
+  # flair#1012: also needs `test-darwin-gated`. That job is the only lane
+  # that executes the launchd tests. If it is not on this adapter, Linux
+  # unit + this required check stay green on a darwin-only failure and
+  # merge proceeds until `release.sh` on macOS — the gap this issue
+  # exists to close. A new required-check name would need a protection
+  # settings change; folding into "Unit Tests" does not.
   test-unit-gate:
     name: Unit Tests
-    needs: test-unit
+    needs: [test-unit, test-darwin-gated]
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: Require all Node-version legs to pass
+      - name: Require all Node-version legs and the darwin-gated lane to pass
         run: |
           echo "test-unit matrix result: ${{ needs.test-unit.result }}"
+          echo "test-darwin-gated result: ${{ needs.test-darwin-gated.result }}"
           if [ "${{ needs.test-unit.result }}" != "success" ]; then
             echo "::error::One or more Unit Tests Node-version legs did not succeed"
+            exit 1
+          fi
+          if [ "${{ needs.test-darwin-gated.result }}" != "success" ]; then
+            echo "::error::Darwin-gated unit tests did not succeed (flair#1012)"
             exit 1
           fi
 
