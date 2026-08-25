@@ -34,11 +34,12 @@
 // `--data-dir` pointed at, and none names the default install.
 //
 // The launchd tests are darwin-only because `stopFlairProcess`'s launchd
-// branch is itself gated on `process.platform === "darwin"`. CI runs on
-// ubuntu, where the port-based path is the ONLY path — which is why the
-// port-attribution test below is deliberately platform-independent: it is
-// both the Linux face of this bug and the one that catches the regression
-// everywhere.
+// branch is itself gated on `process.platform === "darwin"`. They use
+// `test.skipIf(!isDarwin)` so Linux CI reports them as skipped (flair#1012)
+// rather than omitting them. The darwin-gated lane and `scripts/release.sh`
+// are what actually execute them. The port-attribution test below is
+// deliberately platform-independent: it is both the Linux face of this bug
+// and the one that catches the regression everywhere.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -201,7 +202,7 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
 
   // ─── the headline defect, end to end ────────────────────────────────────
 
-  test.if(isDarwin)(
+  test.skipIf(!isDarwin)(
     "snapshot restore --data-dir <scratch> resolves the SCRATCH instance's launchd label, never the default install's",
     async () => {
       const scratchLabel = launchdLabel(scratchDataDir);
@@ -243,7 +244,7 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
     },
   );
 
-  test.if(isDarwin)(
+  test.skipIf(!isDarwin)(
     "snapshot create --data-dir <scratch> quiesces the SCRATCH instance around the snapshot",
     async () => {
       const scratchLabel = launchdLabel(scratchDataDir);
@@ -269,7 +270,7 @@ describe("flair#902 — snapshot commands target the instance named by --data-di
 
   // ─── the pre-flair#693 legacy label, which is global to the whole user ──
 
-  test.if(isDarwin)(
+  test.skipIf(!isDarwin)(
     "refuses to stop the legacy launchd service when its plist belongs to another data dir",
     async () => {
       // `ai.tpsdev.flair` is a single label for the whole login session, so

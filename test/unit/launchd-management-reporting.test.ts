@@ -49,9 +49,10 @@
 //     succeeds against the shim + stub, or the run aborts before the start leg.
 //
 // COVERAGE — the end-to-end half of this file is darwin-only, because the code
-// it exercises is gated on `process.platform === "darwin"` and CI runs Linux.
-// Nothing in CI will ever run it. The pure tests are deliberately
-// platform-independent so at least the decision logic is gated somewhere.
+// it exercises is gated on `process.platform === "darwin"`. Linux CI reports
+// those cases as skipped (`test.skipIf(!isDarwin)`, flair#1012); the
+// darwin-gated unit-test lane is what executes them. The pure tests are
+// deliberately platform-independent so the decision logic is gated everywhere.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, cpSync } from "node:fs";
 import { join } from "node:path";
@@ -651,7 +652,7 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
     }));
   }
 
-  test.if(isDarwin)(
+  test.skipIf(!isDarwin)(
     "THE DEFECT: a restart that ends with the instance outside launchd does NOT report unqualified success",
     async () => {
       writeHealthyPlist();
@@ -689,7 +690,7 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
     30_000,
   );
 
-  test.if(isDarwin)(
+  test.skipIf(!isDarwin)(
     "POSITIVE CONTROL: a clean restart, still managed by launchd, still reports success",
     async () => {
       writeHealthyPlist();
@@ -713,7 +714,7 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
     30_000,
   );
 
-  test.if(isDarwin)(
+  test.skipIf(!isDarwin)(
     "THE FIRST 60-SECOND WAIT: the stop leg does not wait on a process launchd is not running",
     async () => {
       // The incident's first hang: "launchd stop failed, falling back to
@@ -769,7 +770,7 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
     60_000,
   );
 
-  test.if(isDarwin)(
+  test.skipIf(!isDarwin)(
     "THE 60-SECOND WAIT: a stale plist aborts the launchd start immediately, naming the path and the fix",
     async () => {
       // The start leg is the half that produced
@@ -830,7 +831,7 @@ describe("flair#1022 — `flair restart` reports the launchd outcome, not just l
     60_000,
   );
 
-  test.if(isDarwin)(
+  test.skipIf(!isDarwin)(
     "every launchctl invocation names this fixture's instance — never a real install",
     async () => {
       writeHealthyPlist();

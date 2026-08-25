@@ -366,7 +366,29 @@ echo "🧪 Running tests..."
 # 252 tests that no release has ever executed. They pass on macOS in under a
 # second; there was no reason for the omission beyond nobody comparing the two
 # invocations.
-(cd "$ROOT" && bun test test/unit/ test/*.test.ts) || { echo "❌ Tests failed (unit)"; exit 1; }
+# flair#1012: darwin-gated launchd tests are skipped on Linux CI and used
+# to surface only here, on macOS, as a bare "Tests failed" after the full
+# suite. Run the inventory/execution gate first so a darwin-only failure
+# is named as one, and so a Linux release host still reports the skip
+# count instead of looking like those tests do not exist.
+if ! (cd "$ROOT" && node scripts/check-darwin-gated-tests.mjs); then
+  echo "❌ Tests failed (darwin-gated unit tests — flair#1012)"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    echo "   This host is macOS. These tests exercise the launchd branch Linux CI skips."
+    echo "   Compare the failing file against main on this same host before treating it as a release-branch regression."
+  else
+    echo "   This host is not macOS. The gate failed because the skip inventory is broken, not because a launchd test ran."
+  fi
+  exit 1
+fi
+if ! (cd "$ROOT" && bun test test/unit/ test/*.test.ts); then
+  echo "❌ Tests failed (unit)"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    echo "   This host is macOS. The unit suite includes darwin-gated launchd tests that Linux CI skips (flair#1012)."
+    echo "   If the failure is in a darwin-gated file, compare against main on this host — it is not a failure CI would have seen."
+  fi
+  exit 1
+fi
 (cd "$ROOT" && bun test $(find test/integration -name '*.test.ts' | sort)) || { echo "❌ Tests failed (integration)"; exit 1; }
 # test/unit-isolated/ files mock.module a process-global shared module; each
 # MUST run in its own `bun test` process — they poison the real-importer

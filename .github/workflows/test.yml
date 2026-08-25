@@ -120,6 +120,16 @@ jobs:
       # (auth scoping, data scoping, REM runner/scheduler/snapshot, content
       # safety, key rotation) with no live-service reason to be excluded.
       - run: bun test test/unit/ test/*.test.ts
+      # flair#1012: darwin-gated tests (`test.skipIf(!isDarwin)`) cover the
+      # launchd branch that unloads production services. They do not execute
+      # on this Linux runner. The suite above reports them as skips, but a
+      # skip buried in thousands of passes is how the original failures sat
+      # on main. This step inventories them, refuses `test.if` (omit), and
+      # fails if the skip count is 0 — "0 darwin tests ran on this platform"
+      # is information; nothing at all is what let #1012 sit. The macOS job
+      # `test-darwin-gated` is the lane that actually runs them.
+      - name: "Darwin-gated unit tests: report skip count (flair#1012)"
+        run: bun scripts/check-darwin-gated-tests.mjs
       # test/unit-isolated/ holds files that `mock.module` a process-global
       # shared module (embeddings-provider). `mock.module` is first-wins and
       # unrestored, so these files poison not only the real-importer files in
@@ -206,6 +216,33 @@ jobs:
             echo "::error::One or more Unit Tests Node-version legs did not succeed"
             exit 1
           fi
+
+  # flair#1012: the launchd branch these tests cover is gated on
+  # `process.platform === "darwin"`. Linux CI skips them (and the unit-lane
+  # step above reports that skip count). This job is the lane that executes
+  # them. A defect here does not produce a Linux failure — it produces a
+  # stopped production instance. Kept to the inventoried darwin-gated files
+  # rather than the whole unit suite so the macOS minutes buy the coverage
+  # that Linux cannot, not a duplicate of test-unit.
+  test-darwin-gated:
+    name: Darwin-gated unit tests
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+      - name: Run darwin-gated unit tests (must execute, not skip)
+        run: bun scripts/check-darwin-gated-tests.mjs
 
   test-integration:
     name: Integration Tests

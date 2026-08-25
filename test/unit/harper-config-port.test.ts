@@ -583,7 +583,7 @@ describe("flair#914 — an instance's port comes from Harper's config in its dat
   // spawns a real Harper and waits a minute for health. Gating beats spawning a
   // database in a unit test.
 
-  test.if(process.platform === "darwin")(
+  test.skipIf(process.platform !== "darwin")(
     "restoring a snapshot acts on the target instance and never on the source's port",
     async () => {
       // A snapshot is a byte-exact copy of a data directory, so it carries the
