@@ -40,10 +40,12 @@
  *     reproduce Harper's own shape exactly, or a rescued record's response
  *     bytes would differ from a scanned one's.
  *
- * VEHICLE for premise 1: a `SemanticSearch` with neither `q` nor an embedding
- * returns `allowedById.values()` — a Map built in corpus-scan order — and then
- * stable-sorts on an all-equal `_rank`. So the response order IS the scan
- * order.
+ * VEHICLE for premise 1: `GET /Memory` (Memory.search → Harper Table.search)
+ * with the same read-scope OR-group the listing path uses. Do NOT use
+ * SemanticSearch for this measurement — after flair#1412 the final retrieval
+ * sort is `createdAt DESC, id ASC` on an all-equal `_rank`, so SemanticSearch
+ * no longer leaks scan order. The premise is about Harper's planner, not
+ * about retrieval ranking.
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
@@ -106,6 +108,19 @@ async function search(body: Record<string, any>): Promise<any> {
 
 const ids = (r: any) => (r.results ?? []).map((x: any) => x.id);
 
+async function memoryIds(query = ""): Promise<string[]> {
+  // Premise 1 vehicle: Memory.search, not SemanticSearch (flair#1412).
+  const path = query ? `/Memory?${query}` : "/Memory";
+  const res = await fetch(`${harper.httpURL}${path}`, {
+    headers: { Authorization: ed25519Header(agent, "GET", path) },
+  });
+  const text = await res.text();
+  expect(res.status, `GET ${path} → ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+  const body = JSON.parse(text);
+  const rows = Array.isArray(body) ? body : (body.results ?? body.items ?? []);
+  return rows.map((x: any) => x.id).filter((id: string) => INSERT_ORDER.includes(id));
+}
+
 // File-scope lifecycle: both describes below share ONE instance. A
 // describe-scoped afterAll would stop Harper before the second block ran.
 beforeAll(async () => {
@@ -133,7 +148,7 @@ afterAll(async () => { if (harper) await stopHarper(harper); });
 
 describe("flair#1357 — real-Harper premises of the persistent BM25 index", () => {
   test("PREMISE 1: the multi-agent scope scan is NOT primary-key order — own rows lead", async () => {
-    const observed = ids(await search({}));
+    const observed = await memoryIds();
     const own = INSERT_ORDER.filter((_, i) => i % 2 === 0).sort();
     const other = INSERT_ORDER.filter((_, i) => i % 2 === 1).sort();
     // Own rows first (primary-key order within the group), then the rest.
@@ -147,8 +162,8 @@ describe("flair#1357 — real-Harper premises of the persistent BM25 index", () 
   test("PREMISE 1: a tags/subject-filtered scan of the SAME rows comes back in a DIFFERENT order", async () => {
     // Same store, same rows, different plan, different iteration order — the
     // reason a fixed tie-break cannot be correct for every query.
-    expect(ids(await search({ tag: "shared-tag" }))).toEqual(LEX_ORDER);
-    expect(ids(await search({ subject: "shared-subject" }))).toEqual(LEX_ORDER);
+    expect(await memoryIds("tags=shared-tag")).toEqual(LEX_ORDER);
+    expect(await memoryIds("subject=shared-subject")).toEqual(LEX_ORDER);
   }, 60_000);
 
 
