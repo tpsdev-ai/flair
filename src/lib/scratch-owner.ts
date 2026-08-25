@@ -6,7 +6,7 @@
  * creating process; a sweep may delete a tree only when that process is gone
  * (and, for Harper trees, when `hdb.pid` is gone too).
  */
-import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const SCRATCH_OWNER_FILE = ".flair-scratch-owner";
@@ -51,20 +51,4 @@ export function scratchOwnerIsLive(dir: string): boolean {
 export function hdbPidIsLive(dir: string): boolean {
   const pid = readPidFile(join(dir, "hdb.pid"));
   return pid !== null && isPidAlive(pid);
-}
-
-/**
- * True only for a real directory, not a symlink.
- *
- * Must run before any stamp/`hdb.pid`/mtime read or `rmSync`. Those follow
- * links; a `flair-test-*` symlink in `$TMPDIR` pointing outside would
- * otherwise let a sweep delete the target (Kern on #1408).
- */
-export function isRealScratchDirectory(dir: string): boolean {
-  try {
-    const st = lstatSync(dir);
-    return st.isDirectory() && !st.isSymbolicLink();
-  } catch {
-    return false;
-  }
 }
