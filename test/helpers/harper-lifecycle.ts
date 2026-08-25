@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
   hasScratchOwnerStamp,
   hdbPidIsLive,
+  isRealScratchDirectory,
   scratchOwnerIsLive,
   writeScratchOwnerStamp,
 } from "../../src/lib/scratch-owner.js";
@@ -160,6 +161,8 @@ export function sweepStaleHarperTrees(opts?: { olderThanMs?: number }): number {
     if (!name.startsWith("flair-test-")) continue;
     const dir = join(tmpdir(), name);
     if (live.has(dir)) continue;
+    // lstat first — stamp/hdb.pid/mtime/rm follow links.
+    if (!isRealScratchDirectory(dir)) continue;
     if (scratchOwnerIsLive(dir)) continue;
     if (hdbPidIsLive(dir)) continue;
     try {

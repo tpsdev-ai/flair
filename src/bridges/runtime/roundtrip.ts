@@ -33,6 +33,7 @@ import { evaluatePredicate } from "./predicate.js";
 import { writeRecords } from "./writers.js";
 import {
   hasScratchOwnerStamp,
+  isRealScratchDirectory,
   scratchOwnerIsLive,
   writeScratchOwnerStamp,
 } from "../../lib/scratch-owner.js";
@@ -89,6 +90,8 @@ export function sweepStaleBridgeTestDirs(opts?: {
     if (!name.startsWith(BRIDGE_TEST_DIR_PREFIX)) continue;
     const dir = join(root, name);
     if (IN_FLIGHT_BRIDGE_TEST_DIRS.has(dir)) continue;
+    // lstat first — stamp/mtime/rm follow links.
+    if (!isRealScratchDirectory(dir)) continue;
     if (scratchOwnerIsLive(dir)) continue;
     try {
       if (!hasScratchOwnerStamp(dir)) {

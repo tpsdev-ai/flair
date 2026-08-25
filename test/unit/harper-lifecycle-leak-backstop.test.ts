@@ -16,7 +16,7 @@
 // integration lane; what is asserted here is that the mechanism is WIRED, which
 // is the half that silently rots.
 import { describe, expect, test } from "bun:test";
-import { readFileSync, mkdtempSync, rmSync, readdirSync, existsSync, utimesSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, readdirSync, existsSync, utimesSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countStaleHarperTrees, startHarper, sweepStaleHarperTrees } from "../helpers/harper-lifecycle.js";
@@ -229,6 +229,21 @@ describe("startHarper failure does not leak a scratch dir (flair#1032)", () => {
       expect(existsSync(live)).toBe(true);
     } finally {
       rmSync(live, { recursive: true, force: true });
+    }
+  });
+
+  test("boot sweep does not follow a flair-test-* symlink out of tmpdir", () => {
+    const target = mkdtempSync(join(tmpdir(), "flair-1032-symlink-target-"));
+    writeFileSync(join(target, "keep-me"), "safe");
+    const link = join(tmpdir(), `flair-test-symlink-${Date.now()}`);
+    symlinkSync(target, link);
+    try {
+      sweepStaleHarperTrees({ olderThanMs: 0 });
+      expect(existsSync(join(target, "keep-me"))).toBe(true);
+      expect(existsSync(link)).toBe(true);
+    } finally {
+      try { unlinkSync(link); } catch { /* already gone */ }
+      rmSync(target, { recursive: true, force: true });
     }
   });
 

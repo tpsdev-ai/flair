@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, utimesSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, utimesSync, symlinkSync, unlinkSync } from "node:fs";
 import { SCRATCH_OWNER_FILE, writeScratchOwnerStamp } from "../../src/lib/scratch-owner";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -245,6 +245,21 @@ describe("runRoundTrip: scratch dirs do not leak (flair#1032)", () => {
       expect(existsSync(live)).toBe(true);
     } finally {
       rmSync(live, { recursive: true, force: true });
+    }
+  });
+
+  test("boot sweep does not follow a flair-bridge-test-* symlink out of tmpdir", () => {
+    const target = mkdtempSync(join(tmpdir(), "flair-1032-bridge-symlink-target-"));
+    writeFileSync(join(target, "keep-me"), "safe");
+    const link = join(tmpdir(), `${BRIDGE_TEST_DIR_PREFIX}symlink-${Date.now()}`);
+    symlinkSync(target, link);
+    try {
+      sweepStaleBridgeTestDirs({ olderThanMs: 0 });
+      expect(existsSync(join(target, "keep-me"))).toBe(true);
+      expect(existsSync(link)).toBe(true);
+    } finally {
+      try { unlinkSync(link); } catch { /* already gone */ }
+      rmSync(target, { recursive: true, force: true });
     }
   });
 
