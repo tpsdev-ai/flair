@@ -611,9 +611,10 @@ export interface ToolInvariants {
   /**
    * A self-describing COUNT field must equal the TOTAL length of the
    * container(s) it describes: counted == delivered (flair#1199
-   * memoriesIncluded/teammateFindingsIncluded; flair#1206 sections.events).
-   * `count` may be a dotted path (e.g. "sections.events"); `containers` are
-   * top-level arrays whose lengths SUM to the count.
+   * memoriesIncluded/teammateFindingsIncluded; flair#1206 sections.events;
+   * flair#1371 sections.soul). `count` may be a dotted path (e.g.
+   * "sections.events"); `containers` are top-level arrays (`.length`) or
+   * object maps (`Object.keys().length`) whose sizes SUM to the count.
    *
    * `containers` is a list, not a single name, because `memoriesIncluded`
    * legitimately spans TWO delivered own-memory containers: `memories`
@@ -1152,6 +1153,7 @@ export const TOOLS: Record<string, ToolEntry> = {
           { count: "memoriesIncluded", containers: ["memories", "predicted"] },     // #1199
           { count: "teammateFindingsIncluded", containers: ["teammateFindings"] },  // #1199
           { count: "sections.events", containers: ["events"] },                     // #1206
+          { count: "sections.soul", containers: ["soul"] },                         // #1371
         ],
         // present + typed even when empty — never a bare {} / missing key (#1182).
         selfDescribingEmpty: [

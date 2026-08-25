@@ -273,13 +273,13 @@ If you see (a) the agent calling the `bootstrap` tool returning soul + recent me
 
 ## What the MCP server exposes
 
-Eleven tools, kept deliberately small:
+Twelve tools, kept deliberately small:
 
 | Tool | What it does |
 |---|---|
 | `memory_search` | Semantic search across your agent's memories |
-| `memory_store` | Save a memory with type, durability, tags, visibility. Auto-dedups near-duplicates |
-| `memory_update` | Update an existing memory by ID — overwrite in place, or version it with `preserveHistory` |
+| `memory_store` | Save a memory with type, durability, tags, visibility. Auto-dedups near-duplicates. Optional `usedMemoryIds` cites memories that informed the write |
+| `memory_update` | Update an existing memory by ID — overwrite in place, or version it with `preserveHistory`. Optional `usedMemoryIds` for citation-on-write |
 | `memory_get` | Fetch a specific memory by ID |
 | `memory_delete` | Remove a memory |
 | `relationship_store` | Record a subject-predicate-object relationship triple (e.g. "nathan manages flair") |
@@ -288,6 +288,7 @@ Eleven tools, kept deliberately small:
 | `soul_get` | Get a soul entry |
 | `flair_workspace_set` | Set your agent's current workspace state (ref/branch, phase, task) in the Office Space |
 | `flair_orgevent` | Publish an org-wide coordination event (claim/release/status) to the Office Space |
+| `record_usage` | Report that recalled memories were actually used (id + optional one-line how-it-was-used). Drives `usageCount` / `usageBoost` |
 
 Writes are scoped per-agent (your `FLAIR_AGENT_ID`) and enforced by Flair's server, not by client convention — you can't write as another agent. Reads are more open by design: any agent on the same Flair instance can read any other agent's **non-private** memories, with no grant to set up (open-within-org read; see [SECURITY.md](../SECURITY.md)).
 

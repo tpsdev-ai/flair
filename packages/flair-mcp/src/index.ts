@@ -15,6 +15,7 @@
  *   - soul_get       — get a personality/context entry
  *   - flair_workspace_set — write own WorkspaceState (Office Space coordination)
  *   - flair_orgevent      — publish an OrgEvent attributed to self (no forging)
+ *   - record_usage        — report that recalled memories were actually used (flair#1147)
  *
  * Auto-presence (flair#598): every tool call above triggers a fire-and-forget,
  * rate-limited `POST /Presence` heartbeat for the calling agent (see
@@ -53,6 +54,7 @@ import {
   type PresenceActivity,
 } from "./presence.js";
 import { readEnvOrUnset, stripInterpolationLiteralsFromEnv } from "./env-guard.js";
+import { buildRecordUsageBody, citationIds, withCiteNudge } from "./usage.js";
 import { serverInfo } from "./version.js";
 
 // ─── Error helpers ──────────────────────────────────────────────────────────
@@ -261,7 +263,7 @@ export async function runMcp(): Promise<void> {
           return `${i + 1}. ${r.content}${meta ? ` (${meta})` : ""}`;
         })
         .join("\n");
-      return { content: [{ type: "text", text }] };
+      return { content: [{ type: "text", text: withCiteNudge(text) }] };
     } catch (err) {
       return errorResult(err, flair.url);
     }
@@ -288,8 +290,12 @@ server.tool(
       "private -- never visible to another agent, even one with a memory grant. " +
       "shared -- visible to the owner and any agent holding a read/search grant.",
     ),
+    usedMemoryIds: z.array(z.string()).optional().describe(
+      "IDs of memories that informed this write (citation-on-write). Credited via the same " +
+      "deduped usage ledger as record_usage. Optional.",
+    ),
   },
-  async ({ content, type, durability, tags, visibility }) => {
+  async ({ content, type, durability, tags, visibility, usedMemoryIds }) => {
     heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
       const result = await flair.memory.write(content, {
@@ -299,6 +305,7 @@ server.tool(
         visibility: visibility as any,
         dedup: true,
         dedupThreshold: 0.95,
+        usedMemoryIds: citationIds(usedMemoryIds),
       });
       // The server's conservative dedup gate NEVER suppresses a write
       // (memory-integrity fix, flair#526) — `result.deduplicated` is a
@@ -349,11 +356,18 @@ server.tool(
     content: z.string().describe("New content"),
     preserveHistory: z.coerce.boolean().optional().default(false)
       .describe("Write a new supersedes-linked version instead of overwriting in place (default false)"),
+    usedMemoryIds: z.array(z.string()).optional().describe(
+      "IDs of memories that informed this update (citation-on-write). Credited via the same " +
+      "deduped usage ledger as record_usage. Optional.",
+    ),
   },
-  async ({ id, content, preserveHistory }) => {
+  async ({ id, content, preserveHistory, usedMemoryIds }) => {
     heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
     try {
-      const result = await flair.memory.update(id, content, { preserveHistory });
+      const result = await flair.memory.update(id, content, {
+        preserveHistory,
+        usedMemoryIds: citationIds(usedMemoryIds),
+      });
       const text = preserveHistory
         ? `Memory updated: new version stored (id: ${result.id}), supersedes ${id}.`
         : `Memory updated (id: ${id}).`;
@@ -471,7 +485,7 @@ server.tool(
       if (!result.context) {
         return { content: [{ type: "text", text: "No context available." }] };
       }
-      return { content: [{ type: "text", text: result.context }] };
+      return { content: [{ type: "text", text: withCiteNudge(result.context) }] };
     } catch (err) {
       return errorResult(err, flair.url);
     }
@@ -579,6 +593,44 @@ server.tool(
       const targetStr = targets && targets.length > 0 ? ` → ${targets.join(", ")}` : "";
       const idStr = result?.id ? ` (id: ${result.id})` : "";
       return { content: [{ type: "text", text: `OrgEvent published: kind=${kind}${targetStr} (attributed to ${agentId})${idStr}.` }] };
+    } catch (err) {
+      return errorResult(err, flair.url);
+    }
+  },
+);
+
+// ─── Usage feedback (flair#1147) ─────────────────────────────────────────────
+//
+// POST /RecordUsage already existed; native /mcp already wrapped it. The
+// stdio package did not, so a Claude Code / Cursor client could not close
+// the usageCount loop. Identity is taken from the signed request — the body
+// carries only memory id(s) + optional attribution, never agentId.
+
+server.tool(
+  "record_usage",
+  "Report that one or more memories were actually USED — cited or relied on to ground an answer or decision. " +
+    "Distinct from search (surfacing a memory is not usage). Dedup'd (you can only count once per memory) and rate-limited.",
+  {
+    memoryId: z.string().optional().describe("A single memory id that was used"),
+    memoryIds: z.array(z.string()).optional().describe("IDs of the memories that were used (max 20 per call)"),
+    attribution: z.string().optional().describe("Optional one-line note on how it was used (opaque — stored for audit only)"),
+  },
+  async ({ memoryId, memoryIds, attribution }) => {
+    heartbeat(); // auto-presence (flair#598) — fire-and-forget, rate-limited
+    try {
+      const body = buildRecordUsageBody({ memoryId, memoryIds, attribution });
+      if (!body) {
+        return {
+          content: [{ type: "text", text: "record_usage requires memoryId or memoryIds." }],
+          isError: true,
+        };
+      }
+      const result = await flair.request<{ recorded?: boolean }>("POST", "/RecordUsage", body);
+      const text = result?.recorded === true ? "Usage recorded." : "Usage request accepted.";
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: { recorded: result?.recorded === true },
+      };
     } catch (err) {
       return errorResult(err, flair.url);
     }

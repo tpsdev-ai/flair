@@ -370,9 +370,18 @@ describe("interpretActiveResult (flair#850 — genuine active state, not file pr
 
 describe("describeLoadFailure (flair#850 — remedy naming)", () => {
   it("names loginctl enable-linger for the traced 'no bus' linux failure", () => {
-    const remedy = describeLoadFailure("linux", { code: 1, stderr: "Failed to connect to bus: No medium found\n" });
+    const remedy = describeLoadFailure("linux", { code: 1, stderr: "Failed to connect to bus: No medium found\n" }, { lingerEnabled: false });
     expect(remedy).not.toBeNull();
     expect(remedy).toContain("loginctl enable-linger");
+  });
+
+  it("does not repeat the linger remedy after lingering is already on (flair#1107)", () => {
+    const remedy = describeLoadFailure("linux", { code: 1, stderr: "Failed to connect to bus: No medium found\n" }, { lingerEnabled: true, env: {} });
+    expect(remedy).not.toBeNull();
+    expect(remedy).not.toContain("loginctl enable-linger <user>");
+    expect(remedy).not.toMatch(/Fix: enable lingering/);
+    expect(remedy).toContain("XDG_RUNTIME_DIR");
+    expect(remedy).toContain("DBUS_SESSION_BUS_ADDRESS");
   });
 
   it("returns null for an unrecognized linux failure (caller falls back to raw stderr)", () => {
@@ -440,7 +449,7 @@ describe("formatEnableReport (flair#850 — the core honesty fix)", () => {
     const r = baseEnableResult({
       loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" },
     });
-    const { lines, ok } = formatEnableReport(r, reportInput);
+    const { lines, ok } = formatEnableReport(r, { ...reportInput, lingerEnabled: false });
     const text = lines.join("\n");
     expect(ok).toBe(false);
     expect(text).not.toContain("✅ REM nightly scheduler enabled");
@@ -458,16 +467,33 @@ describe("formatEnableReport (flair#850 — the core honesty fix)", () => {
     const r = baseEnableResult({
       loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" },
     });
-    const { lines } = formatEnableReport(r, reportInput);
+    const { lines } = formatEnableReport(r, { ...reportInput, lingerEnabled: false });
     const text = lines.join("\n");
     expect(text).toContain("loginctl enable-linger");
+  });
+
+  it("FAILURE PATH: probes linger when lingerEnabled is omitted — the CLI path (flair#1107)", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" },
+    });
+    let probed = 0;
+    const { lines } = formatEnableReport(r, {
+      ...reportInput,
+      probeLinger: () => { probed += 1; return true; },
+      env: {},
+    });
+    expect(probed).toBe(1);
+    const text = lines.join("\n");
+    expect(text).not.toMatch(/Fix: enable lingering/);
+    expect(text).not.toContain("loginctl enable-linger <user>");
+    expect(text).toContain("XDG_RUNTIME_DIR");
   });
 
   it("FAILURE PATH: still surfaces the raw stderr and the failing command", () => {
     const r = baseEnableResult({
       loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" },
     });
-    const { lines } = formatEnableReport(r, reportInput);
+    const { lines } = formatEnableReport(r, { ...reportInput, lingerEnabled: false });
     const text = lines.join("\n");
     expect(text).toContain("systemctl --user enable --now flair-rem-nightly.timer");
     expect(text).toContain("code 1");
