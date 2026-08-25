@@ -16,7 +16,7 @@
 // integration lane; what is asserted here is that the mechanism is WIRED, which
 // is the half that silently rots.
 import { describe, expect, test } from "bun:test";
-import { readFileSync, mkdtempSync, rmSync, readdirSync, existsSync, utimesSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, readdirSync, existsSync, utimesSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countStaleHarperTrees, startHarper, sweepStaleHarperTrees } from "../helpers/harper-lifecycle.js";
@@ -229,6 +229,25 @@ describe("startHarper failure does not leak a scratch dir (flair#1032)", () => {
       expect(existsSync(live)).toBe(true);
     } finally {
       rmSync(live, { recursive: true, force: true });
+    }
+  });
+
+  test("sweep unlinks a prefix-named symlink and does not touch its target", () => {
+    // Pins the Node property Flint and both reviewers measured on #1408:
+    // fs.rmSync({recursive:true}) lstats and unlinks a symlink — it never
+    // descends into the target. A future Node that followed would fail this
+    // before it deleted someone else's tree.
+    const target = mkdtempSync(join(tmpdir(), "flair-1032-rmsync-target-"));
+    writeFileSync(join(target, "keep-me"), "safe");
+    const link = join(tmpdir(), `flair-test-symlink-${Date.now()}`);
+    symlinkSync(target, link);
+    try {
+      sweepStaleHarperTrees({ olderThanMs: 0 });
+      expect(existsSync(join(target, "keep-me"))).toBe(true);
+      expect(existsSync(link)).toBe(false);
+    } finally {
+      try { unlinkSync(link); } catch { /* sweep already removed it */ }
+      rmSync(target, { recursive: true, force: true });
     }
   });
 
