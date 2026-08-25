@@ -17,19 +17,80 @@
  * Lives here so slice-3c code plugins can reuse the same harness.
  */
 
-import { promises as fsp } from "node:fs";
+import { promises as fsp, readdirSync, rmSync, statSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type {
   BridgeMemory,
   YamlBridgeDescriptor,
+  YamlSourceTarget,
 } from "../types.js";
 import { BridgeRuntimeError } from "../types.js";
 import { parseRecords } from "./formats.js";
 import { applyMap } from "./mapper.js";
 import { evaluatePredicate } from "./predicate.js";
 import { writeRecords } from "./writers.js";
+
+/** mkdtemp prefix for this harness. Leaked trees of this name filled a host
+ *  to zero bytes (flair#1032) — 7,188 leftovers, mostly `…-test-bridge-*`. */
+export const BRIDGE_TEST_DIR_PREFIX = "flair-bridge-test-";
+
+/** Age below which a leftover tree is left alone so a concurrent run's
+ *  in-flight dir is not deleted. Older leftovers are from interrupted runs. */
+export const STALE_BRIDGE_TEST_DIR_MS = 60_000;
+
+const IN_FLIGHT_BRIDGE_TEST_DIRS = new Set<string>();
+let bridgeTestExitHookInstalled = false;
+
+function installBridgeTestExitHook(): void {
+  if (bridgeTestExitHookInstalled) return;
+  bridgeTestExitHookInstalled = true;
+  // Exit only — no signal handlers. The integration suite SIGTERMs the
+  // runner as a fixture (federation-watch); a handler here would truncate it.
+  process.on("exit", () => {
+    for (const dir of IN_FLIGHT_BRIDGE_TEST_DIRS) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+}
+
+/**
+ * Remove leftover `flair-bridge-test-*` trees from earlier interrupted runs.
+ *
+ * A process-exit hook cannot cover SIGKILL or a hard crash, so the next
+ * harness start has to sweep what the last one left. Skips in-flight trees
+ * in this process and anything newer than `olderThanMs`.
+ *
+ * @returns number of trees removed
+ */
+export function sweepStaleBridgeTestDirs(opts?: {
+  olderThanMs?: number;
+  root?: string;
+}): number {
+  const root = opts?.root ?? tmpdir();
+  const olderThanMs = opts?.olderThanMs ?? STALE_BRIDGE_TEST_DIR_MS;
+  const now = Date.now();
+  let names: string[];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith(BRIDGE_TEST_DIR_PREFIX)) continue;
+    const dir = join(root, name);
+    if (IN_FLIGHT_BRIDGE_TEST_DIRS.has(dir)) continue;
+    try {
+      const st = statSync(dir);
+      if (now - st.mtimeMs < olderThanMs) continue;
+      rmSync(dir, { recursive: true, force: true });
+      removed++;
+    } catch { /* gone, or not ours to remove */ }
+  }
+  return removed;
+}
 
 /** Fields the spec (§8) requires to survive round-trip. */
 export const ROUND_TRIP_STABLE_FIELDS = ["content", "subject", "tags", "durability"] as const;
@@ -41,6 +102,12 @@ export interface RoundTripOptions {
   cwd: string;
   /** Override the import source path. Defaults to descriptor's import.sources[0].path. */
   fixturePath?: string;
+  /**
+   * Leave the intermediate export tree on disk after return. Default is to
+   * remove it on both success and throw (flair#1032). The CLI sets this so a
+   * failed `flair bridge test` can still print a live `tmpExportPath`.
+   */
+  retainTmpDir?: boolean;
 }
 
 export interface RoundTripMismatch {
@@ -98,9 +165,32 @@ export async function runRoundTrip(opts: RoundTripOptions): Promise<RoundTripRes
   const exportTarget = descriptor.export.targets[0];
 
   const resolvedFixture = resolvePath(cwd, opts.fixturePath ?? importSource.path);
-  const tmpDir = await fsp.mkdtemp(join(tmpdir(), `flair-bridge-test-${descriptor.name}-`));
+  // Sweep leftovers from interrupted runs *before* creating ours so a crash
+  // mid-call is all the next start has to find. In-flight trees in this
+  // process are skipped inside the sweep.
+  sweepStaleBridgeTestDirs();
+  const tmpDir = await fsp.mkdtemp(join(tmpdir(), `${BRIDGE_TEST_DIR_PREFIX}${descriptor.name}-`));
   const tmpPath = join(tmpDir, `roundtrip.${suffixForFormat(exportTarget.format)}`);
+  IN_FLIGHT_BRIDGE_TEST_DIRS.add(tmpDir);
+  installBridgeTestExitHook();
 
+  try {
+    return await runRoundTripAgainst(descriptor, resolvedFixture, importSource, exportTarget, tmpPath);
+  } finally {
+    IN_FLIGHT_BRIDGE_TEST_DIRS.delete(tmpDir);
+    if (!opts.retainTmpDir) {
+      try { await fsp.rm(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  }
+}
+
+async function runRoundTripAgainst(
+  descriptor: YamlBridgeDescriptor,
+  resolvedFixture: string,
+  importSource: YamlSourceTarget,
+  exportTarget: YamlSourceTarget,
+  tmpPath: string,
+): Promise<RoundTripResult> {
   // Pass 1: fixture → BridgeMemory[]
   const pass1: BridgeMemory[] = [];
   for await (const { record } of parseRecords(descriptor.name, resolvedFixture, importSource.format)) {

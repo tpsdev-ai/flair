@@ -16,10 +16,10 @@
 // integration lane; what is asserted here is that the mechanism is WIRED, which
 // is the half that silently rots.
 import { describe, expect, test } from "bun:test";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, readdirSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { countStaleHarperTrees } from "../helpers/harper-lifecycle.js";
+import { countStaleHarperTrees, startHarper, sweepStaleHarperTrees } from "../helpers/harper-lifecycle.js";
 
 const SRC = readFileSync(join(import.meta.dir, "..", "helpers", "harper-lifecycle.ts"), "utf8");
 
@@ -166,5 +166,39 @@ describe("the harness registers no process-wide signal handlers", () => {
 
   test("the exit hook is still installed — clean exits must still reap", () => {
     expect(CODE).toMatch(/process\.on\("exit", reapLiveInstances\)/);
+  });
+});
+
+describe("startHarper failure does not leak a scratch dir (flair#1032)", () => {
+  test("an install that cannot start leaves no new flair-test-* tree", async () => {
+    const before = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith("flair-test-")));
+    await expect(startHarper({
+      cwd: "/tmp/flair-1032-no-such-cwd",
+      harperBinDir: "/tmp/flair-1032-no-such-cwd",
+    })).rejects.toThrow();
+    const leaked = readdirSync(tmpdir()).filter((n) => n.startsWith("flair-test-") && !before.has(n));
+    expect(leaked).toEqual([]);
+  });
+
+  test("boot sweep removes an abandoned flair-test-* tree", () => {
+    const leftover = mkdtempSync(join(tmpdir(), "flair-test-stale-"));
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    utimesSync(leftover, past, past);
+    try {
+      const removed = sweepStaleHarperTrees({ olderThanMs: 60 * 60 * 1000 });
+      expect(removed).toBeGreaterThanOrEqual(1);
+      expect(existsSync(leftover)).toBe(false);
+    } finally {
+      rmSync(leftover, { recursive: true, force: true });
+    }
+  });
+
+  test("startHarper calls the boot sweep before creating a new tree", () => {
+    expect(CODE).toMatch(/sweepStaleHarperTrees\(/);
+    const sweepAt = CODE.indexOf("sweepStaleHarperTrees()");
+    const mkdtempAt = CODE.indexOf("mkdtemp(join(tmpdir(), \"flair-test-\")");
+    expect(sweepAt).toBeGreaterThan(-1);
+    expect(mkdtempAt).toBeGreaterThan(-1);
+    expect(sweepAt).toBeLessThan(mkdtempAt);
   });
 });

@@ -17961,7 +17961,14 @@ bridge
     }
 
     try {
-      const result = await runRoundTrip({ descriptor: loaded.descriptor, cwd, fixturePath: opts.fixture });
+      const result = await runRoundTrip({
+        descriptor: loaded.descriptor,
+        cwd,
+        fixturePath: opts.fixture,
+        // Keep the intermediate export so a failure can print a live path.
+        // The next harness start sweeps leftovers older than a minute (flair#1032).
+        retainTmpDir: true,
+      });
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
         process.exit(result.passed ? 0 : 1);

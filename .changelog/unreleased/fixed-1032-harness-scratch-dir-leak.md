@@ -1,0 +1,1 @@
+- **The bridge-test and integration harnesses no longer leak scratch directories.** `flair bridge test` and the Harper test lifecycle now remove the trees they create on both success and failure, and sweep leftovers from interrupted runs on the next start — the class of leak that filled a host to zero bytes (flair#1032).
