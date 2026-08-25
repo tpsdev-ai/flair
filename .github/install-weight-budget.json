@@ -3,8 +3,8 @@
   "maxBytes": 330000000,
   "maxPackages": 570,
   "baseline": {
-    "bytes": 290185821,
-    "packages": 540,
+    "bytes": 308910490,
+    "packages": 542,
     "entries": {
       "harper": 247550655,
       "@node-llama-cpp": 33023052,

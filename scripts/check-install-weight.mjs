@@ -143,21 +143,41 @@ export function collectPackages(nodeModulesDir) {
   return packages;
 }
 
-/** Top-level node_modules children (unscoped package or whole @scope). */
-export function collectTopLevelEntries(nodeModulesDir) {
-  const entries = [];
+function listInstallDirs(dir) {
   let children;
   try {
-    children = readdirSync(nodeModulesDir, { withFileTypes: true });
+    children = readdirSync(dir, { withFileTypes: true });
   } catch {
-    return entries;
+    return [];
   }
-  for (const e of children) {
-    if (!e.isDirectory() && !e.isSymbolicLink()) continue;
-    if (e.name.startsWith(".")) continue;
-    const p = join(nodeModulesDir, e.name);
-    entries.push({ name: e.name, bytes: dirSize(p) });
+  return children
+    .filter((e) => (e.isDirectory() || e.isSymbolicLink()) && !e.name.startsWith("."))
+    .map((e) => e.name);
+}
+
+/**
+ * Heaviest folders a human would `du` after install.
+ *
+ * A local `npm install` hoists onto node_modules/. A global
+ * `npm install --prefix` of a scoped package nests every dep under
+ * `@scope/name/node_modules`. Listing only the outer `@scope` then reports
+ * "the whole tree grew" and cannot name `foo@1.2.3`. Unwrap that one layout.
+ */
+export function collectTopLevelEntries(nodeModulesDir) {
+  const top = listInstallDirs(nodeModulesDir);
+  if (top.length === 1 && top[0].startsWith("@")) {
+    const scope = top[0];
+    const scoped = listInstallDirs(join(nodeModulesDir, scope));
+    if (scoped.length === 1) {
+      const pkgDir = join(nodeModulesDir, scope, scoped[0]);
+      const pkgName = `${scope}/${scoped[0]}`;
+      const own = dirSize(pkgDir, { skipNodeModules: true });
+      const nested = join(pkgDir, "node_modules");
+      const inner = existsSync(nested) ? collectTopLevelEntries(nested) : [];
+      return [{ name: pkgName, bytes: own }, ...inner].sort((a, b) => b.bytes - a.bytes);
+    }
   }
+  const entries = top.map((name) => ({ name, bytes: dirSize(join(nodeModulesDir, name)) }));
   entries.sort((a, b) => b.bytes - a.bytes);
   return entries;
 }
@@ -288,7 +308,7 @@ export function formatReport(result) {
   const m = result.measured;
   const b = result.budget;
   lines.push(
-    `Installed tree: ${formatBytes(m.bytes)} / ${m.packages} packages` +
+    `Installed tree: ${formatBytes(m.bytes)} (${m.bytes} bytes) / ${m.packages} packages` +
       `  (budget ${formatBytes(b.maxBytes)} / ${b.maxPackages} packages)`,
   );
   if (b.baseline?.bytes) {

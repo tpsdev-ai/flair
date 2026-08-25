@@ -15,7 +15,6 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-// @ts-expect-error — plain .mjs helper, no type declarations by design.
 import {
   EXIT_DID_NOT_RUN,
   EXIT_OK,
@@ -80,7 +79,7 @@ describe("measureInstalledTree", () => {
     expect(m.didNotRun).toBe(false);
     expect(m.packages).toBe(2);
     expect(m.bytes).toBeGreaterThanOrEqual(1040);
-    const names = m.entries.map((e: { name: string }) => e.name);
+    const names = (m.entries ?? []).map((e) => e.name);
     expect(names).toContain("harper");
     expect(names).toContain("left-pad");
   });
@@ -97,6 +96,28 @@ describe("measureInstalledTree", () => {
     const m = measureInstalledTree(empty);
     expect(m.didNotRun).toBe(true);
     expect(m.reason).toMatch(/empty/);
+  });
+
+  test("a global-install layout names the nested dep, not just @scope", () => {
+    // npm i -g --prefix puts @tpsdev-ai/flair at the only top-level child and
+    // nests every dep under it. The 294.7 MB CI tree looked like one entry
+    // named `@tpsdev-ai` until this unwrap.
+    const tree = join(scratch(), "node_modules");
+    const flair = join(tree, "@tpsdev-ai", "flair");
+    const nestedFoo = join(flair, "node_modules", "foo");
+    mkdirSync(nestedFoo, { recursive: true });
+    writeFileSync(join(flair, "package.json"), JSON.stringify({ name: "@tpsdev-ai/flair", version: "0.0.0" }) + "\n");
+    writeFileSync(join(flair, "own.bin"), Buffer.alloc(200));
+    writeFileSync(join(nestedFoo, "package.json"), JSON.stringify({ name: "foo", version: "1.2.3" }) + "\n");
+    writeFileSync(join(nestedFoo, "payload.bin"), Buffer.alloc(8000));
+    const m = measureInstalledTree(tree);
+    expect(m.didNotRun).toBe(false);
+    const names = (m.entries ?? []).map((e) => e.name);
+    expect(names).toContain("foo");
+    expect(names).toContain("@tpsdev-ai/flair");
+    expect(names).not.toContain("@tpsdev-ai");
+    const foo = (m.entries ?? []).find((e) => e.name === "foo");
+    expect(foo?.bytes).toBeGreaterThanOrEqual(8000);
   });
 });
 
@@ -256,12 +277,16 @@ describe("the committed ratchet", () => {
 
   test("loads and is a ceiling above the recorded baseline, not an aspirational miss", () => {
     expect(loaded.ok).toBe(true);
-    expect(loaded.maxBytes).toBeGreaterThan(loaded.baseline.bytes);
-    expect(loaded.maxPackages).toBeGreaterThan(loaded.baseline.packages);
+    const maxBytes = loaded.maxBytes ?? 0;
+    const maxPackages = loaded.maxPackages ?? 0;
+    const baselineBytes = loaded.baseline?.bytes ?? 0;
+    const baselinePackages = loaded.baseline?.packages ?? 0;
+    expect(maxBytes).toBeGreaterThan(baselineBytes);
+    expect(maxPackages).toBeGreaterThan(baselinePackages);
     // Headroom is "slightly above today", not a 2× wish. A 2× budget is how
     // the gate gets disabled without anyone saying so.
-    expect(loaded.maxBytes).toBeLessThanOrEqual(loaded.baseline.bytes * 1.25);
-    expect(loaded.maxPackages).toBeLessThanOrEqual(loaded.baseline.packages + 50);
+    expect(maxBytes).toBeLessThanOrEqual(baselineBytes * 1.25);
+    expect(maxPackages).toBeLessThanOrEqual(baselinePackages + 50);
   });
 
   test("records the heaviest known entries so a failure can name what grew", () => {
