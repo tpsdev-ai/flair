@@ -50,6 +50,15 @@ function isLocaleCompareCall(expr: ts.Expression): boolean {
     && e.expression.name.text === "localeCompare";
 }
 
+/** `-1` / `0` / `1` — the leaves of `a < b ? -1 : a > b ? 1 : 0`. */
+function isComparatorConstant(expr: ts.Expression): boolean {
+  const e = unwrap(expr);
+  if (ts.isNumericLiteral(e)) return true;
+  return ts.isPrefixUnaryExpression(e)
+    && (e.operator === ts.SyntaxKind.MinusToken || e.operator === ts.SyntaxKind.PlusToken)
+    && ts.isNumericLiteral(e.operand);
+}
+
 function isSingleKeyComparator(expr: ts.Expression): boolean {
   const e = unwrap(expr);
   if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
@@ -57,9 +66,10 @@ function isSingleKeyComparator(expr: ts.Expression): boolean {
   }
   if (ts.isConditionalExpression(e)) {
     // `a.id < b.id ? -1 : a.id > b.id ? 1 : 0` is a single-key id compare.
-    // Treat as single-key unless a branch itself is a `||` chain.
-    return isSingleKeyComparator(e.whenTrue) && isSingleKeyComparator(e.whenFalse)
-      && isSingleKeyComparator(e.condition);
+    // Constants are valid LEAVES (the ±1/0 the comparator returns), not a
+    // second key. A branch that itself has `||` is not single-key.
+    const leaf = (x: ts.Expression) => isComparatorConstant(x) || isSingleKeyComparator(x);
+    return leaf(e.whenTrue) && leaf(e.whenFalse) && isSingleKeyComparator(e.condition);
   }
   if (isLocaleCompareCall(e)) return true;
   if (ts.isBinaryExpression(e)) {
@@ -175,6 +185,16 @@ describe("sort-determinism guard detector", () => {
   test("passes when a || tie-break tail is present", () => {
     const src = `rows.sort((a, b) => (b._rank - a._rank) || byRecencyThenId(a, b));`;
     expect(findBareSingleKeySorts("scratch.ts", src)).toEqual([]);
+  });
+
+  test("FAILS on the classic a<b ? -1 : a>b ? 1 : 0 ternary (no || tail)", () => {
+    // Constants are the comparator's return values, not a second key.
+    // If this were not flagged, the opt-out test below would pass with the
+    // marker removed and could not catch a broken opt-out path.
+    const src = `names.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);`;
+    const hits = findBareSingleKeySorts("scratch.ts", src);
+    expect(hits.length).toBe(1);
+    expect(hits[0]!.excerpt).toContain("a.name < b.name");
   });
 
   test("opt-out marker // deterministic: key is unique suppresses the flag", () => {
