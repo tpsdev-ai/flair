@@ -347,6 +347,28 @@ describe("MemoryApi", () => {
     expect(body.visibility).toBe("shared");
   });
 
+  test("write() forwards usedMemoryIds ONLY when the caller supplies a non-empty list (flair#1147)", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.write("content long enough to matter", { usedMemoryIds: ["mem-cited"] });
+
+    const body = JSON.parse((mockFetch as any).mock.calls[0][1].body);
+    expect(body.usedMemoryIds).toEqual(["mem-cited"]);
+  });
+
+  test("write() omits usedMemoryIds entirely when the caller doesn't set it — no client-side default", async () => {
+    mockFetch = mock(() => Promise.resolve(new Response("{}", { status: 200 })));
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.write("content long enough to matter");
+
+    const body = JSON.parse((mockFetch as any).mock.calls[0][1].body);
+    expect("usedMemoryIds" in body).toBe(false);
+  });
+
   test("update() default mode: reads existing, PUTs merged content to the SAME id, clears stale embedding", async () => {
     const existing = {
       id: "mem-1", agentId: "test", content: "old content", type: "session",
@@ -411,6 +433,27 @@ describe("MemoryApi", () => {
     await expect(client.memory.update("nonexistent", "x")).rejects.toThrow();
     // Only the GET happened — no PUT was attempted.
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("update() forwards usedMemoryIds on the in-place PUT (flair#1147)", async () => {
+    const existing = {
+      id: "mem-1", agentId: "test", content: "old content", type: "session",
+      durability: "standard", tags: [], createdAt: "2026-01-01T00:00:00Z",
+    };
+    mockFetch = mock((_url: string, init?: any) => {
+      if (init?.method === "GET") {
+        return Promise.resolve(new Response(JSON.stringify(existing), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ written: true }), { status: 200 }));
+    });
+    globalThis.fetch = mockFetch as any;
+
+    const client = new FlairClient({ agentId: "test" });
+    await client.memory.update("mem-1", "new content", { usedMemoryIds: ["mem-cited"] });
+
+    const putCall = (mockFetch as any).mock.calls.find((c: any) => c[1].method === "PUT");
+    const putBody = JSON.parse(putCall[1].body);
+    expect(putBody.usedMemoryIds).toEqual(["mem-cited"]);
   });
 
   // ─── flair#718 authorship-provenance — claimedClient forwarding on memory writes ──
