@@ -73,9 +73,10 @@ describe("byRecencyThenId — createdAt DESC (null→oldest) then id ASC", () =>
   });
 
   test("never returns NaN — including null / missing createdAt", () => {
-    const a = { id: "a", createdAt: null };
-    const b = { id: "b" };
-    const c = { id: "c", createdAt: "2024-01-01T00:00:00.000Z" };
+    type Row = { id: string; createdAt?: string | null };
+    const a: Row = { id: "a", createdAt: null };
+    const b: Row = { id: "b" };
+    const c: Row = { id: "c", createdAt: "2024-01-01T00:00:00.000Z" };
     expect(Number.isNaN(byRecencyThenId(a, b))).toBe(false);
     expect(Number.isNaN(byRecencyThenId(a, c))).toBe(false);
     expect(Number.isNaN(byRecencyThenId(b, c))).toBe(false);
