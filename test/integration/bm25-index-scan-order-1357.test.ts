@@ -40,7 +40,7 @@
  *     reproduce Harper's own shape exactly, or a rescued record's response
  *     bytes would differ from a scanned one's.
  *
- * VEHICLE for premise 1: `GET /Memory/?` (Memory.search → Harper Table.search)
+ * VEHICLE for premise 1: `GET /Memory/` (Memory.search → Harper Table.search)
  * for the scope OR-group scan, and ops `search_by_value` for the tags/subject
  * index seek. Do NOT use SemanticSearch — after flair#1412 that path is
  * `createdAt DESC, id ASC` on an all-equal `_rank` and no longer leaks scan
