@@ -1,4 +1,4 @@
-import { Resource, databases, server } from "harper";
+import { Resource, databases, server, logger } from "harper";
 import { promises as fsp, existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";
@@ -119,8 +119,18 @@ export class Health extends Resource {
 }
 
 /** Same sources /Health and /HealthDetail consult so they cannot disagree. */
+let _warnedMissingRegistry = false;
 function currentSearchReadiness(): SearchReadiness {
+  // Shipped Harper launch: this Resource is already registered, so
+  // server.resources is populated. The null skip is a stated fail-open
+  // (Sherlock on #1406) for the injectable/test path — not an accident.
   const resources = (server as { resources?: ResourceRegistry }).resources ?? null;
+  if (!resources && !_warnedMissingRegistry) {
+    _warnedMissingRegistry = true;
+    logger.warn?.(
+      "Health: server.resources is absent — skipping the search-route mount check (table-only fail-open). Shipped Harper launch always exposes the registry.",
+    );
+  }
   return resolveSearchReadiness({
     resources,
     memoryTable: db.flair?.Memory,

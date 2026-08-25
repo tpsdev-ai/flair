@@ -63,9 +63,14 @@ function routeMounted(resources: ResourceRegistry, name: string): boolean {
  * Decide whether search is actually usable, and whether /Health should claim
  * the process is healthy.
  *
- * `resources` is optional: Harper's `server` export may not expose the
- * registry in every context. When it is missing we skip the route check
- * rather than fail-closed forever. The memory-table check still applies.
+ * `resources` is optional. Stated fail-open (Sherlock on #1406): when the
+ * registry is missing we skip the route-mount check rather than 503 forever.
+ * A table handle can exist while `/Memory` and `/SemanticSearch` still 404,
+ * so this is weaker than the primary defense. In the shipped launch path
+ * `/Health` is served by this Resource after Harper has registered us, so
+ * `server.resources` is populated; the skip is the injectable/test path
+ * (and a theoretical export without a registry). Health.ts logs once if
+ * the live call site actually takes it.
  */
 export function resolveSearchReadiness(opts: {
   resources?: ResourceRegistry | null;
