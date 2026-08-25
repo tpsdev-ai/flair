@@ -1,0 +1,1 @@
+- **CI now fails when a global install of the packed tarball exceeds the install-weight budget.** The published tarball is a few megabytes; the installed tree is hundreds. The new gate measures that installed tree (not the tarball), reports the delta and the heaviest new or grown packages on failure, and refuses to pass when it could not measure. (flair#1004)
