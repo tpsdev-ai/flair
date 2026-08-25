@@ -1,4 +1,4 @@
-import { Resource, databases } from "harper";
+import { Resource, databases, server } from "harper";
 import { promises as fsp, existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, dirname } from "node:path";
@@ -8,6 +8,9 @@ import { resolveBuildInfo } from "./build-info.js";
 import { getMigrationStatusSnapshot } from "./migrations/status.js";
 import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
 import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
+import { hybridEnabled } from "./bm25.js";
+import { bm25IndexStatus } from "./bm25-index-service.js";
+import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
 
 const db = databases as any;
 
@@ -49,7 +52,7 @@ function resolveVersion(): string {
 }
 
 /**
- * Health endpoint — truly public, returns only { ok: true }.
+ * Health endpoint — truly public. Identity-free; no auth, no role check.
  *
  * `allowRead() { return true }` opens Harper's role gate for anonymous GETs,
  * which is what makes /Health work for callers outside `authorizeLocal`'s
@@ -63,8 +66,15 @@ function resolveVersion(): string {
  *
  * Same pattern as `FederationPair.allowCreate(){ return true }` (PR #299):
  * declare the Resource anonymously-accessible at the Harper layer; let the
- * handler itself enforce whatever it needs (in this case, nothing — /Health
- * is intentionally and always public).
+ * handler itself enforce whatever it needs.
+ *
+ * flair#1326: `ok: true` used to mean only "this resource answered." That
+ * is a green light that lies when search routes are not mounted yet, or
+ * when the hybrid BM25 index is still cold (first search after restart
+ * scans the corpus; the lag grows with store size). `searchReady` is
+ * always present. When search cannot be served at all, this endpoint
+ * returns HTTP 503 and `ok: false`. When the process is live but recall
+ * is still cold, it stays 200 and names the lag on `searchReadyReason`.
  *
  * Rich stats (memory counts, agent names, etc.) are behind /HealthDetail
  * which requires authentication. This prevents information leakage on
@@ -93,12 +103,30 @@ export class Health extends Resource {
     // a 40-hex sha when the build ran in a git work tree, an honest null
     // otherwise (tarball builds) — never omitted, never fabricated (Sherlock).
     const build = resolveBuildInfo();
-    return {
-      ok: true,
+    const readiness = currentSearchReadiness();
+    const body = buildPublicHealthBody(readiness, {
       version: build?.version ?? resolveVersion(),
       buildCommit: build?.commit ?? null,
-    };
+    });
+    if (readiness.status !== 200) {
+      return new Response(JSON.stringify(body), {
+        status: readiness.status,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return body;
   }
+}
+
+/** Same sources /Health and /HealthDetail consult so they cannot disagree. */
+function currentSearchReadiness(): SearchReadiness {
+  const resources = (server as { resources?: ResourceRegistry }).resources ?? null;
+  return resolveSearchReadiness({
+    resources,
+    memoryTable: db.flair?.Memory,
+    bm25: bm25IndexStatus(),
+    hybridEnabled: hybridEnabled(),
+  });
 }
 
 /**
@@ -126,6 +154,16 @@ export class HealthDetail extends Resource {
     const stats: Record<string, any> = { ok: true };
     const nowMs = Date.now();
     const warnings: Array<{ level: "warn" | "info"; message: string }> = [];
+
+    // flair#1326: same search-ready signal as public /Health. HealthDetail
+    // stays HTTP 200 (it is a stats dump, not a traffic gate); the field
+    // and a warning name the lag so `flair status` / operators can see it.
+    const readiness = currentSearchReadiness();
+    stats.searchReady = readiness.searchReady;
+    if (readiness.searchReadyReason) {
+      stats.searchReadyReason = readiness.searchReadyReason;
+      warnings.push({ level: "warn", message: readiness.searchReadyReason });
+    }
 
     const ctx = (this as any).getContext?.();
     // #614 fix: resolve identity via the shared three-way verdict
