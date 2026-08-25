@@ -16,10 +16,11 @@
 // integration lane; what is asserted here is that the mechanism is WIRED, which
 // is the half that silently rots.
 import { describe, expect, test } from "bun:test";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, readdirSync, existsSync, utimesSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { countStaleHarperTrees } from "../helpers/harper-lifecycle.js";
+import { countStaleHarperTrees, startHarper, sweepStaleHarperTrees } from "../helpers/harper-lifecycle.js";
+import { SCRATCH_OWNER_FILE, writeScratchOwnerStamp } from "../../src/lib/scratch-owner.js";
 
 const SRC = readFileSync(join(import.meta.dir, "..", "helpers", "harper-lifecycle.ts"), "utf8");
 
@@ -166,5 +167,96 @@ describe("the harness registers no process-wide signal handlers", () => {
 
   test("the exit hook is still installed — clean exits must still reap", () => {
     expect(CODE).toMatch(/process\.on\("exit", reapLiveInstances\)/);
+  });
+});
+
+describe("startHarper failure does not leak a scratch dir (flair#1032)", () => {
+  test("an install that cannot start leaves no new flair-test-* tree", async () => {
+    const before = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith("flair-test-")));
+    await expect(startHarper({
+      cwd: "/tmp/flair-1032-no-such-cwd",
+      harperBinDir: "/tmp/flair-1032-no-such-cwd",
+    })).rejects.toThrow();
+    const leaked = readdirSync(tmpdir()).filter((n) => n.startsWith("flair-test-") && !before.has(n));
+    expect(leaked).toEqual([]);
+  });
+
+  test("boot sweep removes an abandoned flair-test-* tree", () => {
+    const leftover = mkdtempSync(join(tmpdir(), "flair-test-stale-"));
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    utimesSync(leftover, past, past);
+    try {
+      const removed = sweepStaleHarperTrees({ olderThanMs: 60 * 60 * 1000 });
+      expect(removed).toBeGreaterThanOrEqual(1);
+      expect(existsSync(leftover)).toBe(false);
+    } finally {
+      rmSync(leftover, { recursive: true, force: true });
+    }
+  });
+
+  test("boot sweep does not delete a tree whose owner pid is still alive", () => {
+    const live = mkdtempSync(join(tmpdir(), "flair-test-live-"));
+    writeScratchOwnerStamp(live);
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    utimesSync(live, past, past);
+    try {
+      sweepStaleHarperTrees({ olderThanMs: 0 });
+      expect(existsSync(live)).toBe(true);
+    } finally {
+      rmSync(live, { recursive: true, force: true });
+    }
+  });
+
+  test("boot sweep removes a tree whose owner pid is dead", () => {
+    const orphan = mkdtempSync(join(tmpdir(), "flair-test-orphan-"));
+    writeFileSync(join(orphan, SCRATCH_OWNER_FILE), "999999999\n");
+    try {
+      const removed = sweepStaleHarperTrees({ olderThanMs: 0 });
+      expect(removed).toBeGreaterThanOrEqual(1);
+      expect(existsSync(orphan)).toBe(false);
+    } finally {
+      rmSync(orphan, { recursive: true, force: true });
+    }
+  });
+
+  test("boot sweep does not delete a tree whose hdb.pid is still alive", () => {
+    const live = mkdtempSync(join(tmpdir(), "flair-test-hdb-"));
+    writeFileSync(join(live, "hdb.pid"), `${process.pid}\n`);
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    utimesSync(live, past, past);
+    try {
+      sweepStaleHarperTrees({ olderThanMs: 0 });
+      expect(existsSync(live)).toBe(true);
+    } finally {
+      rmSync(live, { recursive: true, force: true });
+    }
+  });
+
+  test("sweep unlinks a prefix-named symlink and does not touch its target", () => {
+    // Pins the Node property Flint and both reviewers measured on #1408:
+    // fs.rmSync({recursive:true}) lstats and unlinks a symlink — it never
+    // descends into the target. A future Node that followed would fail this
+    // before it deleted someone else's tree.
+    const target = mkdtempSync(join(tmpdir(), "flair-1032-rmsync-target-"));
+    writeFileSync(join(target, "keep-me"), "safe");
+    const link = join(tmpdir(), `flair-test-symlink-${Date.now()}`);
+    symlinkSync(target, link);
+    try {
+      sweepStaleHarperTrees({ olderThanMs: 0 });
+      expect(existsSync(join(target, "keep-me"))).toBe(true);
+      expect(existsSync(link)).toBe(false);
+    } finally {
+      try { unlinkSync(link); } catch { /* sweep already removed it */ }
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  test("startHarper calls the boot sweep before creating a new tree", () => {
+    expect(CODE).toMatch(/sweepStaleHarperTrees\(/);
+    const sweepAt = CODE.indexOf("sweepStaleHarperTrees()");
+    const mkdtempAt = CODE.indexOf("mkdtemp(join(tmpdir(), \"flair-test-\")");
+    expect(sweepAt).toBeGreaterThan(-1);
+    expect(mkdtempAt).toBeGreaterThan(-1);
+    expect(sweepAt).toBeLessThan(mkdtempAt);
   });
 });

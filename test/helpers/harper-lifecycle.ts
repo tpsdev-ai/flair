@@ -2,9 +2,15 @@ import { spawn, execFileSync, ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import type { AddressInfo, Server } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync, rmSync, readdirSync, readFileSync, appendFileSync } from "node:fs";
+import { existsSync, rmSync, readdirSync, readFileSync, appendFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  hasScratchOwnerStamp,
+  hdbPidIsLive,
+  scratchOwnerIsLive,
+  writeScratchOwnerStamp,
+} from "../../src/lib/scratch-owner.js";
 
 // ─── Leak backstop: clean up even when the test framework never gets to ──────
 //
@@ -99,10 +105,10 @@ function installExitHook(): void {
   //
   // What is left: the exit hook, which covers clean exits including a suite that
   // finishes with instances still tracked. An interrupted or cancelled run will
-  // leak, and that is the accepted cost. countStaleHarperTrees() makes the leak
-  // visible on the NEXT run instead of at 0 bytes free, which is the property
-  // that actually mattered — the incident was invisible for four days, not
-  // uncleaned for four days.
+  // still leak in *this* process — that is the accepted cost of no signal
+  // handlers. sweepStaleHarperTrees() on the NEXT startHarper removes the
+  // abandoned trees, and countStaleHarperTrees() makes a leftover visible as a
+  // test failure instead of at 0 bytes free.
 }
 
 /**
@@ -118,6 +124,54 @@ export function countStaleHarperTrees(): number {
   } catch {
     return 0;
   }
+}
+
+/** Grace for *unstamped* leftovers only (stamp not written yet, or a tree
+ *  from before the owner file existed). Stamped trees use pid liveness;
+ *  directory mtime is not a liveness signal. */
+export const STALE_HARPER_TREE_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Remove abandoned `flair-test-*` trees left by interrupted runs.
+ *
+ * A process-exit hook cannot cover SIGKILL, so the next `startHarper` has
+ * to sweep what the last one left. Skips dirs this process still tracks,
+ * any tree whose owner pid is still alive, and any tree whose `hdb.pid`
+ * is still alive (a live Harper from before the stamp existed). Directory
+ * mtime is only a race guard for unstamped dirs — Linux does not update
+ * it when files inside subdirs are appended.
+ *
+ * @returns number of trees removed
+ */
+export function sweepStaleHarperTrees(opts?: { olderThanMs?: number }): number {
+  const olderThanMs = opts?.olderThanMs ?? STALE_HARPER_TREE_MS;
+  const live = new Set(
+    [...LIVE_INSTANCES].map((inst) => inst.installDir).filter((d): d is string => Boolean(d)),
+  );
+  const now = Date.now();
+  let names: string[];
+  try {
+    names = readdirSync(tmpdir());
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith("flair-test-")) continue;
+    const dir = join(tmpdir(), name);
+    if (live.has(dir)) continue;
+    if (scratchOwnerIsLive(dir)) continue;
+    if (hdbPidIsLive(dir)) continue;
+    try {
+      if (!hasScratchOwnerStamp(dir)) {
+        const st = statSync(dir);
+        if (now - st.mtimeMs < olderThanMs) continue;
+      }
+      rmSync(dir, { recursive: true, force: true, maxRetries: 2 });
+      removed++;
+    } catch { /* gone, or not ours to remove */ }
+  }
+  return removed;
 }
 
 const STARTUP_TIMEOUT_MS = 45_000;
@@ -393,7 +447,20 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
 
   // ── Local mode: spawn Harper from node_modules ────────────────────────────
   const ownsInstallDir = !opts.installDir;
+  // Boot sweep first: leftovers from SIGKILL / cancelled CI are not small,
+  // and a handler cannot cover those exits (flair#1032).
+  if (ownsInstallDir) sweepStaleHarperTrees();
   const installDir = opts.installDir ?? await mkdtemp(join(tmpdir(), "flair-test-"));
+  if (ownsInstallDir) writeScratchOwnerStamp(installDir);
+  // Track before install/spawn so a timeout or thrown install still reaps
+  // the tree. stopHarper / the success-path return replace pid once we have it.
+  const tracked: { pid?: number; installDir?: string; owns: boolean } = {
+    installDir,
+    owns: ownsInstallDir,
+  };
+  LIVE_INSTANCES.add(tracked);
+  installExitHook();
+  let started = false;
 
   // Deny-list: strip CI secrets from the inherited env so Harper's child
   // process (and any log dump on failure) doesn't leak them onto a public
@@ -430,6 +497,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   // predates flair#504 simply has no such file and skips registration —
   // exactly the pre-#504 degrade behavior.
 
+  try {
   const install = spawn(NODE_BIN, [HARPER_BIN, "install"], { cwd, env: baseEnv });
   await new Promise<void>((resolve, reject) => {
     let output = "";
@@ -498,11 +566,10 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
         waitForHealth(httpURL, 60_000, () => exited, () => log),
         waitForHealth(opsURL, 60_000, () => exited, () => log),
       ]);
-      // Register BEFORE returning. If a caller's beforeAll times out between
-      // here and its afterAll, the exit hook is the only thing that reaps this.
-      installExitHook();
-      const tracked = { pid: proc.pid, installDir, owns: ownsInstallDir };
-      LIVE_INSTANCES.add(tracked);
+      // pid is filled in now that spawn succeeded. The registry entry itself
+      // was added before install so a thrown start still reaps the tree.
+      tracked.pid = proc.pid;
+      started = true;
       return {
         httpURL, opsURL, installDir, process: proc,
         admin: { username: "admin", password: "test123" },
@@ -522,6 +589,16 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     }
   }
   throw lastErr ?? new Error("Harper failed to start");
+  } catch (err) {
+    LIVE_INSTANCES.delete(tracked);
+    throw err;
+  } finally {
+    // Failure path: install/spawn threw. Success path sets `started` so the
+    // tree stays — stopHarper / the exit hook own it from here.
+    if (!started && ownsInstallDir) {
+      try { rmSync(installDir, { recursive: true, force: true, maxRetries: 2 }); } catch { /* best effort */ }
+    }
+  }
 }
 
 export interface StopHarperOptions {
