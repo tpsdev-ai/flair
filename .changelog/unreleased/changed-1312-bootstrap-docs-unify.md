@@ -1,1 +1,0 @@
-- **README, quickstart, and `docs/claude-code.md` now recommend the same bootstrap flow.** Session start is the MCP `bootstrap` tool (`mcp__flair__bootstrap` is Claude Code's namespaced name for it). `flair bootstrap --agent <id>` is the CLI variant, for when MCP is not wired. (flair#1312)

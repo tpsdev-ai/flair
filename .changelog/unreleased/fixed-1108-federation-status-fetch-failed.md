@@ -1,1 +1,0 @@
-- **`flair federation status` names the URL and the setting on fetch failure.** A probe that used to print only `fetch failed` now says what was contacted and which knob produced it (`FLAIR_URL`, `--port`, `--target`, or `FLAIR_TARGET`), so a healthy instance on a different port is a one-line fix (flair#1108).

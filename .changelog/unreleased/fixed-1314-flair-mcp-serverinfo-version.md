@@ -1,1 +1,0 @@
-- **flair-mcp `initialize` now reports the published package version.** Client UIs (Claude Code `/mcp`, Cursor) were showing `0.1.0` because `serverInfo.version` was hardcoded. It now reads `@tpsdev-ai/flair-mcp`'s `package.json`, so the version a debugger sees is the version that's running (flair#1314).

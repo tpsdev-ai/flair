@@ -1,1 +1,0 @@
-- **flair-mcp key auto-resolve no longer misses a freshly-created `~/.flair/keys/<id>.key`.** Resolution calls `os.homedir()` at request time (never a cached miss, never a cwd-relative `~`), and a 401 names the agent, the paths that were looked in, and the remedy (flair#1271).

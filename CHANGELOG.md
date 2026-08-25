@@ -18,6 +18,173 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.50.0] - 2026-08-25
+
+### Added
+
+- **CI now fails when a global install of the packed tarball exceeds the install-weight budget.** The published tarball is a few megabytes; the installed tree is hundreds. The new gate measures that installed tree (not the tarball), reports the delta and the heaviest new or grown packages on failure, and refuses to pass when it could not measure. (flair#1004)
+
+- **`flair hook install --harness codex` writes a Codex SessionStart hook.** Same
+  `flair-session-start` command Claude Code already uses, merged into
+  `~/.codex/hooks.json` (Codex's hook file — same JSON schema). `uninstall` /
+  `status` take the same flag. `flair doctor` reports the Codex hook when
+  Codex is detected; after install, trust the command with `/hooks`. Clients
+  with no session-start hook get a documented AGENTS.md / GEMINI.md fallback
+  in `docs/mcp-clients.md` so MCP wiring alone is not mistaken for done
+  (flair#1148). Continuity capture (`--continuity`) stays Claude Code only —
+  Codex status does not offer it, and `flair hook install --continuity
+  --harness codex` refuses rather than writing unused PostToolUse/Stop
+  entries.
+
+- **Runnable two-node repro for the #1244 loss mechanism**
+  (`test/repro/basecopy-retention-repro.mjs`). Boots an ephemeral, fully
+  isolated two-node Harper cluster, partitions one node, writes rows only the
+  surviving node holds, ages the partition past `logging.auditRetention`, and
+  reconnects to force Harper's "bounded base-copy resync" — then asserts what
+  that lane actually does to receiver-only rows, with a positive-control
+  proving normal deletes do appear in `read_transaction_log`. A control lane
+  reconnects within retention to distinguish base-copy from incremental
+  catch-up. Nothing in it touches a production data directory or port.
+
+- **The LongMemEval bench now measures and publishes its reader's
+  nondeterminism, and states what each hash actually proves.** "Re-run and
+  compare within variance" was an empty instruction: we published no variance to
+  compare against, so a re-runner whose completion text diverged from ours had
+  no way to tell normal from broken. Every run now probes the reader — N
+  byte-identical calls on a FIXED, recorded question sample — and records
+  distinct completions, common-prefix length and verdict-agreement rate in the
+  artifact's **unhashed provenance** partition. The probe issues the main run's
+  own reader request builder and takes no reader parameters of its own, so it
+  cannot drift into measuring a different configuration; the question sample is
+  a hardcoded constant so probes stay comparable across runs; and a probe id
+  missing from the dataset is fatal rather than a silent skip. Alongside it, the
+  reproducibility language is restated in three tiers: `configHash` is the
+  re-derivable anchor and leads, `runHash` is the decision set (re-derivable
+  locally, statistical under the cloud profile), and **`artifactHash` is a seal,
+  not a proof** — tamper-evidence for a signed-off artifact, never
+  reproducibility evidence. "Verify it yourself" rests on `configHash` plus the
+  exact prompts, dataset selection and judge rubric. Bench tooling only; nothing
+  in the shipped package changes.
+
+- **Hosted-Flair auth guide for adapters.** If your agent just got a 404
+  against a hosted instance, identity is three things that must match
+  (Ed25519 keyfile + agent id + the `Agent` row on **that** instance),
+  the failure is one of three shapes (record missing / key mismatch /
+  config wrong), and a 404 on by-id routes is fail-closed ownership —
+  never an existence signal. Lives in `docs/integrations.md` (the shared
+  adapter home) and the adk-flair README hosted section; pointers from
+  auth, Fabric, troubleshooting, and mcp-clients. Docs slice of
+  flair#1338 only — not the canary / hosted-shape CI program.
+
+### Changed
+
+- **README, quickstart, and `docs/claude-code.md` now recommend the same bootstrap flow.** Session start is the MCP `bootstrap` tool (`mcp__flair__bootstrap` is Claude Code's namespaced name for it). `flair bootstrap --agent <id>` is the CLI variant, for when MCP is not wired. (flair#1312)
+
+- **Embedder thread count is now host-aware, and overridable via
+  `FLAIR_EMBED_THREADS`** (flair#1330). Flair now passes `threads` through
+  `embeddings-boot` to harper-fabric-embeddings instead of inheriting HFE's
+  fixed default of 6 — which left cores idle on an 8-vCPU ingest host and
+  oversubscribed a 4-core one. Unset, the value is
+  `max(1, availableParallelism() − 1)` (cgroup-aware; one core left for
+  Harper). Set `FLAIR_EMBED_THREADS` to a positive integer to pin. Invalid
+  values fall back to the default. Env-only — not a `config.yaml` key.
+
+### Fixed
+
+- **The bridge-test and integration harnesses no longer leak scratch directories.** `flair bridge test` and the Harper test lifecycle now remove the trees they create on both success and failure, and sweep leftovers from interrupted runs on the next start — the class of leak that filled a host to zero bytes (flair#1032).
+
+  The sweep matches the `flair-test-` / `flair-bridge-test-` prefixes under `$TMPDIR`. A stamped tree is kept while its owner pid (or Harper's `hdb.pid`) is alive. An *unstamped* leftover is swept on age alone, so a directory a person created with those prefixes and left past the grace window would be removed — that path exists to clean the pre-stamp leak. The pid check is also host-pid-namespace only; a container with its own pid space is not a deployment this harness claims to cover.
+
+- **`flair deploy` refuses a `files` entry it cannot honour, instead of silently dropping it.** Any `package.json` `files` entry that is not a plain top-level name (glob, negation, `?` / `[]` / `{}`, a nested path) used to vanish from the deploy payload with no error — npm would publish the files and the deployed component would not contain them. Deploy now admits only plain top-level names and fails with a message naming any other entry. (flair#1083)
+
+- **`flair memory add` accepts the same credential flags as `backup` and `federation sync`.** `--admin-pass-file` is no longer an unknown option, and `--agent` is optional when `FLAIR_AGENT_ID` is set — commander no longer rejects the env fallback as a missing required flag. (flair#1106)
+
+- **`flair federation sync enable` no longer repeats `loginctl enable-linger` after lingering is already on.** Over ssh, a missing systemd user bus used to print the linger remedy even after the operator had applied it. The remaining gap is this session's user-bus environment (`XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS`); enable now prints those export lines instead of re-asking for linger. `flair rem nightly enable` uses the same helper. (flair#1107)
+
+- **`flair federation status` names the URL and the setting on fetch failure.** A probe that used to print only `fetch failed` now says what was contacted and which knob produced it (`FLAIR_URL`, `--port`, `--target`, or `FLAIR_TARGET`), so a healthy instance on a different port is a one-line fix (flair#1108).
+
+- **adk-flair-js Ollama test helper throws on unmapped LlmRequest part kinds (flair#1122).** `functionCall`, `functionResponse`, and any other non-text part used to become `""`, so a future tool-calling test would look like a blank turn. Those kinds now throw. The `app_name` vs `app:name` tag collision stays covered by the existing percent-encoding scheme, locked by a regression test.
+
+- **stdio MCP clients can record usage.** `@tpsdev-ai/flair-mcp` now exposes
+  `record_usage` (POST `/RecordUsage`: memory id + optional one-line
+  how-it-was-used) and an optional `usedMemoryIds` passthrough on
+  `memory_store` / `memory_update`. `memory_search` and `bootstrap` append a
+  one-line nudge to cite what you actually use — a search hit is not usage.
+  Native `/mcp` already had this surface; the stdio package the issue named
+  did not (flair#1147).
+
+- **flair-mcp key auto-resolve no longer misses a freshly-created `~/.flair/keys/<id>.key`.** Resolution calls `os.homedir()` at request time (never a cached miss, never a cwd-relative `~`), and a 401 names the agent, the paths that were looked in, and the remedy (flair#1271).
+
+- **`flair federation sync enable` / `flair rem nightly enable` now warn when the path baked into the scheduler shim is not the public `flair` command.** Enable still captures `FLAIR_BIN` once (the shim keeps #1231's `exec <node> <script>` form and still does zero PATH lookups at run time), but a debug-session `node dist/cli.js` or a versioned blue/green tree is no longer trusted silently — the report names the baked path and says that a later directory swap will strand the unit. Relative captures are resolved to an absolute path before they are written. (flair#1279)
+
+- **`flair doctor` no longer tells you to set `FLAIR_PUBLIC_URL` in a `.env` inside the npm package directory.** That path (e.g. `/lib/node_modules/@tpsdev-ai/flair/.env`) does not exist by default and is wiped on every upgrade. The hint now names a durable location the process actually reads: the Flair process environment (launchd / systemd / `export` before `flair start`), or the component `.env` on a Fabric/server deploy (`loadEnv` in `config.yaml`). (flair#1313)
+
+- **flair-mcp `initialize` now reports the published package version.** Client UIs (Claude Code `/mcp`, Cursor) were showing `0.1.0` because `serverInfo.version` was hardcoded. It now reads `@tpsdev-ai/flair-mcp`'s `package.json`, so the version a debugger sees is the version that's running (flair#1314).
+
+- **`/Health` no longer reports a node as healthy when search is not actually usable** (flair#1326).
+  After restart, Harper can answer `/health` in a few seconds while `/Memory`
+  and `/SemanticSearch` are still catch-all 404s, and while the hybrid BM25
+  index is still empty (the first search scans the corpus; that lag grows with
+  store size). `/Health` now always includes `searchReady`. Missing search
+  routes return HTTP 503 and `ok: false`. A live process with a cold index
+  stays 200 and names the lag on `searchReadyReason` so a traffic gate can
+  tell "up" from "recall-ready." `/HealthDetail` carries the same fields.
+
+- **`flair quality` no longer pulls the Memory table with embeddings inline
+  to sample 10 memories (flair#1360).** The recall spot-check now GETs a
+  Harper-projected, recency-sorted, bounded window
+  (`select(id,subject,content,createdAt)` + `limit(0, 26)`) instead of an
+  unfiltered `GET /Memory?agentId=…` that returned every row's embedding
+  vector — 66 MB, twice per `--emit` run on a 3k-row production store, and
+  growing with store size. The previous-snapshot lookup uses the same
+  projection. Score, sample frame (most-recently-written), and auth path
+  are unchanged.
+
+- **Bootstrap no longer ships a soul entry it decided to drop** (flair#1371).
+  Under a tight `maxTokens`, the soul selector could drop an entry from
+  `sections.soul`, `soulTokens`, and the context pointer while still putting
+  the full key in the structured `soul` map. A decided drop now omits that
+  key, so counted == delivered.
+
+- **LongMemEval bench: a single run no longer reports `± 0.0%`** (flair#1376).
+  The sample std returned `0` for `n < 2` and the report printed
+  `66.0% ± 0.0%`, which reads as "we ran it repeatedly and it agreed perfectly"
+  when it means "we never measured variance" — an absence rendered as the
+  strongest possible claim, on the path a published number travels. `std()` now
+  returns `null` when there is nothing to measure, each arm aggregate carries
+  `varianceMeasured`, and the headline renders
+  `66.0% (single run — variance unmeasured)`. Affects the bench harness only;
+  no change to Flair itself.
+
+- **The impl-term-leak gate no longer treats English `ops-*` compounds as bead IDs**
+  (flair#1381). `ops-port`, `ops-api`, `ops-target`, and `ops-server` are an
+  exact-literal allowlist — not a heuristic. A real bead ID (`ops-xllz`) still
+  fails. Each finding now names the matched token and the rule that tripped,
+  e.g. `docs/integrations.md:41: matched bead-ID pattern on token "ops-xllz"`.
+
+- **`engines.node` now matches Harper's floor.** Flair declared `>=22` while
+  the bundled Harper requires `^22.18.0 || >=24`. Node 22.0–22.17 installed
+  cleanly and then Harper refused to boot. The declared range is now Harper's
+  (flair#1385).
+
+- **Tied retrieval results now have a specified order** (flair#1412).
+  When fused ranks are equal, the newer `createdAt` wins and `id`
+  ascending is the total-order backstop, so the same query against the
+  same store returns the same order after a restart. A missing
+  `createdAt` sorts as oldest (never NaN). Recency within a tie is
+  best-effort across federated writers — clock skew cannot reintroduce
+  nondeterminism.
+
+- **`flair test` banner now prints the URL the test actually talks to.** With `FLAIR_URL` pointed at a remote, the command already ran against that remote but the banner printed `127.0.0.1:<port>` — so connectivity debugging claimed a possibly-dead local instance. The banner now uses the same resolved target the test's own client uses (flair#1351).
+
+### Security
+
+- **SessionStart hook now pins `@tpsdev-ai/flair-mcp` the same way `flair init` pins client MCP configs.** `flair hook install`, `flair init`, and `flair doctor --fix` (when adding a missing hook) write `npx -y -p @tpsdev-ai/flair-mcp@<cli-version> flair-session-start` (flair#1143). A wired hook no longer self-updates to whatever was just published.
+
+  This is the #907 supply-chain posture applied to the other user-local npx path — the same package, every session. Public plugin `mcp.json` stays unpinned (flair#1308) so directory listings do not freeze on a shipped version; that is a catalog file, not a machine we just wired.
+
+  `flair hook status` still treats a pre-#1143 unpinned `-p` invocation as the correct shape. Re-run `flair hook install` to advance it to the running CLI's pin. A stale hook pin no longer shadows a client MCP pin, so `flair upgrade`'s client-config refresh can still clear an outdated flair-mcp finding.
+
 ## [0.49.0] - 2026-08-24
 
 ### Added
