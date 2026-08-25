@@ -532,7 +532,7 @@ export class BootstrapMemories extends Resource {
     const soulMaxTokens = Math.floor(maxTokens * 0.4); // 40% of budget for soul
     if (includeSoul) {
       let soulTokens = 0;
-      const soulEntries: { key: string; line: string; tokens: number; priority: number }[] = [];
+      const soulEntries: { key: string; value: unknown; line: string; tokens: number; priority: number }[] = [];
 
       for await (const record of (databases as any).flair.Soul.search()) {
         if (record.agentId !== agentId) continue;
@@ -540,18 +540,20 @@ export class BootstrapMemories extends Resource {
           skillAssignments.push(record);
           continue;
         }
-        // flair#1182 — the raw soul container (key→value), independent of the
-        // token-budgeted/priority-truncated `sections.soul` lines built below.
-        soulMap[record.key] = record.value;
         const line = `**${record.key}:** ${record.value}`;
         const tokens = estimateTokens(line);
         const priority = SOUL_KEY_PRIORITY[record.key] ?? 50;
-        soulEntries.push({ key: record.key, line, tokens, priority });
+        soulEntries.push({ key: record.key, value: record.value, line, tokens, priority });
       }
 
       // Sort by priority (lower = more important)
       soulEntries.sort((a, b) => a.priority - b.priority);
 
+      // flair#1371 — the structured `soul` map follows the admission decision.
+      // Filling it during the scan (flair#1182) shipped every key even when
+      // this loop dropped the entry, so sections.soul / soulTokens / the
+      // context pointer described N while `soul` delivered N+1 (delivered
+      // but not counted or charged — the #1206 mirror).
       for (const entry of soulEntries) {
         if (soulTokens + entry.tokens > soulMaxTokens) {
           // Skip large entries that exceed budget — truncate or skip
@@ -561,6 +563,7 @@ export class BootstrapMemories extends Resource {
           if (maxChars > 100) {
             const truncated = `**${entry.key}:** ${entry.line.slice(entry.key.length + 6, entry.key.length + 6 + maxChars)}…(truncated)`;
             sections.soul.push(truncated);
+            soulMap[entry.key] = entry.value;
             const cost = estimateTokens(truncated);
             soulTokens += cost;
             tokenBudget -= cost; // #1199 — soul draws from the shared budget
@@ -568,6 +571,7 @@ export class BootstrapMemories extends Resource {
           continue;
         }
         sections.soul.push(entry.line);
+        soulMap[entry.key] = entry.value;
         soulTokens += entry.tokens;
         tokenBudget -= entry.tokens; // #1199 — soul draws from the shared budget
       }
