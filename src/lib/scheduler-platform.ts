@@ -117,6 +117,13 @@ export interface UserBusSessionFacts {
   lingerEnabled?: boolean | null;
   /** Session environment used to detect a missing user-bus env. */
   env?: NodeJS.Dict<string>;
+  /**
+   * Injectable linger probe for the production omit-path (CLI never passes
+   * lingerEnabled). Tests inject this so they can express a dropped probe
+   * without spawning loginctl. Production formatEnableReport falls through
+   * to probeUserLingerEnabled.
+   */
+  probeLinger?: () => boolean | null;
 }
 
 /** True when this session already has the env `systemctl --user` needs. */

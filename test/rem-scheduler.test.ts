@@ -472,6 +472,23 @@ describe("formatEnableReport (flair#850 — the core honesty fix)", () => {
     expect(text).toContain("loginctl enable-linger");
   });
 
+  it("FAILURE PATH: probes linger when lingerEnabled is omitted — the CLI path (flair#1107)", () => {
+    const r = baseEnableResult({
+      loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" },
+    });
+    let probed = 0;
+    const { lines } = formatEnableReport(r, {
+      ...reportInput,
+      probeLinger: () => { probed += 1; return true; },
+      env: {},
+    });
+    expect(probed).toBe(1);
+    const text = lines.join("\n");
+    expect(text).not.toMatch(/Fix: enable lingering/);
+    expect(text).not.toContain("loginctl enable-linger <user>");
+    expect(text).toContain("XDG_RUNTIME_DIR");
+  });
+
   it("FAILURE PATH: still surfaces the raw stderr and the failing command", () => {
     const r = baseEnableResult({
       loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" },

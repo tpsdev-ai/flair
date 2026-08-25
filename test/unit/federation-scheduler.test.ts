@@ -672,6 +672,22 @@ describe("formatEnableReport (flair#850 — no success headline before activatio
     expect(text).toContain("flair federation sync enable");
   });
 
+  it("probes linger when lingerEnabled is omitted — the CLI path (flair#1107)", () => {
+    // The CLI never passes lingerEnabled. Dropping this probe would reprint
+    // `loginctl enable-linger` after it already ran, while every injected-facts
+    // test still passed. The probe returning true must change the remedy.
+    let probed = 0;
+    const { lines } = formatEnableReport(
+      result({ loadResult: { code: 1, stdout: "", stderr: "Failed to connect to bus: No medium found\n" } }),
+      { probeLinger: () => { probed += 1; return true; }, env: {} },
+    );
+    expect(probed).toBe(1);
+    const text = lines.join("\n");
+    expect(text).not.toMatch(/Fix: enable lingering/);
+    expect(text).not.toContain("loginctl enable-linger <user>");
+    expect(text).toContain("XDG_RUNTIME_DIR");
+  });
+
   it("treats a null exit code (timeout/killed) as failure", () => {
     expect(formatEnableReport(result({ loadResult: { code: null, stdout: "", stderr: "" } }), {}).ok).toBe(false);
   });

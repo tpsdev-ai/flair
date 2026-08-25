@@ -385,7 +385,7 @@ export function formatEnableReport(r: EnableResult, input: EnableReportInput): F
     if (lr.stderr) lines.push(`     stderr: ${lr.stderr.trim()}`);
     const lingerEnabled = input.lingerEnabled !== undefined
       ? input.lingerEnabled
-      : (r.platform === "linux" ? probeUserLingerEnabled() : undefined);
+      : (r.platform === "linux" ? (input.probeLinger ?? probeUserLingerEnabled)() : undefined);
     const remedy = describeLoadFailure(r.platform, lr, { lingerEnabled, env: input.env });
     lines.push("");
     lines.push(remedy ? `   ${remedy}` : `   Re-run the activation command above manually to see the full diagnostic.`);

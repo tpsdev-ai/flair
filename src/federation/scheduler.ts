@@ -790,7 +790,7 @@ export function formatEnableReport(
     if (lr.stderr) lines.push(`     stderr: ${lr.stderr.trim()}`);
     const lingerEnabled = input.lingerEnabled !== undefined
       ? input.lingerEnabled
-      : (r.platform === "linux" ? probeUserLingerEnabled() : undefined);
+      : (r.platform === "linux" ? (input.probeLinger ?? probeUserLingerEnabled)() : undefined);
     const remedy = describeLoadFailureFor(r.platform, lr, "flair federation sync enable", {
       lingerEnabled,
       env: input.env,
