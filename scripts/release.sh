@@ -11,16 +11,22 @@ set -euo pipefail
 #         fragments into a `## [0.5.0]` CHANGELOG section, bumps + builds +
 #         tests, commits, pushes, opens PR. Review and merge via GitHub.
 #
-#   Phase 2 — publish after merge:
+#   Phase 2 — tag after merge (normal path; see docs/releasing.md):
+#     git tag v0.5.0 && git push origin v0.5.0
+#       → CI stages every package via OIDC. No npm credential on any machine.
+#
+#   Break-glass only (CI staging unavailable):
 #     ./scripts/release.sh 0.5.0 --publish
-#       → verifies main HEAD matches v0.5.0, publishes all packages
-#         to npm in dep order, tags, pushes the tag.
+#       → publishes from THIS machine. Requires an explicit acknowledgement
+#         (type BREAK-GLASS, or pass --break-glass). Who can publish is
+#         unchanged; this only marks the path.
 #
 #   ./scripts/release.sh 0.5.0 --dry
 #       → phase-1 bump + build + test on a local branch, skip push/PR.
 
-VERSION="${1:?Usage: release.sh <version> [--publish|--dry]}"
+VERSION="${1:?Usage: release.sh <version> [--publish [--break-glass]|--dry]}"
 MODE="${2:-}"
+ACK="${3:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # VERSION is interpolated into node -e heredocs and git/gh commands below.
@@ -83,10 +89,51 @@ git_push_auth() {
 }
 
 # -----------------------------------------------------------------------------
-# Phase 2: publish after release PR is merged
+# Break-glass: publish from this machine (CI staging unavailable)
 # -----------------------------------------------------------------------------
 if [[ "$MODE" == "--publish" ]]; then
-  echo "=== Flair Release v${VERSION} — PUBLISH ==="
+  # flair#1038: --publish is break-glass. The script used to print
+  # "🚀 Publishing to npm..." and start publishing — indistinguishable from
+  # the old laptop-login flow. Banner + acknowledgement first, before any
+  # git/npm work, so a half-remembered procedure cannot reach publish.
+  echo ""
+  echo "⚠️  --publish is the BREAK-GLASS path. The normal release is:"
+  echo "      git tag v${VERSION} && git push origin v${VERSION}"
+  echo "    which stages every package via OIDC (no npm credential on any machine)."
+  echo "    See docs/releasing.md. Continue only if CI staging is unavailable."
+  echo ""
+
+  if [[ "$ACK" == "--break-glass" ]]; then
+    echo "Acknowledged via --break-glass."
+  else
+    echo "Type BREAK-GLASS to continue, or anything else to abort:"
+    if ! read -r REPLY; then
+      echo "❌ --publish requires an explicit acknowledgement."
+      echo "   Re-run with --publish --break-glass if CI staging is unavailable."
+      echo "   The normal release is: git tag v${VERSION} && git push origin v${VERSION}"
+      exit 1
+    fi
+    if [[ "$REPLY" != "BREAK-GLASS" ]]; then
+      echo "Aborted. Nothing was published."
+      exit 1
+    fi
+  fi
+
+  # Fail with our own message before npm's ENEEDAUTH names `npm login` as
+  # the fix. Logging in would put a long-lived credential back on a machine
+  # — the thing OIDC trusted publishing was adopted to eliminate.
+  if ! npm whoami --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+    echo "❌ This machine is not logged into npm."
+    echo "   --publish publishes from THIS machine and is break-glass only."
+    echo "   The normal release does not need npm credentials:"
+    echo "     git tag v${VERSION} && git push origin v${VERSION}"
+    echo "   That stages via OIDC. See docs/releasing.md."
+    echo "   Do not run \`npm login\` unless CI staging is actually unavailable"
+    echo "   and you are deliberately using this break-glass path."
+    exit 1
+  fi
+
+  echo "=== Flair Release v${VERSION} — BREAK-GLASS PUBLISH ==="
 
   if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
     echo "❌ Working tree is dirty. Check out main at the release commit."
@@ -438,11 +485,17 @@ PR_TITLE="release: v${VERSION}" PR_HEAD="$RELEASE_BRANCH" PR_VERSION="$VERSION" 
 
 See CHANGELOG.md for what'"'"'s in this release.
 
-After CI is green and this is merged:
+After CI is green and this is merged, tag the release (OIDC staging — no npm login):
 \`\`\`
 git checkout main && git pull
+git tag -a v${process.env.PR_VERSION} -m "v${process.env.PR_VERSION}" && git push origin v${process.env.PR_VERSION}
+\`\`\`
+
+Break-glass only, if CI staging is unavailable:
+\`\`\`
 ./scripts/release.sh ${process.env.PR_VERSION} --publish
-\`\`\``;
+\`\`\`
+See docs/releasing.md.`;
   process.stdout.write(JSON.stringify({
     title: process.env.PR_TITLE,
     head: process.env.PR_HEAD,
@@ -459,4 +512,10 @@ echo "Next steps:"
 echo "  1. Wait for CI green on the PR"
 echo "  2. Merge via GitHub UI (or: $GH pr merge --squash --repo tpsdev-ai/flair <num>)"
 echo "  3. git checkout main && git pull"
-echo "  4. ./scripts/release.sh ${VERSION} --publish"
+echo "  4. git tag -a v${VERSION} -m \"v${VERSION}\" && git push origin v${VERSION}"
+echo "     → triggers release-publish.yml, which stage-publishes via OIDC."
+echo "       Approve the staged packages on npmjs.com (2FA)."
+echo ""
+echo "  Break-glass only, if CI staging is unavailable:"
+echo "    ./scripts/release.sh ${VERSION} --publish"
+echo "  This publishes from THIS machine and requires an npm login. See docs/releasing.md."
