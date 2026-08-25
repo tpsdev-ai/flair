@@ -34,8 +34,10 @@ import {
   resolveFlairBin,
   formatFlairBinWarning,
   verifyFirstRun,
+  probeUserLingerEnabled,
   SPAWN_TIMEOUT_MS,
   STATUS_CHECK_TIMEOUT_MS,
+  type UserBusSessionFacts,
 } from "../lib/scheduler-platform.js";
 
 // Re-exported so this module's public surface is unchanged by the extraction
@@ -319,11 +321,15 @@ export async function queryActiveStateAsync(plat: SchedulerPlatform, timeoutMs: 
  * known pattern — the caller already prints the raw stderr, so the operator
  * still has something to go on.
  */
-export function describeLoadFailure(plat: SchedulerPlatform, loadResult: { code: number | null; stderr: string }): string | null {
-  return describeLoadFailureFor(plat, loadResult, "flair rem nightly enable");
+export function describeLoadFailure(
+  plat: SchedulerPlatform,
+  loadResult: { code: number | null; stderr: string },
+  session?: UserBusSessionFacts,
+): string | null {
+  return describeLoadFailureFor(plat, loadResult, "flair rem nightly enable", session);
 }
 
-export interface EnableReportInput {
+export interface EnableReportInput extends UserBusSessionFacts {
   hour: number;
   minute: number;
   agentId: string;
@@ -377,7 +383,10 @@ export function formatEnableReport(r: EnableResult, input: EnableReportInput): F
       `   Activation:  ${r.loadCommand.join(" ")} → code ${lr.code}`,
     ];
     if (lr.stderr) lines.push(`     stderr: ${lr.stderr.trim()}`);
-    const remedy = describeLoadFailure(r.platform, lr);
+    const lingerEnabled = input.lingerEnabled !== undefined
+      ? input.lingerEnabled
+      : (r.platform === "linux" ? (input.probeLinger ?? probeUserLingerEnabled)() : undefined);
+    const remedy = describeLoadFailure(r.platform, lr, { lingerEnabled, env: input.env });
     lines.push("");
     lines.push(remedy ? `   ${remedy}` : `   Re-run the activation command above manually to see the full diagnostic.`);
     lines.push("");
