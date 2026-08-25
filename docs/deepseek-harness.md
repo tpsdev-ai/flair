@@ -4,7 +4,7 @@ Give DeepSeek Harness (DSH) sessions persistent, portable memory — no plugin c
 
 > **Verified against DSH as of 2026-08-20** (`deepseek-ai/deepseek-harness`, branch `master`). DSH is a developer preview and its own README promises compatibility-breaking changes. If wiring fails after a DSH upgrade, re-check the config field names against [their MCP client README](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/mcp/mcp-client/README.md) before suspecting Flair.
 
-The same eleven tools every other MCP client gets ([full table in mcp-clients.md](mcp-clients.md#what-the-mcp-server-exposes)) appear to the model under DSH's server-qualified names: `mcp__flair__memory_search`, `mcp__flair__memory_store`, `mcp__flair__bootstrap`, and so on — the same `mcp__<server>__<tool>` convention Claude Code uses.
+The same twelve tools every other MCP client gets ([full table in mcp-clients.md](mcp-clients.md#what-the-mcp-server-exposes)) appear to the model under DSH's server-qualified names: `mcp__flair__memory_search`, `mcp__flair__memory_store`, `mcp__flair__bootstrap`, and so on — the same `mcp__<server>__<tool>` convention Claude Code uses.
 
 Two caveats up front, both structural to DSH's bridge (details below):
 

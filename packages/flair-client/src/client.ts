@@ -204,6 +204,11 @@ class MemoryApi {
     /** Cosine-similarity threshold hint for the server's dedup gate.
      *  Default (server-side): 0.95 */
     dedupThreshold?: number;
+    /** Citation-on-write (flair#1147 / #744). IDs of memories that informed
+     *  this write. Forwarded only when the caller supplies a non-empty array;
+     *  the server credits each id through the same usage ledger as
+     *  POST /RecordUsage and strips the field before persisting. */
+    usedMemoryIds?: string[];
   } = {}): Promise<Memory> {
     const id = opts.id ?? `${this.client.agentId}-${crypto.randomUUID()}`;
     const record: Record<string, unknown> = {
@@ -225,6 +230,11 @@ class MemoryApi {
     // never stored on the record itself.
     if (opts.dedup !== undefined) record.dedup = opts.dedup;
     if (opts.dedupThreshold !== undefined) record.dedupThreshold = opts.dedupThreshold;
+    // flair#1147: citation-on-write passthrough — only when supplied, so an
+    // omitted list is byte-identical to a pre-#1147 write.
+    if (Array.isArray(opts.usedMemoryIds) && opts.usedMemoryIds.length > 0) {
+      record.usedMemoryIds = opts.usedMemoryIds;
+    }
     // flair#718 authorship-provenance: forward this process's claimed client
     // label (config.claimedClient / FLAIR_CLIENT env) only when set — the
     // server folds it into provenance.claimed.client and strips it from the
@@ -259,7 +269,7 @@ class MemoryApi {
    * MemoryGrant from that owner — otherwise it denies the request (cross-agent
    * write).
    */
-  async update(id: string, content: string, opts: { preserveHistory?: boolean } = {}): Promise<Memory> {
+  async update(id: string, content: string, opts: { preserveHistory?: boolean; usedMemoryIds?: string[] } = {}): Promise<Memory> {
     const existing = await this.get(id);
     if (!existing) {
       throw new FlairError("PUT", `/Memory/${id}`, 404, `memory ${id} not found`);
@@ -294,6 +304,9 @@ class MemoryApi {
       delete record.lastRetrieved;
       // flair#718 authorship-provenance — see write()'s identical comment above.
       if (this.client.claimedClient) record.claimedClient = this.client.claimedClient;
+      if (Array.isArray(opts.usedMemoryIds) && opts.usedMemoryIds.length > 0) {
+        record.usedMemoryIds = opts.usedMemoryIds;
+      }
       // The Memory schema does not expose a working HTTP POST route (see
       // resources/Memory.ts) — Memory.post() is only reachable in-process
       // (resources/mcp-tools.ts). So the supersede-link write goes through
@@ -314,6 +327,9 @@ class MemoryApi {
     delete merged.deduped;
     // flair#718 authorship-provenance — see write()'s identical comment above.
     if (this.client.claimedClient) merged.claimedClient = this.client.claimedClient;
+    if (Array.isArray(opts.usedMemoryIds) && opts.usedMemoryIds.length > 0) {
+      merged.usedMemoryIds = opts.usedMemoryIds;
+    }
     const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${id}`, merged);
     return { ...merged, id, ...(response ?? {}) } as unknown as Memory;
   }

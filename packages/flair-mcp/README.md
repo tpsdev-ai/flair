@@ -41,12 +41,13 @@ Once configured, Claude Code (or any MCP client) gets these tools:
 | Tool | Description |
 |------|-------------|
 | `memory_search` | Semantic search across memories. Understands "what happened today". |
-| `memory_store` | Save a memory with type (lesson/decision/fact) and durability. |
+| `memory_store` | Save a memory with type (lesson/decision/fact) and durability. Optional `usedMemoryIds` cites memories that informed the write. |
 | `memory_get` | Retrieve a specific memory by ID. |
 | `memory_delete` | Delete a memory. |
 | `bootstrap` | Cold-start context — soul + recent memories in one call. |
 | `soul_set` | Set personality or project context (included in every bootstrap). |
 | `soul_get` | Get a personality or project context entry. |
+| `record_usage` | Report that recalled memories were actually used (drives `usageCount`). |
 
 ## Environment Variables
 
