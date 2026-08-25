@@ -68,6 +68,7 @@ function matchesCondition(record: any, cond: any): boolean {
 
 let memoryStore: Map<string, any>;
 let memoryGrants: any[];
+let soulStore: Map<string, any> = new Map();
 
 function memorySearchGen(query: any) {
   const conditions = Array.isArray(query) ? query : Array.isArray(query?.conditions) ? query.conditions : [];
@@ -109,7 +110,14 @@ const databasesMock = {
         return gen();
       },
     },
-    Soul: { search: () => emptyGen() },
+    Soul: {
+      search: () => {
+        async function* gen() {
+          for (const r of soulStore.values()) yield r;
+        }
+        return gen();
+      },
+    },
     Agent: { search: () => emptyGen(), get: async () => null },
     Relationship: { search: () => emptyGen() },
     OrgEvent: { search: () => emptyGen() },
@@ -132,6 +140,7 @@ const agentCtx = (agentId: string, isAdmin = false) => ({ tpsAgent: agentId, tps
 function reset() {
   memoryStore = new Map();
   memoryGrants = [];
+  soulStore = new Map();
   embedInputTypeCalls = [];
 }
 
@@ -590,5 +599,54 @@ describe("MemoryBootstrap.post() — flair#550 teammate-findings attribution + s
     // which here is empty → no header at all).
     expect(res.context).not.toContain("## Core Principles");
     expect(res.sections.permanent).toBe(0);
+  });
+});
+
+// flair#1371 — soul admission used to decide a drop (count, charge, context
+// pointer) and then ship the full key→value map anyway. The discriminating
+// check is shipped-vs-counted (`sections.soul === |soul| keys`), not the
+// #1290 token-ledger tolerance (an uncharged small item hides inside it).
+describe("MemoryBootstrap.post() — soul admission vs shipped map (flair#1371)", () => {
+  function seedSoul(agentId: string, key: string, value: string) {
+    soulStore.set(`${agentId}:${key}`, { id: `${agentId}:${key}`, agentId, key, value });
+  }
+
+  it("a decided soul drop is absent from the shipped map; sections.soul matches the keys", async () => {
+    reset();
+    const agentId = "agent-soul-1371";
+    // Four entries mirroring the live 0.48.0 case. `role` is priority 0; the
+    // rest share default priority 50 and keep insertion order after the sort.
+    seedSoul(agentId, "role", "r".repeat(40));
+    seedSoul(agentId, "security-context", "s".repeat(80));
+    seedSoul(agentId, "user", "u".repeat(80));
+    seedSoul(agentId, "flair-usage", "f".repeat(80));
+
+    const b = makeBootstrap(agentCtx(agentId));
+    const wide: any = await b.post({
+      agentId, maxTokens: 4000, includeContext: false,
+    });
+    expect(Object.keys(wide.soul).sort()).toEqual(
+      ["flair-usage", "role", "security-context", "user"],
+    );
+    expect(wide.sections.soul).toBe(4);
+    expect(Object.keys(wide.soul).length).toBe(wide.sections.soul);
+
+    // soulMaxTokens = floor(200 * 0.4) = 80. role + security-context + user
+    // fit; flair-usage does not, and remaining room is < 100 chars so the
+    // loop skips rather than truncates — a decided drop.
+    const tight: any = await b.post({
+      agentId, maxTokens: 200, includeContext: false,
+    });
+    expect(tight.sections.soul, "tight budget must drop at least one soul entry").toBeLessThan(4);
+    expect(tight.sections.soul, "sections.soul must equal shipped soul keys").toBe(Object.keys(tight.soul).length);
+    expect(
+      tight.soul["flair-usage"],
+      "the dropped flair-usage entry must not ship in the structured map",
+    ).toBeUndefined();
+    expect(tight.soul.role, "higher-priority role still ships").toBe("r".repeat(40));
+    expect(tight.context, "context pointer must describe the shipped count").toContain(
+      `${tight.sections.soul} soul entries`,
+    );
+    expect(tight.soulTokens, "dropped entry must not be charged").toBeLessThan(wide.soulTokens);
   });
 });

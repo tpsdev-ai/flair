@@ -104,12 +104,22 @@ export function conform(toolName: string, result: any, contract: ToolContract, o
   for (const { count, containers } of inv.countEqualsDelivered ?? []) {
     let total = 0;
     for (const c of containers) {
-      const arr = getPath(result, c);
-      expect(Array.isArray(arr), `${toolName}: container '${c}' must be an array for count==delivered`).toBe(true);
-      total += arr.length;
+      const val = getPath(result, c);
+      if (Array.isArray(val)) {
+        total += val.length;
+      } else if (val !== null && typeof val === "object") {
+        // flair#1371 — soul is a key→value map, not an array. Counted ==
+        // delivered is |keys|, the same number sections.soul reports.
+        total += Object.keys(val).length;
+      } else {
+        expect(
+          false,
+          `${toolName}: container '${c}' must be an array or object map for count==delivered (got ${jsTypeOf(val)})`,
+        ).toBe(true);
+      }
     }
     const reported = getPath(result, count);
-    expect(reported, `${toolName}: ${count} (=${reported}) must equal Σ[${containers.join(", ")}] lengths (=${total})`).toBe(total);
+    expect(reported, `${toolName}: ${count} (=${reported}) must equal Σ[${containers.join(", ")}] sizes (=${total})`).toBe(total);
   }
 
   for (const { path, type } of inv.selfDescribingEmpty ?? []) {
