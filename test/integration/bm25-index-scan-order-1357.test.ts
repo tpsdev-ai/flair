@@ -40,12 +40,11 @@
  *     reproduce Harper's own shape exactly, or a rescued record's response
  *     bytes would differ from a scanned one's.
  *
- * VEHICLE for premise 1: `GET /Memory` (Memory.search → Harper Table.search)
- * with the same read-scope OR-group the listing path uses. Do NOT use
- * SemanticSearch for this measurement — after flair#1412 the final retrieval
- * sort is `createdAt DESC, id ASC` on an all-equal `_rank`, so SemanticSearch
- * no longer leaks scan order. The premise is about Harper's planner, not
- * about retrieval ranking.
+ * VEHICLE for premise 1: `GET /Memory/?` (Memory.search → Harper Table.search)
+ * for the scope OR-group scan, and ops `search_by_value` for the tags/subject
+ * index seek. Do NOT use SemanticSearch — after flair#1412 that path is
+ * `createdAt DESC, id ASC` on an all-equal `_rank` and no longer leaks scan
+ * order. `GET /Memory` (no slash) is the collection describe, not a search.
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
@@ -116,9 +115,11 @@ function rowIds(body: any): string[] {
 async function memoryIds(): Promise<string[]> {
   // Premise 1 unfiltered vehicle: Memory.search (scope OR-group), not
   // SemanticSearch — after flair#1412 that path is createdAt/id ordered.
-  // GET /Memory (no slash/query) is the collection DESCRIBE, not a search.
-  // GET /Memory/? is the collection-search form (auth-middleware e2e).
-  const path = "/Memory/?";
+  // GET /Memory (no slash) is the collection DESCRIBE, not a search.
+  // GET /Memory/ is the collection-search form. Sign pathname only —
+  // `url.pathname + url.search` for `/Memory/?` is `/Memory/` (empty
+  // search), so signing `/Memory/?` 401s as invalid_signature.
+  const path = "/Memory/";
   const res = await fetch(`${harper.httpURL}${path}`, {
     headers: { Authorization: ed25519Header(agent, "GET", path) },
   });
