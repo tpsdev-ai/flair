@@ -25,6 +25,20 @@ export function withCiteNudge(text: string): string {
  * Accepts singular `memoryId` and/or `memoryIds`. Returns null when there is
  * nothing to send (the tool should fail locally rather than POST an empty list).
  * Never includes agentId — the server attributes from the signature.
+ *
+ * MERGE vs native /mcp PREFER (deliberate, named — Sherlock #1404):
+ * native `recordUsage` in resources/mcp-tools.ts prefers `memoryIds` and
+ * drops `memoryId` when both are supplied (`Array.isArray(args?.memoryIds)
+ * ? args.memoryIds : [args.memoryId]`). This stdio helper MERGES them, then
+ * dedupes. A client that fills both fields (common when an agent echoes
+ * the singular convenience into a list) would silently lose the singular
+ * id on the native path; dropping a citation here would reopen the
+ * usageCount hole this issue exists to close. Server-side
+ * `RecordUsage.post()` already unions `memoryIds` / `memoryId` the same
+ * way (`data?.memoryIds ?? [data?.memoryId]` is prefer, but once we send
+ * a merged `memoryIds` array the endpoint sees one list). Do not "align"
+ * this helper to the native prefer — the merge is the intended stdio
+ * behavior; native prefer is pre-existing and out of this issue's scope.
  */
 export function buildRecordUsageBody(args: {
   memoryId?: string;

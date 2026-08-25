@@ -26,9 +26,16 @@ describe("record_usage body (flair#1147)", () => {
     });
   });
 
-  test("singular + plural merge, then dedupe", () => {
+  test("when BOTH memoryId and memoryIds are supplied, MERGE (do not prefer-and-drop like native /mcp)", () => {
+    // Native resources/mcp-tools.ts recordUsage prefers memoryIds and drops
+    // memoryId when both are present. Stdio merge is deliberate (Sherlock
+    // #1404): silently discarding the singular id would lose a citation.
     expect(buildRecordUsageBody({ memoryId: "mem-b", memoryIds: ["mem-a"] })).toEqual({
       memoryIds: ["mem-a", "mem-b"],
+    });
+    // Contrast: native prefer would have returned ["mem-a"] only.
+    expect(buildRecordUsageBody({ memoryId: "mem-solo", memoryIds: ["mem-a", "mem-b"] })).toEqual({
+      memoryIds: ["mem-a", "mem-b", "mem-solo"],
     });
   });
 
