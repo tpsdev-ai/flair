@@ -127,6 +127,23 @@ describe("resolveSearchReadiness (flair#1326)", () => {
     expect(r.status).toBe(200);
   });
 
+  test("FLAIR_BM25_INDEX off: empty is the kill-switch steady state, not cold lag", () => {
+    // ensureReady never builds when the index is killed, so status stays
+    // empty for the process lifetime while hybrid still serves the legacy
+    // per-query scan. searchReady must not stay false forever.
+    const r = resolveSearchReadiness({
+      resources: mounted,
+      memoryTable,
+      bm25: { state: "empty" },
+      hybridEnabled: true,
+      bm25IndexEnabled: false,
+    });
+    expect(r.searchReady).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.status).toBe(200);
+    expect(r.searchReadyReason).toBeUndefined();
+  });
+
   test("BM25 disabled (legacy per-query scan) is still serving, so searchReady stays true", () => {
     const r = resolveSearchReadiness({
       resources: mounted,

@@ -9,7 +9,7 @@ import { getMigrationStatusSnapshot } from "./migrations/status.js";
 import { resolveMigrationDataDirForRead } from "./migrations/data-dir.js";
 import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
 import { hybridEnabled } from "./bm25.js";
-import { bm25IndexStatus } from "./bm25-index-service.js";
+import { bm25IndexEnabled, bm25IndexStatus } from "./bm25-index-service.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
 
 const db = databases as any;
@@ -126,6 +126,7 @@ function currentSearchReadiness(): SearchReadiness {
     memoryTable: db.flair?.Memory,
     bm25: bm25IndexStatus(),
     hybridEnabled: hybridEnabled(),
+    bm25IndexEnabled: bm25IndexEnabled(),
   });
 }
 

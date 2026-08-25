@@ -72,6 +72,8 @@ export function resolveSearchReadiness(opts: {
   memoryTable?: MemoryTable;
   bm25?: Bm25Status;
   hybridEnabled?: boolean;
+  /** Persistent BM25 index kill switch (`FLAIR_BM25_INDEX`). Default on. */
+  bm25IndexEnabled?: boolean;
 }): SearchReadiness {
   if (opts.resources) {
     const memoryMounted = routeMounted(opts.resources, "Memory");
@@ -89,11 +91,17 @@ export function resolveSearchReadiness(opts: {
     return notServing("memory table not queryable");
   }
 
-  // Hybrid is default-on. A cold or in-flight BM25 index means the first
-  // search will pay a full corpus scan — the #1326 lag. Name it; do not
-  // fail liveness. `disabled` falls back to the per-query scan (slow but
-  // serving), so that is still search-ready.
-  if (opts.hybridEnabled !== false && opts.bm25) {
+  // Hybrid + the persistent index are default-on. A cold or in-flight BM25
+  // index means the first search will pay a full corpus scan — the #1326
+  // lag. Name it; do not fail liveness.
+  //
+  // `disabled` (feed/build failure) and `FLAIR_BM25_INDEX=false` both fall
+  // back to the per-query scan. The kill switch never calls ensureReady, so
+  // status stays `empty` for the life of the process — that is serving, not
+  // cold. Treating it as lag would make searchReady false forever and refuse
+  // a node that is already answering recall.
+  const indexInPath = opts.hybridEnabled !== false && opts.bm25IndexEnabled !== false;
+  if (indexInPath && opts.bm25) {
     if (opts.bm25.state === "building") {
       return namesLag("bm25 index building — first search is still scanning the corpus");
     }
