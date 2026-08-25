@@ -16,10 +16,11 @@
 // integration lane; what is asserted here is that the mechanism is WIRED, which
 // is the half that silently rots.
 import { describe, expect, test } from "bun:test";
-import { readFileSync, mkdtempSync, rmSync, readdirSync, existsSync, utimesSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, readdirSync, existsSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countStaleHarperTrees, startHarper, sweepStaleHarperTrees } from "../helpers/harper-lifecycle.js";
+import { SCRATCH_OWNER_FILE, writeScratchOwnerStamp } from "../../src/lib/scratch-owner.js";
 
 const SRC = readFileSync(join(import.meta.dir, "..", "helpers", "harper-lifecycle.ts"), "utf8");
 
@@ -190,6 +191,44 @@ describe("startHarper failure does not leak a scratch dir (flair#1032)", () => {
       expect(existsSync(leftover)).toBe(false);
     } finally {
       rmSync(leftover, { recursive: true, force: true });
+    }
+  });
+
+  test("boot sweep does not delete a tree whose owner pid is still alive", () => {
+    const live = mkdtempSync(join(tmpdir(), "flair-test-live-"));
+    writeScratchOwnerStamp(live);
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    utimesSync(live, past, past);
+    try {
+      sweepStaleHarperTrees({ olderThanMs: 0 });
+      expect(existsSync(live)).toBe(true);
+    } finally {
+      rmSync(live, { recursive: true, force: true });
+    }
+  });
+
+  test("boot sweep removes a tree whose owner pid is dead", () => {
+    const orphan = mkdtempSync(join(tmpdir(), "flair-test-orphan-"));
+    writeFileSync(join(orphan, SCRATCH_OWNER_FILE), "999999999\n");
+    try {
+      const removed = sweepStaleHarperTrees({ olderThanMs: 0 });
+      expect(removed).toBeGreaterThanOrEqual(1);
+      expect(existsSync(orphan)).toBe(false);
+    } finally {
+      rmSync(orphan, { recursive: true, force: true });
+    }
+  });
+
+  test("boot sweep does not delete a tree whose hdb.pid is still alive", () => {
+    const live = mkdtempSync(join(tmpdir(), "flair-test-hdb-"));
+    writeFileSync(join(live, "hdb.pid"), `${process.pid}\n`);
+    const past = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    utimesSync(live, past, past);
+    try {
+      sweepStaleHarperTrees({ olderThanMs: 0 });
+      expect(existsSync(live)).toBe(true);
+    } finally {
+      rmSync(live, { recursive: true, force: true });
     }
   });
 

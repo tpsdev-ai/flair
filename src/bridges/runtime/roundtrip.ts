@@ -31,13 +31,18 @@ import { parseRecords } from "./formats.js";
 import { applyMap } from "./mapper.js";
 import { evaluatePredicate } from "./predicate.js";
 import { writeRecords } from "./writers.js";
+import {
+  hasScratchOwnerStamp,
+  scratchOwnerIsLive,
+  writeScratchOwnerStamp,
+} from "../../lib/scratch-owner.js";
 
 /** mkdtemp prefix for this harness. Leaked trees of this name filled a host
  *  to zero bytes (flair#1032) — 7,188 leftovers, mostly `…-test-bridge-*`. */
 export const BRIDGE_TEST_DIR_PREFIX = "flair-bridge-test-";
 
-/** Age below which a leftover tree is left alone so a concurrent run's
- *  in-flight dir is not deleted. Older leftovers are from interrupted runs. */
+/** Grace for *unstamped* leftovers only (stamp not written yet, or a tree
+ *  from before the owner file existed). Stamped trees use pid liveness. */
 export const STALE_BRIDGE_TEST_DIR_MS = 60_000;
 
 const IN_FLIGHT_BRIDGE_TEST_DIRS = new Set<string>();
@@ -60,7 +65,9 @@ function installBridgeTestExitHook(): void {
  *
  * A process-exit hook cannot cover SIGKILL or a hard crash, so the next
  * harness start has to sweep what the last one left. Skips in-flight trees
- * in this process and anything newer than `olderThanMs`.
+ * in this process and any tree whose owner pid is still alive. Directory
+ * mtime is not a liveness signal (Linux does not update it when files
+ * inside subdirs are appended) — it is only a race guard for unstamped dirs.
  *
  * @returns number of trees removed
  */
@@ -82,9 +89,12 @@ export function sweepStaleBridgeTestDirs(opts?: {
     if (!name.startsWith(BRIDGE_TEST_DIR_PREFIX)) continue;
     const dir = join(root, name);
     if (IN_FLIGHT_BRIDGE_TEST_DIRS.has(dir)) continue;
+    if (scratchOwnerIsLive(dir)) continue;
     try {
-      const st = statSync(dir);
-      if (now - st.mtimeMs < olderThanMs) continue;
+      if (!hasScratchOwnerStamp(dir)) {
+        const st = statSync(dir);
+        if (now - st.mtimeMs < olderThanMs) continue;
+      }
       rmSync(dir, { recursive: true, force: true });
       removed++;
     } catch { /* gone, or not ours to remove */ }
@@ -170,6 +180,7 @@ export async function runRoundTrip(opts: RoundTripOptions): Promise<RoundTripRes
   // process are skipped inside the sweep.
   sweepStaleBridgeTestDirs();
   const tmpDir = await fsp.mkdtemp(join(tmpdir(), `${BRIDGE_TEST_DIR_PREFIX}${descriptor.name}-`));
+  writeScratchOwnerStamp(tmpDir);
   const tmpPath = join(tmpDir, `roundtrip.${suffixForFormat(exportTarget.format)}`);
   IN_FLIGHT_BRIDGE_TEST_DIRS.add(tmpDir);
   installBridgeTestExitHook();

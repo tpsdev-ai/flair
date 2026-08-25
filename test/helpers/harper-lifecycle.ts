@@ -5,6 +5,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync, rmSync, readdirSync, readFileSync, appendFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  hasScratchOwnerStamp,
+  hdbPidIsLive,
+  scratchOwnerIsLive,
+  writeScratchOwnerStamp,
+} from "../../src/lib/scratch-owner.js";
 
 // ─── Leak backstop: clean up even when the test framework never gets to ──────
 //
@@ -120,19 +126,20 @@ export function countStaleHarperTrees(): number {
   }
 }
 
-/** mtime age above which an untracked `flair-test-*` tree is treated as abandoned.
- *  Live Harpers keep writing logs, so a still-running suite's dir stays recent.
- *  Two hours leaves concurrent long suites alone and still catches the
- *  multi-day leftovers that filled a host (flair#1032). */
+/** Grace for *unstamped* leftovers only (stamp not written yet, or a tree
+ *  from before the owner file existed). Stamped trees use pid liveness;
+ *  directory mtime is not a liveness signal. */
 export const STALE_HARPER_TREE_MS = 2 * 60 * 60 * 1000;
 
 /**
  * Remove abandoned `flair-test-*` trees left by interrupted runs.
  *
  * A process-exit hook cannot cover SIGKILL, so the next `startHarper` has
- * to sweep what the last one left. Skips dirs this process still tracks
- * and anything whose mtime is newer than `olderThanMs` — a live Harper
- * keeps writing, so its tree will not look stale.
+ * to sweep what the last one left. Skips dirs this process still tracks,
+ * any tree whose owner pid is still alive, and any tree whose `hdb.pid`
+ * is still alive (a live Harper from before the stamp existed). Directory
+ * mtime is only a race guard for unstamped dirs — Linux does not update
+ * it when files inside subdirs are appended.
  *
  * @returns number of trees removed
  */
@@ -153,9 +160,13 @@ export function sweepStaleHarperTrees(opts?: { olderThanMs?: number }): number {
     if (!name.startsWith("flair-test-")) continue;
     const dir = join(tmpdir(), name);
     if (live.has(dir)) continue;
+    if (scratchOwnerIsLive(dir)) continue;
+    if (hdbPidIsLive(dir)) continue;
     try {
-      const st = statSync(dir);
-      if (now - st.mtimeMs < olderThanMs) continue;
+      if (!hasScratchOwnerStamp(dir)) {
+        const st = statSync(dir);
+        if (now - st.mtimeMs < olderThanMs) continue;
+      }
       rmSync(dir, { recursive: true, force: true, maxRetries: 2 });
       removed++;
     } catch { /* gone, or not ours to remove */ }
@@ -440,6 +451,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   // and a handler cannot cover those exits (flair#1032).
   if (ownsInstallDir) sweepStaleHarperTrees();
   const installDir = opts.installDir ?? await mkdtemp(join(tmpdir(), "flair-test-"));
+  if (ownsInstallDir) writeScratchOwnerStamp(installDir);
   // Track before install/spawn so a timeout or thrown install still reaps
   // the tree. stopHarper / the success-path return replace pid once we have it.
   const tracked: { pid?: number; installDir?: string; owns: boolean } = {

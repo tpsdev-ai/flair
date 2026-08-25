@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, utimesSync } from "node:fs";
+import { SCRATCH_OWNER_FILE, writeScratchOwnerStamp } from "../../src/lib/scratch-owner";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -231,6 +232,31 @@ describe("runRoundTrip: scratch dirs do not leak (flair#1032)", () => {
       expect(existsSync(leftover)).toBe(false);
     } finally {
       rmSync(leftover, { recursive: true, force: true });
+    }
+  });
+
+  test("boot sweep does not delete a tree whose owner pid is still alive", () => {
+    const live = mkdtempSync(join(tmpdir(), `${BRIDGE_TEST_DIR_PREFIX}live-`));
+    writeScratchOwnerStamp(live);
+    const past = new Date(Date.now() - 5 * 60_000);
+    utimesSync(live, past, past);
+    try {
+      sweepStaleBridgeTestDirs({ olderThanMs: 0 });
+      expect(existsSync(live)).toBe(true);
+    } finally {
+      rmSync(live, { recursive: true, force: true });
+    }
+  });
+
+  test("boot sweep removes a tree whose owner pid is dead", () => {
+    const orphan = mkdtempSync(join(tmpdir(), `${BRIDGE_TEST_DIR_PREFIX}orphan-`));
+    writeFileSync(join(orphan, SCRATCH_OWNER_FILE), "999999999\n");
+    try {
+      const removed = sweepStaleBridgeTestDirs({ olderThanMs: 0 });
+      expect(removed).toBeGreaterThanOrEqual(1);
+      expect(existsSync(orphan)).toBe(false);
+    } finally {
+      rmSync(orphan, { recursive: true, force: true });
     }
   });
 });
