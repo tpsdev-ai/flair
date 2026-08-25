@@ -26,19 +26,24 @@ export function withCiteNudge(text: string): string {
  * nothing to send (the tool should fail locally rather than POST an empty list).
  * Never includes agentId — the server attributes from the signature.
  *
- * MERGE vs native /mcp PREFER (deliberate, named — Sherlock #1404):
- * native `recordUsage` in resources/mcp-tools.ts prefers `memoryIds` and
- * drops `memoryId` when both are supplied (`Array.isArray(args?.memoryIds)
- * ? args.memoryIds : [args.memoryId]`). This stdio helper MERGES them, then
- * dedupes. A client that fills both fields (common when an agent echoes
- * the singular convenience into a list) would silently lose the singular
- * id on the native path; dropping a citation here would reopen the
- * usageCount hole this issue exists to close. Server-side
- * `RecordUsage.post()` already unions `memoryIds` / `memoryId` the same
- * way (`data?.memoryIds ?? [data?.memoryId]` is prefer, but once we send
- * a merged `memoryIds` array the endpoint sees one list). Do not "align"
- * this helper to the native prefer — the merge is the intended stdio
- * behavior; native prefer is pre-existing and out of this issue's scope.
+ * MERGE vs PREFER (deliberate, named — Sherlock/Kern #1404):
+ * This helper MERGES `memoryId` + `memoryIds`, then dedupes. Native `/mcp`
+ * `recordUsage` (resources/mcp-tools.ts) PREFERS `memoryIds` and drops
+ * `memoryId` when both are supplied. The HTTP endpoint does the same:
+ * `RecordUsage.post()` is `data?.memoryIds ?? [data?.memoryId]` — PREFER,
+ * not union. If `memoryIds` is present (even `[]`, which is truthy),
+ * `memoryId` is never read.
+ *
+ * The stdio merge is load-bearing because it flattens first: we send only
+ * a single `memoryIds` array, so the server's prefer is never exercised
+ * on two fields. A future path that POSTs both fields through to
+ * `/RecordUsage` without flattening would silently drop `memoryId`
+ * (delivered-but-uncounted; empty `memoryIds: []` alongside a real
+ * `memoryId` would 400 rather than fall through).
+ *
+ * Native prefer is a pre-existing delivered-but-uncounted bug on a
+ * different surface, tracked in flair#1410 — not a regression from this
+ * PR, and not a blocker for #1147. Do not "align" this helper to prefer.
  */
 export function buildRecordUsageBody(args: {
   memoryId?: string;

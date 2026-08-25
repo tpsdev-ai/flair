@@ -27,9 +27,10 @@ describe("record_usage body (flair#1147)", () => {
   });
 
   test("when BOTH memoryId and memoryIds are supplied, MERGE (do not prefer-and-drop like native /mcp)", () => {
-    // Native resources/mcp-tools.ts recordUsage prefers memoryIds and drops
-    // memoryId when both are present. Stdio merge is deliberate (Sherlock
-    // #1404): silently discarding the singular id would lose a citation.
+    // Native /mcp and RecordUsage.post() PREFER memoryIds (never union).
+    // Stdio merge is load-bearing because it flattens first (Sherlock/Kern
+    // #1404). Native prefer is the pre-existing delivered-but-uncounted
+    // bug tracked in flair#1410 — not this PR's to fix.
     expect(buildRecordUsageBody({ memoryId: "mem-b", memoryIds: ["mem-a"] })).toEqual({
       memoryIds: ["mem-a", "mem-b"],
     });
