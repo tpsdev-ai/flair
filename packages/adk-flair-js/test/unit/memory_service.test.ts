@@ -95,6 +95,17 @@ describe("tag helpers", () => {
     expect(sanitizeTagSegment("alice_admin")).toBe("alice%5Fadmin");
   });
 
+  it("does not collide app_name and app:name (regression #1122)", () => {
+    // Sherlock Attack 3 on #1119: ':' -> '_' made these the same tag, so two
+    // apps from the same developer silently shared a memory namespace.
+    // Percent-encoding is the accepted escaping scheme (alternative to
+    // rejecting ':' at the API boundary).
+    expect(sanitizeTagSegment("app_name")).not.toBe(sanitizeTagSegment("app:name"));
+    expect(compoundTag("app_name", "user")).not.toBe(compoundTag("app:name", "user"));
+    expect(compoundTag("app_name", "user")).toBe("adk:app%5Fname:user");
+    expect(compoundTag("app:name", "user")).toBe("adk:app%3Aname:user");
+  });
+
   it("encoding is injective, incl. the literal-escape trap", () => {
     // 'alice%3Aadmin' (literal) must not collide with 'alice:admin' (encoded).
     const tricky = [

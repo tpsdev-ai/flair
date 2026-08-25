@@ -7,9 +7,11 @@
  * OLLAMA_API_BASE (default http://localhost:11434).
  *
  * The ollama_chat/ prefix is stripped to derive the Ollama model name.
- * No tool/function-calling support — the quickstart-parity agent loop only
- * uses PreloadMemoryTool (a processor-level tool that never reaches the
- * model), so plain chat completions are sufficient.
+ * Text parts only — functionCall/functionResponse and any other non-text
+ * part kind throw instead of mapping to an empty string (flair#1122). The
+ * quickstart-parity agent loop only uses PreloadMemoryTool (a processor-
+ * level tool that never reaches the model), so plain chat completions are
+ * sufficient.
  *
  * Non-streaming only. Streaming is not needed for the integration tests.
  *
@@ -25,9 +27,28 @@ import type { Content, Part } from "@google/genai";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function extractText(part: Part): string {
-  if (part.text) return part.text;
-  return "";
+/** Keys that are metadata on a text part, not a distinct part kind. */
+const TEXT_PART_KEYS = new Set(["text", "thought", "thoughtSignature"]);
+
+/**
+ * Pull `part.text`, or throw if the part is a kind this helper does not map.
+ *
+ * The old empty-string fallback silently dropped functionCall /
+ * functionResponse (and any future non-text kind). A test that starts
+ * exercising tool use must fail here, not look like a blank turn.
+ * Exported for the #1122 unit test.
+ */
+export function extractText(part: Part): string {
+  for (const key of Object.keys(part) as Array<keyof Part>) {
+    if (TEXT_PART_KEYS.has(key)) continue;
+    if (part[key] != null) {
+      throw new Error(
+        `OllamaLlm: unmapped LlmRequest part kind "${String(key)}" — ` +
+          "this helper only maps text parts",
+      );
+    }
+  }
+  return part.text ?? "";
 }
 
 function contentToOllamaMessage(
