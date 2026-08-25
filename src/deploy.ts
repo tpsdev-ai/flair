@@ -872,9 +872,28 @@ export function publishedEntryNames(packageRoot: string): Set<string> {
   }
   // `files` entries are npm patterns; the ones flair uses are plain top-level
   // names, optionally trailing-slashed ("dist/"). Normalise to the entry name.
-  const names = declared
-    .map((f) => String(f).replace(/^\.\//, "").replace(/\/+$/, ""))
-    .filter((f) => f !== "" && !f.includes("*") && !f.startsWith("!"));
+  //
+  // Honourable iff the entry is a plain top-level name. A blacklist of `*` and
+  // `!` lets `?`, `[]`, `{}` (and anything else minimatch understands) through
+  // as a literal that matches no real file — the same silent drop this fix
+  // exists to prevent (Sherlock on #1398). Whitelist: there is no
+  // differently-malformed form that slips through.
+  const names: string[] = [];
+  for (const raw of declared) {
+    const f = String(raw).replace(/^\.\//, "").replace(/\/+$/, "");
+    // Empty after normalize (`""`, `./`, `/`) is a listed entry we cannot
+    // honour as a plain top-level name. Skipping it left hasDeclaredFiles
+    // true and shipped only the always-includes — the same silent omit
+    // (Bugbot on #1398).
+    if (f === "." || f === ".." || !/^[a-zA-Z0-9._-]+$/.test(f)) {
+      throw new Error(
+        `Cannot honour files entry ${JSON.stringify(String(raw))}: the deploy payload filter supports plain ` +
+          `top-level entries only. Either simplify the entry, or extend publishedEntryNames() ` +
+          `to match npm pack semantics.`,
+      );
+    }
+    names.push(f);
+  }
   return new Set([...names, ...always]);
 }
 
