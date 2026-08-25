@@ -1,1 +1,0 @@
-- **`flair test` banner now prints the URL the test actually talks to.** With `FLAIR_URL` pointed at a remote, the command already ran against that remote but the banner printed `127.0.0.1:<port>` — so connectivity debugging claimed a possibly-dead local instance. The banner now uses the same resolved target the test's own client uses (flair#1351).
