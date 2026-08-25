@@ -217,7 +217,7 @@ describe("every Resource under resources/*.ts declares an explicit allow-decisio
  * self-verify (signature / token) or genuinely not need identity at all.
  */
 const EARLY_RETURN_ENDPOINTS: Array<{ path: string; file: string; className: string; note: string }> = [
-  { path: "/health, /Health", file: "health.ts", className: "Health", note: "genuinely identity-free — returns only {ok:true}" },
+  { path: "/health, /Health", file: "health.ts", className: "Health", note: "genuinely identity-free — {ok, version, buildCommit, searchReady}; no caller identity" },
   { path: "GET /a2a, /A2AAdapter*", file: "A2AAdapter.ts", className: "A2AAdapter", note: "public agent-card metadata; POST is NOT early-returned and goes through the general middleware path" },
   { path: "/AgentCard*", file: "AgentCard.ts", className: "AgentCard", note: "public discovery metadata, per A2A spec" },
   { path: "/FederationSync", file: "Federation.ts", className: "FederationSync", note: "self-verifies via verifyBodySignatureFresh (Ed25519 body signature + anti-replay)" },

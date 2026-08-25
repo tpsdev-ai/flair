@@ -61,8 +61,21 @@ describe("/Health serves the build's own identity (flair#1076)", () => {
   test("GET /Health: version and buildCommit come from the stamp the running server loaded", async () => {
     const res = await fetch(`${harper.httpURL}/Health`);
     expect(res.ok).toBe(true);
-    const body = (await res.json()) as { ok?: boolean; version?: string; buildCommit?: string | null };
+    const body = (await res.json()) as {
+      ok?: boolean;
+      version?: string;
+      buildCommit?: string | null;
+      searchReady?: boolean;
+      searchReadyReason?: string;
+    };
     expect(body.ok).toBe(true);
+    // flair#1326: searchReady is always present. After a fresh startHarper
+    // the BM25 index is still cold, so false + a reason is the honest
+    // reading; if something warmed it, true with no reason is also fine.
+    expect(typeof body.searchReady).toBe("boolean");
+    if (body.searchReady === false) {
+      expect(body.searchReadyReason).toMatch(/bm25|not mounted|not queryable/i);
+    }
     // Sherlock's honesty ruling: the field is ALWAYS present — a tarball
     // build renders null, but the key is never silently omitted.
     expect("buildCommit" in body).toBe(true);
