@@ -17,16 +17,45 @@ set -euo pipefail
 #
 #   Break-glass only (CI staging unavailable):
 #     ./scripts/release.sh 0.5.0 --publish
+#     ./scripts/release.sh 0.5.0 --publish --break-glass
 #       → publishes from THIS machine. Requires an explicit acknowledgement
-#         (type BREAK-GLASS, or pass --break-glass). Who can publish is
-#         unchanged; this only marks the path.
+#         (type BREAK-GLASS, or pass --break-glass with --publish). Who can
+#         publish is unchanged; this only marks the path. --break-glass is
+#         not a mode — alone it fails closed instead of entering Phase 1.
 #
 #   ./scripts/release.sh 0.5.0 --dry
 #       → phase-1 bump + build + test on a local branch, skip push/PR.
 
 VERSION="${1:?Usage: release.sh <version> [--publish [--break-glass]|--dry]}"
-MODE="${2:-}"
-ACK="${3:-}"
+shift
+MODE=""
+ACK=""
+for arg in "$@"; do
+  case "$arg" in
+    --publish|--dry)
+      if [[ -n "$MODE" && "$MODE" != "$arg" ]]; then
+        echo "❌ Conflicting flags: $MODE and $arg"
+        echo "   Usage: release.sh <version> [--publish [--break-glass]|--dry]"
+        exit 1
+      fi
+      MODE="$arg"
+      ;;
+    --break-glass)
+      ACK="--break-glass"
+      ;;
+    *)
+      echo "❌ Unknown argument: $arg"
+      echo "   Usage: release.sh <version> [--publish [--break-glass]|--dry]"
+      exit 1
+      ;;
+  esac
+done
+if [[ "$ACK" == "--break-glass" && "$MODE" != "--publish" ]]; then
+  echo "❌ --break-glass is an acknowledgement for --publish, not a mode."
+  echo "   Use: ./scripts/release.sh ${VERSION} --publish --break-glass"
+  echo "   The normal release is: git tag v${VERSION} && git push origin v${VERSION}"
+  exit 1
+fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # VERSION is interpolated into node -e heredocs and git/gh commands below.

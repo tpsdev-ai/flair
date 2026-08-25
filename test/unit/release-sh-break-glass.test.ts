@@ -8,19 +8,34 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "release.sh");
 const SRC = readFileSync(SCRIPT, "utf8");
 
-function runPublish(args: string[], stdin?: string) {
+function runPublish(args: string[], stdin?: string, env: NodeJS.ProcessEnv = process.env) {
   return spawnSync("bash", [SCRIPT, ...args], {
     encoding: "utf8",
     input: stdin,
     timeout: 20_000,
     cwd: REPO_ROOT,
+    env,
+  });
+}
+
+/** Spawn with no npm credentials so the auth gate is what actually runs. */
+function runPublishUnauth(args: string[]) {
+  const home = mkdtempSync(join(tmpdir(), "flair-release-unauth-"));
+  return runPublish(args, undefined, {
+    ...process.env,
+    HOME: home,
+    NPM_CONFIG_USERCONFIG: join(home, ".npmrc"),
+    npm_config_userconfig: join(home, ".npmrc"),
+    NPM_TOKEN: "",
+    NODE_AUTH_TOKEN: "",
   });
 }
 
@@ -69,15 +84,34 @@ describe("release.sh --publish is the break-glass path", () => {
   });
 
   test("unauthenticated --break-glass names the tag path, not npm login as the fix", () => {
-    const r = runPublish(["9.9.9", "--publish", "--break-glass"]);
+    const r = runPublishUnauth(["9.9.9", "--publish", "--break-glass"]);
     const out = output(r);
-    // This machine is not an npm publisher. The script must fail with our
-    // message so the operator is not sent to `npm login`.
-    if (out.includes("This machine is not logged into npm")) {
-      expect(out).toContain("git tag v9.9.9 && git push origin v9.9.9");
-      expect(out).toMatch(/Do not run `npm login` unless CI staging is actually unavailable/);
-    }
-    expect(r.status).not.toBe(0);
+    expect(r.status).toBe(1);
+    expect(out).toContain("This machine is not logged into npm");
+    expect(out).toContain("git tag v9.9.9 && git push origin v9.9.9");
+    expect(out).toMatch(/Do not run `npm login` unless CI staging is actually unavailable/);
+    expect(out).not.toContain("Publishing to npm");
+    expect(out).not.toMatch(/need auth You need to authorize this machine using `npm login`/);
+  });
+
+  test("--break-glass without --publish fails closed instead of entering Phase 1", () => {
+    const r = runPublish(["9.9.9", "--break-glass"]);
+    const out = output(r);
+    expect(r.status).toBe(1);
+    expect(out).toContain("--break-glass is an acknowledgement for --publish");
+    expect(out).not.toContain("PR PREP");
+    expect(out).not.toContain("Publishing to npm");
+  });
+
+  test("--break-glass --publish is accepted as publish + acknowledgement", () => {
+    const r = runPublishUnauth(["9.9.9", "--break-glass", "--publish"]);
+    const out = output(r);
+    expect(out).toContain("BREAK-GLASS");
+    expect(out).toContain("Acknowledged via --break-glass.");
+    expect(out).toContain("This machine is not logged into npm");
+    expect(r.status).toBe(1);
+    expect(out).not.toContain("PR PREP");
+    expect(out).not.toContain("Publishing to npm");
   });
 });
 
