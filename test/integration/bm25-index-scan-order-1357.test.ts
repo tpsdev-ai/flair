@@ -108,17 +108,44 @@ async function search(body: Record<string, any>): Promise<any> {
 
 const ids = (r: any) => (r.results ?? []).map((x: any) => x.id);
 
-async function memoryIds(query = ""): Promise<string[]> {
-  // Premise 1 vehicle: Memory.search, not SemanticSearch (flair#1412).
-  const path = query ? `/Memory?${query}` : "/Memory";
+function rowIds(body: any): string[] {
+  const rows = Array.isArray(body) ? body : (body?.results ?? body?.items ?? []);
+  return rows.map((x: any) => x.id).filter((id: string) => INSERT_ORDER.includes(id));
+}
+
+async function memoryIds(): Promise<string[]> {
+  // Premise 1 unfiltered vehicle: Memory.search (scope OR-group), not
+  // SemanticSearch — after flair#1412 that path is createdAt/id ordered.
+  // GET /Memory (no slash/query) is the collection DESCRIBE, not a search.
+  // GET /Memory/? is the collection-search form (auth-middleware e2e).
+  const path = "/Memory/?";
   const res = await fetch(`${harper.httpURL}${path}`, {
     headers: { Authorization: ed25519Header(agent, "GET", path) },
   });
   const text = await res.text();
   expect(res.status, `GET ${path} → ${res.status}: ${text.slice(0, 300)}`).toBe(200);
-  const body = JSON.parse(text);
-  const rows = Array.isArray(body) ? body : (body.results ?? body.items ?? []);
-  return rows.map((x: any) => x.id).filter((id: string) => INSERT_ORDER.includes(id));
+  const ids = rowIds(JSON.parse(text));
+  expect(ids.length, `GET ${path} returned no fixture rows: ${text.slice(0, 200)}`).toBeGreaterThan(0);
+  return ids;
+}
+
+async function indexSeekIds(attribute: string, value: string): Promise<string[]> {
+  // Tags/subject index seek — the plan SemanticSearch's extra equals
+  // condition used to select. REST `?tags=` does not switch the planner
+  // (CI: same own-then-other order as the scope scan).
+  const res = await adminOp(harper, {
+    operation: "search_by_value",
+    database: "flair",
+    table: "Memory",
+    search_attribute: attribute,
+    search_value: value,
+    get_attributes: ["id"],
+  });
+  const text = await res.text();
+  expect(res.status, `search_by_value ${attribute}=${value} → ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+  const ids = rowIds(JSON.parse(text));
+  expect(ids.length, `search_by_value ${attribute} returned no fixture rows`).toBeGreaterThan(0);
+  return ids;
 }
 
 // File-scope lifecycle: both describes below share ONE instance. A
@@ -162,8 +189,8 @@ describe("flair#1357 — real-Harper premises of the persistent BM25 index", () 
   test("PREMISE 1: a tags/subject-filtered scan of the SAME rows comes back in a DIFFERENT order", async () => {
     // Same store, same rows, different plan, different iteration order — the
     // reason a fixed tie-break cannot be correct for every query.
-    expect(await memoryIds("tags=shared-tag")).toEqual(LEX_ORDER);
-    expect(await memoryIds("subject=shared-subject")).toEqual(LEX_ORDER);
+    expect(await indexSeekIds("tags", "shared-tag")).toEqual(LEX_ORDER);
+    expect(await indexSeekIds("subject", "shared-subject")).toEqual(LEX_ORDER);
   }, 60_000);
 
 
