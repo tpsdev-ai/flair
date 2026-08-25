@@ -40,10 +40,11 @@
  *     reproduce Harper's own shape exactly, or a rescued record's response
  *     bytes would differ from a scanned one's.
  *
- * VEHICLE for premise 1: a `SemanticSearch` with neither `q` nor an embedding
- * returns `allowedById.values()` — a Map built in corpus-scan order — and then
- * stable-sorts on an all-equal `_rank`. So the response order IS the scan
- * order.
+ * VEHICLE for premise 1: `GET /Memory/` (Memory.search → Harper Table.search)
+ * for the scope OR-group scan, and ops `search_by_value` for the tags/subject
+ * index seek. Do NOT use SemanticSearch — after flair#1412 that path is
+ * `createdAt DESC, id ASC` on an all-equal `_rank` and no longer leaks scan
+ * order. `GET /Memory` (no slash) is the collection describe, not a search.
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
@@ -106,6 +107,48 @@ async function search(body: Record<string, any>): Promise<any> {
 
 const ids = (r: any) => (r.results ?? []).map((x: any) => x.id);
 
+function rowIds(body: any): string[] {
+  const rows = Array.isArray(body) ? body : (body?.results ?? body?.items ?? []);
+  return rows.map((x: any) => x.id).filter((id: string) => INSERT_ORDER.includes(id));
+}
+
+async function memoryIds(): Promise<string[]> {
+  // Premise 1 unfiltered vehicle: Memory.search (scope OR-group), not
+  // SemanticSearch — after flair#1412 that path is createdAt/id ordered.
+  // GET /Memory (no slash) is the collection DESCRIBE, not a search.
+  // GET /Memory/ is the collection-search form. Sign pathname only —
+  // `url.pathname + url.search` for `/Memory/?` is `/Memory/` (empty
+  // search), so signing `/Memory/?` 401s as invalid_signature.
+  const path = "/Memory/";
+  const res = await fetch(`${harper.httpURL}${path}`, {
+    headers: { Authorization: ed25519Header(agent, "GET", path) },
+  });
+  const text = await res.text();
+  expect(res.status, `GET ${path} → ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+  const ids = rowIds(JSON.parse(text));
+  expect(ids.length, `GET ${path} returned no fixture rows: ${text.slice(0, 200)}`).toBeGreaterThan(0);
+  return ids;
+}
+
+async function indexSeekIds(attribute: string, value: string): Promise<string[]> {
+  // Tags/subject index seek — the plan SemanticSearch's extra equals
+  // condition used to select. REST `?tags=` does not switch the planner
+  // (CI: same own-then-other order as the scope scan).
+  const res = await adminOp(harper, {
+    operation: "search_by_value",
+    database: "flair",
+    table: "Memory",
+    search_attribute: attribute,
+    search_value: value,
+    get_attributes: ["id"],
+  });
+  const text = await res.text();
+  expect(res.status, `search_by_value ${attribute}=${value} → ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+  const ids = rowIds(JSON.parse(text));
+  expect(ids.length, `search_by_value ${attribute} returned no fixture rows`).toBeGreaterThan(0);
+  return ids;
+}
+
 // File-scope lifecycle: both describes below share ONE instance. A
 // describe-scoped afterAll would stop Harper before the second block ran.
 beforeAll(async () => {
@@ -133,7 +176,7 @@ afterAll(async () => { if (harper) await stopHarper(harper); });
 
 describe("flair#1357 — real-Harper premises of the persistent BM25 index", () => {
   test("PREMISE 1: the multi-agent scope scan is NOT primary-key order — own rows lead", async () => {
-    const observed = ids(await search({}));
+    const observed = await memoryIds();
     const own = INSERT_ORDER.filter((_, i) => i % 2 === 0).sort();
     const other = INSERT_ORDER.filter((_, i) => i % 2 === 1).sort();
     // Own rows first (primary-key order within the group), then the rest.
@@ -147,8 +190,8 @@ describe("flair#1357 — real-Harper premises of the persistent BM25 index", () 
   test("PREMISE 1: a tags/subject-filtered scan of the SAME rows comes back in a DIFFERENT order", async () => {
     // Same store, same rows, different plan, different iteration order — the
     // reason a fixed tie-break cannot be correct for every query.
-    expect(ids(await search({ tag: "shared-tag" }))).toEqual(LEX_ORDER);
-    expect(ids(await search({ subject: "shared-subject" }))).toEqual(LEX_ORDER);
+    expect(await indexSeekIds("tags", "shared-tag")).toEqual(LEX_ORDER);
+    expect(await indexSeekIds("subject", "shared-subject")).toEqual(LEX_ORDER);
   }, 60_000);
 
 

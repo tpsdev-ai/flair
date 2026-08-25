@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { cosineSimilarity, rankOf } from "../src/cosine.js";
+import { compareKey } from "../src/sort-comparators.js";
 
 describe("cosineSimilarity", () => {
   test("identical vectors -> 1", () => {
@@ -46,5 +47,28 @@ describe("rankOf", () => {
 
   test("middle match ranks in between", () => {
     expect(rankOf(query, corpus, 1)).toBe(1);
+  });
+
+  test("tied cosine scores break on corpus index, not scored-array input order", () => {
+    // Same comparator rankOf uses. Two identical vectors (score tie) plus a
+    // worse one — permute the scored rows and the ranking must not move.
+    const queryV = [1, 0];
+    const tied = [1, 0];
+    const worse = [0, 1];
+    const corpus = [tied, tied, worse];
+    expect(rankOf(queryV, corpus, 0)).toBe(0);
+    expect(rankOf(queryV, corpus, 1)).toBe(1);
+    expect(rankOf(queryV, corpus, 2)).toBe(2);
+
+    const scored = corpus.map((v, index) => ({ index, score: cosineSimilarity(queryV, v) }));
+    expect(new Set(scored.filter((s) => s.index !== 2).map((s) => s.score)).size).toBe(1);
+    const cmp = (
+      a: { index: number; score: number },
+      b: { index: number; score: number },
+    ) => (b.score - a.score) || compareKey(a.index, b.index);
+    const forward = [...scored].sort(cmp).map((s) => s.index);
+    const reversed = [...scored].reverse().sort(cmp).map((s) => s.index);
+    expect(forward).toEqual([0, 1, 2]);
+    expect(reversed).toEqual(forward);
   });
 });

@@ -60,6 +60,7 @@ import { compositeScore } from "./scoring.js";
 import { buildBM25, fuseRrfNormalized, SEM_LIMIT } from "./bm25.js";
 import { isAllowedBm25Candidate, type Condition } from "./bm25-filter.js";
 import { indexedBm25Ids } from "./bm25-index-service.js";
+import { byRecencyThenId } from "./sort-comparators.js";
 
 // Convert HNSW cosine distance (1 - similarity) to similarity score.
 function distanceToSimilarity(distance: number): number {
@@ -576,7 +577,14 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
   // retrieval lives in the fused ORDER (a BM25 rank-1 rescue outranks weak
   // semantic hits), while `_score` carries the honest absolute evidence for
   // each result — the two can disagree, and that is correct.
-  filteredResults.sort((a: any, b: any) => b._rank - a._rank);
+  //
+  // Ties at this sort are cross-leg RRF identities (flair#1412): no
+  // within-leg tie-break can prevent `1/(k+3)+1/(k+5) === 1/(k+5)+1/(k+3)`.
+  // Break them by createdAt DESC (null → oldest, never NaN) then id ASC.
+  // Determinism is the id ASC total order. createdAt is best-effort recency
+  // within an exact `_rank` tie — federated writer clocks can skew, and
+  // that cannot reintroduce nondeterminism (see byRecencyThenId).
+  filteredResults.sort((a: any, b: any) => (b._rank - a._rank) || byRecencyThenId(a, b));
   for (const r of filteredResults) delete r._rank;
   return filteredResults;
 }
