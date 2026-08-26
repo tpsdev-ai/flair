@@ -1,12 +1,11 @@
-# @tpsdev-ai/cursor-flair
+# Flair for Cursor
 
-Cursor Marketplace plugin for [Flair](https://tps.dev/#flair) — self-hosted identity, memory, and soul for Cursor agents.
+Persistent memory, identity, and personality for your Cursor agents — stored in a Flair instance **you run**, not a vendor's cloud.
 
-This bundle is **not an npm runtime**. It wires Cursor to the stdio MCP server [`@tpsdev-ai/flair-mcp`](https://www.npmjs.com/package/@tpsdev-ai/flair-mcp) and ships skills plus one always-on rule. Memories live in **your** Flair/Harper instance (local or a URL you run). Nothing is stored in Cursor cloud.
+Install it and your agent remembers across sessions: decisions you made, preferences you stated, what a project is for. Ask *"what did we decide about X?"* three weeks later and get an answer.
 
-## Flair vs Cursor's built-in Memories
+This bundle is not an npm runtime. It wires Cursor to the stdio MCP server [`@tpsdev-ai/flair-mcp`](https://www.npmjs.com/package/@tpsdev-ai/flair-mcp) and ships the skills that drive it.
 
-Cursor ships a native **Memories** feature: persistent notes the agent saves as you work, stored in Cursor's cloud with your Cursor account, available in Cursor. Flair is a different shape — one memory you own: self-hosted, semantically searchable, and shared across every AI you use (Cursor, Grok Bot, Claude Code, your own agents) and with your team. The two coexist: keep Memories for quick scratch notes; Flair is the memory that follows you across tools.
 
 ## Prerequisites
 
@@ -26,9 +25,11 @@ flair status               # default HTTP origin: http://127.0.0.1:19926
 
 ## Install
 
-**Marketplace.** In Cursor, search **Flair** in the Marketplace, install, then **Plugins → Configure**.
+**Plugin directory.** Flair is listed at **[cursor.directory/plugins/flair](https://cursor.directory/plugins/flair)** — install it from there, then open **Plugins → Configure** in Cursor and set the variables below.
 
-**Local development.** Copy or symlink this directory to `~/.cursor/plugins/local/flair`, then Configure the same variables.
+**From this repository.** Copy or symlink `packages/cursor-flair` to `~/.cursor/plugins/local/flair`, then Configure the same variables. This is also the route for local development.
+
+> Flair is **not** currently in Cursor's built-in Marketplace, so searching there will not find it. Use one of the two paths above.
 
 ## Configure
 
@@ -40,6 +41,10 @@ Set these under **Plugins → Configure**. `FLAIR_CLIENT=cursor` is set for you 
 | `FLAIR_URL` | no | `http://127.0.0.1:19926` | Reachable Flair HTTP origin |
 
 Those are the only two fields in the plugin schema (`plugin.json`). `FLAIR_KEY_PATH` and `FLAIR_ADMIN_*` are documented here in the README only — they are **not** declared as plugin variables and **not** interpolated into `mcp.json`. Set them in the host env of the machine that runs `npx`. Keeping them out of `mcp.json` is deliberate: an unsubstituted `${FLAIR_KEY_PATH}` would be truthy and break key auto-resolve, and an unsubstituted admin password would send literal Basic auth.
+
+## Flair vs Cursor's built-in Memories
+
+Cursor ships a native **Memories** feature: persistent notes the agent saves as you work, stored in Cursor's cloud with your Cursor account, available in Cursor. Flair is a different shape — one memory you own: self-hosted, semantically searchable, and shared across every AI you use (Cursor, Grok Bot, Claude Code, your own agents) and with your team. The two coexist: keep Memories for quick scratch notes; Flair is the memory that follows you across tools.
 
 ## Grok Bot / Cursor cloud agents
 
