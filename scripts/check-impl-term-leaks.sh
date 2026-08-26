@@ -30,17 +30,22 @@ TMPFILE=$(mktemp)
 ERRFILE=$(mktemp)
 trap 'rm -f "$TMPFILE" "$ERRFILE"' EXIT
 
-# Find files to search:
+# Find files to search. Each find is dir-guarded so a missing tree cannot
+# trip `set -e` before the empty-corpus refusal below (flair#1420).
 # 1. All files under packages/*/dist/
-find packages -type f -path '*/dist/*' -not -path '*/.github/*' -not -path '*/specs/*' -not -path '*/test/*' 2>/dev/null >> "$TMPFILE"
-# 2. All packages/*/README.md
-find packages -type f -name 'README.md' -path 'packages/*' -not -path '*/.github/*' -not -path '*/specs/*' -not -path '*/test/*' 2>/dev/null >> "$TMPFILE"
+if [[ -d packages ]]; then
+  find packages -type f -path '*/dist/*' -not -path '*/.github/*' -not -path '*/specs/*' -not -path '*/test/*' 2>/dev/null >> "$TMPFILE"
+  # 2. All packages/*/README.md
+  find packages -type f -name 'README.md' -path 'packages/*' -not -path '*/.github/*' -not -path '*/specs/*' -not -path '*/test/*' 2>/dev/null >> "$TMPFILE"
+fi
 # 3. Root README.md
 if [[ -f README.md && ! README.md -ef */.github/* && ! README.md -ef */specs/* && ! README.md -ef */test/* ]]; then
   echo "README.md" >> "$TMPFILE"
 fi
 # 4. All files under docs/
-find docs -type f -not -path '*/.github/*' -not -path '*/specs/*' -not -path '*/test/*' 2>/dev/null >> "$TMPFILE"
+if [[ -d docs ]]; then
+  find docs -type f -not -path '*/.github/*' -not -path '*/specs/*' -not -path '*/test/*' 2>/dev/null >> "$TMPFILE"
+fi
 # 5. Root CHANGELOG.md (flair#1420) — release notes are the most consumer-facing
 #    document we publish. A leak here is what a reader actually sees.
 if [[ -f CHANGELOG.md ]]; then
