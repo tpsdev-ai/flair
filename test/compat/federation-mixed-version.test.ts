@@ -25,19 +25,22 @@
 // mixed-version test is to prove OLD's wire format is accepted by NEW's
 // receiver and vice versa, so the two sides must never share code.
 //
-// ─── flair#1416 Phase 2 — Memory is NOT bidirectional during this window ─
-// HEAD senders emit per-record signatures over a v:2 body (principalId in
-// the signed field set, `v` on the wire). npm-baseline receivers still
-// reconstruct a hardcoded v:1 field set, cannot verify those signatures,
-// and skip the records (`invalid_signature`). That is the issue's own
-// documented Phase 2 degradation — per-record, not a batch outage — and
-// it resolves as baseline peers upgrade. So:
+// ─── flair#1416 Phase 2 — B→A is gated on the baseline receiver ─────────
+// HEAD senders emit per-record signatures over a v:2 body. A baseline
+// that still hardcodes a v:1 verify body cannot reconstruct that shape
+// and skips (`invalid_signature`) — the issue's own documented Phase 2
+// degradation, per-record, not a batch outage.
+//
+// That skip is NOT permanent `@latest` behavior. The header above still
+// claims same-version runs (HEAD === npm-latest after this ships). Once
+// the baseline has Phase 1 reconstruct (`reconstructRecordVerifyBody` /
+// `record.v ?? 1`), B→A must merge again and lastMergeAt is set on both
+// sides. `baselineReceiverHardcodesV1()` is the skew gate: probe the
+// installed package, don't pin the skip forever.
+//
 //   - A→B (baseline sender → HEAD receiver) MUST still merge Memory.
-//     That is the Phase 1 must-pass: receivers first, old senders keep
-//     working.
-//   - B→A (HEAD sender → baseline receiver) MUST skip. Asserting
-//     bidirectional Memory replicate here is the wrong expectation for
-//     this release; lastMergeAt is therefore direction-aware too.
+//     Phase 1 must-pass either way: receivers first, old senders work.
+//   - B→A: skip only while the gate is true; merge after cutover.
 //
 // ─── Why reciprocal pairing (two pair operations, not one) ─────────────────
 // `POST /FederationSync` (resources/Federation.ts) is PUSH-ONLY and
@@ -95,6 +98,7 @@
 // resolveInstanceEnv() below.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -298,6 +302,36 @@ async function addMemory(inst: Instance, content: string): Promise<void> {
  * rows to push, making this the version-stable way to verify "did the
  * record actually land", independent of either side's HTTP REST client bugs.
  */
+/**
+ * True when the installed npm baseline still pins `v: 1` on verify — the
+ * Phase 2 window where a HEAD v:2 record is skipped. False once `@latest`
+ * includes reconstructRecordVerifyBody / `record.v ?? 1` (this PR, and
+ * same-version runs after it ships).
+ */
+function baselineReceiverHardcodesV1(pkgDir: string): boolean {
+  const candidates = [
+    join(pkgDir, "dist", "resources", "Federation.js"),
+    join(pkgDir, "resources", "Federation.js"),
+    join(pkgDir, "resources", "Federation.ts"),
+  ];
+  for (const p of candidates) {
+    if (!existsSync(p)) continue;
+    const src = readFileSync(p, "utf8");
+    // Any Phase 1+ copy means this package can verify v:2.
+    if (src.includes("reconstructRecordVerifyBody")) return false;
+    if (/record\.v\s*\?\?\s*1/.test(src)) return false;
+  }
+  return true;
+}
+
+function parseHeadSyncCounts(stdout: string): { merged: number; skipped: number } {
+  const m = stdout.match(/Synced (\d+) records \((\d+) skipped\)/);
+  if (!m) {
+    throw new Error(`HEAD federation sync stdout missing merged/skipped counts:\n${stdout}`);
+  }
+  return { merged: Number(m[1]), skipped: Number(m[2]) };
+}
+
 async function fetchAgentMemories(inst: Instance, agentId: string): Promise<any[]> {
   const auth = "Basic " + Buffer.from(`admin:${inst.adminPass}`).toString("base64");
   const res = await fetch(`${inst.harper.opsURL}/`, {
@@ -324,6 +358,8 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
   let a: Instance;
   let b: Instance;
   let tokenDir: string;
+  /** Set in beforeAll from the installed npm package, not assumed. */
+  let baselineIsPreV2Receiver = true;
 
   beforeAll(async () => {
     // ── 1. Install the previous published baseline from npm ──────────────
@@ -363,6 +399,7 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     }
 
     const pkgDirA = join(baselineDir, "node_modules", "@tpsdev-ai", "flair");
+    baselineIsPreV2Receiver = baselineReceiverHardcodesV1(pkgDirA);
 
     // ── 2. Start both Harper instances ────────────────────────────────────
     // A: baseline component + baseline's own bundled harper.
@@ -494,27 +531,44 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(true);
   }, CLI_TIMEOUT_MS * 6);
 
-  test("memory written on B (HEAD build) is skipped by A (npm baseline) — Phase 2 v:2 degradation", async () => {
-    // HEAD sender emits v:2. Baseline receiver cannot reconstruct that
-    // body (hardcoded v:1 field set) and skips the record. Documented
-    // Phase 2 degradation of flair#1416 — not a regression.
+  test("memory written on B (HEAD) vs A (baseline) — skip only while baseline hardcodes v:1", async () => {
     const marker = `compat-marker-b-to-a-${Date.now()}`;
     await addMemory(b, `mixed-version federation compat marker: ${marker}`);
-    await runSync(b); // B pushes to its hub, A (paired in round 1 above)
 
-    // Settle across several reads so a delayed merge would still fail
-    // this test. A→B uses retryUntil-until-present; here the success
-    // condition is "still absent".
-    let rows: any[] = [];
-    for (let i = 0; i < 4; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      rows = await fetchAgentMemories(a, b.agentId);
-      expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(false);
+    // The row must exist on B before we talk about skip-or-merge on A.
+    // Absence-on-A alone would also pass if the write never left B
+    // (visibility filter, push bug).
+    const originRows = await fetchAgentMemories(b, b.agentId);
+    expect(originRows.some((r) => String(r.content ?? "").includes(marker))).toBe(true);
+
+    const sync = await runSync(b); // B pushes to its hub, A
+    const counts = parseHeadSyncCounts(sync.stdout);
+
+    if (baselineIsPreV2Receiver) {
+      // Phase 2 degradation: receiver returned skips. That is the
+      // defect-expressing signal (push happened; A could not verify v:2).
+      expect(counts.skipped).toBeGreaterThan(0);
+      expect(counts.merged).toBe(0);
+
+      let rows: any[] = [];
+      for (let i = 0; i < 4; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        rows = await fetchAgentMemories(a, b.agentId);
+        expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(false);
+      }
+      expect(rows.filter((r) => String(r.content ?? "").includes(marker))).toEqual([]);
+    } else {
+      // Same-version / post-cutover: baseline can reconstruct v:2.
+      expect(counts.merged).toBeGreaterThan(0);
+      const rows = await retryUntil(
+        () => fetchAgentMemories(a, b.agentId),
+        (found) => found.some((r) => String(r.content ?? "").includes(marker)),
+      );
+      expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(true);
     }
-    expect(rows.filter((r) => String(r.content ?? "").includes(marker))).toEqual([]);
   }, CLI_TIMEOUT_MS * 6);
 
-  test("federation status lastMergeAt is direction-aware (A→B merged, B→A skipped)", async () => {
+  test("federation status lastMergeAt follows the same skew gate as B→A", async () => {
     async function statusOf(inst: Instance): Promise<any> {
       const { stdout } = await runFlairCli(
         inst.cliPath,
@@ -532,22 +586,20 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     expect(statusA.peers.length).toBeGreaterThan(0);
     expect(statusB.peers.length).toBeGreaterThan(0);
 
-    // B (HEAD) received A's v:1 Memory — lastMergeAt must be set on the
-    // peer A pushed as. Reciprocal pairing records the other instance as
-    // role=hub locally; FederationSync updates that same Peer row on
-    // receive. See Federation.ts lastSyncAt vs lastMergeAt split.
+    // B (HEAD) received A's v:1 Memory — lastMergeAt must be set either way.
     const hubOnB = statusB.peers.find((p: any) => p.role === "hub");
     expect(hubOnB).toBeDefined();
     expect(hubOnB.lastMergeAt).toBeTruthy();
 
-    // A (baseline) was contacted by B (lastSyncAt) but skipped every v:2
-    // record (merged === 0), so lastMergeAt stays unset. Requiring it
-    // here is the stale bidirectional assertion this Phase 2 window
-    // makes false.
     const hubOnA = statusA.peers.find((p: any) => p.role === "hub");
     expect(hubOnA).toBeDefined();
     expect(hubOnA.lastSyncAt).toBeTruthy();
-    expect(hubOnA.lastMergeAt == null || hubOnA.lastMergeAt === "").toBe(true);
+    if (baselineIsPreV2Receiver) {
+      // Contacted, but merged === 0 on the v:2 skip path.
+      expect(hubOnA.lastMergeAt == null || hubOnA.lastMergeAt === "").toBe(true);
+    } else {
+      expect(hubOnA.lastMergeAt).toBeTruthy();
+    }
   }, CLI_TIMEOUT_MS * 2);
 
   test("presence heartbeats work independently on each mixed-version instance (NOT federated — see file header)", async () => {
