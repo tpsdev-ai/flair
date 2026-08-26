@@ -259,6 +259,15 @@ describe("the impl-term-leak gate cannot report clean without scanning", () => {
     expect(src).toMatch(/found 0 files to search[\s\S]*?exit 1/);
   });
 
+  test("CHANGELOG.md and .changelog/ are in the scan corpus (flair#1420)", () => {
+    // The v0.50.0 notes carried a live bead ID because neither path was
+    // searched. Pin the widened finds so the corpus cannot shrink back to
+    // docs/ + packages/ unnoticed.
+    expect(src).toMatch(/echo "CHANGELOG\.md"/);
+    expect(src).toMatch(/find \.changelog -type f/);
+    expect(src).toContain("CHANGELOG.md and .changelog/");
+  });
+
   test("the file list is not word-split", () => {
     // `$(cat "$TMPFILE")` unquoted splits `docs/name with space.md` into three
     // nonexistent paths — which the old code then reported as clean.
