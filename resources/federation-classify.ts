@@ -14,6 +14,13 @@ export interface SyncRecord {
   originatorInstanceId: string;
   signature?: string;
   principalId?: string;
+  /**
+   * Signature-body version. Not on the wire for today's (v:1) records —
+   * receivers MUST default absent `v` to 1. Spreading the record without
+   * that default drops `v` from the canonical form and fails every existing
+   * record (fail-closed, fleet-wide). See reconstructRecordVerifyBody().
+   */
+  v?: number;
 }
 
 export type SkipReason =
@@ -32,8 +39,128 @@ export type SkipReason =
                               // has no pinned public key on file (unknown peer)
   | "invalid_signature" // record is signed, but the signature doesn't verify
                         // against the originator's pinned public key
-  | "missing_signature"; // require-mode is on (FLAIR_FEDERATION_REQUIRE_RECORD_SIGNATURES)
+  | "missing_signature" // require-mode is on (FLAIR_FEDERATION_REQUIRE_RECORD_SIGNATURES)
                          // and the record has no signature at all
+  // ─── federation-edge-hardening slice 3a (principalId) ────────────────────
+  // Emitted by FederationSync.post AFTER signature verification, NEVER by
+  // classifyRecord. A v:2 record on a principal-owning table (see
+  // PRINCIPAL_OWNING_TABLES) whose principalId is absent or does not equal
+  // data.agentId. Absent is a skip, not an accept — deriving the
+  // requirement from field presence would make the check opt-out.
+  | "principal_mismatch";
+
+/**
+ * Static policy for every table FederationSync will merge.
+ *
+ * Lives next to SkipReason / SyncRecord so the principal-owning decision is
+ * one visible list, not a condition scattered through the apply path.
+ * `Federation.ts` types its `tableMap` as `Record<FederationSyncTable, …>`,
+ * so adding a federated table without deciding `principalOwning` here is a
+ * type error rather than a silent default.
+ *
+ * Scope the principalId requirement by TABLE, never by field presence.
+ * Memory carries agentId / a provenance stamp; Soul, Agent, and
+ * Relationship do not, and will legitimately have no principalId.
+ */
+export const FEDERATION_TABLE_POLICY = {
+  Memory: { principalOwning: true },
+  Soul: { principalOwning: false },
+  Agent: { principalOwning: false },
+  Relationship: { principalOwning: false },
+} as const;
+
+export type FederationSyncTable = keyof typeof FEDERATION_TABLE_POLICY;
+
+export const FEDERATION_SYNC_TABLES = Object.keys(
+  FEDERATION_TABLE_POLICY,
+) as FederationSyncTable[];
+
+export const PRINCIPAL_OWNING_TABLES: ReadonlySet<string> = new Set(
+  FEDERATION_SYNC_TABLES.filter((t) => FEDERATION_TABLE_POLICY[t].principalOwning),
+);
+
+/** Wire `v` when present; assume 1 when absent (today's records omit it). */
+export function recordSignatureVersion(record: { v?: number }): number {
+  return record.v ?? 1;
+}
+
+/**
+ * Rebuild the object FederationSync verifies against the originator's key.
+ *
+ * Load-bearing details, both of which fail every existing record if missed:
+ *
+ * 1. `v` is not on the wire today. The push side signs a body containing
+ *    `v: 1` but sends a SyncRecord without it. Verification works today
+ *    only because the receiver pinned the same literal. Default it.
+ *    Apply `v` AFTER the spread so an absent/undefined `record.v` cannot
+ *    overwrite the default.
+ *
+ * 2. `principalId` IS on the wire today for some records, but it is
+ *    attached AFTER signing (informational). Spreading it into a v:1
+ *    verify body changes the field set and fails those records. v:1
+ *    therefore strips it; v:2 signs it, so it stays.
+ *
+ * `originatorInstanceId` is the classifyRecord originator (same override
+ * the pre-3a hardcoded reconstruction used), not a blind spread of the
+ * wire field.
+ */
+export function reconstructRecordVerifyBody(
+  record: SyncRecord,
+  originator: string,
+): Record<string, any> {
+  const v = recordSignatureVersion(record);
+  const { signature, v: _wireV, principalId, ...payload } = record;
+  const verifyPayload =
+    v >= 2 && principalId !== undefined ? { ...payload, principalId } : payload;
+  return {
+    ...verifyPayload,
+    v,
+    originatorInstanceId: originator,
+    signature,
+  };
+}
+
+/**
+ * Per-record principal entitlement — apply-site check, DB-free.
+ *
+ * Table in PRINCIPAL_OWNING_TABLES → principalId is mandatory on v:2
+ * (absent is a skip, mismatched is a skip). Table not in the set →
+ * principalId is not consulted at all.
+ *
+ * Does not load Agent, does not read originatorInstanceId off an Agent
+ * row. The record's own stamp is the binding.
+ *
+ * `enforceV1Principal` is Phase 3 (FLAIR_FEDERATION_REQUIRE_RECORD_PRINCIPAL):
+ * skip leftover v:1 records on principal-owning tables that lack
+ * principalId. Off by default — v:1 Memory keeps merging until an
+ * operator flips the flag after the fleet is on v:2.
+ */
+export function checkPrincipalEntitlement(
+  record: SyncRecord,
+  opts: { enforceV1Principal?: boolean } = {},
+): SkipReason | null {
+  if (!PRINCIPAL_OWNING_TABLES.has(record.table)) {
+    return null;
+  }
+  const v = recordSignatureVersion(record);
+  if (v >= 2) {
+    if (
+      typeof record.principalId !== "string" ||
+      record.principalId.length === 0 ||
+      record.principalId !== record.data?.agentId
+    ) {
+      return "principal_mismatch";
+    }
+    return null;
+  }
+  if (
+    opts.enforceV1Principal &&
+    (typeof record.principalId !== "string" || record.principalId.length === 0)
+  ) {
+    return "principal_mismatch";
+  }
+  return null;
+}
 
 export type ClassifyResult =
   | { action: "merge"; originator: string }

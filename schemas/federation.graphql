@@ -58,7 +58,7 @@ type SyncLog @table(database: "flair") {
   direction: String! @indexed      # "push" | "pull"
   recordCount: Int                 # how many records merged in this batch
   skippedCount: Int                # how many records skipped (sum of skippedReasons)
-  skippedReasons: String           # JSON: { unknown_table: N, non_originator: N, future_timestamp: N, no_op_same_hash: N, merge_error: N }
+  skippedReasons: String           # JSON: { unknown_table: N, non_originator: N, future_timestamp: N, no_op_same_hash: N, merge_error: N, unknown_originator_key: N, invalid_signature: N, missing_signature: N, principal_mismatch: N }
   status: String @indexed          # "success" | "partial" | "failed"
   error: String                    # human-readable summary if partial/failed (includes per-record error messages, capped)
   durationMs: Int                  # how long the sync took

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { canonicalize, verifyBodySignature } from "../../resources/federation-crypto";
+import { reconstructRecordVerifyBody } from "../../resources/federation-classify";
 import { keystore } from "../../src/keystore";
 
 /**
@@ -20,13 +21,13 @@ import { keystore } from "../../src/keystore";
  * This file proves, against the real push path:
  *   - every pushed record carries a `signature` field
  *   - that signature verifies against the instance's public key, over the
- *     EXACT canonical form { v: 1, table, id, data, updatedAt,
- *     originatorInstanceId } — the same shape resources/Federation.ts
- *     reconstructs on verify
- *   - principalId is attached ONLY when the row carries a write-time
- *     provenance stamp with a verified agentId (informational; never
- *     required for verification)
+ *     v:2 canonical form { v: 2, table, id, data, updatedAt,
+ *     originatorInstanceId, principalId? } — the same shape
+ *     reconstructRecordVerifyBody builds on the receiver
+ *   - principalId is attached (and signed) ONLY when the row carries a
+ *     write-time provenance stamp with a verified agentId
  *   - a tampered field breaks verification (the round-trip isn't a no-op)
+ *   - Soul/Agent/Relationship emit v:2 with no principalId (push direction)
  */
 
 const origFetch = globalThis.fetch;
@@ -76,7 +77,7 @@ describe("federation sync push — per-record signing (federation-edge-hardening
     globalThis.fetch = origFetch;
   });
 
-  function installMock(memoryRows: any[]) {
+  function installMock(memoryRows: any[], rowsByTable: Record<string, any[]> = {}) {
     capturedCalls = [];
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = typeof urlInput === "string" ? urlInput : urlInput.toString();
@@ -91,6 +92,10 @@ describe("federation sync push — per-record signing (federation-edge-hardening
         return res(true, 200, { id: INSTANCE_ID, publicKey: publicKeyB64url, role: "spoke" });
       }
       if (body?.operation === "search_by_conditions") {
+        const extra = rowsByTable[body.table];
+        if (extra && body.conditions?.[0]?.search_type === "greater_than") {
+          return res(true, 200, extra);
+        }
         const isMemoryUpdatedAtQuery = body.table === "Memory" && body.conditions?.[0]?.search_type === "greater_than";
         return res(true, 200, isMemoryUpdatedAtQuery ? memoryRows : []);
       }
@@ -121,14 +126,7 @@ describe("federation sync push — per-record signing (federation-edge-hardening
 
   /** Reconstruct the canonical payload the receiver verifies against. */
   function canonicalPayloadOf(record: any) {
-    return {
-      v: 1,
-      table: record.table,
-      id: record.id,
-      data: record.data,
-      updatedAt: record.updatedAt,
-      originatorInstanceId: record.originatorInstanceId,
-    };
+    return reconstructRecordVerifyBody(record, record.originatorInstanceId);
   }
 
   it("attaches a signature to every pushed record", async () => {
@@ -158,9 +156,10 @@ describe("federation sync push — per-record signing (federation-edge-hardening
     expect(record.originatorInstanceId).toBe(INSTANCE_ID);
 
     const payload = canonicalPayloadOf(record);
-    expect(payload.v).toBe(1);
+    expect(payload.v).toBe(2);
+    expect(record.v).toBe(2);
 
-    const ok = verifyBodySignature({ ...payload, signature: record.signature }, publicKeyB64url);
+    const ok = verifyBodySignature(payload, publicKeyB64url);
     expect(ok).toBe(true);
   });
 
@@ -199,6 +198,11 @@ describe("federation sync push — per-record signing (federation-edge-hardening
 
     const record = pushedRecords()[0];
     expect(record.principalId).toBe("agent-nathan");
+    expect(record.v).toBe(2);
+    // principalId is in the signed payload — reconstruct keeps it at v:2
+    const body = canonicalPayloadOf(record);
+    expect(body.principalId).toBe("agent-nathan");
+    expect(verifyBodySignature(body, publicKeyB64url)).toBe(true);
   });
 
   it("principalId is OMITTED (not null/undefined-valued) when the row has no provenance stamp", async () => {
@@ -231,8 +235,29 @@ describe("federation sync push — per-record signing (federation-edge-hardening
   it("canonicalize sorts keys — signing is insensitive to source field order", () => {
     // Sanity-check the exact shared primitive both sides rely on for the
     // byte-for-byte contract: field order must not matter.
-    const a = canonicalize({ v: 1, table: "Memory", id: "x", data: { b: 1, a: 2 }, updatedAt: "t", originatorInstanceId: "i" });
-    const b = canonicalize({ originatorInstanceId: "i", updatedAt: "t", data: { a: 2, b: 1 }, id: "x", table: "Memory", v: 1 });
+    const a = canonicalize({ v: 2, table: "Memory", id: "x", data: { b: 1, a: 2 }, updatedAt: "t", originatorInstanceId: "i", principalId: "agt" });
+    const b = canonicalize({ principalId: "agt", originatorInstanceId: "i", updatedAt: "t", data: { a: 2, b: 1 }, id: "x", table: "Memory", v: 2 });
     expect(a).toBe(b);
+  });
+
+  it("Soul / Agent / Relationship emit v:2 with no principalId (push direction)", async () => {
+    const rowsByTable = {
+      Soul: [{ id: "soul-1", name: "core", updatedAt: "2025-06-01T00:00:00.000Z", createdAt: "2025-06-01T00:00:00.000Z" }],
+      Agent: [{ id: "agt-1", name: "flint", updatedAt: "2025-06-01T00:00:00.000Z", createdAt: "2025-06-01T00:00:00.000Z" }],
+      Relationship: [{ id: "rel-1", from: "a", to: "b", updatedAt: "2025-06-01T00:00:00.000Z", createdAt: "2025-06-01T00:00:00.000Z" }],
+    };
+    installMock([], rowsByTable);
+
+    const { runFederationSyncOnce } = await import("../../src/cli");
+    const result = await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });
+    expect(result.error).toBeUndefined();
+
+    const records = pushedRecords();
+    expect(records.map((r) => r.table).sort()).toEqual(["Agent", "Relationship", "Soul"]);
+    for (const record of records) {
+      expect(record.v).toBe(2);
+      expect("principalId" in record).toBe(false);
+      expect(verifyBodySignature(canonicalPayloadOf(record), publicKeyB64url)).toBe(true);
+    }
   });
 });
