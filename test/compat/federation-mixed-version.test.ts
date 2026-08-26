@@ -25,6 +25,20 @@
 // mixed-version test is to prove OLD's wire format is accepted by NEW's
 // receiver and vice versa, so the two sides must never share code.
 //
+// ─── flair#1416 Phase 2 — Memory is NOT bidirectional during this window ─
+// HEAD senders emit per-record signatures over a v:2 body (principalId in
+// the signed field set, `v` on the wire). npm-baseline receivers still
+// reconstruct a hardcoded v:1 field set, cannot verify those signatures,
+// and skip the records (`invalid_signature`). That is the issue's own
+// documented Phase 2 degradation — per-record, not a batch outage — and
+// it resolves as baseline peers upgrade. So:
+//   - A→B (baseline sender → HEAD receiver) MUST still merge Memory.
+//     That is the Phase 1 must-pass: receivers first, old senders keep
+//     working.
+//   - B→A (HEAD sender → baseline receiver) MUST skip. Asserting
+//     bidirectional Memory replicate here is the wrong expectation for
+//     this release; lastMergeAt is therefore direction-aware too.
+//
 // ─── Why reciprocal pairing (two pair operations, not one) ─────────────────
 // `POST /FederationSync` (resources/Federation.ts) is PUSH-ONLY and
 // one-directional per call: a spoke pushes its own new/updated rows up to
@@ -480,36 +494,60 @@ describe("federation mixed-version compat (npm baseline vs HEAD build) [flair#63
     expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(true);
   }, CLI_TIMEOUT_MS * 6);
 
-  test("memory written on B (HEAD build) replicates to A (npm baseline) via sync", async () => {
+  test("memory written on B (HEAD build) is skipped by A (npm baseline) — Phase 2 v:2 degradation", async () => {
+    // HEAD sender emits v:2. Baseline receiver cannot reconstruct that
+    // body (hardcoded v:1 field set) and skips the record. Documented
+    // Phase 2 degradation of flair#1416 — not a regression.
     const marker = `compat-marker-b-to-a-${Date.now()}`;
     await addMemory(b, `mixed-version federation compat marker: ${marker}`);
     await runSync(b); // B pushes to its hub, A (paired in round 1 above)
 
-    const rows = await retryUntil(
-      () => fetchAgentMemories(a, b.agentId),
-      (rows) => rows.some((r) => String(r.content ?? "").includes(marker)),
-    );
-    expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(true);
+    // Settle across several reads so a delayed merge would still fail
+    // this test. A→B uses retryUntil-until-present; here the success
+    // condition is "still absent".
+    let rows: any[] = [];
+    for (let i = 0; i < 4; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      rows = await fetchAgentMemories(a, b.agentId);
+      expect(rows.some((r) => String(r.content ?? "").includes(marker))).toBe(false);
+    }
+    expect(rows.filter((r) => String(r.content ?? "").includes(marker))).toEqual([]);
   }, CLI_TIMEOUT_MS * 6);
 
-  test("federation status reports both peers as paired with no errors", async () => {
-    for (const inst of [a, b]) {
+  test("federation status lastMergeAt is direction-aware (A→B merged, B→A skipped)", async () => {
+    async function statusOf(inst: Instance): Promise<any> {
       const { stdout } = await runFlairCli(
         inst.cliPath,
         ["federation", "status", "--json",
           "--port", String(new URL(inst.harper.httpURL).port)],
         resolveInstanceEnv(inst),
       );
-      const status = JSON.parse(stdout.trim());
-      expect(Array.isArray(status.peers)).toBe(true);
-      expect(status.peers.length).toBeGreaterThan(0);
-      // The peer this instance syncs TO must have actually merged data by
-      // now (lastMergeAt set) — not just been contacted (lastSyncAt) — see
-      // Federation.ts's Peer schema doc on the merge-vs-contact distinction.
-      const hubPeer = status.peers.find((p: any) => p.role === "hub");
-      expect(hubPeer).toBeDefined();
-      expect(hubPeer.lastMergeAt).toBeTruthy();
+      return JSON.parse(stdout.trim());
     }
+
+    const statusA = await statusOf(a);
+    const statusB = await statusOf(b);
+    expect(Array.isArray(statusA.peers)).toBe(true);
+    expect(Array.isArray(statusB.peers)).toBe(true);
+    expect(statusA.peers.length).toBeGreaterThan(0);
+    expect(statusB.peers.length).toBeGreaterThan(0);
+
+    // B (HEAD) received A's v:1 Memory — lastMergeAt must be set on the
+    // peer A pushed as. Reciprocal pairing records the other instance as
+    // role=hub locally; FederationSync updates that same Peer row on
+    // receive. See Federation.ts lastSyncAt vs lastMergeAt split.
+    const hubOnB = statusB.peers.find((p: any) => p.role === "hub");
+    expect(hubOnB).toBeDefined();
+    expect(hubOnB.lastMergeAt).toBeTruthy();
+
+    // A (baseline) was contacted by B (lastSyncAt) but skipped every v:2
+    // record (merged === 0), so lastMergeAt stays unset. Requiring it
+    // here is the stale bidirectional assertion this Phase 2 window
+    // makes false.
+    const hubOnA = statusA.peers.find((p: any) => p.role === "hub");
+    expect(hubOnA).toBeDefined();
+    expect(hubOnA.lastSyncAt).toBeTruthy();
+    expect(hubOnA.lastMergeAt == null || hubOnA.lastMergeAt === "").toBe(true);
   }, CLI_TIMEOUT_MS * 2);
 
   test("presence heartbeats work independently on each mixed-version instance (NOT federated — see file header)", async () => {
