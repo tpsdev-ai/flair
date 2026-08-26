@@ -422,7 +422,7 @@ The four-way read:
 |---|---|
 | `pool < N` | recall gap into the pool |
 | `pool ≈ N`, `topK < N` | ranker crowding |
-| `topK ≈ N`, `readerContext < N` | **truncation — not a ranking problem** |
+| `topK ≈ N`, `readerContext < N` | **truncation — full-context only**, not a ranking problem. Harper / retrieved arms have `readerContext === topK` by construction |
 | `topK ≈ N`, `readerContext ≈ N`, still wrong | reader / prompt |
 
 `readerContext` is the formatter-admitted id set, not a prompt-string scan.
