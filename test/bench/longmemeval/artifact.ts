@@ -57,6 +57,7 @@ import { join } from "node:path";
 import { canonicalJson, sha256hex } from "./config";
 import type { ArmAggregate, ArmRunMetrics } from "./metrics";
 import type { ReaderDeterminism } from "./determinism";
+import type { EvidenceCoverageArtifact } from "./evidence-coverage";
 
 export interface RunRecord {
   runIndex: number;
@@ -75,6 +76,14 @@ export interface Artifact {
   config: unknown;          // the full pinned manifest (self-describing artifact)
   runHashes: string[];
   aggregate: ArmAggregate[];
+  /**
+   * Additive (flair#1358). Per-question, per-arm event-granularity coverage
+   * at pool / top-k / reader-handoff. Optional so historical artifacts remain
+   * the same shape; omitted when the run produced none. Hashed content — a
+   * coverage change is a change in what was measured — but because the key
+   * is new, prior artifacts (which lack it) still project and verify.
+   */
+  evidenceCoverage?: EvidenceCoverageArtifact;
 
   // ── Unhashed PROVENANCE — stamped AFTER hashing, stripped BEFORE verify. ──
   // These describe WHERE/WHEN/HOW-STABLY the number was produced, not WHAT it
@@ -116,6 +125,8 @@ export interface BuildArtifactInput {
    *  invent one. Omitted ⇒ the key is absent from the artifact entirely, which
    *  is honestly different from "probed and found deterministic". */
   readerDeterminism?: ReaderDeterminism;
+  /** Optional so callers that predate #1358 do not have to invent a record. */
+  evidenceCoverage?: EvidenceCoverageArtifact;
 }
 
 /** Provenance fields — stamped AFTER hashing and stripped BEFORE verification.
@@ -166,6 +177,7 @@ export function buildArtifact(input: BuildArtifactInput): Artifact {
     aggregate: input.aggregate,
   };
   if (input.readerDeterminism) art.readerDeterminism = input.readerDeterminism;
+  if (input.evidenceCoverage) art.evidenceCoverage = input.evidenceCoverage;
   // Hash the CONTENT partition only — provenance (generatedAt, host, notice,
   // readerDeterminism) is excluded so two runs with identical content hash
   // identically regardless of wall clock, host, or measured reader

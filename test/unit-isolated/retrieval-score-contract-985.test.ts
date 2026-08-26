@@ -256,6 +256,33 @@ describe("flair#985 — hybrid recall is preserved: order and score are decouple
   });
 });
 
+describe("flair#1358 — onLegs is opt-in observation and does not change results", () => {
+  beforeEach(seedThreeRecords);
+
+  it("unset onLegs leaves results byte-identical to a call that collects legs (this change)", async () => {
+    const plain = await run({ limit: 2 });
+    let legs: { hnsw: string[]; bm25: string[]; fused: string[] } | undefined;
+    const withLegs = await run({ limit: 2, onLegs: (l: any) => { legs = l; } });
+    expect(JSON.stringify(withLegs)).toBe(JSON.stringify(plain));
+    expect(legs).toBeDefined();
+    expect(legs!.fused).toEqual(plain.map((r: any) => r.id));
+    // runbook is the BM25-only rescue at limit 2 — must appear on the BM25
+    // leg and in the fused pool even if the HNSW window missed it.
+    expect(legs!.bm25).toContain("runbook");
+    expect(legs!.fused).toContain("runbook");
+  });
+
+  it("onLegs fused equals retrieveCandidates output — the core does not slice (clarified)", async () => {
+    // retrieveCandidates returns the pool. SemanticSearch slices after.
+    // fused === results is the CORE contract. The test that can go red if
+    // legs.fused is wired to the sliced results lives on SemanticSearch.post
+    // (six rows, limit 1).
+    let legs: { hnsw: string[]; bm25: string[]; fused: string[] } | undefined;
+    const results = await run({ limit: 2, onLegs: (l: any) => { legs = l; } });
+    expect(legs!.fused).toEqual(results.map((r: any) => r.id));
+  });
+});
+
 describe("flair#985 — the singleton corpus (delete+store death-spiral shape)", () => {
   it("with exactly ONE stored memory ($distance omitted by Harper), _score is the true cosine — not 1.0, not 0", async () => {
     // The #985 reporter's delete+store update pattern: after the delete, the

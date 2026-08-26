@@ -87,6 +87,15 @@ export interface RetrieveOptions {
    *  (composite's unconditional durability/recency multiplier was net-harmful
    *  to precision once hybrid retrieval went live). */
   scoring?: "raw" | "composite";
+  /** Opt-in (flair#1358): ask SemanticSearch for per-leg candidate ids
+   *  (BM25 / HNSW / fused) without changing the ranked `results`. */
+  includeLegs?: boolean;
+}
+
+export interface RetrievalLegs {
+  bm25: string[];
+  hnsw: string[];
+  fused: string[];
 }
 
 export interface RetrievedItem {
@@ -108,4 +117,6 @@ export interface RetrievedContext {
   items: RetrievedItem[];
   /** Round-trip wall-clock for this one query (ms). */
   latencyMs: number;
+  /** Per-leg candidate ids when `includeLegs` was requested (flair#1358). */
+  legs?: RetrievalLegs;
 }

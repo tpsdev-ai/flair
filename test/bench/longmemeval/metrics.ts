@@ -20,6 +20,7 @@ import type { Ability } from "./dataset";
 import { FACTUAL_ABILITIES } from "./dataset";
 import type { Arm } from "./arms";
 import type { ExtractionScore } from "./extraction";
+import type { EvidenceCoverageRecord } from "./evidence-coverage";
 
 export interface QuestionArmResult {
   questionId: string;
@@ -39,6 +40,9 @@ export interface QuestionArmResult {
    *  vs the reader without re-running the query. */
   rankedIds?: string[];
   truncated?: boolean;
+  /** flair#1358 — event-granularity coverage at pool / top-k / reader handoff.
+   *  Not part of runHash (decisions only) and not folded into the aggregate. */
+  evidenceCoverage?: EvidenceCoverageRecord;
 }
 
 export interface AbilityMetric { n: number; judged: number; correct: number; accuracy: number }

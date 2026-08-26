@@ -401,3 +401,55 @@ describe("SemanticSearch.post() — flair#1245 temporal intent BOOSTS, never har
     expect(ids).not.toContain("old-widget"); // 30 days old ⇒ hard-excluded by `since`
   });
 });
+
+describe("SemanticSearch.post() — flair#1358 includeLegs is opt-in and does not change results", () => {
+  it("default response has no legs key (regression lock: already-shipped byte shape)", async () => {
+    reset();
+    memoryStore.set("m1", { id: "m1", agentId: "agent-1", content: "alpha", visibility: "private" });
+    memoryStore.set("m2", { id: "m2", agentId: "agent-1", content: "beta", visibility: "private" });
+    const s = makeSearch(agentCtx("agent-1"));
+    const res: any = await s.post({ agentId: "agent-1", limit: 10 });
+    expect("legs" in res).toBe(false);
+    expect(Array.isArray(res.results)).toBe(true);
+  });
+
+  it("includeLegs:true reports a PRE-slice fused pool when results are sliced (this change; Bugbot)", async () => {
+    // Six in-scope rows, limit 1. SemanticSearch overfetches (limit×5) then
+    // slices. legs.fused must be the pool, not a copy of results — a wiring
+    // slip that set fused = results.map(id) would keep the old 2-row/limit-10
+    // test green and make every Harper-arm record report pool == topK.
+    const seed = () => {
+      for (const id of ["m1", "m2", "m3", "m4", "m5", "m6"]) {
+        memoryStore.set(id, { id, agentId: "agent-1", content: `row ${id}`, visibility: "private" });
+      }
+    };
+    reset(); seed();
+    const withLegs: any = await makeSearch(agentCtx("agent-1")).post({
+      agentId: "agent-1", limit: 1, includeLegs: true,
+    });
+    expect(withLegs.results).toHaveLength(1);
+    expect(withLegs.legs.fused.length).toBeGreaterThan(withLegs.results.length);
+    expect(withLegs.legs.fused.length).toBe(6);
+    expect(withLegs.results.map((r: any) => r.id)).toEqual(withLegs.legs.fused.slice(0, 1));
+  });
+
+  it("includeLegs:true adds per-leg ids and does not change ranked result ids (this change)", async () => {
+    // Two posts on one store would differ in retrievalCount/lastRetrieved
+    // (hit-tracking) — that is already-shipped behaviour, not this flag.
+    // Compare ranked ids from two fresh stores instead.
+    const seed = () => {
+      memoryStore.set("m1", { id: "m1", agentId: "agent-1", content: "alpha", visibility: "private" });
+      memoryStore.set("m2", { id: "m2", agentId: "agent-1", content: "beta", visibility: "private" });
+    };
+    reset(); seed();
+    const plain: any = await makeSearch(agentCtx("agent-1")).post({ agentId: "agent-1", limit: 10 });
+    reset(); seed();
+    const withLegs: any = await makeSearch(agentCtx("agent-1")).post({ agentId: "agent-1", limit: 10, includeLegs: true });
+    expect(withLegs.results.map((r: any) => r.id)).toEqual(plain.results.map((r: any) => r.id));
+    expect("legs" in plain).toBe(false);
+    expect(withLegs.legs).toBeDefined();
+    expect(withLegs.legs.fused.sort()).toEqual(plain.results.map((r: any) => r.id).sort());
+    expect(Array.isArray(withLegs.legs.bm25)).toBe(true);
+    expect(Array.isArray(withLegs.legs.hnsw)).toBe(true);
+  });
+});

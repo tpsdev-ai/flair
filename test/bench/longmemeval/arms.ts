@@ -76,8 +76,11 @@ export function formatRetrieved(items: RetrievedItem[]): string {
  *  with dates, truncated to a character budget derived from the arm's num_ctx.
  *  Truncation is reported by the caller (a truncated ceiling is a documented
  *  limitation, not a silent one — Kern 3a). */
-export function formatFullContext(sessions: LmeSession[], charBudget: number): { text: string; truncated: boolean } {
+export function formatFullContext(sessions: LmeSession[], charBudget: number): {
+  text: string; truncated: boolean; includedEventIds: string[];
+} {
   const parts: string[] = [];
+  const includedEventIds: string[] = [];
   let used = 0;
   let truncated = false;
   for (const s of sessions) {
@@ -88,10 +91,11 @@ export function formatFullContext(sessions: LmeSession[], charBudget: number): {
       const line = `${ev.role ?? "?"}: ${ev.content}\n`;
       if (used + line.length > charBudget) { truncated = true; break; }
       parts.push(line); used += line.length;
+      includedEventIds.push(ev.id);
     }
     if (truncated) break;
   }
-  return { text: parts.join(""), truncated };
+  return { text: parts.join(""), truncated, includedEventIds };
 }
 
 /** Assemble the final reader prompt for one (question, arm). */

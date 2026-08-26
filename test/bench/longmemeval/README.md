@@ -396,6 +396,40 @@ a different set. That is tamper-evidence — a **seal**, not a reproducibility
 proof. Anyone checking that we ran what we said we ran should check
 `configHash`.
 
+## Stage attribution (flair#1358)
+
+The artifact's aggregate is still a scoreboard. It cannot say whether a miss
+was a recall gap, ranker crowding, context-window truncation, or the reader
+fluffing evidence it was given. Those want opposite fixes.
+
+Every run now also writes an additive `evidenceCoverage` block — per question,
+per arm, at **event** granularity:
+
+| field | what it counts |
+|---|---|
+| `evidenceEventsInPool` | gold events in the candidate pool, **per leg** (BM25, HNSW, fused) |
+| `evidenceEventsInFinalTopK` | gold events that survived the final top-k |
+| `evidenceEventsInReaderContext` | gold events in the prompt actually handed to the reader |
+
+Where LongMemEval names specific `has_answer` turns, those are the events.
+When it does not, the record falls back to per-session event-count and
+token-count in the top-k and flags any session represented by exactly one
+fragment.
+
+The four-way read:
+
+| signal | conclusion |
+|---|---|
+| `pool < N` | recall gap into the pool |
+| `pool ≈ N`, `topK < N` | ranker crowding |
+| `topK ≈ N`, `readerContext < N` | **truncation — not a ranking problem** |
+| `topK ≈ N`, `readerContext ≈ N`, still wrong | reader / prompt |
+
+Existing artifact fields and the aggregate shape are unchanged. Prior hashes
+stay interpretable: a historical artifact does not have this key, so
+projection drops it. The instrument is reader-free — no extra model calls.
+Session-diversity selection is not in this change.
+
 ## Isolation
 
 Each run spawns a **fresh ephemeral Harper** per Harper-arm

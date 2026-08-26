@@ -66,7 +66,7 @@ export class SemanticSearch extends Resource {
     // recall-harness (test/bench/recall-harness/run.ts) and `recall-eval.mjs`
     // before reconsidering this default if the compositeScore formula or
     // corpus changes.
-    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, includeMetadata = false, abstain = false, explain = false } = data || {};
+    const { agentId: bodyAgentId, q, queryEmbedding, tag, subject, subjects, limit = 10, includeSuperseded = false, scoring = "raw", minScore = 0, since, asOf, includeTrust = false, includeMetadata = false, abstain = false, explain = false, includeLegs = false } = data || {};
 
     // Authenticated identity lives on the Harper Resource context (getContext().request).
     // `this.request` is NOT populated on Harper v5 Resources — prior reads here
@@ -231,6 +231,7 @@ export class SemanticSearch extends Resource {
 
     const ctx = (this as any).getContext?.();
 
+    let legs: { hnsw: string[]; bm25: string[]; fused: string[] } | undefined;
     const filteredResults = await retrieveCandidates({
       queryEmbedding: qEmb,
       q,
@@ -246,6 +247,7 @@ export class SemanticSearch extends Resource {
       isAllowed: scope?.isAllowed,
       hybrid,
       ctx,
+      onLegs: includeLegs ? (l) => { legs = l; } : undefined,
       // flair#744 slice 1: the trust block needs `provenance`, which the
       // default projection omits. Widen the select ONLY when the caller opts
       // in — passing undefined otherwise keeps the default (no `provenance`)
@@ -351,6 +353,10 @@ export class SemanticSearch extends Resource {
     if (!qEmb && q && getMode() === "none") {
       response._warning = "semantic search unavailable — results are keyword-only";
     }
+    // flair#1358: opt-in per-leg candidate ids for the bench instrument.
+    // Default OFF ⇒ response is byte-identical (no `legs` key). The ranked
+    // `results` slice is unchanged either way — this is observation only.
+    if (includeLegs && legs) response.legs = legs;
 
     return response;
   }
