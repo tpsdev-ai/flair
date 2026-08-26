@@ -12,9 +12,22 @@ import {
 } from "./federation-crypto.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { createPersistentNonceStore, initNonceStoreCleanup } from "./federation-nonce-store.js";
-import { classifyRecord } from "./federation-classify.js";
-export { classifyRecord } from "./federation-classify.js";
-export type { SkipReason, ClassifyResult } from "./federation-classify.js";
+import {
+  classifyRecord,
+  reconstructRecordVerifyBody,
+  checkPrincipalEntitlement,
+  type FederationSyncTable,
+} from "./federation-classify.js";
+export {
+  classifyRecord,
+  reconstructRecordVerifyBody,
+  checkPrincipalEntitlement,
+  recordSignatureVersion,
+  PRINCIPAL_OWNING_TABLES,
+  FEDERATION_TABLE_POLICY,
+  FEDERATION_SYNC_TABLES,
+} from "./federation-classify.js";
+export type { SkipReason, ClassifyResult, FederationSyncTable } from "./federation-classify.js";
 
 // Module-level nonce store for federation anti-replay.
 // Shared across FederationPair + FederationSync — nonces are globally unique
@@ -61,7 +74,8 @@ interface SyncRecord {
   updatedAt: string;         // ISO timestamp — LWW tiebreaker
   originatorInstanceId: string;
   signature?: string;        // Ed25519 signature for agent-originated records
-  principalId?: string;      // who authored this record
+  principalId?: string;      // who authored this record (signed at v:2)
+  v?: number;                // signature-body version; absent on today's wire
 }
 
 interface PeerAnnouncement {
@@ -89,6 +103,18 @@ interface PeerAnnouncement {
  */
 function requireRecordSignatures(): boolean {
   return (process.env.FLAIR_FEDERATION_REQUIRE_RECORD_SIGNATURES ?? "").toLowerCase() === "true";
+}
+
+/**
+ * Phase 3 of flair#1416 — skip leftover v:1 records on principal-owning
+ * tables that lack principalId. Default OFF. Flip only once every paired
+ * peer is emitting v:2 (check SyncLog for unsigned / v:1 Memory). Same
+ * operator-decision pattern as requireRecordSignatures() — never
+ * auto-flipped. v:2 Memory is already mandatory-principal regardless of
+ * this flag (see checkPrincipalEntitlement).
+ */
+function requireRecordPrincipal(): boolean {
+  return (process.env.FLAIR_FEDERATION_REQUIRE_RECORD_PRINCIPAL ?? "").toLowerCase() === "true";
 }
 
 // ─── Conflict resolution ─────────────────────────────────────────────────────
@@ -448,8 +474,11 @@ export class FederationSync extends Resource {
       skippedReasons[reason] = (skippedReasons[reason] ?? 0) + 1;
     }
 
-    // Table name → Harper database table mapping
-    const tableMap: Record<string, any> = {
+    // Table name → Harper database table mapping.
+    // Typed against FEDERATION_TABLE_POLICY so adding a federated table
+    // without deciding principalOwning is a type error, not a silent
+    // default (flair#1416 — refuse by whitelist, never by field presence).
+    const tableMap: Record<FederationSyncTable, any> = {
       Memory: (databases as any).flair.Memory,
       Soul: (databases as any).flair.Soul,
       Agent: (databases as any).flair.Agent,
@@ -459,7 +488,9 @@ export class FederationSync extends Resource {
 
     for (const record of records as SyncRecord[]) {
       try {
-        const table = tableMap[record.table];
+        const table = (record.table in tableMap)
+          ? tableMap[record.table as FederationSyncTable]
+          : undefined;
         const local = table ? await table.get(record.id) : null;
 
         const decision = classifyRecord(
@@ -504,23 +535,16 @@ export class FederationSync extends Resource {
             continue;
           }
 
-          // CONTRACT — must match src/cli.ts runFederationSyncOnce's signing
-          // payload byte-for-byte: keys { v, table, id, data, updatedAt,
-          // originatorInstanceId }. canonicalize() sorts keys, so field ORDER
-          // doesn't matter, but the field SET and values do. `v: 1` versions
-          // the canonical form itself — bump it on BOTH sides together if the
-          // signed field set ever changes, so an old signature fails closed
-          // instead of silently mis-verifying under a new form.
+          // CONTRACT — reconstruct from the record (v defaults to 1 when
+          // absent — v is NOT on the wire today). Must match
+          // reconstructRecordVerifyBody / src/cli.ts's signing payload.
+          // A hardcoded { v: 1, table, id, data, updatedAt,
+          // originatorInstanceId } field set can only ever verify one
+          // shape; building from the record is what makes v:2 (principalId
+          // in the signed body) verifiable without breaking existing
+          // records. See flair#1416.
           const signatureValid = verifyBodySignature(
-            {
-              v: 1,
-              table: record.table,
-              id: record.id,
-              data: record.data,
-              updatedAt: record.updatedAt,
-              originatorInstanceId: originator,
-              signature: record.signature,
-            },
+            reconstructRecordVerifyBody(record, originator),
             originatorPublicKey,
           );
           if (!signatureValid) {
@@ -532,6 +556,20 @@ export class FederationSync extends Resource {
           // batch-level auth alone. Default mode (verify-if-present) falls
           // through here and merges — see requireRecordSignatures() above.
           recordSkip("missing_signature");
+          continue;
+        }
+
+        // ── Per-record principal entitlement (flair#1416 / slice 3a) ──
+        // After signature verification, before table.put. Scoped by the
+        // explicit PRINCIPAL_OWNING_TABLES set (Memory), never by whether
+        // principalId happens to be present — absent Memory principalId
+        // is a skip, not an accept. Soul/Agent/Relationship are not in
+        // the set and are not consulted. No Agent.get.
+        const principalSkip = checkPrincipalEntitlement(record, {
+          enforceV1Principal: requireRecordPrincipal(),
+        });
+        if (principalSkip) {
+          recordSkip(principalSkip);
           continue;
         }
 

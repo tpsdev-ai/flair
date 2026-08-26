@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { classifyRecord } from "../../resources/federation-classify.js";
+import {
+  classifyRecord,
+  FEDERATION_SYNC_TABLES,
+  PRINCIPAL_OWNING_TABLES,
+} from "../../resources/federation-classify.js";
 
 // classifyRecord is the pure decision function extracted from FederationSync.post.
 // Centralizing the skip-vs-merge decision lets us categorize skips for
@@ -128,5 +132,16 @@ describe("classifyRecord — skip categorization", () => {
   test("classifyRecord stays pure/DB-free — signature unchanged by slice 3b", () => {
     expect(classifyRecord.length).toBe(5); // record, peerRole, receiverInstanceId, local, knownTables (now has a default)
     expect(classifyRecord.constructor.name).toBe("Function"); // not async — no DB awaits possible
+  });
+
+  test("principal entitlement lives next to knownTables, not inside classifyRecord", () => {
+    // flair#1416: classifyRecord stays a structural decision. principalId
+    // validation is checkPrincipalEntitlement at the apply site. This file
+    // only asserts the policy list is the same set classifyRecord is
+    // typically called with — adding a table without a policy entry is
+    // what FEDERATION_TABLE_POLICY + tableMap typing prevents.
+    expect([...knownTables].sort()).toEqual([...FEDERATION_SYNC_TABLES].sort());
+    expect(PRINCIPAL_OWNING_TABLES.has("Memory")).toBe(true);
+    expect(PRINCIPAL_OWNING_TABLES.has("Soul")).toBe(false);
   });
 });

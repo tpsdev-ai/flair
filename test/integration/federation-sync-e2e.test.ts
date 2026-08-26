@@ -7,6 +7,10 @@ import {
   verifyBodySignature,
   signBody,
 } from "../../resources/federation-crypto.js";
+import {
+  reconstructRecordVerifyBody,
+  checkPrincipalEntitlement,
+} from "../../resources/federation-classify.js";
 
 // ─── Transitional integration test for Federation resource logic ──────────
 // TODO(ops-NEW-P1): Upgrade to real Harper container using test/helpers/harper-lifecycle.
@@ -28,12 +32,18 @@ import {
 
 describe("FederationSync resource logic (transitional)", () => {
   let peerStore: Map<string, any>;
-  let memoryStore: Map<string, any>;
+  let tableStores: Record<string, Map<string, any>>;
   const WINDOW_MS = 30_000;
+  const KNOWN_TABLES = new Set(["Memory", "Soul", "Agent", "Relationship"]);
 
   beforeEach(() => {
     peerStore = new Map();
-    memoryStore = new Map();
+    tableStores = {
+      Memory: new Map(),
+      Soul: new Map(),
+      Agent: new Map(),
+      Relationship: new Map(),
+    };
   });
 
   function peerGet(id: string) {
@@ -41,12 +51,16 @@ describe("FederationSync resource logic (transitional)", () => {
   }
 
   function memoryGet(id: string) {
-    return memoryStore.get(id) ?? null;
+    return tableStores.Memory.get(id) ?? null;
   }
 
   function memoryPut(record: any) {
-    memoryStore.set(record.id, record);
+    tableStores.Memory.set(record.id, record);
     return record.id;
+  }
+
+  function tableGet(table: string, id: string) {
+    return tableStores[table]?.get(id) ?? null;
   }
 
   /**
@@ -106,7 +120,7 @@ describe("FederationSync resource logic (transitional)", () => {
       // reject-the-batch policy would be a DoS vector: any peer could
       // blackhole every other legitimate record by including one bad one).
       try {
-        if (record.table !== "Memory") { recordSkip("unknown_table"); continue; }
+        if (!KNOWN_TABLES.has(record.table)) { recordSkip("unknown_table"); continue; }
 
         const originator = record.originatorInstanceId ?? instanceId;
         if (originator !== instanceId && peer.role !== "hub") {
@@ -114,7 +128,7 @@ describe("FederationSync resource logic (transitional)", () => {
           continue;
         }
 
-        const local = memoryGet(record.id);
+        const local = tableGet(record.table, record.id);
         const ts = record.updatedAt ?? new Date().toISOString();
 
         // Timestamp ceiling
@@ -161,18 +175,9 @@ describe("FederationSync resource logic (transitional)", () => {
             continue;
           }
 
-          // CONTRACT: byte-for-byte the same canonical form src/cli.ts signs
-          // — { v: 1, table, id, data, updatedAt, originatorInstanceId }.
+          // CONTRACT: reconstruct from the record (v defaults to 1).
           const signatureValid = verifyBodySignature(
-            {
-              v: 1,
-              table: record.table,
-              id: record.id,
-              data: record.data,
-              updatedAt: record.updatedAt,
-              originatorInstanceId: originator,
-              signature: record.signature,
-            },
+            reconstructRecordVerifyBody(record, originator),
             originatorPublicKey,
           );
           if (!signatureValid) {
@@ -188,6 +193,12 @@ describe("FederationSync resource logic (transitional)", () => {
         // else: verify-if-present (default) — unsigned record still merges,
         // covered by the batch-level signature verified above.
 
+        const principalSkip = checkPrincipalEntitlement(record);
+        if (principalSkip) {
+          recordSkip(principalSkip);
+          continue;
+        }
+
         const mergedData = {
           ...(record.data ?? {}),
           id: record.id,
@@ -195,7 +206,7 @@ describe("FederationSync resource logic (transitional)", () => {
           _originatorInstanceId: originator,
           _syncedFrom: instanceId,
         };
-        memoryPut(mergedData);
+        tableStores[record.table].set(mergedData.id, mergedData);
         merged++;
       } catch {
         // Mirrors FederationSync.post's per-record try/catch: an unexpected
@@ -437,7 +448,7 @@ describe("FederationSync resource logic (transitional)", () => {
 
     // Pre-existing record with an older timestamp
     const olderTs = new Date(Date.now() - 10000).toISOString();
-    memoryStore.set("mem-1", { id: "mem-1", content: "old", updatedAt: olderTs });
+    tableStores.Memory.set("mem-1", { id: "mem-1", content: "old", updatedAt: olderTs });
 
     // Incoming record with a newer timestamp
     const newerTs = new Date(Date.now() - 5000).toISOString();
@@ -785,6 +796,163 @@ describe("FederationSync resource logic (transitional)", () => {
       expect(response.body.merged).toBe(1);
       expect(response.body.skipped).toBe(0);
       expect(memoryGet("mem-legacy")?.content).toBe("pre-3a spoke, no per-record signature");
+    });
+  });
+
+  // ─── flair#1416 — principalId on apply (slice 3a) ────────────────────────
+  describe("principalId entitlement (flair#1416)", () => {
+    function signRecordV2(
+      record: {
+        table: string;
+        id: string;
+        data: Record<string, any>;
+        updatedAt: string;
+        originatorInstanceId: string;
+        principalId?: string;
+      },
+      secretKey: Uint8Array,
+    ): string {
+      const payload: Record<string, any> = {
+        v: 2,
+        table: record.table,
+        id: record.id,
+        data: record.data,
+        updatedAt: record.updatedAt,
+        originatorInstanceId: record.originatorInstanceId,
+      };
+      if (record.principalId) payload.principalId = record.principalId;
+      return signBody(payload, secretKey);
+    }
+
+    test("v:2 Memory with matching principalId merges; omitted principalId is SKIPPED", async () => {
+      const spokeKp = nacl.sign.keyPair();
+      const spokeId = "spoke-principal-1";
+      peerStore.set(spokeId, {
+        id: spokeId,
+        publicKey: Buffer.from(spokeKp.publicKey).toString("base64url"),
+        role: "spoke",
+        status: "paired",
+      });
+
+      const goodBase = {
+        table: "Memory",
+        id: "mem-ok",
+        data: { id: "mem-ok", content: "owned", agentId: "agt_a" },
+        updatedAt: new Date().toISOString(),
+        originatorInstanceId: spokeId,
+        principalId: "agt_a",
+        v: 2,
+      };
+      const omittedBase = {
+        table: "Memory",
+        id: "mem-omit",
+        data: { id: "mem-omit", content: "no principal", agentId: "agt_a" },
+        updatedAt: new Date().toISOString(),
+        originatorInstanceId: spokeId,
+        v: 2,
+      };
+
+      const signed = signBodyFresh(
+        {
+          instanceId: spokeId,
+          records: [
+            { ...goodBase, signature: signRecordV2(goodBase, spokeKp.secretKey) },
+            { ...omittedBase, signature: signRecordV2(omittedBase, spokeKp.secretKey) },
+          ],
+          lamportClock: Date.now(),
+        },
+        spokeKp.secretKey,
+      );
+
+      const response = await handleSyncRequest(signed);
+      expect(response.status).toBe(200);
+      expect(response.body.merged).toBe(1);
+      expect(response.body.skipped).toBe(1);
+      expect(response.body.skippedReasons.principal_mismatch).toBe(1);
+      expect(memoryGet("mem-ok")?.content).toBe("owned");
+      expect(memoryGet("mem-omit")).toBeNull();
+    });
+
+    test("Soul / Agent / Relationship with no principalId still merge", async () => {
+      const spokeKp = nacl.sign.keyPair();
+      const spokeId = "spoke-principal-2";
+      peerStore.set(spokeId, {
+        id: spokeId,
+        publicKey: Buffer.from(spokeKp.publicKey).toString("base64url"),
+        role: "spoke",
+        status: "paired",
+      });
+
+      const records = (["Soul", "Agent", "Relationship"] as const).map((table) => {
+        const base = {
+          table,
+          id: `${table.toLowerCase()}-ok`,
+          data: { id: `${table.toLowerCase()}-ok` },
+          updatedAt: new Date().toISOString(),
+          originatorInstanceId: spokeId,
+          v: 2,
+        };
+        return { ...base, signature: signRecordV2(base, spokeKp.secretKey) };
+      });
+
+      const signed = signBodyFresh(
+        { instanceId: spokeId, records, lamportClock: Date.now() },
+        spokeKp.secretKey,
+      );
+      const response = await handleSyncRequest(signed);
+      expect(response.status).toBe(200);
+      expect(response.body.merged).toBe(3);
+      expect(response.body.skipped).toBe(0);
+      expect(tableGet("Soul", "soul-ok")).not.toBeNull();
+      expect(tableGet("Agent", "agent-ok")).not.toBeNull();
+      expect(tableGet("Relationship", "relationship-ok")).not.toBeNull();
+    });
+
+    test("Phase 1 mixed batch: today's v:1 Memory (no v on wire) and v:2 Memory both merge", async () => {
+      const spokeKp = nacl.sign.keyPair();
+      const spokeId = "spoke-principal-3";
+      peerStore.set(spokeId, {
+        id: spokeId,
+        publicKey: Buffer.from(spokeKp.publicKey).toString("base64url"),
+        role: "spoke",
+        status: "paired",
+      });
+
+      const v1Base = {
+        table: "Memory",
+        id: "mem-v1",
+        data: { id: "mem-v1", content: "today", agentId: "agt_a" },
+        updatedAt: new Date().toISOString(),
+        originatorInstanceId: spokeId,
+      };
+      const v2Base = {
+        table: "Memory",
+        id: "mem-v2",
+        data: { id: "mem-v2", content: "next", agentId: "agt_a" },
+        updatedAt: new Date().toISOString(),
+        originatorInstanceId: spokeId,
+        principalId: "agt_a",
+        v: 2,
+      };
+
+      const signed = signBodyFresh(
+        {
+          instanceId: spokeId,
+          records: [
+            { ...v1Base, signature: signRecord(v1Base, spokeKp.secretKey) },
+            { ...v2Base, signature: signRecordV2(v2Base, spokeKp.secretKey) },
+          ],
+          lamportClock: Date.now(),
+        },
+        spokeKp.secretKey,
+      );
+
+      const response = await handleSyncRequest(signed);
+      expect(response.status).toBe(200);
+      expect(response.body.merged).toBe(2);
+      expect(response.body.skipped).toBe(0);
+      expect(memoryGet("mem-v1")?.content).toBe("today");
+      expect(memoryGet("mem-v2")?.content).toBe("next");
     });
   });
 });

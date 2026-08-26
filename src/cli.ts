@@ -196,14 +196,18 @@ function signBody(body: Record<string, any>, secretKey: Uint8Array): string {
   return Buffer.from(sig).toString("base64url");
 }
 
-// Per-record principalId (federation-edge-hardening slice 3a) — INFORMATIONAL
-// only; the receiver (resources/Federation.ts) never treats it as verified
-// identity or uses it in any auth decision. Sourced from the write-time
-// provenance stamp (memory-provenance slice 1, Memory.ts's buildProvenance)
-// when present. `provenance` is persisted as a JSON STRING (not an object),
-// so it must be parsed — a raw `row.provenance?.verified?.agentId` would
-// silently always be undefined. Soul/Agent/Relationship rows never carry a
-// provenance stamp today, so this is a no-op for them.
+// Per-record principalId (federation-edge-hardening slice 3a / flair#1416).
+// Sourced from the write-time provenance stamp (memory-provenance slice 1,
+// Memory.ts's buildProvenance) when present. `provenance` is persisted as
+// a JSON STRING (not an object), so it must be parsed — a raw
+// `row.provenance?.verified?.agentId` would silently always be undefined.
+// Soul/Agent/Relationship rows never carry a provenance stamp today, so
+// this is a no-op for them (those tables are not principal-owning).
+//
+// As of v:2 this value is IN the signed payload. The receiver validates
+// it against data.agentId for Memory (PRINCIPAL_OWNING_TABLES); it is
+// no longer informational-only. Credential.principalId is an unrelated
+// owner field — do not grep that path when changing this one.
 function principalIdFromRow(row: any): string | undefined {
   if (typeof row?.provenance !== "string" || row.provenance.length === 0) return undefined;
   try {
@@ -7881,27 +7885,40 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         // batch. Closes the hub-relay forgery hole — see
         // resources/Federation.ts FederationSync.post's verification gate.
         //
-        // CONTRACT — must match Federation.ts's verification payload
-        // byte-for-byte: keys { v, table, id, data, updatedAt,
-        // originatorInstanceId }. canonicalize() sorts keys, so field ORDER
-        // doesn't matter, but the field SET and values do. `v: 1` versions the
-        // canonical form itself: bump it on BOTH sides together if the signed
-        // field set ever changes, so an old signature fails closed instead of
-        // silently mis-verifying under a new form.
+        // CONTRACT — must match reconstructRecordVerifyBody
+        // (resources/federation-classify.ts) byte-for-byte. canonicalize()
+        // sorts keys, so field ORDER doesn't matter, but the field SET and
+        // values do. `v` versions the canonical form itself: a v:1
+        // signature cannot verify as v:2 (principalId in the field set).
         //
-        // Additive/backward-compatible: pre-3a receivers don't read
-        // `signature`/`principalId` at all and merge exactly as before.
-        const signature = signBody(
-          { v: 1, table, id: row.id, data: row, updatedAt, originatorInstanceId },
-          secretKey,
-        );
-
-        const sr: Record<string, any> = { table, id: row.id, data: row, updatedAt, originatorInstanceId, signature };
-
-        // Informational only (see principalIdFromRow) — never verified by the
-        // receiver as proof of authorship. Omitted entirely when the row
-        // carries no write-time provenance stamp.
+        // v: 2 puts principalId in the signed payload when the row carries
+        // a provenance stamp, and puts `v` on the wire so Phase 1
+        // receivers (`const v = record.v ?? 1`) don't default these
+        // records back to 1. Soul/Agent/Relationship have no stamp and
+        // omit principalId; Memory without a stamp also omits it (the
+        // receiver then skips Memory as principal_mismatch — absent is
+        // not an accept).
         const principalId = principalIdFromRow(row);
+        const signedPayload: Record<string, any> = {
+          v: 2,
+          table,
+          id: row.id,
+          data: row,
+          updatedAt,
+          originatorInstanceId,
+        };
+        if (principalId) signedPayload.principalId = principalId;
+        const signature = signBody(signedPayload, secretKey);
+
+        const sr: Record<string, any> = {
+          v: 2,
+          table,
+          id: row.id,
+          data: row,
+          updatedAt,
+          originatorInstanceId,
+          signature,
+        };
         if (principalId) sr.principalId = principalId;
 
         const srBytes = JSON.stringify(sr).length;

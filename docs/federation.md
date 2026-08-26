@@ -171,6 +171,17 @@ Re-pairing an existing peer (same instance ID, same public key) does not require
 
 Spoke instances can only push records they originated. A spoke cannot overwrite records from another spoke or from the hub. The hub can relay records from any origin.
 
+### Per-record signatures and principalId
+
+Each pushed record carries an Ed25519 signature over a versioned canonical body. `v` lives inside that body so versions are distinguishable: a `v: 1` signature cannot verify as `v: 2`.
+
+- **`v: 1` (today's wire):** signed fields are `{ v, table, id, data, updatedAt, originatorInstanceId }`. Senders did not put `v` on the wire; receivers default absent `v` to `1`. `principalId` may appear on the record (from a Memory provenance stamp) but was not in the signed field set.
+- **`v: 2`:** `principalId` is included in the signed payload when the row has a write-time provenance stamp (`provenance.verified.agentId`). `v` is on the wire.
+
+On apply, after the signature checks, **Memory** (the only principal-owning federated table) requires `principalId` to be present and equal to `data.agentId`. Absent is a skip (`principal_mismatch`), not an accept. Soul, Agent, and Relationship are not in that set and still sync without a principal.
+
+Receivers must be upgraded before senders. A Phase 1 receiver verifies both shapes in one batch. Old receivers cannot reconstruct a `v: 2` body and will skip those records (per-record, not a batch outage) until they upgrade. Optional `FLAIR_FEDERATION_REQUIRE_RECORD_PRINCIPAL=true` skips leftover `v: 1` Memory records that lack `principalId` once the fleet is on `v: 2`.
+
 ### Timestamp ceiling
 
 Records with `updatedAt` more than 5 minutes in the future are rejected. This prevents an attacker from using far-future timestamps to permanently win last-write-wins (LWW) merge conflicts.
