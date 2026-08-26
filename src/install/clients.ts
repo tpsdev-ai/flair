@@ -5,7 +5,9 @@
 // @tpsdev-ai/flair-mcp); pi is a native-extension host (kind:
 // "native-extension" — wired via pi's own settings.json `packages` key,
 // flair#1342). Each client has:
-//   - detection: `bin` on PATH, optionally widened by a declared detect() override
+//   - detection: `bin` on PATH OR the client's known config path exists
+//     (flair#1417 — GUI-only Cursor, PATH-quirky installs). A declared
+//     detect() override remains the exception (pi).
 //   - wire(env): { ok: boolean; message: string }
 //
 // Wiring contract (FIX 4 — onboarding dogfood round 1):
@@ -52,11 +54,12 @@ export interface Client {
   kind: "mcp" | "native-extension";
   detected: boolean;
   /**
-   * Optional detection override. Default detection is `bin` on PATH (one rule,
-   * see detectClients); a client whose presence is ALSO evidenced by a config
-   * file (pi: ~/.pi/agent/settings.json survives PATH quirks like a version
-   * manager or launchd context) declares that here. Must stay a pure
-   * filesystem check — detection never spawns a subprocess (flair#946).
+   * Optional detection override. Default detection is `bin` on PATH OR the
+   * client's known config path (one rule, see detectClients — flair#1417).
+   * A client whose presence signal is not that pair (pi already used this
+   * shape before it became the default) declares the exception here. Must
+   * stay a pure filesystem check — detection never spawns a subprocess
+   * (flair#946).
    */
   detect?: () => boolean;
   wire: (env: WireEnv) => { ok: boolean; message: string };
@@ -129,12 +132,13 @@ function binInPath(name: string): boolean {
  *      elsewhere — the same defect already fixed for `flair upgrade`'s presence
  *      probes (see "Upgrade presence probes" in src/cli.ts).
  *
- * Nothing is lost by dropping it: an `npm install -g` links the package's bin
- * into the prefix's bin directory, which is on PATH by construction (it is where
- * `npm` itself is found from). A client whose binary is NOT on PATH is a client
- * the user cannot launch, and wiring an MCP config for it is at best a no-op.
- * `flair init --client <name>` still wires a client explicitly, bypassing
- * detection entirely, so an exotic install is never locked out.
+ * Nothing is lost by dropping the npm-list fallback: an `npm install -g` links
+ * the package's bin into the prefix's bin directory, which is on PATH by
+ * construction. Detection still asks PATH first. A second signal is the
+ * client's known config path (detectClients, flair#1417): a GUI install whose
+ * shell command is opt-in (Cursor) is still present when its config file
+ * exists. `flair init --client <name>` still wires a client explicitly,
+ * bypassing detection entirely, so an exotic install is never locked out.
  */
 function detectBin(bin: string): boolean {
   try {
@@ -638,10 +642,12 @@ function antigravityConfigPath(): string {
 }
 
 /**
- * Single dispatcher for "where does this client's MCP config live" — used by
+ * Single dispatcher for "where does this client's config live" — used by
  * `flair doctor`'s client-integration checks (flair#588) to read the config
- * without duplicating the per-client path logic that already lives here.
- * Additive only: does not change existing wire/detect behavior.
+ * without duplicating the per-client path logic that already lives here,
+ * and by detectClients() as the config-path presence signal (flair#1417).
+ * Every current ClientId has a path; a future id must extend this switch
+ * or stay binary-only via a `detect` override — do not invent a path.
  */
 export function clientConfigPath(id: ClientId): string {
   switch (id) {
@@ -878,17 +884,23 @@ export function renderWiringSummary(
 }
 
 /**
- * Detect every known client. One rule (`bin` on PATH) applied uniformly — a
- * client added to ALL_CLIENTS is detected by declaring its executable, with no
- * per-client branch here to forget to extend. A client may widen that with a
- * declared `detect` override (still a pure fs check — pi adds its settings
- * file as a second signal, flair#1342); the override lives on the registry
- * entry, so this function stays branch-free.
+ * Detect every known client. One rule applied uniformly: `bin` on PATH OR
+ * the client's known config path exists (flair#1417). A client added to
+ * ALL_CLIENTS is detected by declaring its executable; clientConfigPath()
+ * already names every current id, so the config-path fallback is not a
+ * per-client branch to forget. A declared `detect` override remains the
+ * exception (still a pure fs check — pi, flair#1342). Detection never
+ * spawns a subprocess (flair#946).
+ *
+ * A future client with no config path helper stays binary-only until it
+ * grows one here or a `detect` override — do not invent a path.
  */
 export function detectClients(): Client[] {
   return ALL_CLIENTS.map((client) => ({
     ...client,
-    detected: client.detect ? client.detect() : detectBin(client.bin),
+    detected: client.detect
+      ? client.detect()
+      : detectBin(client.bin) || existsSync(clientConfigPath(client.id)),
   }));
 }
 
