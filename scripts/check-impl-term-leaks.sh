@@ -41,6 +41,17 @@ if [[ -f README.md && ! README.md -ef */.github/* && ! README.md -ef */specs/* &
 fi
 # 4. All files under docs/
 find docs -type f -not -path '*/.github/*' -not -path '*/specs/*' -not -path '*/test/*' 2>/dev/null >> "$TMPFILE"
+# 5. Root CHANGELOG.md (flair#1420) — release notes are the most consumer-facing
+#    document we publish. A leak here is what a reader actually sees.
+if [[ -f CHANGELOG.md ]]; then
+  echo "CHANGELOG.md" >> "$TMPFILE"
+fi
+# 6. Changelog fragments (flair#1420) — this is where the text is authored, so
+#    a leak fails the PR that introduces it rather than the release that
+#    assembles it.
+if [[ -d .changelog ]]; then
+  find .changelog -type f -not -path '*/.github/*' -not -path '*/specs/*' -not -path '*/test/*' 2>/dev/null >> "$TMPFILE"
+fi
 
 # Sort and remove duplicates
 sort -u "$TMPFILE" > "${TMPFILE}.sorted"
@@ -52,7 +63,8 @@ mv "${TMPFILE}.sorted" "$TMPFILE"
 # silently going dark while still reporting green.
 if [[ ! -s "$TMPFILE" ]]; then
   echo "✗ found 0 files to search — the corpus is empty, so NOTHING was checked."
-  echo "  This gate scans packages/*/dist/, packages/*/README.md, README.md and docs/."
+  echo "  This gate scans packages/*/dist/, packages/*/README.md, README.md, docs/,"
+  echo "  CHANGELOG.md and .changelog/."
   echo "  If dist/ has not been built yet, build it first; if the layout moved, fix the"
   echo "  find expressions above. An empty scan is not a passing scan."
   exit 1

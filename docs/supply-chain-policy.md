@@ -151,7 +151,7 @@ Mirrors the CI test-unit gates locally so issues are caught at `git commit` time
 Runs three checks before each commit:
 - `check-workspace-deps.mjs` — workspace internal-dep version lockstep
 - `check-dep-ages.mjs` — supply-chain bake-time (≥7 days for external pinned deps)
-- `check-impl-term-leaks.sh` — no Bead refs / impl labels in user-facing docs
+- `check-impl-term-leaks.sh` — no Bead refs / impl labels in user-facing docs, `CHANGELOG.md`, or `.changelog/`
 
 Each check matches a CI gate exactly so the local and remote outcomes can't drift. Bypass with `git commit --no-verify` when warranted (rare; CI will still catch you). Skip just the dep-ages check (the slowest one, ~2-5s of registry fetches) with `FLAIR_PRECOMMIT_SKIP_DEP_AGES=1 git commit`.
 

@@ -1,4 +1,4 @@
-// Behaviour of scripts/check-impl-term-leaks.sh (flair#1381).
+// Behaviour of scripts/check-impl-term-leaks.sh (flair#1381, flair#1420).
 //
 // The gate exists to keep bead IDs and impl labels out of user-facing docs.
 // Two defects landed together: English compounds such as "ops-port" were
@@ -15,23 +15,42 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "check-impl-term-leaks.sh");
 
 const ALLOWLISTED = ["ops-port", "ops-api", "ops-target", "ops-server"] as const;
-const REAL_BEAD_ID = "ops-xllz";
+// Verified to resolve to nothing in the internal tracker (flair#1420).
+// Do not replace with a live bead ID — the repo is public.
+const DEAD_BEAD_ID = "ops-0000";
 
 const created: string[] = [];
 
-function fixture(body: string, filename = "integrations.md"): string {
+function writeCorpus(dir: string, relPath: string, body: string) {
+  const dest = join(dir, relPath);
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, body);
+}
+
+function emptyCorpus(): string {
   const dir = mkdtempSync(join(tmpdir(), "flair-impl-term-leaks-"));
   created.push(dir);
+  return dir;
+}
+
+function fixtureWith(files: Record<string, string>): string {
+  const dir = emptyCorpus();
   mkdirSync(join(dir, "docs"), { recursive: true });
   mkdirSync(join(dir, "packages"), { recursive: true });
-  writeFileSync(join(dir, "docs", filename), body);
+  for (const [relPath, body] of Object.entries(files)) {
+    writeCorpus(dir, relPath, body);
+  }
   return dir;
+}
+
+function fixture(body: string, filename = "integrations.md"): string {
+  return fixtureWith({ [`docs/${filename}`]: body });
 }
 
 function runGate(dir: string, scriptPath = SCRIPT) {
@@ -49,20 +68,20 @@ afterAll(() => {
 });
 
 describe("impl-term-leak gate: real bead IDs still fail (flair#1381)", () => {
-  test(`a real bead ID (${REAL_BEAD_ID}) in a docs file FAILS and names token + rule`, () => {
-    const dir = fixture(`See the coordination note in ${REAL_BEAD_ID} for the write surface.\n`);
+  test(`a bead-shaped ID (${DEAD_BEAD_ID}) in a docs file FAILS and names token + rule`, () => {
+    const dir = fixture(`See the coordination note in ${DEAD_BEAD_ID} for the write surface.\n`);
     const res = runGate(dir);
     expect(res.status).not.toBe(0);
     expect(res.out).toContain(
-      `docs/integrations.md:1: matched bead-ID pattern on token "${REAL_BEAD_ID}"`,
+      `docs/integrations.md:1: matched bead-ID pattern on token "${DEAD_BEAD_ID}"`,
     );
   });
 
-  test("an allowlisted compound on the same line does not hide a real bead ID", () => {
-    const dir = fixture(`the ops-port trap is not ${REAL_BEAD_ID}\n`);
+  test("an allowlisted compound on the same line does not hide a bead-shaped ID", () => {
+    const dir = fixture(`the ops-port trap is not ${DEAD_BEAD_ID}\n`);
     const res = runGate(dir);
     expect(res.status).not.toBe(0);
-    expect(res.out).toContain(`matched bead-ID pattern on token "${REAL_BEAD_ID}"`);
+    expect(res.out).toContain(`matched bead-ID pattern on token "${DEAD_BEAD_ID}"`);
     expect(res.out).not.toContain('token "ops-port"');
   });
 });
@@ -88,12 +107,12 @@ describe("impl-term-leak gate: exact-literal allowlist PASSES (flair#1381)", () 
   test("a leading hyphen still excludes a non-allowlisted ops-* token", () => {
     // The fixture used to prove the guard must not itself be on the allowlist.
     // `--ops-target` would still exit 0 if the [^-a-z0-9] guard disappeared,
-    // because ops-target is exempt. `--ops-xllz` is a real bead-ID shape:
+    // because ops-target is exempt. `--ops-0000` is a bead-ID shape:
     // bare it fails (test above); prefixed with `--` it passes only if the
     // preceding hyphen excludes it.
     const src = readFileSync(SCRIPT, "utf8");
-    expect(src).not.toMatch(/^ops-xllz$/m);
-    const dir = fixture("flair agent add --ops-xllz <ops-url>\n");
+    expect(src).not.toMatch(/^ops-0000$/m);
+    const dir = fixture("flair agent add --ops-0000 <ops-url>\n");
     const res = runGate(dir);
     expect(res.status).toBe(0);
     expect(res.out).toContain("No leaks found");
@@ -137,5 +156,66 @@ describe("impl-term-leak gate: allowlist mutation restores the failure (flair#13
     const after = runGate(dir, mutatedScript);
     expect(after.status).not.toBe(0);
     expect(after.out).toContain('matched bead-ID pattern on token "ops-port"');
+  });
+});
+
+describe("impl-term-leak gate: CHANGELOG.md and .changelog/ are in scope (flair#1420)", () => {
+  // Clean docs keep the corpus non-empty if the changelog paths are ignored.
+  // Against current main (scan docs/ only) the leaky fragment is invisible, so
+  // the gate exits 0 and this test is red. That is the powered check.
+  const CLEAN_DOCS = "no implementation terms here\n";
+
+  test("a non-allowlisted bead-shaped token in .changelog/unreleased/ FAILS", () => {
+    const dir = fixtureWith({
+      "docs/integrations.md": CLEAN_DOCS,
+      ".changelog/unreleased/leaked-bead.md": `See ${DEAD_BEAD_ID} for the write surface.\n`,
+    });
+    const res = runGate(dir);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain(
+      `.changelog/unreleased/leaked-bead.md:1: matched bead-ID pattern on token "${DEAD_BEAD_ID}"`,
+    );
+  });
+
+  test("a fragment with only allowlisted compounds PASSES", () => {
+    const dir = fixtureWith({
+      "docs/integrations.md": CLEAN_DOCS,
+      ".changelog/unreleased/allowlisted.md":
+        "ops-port, ops-api, ops-target, and ops-server are English compounds.\n",
+    });
+    const res = runGate(dir);
+    expect(res.status).toBe(0);
+    expect(res.out).toContain("No leaks found");
+  });
+
+  test("a non-allowlisted bead-shaped token in CHANGELOG.md FAILS", () => {
+    const dir = fixtureWith({
+      "docs/integrations.md": CLEAN_DOCS,
+      "CHANGELOG.md": `## [Unreleased]\n\n- leaked ${DEAD_BEAD_ID} in the notes\n`,
+    });
+    const res = runGate(dir);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain(
+      `CHANGELOG.md:3: matched bead-ID pattern on token "${DEAD_BEAD_ID}"`,
+    );
+  });
+
+  test("CHANGELOG.md with only allowlisted compounds PASSES", () => {
+    const dir = fixtureWith({
+      "docs/integrations.md": CLEAN_DOCS,
+      "CHANGELOG.md":
+        "## [Unreleased]\n\n- ops-port, ops-api, ops-target, and ops-server are English compounds.\n",
+    });
+    const res = runGate(dir);
+    expect(res.status).toBe(0);
+    expect(res.out).toContain("No leaks found");
+  });
+
+  test("an empty corpus still fails after the changelog paths were added", () => {
+    const dir = emptyCorpus();
+    const res = runGate(dir);
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain("found 0 files to search");
+    expect(res.out).toContain("CHANGELOG.md and .changelog/");
   });
 });
