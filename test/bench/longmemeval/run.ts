@@ -39,6 +39,7 @@ import { loadDataset, selectSlice, abilityOf, isAbstention } from "./dataset";
 import { runOnce, SELECTED_ARMS, writeProgress, setJournalContext } from "./eval";
 import { aggregateArmAcrossRuns, type ArmRunMetrics } from "./metrics";
 import { buildArtifact, writeArtifact, verifyArtifactHash } from "./artifact";
+import { collectEvidenceCoverage } from "./evidence-coverage";
 import { formatReport } from "./report";
 import {
   probeReaderDeterminism, failedProbe, printReaderDeterminism, type ReaderDeterminism,
@@ -201,9 +202,11 @@ async function runSlice(): Promise<void> {
 
   const perArmRuns = new Map<Arm, ArmRunMetrics[]>(SELECTED_ARMS.map((a) => [a, []]));
   const runHashes: string[] = [];
+  const coverageRuns: Array<{ runIndex: number; results: Awaited<ReturnType<typeof runOnce>>["results"] }> = [];
   for (let i = 1; i <= runs; i++) {
     const r = await runOnce(i, slice, { repoRoot: REPO_ROOT, host, log: (s) => console.log(s) });
     runHashes.push(r.runHash);
+    coverageRuns.push({ runIndex: r.runIndex, results: r.results });
     for (const m of r.armMetrics) perArmRuns.get(m.arm)!.push(m);
   }
 
@@ -212,6 +215,7 @@ async function runSlice(): Promise<void> {
     configHash, config: manifest, runHashes, aggregate,
     gitCommit: gitCommit(), ollamaHost: host, benchHost: process.env.LME_BENCH_HOST ?? "rockit", validationSlice,
     readerDeterminism,
+    evidenceCoverage: collectEvidenceCoverage(coverageRuns),
   });
   const artifactPath = writeArtifact(artifact, outDir);
 

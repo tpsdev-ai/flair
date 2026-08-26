@@ -18,8 +18,11 @@ import {
 } from "../../helpers/harper-lifecycle";
 import {
   mkAgent, registerAgent, ingestSessionHistory, retrieveContext, adminOp, signedFetch,
-  type BenchClient, type TestAgent,
+  type BenchClient, type TestAgent, type RetrievedContext,
 } from "../../../packages/flair-bench/lib/index";
+import {
+  measureEvidenceCoverage, idsInHandoffContext, type EvidenceCoverageRecord,
+} from "./evidence-coverage";
 import { OLLAMA_HOST, READER, JUDGE, RETRIEVAL, FULL_CONTEXT } from "./config";
 import { generate, type OllamaModelSpec } from "./ollama";
 import { buildJudgePrompt, parseVerdict, JudgeParseError, type LmeTask } from "./judge";
@@ -70,8 +73,8 @@ const clean = (s: string) => s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
 //                                                     (config.ts, via the pins)
 //
 //   OPERATIONAL-ONLY     INGEST_CONCURRENCY, RECORDS_JSONL journal (+ its
-//                        rankedIds/retrievalMs/cfg/latencyMs fields),
-//                        LME_RESUME, PROGRESS_FILE, readiness deadline /
+//                        rankedIds/retrievalMs/cfg/latencyMs/evidenceCoverage
+//                        fields), LME_RESUME, PROGRESS_FILE, readiness deadline /
 //                        restart-retry / nonce probe, 429+5xx backoff
 //                        (ollama.ts), LME_FLAIR_PKG_DIR / LME_HARPER_BIN_DIR /
 //                        LME_BENCH_HOST path+provenance overrides (run.ts).
@@ -159,6 +162,7 @@ export function setJournalContext(configHash: string): void { JOURNAL_CFG = conf
 interface BankedLine {
   questionId: string; arm: Arm; ability: string; isAbstention: boolean;
   answer: string; verdict: string | null; judgeError: string | null; tokensFed: number;
+  evidenceCoverage?: EvidenceCoverageRecord;
 }
 export function loadResumeJournal(path: string): Map<string, Map<Arm, BankedLine>> {
   const out = new Map<string, Map<Arm, BankedLine>>();
@@ -274,11 +278,47 @@ function extractionFor(entry: LmeEntry, answer: string) {
   return scoreExtraction(answer, entry.answer);
 }
 
+/** flair#1358 — coverage from a Harper retrieval + the prompt we actually hand off. */
+function coverageForRetrieved(
+  entry: LmeEntry, arm: Arm, ctx: RetrievedContext, context: string,
+): EvidenceCoverageRecord {
+  return measureEvidenceCoverage({
+    entry, arm,
+    stages: {
+      pool: ctx.legs ?? { bm25: [], hnsw: [], fused: ctx.rankedIds },
+      topK: ctx.rankedIds,
+      readerContext: idsInHandoffContext(ctx.items, context),
+    },
+    topKItems: ctx.items,
+  });
+}
+
+function coverageForFullContext(entry: LmeEntry, context: string): EvidenceCoverageRecord {
+  const events = entryToSessions(entry).flatMap((s) => s.events);
+  const allIds = events.map((e) => e.id);
+  return measureEvidenceCoverage({
+    entry, arm: "full-context",
+    stages: {
+      pool: { bm25: [], hnsw: [], fused: allIds },
+      topK: allIds,
+      readerContext: idsInHandoffContext(events, context),
+    },
+    topKItems: events,
+  });
+}
+
+function coverageForNoContext(entry: LmeEntry): EvidenceCoverageRecord {
+  return measureEvidenceCoverage({
+    entry, arm: "no-context",
+    stages: { pool: { bm25: [], hnsw: [], fused: [] }, topK: [], readerContext: [] },
+  });
+}
+
 /** Evaluate one (question, arm) end to end (reader → judge). `context` and any
  *  retrieval metadata are supplied by the caller (Harper arms retrieve first). */
 async function evalOne(
   host: string, entry: LmeEntry, arm: Arm, context: string,
-  extra: { retrievalMs?: number; truncated?: boolean; rankedIds?: string[] },
+  extra: { retrievalMs?: number; truncated?: boolean; rankedIds?: string[]; evidenceCoverage?: EvidenceCoverageRecord },
 ): Promise<QuestionArmResult> {
   const r = await readerAnswer(host, entry.question, entry.question_date, context, arm);
   const abstention = isAbstention(entry);
@@ -297,6 +337,7 @@ async function evalOne(
         // these a wrong answer can't be attributed retrieval-vs-reader, nor
         // retrieval latency separated, from the journal alone.
         retrievalMs: extra.retrievalMs ?? null, rankedIds: extra.rankedIds ?? null,
+        evidenceCoverage: extra.evidenceCoverage ?? null,
         cfg: JOURNAL_CFG, at: new Date().toISOString(),
       }) + "\n");
     } catch { /* journal is best-effort */ }
@@ -315,6 +356,7 @@ async function evalOne(
     retrievalMs: extra.retrievalMs,
     rankedIds: extra.rankedIds,
     truncated: extra.truncated,
+    evidenceCoverage: extra.evidenceCoverage,
   };
 }
 
@@ -331,10 +373,17 @@ async function runNoHarperArms(
     if (doFc && !isDone(entry.question_id, "full-context")) {
       const sessions = entryToSessions(entry);
       const fc = formatFullContext(sessions, FULL_CONTEXT.charBudget);
-      out.push(await evalOne(host, entry, "full-context", fc.text, { truncated: fc.truncated }));
+      out.push(await evalOne(host, entry, "full-context", fc.text, {
+        truncated: fc.truncated,
+        evidenceCoverage: coverageForFullContext(entry, fc.text),
+      }));
     }
     // no-context (the contamination probe): zero memory
-    if (doNc && !isDone(entry.question_id, "no-context")) out.push(await evalOne(host, entry, "no-context", "", {}));
+    if (doNc && !isDone(entry.question_id, "no-context")) {
+      out.push(await evalOne(host, entry, "no-context", "", {
+        evidenceCoverage: coverageForNoContext(entry),
+      }));
+    }
   }
   log(`  no-Harper arms done (${entries.length} q × ${(doFc ? 1 : 0) + (doNc ? 1 : 0)} arms)`);
   return out;
@@ -368,10 +417,15 @@ async function runHarperArm(
       const ingest = await ingestSessionHistory(client, toSessionHistories(sessions), { concurrency: INGEST_CONCURRENCY });
       await waitSearchable(client, sessions);
       const t0 = performance.now();
-      const ctx = await retrieveContext(client, entry.question, { limit: RETRIEVAL.readerTopK, scoring: RETRIEVAL.scoring });
+      const ctx = await retrieveContext(client, entry.question, {
+        limit: RETRIEVAL.readerTopK, scoring: RETRIEVAL.scoring, includeLegs: true,
+      });
       const retrievalMs = performance.now() - t0;
       const context = formatRetrieved(ctx.items);
-      out.push(await evalOne(host, entry, arm, context, { retrievalMs, rankedIds: ctx.rankedIds }));
+      out.push(await evalOne(host, entry, arm, context, {
+        retrievalMs, rankedIds: ctx.rankedIds,
+        evidenceCoverage: coverageForRetrieved(entry, arm, ctx, context),
+      }));
       if ((qi + 1) % 5 === 0 || qi === entries.length - 1) {
         log(`  [${arm}] ${qi + 1}/${entries.length} (last ingest ${ingest.written} events, ${ingest.elapsedMs.toFixed(0)}ms)`);
       }
@@ -583,9 +637,15 @@ async function runHarperArmsShared(
     const client: BenchClient = { harper, agent };
     if (countProbe) log(`  [shared][probe] Memory rows before ${arm} query of ${entry.question_id}: ${await memoryRows()}`);
     const t0 = performance.now();
-    const ctx = await retrieveContext(client, entry.question, { limit: RETRIEVAL.readerTopK, scoring: RETRIEVAL.scoring });
+    const ctx = await retrieveContext(client, entry.question, {
+      limit: RETRIEVAL.readerTopK, scoring: RETRIEVAL.scoring, includeLegs: true,
+    });
     const retrievalMs = performance.now() - t0;
-    out.push(await evalOne(host, entry, arm, formatRetrieved(ctx.items), { retrievalMs, rankedIds: ctx.rankedIds }));
+    const context = formatRetrieved(ctx.items);
+    out.push(await evalOne(host, entry, arm, context, {
+      retrievalMs, rankedIds: ctx.rankedIds,
+      evidenceCoverage: coverageForRetrieved(entry, arm, ctx, context),
+    }));
   }
 
   async function flipMode(): Promise<void> {
@@ -731,6 +791,7 @@ export async function runOnce(runIndex: number, entries: LmeEntry[], opts: RunOp
           answer: l.answer, verdict: (l.verdict ?? null) as QuestionArmResult["verdict"],
           judgeError: l.judgeError ?? undefined, extraction: extractionFor(entry, l.answer),
           tokensFed: l.tokensFed, latencyMs: (l as any).latencyMs ?? 0,
+          evidenceCoverage: l.evidenceCoverage,
         });
         if (l.verdict) progressState.verdictCounts[l.verdict] = (progressState.verdictCounts[l.verdict] ?? 0) + 1;
         else progressState.errors++;

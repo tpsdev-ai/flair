@@ -256,6 +256,30 @@ describe("flair#985 — hybrid recall is preserved: order and score are decouple
   });
 });
 
+describe("flair#1358 — onLegs is opt-in observation and does not change results", () => {
+  beforeEach(seedThreeRecords);
+
+  it("unset onLegs leaves results byte-identical to a call that collects legs (this change)", async () => {
+    const plain = await run({ limit: 2 });
+    let legs: { hnsw: string[]; bm25: string[]; fused: string[] } | undefined;
+    const withLegs = await run({ limit: 2, onLegs: (l: any) => { legs = l; } });
+    expect(JSON.stringify(withLegs)).toBe(JSON.stringify(plain));
+    expect(legs).toBeDefined();
+    expect(legs!.fused).toEqual(plain.map((r: any) => r.id));
+    // runbook is the BM25-only rescue at limit 2 — must appear on the BM25
+    // leg and in the fused pool even if the HNSW window missed it.
+    expect(legs!.bm25).toContain("runbook");
+    expect(legs!.fused).toContain("runbook");
+  });
+
+  it("onLegs fused is the pre-slice pool, so a caller-side top-k can crowd evidence (this change)", async () => {
+    let legs: { hnsw: string[]; bm25: string[]; fused: string[] } | undefined;
+    const results = await run({ limit: 2, onLegs: (l: any) => { legs = l; } });
+    expect(legs!.fused.length).toBeGreaterThanOrEqual(results.length);
+    expect(legs!.fused.slice(0, results.length)).toEqual(results.map((r: any) => r.id));
+  });
+});
+
 describe("flair#985 — the singleton corpus (delete+store death-spiral shape)", () => {
   it("with exactly ONE stored memory ($distance omitted by Harper), _score is the true cosine — not 1.0, not 0", async () => {
     // The #985 reporter's delete+store update pattern: after the delete, the

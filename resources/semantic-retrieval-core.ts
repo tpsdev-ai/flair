@@ -34,9 +34,11 @@
 // multiplies `limit` internally; any overfetch policy — SemanticSearch's
 // CANDIDATE_MULTIPLIER, MemoryBootstrap's K formula — is the CALLER's
 // decision, made
-// before calling in). Never exposes which internal leg (BM25+RRF hybrid vs.
-// legacy HNSW-only vs. keyword-only fallback) produced a given result — the
-// output shape is identical regardless of `hybrid`.
+// before calling in). The result array never annotates which internal leg
+// (BM25+RRF hybrid vs. legacy HNSW-only vs. keyword-only fallback) produced
+// a given row — that output shape is identical regardless of `hybrid`.
+// Per-leg membership is available only through the opt-in `onLegs`
+// callback (flair#1358); unset ⇒ the return is byte-identical to before.
 //
 // ── SCORE CONTRACT (flair#985) ───────────────────────────────────────────────
 // `_score` under `scoring:"raw"` is ALWAYS an ABSOLUTE similarity (cosine of
@@ -179,6 +181,16 @@ export interface RetrieveCandidatesParams {
    * it cannot turn abstention into an authority side-channel.
    */
   withSemSimilarity?: boolean;
+  /**
+   * Opt-in diagnostic (flair#1358). Called once with per-leg candidate ids
+   * after scope/temporal filters, and with the fused pool after supersede /
+   * minScore / sort — BEFORE any caller-side top-k slice. Does not change
+   * `results`. Unset ⇒ byte-identical return.
+   *
+   * `sessionId` is never a scope input here — these ids are already
+   * scope-filtered (conditions + isAllowed). The callback may only observe.
+   */
+  onLegs?: (legs: { hnsw: string[]; bm25: string[]; fused: string[] }) => void;
 }
 
 export async function retrieveCandidates(params: RetrieveCandidatesParams): Promise<any[]> {
@@ -196,12 +208,15 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
     hybrid,
     ctx,
     withSemSimilarity = false,
+    onLegs,
   } = params;
 
   const passesAllowed = (record: any) => !isAllowed || isAllowed(record);
   const hnswSelect = [...select, "$distance"];
 
   const results: any[] = [];
+  const hnswLegIds: string[] = [];
+  const bm25LegIds: string[] = [];
 
   if (hybrid) {
     // ─── BM25 + union-RRF hybrid path ────────────────────────────────────
@@ -259,6 +274,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         }
         semRecords.push(record);
         semIds.push(record.id);
+        hnswLegIds.push(record.id);
       }
     }
 
@@ -360,6 +376,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       }
       bm25Ids = resolved;
     }
+    if (q) bm25LegIds.push(...bm25Ids);
 
     // ── (d) No retrieval signal at all → full scoped listing ────────────
     if (!q && !qEmb) {
@@ -506,6 +523,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         _rank: finalScore,
         ...(withSemSimilarity ? { _semSimilarity: semanticScore } : {}),
       });
+      hnswLegIds.push(record.id);
     }
   } else {
     // ─── No embedding available — keyword-only fallback ──────────────────
@@ -586,5 +604,10 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
   // that cannot reintroduce nondeterminism (see byRecencyThenId).
   filteredResults.sort((a: any, b: any) => (b._rank - a._rank) || byRecencyThenId(a, b));
   for (const r of filteredResults) delete r._rank;
+  onLegs?.({
+    hnsw: hnswLegIds,
+    bm25: bm25LegIds,
+    fused: filteredResults.map((r: any) => r.id),
+  });
   return filteredResults;
 }

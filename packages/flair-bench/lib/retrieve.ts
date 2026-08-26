@@ -52,6 +52,7 @@ export async function retrieveContext(
     q: query,
     limit,
     scoring,
+    ...(opts.includeLegs ? { includeLegs: true } : {}),
   });
   const latencyMs = performance.now() - t0;
 
@@ -60,5 +61,11 @@ export async function retrieveContext(
   }
   const results: any[] = Array.isArray(res.body?.results) ? res.body.results : [];
   const items: RetrievedItem[] = results.map((r) => ({ id: r.id, score: r._score ?? r.score ?? 0, content: r.content, createdAt: r.createdAt }));
-  return { rankedIds: items.map((i) => i.id), items, latencyMs };
+  const rawLegs = res.body?.legs;
+  const legs = rawLegs && typeof rawLegs === "object" ? {
+    bm25: Array.isArray(rawLegs.bm25) ? rawLegs.bm25.map(String) : [],
+    hnsw: Array.isArray(rawLegs.hnsw) ? rawLegs.hnsw.map(String) : [],
+    fused: Array.isArray(rawLegs.fused) ? rawLegs.fused.map(String) : [],
+  } : undefined;
+  return { rankedIds: items.map((i) => i.id), items, latencyMs, ...(legs ? { legs } : {}) };
 }
