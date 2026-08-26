@@ -10,8 +10,10 @@
  *   3. evidenceEventsInReaderContext  — the prompt actually handed to the reader
  *
  * Truncation is a fourth outcome (topK ≈ N, readerContext < N), not crowding
- * (pool ≈ N, topK < N). Session-diversity selection is NOT implemented here
- * and is not imported from anywhere — this file is observation only.
+ * (pool ≈ N, topK < N). readerContext is the formatter-admitted id set
+ * (`ctx.items` / `formatFullContext.includedEventIds`), not a prompt scan.
+ * Session-diversity selection is NOT implemented here and is not imported
+ * from anywhere — this file is observation only.
  *
  * Pure. No Harper, no reader, no spend. Ground truth comes from the dataset
  * (`has_answer` turns via goldEvidenceFor). When those are absent, the
@@ -70,47 +72,6 @@ export interface HandoffCandidate {
 /** Reader-free token estimate: 4 chars/token. Not a model call. */
 export function estimateTokens(text: string): number {
   return Math.ceil((text ?? "").length / 4);
-}
-
-/**
- * Line-payload of one prompt line. Retrieved lines are `- content` or
- * `- [YYYY-MM-DD] content`. Full-context lines are `role: content`. A raw
- * substring match is not used — overlapping event text in an earlier line
- * must not count a later, unadmitted event (flair#1358 Bugbot).
- */
-function linePayload(line: string): string {
-  const t = line.trim();
-  const dated = t.match(/^- \[\d{4}-\d{2}-\d{2}\] (.*)$/);
-  if (dated) return dated[1]!;
-  if (t.startsWith("- ")) return t.slice(2);
-  const role = t.match(/^[^:]+: (.*)$/);
-  if (role) return role[1]!;
-  return t;
-}
-
-/**
- * Evidence events whose FULL content is a distinct admitted line in the
- * prompt. Each line is consumed at most once. A truncated event whose text
- * also appears inside an earlier line does not count.
- */
-export function idsInHandoffContext(
-  candidates: HandoffCandidate[],
-  context: string,
-): string[] {
-  if (!context) return [];
-  const payloads = context.split("\n").map(linePayload);
-  const used = new Set<number>();
-  const found: string[] = [];
-  for (const c of candidates) {
-    const text = (c.content ?? "").trim();
-    if (!text) continue;
-    const idx = payloads.findIndex((p, i) => !used.has(i) && p === text);
-    if (idx >= 0) {
-      used.add(idx);
-      found.push(c.id);
-    }
-  }
-  return found;
 }
 
 function countNamed(goldIds: string[], ids: string[]): number {
@@ -210,6 +171,9 @@ export function collectEvidenceCoverage(
   const questions: Array<EvidenceCoverageRecord & { runIndex: number }> = [];
   for (const run of runs) {
     for (const r of run.results) {
+      // Truthy filter: a present record (including genuine zeros) is kept;
+      // null / omitted is skipped. A new arm that forgets to emit a record
+      // silently vanishes — every arm must write one.
       if (r.evidenceCoverage) questions.push({ ...r.evidenceCoverage, runIndex: run.runIndex });
     }
   }

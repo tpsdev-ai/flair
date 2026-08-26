@@ -12,7 +12,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
-  measureEvidenceCoverage, idsInHandoffContext, estimateTokens, collectEvidenceCoverage,
+  measureEvidenceCoverage, estimateTokens, collectEvidenceCoverage,
   EVIDENCE_COVERAGE_SCHEMA,
 } from "../bench/longmemeval/evidence-coverage";
 import { goldEvidenceFor, entryToSessions, type LmeEntry } from "../bench/longmemeval/dataset";
@@ -172,29 +172,11 @@ describe("four-outcome disambiguation (this change)", () => {
   });
 });
 
-describe("handoff measurement — truncation is read from the prompt string (this change)", () => {
-  test("idsInHandoffContext counts only events whose full content is in the prompt", () => {
-    const items = [
-      { id: GOLD[0]!, content: "user: I started yoga" },
-      { id: GOLD[1]!, content: "user: then spin" },
-      { id: GOLD[2]!, content: "user: then boxing" },
-    ];
-    const full = items.map((i) => `- ${i.content}`).join("\n");
-    expect(idsInHandoffContext(items, full).sort()).toEqual([...GOLD].sort());
-
-    // Truncation cut the last event mid-line — it must not count.
-    const truncated = `- ${items[0]!.content}\n- ${items[1]!.content}\n- user: then box`;
-    expect(idsInHandoffContext(items, truncated).sort()).toEqual([GOLD[0]!, GOLD[1]!].sort());
-  });
-
-  test("an empty handoff (no-context) contributes no ids", () => {
-    expect(idsInHandoffContext([{ id: GOLD[0]!, content: "user: I started yoga" }], "")).toEqual([]);
-  });
-
-  test("overlapping event text does not count a truncated gold event (Bugbot: substring match collapsed truncation)", () => {
+describe("handoff measurement — formatter-admitted ids, not a prompt scan (this change)", () => {
+  test("overlapping event text does not count a truncated gold event", () => {
     // B's ingested content is a prefix of A's. A is admitted; B is cut by the
-    // char budget. context.includes(B.content) is still true — that is the hole
-    // the first idsInHandoffContext (raw substring) had.
+    // char budget. context.includes(B.content) is still true — a prompt-string
+    // scan would count B. The shipped path uses formatFullContext.includedEventIds.
     const entry: LmeEntry = {
       question_id: "qOverlap",
       question_type: "multi-session",
@@ -230,7 +212,6 @@ describe("handoff measurement — truncation is read from the prompt string (thi
     expect(rec.n).toBe(2);
     expect(rec.evidenceEventsInFinalTopK).toBe(2);
     expect(rec.evidenceEventsInReaderContext).toBe(1);
-    expect(idsInHandoffContext([a, b], fc.text)).toEqual([a.id]);
   });
 });
 
@@ -356,5 +337,20 @@ describe("collectEvidenceCoverage", () => {
 
   test("omits the block entirely when no question carried coverage", () => {
     expect(collectEvidenceCoverage([{ runIndex: 1, results: [{}] }])).toBeUndefined();
+  });
+
+  test("keeps a genuine-zero record and drops a missing one (this change; missing vs zero)", () => {
+    const zero = measureEvidenceCoverage({
+      entry: mkNamedEntry(), arm: "no-context",
+      stages: { pool: { bm25: [], hnsw: [], fused: [] }, topK: [], readerContext: [] },
+    });
+    expect(zero.n).toBeGreaterThan(0);
+    expect(zero.evidenceEventsInFinalTopK).toBe(0);
+    const collected = collectEvidenceCoverage([
+      { runIndex: 1, results: [{ evidenceCoverage: zero }, {}] },
+    ]);
+    expect(collected!.questions).toHaveLength(1);
+    expect(collected!.questions[0]!.arm).toBe("no-context");
+    expect(collected!.questions[0]!.evidenceEventsInReaderContext).toBe(0);
   });
 });
