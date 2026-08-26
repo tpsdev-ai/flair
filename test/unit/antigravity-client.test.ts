@@ -51,7 +51,8 @@ describe("Antigravity client registration (flair#1209)", () => {
     expect(antigravity).toBeDefined();
     expect(antigravity!.bin).toBe("agy");
     expect(antigravity!.label).toBe("Antigravity");
-    // detectClients() must surface it (detected flag driven by `agy` on PATH).
+    // detectClients() must surface it (detected flag driven by `agy` on PATH
+    // or ~/.gemini/config/mcp_config.json — flair#1417).
     expect(detectClients().some((c) => c.id === "antigravity")).toBe(true);
   });
 

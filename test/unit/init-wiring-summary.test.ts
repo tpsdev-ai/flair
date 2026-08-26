@@ -133,7 +133,7 @@ describe("renderWiringSummary — a client that was NOT wired stays visible", ()
   });
 });
 
-describe("Claude Code detection is by binary on PATH, not by its config (flair#906)", () => {
+describe("Claude Code detection fires from the binary alone (flair#906); config is a second signal (flair#1417)", () => {
   /** Put an executable named `name` in `dir` and make `dir` the entire PATH. */
   function fakeBinOnPath(dir: string, name: string) {
     const p = join(dir, name);
@@ -151,22 +151,24 @@ describe("Claude Code detection is by binary on PATH, not by its config (flair#9
     expect(claudeCode.detected).toBe(true);
   });
 
-  it("does not detect Claude Code when the binary is absent", () => {
-    // Empty PATH: no `claude` anywhere, so this exercises the negative case
-    // end to end.
+  it("does not detect Claude Code when the binary and ~/.claude.json are both absent", () => {
+    // Empty PATH: no `claude` anywhere, isolated HOME: no config file.
+    // The config-path signal (flair#1417) is a second presence check, not
+    // a default-true; this is the negative case end to end.
     process.env.PATH = isoHome;
     const claudeCode = detectClients().find(c => c.id === "claude-code")!;
     expect(claudeCode.detected).toBe(false);
   });
 
-  it("reports NO client detected when PATH holds none of their binaries", () => {
+  it("reports NO client detected when PATH holds none of their binaries and no config exists", () => {
     // The Gemini false positive: detection used to fall back to
     // `npm list -g @google/generative-ai`, which exits 0 when that package is
     // anywhere in the global tree — including as a transitive dependency of an
     // unrelated global tool. Gemini was then reported installed, and
     // ~/.gemini/settings.json written, on a machine with no `gemini` binary.
-    // PATH is the only question detection asks now, so the answer cannot
-    // depend on what else happens to be installed globally.
+    // Detection asks PATH or a known config file (flair#1417) — never a
+    // global-tree walk — so the answer cannot depend on what else happens
+    // to be installed globally. Isolated HOME means no config files either.
     process.env.PATH = isoHome;
     for (const client of detectClients()) {
       expect(`${client.id}=${client.detected}`).toBe(`${client.id}=false`);
