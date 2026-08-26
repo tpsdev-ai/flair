@@ -425,6 +425,18 @@ The four-way read:
 | `topK ≈ N`, `readerContext < N` | **truncation — not a ranking problem** |
 | `topK ≈ N`, `readerContext ≈ N`, still wrong | reader / prompt |
 
+`readerContext` is the formatter-admitted id set, not a prompt-string scan.
+Harper arms use `ctx.items` ids (`formatRetrieved` does not truncate, so
+`readerContext === topK` structurally). Full-context uses
+`formatFullContext.includedEventIds` — events written before the char-budget
+break. A truncated event is simply not in that set.
+
+A new arm that forgets to emit an `EvidenceCoverageRecord` silently vanishes
+from `collectEvidenceCoverage` (`if (r.evidenceCoverage)`). Every arm —
+including a genuine-zero arm like `no-context` — must write a record.
+`null` / omitted is "instrument produced nothing"; a zeroed record is
+"found nothing." Distinguish those.
+
 Existing artifact fields and the aggregate shape are unchanged. Prior hashes
 stay interpretable: a historical artifact does not have this key, so
 projection drops it. The instrument is reader-free — no extra model calls.
