@@ -15,7 +15,8 @@ import {
   measureEvidenceCoverage, idsInHandoffContext, estimateTokens, collectEvidenceCoverage,
   EVIDENCE_COVERAGE_SCHEMA,
 } from "../bench/longmemeval/evidence-coverage";
-import { goldEvidenceFor, type LmeEntry } from "../bench/longmemeval/dataset";
+import { goldEvidenceFor, entryToSessions, type LmeEntry } from "../bench/longmemeval/dataset";
+import { formatFullContext } from "../bench/longmemeval/arms";
 import {
   buildArtifact, hashedContent, verifyArtifactHash,
 } from "../bench/longmemeval/artifact";
@@ -188,6 +189,48 @@ describe("handoff measurement — truncation is read from the prompt string (thi
 
   test("an empty handoff (no-context) contributes no ids", () => {
     expect(idsInHandoffContext([{ id: GOLD[0]!, content: "user: I started yoga" }], "")).toEqual([]);
+  });
+
+  test("overlapping event text does not count a truncated gold event (Bugbot: substring match collapsed truncation)", () => {
+    // B's ingested content is a prefix of A's. A is admitted; B is cut by the
+    // char budget. context.includes(B.content) is still true — that is the hole
+    // the first idsInHandoffContext (raw substring) had.
+    const entry: LmeEntry = {
+      question_id: "qOverlap",
+      question_type: "multi-session",
+      question: "which classes?",
+      answer: "yoga and boxing",
+      question_date: "2023/05/20 (Sat) 02:21",
+      haystack_dates: ["2023/05/01 (Mon) 10:00"],
+      haystack_session_ids: ["sess_gold"],
+      haystack_sessions: [[
+        { role: "user", content: "then boxing later I started yoga then boxing", has_answer: true },
+        { role: "user", content: "then boxing", has_answer: true },
+      ]],
+      answer_session_ids: ["sess_gold"],
+    };
+    const sessions = entryToSessions(entry);
+    const a = sessions[0]!.events[0]!;
+    const b = sessions[0]!.events[1]!;
+    const header = `\n[Session ${sessions[0]!.sessionId} — ${sessions[0]!.date}]\n`;
+    const lineA = `${a.role}: ${a.content}\n`;
+    const fc = formatFullContext(sessions, header.length + lineA.length);
+    expect(fc.truncated).toBe(true);
+    expect(fc.includedEventIds).toEqual([a.id]);
+    expect(fc.text.includes(b.content)).toBe(true);
+
+    const rec = measureEvidenceCoverage({
+      entry, arm: "full-context",
+      stages: {
+        pool: { bm25: [], hnsw: [], fused: [a.id, b.id] },
+        topK: [a.id, b.id],
+        readerContext: fc.includedEventIds,
+      },
+    });
+    expect(rec.n).toBe(2);
+    expect(rec.evidenceEventsInFinalTopK).toBe(2);
+    expect(rec.evidenceEventsInReaderContext).toBe(1);
+    expect(idsInHandoffContext([a, b], fc.text)).toEqual([a.id]);
   });
 });
 

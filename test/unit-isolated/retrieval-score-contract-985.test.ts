@@ -272,11 +272,14 @@ describe("flair#1358 — onLegs is opt-in observation and does not change result
     expect(legs!.fused).toContain("runbook");
   });
 
-  it("onLegs fused is the pre-slice pool, so a caller-side top-k can crowd evidence (this change)", async () => {
+  it("onLegs fused equals retrieveCandidates output — the core does not slice (clarified)", async () => {
+    // retrieveCandidates returns the pool. SemanticSearch slices after.
+    // fused === results is the CORE contract. The test that can go red if
+    // legs.fused is wired to the sliced results lives on SemanticSearch.post
+    // (six rows, limit 1).
     let legs: { hnsw: string[]; bm25: string[]; fused: string[] } | undefined;
     const results = await run({ limit: 2, onLegs: (l: any) => { legs = l; } });
-    expect(legs!.fused.length).toBeGreaterThanOrEqual(results.length);
-    expect(legs!.fused.slice(0, results.length)).toEqual(results.map((r: any) => r.id));
+    expect(legs!.fused).toEqual(results.map((r: any) => r.id));
   });
 });
 

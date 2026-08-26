@@ -7,7 +7,8 @@
  * without changing the configHash. Both claims get a positive control here.
  */
 import { describe, expect, test } from "bun:test";
-import { formatRetrieved, READER_PAYLOAD_FORMAT } from "../bench/longmemeval/arms";
+import { formatRetrieved, formatFullContext, READER_PAYLOAD_FORMAT } from "../bench/longmemeval/arms";
+import { entryToSessions, type LmeEntry } from "../bench/longmemeval/dataset";
 import { configManifest, hashConfig } from "../bench/longmemeval/config";
 import type { RetrievedItem } from "../../packages/flair-bench/lib/index";
 
@@ -33,6 +34,35 @@ describe("formatRetrieved (v2-dated payload)", () => {
 
   test("empty retrieval keeps the explicit no-memory marker", () => {
     expect(formatRetrieved([])).toBe("(no relevant memory found)");
+  });
+});
+
+describe("formatFullContext reports which events it admitted (flair#1358)", () => {
+  test("includedEventIds is the events actually written, not a substring scan", () => {
+    const entry: LmeEntry = {
+      question_id: "qFc",
+      question_type: "multi-session",
+      question: "q",
+      answer: "a",
+      question_date: "2023/05/20 (Sat) 02:21",
+      haystack_dates: ["2023/05/01 (Mon) 10:00"],
+      haystack_session_ids: ["s1"],
+      haystack_sessions: [[
+        { role: "user", content: "first event" },
+        { role: "user", content: "second event" },
+      ]],
+      answer_session_ids: ["s1"],
+    };
+    const sessions = entryToSessions(entry);
+    const full = formatFullContext(sessions, 1_000_000);
+    expect(full.truncated).toBe(false);
+    expect(full.includedEventIds).toEqual(sessions[0]!.events.map((e) => e.id));
+
+    const header = `\n[Session ${sessions[0]!.sessionId} — ${sessions[0]!.date}]\n`;
+    const firstLine = `${sessions[0]!.events[0]!.role}: ${sessions[0]!.events[0]!.content}\n`;
+    const cut = formatFullContext(sessions, header.length + firstLine.length);
+    expect(cut.truncated).toBe(true);
+    expect(cut.includedEventIds).toEqual([sessions[0]!.events[0]!.id]);
   });
 });
 

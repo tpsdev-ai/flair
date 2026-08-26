@@ -73,20 +73,44 @@ export function estimateTokens(text: string): number {
 }
 
 /**
- * Evidence events that actually appear in the prompt string handed to the
- * reader. Measured at the handoff, so a truncated line does not count.
+ * Line-payload of one prompt line. Retrieved lines are `- content` or
+ * `- [YYYY-MM-DD] content`. Full-context lines are `role: content`. A raw
+ * substring match is not used — overlapping event text in an earlier line
+ * must not count a later, unadmitted event (flair#1358 Bugbot).
+ */
+function linePayload(line: string): string {
+  const t = line.trim();
+  const dated = t.match(/^- \[\d{4}-\d{2}-\d{2}\] (.*)$/);
+  if (dated) return dated[1]!;
+  if (t.startsWith("- ")) return t.slice(2);
+  const role = t.match(/^[^:]+: (.*)$/);
+  if (role) return role[1]!;
+  return t;
+}
+
+/**
+ * Evidence events whose FULL content is a distinct admitted line in the
+ * prompt. Each line is consumed at most once. A truncated event whose text
+ * also appears inside an earlier line does not count.
  */
 export function idsInHandoffContext(
   candidates: HandoffCandidate[],
   context: string,
 ): string[] {
   if (!context) return [];
-  return candidates
-    .filter((c) => {
-      const text = (c.content ?? "").trim();
-      return text.length > 0 && context.includes(text);
-    })
-    .map((c) => c.id);
+  const payloads = context.split("\n").map(linePayload);
+  const used = new Set<number>();
+  const found: string[] = [];
+  for (const c of candidates) {
+    const text = (c.content ?? "").trim();
+    if (!text) continue;
+    const idx = payloads.findIndex((p, i) => !used.has(i) && p === text);
+    if (idx >= 0) {
+      used.add(idx);
+      found.push(c.id);
+    }
+  }
+  return found;
 }
 
 function countNamed(goldIds: string[], ids: string[]): number {

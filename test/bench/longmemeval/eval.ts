@@ -21,7 +21,7 @@ import {
   type BenchClient, type TestAgent, type RetrievedContext,
 } from "../../../packages/flair-bench/lib/index";
 import {
-  measureEvidenceCoverage, idsInHandoffContext, type EvidenceCoverageRecord,
+  measureEvidenceCoverage, type EvidenceCoverageRecord,
 } from "./evidence-coverage";
 import { OLLAMA_HOST, READER, JUDGE, RETRIEVAL, FULL_CONTEXT } from "./config";
 import { generate, type OllamaModelSpec } from "./ollama";
@@ -278,22 +278,25 @@ function extractionFor(entry: LmeEntry, answer: string) {
   return scoreExtraction(answer, entry.answer);
 }
 
-/** flair#1358 — coverage from a Harper retrieval + the prompt we actually hand off. */
+/** flair#1358 — coverage from a Harper retrieval. formatRetrieved includes
+ *  every ranked item, so the handoff set is the item ids (not a substring
+ *  scan of the prompt — overlapping event text would otherwise count a
+ *  truncated event as present). */
 function coverageForRetrieved(
-  entry: LmeEntry, arm: Arm, ctx: RetrievedContext, context: string,
+  entry: LmeEntry, arm: Arm, ctx: RetrievedContext,
 ): EvidenceCoverageRecord {
   return measureEvidenceCoverage({
     entry, arm,
     stages: {
       pool: ctx.legs ?? { bm25: [], hnsw: [], fused: ctx.rankedIds },
       topK: ctx.rankedIds,
-      readerContext: idsInHandoffContext(ctx.items, context),
+      readerContext: ctx.items.map((i) => i.id),
     },
     topKItems: ctx.items,
   });
 }
 
-function coverageForFullContext(entry: LmeEntry, context: string): EvidenceCoverageRecord {
+function coverageForFullContext(entry: LmeEntry, includedEventIds: string[]): EvidenceCoverageRecord {
   const events = entryToSessions(entry).flatMap((s) => s.events);
   const allIds = events.map((e) => e.id);
   return measureEvidenceCoverage({
@@ -301,7 +304,7 @@ function coverageForFullContext(entry: LmeEntry, context: string): EvidenceCover
     stages: {
       pool: { bm25: [], hnsw: [], fused: allIds },
       topK: allIds,
-      readerContext: idsInHandoffContext(events, context),
+      readerContext: includedEventIds,
     },
     topKItems: events,
   });
@@ -375,7 +378,7 @@ async function runNoHarperArms(
       const fc = formatFullContext(sessions, FULL_CONTEXT.charBudget);
       out.push(await evalOne(host, entry, "full-context", fc.text, {
         truncated: fc.truncated,
-        evidenceCoverage: coverageForFullContext(entry, fc.text),
+        evidenceCoverage: coverageForFullContext(entry, fc.includedEventIds),
       }));
     }
     // no-context (the contamination probe): zero memory
@@ -424,7 +427,7 @@ async function runHarperArm(
       const context = formatRetrieved(ctx.items);
       out.push(await evalOne(host, entry, arm, context, {
         retrievalMs, rankedIds: ctx.rankedIds,
-        evidenceCoverage: coverageForRetrieved(entry, arm, ctx, context),
+        evidenceCoverage: coverageForRetrieved(entry, arm, ctx),
       }));
       if ((qi + 1) % 5 === 0 || qi === entries.length - 1) {
         log(`  [${arm}] ${qi + 1}/${entries.length} (last ingest ${ingest.written} events, ${ingest.elapsedMs.toFixed(0)}ms)`);
@@ -644,7 +647,7 @@ async function runHarperArmsShared(
     const context = formatRetrieved(ctx.items);
     out.push(await evalOne(host, entry, arm, context, {
       retrievalMs, rankedIds: ctx.rankedIds,
-      evidenceCoverage: coverageForRetrieved(entry, arm, ctx, context),
+      evidenceCoverage: coverageForRetrieved(entry, arm, ctx),
     }));
   }
 
