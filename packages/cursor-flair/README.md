@@ -1,6 +1,6 @@
 # Flair for Cursor
 
-Persistent memory, identity, and personality for your Cursor agents — stored in a Flair instance **you run**, not a vendor's cloud.
+Persistent memory, identity, and personality for your Cursor agents — stored in a Flair instance **you control**: self-hosted by default, or Harper-hosted on Fabric. Never Cursor's cloud.
 
 Install it and your agent remembers across sessions: decisions you made, preferences you stated, what a project is for. Ask *"what did we decide about X?"* three weeks later and get an answer.
 
@@ -21,7 +21,7 @@ flair status               # default HTTP origin: http://127.0.0.1:19926
 
 **Grok Bot / Cursor cloud / another machine:** `127.0.0.1:19926` is not reachable. Start on Harper Fabric: **[docs/quickstart-fabric.md](../../docs/quickstart-fabric.md)**.
 
-`<id>` must match the `FLAIR_AGENT_ID` you configure in the plugin. Node.js **>= 22** is required on the machine that runs `npx` (the MCP server's engines field).
+`<id>` must match the `FLAIR_AGENT_ID` you configure in the plugin. Node.js **>= 22.18** is required on the machine that runs `npx` (the MCP server's engines field).
 
 ## Install
 
@@ -37,7 +37,7 @@ Set these under **Plugins → Configure**. `FLAIR_CLIENT=cursor` is set for you 
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
-| `FLAIR_AGENT_ID` | yes | — | Must match `flair agent add <id>` |
+| `FLAIR_AGENT_ID` | yes | — | The agent id you created — `flair init --agent <id>` or `flair agent add <id>` |
 | `FLAIR_URL` | no | `http://127.0.0.1:19926` | Reachable Flair HTTP origin |
 
 Those are the only two fields in the plugin schema (`plugin.json`). `FLAIR_KEY_PATH` and `FLAIR_ADMIN_*` are documented here in the README only — they are **not** declared as plugin variables and **not** interpolated into `mcp.json`. Set them in the host env of the machine that runs `npx`. Keeping them out of `mcp.json` is deliberate: an unsubstituted `${FLAIR_KEY_PATH}` would be truthy and break key auto-resolve, and an unsubstituted admin password would send literal Basic auth.
@@ -54,7 +54,7 @@ Cursor ships a native **Memories** feature: persistent notes the agent saves as 
 
 - Set `FLAIR_URL` to an origin the agent VM can reach. The default `http://127.0.0.1:19926` points at the npx host, which on a cloud agent is the cloud VM.
 - The agent key lives on the **npx host** at `~/.flair/keys/<id>.key` (or `FLAIR_KEY_PATH` in that machine's environment). If you cannot mount a key, set `FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD` in the host env of the machine that runs `npx` — not in plugin Configure.
-- Node **>= 22** must be on that same machine.
+- Node **>= 22.18** must be on that same machine.
 
 ## Skills
 
