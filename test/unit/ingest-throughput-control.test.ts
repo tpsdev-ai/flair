@@ -24,4 +24,11 @@ describe("decideNegativeControl (flair#1436)", () => {
   test("NaN tokPerSec (failed warm-up) → blocked, never proceed on missing data", () => {
     expect(decideNegativeControl(NaN, 800, THRESHOLD).blocked).toBe(true);
   });
+
+  test("zero high throughput → ratio Infinity → blocked (distinct from NaN)", () => {
+    // Architecturally distinct from NaN: NaN means "no measurement", Infinity
+    // means "the high run produced zero throughput". Different broken states,
+    // same verdict — both must BLOCK, and both are covered.
+    expect(decideNegativeControl(100, 0, THRESHOLD).blocked).toBe(true);
+  });
 });
